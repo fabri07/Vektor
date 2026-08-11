@@ -224,3 +224,83 @@ class TestTrazaDelConfirm:
         assert detail["stock_treatment"] == {_CTX: "opening_balance"}
         # Sin valores de fila.
         assert "Vela aromática" not in str(detail["mappings"])
+
+
+class TestDesgloseDeTiempos:
+    """F-T — el confirm dice dónde se le fue el tiempo, no sólo cuánto tardó.
+
+    `latency_ms` medía únicamente `insert_confirmed_data`: un confirm que tarda
+    treinta segundos validando y uno que tarda uno se reportaban igual.
+    """
+
+    async def test_un_confirm_exitoso_publica_el_desglose_por_etapa(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo: UploadedFile,
+        db_session: AsyncSession,
+        mock_score_trigger: Any,
+    ) -> None:
+        response = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/confirm",
+            json={
+                "column_mappings": [
+                    _map("Productos", "name"),
+                    _map("Precio de venta final", "sale_price_ars"),
+                ],
+                "confirmed_fields": {"productos": True},
+                "context_confirmed": {_CTX: True},
+                "stock_treatment": {_CTX: "opening_balance"},
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+        detail = await _detalle_unico(db_session, "confirm")
+        etapas = detail["timings_ms"]["stages"]
+        # Las etapas del camino feliz, de punta a punta. Si alguna desaparece, el
+        # desglose deja de cubrir el confirm y vuelve a haber tiempo sin atribuir.
+        assert {
+            "validaciones_pre_lease",
+            "lease",
+            "snapshot_maestros",
+            "import",
+            "ledger_reversa",
+            "aprendizaje_mapeos",
+            "finalize_lease",
+        } <= set(etapas)
+        # El import declara CUÁNTAS filas movió: un tiempo sin denominador no se
+        # puede comparar entre dos archivos.
+        assert etapas["import"]["rows"] == 1
+        # El total cubre todo el request, no sólo el import.
+        assert detail["timings_ms"]["total_ms"] >= etapas["import"]["ms"]
+
+    async def test_un_confirm_rechazado_tambien_dice_cuanto_tardo_en_rebotar(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        archivo: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """Un 422 también hace esperar. Sin esto, «rebotó» y «rebotó a los veinte
+        segundos» se leen igual en la traza."""
+        response = await client.post(
+            f"/api/v1/ingestion/files/{archivo.id}/confirm",
+            json={
+                "column_mappings": [
+                    _map("Productos", "custom_field:nombre_del_producto"),
+                    _map("Precio de venta final", "sale_price_ars"),
+                ],
+                "confirmed_fields": {"productos": True},
+                "context_confirmed": {_CTX: True},
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+        detail = await _detalle_unico(db_session, "reject")
+        assert detail["timings_ms"]["total_ms"] >= 0
+        # El rechazo es PREVIO al lease, así que no hay etapas cerradas todavía:
+        # lo que importa es el total. Afirmar que hay etapas sería afirmar que el
+        # confirm llegó más lejos de lo que llegó.
+        assert detail["timings_ms"]["stages"] == {}

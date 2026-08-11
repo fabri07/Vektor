@@ -120,6 +120,7 @@ from app.domain.purchase_group import (
     MOTIVO_SIN_ENVIO_COMPARTIDO,
     MOTIVO_SIN_IDENTIDAD,
 )
+from app.domain.stage_timing import StageTimings
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
     process_image_ocr,
@@ -1601,6 +1602,12 @@ async def confirm_file(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> ConfirmIngestionResponse:
+    # F-T: el reloj arranca acá, no en el import. `latency_ms` medía sólo
+    # `insert_confirmed_data`, así que un confirm que tarda 30 s en validar y 1 s
+    # en insertar se reportaba como "1 s" — y la persona que esperó los 31
+    # tenía razón. Los checkpoints se cierran con `mark()` para no re-indentar
+    # las ~800 líneas de validación.
+    _timings = StageTimings()
     repo = FileRepository(session)
     record = await repo.get_by_id(file_id, tenant.tenant_id)
     if not record:
@@ -1747,6 +1754,11 @@ async def confirm_file(
                     "http_status": status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "motivo": motivo,
                     "confirmed_fields": body.confirmed_fields,
+                    # F-T: cuánto costó llegar al rechazo. Un 422 también hace
+                    # esperar, y con nueve hojas la validación no es gratis: sin
+                    # esto, "rebotó" y "rebotó después de veinte segundos" se leen
+                    # igual en la traza.
+                    "timings_ms": _timings.as_detail(),
                     **detalle,
                 },
             )
@@ -2435,12 +2447,14 @@ async def confirm_file(
     # rowcount==0 → otro intento tiene el lease vivo → 409. Se toma DESPUÉS de las
     # validaciones puras (una request que va a rebotar por 422 nunca lo toma) y
     # ANTES de la creación de custom fields (primera escritura).
+    _timings.mark("validaciones_pre_lease")
     _import_token = uuid.uuid4()
     if not await acquire_import_lease(session, tenant.tenant_id, file_id, _import_token):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="El archivo ya se está importando o ya se importó.",
         )
+    _timings.mark("lease")
 
     # `_trace_id` ya quedó resuelto arriba, antes del PRIMER guard de validación:
     # la traza del fallo lo necesita y el import puede reventar mucho antes de la
@@ -2483,6 +2497,11 @@ async def confirm_file(
             "contexts_included": sorted(
                 cid for cid, incluido in (body.context_confirmed or {}).items() if incluido
             ),
+            # F-T: un confirm que muere es donde más importa saber dónde tardó —
+            # si se fue en validar o en insertar cambia por completo qué mirar.
+            # Las etapas ya cerradas están registradas: `stage`/`mark` anotan en
+            # `finally`, así que el bloque que explotó también deja su tiempo.
+            "timings_ms": _timings.as_detail(),
         }
         if isinstance(exc, HTTPException):
             detail["http_status"] = exc.status_code
@@ -2637,6 +2656,10 @@ async def confirm_file(
             _before_customers, _before_suppliers = await snapshot_masters_before_import(
                 session, tenant.tenant_id
             )
+        # Se marca SIEMPRE, traiga maestros o no: un cero acá es el dato de que
+        # el archivo no los trae, y saltear el checkpoint mezclaría ese tiempo
+        # con el del import.
+        _timings.mark("snapshot_maestros")
 
         _t0 = time.monotonic()
         counts = await insert_confirmed_data(
@@ -2675,6 +2698,20 @@ async def confirm_file(
             return_details=True,
         )
         _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
+        # `latency_ms` del evento NO cambia de significado: sigue siendo el import
+        # y sólo el import. Redefinirlo a "todo el confirm" volvería incomparables
+        # las filas ya escritas, que son la única serie histórica que hay. El
+        # desglose completo viaja aparte, en `detail.timings_ms`.
+        _timings.mark(
+            "import",
+            rows=(
+                counts["ventas"]
+                + counts["gastos"]
+                + counts["productos"]
+                + counts["clientes"]
+                + counts["proveedores"]
+            ),
+        )
 
         # `product_details` sale de `counts` ANTES de cualquier otra cosa: más
         # abajo `counts` se serializa entero en `compact_summary`, y meter ahí el
@@ -2703,6 +2740,7 @@ async def confirm_file(
             product_details=_product_details,
             master_details=_master_details,
         )
+        _timings.mark("ledger_reversa")
 
         # ── F8b (Task 4) + F8c (Minor 1): capturar en "Otros" las filas
         # ruteadas por columna riesgosa + counters + auditoría AGREGADA, todo
@@ -2828,6 +2866,7 @@ async def confirm_file(
                 )
             for _ent, _confirmed in _learn.items():
                 await mapping_svc.save_mappings(tenant.tenant_id, _ent, _confirmed)
+        _timings.mark("aprendizaje_mapeos")
 
         # Transición final IMPORTING→DONE, token-checked, en la MISMA transacción
         # que los inserts. Si un takeover nos robó el lease → ImportLeaseLostError
@@ -2835,6 +2874,7 @@ async def confirm_file(
         await finalize_import_lease(
             session, tenant.tenant_id, file_id, _import_token, compact_summary
         )
+        _timings.mark("finalize_lease")
 
         # F8c: cuántos contextos (hojas/grupos) tuvieron una decisión de riesgo
         # EFECTIVA — ruteo con filas reales o drop de columna. Sin PII (solo
@@ -2866,6 +2906,12 @@ async def confirm_file(
             detail={
                 "imported_counts": counts,
                 "confirmed_fields": body.confirmed_fields,
+                # F-T: dónde se fue el tiempo. `latency_ms` (arriba) sigue siendo
+                # sólo el import, por compatibilidad con las filas viejas; acá está
+                # el confirm entero, etapa por etapa y con las filas que movió cada
+                # una. Un tiempo sin su denominador no se puede comparar entre
+                # archivos.
+                "timings_ms": _timings.as_detail(),
                 # Con qué mapeo se importó de verdad. Sin esto, saber si un
                 # producto quedó con el costo cargado como precio de venta exigía
                 # INFERIRLO de los alias aprendidos del tenant, que pudieron
@@ -2923,14 +2969,6 @@ async def confirm_file(
         await _emit_confirm_failure(exc, phase="import")
         raise
 
-    logger.info(
-        "ingestion.confirm.done",
-        file_id=str(file_id),
-        ventas=counts["ventas"],
-        gastos=counts["gastos"],
-        productos=counts["productos"],
-    )
-
     # Enqueue score recalculation — BSL will aggregate newly confirmed data
     from app.application.services.score_trigger_service import (  # noqa: PLC0415
         trigger_score_recalculation,
@@ -2940,6 +2978,22 @@ async def confirm_file(
         trigger_score_recalculation.delay(str(tenant.tenant_id), str(file_id))
     except Exception:
         logger.warning("ingestion.confirm.score_trigger_failed", file_id=str(file_id))
+    # F-T: `.delay()` habla con el broker DENTRO del request. Si el broker está
+    # lento o caído, el usuario espera — y es la clase de demora que nadie
+    # atribuiría al confirm porque el import ya terminó. Va al log y no al evento
+    # porque ocurre después de emitirlo.
+    _timings.mark("encolar_score")
+
+    # El log va DESPUÉS del encolado (antes quedaba antes) para que lleve el
+    # desglose completo, incluida esa última etapa.
+    logger.info(
+        "ingestion.confirm.done",
+        file_id=str(file_id),
+        ventas=counts["ventas"],
+        gastos=counts["gastos"],
+        productos=counts["productos"],
+        timings=_timings.as_detail(),
+    )
 
     parts: list[str] = []
     if counts["ventas"]:
