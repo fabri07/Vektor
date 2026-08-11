@@ -1739,9 +1739,39 @@ class ColumnMappingService:
 
         now = datetime.now(tz=UTC)
 
+        # Una columna aparece TANTAS veces como hojas de esta entidad la traigan:
+        # un libro con Compras_Mercaderia + Compras_Insumos + Gastos_Fijos manda
+        # tres `fecha`. Procesarlas de a una rompía de dos formas distintas:
+        #
+        #  1. El `SELECT` de abajo no ve la fila que la vuelta anterior dejó
+        #     PENDIENTE (producción corre con `autoflush=False`), así que insertaba
+        #     una segunda con la misma clave → UniqueViolationError y 500 al
+        #     confirmar. Es leer lo que uno mismo acaba de escribir.
+        #  2. Aun sin reventar, `confirmed_count` subía una vez por hoja: un solo
+        #     archivo le daba a un alias la confianza de tres archivos distintos.
+        #
+        # Tres hojas del mismo archivo son UNA confirmación. Y si no coinciden en
+        # el destino, la columna NO se aprende: evidencia contradictoria dentro de
+        # un mismo archivo es ambigüedad, no una preferencia — quedarse con una
+        # sería elegir por orden de hoja, el last-wins silencioso que este
+        # pipeline existe para evitar.
+        colapsado: dict[str, str | None] = {}
         for mapping in confirmed:
-            source_col = _normalize_col(mapping["source_column"])
-            target = mapping["target_field"]
+            col = _normalize_col(mapping["source_column"])
+            tgt = mapping["target_field"]
+            if col in colapsado and colapsado[col] != tgt:
+                colapsado[col] = None  # contradicción: no se aprende
+            elif col not in colapsado:
+                colapsado[col] = tgt
+
+        for source_col, target in colapsado.items():
+            if target is None:
+                logger.info(
+                    "column_mapping.learning_skipped_conflict",
+                    entity_type=entity_type,
+                    source_column=source_col,
+                )
+                continue
 
             # No aprendemos "ignore" ni custom_fields
             if parse_target(target).kind in ("ignore", "none", "custom"):
