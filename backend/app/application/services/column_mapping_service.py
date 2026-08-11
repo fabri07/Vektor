@@ -1755,10 +1755,18 @@ class ColumnMappingService:
         # un mismo archivo es ambigüedad, no una preferencia — quedarse con una
         # sería elegir por orden de hoja, el last-wins silencioso que este
         # pipeline existe para evitar.
+        # El filtro de no-aprendibles va ANTES de buscar contradicciones: si una
+        # hoja manda `fecha → expense_date` y otra `fecha → ignore`, no hay
+        # conflicto que resolver. Ignorar una columna en una hoja no dice nada
+        # sobre qué significa esa columna, y tratarlo como contradicción
+        # descartaba el mapeo bueno y dejaba el alias ya aprendido sin refrescar.
+        # Un conflicto real es entre dos destinos REALES.
         colapsado: dict[str, str | None] = {}
         for mapping in confirmed:
-            col = _normalize_col(mapping["source_column"])
             tgt = mapping["target_field"]
+            if parse_target(tgt).kind in ("ignore", "none", "custom"):
+                continue
+            col = _normalize_col(mapping["source_column"])
             if col in colapsado and colapsado[col] != tgt:
                 colapsado[col] = None  # contradicción: no se aprende
             elif col not in colapsado:
@@ -1771,10 +1779,6 @@ class ColumnMappingService:
                     entity_type=entity_type,
                     source_column=source_col,
                 )
-                continue
-
-            # No aprendemos "ignore" ni custom_fields
-            if parse_target(target).kind in ("ignore", "none", "custom"):
                 continue
 
             result = await self.db.execute(
