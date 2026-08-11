@@ -106,17 +106,11 @@ from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
 from app.domain.inventory_effect import (
     EFFECT_LABELS,
-    HISTORICAL_REPLAY,
     InvalidInventoryEffectError,
     SheetInventoryProfile,
     default_effect_for,
     options_for,
     resolve_inventory_effects,
-)
-from app.domain.inventory_replay_gate import (
-    MENSAJE_REPLAY_NO_GATEABLE,
-    MOTIVO_REPLAY_NO_GATEABLE,
-    replay_no_gateable,
 )
 from app.domain.purchase_cost import CENTAVO
 from app.domain.purchase_cost_decision import (
@@ -2383,76 +2377,12 @@ async def confirm_file(
         if d.action == "drop_column"
     }
 
-    # ── F-H3.d.6: un replay que no se puede validar no se confirma ──────────────
-    # En el archivo de UNA sola tabla que además da de alta productos, el gate de
-    # `historical_replay` no tiene saldo contra el cual evaluar: lo carga el mismo
-    # archivo en la misma pasada. Antes se abstenía y las ventas sin respaldo
-    # entraban igual a los libros, o sea justo lo contrario de lo que el modo
-    # promete. Se rechaza acá —pre-lease, sin nada a medio importar— en vez de
-    # degradar a `informational` en silencio: el usuario eligió que Véktor validara
-    # cada venta contra el stock, y cambiarle eso sin decírselo lo deja creyendo que
-    # su inventario se reconstruyó. Ver `domain/inventory_replay_gate` para el
-    # límite y por qué es transitorio.
-    #
-    # Va acá, pegado al lease y no junto a la resolución del efecto, porque
-    # necesita `_dropped_pairs` — el MISMO set de columnas eliminadas que se le
-    # pasa al importador. Filtrar con las decisiones crudas dejaba fuera una
-    # columna que el importador sí iba a ver (las de contextos no incluidos no
-    # cuentan), y esa divergencia va en la peor dirección: el confirm no bloquea y
-    # el respaldo termina degradando con el lease ya tomado.
-    if _inventory_effects and len(_inventory_effects) == 1:
-        _cid_unico, _efecto_unico = next(iter(_inventory_effects.items()))
-        # Sobre el mapeo EFECTIVO, igual que la colisión de escalares: una columna
-        # que las decisiones de riesgo (F8) van a dropear no da de alta nada, y
-        # bloquear por ella sería bloquear por un mapeo que no va a existir.
-        # Misma convención de clave que `context_mappings`, que es lo que
-        # efectivamente viaja al importador: `context_id or "table"`.
-        _targets_unicos = {
-            m.target_field
-            for m in _mappings_por_contexto.get(_cid_unico, [])
-            if (m.context_id or "table", m.source_column) not in _dropped_pairs
-        }
-        if replay_no_gateable(
-            hoja_unica=_plano,
-            pide_replay=_efecto_unico == HISTORICAL_REPLAY,
-            # Espejo de `wants_productos` / `wants_ventas` del importador, con la
-            # columna leída del mapeo declarado (lo único disponible antes del
-            # lease). Cuando la columna viene autodetectada y sin mapeo, esto no la
-            # ve y el respaldo del importador es el que actúa.
-            da_de_alta_productos=bool(
-                body.confirmed_fields.get("productos")
-                and (_summary_for_ctx.get("has_producto") or _inferred_type == "stock")
-                and _targets_unicos & {"product_name", "name"}
-            ),
-            trae_ventas=bool(
-                _inferred_type != "stock"
-                and body.confirmed_fields.get("ventas")
-                and (
-                    _summary_for_ctx.get("has_venta")
-                    or _inferred_type in ("ventas", "general")
-                )
-                and "amount" in _targets_unicos
-            ),
-            # Espejo de `wants_gastos`: una compra de mercadería declara stock que
-            # todavía no existe cuando el gate mira, igual que un catálogo.
-            trae_compras=bool(
-                _inferred_type != "stock"
-                and body.confirmed_fields.get("gastos")
-                and (
-                    _summary_for_ctx.get("has_gasto")
-                    or _inferred_type in ("gastos", "general")
-                )
-                and "amount" in _targets_unicos
-            ),
-        ):
-            await _emit_validation_reject(
-                MOTIVO_REPLAY_NO_GATEABLE,
-                {"context_id": _cid_unico, "inventory_effect": _efecto_unico},
-            )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=MENSAJE_REPLAY_NO_GATEABLE.format(hoja=_hoja(_cid_unico)),
-            )
+    # F-F: acá vivía el rechazo pre-lease del archivo de UNA sola tabla que declara
+    # el stock y las ventas juntas (F-H3.d.6). Ya no hace falta: el gate recibe las
+    # compras del archivo como créditos DATADOS, así que el saldo contra el cual
+    # validar deja de depender de que esas compras ya estén aplicadas. Ver el
+    # docstring de `domain/inventory_replay_gate`. Un archivo plano no se rechaza
+    # más por serlo.
 
     # ── F4: tomar el lease per-file ANTES de cualquier escritura ────────────────
     # CAS atómico NEEDS_CONFIRMATION→IMPORTING (o takeover si quedó stale),
@@ -3174,19 +3104,10 @@ async def confirm_file(
             "columnas riesgosas se enviaron a «Otros» para que las completes."
         )
 
-    # F-H3.d.6: el respaldo se activó. No debería llegar acá —el confirm rechaza
-    # antes del lease— pero si el importador vio un alta de productos que la
-    # validación no llegó a ver, la hoja se degradó y hay que DECIRLO: un replay
-    # que no se aplicó y no se avisa se lee como un replay que se aplicó.
-    if counts.get("replay_degradado"):
-        warnings.append(
-            "Estas ventas no modificaron el inventario: el archivo también da de "
-            "alta productos, así que no había stock previo contra el cual validar "
-            "cada venta. Se calculó el impacto y quedó a la vista. Para aplicarlo, "
-            "usá «Aplicar las ventas al inventario» en el panel de impacto: ahí el "
-            "cálculo corre contra el stock ya cargado. Las ventas que no alcancen a "
-            "cubrirse quedarán con el descuento pendiente."
-        )
+    # F-F: acá vivía el aviso de la degradación a `informational` (F-H3.d.6). El
+    # importador ya no degrada ninguna hoja: las compras del archivo entran al gate
+    # como créditos datados, así que "no había stock previo contra el cual validar"
+    # dejó de ser una situación posible.
 
     # F-H3.b: el impacto que el archivo TENDRÍA sobre el stock. Nada se aplicó —
     # el default es `informational`—, así que el aviso dice qué pasaría, no qué

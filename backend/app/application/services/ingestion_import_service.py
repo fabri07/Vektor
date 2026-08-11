@@ -59,10 +59,9 @@ from app.domain.inventory_effect import (
     INFORMATIONAL,
 )
 from app.domain.inventory_replay_gate import (
-    MOTIVO_REPLAY_NO_GATEABLE,
+    CreditEvent,
     ReplayRow,
     UnbackedRow,
-    replay_no_gateable,
     rows_without_stock_backing,
 )
 from app.domain.line_amount import (
@@ -3513,73 +3512,90 @@ async def _insert_confirmed_data_impl(
         # F-H3.d.3 — el gate en el archivo de una sola tabla.
         #
         # Corre ANTES del recorrido porque acá no hay pasadas separadas: una misma
-        # fila puede dar venta, gasto y producto en la misma vuelta. Cuando el
-        # archivo también da de alta productos no hay saldo contra el cual evaluar
-        # —lo carga el propio archivo—, y ese caso el confirm ya lo rechaza antes
-        # de tomar el lease (F-H3.d.6).
+        # fila puede dar venta, gasto y producto en la misma vuelta. Por eso el
+        # saldo que lee es el PREVIO al archivo: nada de lo que el archivo declara
+        # se aplicó todavía.
         #
-        # Esto es el RESPALDO de aquel rechazo, para la divergencia posible entre
-        # los dos: el confirm mira el mapeo declarado y acá las columnas ya están
-        # resueltas, incluidas las autodetectadas sin mapeo. Si igual llega, la
-        # hoja se degrada a `informational` y queda contado. No levanta excepción:
-        # a esta altura el lease está tomado y la operación en curso: se preserva
-        # el import, pero NUNCA se reporta como un replay que se validó.
+        # **F-F** — acá vivía el respaldo del rechazo de F-H3.d.6: si el archivo
+        # también daba de alta productos o traía compras, la hoja se degradaba a
+        # `informational` porque el gate no tenía contra qué validar. Ya no hace
+        # falta para las compras: entran como créditos DATADOS y respaldan a las
+        # ventas del mismo archivo, en orden cronológico.
+        #
+        # Lo que este camino todavía NO puede gatear es la venta de un producto que
+        # el propio archivo crea: al pre-escanear no existe, `_resolve_product`
+        # devuelve `None` y la fila ni siquiera entra como candidata — así que la
+        # venta se importa sin validar. No se pierde nada (antes ese archivo se
+        # rechazaba entero) y es justo el caso "no sé cuánto stock había", que F-F.2
+        # convierte en un descuento pendiente contado en vez de un silencio.
         _sin_respaldo_plano: dict[tuple[str, int], UnbackedRow] = {}
         if (
             wants_ventas
             and _ctx_inline
             and _proyeccion_recorder.effect_for(_ctx_inline) == HISTORICAL_REPLAY
         ):
-            if replay_no_gateable(
-                hoja_unica=True,
-                pide_replay=True,
-                da_de_alta_productos=wants_productos,
-                trae_ventas=True,
-                # El gate se calcula ACÁ, antes del bucle, con el stock previo al
-                # archivo; las compras de este mismo archivo lo suman recién
-                # adentro del bucle (`_apply_purchase_to_stock`). Gatear igual
-                # mandaría a "Otros" ventas que las compras de la fila de abajo
-                # respaldan — y el mismo libro partido en hojas importa bien.
-                trae_compras=wants_gastos,
-            ):
-                counts["replay_degradado"] = counts.get("replay_degradado", 0) + 1
-                _proyeccion_recorder.degradar_a_informational(_ctx_inline)
-                logger.warning(
-                    "ingestion.replay.degradado_a_informational",
-                    motivo=MOTIVO_REPLAY_NO_GATEABLE,
-                    context_id=_ctx_inline,
-                    uploaded_file_id=str(uploaded_file_id) if uploaded_file_id else None,
+            _candidatas_planas: list[ReplayRow] = []
+            for _idx, _row in enumerate(rows):
+                _raw_fecha = _row.get(fecha_col) if fecha_col else None
+                _fecha = _parse_date(_raw_fecha) if _raw_fecha is not None else None
+                _pid = _venta_producto_id_plana(_row)
+                if _pid is None or _fecha is None:
+                    continue
+                _candidatas_planas.append(
+                    ReplayRow(
+                        key=(_ctx_inline, _idx),
+                        product_id=_pid,
+                        day=_fecha.date(),
+                        qty=_venta_cantidad_plana(_row),
+                    )
                 )
-            else:
-                _candidatas_planas: list[ReplayRow] = []
-                for _idx, _row in enumerate(rows):
+            # Las compras del propio archivo, con su fecha. Las tres condiciones son
+            # las de `_apply_purchase_to_stock` —monto en la columna de GASTO,
+            # producto resuelto, cantidad > 0—, y esa es la única forma de que el
+            # crédito diga lo mismo que el stock que después se suma. En particular
+            # el monto tiene que salir de `gasto_col` y no de la de venta: una tabla
+            # plana da venta y gasto desde columnas distintas, y contar toda fila con
+            # producto como crédito haría que cada venta se respalde a sí misma.
+            _creditos_planos: list[CreditEvent] = []
+            # El crédito tiene que decir exactamente lo que el importador le hace al
+            # stock, ni más ni menos. Con `amount` mapeado, `venta_col` y `gasto_col`
+            # son LA MISMA columna (ver la resolución del mapeo explícito), así que
+            # cada fila con monto genera venta Y compra: suma y resta las mismas
+            # unidades. Que el crédito la respalde no es un agujero, es el reflejo
+            # fiel de un import que deja el stock igual que como lo encontró.
+            if wants_gastos and gasto_col:
+                for _row in rows:
+                    if not _parse_amount(_row.get(gasto_col)):
+                        continue
                     _raw_fecha = _row.get(fecha_col) if fecha_col else None
                     _fecha = _parse_date(_raw_fecha) if _raw_fecha is not None else None
                     _pid = _venta_producto_id_plana(_row)
                     if _pid is None or _fecha is None:
                         continue
-                    _candidatas_planas.append(
-                        ReplayRow(
-                            key=(_ctx_inline, _idx),
-                            product_id=_pid,
-                            day=_fecha.date(),
-                            qty=_venta_cantidad_plana(_row),
-                        )
+                    _qty_compra = _parse_qty(
+                        _row.get(qty_col) if qty_col else _row_val(_row, _CANTIDAD_COLS)
                     )
-                if _candidatas_planas:
-                    _saldos_planos: dict[uuid.UUID, int] = {}
-                    for _pid in {c.product_id for c in _candidatas_planas}:
-                        _prod = _product_cache.get(_pid) or await session.get(Product, _pid)
-                        if _prod is not None and _prod.tenant_id == tenant_id:
-                            _saldos_planos[_pid] = int(_prod.stock_units)
-                    # `ReplayRow.key` es `Hashable` porque el gate lo usan dos
-                    # momentos distintos (acá una tupla hoja+fila, en el apply el
-                    # id de la venta). Acá sabemos cuál de los dos es: lo pusimos
-                    # nosotros tres líneas arriba.
-                    _sin_respaldo_plano = {
-                        cast("tuple[str, int]", r.key): r
-                        for r in rows_without_stock_backing(_candidatas_planas, _saldos_planos)
-                    }
+                    if _qty_compra <= 0:
+                        continue
+                    _creditos_planos.append(
+                        CreditEvent(product_id=_pid, day=_fecha.date(), qty=_qty_compra)
+                    )
+            if _candidatas_planas:
+                _saldos_planos: dict[uuid.UUID, int] = {}
+                for _pid in {c.product_id for c in _candidatas_planas}:
+                    _prod = _product_cache.get(_pid) or await session.get(Product, _pid)
+                    if _prod is not None and _prod.tenant_id == tenant_id:
+                        _saldos_planos[_pid] = int(_prod.stock_units)
+                # `ReplayRow.key` es `Hashable` porque el gate lo usan dos
+                # momentos distintos (acá una tupla hoja+fila, en el apply el
+                # id de la venta). Acá sabemos cuál de los dos es: lo pusimos
+                # nosotros unas líneas arriba.
+                _sin_respaldo_plano = {
+                    cast("tuple[str, int]", r.key): r
+                    for r in rows_without_stock_backing(
+                        _candidatas_planas, _saldos_planos, _creditos_planos
+                    )
+                }
 
         # F-H6.c: misma pasada previa que en el camino multi-hoja. Va acá y no
         # dentro del bucle porque repartir un costo compartido exige ver el grupo
@@ -6234,10 +6250,13 @@ async def _insert_multisheet_data(
             Sólo mira las hojas marcadas ``historical_replay``. Con el default el
             archivo entra completo y esto ni se ejecuta.
 
-            El saldo de partida es el ``stock_units`` de AHORA, que en este punto ya
-            tiene adentro los catálogos y las compras del archivo (**V16**: las
-            compras sí suman al confirmar). O sea: lo que el archivo dice que hay
-            antes de sus propias ventas.
+            **F-F — el saldo de partida es el PREVIO al archivo, no el de ahora.**
+            Antes se leía el ``stock_units`` del momento, que en este punto ya tiene
+            adentro los catálogos y las compras del archivo (**V16**). Ahora esas
+            compras entran como créditos CON FECHA, así que sumarlas también al
+            saldo inicial las contaría dos veces. El previo lo lleva el recorder,
+            que lo captura antes de mutar; un producto que este archivo no tocó no
+            está ahí y su stock de hoy ES el previo.
             """
             _candidatas: list[ReplayRow] = []
             for _rank, _ctx in enumerate(contexts):
@@ -6269,6 +6288,10 @@ async def _insert_multisheet_data(
                 return {}
             _saldos: dict[uuid.UUID, int] = {}
             for _pid in {c.product_id for c in _candidatas}:
+                _apertura = proyeccion.apertura_de(_pid) if proyeccion else None
+                if _apertura is not None:
+                    _saldos[_pid] = _apertura
+                    continue
                 _prod = (product_cache or {}).get(_pid) or await session.get(Product, _pid)
                 if _prod is not None and _prod.tenant_id == tenant_id:
                     _saldos[_pid] = int(_prod.stock_units)
@@ -6276,7 +6299,11 @@ async def _insert_multisheet_data(
             # es la tupla (hoja, índice de fila) que armamos más arriba.
             return {
                 cast("tuple[str, int]", r.key): r
-                for r in rows_without_stock_backing(_candidatas, _saldos)
+                for r in rows_without_stock_backing(
+                    _candidatas,
+                    _saldos,
+                    proyeccion.creditos() if proyeccion else (),
+                )
             }
 
         #: ``None`` = todavía no se calculó. Se calcula al llegar a la primera hoja de
