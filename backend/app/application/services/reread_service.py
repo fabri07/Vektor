@@ -71,6 +71,7 @@ from typing import Any, Literal
 
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTasks
 
 from app.application.services import ingestion_import_service as _iis
 from app.application.services import maintenance_lock_service
@@ -1730,7 +1731,7 @@ async def apply_reread(
     }
     await session.flush()
 
-    _trigger_score(tenant_id)
+    _trigger_score(session, tenant_id)
     return result
 
 
@@ -1939,6 +1940,7 @@ async def undo_reread(
     session: AsyncSession,
     run_id: uuid.UUID,
     tenant_id: uuid.UUID,
+    background: BackgroundTasks | None = None,
 ) -> dict[str, Any]:
     """Revierte un run de relectura aplicado: des-anula los registros voldados por
     ese run y borra los insertados por ese run. El commit lo hace el caller."""
@@ -2095,7 +2097,7 @@ async def undo_reread(
     run.completed_at = datetime.now(UTC)
     await session.flush()
 
-    _trigger_score(tenant_id)
+    _trigger_score(session, tenant_id, background)
     return {
         "run_id": str(run_id),
         "restored": restored,
@@ -2152,15 +2154,27 @@ async def latest_applied_run_for_file(
     return None
 
 
-def _trigger_score(tenant_id: uuid.UUID) -> None:
+def _trigger_score(
+    session: AsyncSession, tenant_id: uuid.UUID, background: BackgroundTasks | None = None
+) -> None:
+    """Encola el recálculo de score DESPUÉS del commit del caller.
+
+    Ni el apply ni el undo comitean (lo hace el caller: el worker de Celery, el
+    script del batch o la dependency del request). Encolar en el flush, como se
+    hacía antes, dejaba al worker de score —que abre su propia sesión— leyendo un
+    estado que todavía no existía; si además esa transacción hacía rollback, el
+    score se recalculaba por una relectura que nunca ocurrió.
+
+    ``background`` solo llega desde el request (el undo). El apply corre en un
+    worker, donde no hay respuesta que proteger.
+    """
     from app.application.services.score_trigger_service import (  # noqa: PLC0415
-        trigger_score_recalculation,
+        trigger_score_recalculation_after_commit,
     )
 
-    try:
-        trigger_score_recalculation.delay(str(tenant_id), "reread_file")
-    except Exception:  # noqa: BLE001
-        logger.warning("reread.score_trigger_failed", tenant_id=str(tenant_id))
+    trigger_score_recalculation_after_commit(
+        session, str(tenant_id), "reread_file", background=background
+    )
 
 
 # Re-export para tests

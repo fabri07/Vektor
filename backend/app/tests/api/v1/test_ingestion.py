@@ -670,7 +670,15 @@ class TestConfirmEndpoint:
         data = response.json()
         assert data["status"] == PROCESSING_STATUS_DONE
         assert "recalculada" in data["message"]
-        mock_score_trigger.assert_called_once()
+        # El confirm ya NO habla con el broker dentro del handler: encolar ahí
+        # hacía esperar al usuario y, peor, salía con la transacción abierta (el
+        # worker abre su propia sesión y podía leer el estado previo al import).
+        # Ahora el encolado se agenda en el `after_commit` y corre después de la
+        # respuesta — camino que este harness no puede observar, porque el
+        # fixture `client` pisa `get_db_session` por una sesión que no comitea.
+        # El contrato está cubierto en `test_score_trigger_after_commit.py`; acá
+        # lo que se vigila es que no haya vuelto una llamada en línea.
+        mock_score_trigger.assert_not_called()
 
     async def test_confirm_wrong_status_returns_409(
         self,

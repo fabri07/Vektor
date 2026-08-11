@@ -15,7 +15,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, cast
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from sqlalchemy import func, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1161,6 +1171,7 @@ async def get_deletion_preview(
 )
 async def delete_file(
     file_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     confirm: bool = Query(
         default=False,
         description=(
@@ -1253,9 +1264,11 @@ async def delete_file(
         # Los scores quedaban calculados sobre datos que este borrado acaba de
         # revertir. Se dispara DESPUÉS del commit: el worker abre su propia
         # sesión, así que encolarlo antes lo haría leer un estado que todavía no
-        # existe — o que un rollback va a descartar.
+        # existe — o que un rollback va a descartar. Y con `background`, el
+        # `.delay()` sale del camino de la respuesta: el borrado ya terminó, el
+        # usuario no tiene por qué esperar al broker.
         trigger_score_recalculation_after_commit(
-            session, str(tenant.tenant_id), "file_deleted"
+            session, str(tenant.tenant_id), "file_deleted", background=background_tasks
         )
     await session.commit()
 
@@ -1599,6 +1612,7 @@ def _sanitize_error_message(exc: BaseException) -> str:
 async def confirm_file(
     file_id: uuid.UUID,
     body: ConfirmIngestionRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> ConfirmIngestionResponse:
@@ -2995,23 +3009,22 @@ async def confirm_file(
         await _emit_confirm_failure(exc, phase="import")
         raise
 
-    # Enqueue score recalculation — BSL will aggregate newly confirmed data
-    from app.application.services.score_trigger_service import (  # noqa: PLC0415
-        trigger_score_recalculation,
+    # Recálculo de score — el BSL agrega los datos recién confirmados.
+    #
+    # Dos motivos para no llamar a `.delay()` acá, que es lo que hacía antes:
+    # (1) se encolaba con la transacción del request TODAVÍA abierta (commitea
+    # `get_db_session` al salir), así que el worker —que abre su propia sesión—
+    # podía leer el estado PREVIO al import y persistir un score que no
+    # correspondía; (2) F-T: hablar con el broker dentro del request hace esperar
+    # al usuario por una operación que ya terminó, y es la clase de demora que
+    # nadie atribuiría al confirm.
+    # Con `background`, el encolado se agenda en el commit y corre después de que
+    # la respuesta salió. Ya no hay etapa que medir acá: el desglose F-T termina
+    # en `finalize_lease`.
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), str(file_id), background=background_tasks
     )
 
-    try:
-        trigger_score_recalculation.delay(str(tenant.tenant_id), str(file_id))
-    except Exception:
-        logger.warning("ingestion.confirm.score_trigger_failed", file_id=str(file_id))
-    # F-T: `.delay()` habla con el broker DENTRO del request. Si el broker está
-    # lento o caído, el usuario espera — y es la clase de demora que nadie
-    # atribuiría al confirm porque el import ya terminó. Va al log y no al evento
-    # porque ocurre después de emitirlo.
-    _timings.mark("encolar_score")
-
-    # El log va DESPUÉS del encolado (antes quedaba antes) para que lleve el
-    # desglose completo, incluida esa última etapa.
     logger.info(
         "ingestion.confirm.done",
         file_id=str(file_id),
@@ -3426,6 +3439,7 @@ async def reread_run_status(
 )
 async def reread_undo(
     file_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> RereadUndoResponse:
@@ -3441,7 +3455,9 @@ async def reread_undo(
         )
 
     try:
-        result = await reread_service.undo_reread(session, run.id, tenant.tenant_id)
+        result = await reread_service.undo_reread(
+            session, run.id, tenant.tenant_id, background=background_tasks
+        )
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Relectura no encontrada."
