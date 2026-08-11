@@ -267,12 +267,12 @@ async def _resolve_or_create_supplier(
     Find-or-create contra el índice en memoria (cargado una vez por import):
       - celda vacía / "none" / "nan" → ``(None, None)``;
       - si el nombre normalizado ya está en el índice → reusa el proveedor;
-      - si no, crea un ``Supplier`` nuevo, lo agrega a la sesión y hace
-        ``flush`` para materializar su id (necesario para vincular el gasto y
-        cachearlo) dentro de la misma transacción del import — mismo patrón de
-        id-resolución que ``_ensure_product_for_purchase`` (que delega en
-        ``build_incomplete_product`` con id explícito). Cachea el id nuevo para
-        que filas posteriores del mismo proveedor lo reusen sin duplicar.
+      - si no, crea un ``Supplier`` nuevo con id explícito, lo agrega a la sesión
+        y hace ``flush`` para que la FILA exista antes de que un gasto o un
+        movimiento de inventario la referencien (ver el comentario del flush:
+        una FK no se satisface con un id). Todo dentro de la misma transacción
+        del import. Cachea el id nuevo para que filas posteriores del mismo
+        proveedor lo reusen sin duplicar.
     """
     from app.persistence.models.supplier import Supplier  # noqa: PLC0415
 
@@ -287,17 +287,25 @@ async def _resolve_or_create_supplier(
         return hit, clean
     new_id = uuid.uuid4()
     session.add(Supplier(id=new_id, tenant_id=tenant_id, name=clean))
+    # Flush INMEDIATO: un id explícito alcanza para setear la columna, pero una FK
+    # no la satisface un id — la satisface la FILA. `InventoryMovement` no declara
+    # `relationship()` hacia `Supplier` (sólo la columna con `ForeignKey`), así que
+    # la unit-of-work no tiene arista de dependencia y puede emitir el INSERT del
+    # movimiento antes que el del proveedor → ForeignKeyViolationError y un 500 en
+    # un libro de compras con un proveedor nuevo. SQLite no valida FKs, por eso la
+    # suite estaba verde; el mismo fenómeno ya estaba escrito en
+    # `test_ingestion_lease_pg.py`.
+    #
+    # Esto NO reintroduce el cuello que motivó sacar el flush: es un flush por
+    # proveedor NUEVO, no por fila. En el archivo que destapó el bug son 4 en 1.436
+    # filas.
+    await session.flush()
     # El id se reporta al caller para que entre al LEDGER de reversa. Sin esto,
     # un proveedor creado desde la columna de un gasto quedaba fuera del ledger:
     # borrar el archivo lo dejaba vivo y el DELETE respondía `fully_reverted:
     # true` igual — la mentira exacta que ese contrato existe para evitar.
     if created_ids is not None:
         created_ids.append(str(new_id))
-    # NO se hace flush: el id es explícito (``new_id``), así que no hace falta
-    # materializar para vincular el gasto. Un flush por proveedor nuevo en un
-    # import masivo era O(N) round-trips (flushea todo lo pendiente cada vez) —
-    # un cuello real con libros de compras de muchos proveedores. El commit del
-    # caller persiste Supplier y ExpenseEntry juntos (orden por FK).
     supplier_index[norm] = new_id
     return new_id, clean
 
