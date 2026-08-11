@@ -3104,6 +3104,17 @@ async def confirm_file(
             "columnas riesgosas se enviaron a «Otros» para que las completes."
         )
 
+    # F-F.2: la venta entró porque del producto no se sabe cuánto stock había —no
+    # porque se haya validado—. Decirlo es la mitad de la decisión: un descuento
+    # pendiente que no se avisa es indistinguible de uno que se aplicó.
+    if counts.get("ventas_descuento_pendiente"):
+        warnings.append(
+            f"{counts['ventas_descuento_pendiente']} venta(s) se importaron sin validar "
+            "contra el stock: de esos productos no hay inventario cargado ni compras "
+            "registradas, así que no se sabe cuántas unidades había. Su descuento queda "
+            "pendiente — cargá el inventario y aplicalo desde el panel de impacto."
+        )
+
     # F-F: acá vivía el aviso de la degradación a `informational` (F-H3.d.6). El
     # importador ya no degrada ninguna hoja: las compras del archivo entran al gate
     # como créditos datados, así que "no había stock previo contra el cual validar"

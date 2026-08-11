@@ -62,6 +62,7 @@ from app.domain.inventory_replay_gate import (
     CreditEvent,
     ReplayRow,
     UnbackedRow,
+    productos_con_saldo_conocido,
     rows_without_stock_backing,
 )
 from app.domain.line_amount import (
@@ -2047,6 +2048,33 @@ async def _ensure_product_for_purchase(
     return new_id
 
 
+async def _productos_con_movimientos_vivos(
+    session: AsyncSession, tenant_id: uuid.UUID, product_ids: set[uuid.UUID]
+) -> set[uuid.UUID]:
+    """F-F.2 — de cuáles productos el ledger tiene historia (una query, no una por fila).
+
+    Un movimiento vivo significa que el saldo de ese producto es el resultado de algo
+    que se registró. Sin ninguno, su ``stock_units`` en cero no dice "no hay": dice
+    que nunca se cargó inventario.
+    """
+    if not product_ids:
+        return set()
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.inventory import InventoryMovement  # noqa: PLC0415
+
+    result = await session.execute(
+        select(InventoryMovement.product_id)
+        .where(
+            InventoryMovement.tenant_id == tenant_id,
+            InventoryMovement.product_id.in_(product_ids),
+            InventoryMovement.voided_at.is_(None),
+        )
+        .distinct()
+    )
+    return set(result.scalars().all())
+
+
 async def _apply_purchase_to_stock(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -3586,15 +3614,33 @@ async def _insert_confirmed_data_impl(
                     _prod = _product_cache.get(_pid) or await session.get(Product, _pid)
                     if _prod is not None and _prod.tenant_id == tenant_id:
                         _saldos_planos[_pid] = int(_prod.stock_units)
+                _sin_unidades_planas = rows_without_stock_backing(
+                    _candidatas_planas, _saldos_planos, _creditos_planos
+                )
+                # F-F.2, mismo criterio que en el camino multi-hoja: sólo se saca de
+                # los libros la venta de un producto cuyo saldo es un dato afirmado.
+                _pids_planos = {c.product_id for c in _candidatas_planas}
+                _conocidos_planos = productos_con_saldo_conocido(
+                    _pids_planos,
+                    saldo_previo=_saldos_planos,
+                    declarados_por_el_archivo={c.product_id for c in _creditos_planos},
+                    con_historial=await _productos_con_movimientos_vivos(
+                        session, tenant_id, _pids_planos
+                    ),
+                )
+                counts["ventas_descuento_pendiente"] = counts.get(
+                    "ventas_descuento_pendiente", 0
+                ) + sum(
+                    1 for r in _sin_unidades_planas if r.product_id not in _conocidos_planos
+                )
                 # `ReplayRow.key` es `Hashable` porque el gate lo usan dos
                 # momentos distintos (acá una tupla hoja+fila, en el apply el
                 # id de la venta). Acá sabemos cuál de los dos es: lo pusimos
                 # nosotros unas líneas arriba.
                 _sin_respaldo_plano = {
                     cast("tuple[str, int]", r.key): r
-                    for r in rows_without_stock_backing(
-                        _candidatas_planas, _saldos_planos, _creditos_planos
-                    )
+                    for r in _sin_unidades_planas
+                    if r.product_id in _conocidos_planos
                 }
 
         # F-H6.c: misma pasada previa que en el camino multi-hoja. Va acá y no
@@ -6295,15 +6341,34 @@ async def _insert_multisheet_data(
                 _prod = (product_cache or {}).get(_pid) or await session.get(Product, _pid)
                 if _prod is not None and _prod.tenant_id == tenant_id:
                     _saldos[_pid] = int(_prod.stock_units)
+            _sin_unidades = rows_without_stock_backing(
+                _candidatas,
+                _saldos,
+                proyeccion.creditos() if proyeccion else (),
+            )
+            # F-F.2: no todas las que se quedaron sin unidades significan lo mismo.
+            # Ver `productos_con_saldo_conocido`: si del producto no hay ninguna
+            # procedencia de saldo, su cero no afirma que no había stock, y sacar la
+            # venta de los libros por un dato que falta es inventarlo al revés.
+            _conocidos = productos_con_saldo_conocido(
+                {c.product_id for c in _candidatas},
+                saldo_previo=_saldos,
+                declarados_por_el_archivo=(
+                    proyeccion.productos_que_el_archivo_declara() if proyeccion else set()
+                ),
+                con_historial=await _productos_con_movimientos_vivos(
+                    session, tenant_id, {c.product_id for c in _candidatas}
+                ),
+            )
+            counts["ventas_descuento_pendiente"] = counts.get(
+                "ventas_descuento_pendiente", 0
+            ) + sum(1 for r in _sin_unidades if r.product_id not in _conocidos)
             # `key` es `Hashable` en el gate (dos callers la arman distinto); acá
             # es la tupla (hoja, índice de fila) que armamos más arriba.
             return {
                 cast("tuple[str, int]", r.key): r
-                for r in rows_without_stock_backing(
-                    _candidatas,
-                    _saldos,
-                    proyeccion.creditos() if proyeccion else (),
-                )
+                for r in _sin_unidades
+                if r.product_id in _conocidos
             }
 
         #: ``None`` = todavía no se calculó. Se calcula al llegar a la primera hoja de

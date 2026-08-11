@@ -153,6 +153,18 @@ class ImportProjectionRecorder:
         """Las unidades que el archivo hace entrar, con fecha, para el gate."""
         return list(self._creditos)
 
+    def productos_que_el_archivo_declara(self) -> set[uuid.UUID]:
+        """Productos sobre cuyas unidades el archivo dice ALGO.
+
+        F-F.2: o declara su saldo (una hoja de catálogo) o le compra unidades. En
+        los dos casos el cero de ese producto deja de ser "no sé cuánto había".
+        """
+        return {
+            pid
+            for pid, proyeccion in self._proyecciones.items()
+            if proyeccion.saldo_declarado is not None
+        } | {c.product_id for c in self._creditos}
+
     def apertura_de(self, product_id: uuid.UUID) -> int | None:
         """Saldo del que parte el replay de ese producto: lo declarado, o el previo.
 

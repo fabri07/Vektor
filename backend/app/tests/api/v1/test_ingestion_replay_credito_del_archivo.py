@@ -572,3 +572,80 @@ class TestElBloqueoSeAlcanzaDesdeLaPantalla:
         )
         assert respuesta.status_code == 200, respuesta.text
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 2
+
+
+class TestUnSaldoDesconocidoNoSacaLaVentaDeLosLibros:
+    """F-F.2 — la diferencia entre «sé que no hay» y «no sé», de punta a punta.
+
+    Las dos se ven iguales en la base (`stock_units = 0`). Sacar una venta de los
+    libros porque un producto está en cero SÓLO es correcto si ese cero es un dato
+    afirmado: hay inventario cargado, compras registradas o el archivo lo declara.
+    Si no hay ninguna procedencia, el cero significa "nunca se cargó" y el descuento
+    queda pendiente, contado y avisado.
+    """
+
+    async def test_sin_procedencia_del_saldo_la_venta_entra_y_avisa(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        # Producto en cero, sin un solo movimiento en el ledger, y un archivo que
+        # sólo vende (la hoja de compras no se confirma).
+        await _producto_sin_stock(db_session, sample_tenant)
+        archivo = await _archivo_dos_hojas(
+            db_session, sample_tenant, dia_compra="2024-03-01", dia_venta="2024-03-10"
+        )
+
+        response = await _confirmar(
+            client,
+            auth_headers,
+            archivo,
+            {**_PAYLOAD_DOS_HOJAS, "context_confirmed": {_CTX_VENTAS: True}},
+        )
+
+        assert response.status_code == 200, response.text
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
+        assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0
+        assert any(
+            "sin validar contra el stock" in w for w in response.json()["warnings"]
+        ), response.json()["warnings"]
+
+    async def test_con_inventario_cargado_la_venta_sin_respaldo_si_sale(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """El control: mismo archivo, pero el saldo de este producto SÍ es un dato.
+
+        Tiene 2 unidades cargadas y se le venden 6 el 10/03; la compra del archivo es
+        del 20/03, así que no la respalda. Hay procedencia del saldo, de modo que la
+        venta se va a «Otros» como siempre y NO se avisa de un descuento pendiente.
+        Sin este caso, la regla de F-F.2 podría estar apagando el gate entero.
+        """
+        db_session.add(
+            Product(
+                id=uuid.uuid4(),
+                tenant_id=sample_tenant.tenant_id,
+                name=_PRODUCTO,
+                sale_price_ars=Decimal("2100"),
+                unit_cost_ars=Decimal("1200"),
+                stock_units=2,
+            )
+        )
+        await db_session.commit()
+        archivo = await _archivo_dos_hojas(
+            db_session, sample_tenant, dia_compra="2024-03-20", dia_venta="2024-03-10"
+        )
+
+        response = await _confirmar(client, auth_headers, archivo, _PAYLOAD_DOS_HOJAS)
+
+        assert response.status_code == 200, response.text
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
+        assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 1
+        assert not any(
+            "sin validar contra el stock" in w for w in response.json()["warnings"]
+        )

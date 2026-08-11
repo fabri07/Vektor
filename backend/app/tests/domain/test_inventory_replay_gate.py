@@ -8,6 +8,7 @@ from uuid import uuid4
 from app.domain.inventory_replay_gate import (
     CreditEvent,
     ReplayRow,
+    productos_con_saldo_conocido,
     rows_without_stock_backing,
 )
 
@@ -214,3 +215,57 @@ def test_sin_creditos_el_resultado_es_el_de_siempre() -> None:
     assert rows_without_stock_backing(filas, {_VELA: 10}) == rows_without_stock_backing(
         filas, {_VELA: 10}, []
     )
+
+
+# ── F-F.2: «sé que no hay» no es lo mismo que «no sé» ─────────────────────────
+
+
+def test_un_producto_con_unidades_tiene_saldo_conocido() -> None:
+    conocidos = productos_con_saldo_conocido(
+        [_VELA], saldo_previo={_VELA: 3}, declarados_por_el_archivo=set(), con_historial=set()
+    )
+
+    assert conocidos == frozenset({_VELA})
+
+
+def test_un_cero_sin_procedencia_no_es_saldo_conocido() -> None:
+    """El producto está en cero, nadie lo compró nunca y el archivo no lo declara.
+
+    Ese cero no afirma que no hubiera stock: afirma que nunca se cargó inventario.
+    Tratarlo como "no hay" para sacar una venta de los libros sería inventar el
+    dato que falta, con el signo cambiado.
+    """
+    conocidos = productos_con_saldo_conocido(
+        [_VELA], saldo_previo={}, declarados_por_el_archivo=set(), con_historial=set()
+    )
+
+    assert conocidos == frozenset()
+
+
+def test_un_cero_con_historial_en_el_ledger_si_es_saldo_conocido() -> None:
+    """Se compró y se vendió todo: el cero es el resultado de una historia."""
+    conocidos = productos_con_saldo_conocido(
+        [_VELA], saldo_previo={_VELA: 0}, declarados_por_el_archivo=set(), con_historial={_VELA}
+    )
+
+    assert conocidos == frozenset({_VELA})
+
+
+def test_un_cero_que_el_archivo_declara_es_saldo_conocido() -> None:
+    """Un catálogo que dice «0 unidades» o una compra del archivo son afirmaciones."""
+    conocidos = productos_con_saldo_conocido(
+        [_VELA], saldo_previo={_VELA: 0}, declarados_por_el_archivo={_VELA}, con_historial=set()
+    )
+
+    assert conocidos == frozenset({_VELA})
+
+
+def test_cada_producto_se_juzga_por_su_cuenta() -> None:
+    conocidos = productos_con_saldo_conocido(
+        [_VELA, _TAZA],
+        saldo_previo={_VELA: 5},
+        declarados_por_el_archivo=set(),
+        con_historial=set(),
+    )
+
+    assert conocidos == frozenset({_VELA})
