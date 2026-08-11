@@ -868,6 +868,9 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-F.1 ✅ | a igual fecha el crédito entra antes que el débito, mismo desempate que `replay_timeline` |
 | F-F.1 ✅ | el saldo de partida es el PREVIO al archivo, no el de hoy: pasar un saldo que ya incluye las compras **y** los créditos las contaría dos veces |
 | F-F.1 ✅ | que el archivo también cargue productos ya no apaga el gate ni degrada la hoja (`hojas_con_replay=1`) |
+| F-F.2 ✅ | producto en cero, sin movimientos vivos y que el archivo no declara: la venta **entra**, su descuento queda pendiente y el confirm lo avisa (mutation-testeado: "todo saldo es conocido" → rojo) |
+| F-F.2 ✅ | control con el mismo archivo y 2 unidades cargadas: la venta de 6 sí se va a «Otros» y NO se avisa de pendiente (si no, la regla estaría apagando el gate entero) |
+| F-F.2 ✅ | cuenta como conocido: saldo previo > 0, lo que el archivo declara o compra, o cualquier movimiento vivo en el ledger |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** ✅ | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11, cruzando `.xlsx` real → confirm → apply → saldo persistido** |
 | F-H3 ✅ | re-confirmar el mismo archivo no aplica el movimiento dos veces |

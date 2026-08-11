@@ -49,7 +49,7 @@ fecha del import y las marcaría como sin respaldo — el falso positivo que
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Sequence
+from collections.abc import Container, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
@@ -102,6 +102,41 @@ class UnbackedRow:
     qty: int
     #: Unidades que quedaban cuando llegó su turno. Siempre < ``qty``.
     disponible: int
+
+
+def productos_con_saldo_conocido(
+    candidatos: Iterable[UUID],
+    *,
+    saldo_previo: Mapping[UUID, int],
+    declarados_por_el_archivo: Container[UUID],
+    con_historial: Container[UUID],
+) -> frozenset[UUID]:
+    """Los productos cuyo saldo es un DATO, no la ausencia de un dato.
+
+    F-F.2 — la diferencia entre «sé que no hay» y «no sé». Las dos se ven iguales
+    en la base (``stock_units = 0``) y no significan lo mismo: la primera justifica
+    no importar una venta que no se puede respaldar; la segunda es un producto del
+    que nunca se cargó inventario, y tratar ese cero como "no hay" sería inventar el
+    dato que falta — exactamente lo que la regla de no-invención prohíbe.
+
+    Un saldo cuenta como conocido si se cumple cualquiera de estas, que son las
+    formas que tiene un cero de haber sido AFIRMADO:
+
+    - ``saldo_previo > 0``: hay unidades, así que alguien las cargó;
+    - el archivo declara su stock o le compra unidades (``declarados_por_el_archivo``);
+    - el producto tiene movimientos vivos en el ledger (``con_historial``): su saldo
+      es el resultado de una historia registrada, no un renglón nunca tocado.
+
+    Lo que queda afuera es el producto en cero, sin movimientos y del que el archivo
+    no dice nada sobre unidades. De ese no se sabe cuánto había.
+    """
+    return frozenset(
+        pid
+        for pid in candidatos
+        if saldo_previo.get(pid, 0) > 0
+        or pid in declarados_por_el_archivo
+        or pid in con_historial
+    )
 
 
 def rows_without_stock_backing(
