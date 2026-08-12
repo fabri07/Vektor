@@ -1,11 +1,14 @@
-"""F-H3.e — qué le propone Véktor al inventario de cada hoja, servido a la UI.
+"""F-H3.e — qué le hace al inventario cada hoja, servido a la UI.
 
-El default y las opciones dependen de la entidad de la hoja y de los campos que el
-mapeo BORRADOR cubre: la misma hoja de ventas, con `cantidad` mapeada o sin
-mapear, puede o no aplicar su historia al stock. Por eso lo calcula el backend con
-el mapeo en curso y no una tabla fija en la pantalla — la copia de una regla de
-dominio en el frontend es lo que ya rompió el mapeo de columnas (incidente
-ASTERIA): la UI mostraba una cosa y mandaba otra.
+Depende de la entidad de la hoja y de los campos que el mapeo BORRADOR cubre: la
+misma hoja de ventas, con `cantidad` mapeada o sin mapear, mueve o no mueve stock.
+Por eso lo calcula el backend con el mapeo en curso y no una tabla fija en la
+pantalla — la copia de una regla de dominio en el frontend es lo que ya rompió el
+mapeo de columnas (incidente ASTERIA): la UI mostraba una cosa y mandaba otra.
+
+**F-F.4**: el endpoint dejó de ofrecer opciones y pasó a informar el efecto. Sigue
+existiendo, y con la misma forma, porque la pantalla necesita saber qué mostrar (y
+qué no mostrar) por hoja, y esa sigue siendo una regla de dominio.
 """
 
 from __future__ import annotations
@@ -21,8 +24,6 @@ from app.domain.inventory_effect import (
     CURRENT_SNAPSHOT,
     EFFECT_LABELS,
     HISTORICAL_REPLAY,
-    INFORMATIONAL,
-    NO_INVENTORY,
 )
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.tenant import Tenant
@@ -104,34 +105,40 @@ async def _efectos(
     auth_headers: dict[str, Any],
     archivo: UploadedFile,
     mapeos: list[dict[str, Any]],
+    context_entity: dict[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    cuerpo: dict[str, Any] = {"column_mappings": mapeos}
+    if context_entity:
+        cuerpo["context_entity"] = context_entity
     response = await client.post(
         f"/api/v1/ingestion/files/{archivo.id}/inventory-effects",
-        json={"column_mappings": mapeos},
+        json=cuerpo,
         headers=auth_headers,
     )
     assert response.status_code == 200, response.text
     return {hoja["context_id"]: hoja for hoja in response.json()}
 
 
-class TestEfectoPropuestoPorHoja:
-    async def test_cada_hoja_trae_su_default_y_sus_opciones(
+class TestEfectoPorHoja:
+    async def test_cada_hoja_trae_el_efecto_que_le_corresponde(
         self, client: AsyncClient, auth_headers: dict[str, Any], archivo: UploadedFile
     ) -> None:
+        """Las ventas de mercadería descuentan; el catálogo declara su saldo.
+
+        Y cada una trae UNA sola opción: desde F-F.4 no hay nada que elegir, así
+        que la pantalla informa. Si acá volviera a haber dos, el selector habría
+        vuelto sin que nadie lo declare.
+        """
         hojas = await _efectos(client, auth_headers, archivo, _MAPEO_COMPLETO)
 
         ventas = hojas[_VENTAS]
-        assert ventas["default"] == INFORMATIONAL
-        assert [o["value"] for o in ventas["options"]] == [
-            INFORMATIONAL,
-            HISTORICAL_REPLAY,
-            NO_INVENTORY,
-        ]
+        assert ventas["default"] == HISTORICAL_REPLAY
+        assert [o["value"] for o in ventas["options"]] == [HISTORICAL_REPLAY]
 
         catalogo = hojas[_CATALOGO]
         assert catalogo["default"] == CURRENT_SNAPSHOT
-        # Un saldo no es una secuencia: no hay historia que aplicar.
-        assert HISTORICAL_REPLAY not in [o["value"] for o in catalogo["options"]]
+        # Un saldo no es una secuencia: no se reproduce como movimientos.
+        assert [o["value"] for o in catalogo["options"]] == [CURRENT_SNAPSHOT]
 
     async def test_el_nombre_de_la_hoja_es_el_legible(
         self, client: AsyncClient, auth_headers: dict[str, Any], archivo: UploadedFile
@@ -150,14 +157,15 @@ class TestEfectoPropuestoPorHoja:
             for opcion in hoja["options"]:
                 assert opcion["label"] == EFFECT_LABELS[opcion["value"]]
 
-    async def test_sin_cantidad_mapeada_la_hoja_no_puede_aplicar_su_historia(
+    async def test_sin_cantidad_mapeada_la_hoja_no_habla_de_inventario(
         self, client: AsyncClient, auth_headers: dict[str, Any], archivo: UploadedFile
     ) -> None:
         """El caso que obliga a recalcular contra el mapeo BORRADOR y no una vez.
 
         Es la misma hoja del mismo archivo: lo único que cambia es que el usuario
-        todavía no mapeó `cantidad`. Sin unidades no hay inventario que mover, y
-        ofrecer "aplicar la historia" ahí sería ofrecer algo que no pasa.
+        todavía no mapeó `cantidad`. Sin unidades no hay inventario que mover, y la
+        pantalla no tiene que decir NADA sobre el stock de esa hoja — el cartel en
+        una hoja que no habla de inventario es lo que F-F.4 vino a sacar.
         """
         sin_cantidad = [
             m for m in _MAPEO_COMPLETO if m["target_field"] != "quantity"
@@ -165,8 +173,8 @@ class TestEfectoPropuestoPorHoja:
         hojas = await _efectos(client, auth_headers, archivo, sin_cantidad)
 
         ventas = hojas[_VENTAS]
-        assert ventas["default"] == NO_INVENTORY
-        assert [o["value"] for o in ventas["options"]] == [NO_INVENTORY]
+        assert ventas["default"] is None
+        assert ventas["options"] == []
 
     async def test_un_campo_propio_no_habilita_mover_inventario(
         self, client: AsyncClient, auth_headers: dict[str, Any], archivo: UploadedFile
@@ -179,7 +187,37 @@ class TestEfectoPropuestoPorHoja:
         ]
         hojas = await _efectos(client, auth_headers, archivo, con_custom)
 
-        assert hojas[_VENTAS]["default"] == NO_INVENTORY
+        assert hojas[_VENTAS]["default"] is None
+
+    async def test_cambiar_la_seccion_de_la_hoja_cambia_su_efecto(
+        self, client: AsyncClient, auth_headers: dict[str, Any], archivo: UploadedFile
+    ) -> None:
+        """F-F.4 + F-A: la sección la sigue eligiendo el usuario; el efecto la sigue.
+
+        Es la consecuencia deliberada de derivar el efecto de la entidad EFECTIVA.
+        El usuario reasigna la hoja de ventas a «gastos» —una compra— y esa hoja
+        pasa a mover inventario igual (mercadería, con cantidad); la reasigna a
+        «clientes» y deja de hablar de stock. Lo que NO cambia es que la sección es
+        decisión suya: acá se prueba que el efecto la respete, no que la reemplace.
+        """
+        como_compra = await _efectos(
+            client,
+            auth_headers,
+            archivo,
+            _MAPEO_COMPLETO,
+            context_entity={_VENTAS: "expense"},
+        )
+        assert como_compra[_VENTAS]["default"] == HISTORICAL_REPLAY
+
+        como_maestro = await _efectos(
+            client,
+            auth_headers,
+            archivo,
+            _MAPEO_COMPLETO,
+            context_entity={_VENTAS: "customer"},
+        )
+        assert como_maestro[_VENTAS]["default"] is None
+        assert como_maestro[_VENTAS]["options"] == []
 
     async def test_archivo_inexistente_es_404(
         self, client: AsyncClient, auth_headers: dict[str, Any]

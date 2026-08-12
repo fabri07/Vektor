@@ -95,18 +95,32 @@ def _map(source: str, target: str) -> dict[str, Any]:
     }
 
 
-def _payload(efecto: str) -> dict[str, Any]:
-    return {
-        "column_mappings": [
-            _map("fecha", "transaction_date"),
-            _map("producto", "product_name"),
-            _map("cantidad", "quantity"),
-            _map("monto", "amount"),
-        ],
+def _payload(efecto: str | None = None, *, con_cantidad: bool = True) -> dict[str, Any]:
+    """El confirm tal como lo manda la pantalla.
+
+    ``efecto=None`` es el caso NORMAL desde F-F.4: el frontend dejó de mandar el
+    eje porque el backend lo deduce. Los valores se siguen aceptando (un cliente
+    viejo durante un deploy) y por eso el parámetro sigue existiendo.
+
+    ``con_cantidad=False`` deja la hoja sin la columna de unidades: una venta de
+    servicios. Es la única forma que queda de que una hoja de ventas no mueva
+    inventario — antes era un modo que se elegía.
+    """
+    mapeos = [
+        _map("fecha", "transaction_date"),
+        _map("producto", "product_name"),
+        _map("monto", "amount"),
+    ]
+    if con_cantidad:
+        mapeos.insert(2, _map("cantidad", "quantity"))
+    payload: dict[str, Any] = {
+        "column_mappings": mapeos,
         "confirmed_fields": {"ventas": True},
         "context_confirmed": {_CTX: True},
-        "inventory_effect": {_CTX: efecto},
     }
+    if efecto is not None:
+        payload["inventory_effect"] = {_CTX: efecto}
+    return payload
 
 
 @pytest_asyncio.fixture
@@ -147,11 +161,13 @@ async def _confirmar(
     client: AsyncClient,
     auth_headers: dict[str, Any],
     archivo: UploadedFile,
-    efecto: str,
+    efecto: str | None = None,
+    *,
+    con_cantidad: bool = True,
 ) -> dict[str, Any]:
     response = await client.post(
         f"/api/v1/ingestion/files/{archivo.id}/confirm",
-        json=_payload(efecto),
+        json=_payload(efecto, con_cantidad=con_cantidad),
         headers=auth_headers,
     )
     assert response.status_code == 200, response.text
@@ -228,7 +244,7 @@ class TestElConfirmDescuentaYSePuedeDeshacer:
         assert await _stock(db_session, producto) == _STOCK_PREVIO
         assert await _movimientos_vivos(db_session, sample_tenant) == []
 
-    async def test_la_hoja_que_no_aplica_su_historia_no_toca_el_inventario(
+    async def test_la_hoja_que_no_habla_de_unidades_no_toca_el_inventario(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
@@ -239,17 +255,59 @@ class TestElConfirmDescuentaYSePuedeDeshacer:
     ) -> None:
         """El control: el eje sigue siendo POR HOJA.
 
-        Mismo archivo, misma venta, `informational`: entra a los libros y no mueve
-        una unidad. Sin este caso, la segunda pasada podría estar aplicando todo lo
-        que encuentra y el modo sería decorativo.
+        Mismo archivo, misma venta, sin la columna de unidades mapeada —una venta
+        de servicios—: entra a los libros y no mueve una unidad. Sin este caso, la
+        segunda pasada podría estar aplicando todo lo que encuentra.
+
+        F-F.4 cambió cómo se llega hasta acá: antes era el modo `informational`,
+        elegido a mano; ahora es que la hoja no hable de unidades. Lo que se
+        prueba es lo mismo — que el descuento no sea del ARCHIVO entero.
         """
-        respuesta = await _confirmar(client, auth_headers, archivo, "informational")
+        respuesta = await _confirmar(client, auth_headers, archivo, con_cantidad=False)
 
         assert await _stock(db_session, producto) == _STOCK_PREVIO
         assert await _movimientos_vivos(db_session, sample_tenant) == []
         assert not any(
             "Se descontaron del inventario" in w for w in respuesta.get("warnings") or []
         ), respuesta.get("warnings")
+
+    async def test_sin_declarar_nada_la_venta_de_mercaderia_descuenta(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        producto: Product,
+        archivo: UploadedFile,
+    ) -> None:
+        """F-F.4, el caso que la fase existe para cambiar.
+
+        El payload NO trae `inventory_effect` —la pantalla dejó de mandarlo— y la
+        venta descuenta igual. Antes de F-F.4 este mismo confirm dejaba el stock
+        intacto y el usuario tenía que volver a pedirlo desde el panel.
+        """
+        await _confirmar(client, auth_headers, archivo)
+
+        assert await _stock(db_session, producto) == _STOCK_PREVIO - _VENDIDAS
+
+    async def test_un_modo_que_f_f_4_elimino_no_voltea_el_confirm(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        producto: Product,
+        archivo: UploadedFile,
+    ) -> None:
+        """Vercel y Railway redespliegan en paralelo y sin orden garantizado.
+
+        Durante esa ventana un frontend viejo manda `informational` contra el
+        backend nuevo. Se descarta —dejó de ser una decisión— y la hoja hace lo
+        que su contenido dice: descontar. Rechazarlo con 422 habría dejado a esos
+        usuarios sin poder confirmar ningún archivo.
+        """
+        await _confirmar(client, auth_headers, archivo, "informational")
+
+        assert await _stock(db_session, producto) == _STOCK_PREVIO - _VENDIDAS
 
 
 class TestLaSegundaPasadaVeLoQueElImportAcabaDeEscribir:
@@ -316,6 +374,6 @@ class TestLaSegundaPasadaSeMide:
     ) -> None:
         """Una etapa en cero y una etapa que no corrió se leen distinto, y acá la
         diferencia importa: es lo que dice si el archivo aplicó su historia."""
-        await _confirmar(client, auth_headers, archivo, "informational")
+        await _confirmar(client, auth_headers, archivo, con_cantidad=False)
 
         assert "replay_inventario" not in await _etapas_del_confirm(db_session)

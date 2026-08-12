@@ -1,9 +1,9 @@
 """F-H3.d.3 — qué ventas de un archivo NO tienen stock que las respalde.
 
 Decide, sin sesión ni ORM, cuáles filas de venta se quedan sin unidades cuando se
-reproduce la historia que declara el archivo. Sólo corre para las hojas que el
-usuario marcó ``historical_replay``: con el default (``informational``) el archivo
-entra entero y esto no se ejecuta.
+reproduce la historia que declara el archivo. Corre para las hojas resueltas como
+``historical_replay``, que desde F-F.4 son todas las de compra y venta de
+mercadería: una hoja que no habla de unidades no llega hasta acá.
 
 **Por qué existir, en vez de simplemente dejar el stock en negativo.** Las dos
 alternativas obvias están mal por el mismo motivo: el descuento y el movimiento

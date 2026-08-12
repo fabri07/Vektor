@@ -1,90 +1,92 @@
 import "@testing-library/jest-dom";
 import React from "react";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 
 import { InventoryEffectChoice } from "../InventoryEffectChoice";
 import type { SheetInventoryEffect } from "@/services/ingestion.service";
 
 /**
- * F-H3.e — el control que hacía falta para que `historical_replay` exista fuera
- * de la API.
+ * F-F.4 — el control dejó de ser un control.
  *
- * Lo que estos tests protegen no es el HTML: es que las opciones y sus textos
- * salgan de lo que sirve el backend. Una lista propia acá ofrecería modos que el
- * importador no honra, que es exactamente cómo se rompió el mapeo de columnas.
+ * Hasta F-F.3 ofrecía tres modos y el usuario elegía si sus ventas movían el
+ * stock. Ahora el efecto se deduce del contenido de la hoja, así que esto
+ * informa. Lo que los tests protegen sigue siendo lo mismo: que el texto salga
+ * de lo que sirve el backend y no de una tabla propia — una copia acá mostraría
+ * lo que el importador no hace, que es como se rompió el mapeo de columnas.
  */
 
 const VENTAS: SheetInventoryEffect = {
   context_id: "sheet:Ventas",
   label: "Ventas marzo",
-  default: "informational",
+  default: "historical_replay",
   options: [
-    { value: "informational", label: "Estas filas no modificarán el inventario" },
-    { value: "historical_replay", label: "Aplicar la historia: las compras suman y las ventas restan" },
-    { value: "no_inventory", label: "Estas cantidades no afectan el inventario" },
+    {
+      value: "historical_replay",
+      label: "Las compras suman y las ventas restan del inventario",
+    },
   ],
 };
 
-const SIN_DECISION: SheetInventoryEffect = {
+const CATALOGO: SheetInventoryEffect = {
+  context_id: "sheet:Catalogo",
+  label: "Catálogo",
+  default: "current_snapshot",
+  options: [
+    { value: "current_snapshot", label: "El archivo declara el stock actual (saldo absoluto)" },
+  ],
+};
+
+/** Gastos fijos, clientes, proveedores, servicios: no hablan de inventario. */
+const SIN_INVENTARIO: SheetInventoryEffect = {
   context_id: "sheet:Clientes",
   label: "Clientes",
-  default: "no_inventory",
-  options: [{ value: "no_inventory", label: "Estas cantidades no afectan el inventario" }],
+  default: null,
+  options: [],
 };
 
 describe("InventoryEffectChoice", () => {
-  it("ofrece exactamente las opciones que mandó el backend, con sus textos", () => {
-    render(<InventoryEffectChoice hoja={VENTAS} value="informational" onChange={jest.fn()} />);
+  it("informa el efecto con el texto que mandó el backend", () => {
+    render(<InventoryEffectChoice hoja={VENTAS} />);
 
-    for (const opt of VENTAS.options) {
-      expect(screen.getByRole("button", { name: opt.label })).toBeInTheDocument();
-    }
-    expect(screen.getAllByRole("button")).toHaveLength(VENTAS.options.length);
+    expect(screen.getByText(VENTAS.options[0]!.label)).toBeInTheDocument();
   });
 
-  it("marca la opción activa y avisa el cambio", () => {
-    const onChange = jest.fn();
-    render(<InventoryEffectChoice hoja={VENTAS} value="informational" onChange={onChange} />);
+  it("no ofrece elegir: el efecto es consecuencia de lo que la hoja contiene", () => {
+    render(<InventoryEffectChoice hoja={VENTAS} />);
 
-    const informativo = screen.getByRole("button", { name: VENTAS.options[0]!.label });
-    expect(informativo).toHaveAttribute("aria-pressed", "true");
-
-    fireEvent.click(screen.getByRole("button", { name: VENTAS.options[1]!.label }));
-    expect(onChange).toHaveBeenCalledWith("historical_replay");
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("avisa que aplicar la historia es lo único que toca el stock", () => {
-    // El resto de los modos calculan y muestran. Este escribe: si el usuario no
-    // se entera, descubre el cambio de inventario después de que pasó.
-    render(
-      <InventoryEffectChoice hoja={VENTAS} value="historical_replay" onChange={jest.fn()} />,
-    );
+  it("la hoja que no habla de inventario no renderiza NADA", () => {
+    // El pedido textual: sacar «Estas cantidades no afectan el inventario» de
+    // Gastos_Fijos, Clientes y Proveedores. La respuesta correcta no es un cartel
+    // más suave — es no contestar una pregunta que esa hoja nunca hizo.
+    const { container } = render(<InventoryEffectChoice hoja={SIN_INVENTARIO} />);
 
-    expect(screen.getByText(/único modo que modifica el stock/i)).toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("avisa qué pasa con las ventas que no tengan stock que las respalde", () => {
+    // Se aplica al confirmar, sin un segundo clic: si el usuario no se entera,
+    // descubre después que algunas filas quedaron en «Otros».
+    render(<InventoryEffectChoice hoja={VENTAS} />);
+
+    expect(screen.getByText(/se aplica al stock/i)).toBeInTheDocument();
     expect(screen.getByText(/quedan en «Otros»/i)).toBeInTheDocument();
   });
 
-  it("sin aplicar la historia no muestra el aviso", () => {
-    render(<InventoryEffectChoice hoja={VENTAS} value="informational" onChange={jest.fn()} />);
-    expect(screen.queryByText(/único modo que modifica el stock/i)).not.toBeInTheDocument();
-  });
+  it("el catálogo no muestra ese aviso: declara un saldo, no descuenta nada", () => {
+    render(<InventoryEffectChoice hoja={CATALOGO} />);
 
-  it("con una sola opción informa y no ofrece un control que no decide nada", () => {
-    render(
-      <InventoryEffectChoice hoja={SIN_DECISION} value="no_inventory" onChange={jest.fn()} />,
-    );
-
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.getByText(/no afectan el inventario/i)).toBeInTheDocument();
+    expect(screen.getByText(CATALOGO.options[0]!.label)).toBeInTheDocument();
+    expect(screen.queryByText(/quedan en «Otros»/i)).not.toBeInTheDocument();
   });
 
   it("el copy habla de ESTA hoja, nunca del archivo", () => {
     // Un catálogo puede dejar el stock en su saldo mientras las ventas de la
-    // hoja de al lado no lo descuentan: decir "este archivo" sería falso.
-    const { container } = render(
-      <InventoryEffectChoice hoja={VENTAS} value="informational" onChange={jest.fn()} />,
-    );
-    expect(container.textContent).toContain("esta hoja");
+    // hoja de al lado lo descuentan: decir "este archivo" sería falso para una.
+    const { container } = render(<InventoryEffectChoice hoja={VENTAS} />);
+
     expect(container.textContent).not.toContain("este archivo");
   });
 });

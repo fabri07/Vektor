@@ -26,7 +26,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.inventory_effect import HISTORICAL_REPLAY, INFORMATIONAL, NO_INVENTORY
+from app.domain.inventory_effect import HISTORICAL_REPLAY
 from app.domain.inventory_projection import (
     ImportImpact,
     ProductProjection,
@@ -56,13 +56,17 @@ class ImportProjectionRecorder:
         #: archivo respaldan.
         self._creditos: list[CreditEvent] = []
 
-    def effect_for(self, context_id: str | None) -> str:
-        """Modo resuelto de la hoja. Sin dato → ``informational``.
+    def effect_for(self, context_id: str | None) -> str | None:
+        """Efecto resuelto de la hoja. ``None`` = esta hoja no habla de inventario.
 
-        NUNCA cae a ``historical_replay``: un caller viejo que no manda el modo
-        no puede terminar aplicando la historia entera de un archivo por omisión.
+        F-F.4: el default dejó de ser un valor. Hasta F-F.3 la ausencia caía a
+        ``informational`` y ese "sin dato" significaba dos cosas a la vez —«el
+        caller no mandó el modo» y «esta hoja no mueve unidades»—, así que había
+        que elegir un modo seguro para cubrir las dos. Ahora
+        ``resolve_inventory_effects`` omite del dict exactamente las hojas sin
+        efecto, y la ausencia dice una sola cosa.
         """
-        return self._inventory_effect.get(context_id or "", INFORMATIONAL)
+        return self._inventory_effect.get(context_id or "")
 
     def hojas_con_replay(self) -> int:
         """Cuántas hojas van a aplicar la historia.
@@ -75,7 +79,7 @@ class ImportProjectionRecorder:
         return sum(1 for efecto in self._inventory_effect.values() if efecto == HISTORICAL_REPLAY)
 
     def _cuenta_inventario(self, context_id: str | None) -> bool:
-        return self.effect_for(context_id) != NO_INVENTORY
+        return self.effect_for(context_id) is not None
 
     async def _producto(self, product_id: uuid.UUID) -> Any:
         """El ``Product``, del cache primero.

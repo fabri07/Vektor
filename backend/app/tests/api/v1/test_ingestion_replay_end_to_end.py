@@ -303,7 +303,7 @@ class TestElApplyExigeElegirHojas:
     """El eje de inventario se declara POR HOJA: escribir sin decir sobre cuáles
     contradice esa declaración.
 
-    Un libro con una hoja de ventas de servicios (`no_inventory`, sus filas no
+    Un libro con una hoja de ventas de servicios (sin unidades: sus filas no
     mueven unidades) y otra de mercadería descontaba las dos: el panel mandaba
     `context_ids=null` y el servicio interpretaba "todas". El preview sí puede
     correr sobre el archivo entero — es read-only y es la forma en que la
