@@ -692,6 +692,56 @@ sellar `updated_at` (es el único camino que lo captura en el ledger, así que a
 sí se prendería). Chat y reparación quedan afuera a propósito: no son imports de archivo con
 efecto de inventario declarado por hoja.
 
+### Entregado: F-F.3.b — el costo pasa a depender de los productos, no de las ventas (2026-08-12)
+
+`stock_service.decrement_stock_bulk()`: el lote vive en el **núcleo**, no en el llamador, por la
+misma razón que F-F.3 comparte `run_inventory_replay` — un lote armado del lado del caller
+volvería a separar lo que aplica el confirm de lo que aplica el reintento del panel.
+
+**Medido con el mismo instrumento antes y después** (100 ventas de 10 productos, contando
+sentencias en el propio confirm):
+
+| | sentencias SQL en TODO el confirm | envíos al broker |
+|---|---|---|
+| antes | 671 | 100 |
+| después | **87** | **1** |
+
+Lo que se colapsa: el advisory pasa de dos por venta a uno por corrida (es transaccional, así que
+retomarlo no agregaba exclusión, sólo sentencias); el `SELECT` de balance por venta pasa a uno
+por chunk; los `UPDATE` de balance y producto pasan de uno por venta a uno por **producto**; y
+los `INSERT` de movimiento entran por `executemany`. La traza no se toca: sigue habiendo un
+movimiento por venta.
+
+**El orden importa y no es estético:** primero el movimiento, después el saldo. El movimiento es
+lo único que puede chocar (índice único de `source_event_id`), así que resolverlo antes deja el
+saldo calculado sobre lo que *realmente* entró; al revés habría que adivinar cuánto revertir.
+
+**La carrera se paga por lote, no por archivo.** Si una venta en vivo descontó el mismo registro
+entre el pre-chequeo y el INSERT, el lote entero se rechaza y se rehace **de a una por el camino
+de siempre**: las demás entran igual y la conflictiva cuenta como ya aplicada. Se rehace el lote
+completo —no se lo parte— porque la colisión es rara y el camino de a una es el que ya estaba
+probado.
+
+**El clamp se replica paso a paso**, no al final: `stock_units` no baja de cero, así que una
+venta que pasa por el piso deja las siguientes restando desde 0, y colapsarlo en un solo
+`max(0, …)` sobre el total daría otro número justo en el caso que el clamp existe para cubrir.
+`current_qty` del balance sigue sin clamp a propósito: ahí un negativo es el dato de que la
+historia del archivo no cierra.
+
+**Los avisos al broker dejan de escalar con las ventas.** `events.stock_decreased` sólo encola el
+recálculo de score del tenant: emitirlo por venta encolaba 1.187 veces el mismo recálculo del
+mismo negocio. Pasa a uno por corrida. `STOCK_ALERT_CREATED` pasa a uno por producto que queda
+bajo el umbral — antes un producto con cuarenta ventas que cruzaba en la doceava emitía
+veintinueve alertas idénticas.
+
+**Hallazgo colateral, no reparado acá:** el índice `uq_inventory_movements_live_sale_event` lo
+crea la migración `20260729_0001` y **sólo en Postgres**; el schema de los tests sale de
+`Base.metadata.create_all`, que no lo conoce. Es decir que **el camino de colisión nunca estuvo
+cubierto por la suite** —ni antes ni después de este cambio—: en SQLite el INSERT duplicado
+entra. El test de la carrera crea el índice con el mismo predicado que la migración para correr
+contra la condición real. Declararlo en el modelo ORM es otra discusión (cambiaría el schema de
+todos los tests a la vez).
+
 **Aceptación:** ningún archivo se rechaza por ser plano · el orden de aplicación es por fecha y
 no por solapa (dos libros con las mismas ventas y las solapas invertidas dan el mismo
 resultado) · una hoja sin producto+cantidad no muestra una sola línea sobre inventario · el
@@ -926,6 +976,11 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-F.3 ✅ | la hoja `informational` sigue sin tocar una unidad, y la etapa `replay_inventario` ni siquiera aparece en la traza |
 | F-F.3 ✅ | el descuento se aplica también con la sesión de producción (`autoflush=False`), que la del conftest no reproduce |
 | F-F.3 ✅ | el desglose F-T declara `replay_inventario` con su denominador de filas |
+| F-F.3.b ✅ | 100 ventas de 10 productos: 671 → 87 sentencias en el confirm y 100 → 1 envío al broker, con el MISMO instrumento en las dos corridas |
+| F-F.3.b ✅ | varias ventas del mismo producto dejan el saldo acumulado y **un movimiento por venta** (el lote ahorra viajes, no traza) |
+| F-F.3.b ✅ | el clamp corre paso a paso (mutation-testeado: clamp al final → rojo) y `current_qty` sigue pudiendo ser negativo |
+| F-F.3.b ✅ | la carrera con una venta en vivo rehace el lote de a una: las otras entran, la conflictiva cuenta como ya aplicada y NO se crea un segundo movimiento (mutation-testeado: sin fallback → rojo) |
+| F-F.3.b ✅ | un `STOCK_DECREASED` por corrida y una `STOCK_ALERT_CREATED` por producto bajo umbral, no una por venta |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** ✅ | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11, cruzando `.xlsx` real → confirm → apply → saldo persistido** |
 | F-H3 ✅ | re-confirmar el mismo archivo no aplica el movimiento dos veces |
