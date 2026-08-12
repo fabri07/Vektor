@@ -1,6 +1,7 @@
 """Stock service — inventory operations without LLM."""
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -254,6 +255,223 @@ async def decrement_stock(
         )
 
     return movement
+
+
+#: Descuentos por lote al escribir. Mismo criterio que ``CLAVES_CHUNK_SIZE`` del
+#: replay: un archivo no tiene tope de filas y Postgres corta en 65.535 binds por
+#: statement (un movimiento tiene ~14 columnas). Acota además el costo del camino
+#: de excepción: cuando un lote choca, lo que se rehace de a una es un lote, no el
+#: archivo entero.
+BULK_DECREMENT_CHUNK_SIZE = 500
+
+
+@dataclass(frozen=True)
+class BulkDecrementItem:
+    """Un descuento pedido dentro de un lote.
+
+    Lleva el ``Product`` ya resuelto y no su id: el caller que arma el lote lo
+    tiene cargado, y volver a buscarlo acá reintroduciría por producto la consulta
+    que este camino existe para evitar.
+    """
+
+    product: Product
+    qty: int
+    source_event_id: str
+    occurred_at: datetime | None = None
+
+
+@dataclass
+class BulkDecrementOutcome:
+    """Cuántos descuentos escribió el lote y cuántos ya estaban."""
+
+    applied: int = 0
+    #: El movimiento ya existía: la venta se descontó por otro camino (en vivo, o
+    #: una corrida anterior). Es el no-op idempotente, no un error.
+    already_applied: int = 0
+
+
+async def _balances_por_producto(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    productos: list[Product],
+) -> dict[uuid.UUID, InventoryBalance]:
+    """Los balances de todos los productos del lote, en una consulta por chunk.
+
+    Es el reemplazo del ``SELECT`` por venta de ``_get_or_create_balance``: sobre un
+    archivo grande esa consulta se repetía una vez por fila aunque cuarenta ventas
+    hablaran del mismo producto. Los que no existen se crean por el camino de
+    siempre —uno por producto faltante, no uno por venta—, que es el que sabe
+    resolver la carrera contra el índice único.
+    """
+    ids = list({p.id for p in productos})
+    encontrados: dict[uuid.UUID, InventoryBalance] = {}
+    for inicio in range(0, len(ids), BULK_DECREMENT_CHUNK_SIZE):
+        filas = await db.execute(
+            select(InventoryBalance).where(
+                InventoryBalance.tenant_id == tenant_id,
+                InventoryBalance.product_id.in_(ids[inicio : inicio + BULK_DECREMENT_CHUNK_SIZE]),
+            )
+        )
+        for balance in filas.scalars():
+            encontrados[balance.product_id] = balance
+    for producto in productos:
+        if producto.id not in encontrados:
+            encontrados[producto.id] = await _get_or_create_balance(producto, tenant_id, db)
+    return encontrados
+
+
+def _movimiento_de_venta(
+    tenant_id: uuid.UUID,
+    item: BulkDecrementItem,
+    source_upload_id: uuid.UUID | None,
+    source_type: str | None,
+) -> InventoryMovement:
+    """El mismo movimiento que arma ``decrement_stock``, para un item del lote.
+
+    Se construye acá y no se reusa el objeto entre intentos a propósito: cuando un
+    lote choca, el rollback del SAVEPOINT deja transient todo lo que se había
+    agregado (``_restore_snapshot``), así que el camino de a una necesita objetos
+    nuevos.
+    """
+    return InventoryMovement(
+        tenant_id=tenant_id,
+        product_id=item.product.id,
+        movement_type="sale",
+        qty=-item.qty,
+        source_event_id=item.source_event_id,
+        source_upload_id=source_upload_id,
+        source_type=source_type,
+        occurred_at=ensure_utc(item.occurred_at) or datetime.now(UTC),
+    )
+
+
+async def decrement_stock_bulk(
+    tenant_id: uuid.UUID,
+    items: list[BulkDecrementItem],
+    db: AsyncSession,
+    *,
+    source_upload_id: uuid.UUID | None = None,
+    source_type: str | None = None,
+) -> BulkDecrementOutcome:
+    """Aplica muchos descuentos de venta con un puñado de sentencias, no cuatro por venta.
+
+    **Por qué existe.** ``decrement_stock`` cuesta ~4 sentencias y un envío al broker
+    por llamada, lo cual es correcto para UNA venta y ruinoso para las 1.187 de un
+    archivo: son ~4.700 sentencias adentro del request del confirm (medido). Acá el
+    costo pasa a depender de la cantidad de **productos**, no de la de ventas —
+    cuarenta ventas del mismo producto escriben su saldo una vez, no cuarenta.
+
+    **Vive en el núcleo, no en el llamador.** Lo que aplica el confirm y lo que
+    aplica el reintento del panel tienen que ser la misma operación; un lote armado
+    del lado del caller volvería a separarlas.
+
+    **Escribir primero el movimiento y recién después el saldo** no es un detalle de
+    orden: el movimiento es lo único que puede chocar (índice único de
+    ``source_event_id``), así que resolverlo antes deja el saldo calculado sobre lo
+    que *realmente* entró. Al revés habría que adivinar cuánto revertir.
+
+    **La carrera se paga por lote y no por archivo.** Si entre el pre-chequeo del
+    caller y este INSERT una venta en vivo descontó el mismo registro, el lote entero
+    se rechaza y se rehace de a una por el camino de siempre: cada fila conflictiva
+    cuenta como ``already_applied`` y las demás entran igual. Se rehace el lote
+    completo —no se lo parte— porque la colisión es rara y el camino de a una es el
+    que ya estaba probado.
+    """
+    outcome = BulkDecrementOutcome()
+    if not items:
+        return outcome
+
+    # Uno por corrida y no dos por venta: el advisory es transaccional
+    # (``pg_advisory_xact_lock_shared``), así que tomarlo de nuevo en cada iteración
+    # no agregaba exclusión, sólo sentencias.
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
+
+    balances = await _balances_por_producto(db, tenant_id, [i.product for i in items])
+
+    aplicados: list[BulkDecrementItem] = []
+    for inicio in range(0, len(items), BULK_DECREMENT_CHUNK_SIZE):
+        lote = items[inicio : inicio + BULK_DECREMENT_CHUNK_SIZE]
+        # Contrato de ``_savepoint``: drenar lo pendiente FUERA del try. Acá no es
+        # higiene sino requisito — el rollback del SAVEPOINT expunga TODO lo que la
+        # sesión tenga sin flushear, incluidas las filas que el import acaba de
+        # agregar y que no tienen nada que ver con este lote.
+        await db.flush()
+        try:
+            async with guarded_savepoint(db, LIVE_SALE_EVENT_CONFLICT):
+                for item in lote:
+                    db.add(_movimiento_de_venta(tenant_id, item, source_upload_id, source_type))
+                await db.flush()
+            aplicados.extend(lote)
+            outcome.applied += len(lote)
+        except SavepointConflictError:
+            for item in lote:
+                await db.flush()
+                try:
+                    async with guarded_savepoint(db, LIVE_SALE_EVENT_CONFLICT):
+                        db.add(
+                            _movimiento_de_venta(tenant_id, item, source_upload_id, source_type)
+                        )
+                        await db.flush()
+                    aplicados.append(item)
+                    outcome.applied += 1
+                except SavepointConflictError:
+                    outcome.already_applied += 1
+
+    if not aplicados:
+        return outcome
+
+    # El saldo se acumula en memoria y se escribe UNA vez por producto. El clamp a 0
+    # se replica **paso a paso**, no al final: ``stock_units`` no puede ir abajo de
+    # cero, así que una venta que pasa por el piso deja las siguientes restando desde
+    # 0. Colapsarlo en un solo ``max(0, ...)`` sobre el total daría otro número justo
+    # en el caso que el clamp existe para cubrir. ``current_qty`` sí es resta pura:
+    # el balance registra el saldo real, negativo incluido.
+    for item in aplicados:
+        producto = item.product
+        producto.stock_units = max(0, producto.stock_units - item.qty)
+        balances[producto.id].current_qty -= item.qty
+
+    # Y se escribe antes de volver. NO es redundante con el commit del caller:
+    # ``decrement_stock`` dejaba cada descuento flusheado, así que quien leyera el
+    # stock más adelante en la MISMA transacción veía el saldo ya descontado. Sin
+    # este flush el cambio queda sólo en memoria y cualquier lectura previa al commit
+    # —una query sin autoflush, un ``refresh()``— devuelve el saldo viejo, o peor, lo
+    # pisa. Sigue siendo un flush por corrida y P ``UPDATE``, no uno por venta.
+    await db.flush()
+
+    # Un aviso por corrida, no uno por venta: ``events.stock_decreased`` sólo encola
+    # el recálculo de score del tenant, así que emitirlo 1.187 veces encolaba 1.187
+    # veces el mismo recálculo del mismo negocio.
+    EventBus.emit(
+        "STOCK_DECREASED",
+        {
+            "tenant_id": str(tenant_id),
+            "product_id": None,
+            "qty": sum(i.qty for i in aplicados),
+            "source_event_id": None,
+        },
+    )
+    # Y una alerta por producto que queda bajo el umbral, no una por venta posterior
+    # al cruce: un producto con cuarenta ventas que cruzaba en la doceava emitía
+    # veintinueve alertas idénticas.
+    # Por dict y no con un ``next(...)`` adentro del recorrido: buscar el producto de
+    # cada alerta escaneando la lista de items sería cuadrático, que es exactamente lo
+    # que esta función existe para no hacer.
+    tocados = {i.product.id: i.product for i in aplicados}
+    for product_id, producto in tocados.items():
+        balance = balances[product_id]
+        if balance.current_qty <= effective_threshold(producto.low_stock_threshold_units):
+            EventBus.emit(
+                "STOCK_ALERT_CREATED",
+                {
+                    "tenant_id": str(tenant_id),
+                    "product_id": str(product_id),
+                    "alert_type": "stockout_risk",
+                    "current_qty": balance.current_qty,
+                },
+            )
+
+    return outcome
 
 
 async def increment_stock(

@@ -50,12 +50,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import stock_service
-from app.application.services._savepoint import SavepointConflictError, guarded_savepoint
 from app.application.services.inventory_movement_origin import SOURCE_HISTORICAL_REPLAY
-from app.application.services.stock_service import (
-    LIVE_SALE_EVENT_CONFLICT,
-    sale_source_event_id,
-)
+from app.application.services.stock_service import sale_source_event_id
 from app.domain.inventory_effect import IMPORT_CONTEXT_FIELD
 from app.domain.inventory_projection import (
     ImportImpact,
@@ -282,24 +278,34 @@ async def run_inventory_replay(
     if not apply:
         return resultado
 
-    for venta, producto in aplicables:
-        try:
-            async with guarded_savepoint(session, LIVE_SALE_EVENT_CONFLICT):
-                await stock_service.decrement_stock(
-                    product_id=producto.id,
-                    tenant_id=tenant_id,
-                    qty=int(venta.quantity or 0),
-                    source_event_id=sale_source_event_id(venta.id),
-                    db=session,
-                    occurred_at=venta.transaction_date,
-                    source_upload_id=file_id,
-                    source_type=SOURCE_HISTORICAL_REPLAY,
-                )
-            resultado.aplicadas += 1
-        except SavepointConflictError:
-            # La otra rama (una venta en vivo del mismo registro) ya lo creó: no-op
-            # idempotente, no un error. Ver `decrement_for_sale`.
-            resultado.ya_aplicadas += 1
+    # F-F.3.b: por lote, no venta por venta. Aplicar de a una costaba ~4 sentencias
+    # y un envío al broker por venta —sobre el archivo real, ~4.700 sentencias
+    # adentro del request del confirm—, que es exactamente la demora que F-T existe
+    # para no reintroducir. El lote vive en `stock_service` y no acá: lo que aplica
+    # el confirm y lo que aplica el reintento del panel tienen que ser la misma
+    # operación, y un lote armado del lado del caller volvería a separarlas.
+    #
+    # Las ventas ya descontadas ni siquiera llegan hasta acá (las sacó el chequeo de
+    # `_ya_descontadas`), así que `ya_aplicadas` sólo suma lo que aparezca en la
+    # CARRERA: una venta en vivo que se descontó entre aquel SELECT y este INSERT.
+    # El lote la resuelve rehaciéndose de a una, que es el camino de siempre.
+    bulk = await stock_service.decrement_stock_bulk(
+        tenant_id,
+        [
+            stock_service.BulkDecrementItem(
+                product=producto,
+                qty=int(venta.quantity or 0),
+                source_event_id=sale_source_event_id(venta.id),
+                occurred_at=venta.transaction_date,
+            )
+            for venta, producto in aplicables
+        ],
+        session,
+        source_upload_id=file_id,
+        source_type=SOURCE_HISTORICAL_REPLAY,
+    )
+    resultado.aplicadas += bulk.applied
+    resultado.ya_aplicadas += bulk.already_applied
 
     logger.info(
         "ingestion.inventory_replay.applied",
