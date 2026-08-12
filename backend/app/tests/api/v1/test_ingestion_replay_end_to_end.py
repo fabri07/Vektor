@@ -15,9 +15,13 @@ parser rompe acá con el header a la vista.
 
 - Al confirmar, el catálogo deja el stock en 10 (apertura) y la compra suma 5. Las
   compras del import aplican SIEMPRE, sin mirar `inventory_effect` (**V16**): el
-  eje gobierna las ventas. Por eso después de confirmar hay 15, no 11.
-- La venta descuenta recién en el segundo paso (`/inventory-replay`), que es la
-  decisión de F-H3.c: confirmar → revisar → aplicar.
+  eje gobierna las ventas.
+- **F-F.3: la venta descuenta en el MISMO confirm**, en una segunda pasada. Antes
+  esperaba a un segundo paso manual (`/inventory-replay`), que era la decisión de
+  F-H3.c (confirmar → revisar → aplicar); esa decisión existía porque el replay no
+  se podía validar por fecha, y desde F-F.1 sí se puede. Por eso este test ahora
+  lee 11 apenas confirma, y lo que prueba del endpoint es que **no vuelve a
+  descontar**: los dos caminos comparten la clave de idempotencia.
 - Con `informational` el saldo se queda en 15 y el preview igual dice 11: el modo
   es de la HOJA DE VENTAS, no del archivo — la apertura y la compra ya lo tocaron.
 """
@@ -57,9 +61,10 @@ _CATALOGO = "sheet:Catalogo"
 _COMPRAS = "sheet:Compras"
 _VENTAS = "sheet:Ventas"
 
-#: apertura 10 + compra 5. Lo que hay DESPUÉS de confirmar, antes de aplicar nada.
-_STOCK_TRAS_CONFIRMAR = 15
-#: … − venta 4. Lo que tiene que quedar después del replay.
+#: apertura 10 + compra 5. Lo que deja el confirm cuando la hoja de ventas NO
+#: aplica su historia (`informational`).
+_STOCK_SIN_DESCONTAR = 15
+#: … − venta 4. Con `historical_replay` lo deja el confirm mismo (F-F.3).
 _STOCK_FINAL = 11
 
 
@@ -250,35 +255,42 @@ class TestReplayEndToEnd:
         sample_tenant: Tenant,
         archivo: UploadedFile,
     ) -> None:
-        """El recorrido completo: confirmar → revisar → aplicar → leer el saldo."""
-        await _confirmar(client, auth_headers, archivo, "historical_replay")
+        """El recorrido completo: confirmar (que ya descuenta) → leer el saldo."""
+        respuesta = await _confirmar(client, auth_headers, archivo, "historical_replay")
         # Una fila de cada hoja entró como lo que la hoja dice ser. Se cuenta en la
         # DB y no en la respuesta del confirm: lo que importa es lo que quedó
         # persistido, que es lo que después lee el replay.
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
         assert await _cuantas(db_session, sample_tenant, ExpenseEntry) == 1
         assert await _cuantas(db_session, sample_tenant, Product) == 1
-        # El confirm no descuenta la venta: apertura + compra y nada más.
-        assert await _stock(db_session, sample_tenant) == _STOCK_TRAS_CONFIRMAR
-
-        # El preview proyecta el saldo final SIN escribirlo.
-        preview = await _replay(client, auth_headers, archivo, dry_run=True)
-        assert preview["aplicadas"] == 0
-        assert [(p["saldo_inicial"], p["saldo_final"]) for p in preview["impacto"]] == [
-            (_STOCK_TRAS_CONFIRMAR, _STOCK_FINAL)
-        ]
-        assert preview["hojas"] == [_VENTAS]
-        assert preview["alcance_por_hoja"] is True
-        assert await _stock(db_session, sample_tenant) == _STOCK_TRAS_CONFIRMAR
-
-        aplicado = await _replay(client, auth_headers, archivo, dry_run=False)
-        assert aplicado["aplicadas"] == 1
-        assert aplicado["sin_stock"] == []
+        # F-F.3: apertura + compra − venta, todo en el confirm.
         assert await _stock(db_session, sample_tenant) == _STOCK_FINAL
+        assert any(
+            "Se descontaron del inventario 1 venta(s)" in w
+            for w in respuesta.get("warnings") or []
+        ), respuesta.get("warnings")
 
         # El ledger tiene que contar la misma historia que el saldo: +10 de
         # apertura, +5 de la compra y −4 de la venta. Un saldo correcto con un
         # ledger que no lo explica rompe el chequeo de integridad más adelante.
+        assert await _movimientos(db_session, sample_tenant) == [
+            ("adjustment", 10),
+            ("purchase", 5),
+            ("sale", -4),
+        ]
+
+        # El endpoint sigue siendo el camino de lo que quedó pendiente, y sobre lo
+        # ya descontado es un no-op: los dos entran por el mismo núcleo y comparten
+        # la clave `sale:{id}`. Sin eso, abrir el panel y tocar "aplicar" después de
+        # un confirm que ya descontó dejaría el stock en 7.
+        preview = await _replay(client, auth_headers, archivo, dry_run=True)
+        assert (preview["aplicadas"], preview["ya_aplicadas"]) == (0, 1)
+        assert preview["impacto"] == []
+
+        aplicado = await _replay(client, auth_headers, archivo, dry_run=False)
+        assert (aplicado["aplicadas"], aplicado["ya_aplicadas"]) == (0, 1)
+        assert aplicado["sin_stock"] == []
+        assert await _stock(db_session, sample_tenant) == _STOCK_FINAL
         assert await _movimientos(db_session, sample_tenant) == [
             ("adjustment", 10),
             ("purchase", 5),
@@ -329,8 +341,9 @@ class TestElApplyExigeElegirHojas:
         assert respuesta.status_code == 422
         assert "Elegí qué hojas" in respuesta.json()["detail"]
 
-        # Y no escribió nada: el stock sigue como lo dejó el confirm.
-        assert await _stock(db_session, sample_tenant) == _STOCK_TRAS_CONFIRMAR
+        # Y no escribió nada: el stock sigue como lo dejó el confirm (F-F.3: ya con
+        # la venta descontada).
+        assert await _stock(db_session, sample_tenant) == _STOCK_FINAL
 
     async def test_el_preview_sigue_viendo_todo_el_archivo(
         self,

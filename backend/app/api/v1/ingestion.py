@@ -98,6 +98,10 @@ from app.application.services.ingestion_lease_service import (
     finalize_import_lease,
     release_import_lease,
 )
+from app.application.services.inventory_replay_service import (
+    ReplayOutcome,
+    run_inventory_replay,
+)
 from app.application.services.llm_file_type_detector import maybe_detect_file_type
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
@@ -106,6 +110,7 @@ from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
 from app.domain.inventory_effect import (
     EFFECT_LABELS,
+    HISTORICAL_REPLAY,
     InvalidInventoryEffectError,
     SheetInventoryProfile,
     default_effect_for,
@@ -2677,6 +2682,59 @@ async def confirm_file(
         # desglose completo viaja aparte, en `detail.timings_ms`.
         _confirm_latency_ms = _timings.as_detail()["stages"]["import"]["ms"]
 
+        # ── F-F.3: el confirm APLICA el descuento de las ventas que acaba de
+        # importar, en una segunda pasada dentro de ESTE savepoint.
+        #
+        # Hasta acá regía la decisión de F-H3.c ("confirmar → revisar → aplicar"),
+        # que existía porque el replay no se podía validar por fecha: el gate leía
+        # un saldo estático y el archivo plano ni siquiera se podía gatear. Esa
+        # condición ya no existe (F-F.1: las compras del archivo entran como
+        # créditos datados; el ancla del catálogo se aplica antes de todos los
+        # eventos), así que las ventas que el gate dejó entrar son exactamente las
+        # que la cronología respalda y no hay razón para pedir un segundo clic.
+        #
+        # Se reusa el MISMO núcleo que el endpoint de replay, sin una segunda
+        # implementación: idempotencia por `source_event_id="sale:{id}"` (una venta
+        # ya descontada no se descuenta otra vez) y reversa por `source_upload_id`
+        # (borrar el archivo la deshace). El núcleo recalcula el respaldo contra el
+        # stock de AHORA, así que la venta que entró sin saldo conocido (F-F.2)
+        # queda **pendiente** en vez de dejar el inventario en negativo.
+        #
+        # `flush()` explícito, y NO es redundante por casualidad: hoy
+        # `insert_confirmed_data` termina con un flush propio, así que sacarlo no
+        # pone rojo nada (medido). Se deja porque la alternativa es que la segunda
+        # pasada dependa de un detalle interno del importador que nadie declara —
+        # con la sessionmaker de producción (`autoflush=False`) el `SELECT` por
+        # `source_upload_id` no vería ni una de las ventas recién agregadas y el
+        # confirm dejaría de descontar EN SILENCIO. Los tests no lo agarrarían: su
+        # sesión se arma en el conftest sin ese parámetro, o sea con autoflush.
+        _hojas_replay = [
+            _cid for _cid, _ef in _inventory_effects.items() if _ef == HISTORICAL_REPLAY
+        ]
+        _replay_outcome: ReplayOutcome | None = None
+        if _hojas_replay:
+            # `stage()` y no `mark()`, por lo mismo que el import: si explota, su
+            # tiempo igual queda en la traza del rechazo.
+            with _timings.stage("replay_inventario") as _etapa_replay:
+                await session.flush()
+                _replay_outcome = await run_inventory_replay(
+                    session,
+                    tenant.tenant_id,
+                    file_id,
+                    context_ids=_hojas_replay,
+                    apply=True,
+                )
+                # Las ventas que la pasada MIRÓ, no sólo las que descontó: una
+                # corrida que deja todo pendiente hizo el mismo trabajo de lectura.
+                _etapa_replay.rows = (
+                    _replay_outcome.aplicadas
+                    + _replay_outcome.ya_aplicadas
+                    + len(_replay_outcome.sin_stock)
+                )
+            counts["descuentos_aplicados"] = _replay_outcome.aplicadas
+            counts["descuentos_ya_aplicados"] = _replay_outcome.ya_aplicadas
+            counts["descuentos_pendientes"] = len(_replay_outcome.sin_stock)
+
         # `product_details` sale de `counts` ANTES de cualquier otra cosa: más
         # abajo `counts` se serializa entero en `compact_summary`, y meter ahí el
         # detalle por producto engordaría el JSONB (justo lo que ese bloque
@@ -3104,15 +3162,28 @@ async def confirm_file(
             "columnas riesgosas se enviaron a «Otros» para que las completes."
         )
 
-    # F-F.2: la venta entró porque del producto no se sabe cuánto stock había —no
-    # porque se haya validado—. Decirlo es la mitad de la decisión: un descuento
-    # pendiente que no se avisa es indistinguible de uno que se aplicó.
-    if counts.get("ventas_descuento_pendiente"):
+    # F-F.3: el descuento ya se aplicó en el confirm, así que los dos avisos son de
+    # hechos consumados y no de intenciones. Los números salen del outcome
+    # **recalculado adentro de la transacción que escribió**, nunca del contador del
+    # gate (`ventas_descuento_pendiente`, que queda en `counts` como dato de traza):
+    # entre gatear e insertar el saldo puede moverse, y publicar el número del
+    # preview para una operación que escribió otro es exactamente lo que ya se pagó
+    # en el borrado por procedencia.
+    #
+    # La clave existe (aunque valga 0) si y sólo si la pasada corrió: es lo que
+    # distingue "no había nada que descontar" de "acá no se descuenta".
+    _replay_corrio = "descuentos_aplicados" in counts
+    if counts.get("descuentos_aplicados"):
         warnings.append(
-            f"{counts['ventas_descuento_pendiente']} venta(s) se importaron sin validar "
-            "contra el stock: de esos productos no hay inventario cargado ni compras "
-            "registradas, así que no se sabe cuántas unidades había. Su descuento queda "
-            "pendiente — cargá el inventario y aplicalo desde el panel de impacto."
+            f"Se descontaron del inventario {counts['descuentos_aplicados']} venta(s) "
+            "importada(s), cada una en su fecha."
+        )
+    if counts.get("descuentos_pendientes"):
+        warnings.append(
+            f"{counts['descuentos_pendientes']} venta(s) se importaron sin descontar del "
+            "inventario: de esos productos no hay stock cargado ni compras registradas, "
+            "así que no se sabe cuántas unidades había. El descuento queda pendiente — "
+            "cargá el inventario y aplicalo desde el panel de impacto."
         )
 
     # F-F: acá vivía el aviso de la degradación a `informational` (F-H3.d.6). El
@@ -3120,11 +3191,9 @@ async def confirm_file(
     # como créditos datados, así que "no había stock previo contra el cual validar"
     # dejó de ser una situación posible.
 
-    # F-H3.b: el impacto que el archivo TENDRÍA sobre el stock. Nada se aplicó —
-    # el default es `informational`—, así que el aviso dice qué pasaría, no qué
-    # pasó. Un saldo que se va abajo de cero al reproducir la historia casi
-    # siempre significa que faltan compras viejas, no que el stock de hoy esté
-    # mal: por eso informa y no bloquea.
+    # F-H3.b: el impacto del archivo sobre el stock. Un saldo que se va abajo de
+    # cero al reproducir la historia casi siempre significa que faltan compras
+    # viejas, no que el stock de hoy esté mal: por eso informa y no bloquea.
     if counts.get("stock_proyectado_negativo"):
         _impacto = counts.get("impacto_inventario") or []
         _neg = [p for p in _impacto if p.get("primer_negativo_en")]
@@ -3132,11 +3201,19 @@ async def confirm_file(
         _resto = len(_neg) - 3
         if _resto > 0:
             _muestra += f" y {_resto} más"
+        # F-F.3: "No se modificó el stock" dejó de ser cierto cuando la hoja aplica
+        # su historia al confirmar. Mantenerlo habría convertido el aviso en el
+        # único lugar del confirm que niega lo que el confirm acaba de hacer.
+        _cierre = (
+            "Las ventas que se quedaron sin unidades no se descontaron y su descuento "
+            "quedó pendiente: probablemente falten compras anteriores."
+            if _replay_corrio
+            else "No se modificó el stock: probablemente falten compras anteriores. "
+            "Revisá el detalle antes de aplicar el histórico."
+        )
         warnings.append(
-            f"Si se aplicara la historia de este archivo, {len(_neg)} producto(s) "
-            f"quedarían con stock negativo en algún momento ({_muestra}). No se "
-            "modificó el stock: probablemente falten compras anteriores. Revisá el "
-            "detalle antes de aplicar el histórico."
+            f"Al reproducir la historia de este archivo, {len(_neg)} producto(s) "
+            f"quedan con stock negativo en algún momento ({_muestra}). {_cierre}"
         )
 
     # F-H2: vincular una venta a un producto es resolver su IDENTIDAD, no afirmar

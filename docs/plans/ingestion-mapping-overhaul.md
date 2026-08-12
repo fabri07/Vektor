@@ -309,6 +309,12 @@ F-H3.e  selector de efecto por hoja en la UI                      ✅ entregado
 > La 3 es la que sale gratis con lo ya entregado, pero convierte el replay en una acción posterior al import en vez de una opción del confirm. **Es una decisión de producto, no técnica.**
 >
 > **Resuelto: se eligió la 3.** El confirm no toca stock y devuelve el impacto; el replay es un paso posterior. **Regla que F-H3.d hereda:** el impacto que se muestre al aplicar se **recalcula dentro de la transacción del apply**, nunca se lee de lo que devolvió el confirm. Entre confirmar y aplicar el stock pudo cambiar, y mostrar un número viejo para una operación que va a escribir otro es exactamente lo que ya pagó F11 (por eso ahí el DELETE recalcula y su resultado es el autoritativo, no el del preview).
+>
+> **Superada por F-F.3 (2026-08-11): el confirm APLICA.** La opción 3 no era una preferencia de UX, era la salida a una limitación: sin cola cronológica el gate miraba un saldo estático, el archivo plano ni siquiera se podía gatear y aplicar al confirmar habría escrito descuentos que nadie podía validar. F-F.1 (créditos datados + ancla del catálogo antes de todos los eventos) y F-F.2 (saldo conocido ≠ saldo ausente) eliminaron esa limitación, y con ella la razón del segundo clic: las ventas que el gate deja entrar son exactamente las que la cronología respalda.
+>
+> Lo que **no** cambia y es lo que hace defendible aplicar sin preguntar: el movimiento lleva `source_upload_id`, así que borrar el archivo lo deshace (F11), y lleva `source_event_id="sale:{id}"`, así que aplicar de nuevo no descuenta de nuevo. **La regla heredada sigue en pie, y ahora rige a los dos llamadores:** el número se recalcula adentro de la transacción que escribe. Por eso el confirm no reusa el conteo del gate para avisar qué quedó pendiente — lo toma del outcome del núcleo.
+>
+> `POST /inventory-replay` **no** desaparece: es la vía de lo que quedó pendiente (el producto sin saldo conocido de F-F.2, o un stock que se movió entre corridas). Deja de ser el camino normal y pasa a ser el de la excepción.
 
 > **Decisiones de F-H3.d (2026-08-06), tomadas por el usuario sobre los hallazgos V16–V18.**
 >
@@ -454,6 +460,16 @@ Evidencia preservada sin migración: el monto original discrepante va a la traza
 **Al confirmar:** insertar sólo filas válidas · trazabilidad de las rechazadas · buffers por identidad (no una query por fila) · idempotencia por `(archivo, contexto, fila)` intacta.
 
 `_add_sale`/`_add_expense` pasan de `bool` a `RowOutcome(inserted, product_id, customer_id, supplier_id)`. **Riesgo alto:** `_did_insert` alimenta `_register_import_row_fingerprint`. Test de idempotencia **antes** de tocar la firma.
+
+**Re-scope tras F-F.3 (2026-08-11).** Tres de las cinco piezas de arriba ya están entregadas por otra fase, y conviene anotarlo antes de estimar lo que queda:
+
+| Pieza | Estado |
+|---|---|
+| Cola cronológica de movimientos en memoria | ✅ F-F.1 (`rows_without_stock_backing` con `CreditEvent` datados) |
+| Filas rechazadas por falta de respaldo, con trazabilidad | ✅ F-H3.d.3 + F-F.2 (van a «Otros» con motivo; el pendiente se avisa) |
+| El stock resultante de F-H3 | ✅ F-F.3 — ya no es un preview a mostrar antes: el confirm lo **aplica** y lo informa |
+
+**Lo que sigue siendo F-H5, y es lo caro:** el `RowOutcome` (que es un refactor de firma con riesgo sobre las huellas de idempotencia) y el **preview final previo a escribir**. Y ese preview hay que re-justificarlo: nació para que el usuario viera el impacto de inventario antes de confirmar, y ese impacto ahora se aplica y se revierte borrando el archivo. Si lo único que queda del preview es "cuántas filas van a rebotar", eso ya se responde después, en «Otros», con la fila a la vista.
 
 ## F-H6 · Costos de compra agrupados
 
@@ -642,6 +658,39 @@ entero en una confirmación y la parte ya contada en el saldo de apertura se des
 La regla **no se levanta por conveniencia ni porque el usuario lo pidió**: se levanta porque el
 replay pasa a aplicarse por fecha y el ancla se aplica antes de todo, que era la condición que
 en su momento no existía. Si alguna de esas dos piezas se cae, el default tiene que volver.
+
+### Entregado: F-F.3 — el confirm aplica (2026-08-11)
+
+Una **segunda pasada dentro del savepoint del confirm**, después del import, que llama al mismo
+`run_inventory_replay` que el endpoint del panel. Reusar el núcleo no es prolijidad: lo que
+descuenta el confirm y lo que descuenta el segundo intento tienen que ser la misma operación, o
+el reintento podría descontar distinto que el primero. Sale acotada a las hojas resueltas como
+`historical_replay`, con etapa propia `replay_inventario` en el desglose de F-T.
+
+Esto **deroga la decisión de F-H3.c** (confirmar → revisar → aplicar), que no era una preferencia
+de UX sino la salida a una limitación ya levantada. El detalle está en el bloque de F-H3.c.
+
+**Los avisos pasan a ser de hechos consumados**, y el número de lo que quedó pendiente sale del
+outcome recalculado adentro de la transacción que escribió, no del contador del gate: el confirm
+tiene dos momentos —gatear e insertar— y publicar el número del primero para describir lo que
+hizo el segundo es la misma clase de error que F11 ya pagó. En particular «No se modificó el
+stock» se eliminó del aviso de proyección negativa: era el único lugar del confirm que negaba lo
+que el confirm acababa de hacer.
+
+**Medido antes de dar por buena la forma** (100 ventas, contando sentencias en el propio
+confirm): la pasada cuesta **~4 sentencias SQL y 1 envío al broker por venta** —`SELECT` de
+balance, `UPDATE` de balance, `INSERT` del movimiento, `UPDATE` del producto, más el advisory
+lock por llamada en Postgres—. Sobre el archivo real (1.187 ventas) son ~4.700 sentencias y
+1.187 mensajes a Redis **dentro del request**, que es exactamente la clase de demora que F-T
+existe para no volver a introducir a ciegas. Por eso el batch va en **F-F.3.b**, adentro del
+núcleo compartido y no en el llamador.
+
+**Alcance declarado:** aplica el **confirm**. Los otros cuatro puntos que insertan ventas
+—relectura (`reread_service`), los dos de chat (`pending_action_service`) y
+`data_repair_service`— no descuentan. La relectura entra en **F-F.4**, donde además hay que
+sellar `updated_at` (es el único camino que lo captura en el ledger, así que ahí el guard de V27
+sí se prendería). Chat y reparación quedan afuera a propósito: no son imports de archivo con
+efecto de inventario declarado por hoja.
 
 **Aceptación:** ningún archivo se rechaza por ser plano · el orden de aplicación es por fecha y
 no por solapa (dos libros con las mismas ventas y las solapas invertidas dan el mismo
@@ -871,6 +920,12 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-F.2 ✅ | producto en cero, sin movimientos vivos y que el archivo no declara: la venta **entra**, su descuento queda pendiente y el confirm lo avisa (mutation-testeado: "todo saldo es conocido" → rojo) |
 | F-F.2 ✅ | control con el mismo archivo y 2 unidades cargadas: la venta de 6 sí se va a «Otros» y NO se avisa de pendiente (si no, la regla estaría apagando el gate entero) |
 | F-F.2 ✅ | cuenta como conocido: saldo previo > 0, lo que el archivo declara o compra, o cualquier movimiento vivo en el ledger |
+| F-F.3 ✅ | el confirm de una hoja `historical_replay` deja el stock ya descontado (no hace falta un segundo clic) y lo avisa |
+| F-F.3 ✅ | borrar el archivo devuelve las unidades y responde `fully_reverted: true`: el movimiento del confirm lleva `source_upload_id` y el guard del ledger no se prende por el `updated_at` que mueve el descuento |
+| F-F.3 ✅ | tocar «aplicar» en el panel después de ese confirm es un no-op (`ya_aplicadas`), no un segundo descuento: los dos caminos comparten `sale:{id}` |
+| F-F.3 ✅ | la hoja `informational` sigue sin tocar una unidad, y la etapa `replay_inventario` ni siquiera aparece en la traza |
+| F-F.3 ✅ | el descuento se aplica también con la sesión de producción (`autoflush=False`), que la del conftest no reproduce |
+| F-F.3 ✅ | el desglose F-T declara `replay_inventario` con su denominador de filas |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** ✅ | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11, cruzando `.xlsx` real → confirm → apply → saldo persistido** |
 | F-H3 ✅ | re-confirmar el mismo archivo no aplica el movimiento dos veces |
