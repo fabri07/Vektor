@@ -39,19 +39,20 @@ const mockInventoryEffects = ingestionService.fetchInventoryEffects as jest.Mock
 const mockPurchaseGroups = ingestionService.fetchPurchaseGroups as jest.Mock;
 
 /**
- * F-H3.e — lo que el backend ofrece para una hoja de ventas con producto y
- * cantidad mapeados. Las opciones y sus textos los sirve `/inventory-effects`:
- * el frontend no tiene lista propia.
+ * F-F.4 — lo que el backend DEDUCE para una hoja de ventas de mercadería. El
+ * texto lo sirve `/inventory-effects`: el frontend no tiene lista propia, y
+ * desde F-F.4 tampoco tiene qué elegir — viene una sola opción.
  */
 const EFECTOS_VENTAS = [
   {
     context_id: "table",
     label: "Ventas",
-    default: "informational",
+    default: "historical_replay",
     options: [
-      { value: "informational", label: "Estas filas no modificarán el inventario" },
-      { value: "historical_replay", label: "Aplicar la historia: las compras suman y las ventas restan" },
-      { value: "no_inventory", label: "Estas cantidades no afectan el inventario" },
+      {
+        value: "historical_replay",
+        label: "Las compras suman y las ventas restan del inventario",
+      },
     ],
   },
 ];
@@ -722,12 +723,15 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
   });
 
   /**
-   * F-H3.e — la regresión de la fase: el panel NO mandaba `inventory_effect`, así
-   * que `historical_replay` (el único modo que escribe stock) era inalcanzable
-   * desde la pantalla y todo archivo entraba con el default de cada hoja. Todo lo
-   * demás estaba cableado y probado punta a punta contra el endpoint.
+   * F-F.4 — el panel dejó de mandar `inventory_effect`.
+   *
+   * F-H3.e lo había cableado justamente porque sin eso `historical_replay` era
+   * inalcanzable desde la pantalla. Ahora el backend lo deduce del mismo mapeo
+   * que este confirm ya manda, así que repetirlo desde acá sería tener dos
+   * fuentes de la misma regla — y la que se desincroniza es siempre la del
+   * frontend (el catálogo de campos, el incidente ASTERIA).
    */
-  test("el efecto de inventario elegido viaja en el confirm", async () => {
+  test("el efecto de inventario ya no viaja en el confirm", async () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
@@ -775,26 +779,25 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
 
     renderPanel();
 
-    // El modo se elige con el texto que mandó el backend, no con uno de acá.
-    const aplicar = await screen.findByRole("button", {
-      name: EFECTOS_VENTAS[0]!.options[1]!.label,
-    });
-    fireEvent.click(aplicar);
+    // La línea informativa ya está: el efecto llegó del backend y se muestra.
+    await screen.findByText(EFECTOS_VENTAS[0]!.options[0]!.label);
+    // Y no hay nada que elegir.
+    expect(
+      screen.queryByRole("button", { name: EFECTOS_VENTAS[0]!.options[0]!.label }),
+    ).not.toBeInTheDocument();
+
     fireEvent.click(
       screen.getByRole("button", { name: /Confirmar importación/i }),
     );
 
     await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
     // `inventory_effect` es el 8º argumento posicional (índice 7).
-    expect(mockConfirmFile.mock.calls[0][7]).toEqual({
-      table: "historical_replay",
-    });
+    expect(mockConfirmFile.mock.calls[0][7]).toBeUndefined();
   });
 
-  test("sin tocar nada viaja el default que muestra la pantalla", async () => {
-    // Si el panel mandara `undefined`, el backend aplicaría su propio default y
-    // coincidiría por casualidad. Mandarlo explícito es lo que hace que el
-    // `STAGE_CONFIRM` registre con qué modo entró cada hoja.
+  test("la pantalla muestra el efecto que dedujo el backend", async () => {
+    // El texto sale del backend y no de una tabla de acá: es la misma regla que
+    // decide el import, así que una copia local puede mostrar lo que no pasa.
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
@@ -842,16 +845,9 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
 
     renderPanel();
 
-    // El selector ya está: recién ahí el panel sabe qué efecto mandar.
-    await screen.findByRole("button", {
-      name: EFECTOS_VENTAS[0]!.options[0]!.label,
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: /Confirmar importación/i }),
-    );
-
-    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
-    expect(mockConfirmFile.mock.calls[0][7]).toEqual({ table: "informational" });
+    expect(
+      await screen.findByText(EFECTOS_VENTAS[0]!.options[0]!.label),
+    ).toBeInTheDocument();
   });
 
   test("touched-set: resetear el mapeo (checkbox de confirmedFields) limpia el touched-set", async () => {

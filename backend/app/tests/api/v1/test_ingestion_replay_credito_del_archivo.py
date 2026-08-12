@@ -130,16 +130,19 @@ _MAPEOS = [
 ]
 
 
-def _payload(efecto: str, *, productos: bool = True) -> dict[str, Any]:
+def _payload(efecto: str | None = None, *, productos: bool = True) -> dict[str, Any]:
+    """F-F.4: `efecto=None` es lo que manda la pantalla — el backend lo deduce."""
     confirmados: dict[str, bool] = {"ventas": True}
     if productos:
         confirmados["productos"] = True
-    return {
+    cuerpo: dict[str, Any] = {
         "column_mappings": _MAPEOS,
         "confirmed_fields": confirmados,
         "context_confirmed": {_CTX: True},
-        "inventory_effect": {_CTX: efecto},
     }
+    if efecto is not None:
+        cuerpo["inventory_effect"] = {_CTX: efecto}
+    return cuerpo
 
 
 async def _confirmar(
@@ -249,7 +252,7 @@ class TestUnArchivoPlanoYaNoSeRechaza:
         )
         assert eventos == []
 
-    async def test_el_mismo_archivo_sin_replay_entra(
+    async def test_el_mismo_archivo_sin_declarar_nada_entra(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
@@ -257,11 +260,14 @@ class TestUnArchivoPlanoYaNoSeRechaza:
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
-        """La salida que el mensaje ofrece tiene que existir de verdad: el archivo
-        se importa igual, sólo que sin tocar el inventario."""
-        response = await _confirmar(
-            client, auth_headers, archivo, _payload("informational")
-        )
+        """El archivo que declara stock Y lo vende entra, sin que nadie declare nada.
+
+        Antes de F-F.1 este caso se rechazaba con 422 y el mensaje ofrecía como
+        salida elegir el modo que no tocaba stock. Ese modo ya no existe (F-F.4) y
+        el rechazo tampoco: las compras del archivo entran al gate como créditos
+        datados, así que respaldan a las ventas del mismo archivo.
+        """
+        response = await _confirmar(client, auth_headers, archivo, _payload())
 
         assert response.status_code == 200, response.text
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 2

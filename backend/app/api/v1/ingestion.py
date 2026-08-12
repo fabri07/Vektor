@@ -114,6 +114,7 @@ from app.domain.inventory_effect import (
     InvalidInventoryEffectError,
     SheetInventoryProfile,
     default_effect_for,
+    discard_legacy_overrides,
     options_for,
     resolve_inventory_effects,
 )
@@ -2076,11 +2077,28 @@ async def confirm_file(
                         ),
                     )
 
-    # ── F-H3.a: efecto de inventario por hoja ───────────────────────────────────
+    # ── F-F.4: qué le hace al inventario cada hoja ──────────────────────────────
     # Se resuelve ANTES del lease, con el mapeo ya validado, por la misma razón que
     # el resto de las validaciones de esta zona: un rechazo acá no deja nada a medio
-    # importar. El default NUNCA es `historical_replay` — ver domain/inventory_effect.
+    # importar. El efecto ya no se elige: se DEDUCE de lo que la hoja contiene, y
+    # toda compra o venta de mercadería mueve stock — ver domain/inventory_effect.
+    #
+    # La entidad del perfil sale de `_entity_for`, la MISMA resolución que usa la
+    # inserción real (override del usuario → contexto del summary → payload). Con
+    # cualquier otra, reasignar una hoja a "ventas" en la pantalla cambiaría lo que
+    # se importa sin cambiar lo que se deduce sobre su inventario.
+    _effect_overrides, _effects_legacy = discard_legacy_overrides(body.inventory_effect)
+    if _effects_legacy:
+        # No es un error: es un cliente anterior a F-F.4 mandando modos que dejaron
+        # de ser decisiones. Queda en el log porque durante la ventana de deploy es
+        # la única señal de que todavía hay frontends viejos hablando.
+        logger.info(
+            "ingestion.inventory_effect.modo_legacy_descartado",
+            file_id=str(file_id),
+            contextos=_effects_legacy,
+        )
     _inventory_effects: dict[str, str] = {}
+    _perfiles: list[SheetInventoryProfile] = []
     if _ctx_mappings:
         _perfiles = [
             SheetInventoryProfile(
@@ -2094,8 +2112,31 @@ async def confirm_file(
             )
             for _cid, _ms in _mappings_por_contexto.items()
         ]
+    elif _flat_mappings:
+        # F-F.4 — el payload SIN `context_id` también deduce su efecto.
+        #
+        # No es "el archivo de una sola tabla": la pantalla ya califica ese caso
+        # con `context_id: "table"` (F-H3.e) y entra por la rama de arriba. Acá cae
+        # el summary sin `mapping_contexts` y el caller de API directa. Sin esto,
+        # esos imports quedaban afuera del descuento — el mismo agujero que F-H3.e
+        # tuvo que cerrar: la regla escrita y nunca alcanzada.
+        #
+        # `""` es la clave que `ImportProjectionRecorder.effect_for` ya usa para el
+        # contexto ausente, así que el recorder la encuentra sin traducción.
+        _perfiles = [
+            SheetInventoryProfile(
+                context_id="",
+                entity=_entity_for(_flat_mappings[0]),
+                mapped_fields=frozenset(
+                    m.target_field
+                    for m in _flat_mappings
+                    if parse_target(m.target_field).kind == "canonical"
+                ),
+            )
+        ]
+    if _ctx_mappings or not _effect_overrides:
         try:
-            _inventory_effects = resolve_inventory_effects(_perfiles, body.inventory_effect)
+            _inventory_effects = resolve_inventory_effects(_perfiles, _effect_overrides)
         except InvalidInventoryEffectError as exc:
             await _emit_validation_reject(
                 "efecto_de_inventario_invalido",
@@ -2105,12 +2146,11 @@ async def confirm_file(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
-    elif body.inventory_effect:
-        # Mapeos planos (sin `context_id`): no hay hojas contra las cuales resolver
-        # el efecto, así que el `inventory_effect` que mandó el cliente no se puede
-        # honrar. Antes se descartaba en silencio y el import salía con el default:
-        # el usuario elegía reconstruir su inventario y no pasaba nada, sin error ni
-        # aviso. Misma regla que `resolve_inventory_effects`.
+    else:
+        # Mapeos planos (sin `context_id`) CON un override que nombra hojas: el
+        # efecto se deduce igual (arriba), pero lo que el cliente nombró no existe
+        # en este envío. Se rechaza con su propio mensaje en vez del genérico de
+        # `resolve_inventory_effects`, porque acá se puede decir qué hacer.
         _detalle_plano = (
             "El efecto de inventario se declara por hoja, y este envío manda las "
             "columnas sin identificar a qué hoja pertenecen. Volvé a mapear las "
@@ -2711,6 +2751,17 @@ async def confirm_file(
         _hojas_replay = [
             _cid for _cid, _ef in _inventory_effects.items() if _ef == HISTORICAL_REPLAY
         ]
+        # F-F.4 — el archivo sin hojas identificadas se aplica ENTERO.
+        #
+        # El perfil del camino plano lleva `context_id=""` (la clave que el
+        # recorder usa para el contexto ausente), y por eso mismo el importador no
+        # estampa hoja en esas ventas: `_ctx_inline` la descarta por falsy. Filtrar
+        # el replay por `[""]` no matchearía ninguna —`_contexto_de` devuelve
+        # `__sin_hoja__` para la venta sin estampar— y el confirm dejaría de
+        # descontar EN SILENCIO, que es exactamente la clase de falla que F-H3.e ya
+        # pagó. `None` es "todas las ventas del archivo", que para un archivo de una
+        # sola tabla es la misma cosa dicha sin traducir claves.
+        _replay_todas = _hojas_replay == [""]
         _replay_outcome: ReplayOutcome | None = None
         if _hojas_replay:
             # `stage()` y no `mark()`, por lo mismo que el import: si explota, su
@@ -2721,7 +2772,7 @@ async def confirm_file(
                     session,
                     tenant.tenant_id,
                     file_id,
-                    context_ids=_hojas_replay,
+                    context_ids=None if _replay_todas else _hojas_replay,
                     apply=True,
                 )
                 # Las ventas que la pasada MIRÓ, no sólo las que descontó: una
@@ -3204,6 +3255,12 @@ async def confirm_file(
         # F-F.3: "No se modificó el stock" dejó de ser cierto cuando la hoja aplica
         # su historia al confirmar. Mantenerlo habría convertido el aviso en el
         # único lugar del confirm que niega lo que el confirm acaba de hacer.
+        #
+        # F-F.4: la rama `else` quedó como red y ya casi no se alcanza — para
+        # proyectar hace falta una hoja CON efecto, y la única que proyecta sin
+        # replay es un catálogo, que declara saldos y no puede dar negativo. Se
+        # conserva porque el precio de equivocarse es publicar el contrario de lo
+        # que pasó, no porque se sepa de un caso vivo.
         _cierre = (
             "Las ventas que se quedaron sin unidades no se descontaron y su descuento "
             "quedó pendiente: probablemente falten compras anteriores."
@@ -3500,10 +3557,13 @@ async def inventory_replay(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> InventoryReplayResponse:
-    """F-H3.d.4 — el segundo paso de "confirmar → revisar → aplicar".
+    """F-H3.d.4 — aplicar al inventario las ventas de un archivo ya importado.
 
-    Confirmar no toca stock (`inventory_effect` default: `informational`); acá el
-    usuario aplica la historia de las hojas que eligió.
+    **Vía de excepción desde F-F.3/F-F.4, no el camino normal.** El confirm aplica
+    el descuento de las hojas de mercadería en su propia transacción; acá quedan
+    dos casos: la venta que no tenía stock que la respaldara y quedó pendiente
+    (F-F.2), y los archivos importados ANTES de F-F.4, cuya historia nunca se
+    aplicó porque entonces el default no tocaba stock.
 
     Gateado con ``require_modify_access`` (PIN) porque mueve inventario en masa:
     es la misma clase de operación que la relectura, no un alta de datos.
@@ -3522,11 +3582,11 @@ async def inventory_replay(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         )
 
-    # El eje de inventario se declara POR HOJA al confirmar, así que ESCRIBIR sin
-    # decir sobre cuáles contradice esa declaración: un libro con una hoja de
-    # ventas de servicios (`no_inventory`) y otra de mercadería descontaría las
-    # dos. El preview sí puede correr sobre todo el archivo — es read-only y es la
-    # forma en que la pantalla descubre qué hojas hay para ofrecerlas.
+    # El eje de inventario es POR HOJA, así que ESCRIBIR sin decir sobre cuáles lo
+    # contradice: un libro con una hoja de ventas de servicios —que no habla de
+    # unidades— y otra de mercadería descontaría las dos. El preview sí puede
+    # correr sobre todo el archivo: es read-only y es la forma en que la pantalla
+    # descubre qué hojas hay para ofrecerlas.
     if not body.dry_run and not body.context_ids:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

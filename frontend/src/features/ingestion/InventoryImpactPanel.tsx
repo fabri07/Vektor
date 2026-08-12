@@ -90,10 +90,10 @@ export function InventoryImpactPanel({
   /**
    * Preview read-only: qué hojas del archivo tienen ventas aplicables.
    *
-   * El eje de inventario se declara POR HOJA al importar, así que aplicar el
-   * archivo entero movería stock por filas que el usuario dijo que no lo mueven
-   * (una hoja de servicios entra como `no_inventory` y no descuenta nada). El
-   * backend rechaza un apply sin hojas elegidas; esto es cómo se eligen.
+   * El efecto de inventario es POR HOJA, así que aplicar el archivo entero
+   * movería stock por filas que no hablan de unidades (una hoja de ventas de
+   * servicios no descuenta nada). El backend rechaza un apply sin hojas
+   * elegidas; esto es cómo se eligen.
    */
   async function descubrirHojas() {
     if (!fileId) return;

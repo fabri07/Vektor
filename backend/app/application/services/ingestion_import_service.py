@@ -56,7 +56,6 @@ from app.domain.expense_categories import (
 from app.domain.inventory_effect import (
     HISTORICAL_REPLAY,
     IMPORT_CONTEXT_FIELD,
-    INFORMATIONAL,
 )
 from app.domain.inventory_replay_gate import (
     CreditEvent,
@@ -2916,8 +2915,9 @@ async def insert_confirmed_data(
     uploaded_file_id: uuid.UUID | None = None,
     stock_treatment: str | dict[str, str] | None = None,
     # F-H3.a: efecto de inventario RESUELTO por hoja (`{context_id: modo}`).
-    # Eje separado de `stock_treatment`, que es contable. None = cada hoja cae
-    # a `informational`: se calcula el impacto y no se toca stock.
+    # Eje separado de `stock_treatment`, que es contable. F-F.4: la hoja que no
+    # habla de inventario NO figura en el dict, así que `None`/vacío significa
+    # "ninguna hoja mueve unidades", no "todavía no se decidió".
     inventory_effect: dict[str, str] | None = None,
     # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
     shipping_decisions: dict[str, str] | None = None,
@@ -3545,10 +3545,10 @@ async def _insert_confirmed_data_impl(
         # se aplicó todavía.
         #
         # **F-F** — acá vivía el respaldo del rechazo de F-H3.d.6: si el archivo
-        # también daba de alta productos o traía compras, la hoja se degradaba a
-        # `informational` porque el gate no tenía contra qué validar. Ya no hace
-        # falta para las compras: entran como créditos DATADOS y respaldan a las
-        # ventas del mismo archivo, en orden cronológico.
+        # también daba de alta productos o traía compras, la hoja se degradaba al
+        # modo que no tocaba stock porque el gate no tenía contra qué validar. Ya
+        # no hace falta para las compras: entran como créditos DATADOS y respaldan
+        # a las ventas del mismo archivo, en orden cronológico.
         #
         # Lo que este camino todavía NO puede gatear es la venta de un producto que
         # el propio archivo crea: al pre-escanear no existe, `_resolve_product`
@@ -3815,10 +3815,11 @@ async def _insert_confirmed_data_impl(
                         by_barcode=_identity_indexes.by_barcode,
                         barcode=row.get(barcode_col) if barcode_col else None,
                     )
-                    # F-H3.b: la venta entra a la proyección. NO descuenta stock —
-                    # bajo el default (`informational`) sólo se calcula qué pasaría.
-                    # Una fila sin fecha ya se fue a /otros más arriba y nunca llega
-                    # acá; el guard lo hace explícito en vez de darlo por sabido.
+                    # F-H3.b: la venta entra a la proyección, que es el impacto que
+                    # se REPORTA. El descuento lo aplica la segunda pasada del
+                    # confirm (F-F.3), no esta línea. Una fila sin fecha ya se fue a
+                    # /otros más arriba y nunca llega acá; el guard lo hace
+                    # explícito en vez de darlo por sabido.
                     if tx_date is not None:
                         await _proyeccion_recorder.registrar_venta(
                             entry.product_id, tx_date.date(), qty, _ctx_inline
@@ -5203,10 +5204,10 @@ async def _insert_multisheet_data(
         # F-H2: la venta se vincula igual; lo que NO se afirma es que hubiera
         # stock. Vincular es identidad, no disponibilidad.
         _evaluar_historial(entry.product_id, tx_date, _clean_str(_venta_producto, 299))
-        # F-H3.b: la venta entra a la proyección. NO descuenta stock — bajo el
-        # default (`informational`) sólo se calcula qué pasaría. Si el producto
-        # no está registrado todavía es porque nada de este archivo lo tocó, así
-        # que su stock actual ES el previo.
+        # F-H3.b: la venta entra a la proyección, que es el impacto que se
+        # REPORTA; el descuento lo aplica la segunda pasada del confirm (F-F.3).
+        # Si el producto no está registrado todavía es porque nada de este archivo
+        # lo tocó, así que su stock actual ES el previo.
         if proyeccion is not None:
             await proyeccion.registrar_venta(
                 entry.product_id, tx_date.date(), qty, context_id
@@ -6309,9 +6310,7 @@ async def _insert_multisheet_data(
                 if _entidad_de(_ctx) != "sale" or not _hoja_incluida(_ctx):
                     continue
                 _cid = str(_ctx.get("context_id") or "")
-                if (proyeccion.effect_for(_cid) if proyeccion else INFORMATIONAL) != (
-                    HISTORICAL_REPLAY
-                ):
+                if (proyeccion.effect_for(_cid) if proyeccion else None) != HISTORICAL_REPLAY:
                     continue
                 _rows, _cols, _ = _filas_y_mapeo(_ctx)
                 for _idx, _row in enumerate(_rows):

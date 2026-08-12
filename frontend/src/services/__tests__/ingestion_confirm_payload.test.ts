@@ -3,12 +3,14 @@
  *
  * F-H3.e existió porque el frontend **no mandaba `inventory_effect`**: todo el
  * eje estaba cableado y probado punta a punta contra el endpoint, pero el
- * payload real no lo llevaba, así que `historical_replay` —el único modo que
- * escribe stock— era inalcanzable desde la pantalla.
+ * payload real no lo llevaba. Los tests del panel mockean `ingestionService`
+ * entero —verifican el argumento que le pasa el componente, no el cuerpo del
+ * POST—, así que el agujero vivía justo en el tramo que nadie miraba.
  *
- * Los tests del panel mockean `ingestionService` entero: verifican el argumento
- * que le pasa el componente, no el cuerpo del POST. Este cubre el otro tramo, que
- * es donde estaba el agujero.
+ * **F-F.4**: el efecto dejó de elegirse y la pantalla dejó de mandarlo (lo
+ * deduce el backend). El servicio lo sigue reenviando si alguien se lo pasa,
+ * porque el endpoint lo sigue aceptando; los tests de acá fijan ese reenvío como
+ * compatibilidad, no como el camino de la pantalla — ése es el que manda `null`.
  */
 import { ingestionService } from "../ingestion.service";
 import { api } from "@/lib/api";
@@ -30,7 +32,7 @@ function bodyDelConfirm(): Record<string, unknown> {
 }
 
 describe("confirmFile — cuerpo del POST", () => {
-  test("el efecto de inventario viaja tal como se eligió, por hoja", async () => {
+  test("compatibilidad: si alguien pasa un efecto, el servicio lo reenvía", async () => {
     await ingestionService.confirmFile(
       "f1",
       { ventas: true },
@@ -51,9 +53,9 @@ describe("confirmFile — cuerpo del POST", () => {
     );
   });
 
-  test("sin efecto declarado manda null, no un dict vacío", async () => {
-    // Para el backend significan lo mismo (cada hoja toma su default), pero
-    // `null` lo dice: un `{}` se lee como "declaré algo y quedó vacío".
+  test("como lo llama la pantalla desde F-F.4: manda null, no un dict vacío", async () => {
+    // Es el camino real: el panel ya no pasa el efecto. `null` y `{}` no son lo
+    // mismo — un `{}` se lee como "declaré algo y quedó vacío".
     await ingestionService.confirmFile("f1", { ventas: true });
 
     expect(bodyDelConfirm().inventory_effect).toBeNull();
@@ -88,9 +90,9 @@ describe("confirmFile — cuerpo del POST", () => {
   });
 
   test("el efecto no pisa el tratamiento de stock: son dos ejes", async () => {
-    // `stock_treatment` decide si el stock inicial genera un gasto (contable);
-    // `inventory_effect`, qué pasa con las unidades. Mandar uno no puede
-    // silenciar al otro.
+    // `stock_treatment` decide si el stock inicial genera un gasto (contable) y
+    // **se sigue eligiendo**; `inventory_effect` es el otro eje, el de unidades,
+    // que desde F-F.4 se deduce. Mandar uno no puede silenciar al otro.
     await ingestionService.confirmFile(
       "f1",
       { productos: true },

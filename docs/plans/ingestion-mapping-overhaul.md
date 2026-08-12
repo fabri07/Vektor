@@ -747,6 +747,156 @@ no por solapa (dos libros con las mismas ventas y las solapas invertidas dan el 
 resultado) · una hoja sin producto+cantidad no muestra una sola línea sobre inventario · el
 caso don pedro sigue en rojo si se rompe el anclaje.
 
+### F-F.4 — el eje deja de ser una pregunta (plan, no entregado)
+
+**Lo que dijo el usuario y gobierna esta sub-fase:** *«los archivos informacional no tienen
+razón de ser, porque para eso estamos editando el sistema: para que toda ingesta tenga
+movimiento de inventario, que es una de las principales funciones de Véktor»* y, precisando el
+alcance: *«se tiene que poder elegir como hasta ahora a qué sección corresponde cada hoja de un
+archivo de Excel, pero todo lo que sea compra y venta de mercadería tiene que tener impacto en
+el stock»*.
+
+Eso es más fuerte que «cambiá el default» y más acotado que «sacá las preguntas». Lo que
+desaparece es **la segunda pregunta**: hoy, además de decir que una hoja es de ventas, hay que
+contestar si esas ventas modifican el stock. La primera ya responde la segunda — si la hoja es
+compra o venta de mercadería, mueve inventario.
+
+**Sigue eligiendo el usuario, y no se toca:** a qué sección corresponde cada hoja (el
+`context_entity` que resuelve `_entity_for`), el mapeo de cada columna, y `stock_treatment`
+—apertura vs compra—, que es la pregunta contable de al lado. Como el efecto se deriva de la
+entidad **efectiva**, reasignar una solapa a «ventas» hace que esa hoja empiece a descontar: la
+sección sigue siendo decisión suya y el impacto en stock deja de ser una segunda pregunta sobre
+lo mismo.
+
+#### El modelo nuevo: dos modos derivados y un tercer estado que no es un modo
+
+| Qué contiene la hoja | Qué le pasa al inventario |
+|---|---|
+| ventas/compras con producto **y** cantidad | `historical_replay` — las compras suman y las ventas restan, por fecha |
+| catálogo con cantidad | `current_snapshot` — el archivo declara el saldo absoluto |
+| todo lo demás (Gastos_Fijos, Clientes, Proveedores, servicios sin producto) | **no aplica** — no se pregunta, no se informa, no se muestra |
+
+`INFORMATIONAL` y `NO_INVENTORY` desaparecen de `domain/inventory_effect.py`. Y desaparecen de
+distinta manera, que es lo que hay que hacer bien: `informational` era una **decisión** que se
+elimina; `no_inventory` era un **modo que representaba la ausencia de inventario**, y su
+reemplazo no es otro modo sino la **ausencia de valor**. `default_effect_for` pasa a devolver
+`str | None`, y la hoja que no mueve unidades simplemente no entra en el dict de efectos.
+
+**Por qué importa la diferencia.** Hoy `_import_projection.effect_for()` cae a `INFORMATIONAL`
+cuando no hay dato, y ese «sin dato» significa dos cosas a la vez: «caller viejo que no mandó el
+modo» y «hoja que no habla de inventario». Con el dict resuelto por hoja el «sin dato» queda
+unívoco, y `_cuenta_inventario` pasa a ser `effect_for(...) is not None` — un booleano que se
+lee igual que la pregunta que responde.
+
+#### El payload sin `context_id` tiene que entrar, o el flip no llega a todos
+
+`_inventory_effects` se calcula **sólo si hay `_ctx_mappings`**. Sin ellos el recorder cae a su
+default y el archivo no descuenta. **No es «el archivo de una sola tabla»** —la pantalla ya
+califica ese caso con `context_id: "table"` desde F-H3.e—: es el summary sin `mapping_contexts`
+y el caller de API directa. Si el flip se hiciera sólo en `default_effect_for`, esos envíos
+seguirían sin descontar: el agujero exacto de F-H3.e (la regla escrita e inalcanzable), por
+segunda vez.
+
+F-F.4 arma un `SheetInventoryProfile` con `context_id=""` —la misma clave que `effect_for` ya usa
+para el contexto ausente— a partir de los mapeos planos. El 422 `efecto_de_inventario_sin_hoja`
+se conserva para un override que **nombra** una hoja inexistente: eso sigue siendo una decisión
+que no se puede honrar.
+
+**Y el replay de ese camino se pide sin filtrar por hoja.** El importador no estampa contexto en
+esas ventas (`_ctx_inline` descarta la clave vacía por falsy), así que filtrar por `[""]` no
+matchearía ninguna —`_contexto_de` devuelve `__sin_hoja__`— y el confirm dejaría de descontar en
+silencio. Se pasa `context_ids=None`, que es «todas las ventas del archivo»: para un archivo sin
+hojas identificadas, la misma cosa dicha sin traducir claves.
+
+#### Los overrides legacy no rompen el confirm durante el deploy
+
+Railway y Vercel redespliegan en paralelo y sin orden garantizado, así que durante la ventana un
+frontend viejo va a mandar `{"ctx": "informational"}` contra el backend nuevo. Con
+`VALID_EFFECTS` reducido eso es un 422 y el confirm se cae.
+
+`"informational"` y `"no_inventory"` se aceptan como **alias legacy que se descartan** (la hoja
+toma su modo derivado) con `logger.info`. No es una concesión: es la traducción exacta de la
+decisión del usuario —esos valores dejaron de ser decisiones—, así que descartarlos no pierde
+ninguna intención que siga existiendo. Un modo desconocido de verdad sigue siendo 422.
+
+#### Sub-commits
+
+- **a · el dominio pierde los dos modos.** `inventory_effect.py`: dos constantes, `Literal` de
+  dos, `EFFECT_LABELS` de dos (y el de replay deja de sonar a opción: describe lo que va a
+  pasar). `default_effect_for → str | None`; `options_for` deja de ofrecer y pasa a explicar.
+  Se reescriben `test_historical_replay_nunca_es_un_default` y el docstring del módulo
+  **declarando por qué se levanta la regla** —el ancla se aplica antes de todos los eventos y el
+  replay ordena por fecha, que son las dos condiciones que en don pedro no existían—, y se
+  conserva la compuerta del doble descuento: si alguna de las dos piezas se cae, el default
+  tiene que volver.
+- **b · el confirm aplica siempre que la hoja mueva unidades.** El mecanismo ya está (F-F.3
+  aplica dentro del savepoint, F-F.3.b lo hace por producto y no por venta): lo que cambia es
+  **cuántas hojas caen ahí**. Entra el camino plano. Se revisan los avisos que todavía mandan al
+  usuario a aplicar desde el panel algo que el confirm ya aplicó.
+- **c · la pantalla deja de preguntar por el efecto** (el selector de SECCIÓN queda igual).
+  `InventoryEffectChoice` pasa de selector a línea informativa; la hoja sin efecto no muestra
+  **nada** (hoy muestra el cartel que el usuario pidió sacar). `/inventory-effects` sigue
+  existiendo y sigue siendo la única fuente —la regla es de dominio y una copia en la UI se
+  desactualiza (el defecto ya pagado con el catálogo de campos)—, pero pasa a explicar en vez de
+  ofrecer. La respuesta se mantiene **aditiva** (`options` con un elemento o vacío) para que un
+  frontend viejo muestre la línea correcta durante la ventana de deploy en lugar de romperse.
+  `ColumnMapperPanel` **elimina** el estado de elección (`effectByCtx`, `efectoDe`, el
+  `effectElegido` del camino plano) y deja de mandar `inventory_effect`; no se toca la
+  preservación de mapeos de F-A (`60d400f8`), que vive en otro estado.
+- **d · la relectura descuenta.** `reread_service:779` llama a `insert_confirmed_data` **sin
+  efecto de inventario**, así que hoy re-importa ventas que no descuentan. El efecto pasa a
+  persistirse en `parsed_summary_json` al confirmar —el mismo lugar de donde la relectura ya
+  saca `stock_treatment` (`:778`), mismo precedente, misma lectura—, y después del reimport la
+  relectura corre `run_inventory_replay` sobre las hojas que mueven unidades: la misma función
+  que el confirm y que el panel, por la misma razón que F-F.3 la compartió. Un archivo viejo sin
+  el dato recalcula el default, que ahora es descontar.
+  **La reversa ya existe y hay que probarla, no asumirla:** la relectura voidea todos los
+  movimientos vivos con `source_upload_id == file_id` (`:748-760`), y los del replay lo llevan
+  (`inventory_replay_service:304`), así que se revierten. El caso a fijar con test es la venta
+  **editada preservada**: su movimiento no lleva `source_row_ref`, así que el void no lo saltea,
+  y quien lo tiene que restituir es el re-apply por idempotencia de `source_event_id`. Relectura
+  ×N = mismo stock, o el descuento se pierde justo en las filas que el usuario corrigió a mano.
+- **e · los archivos que quedaron sin aplicar.** Sus ventas están importadas y no descontadas, y
+  la vía para cerrarlos existe (`POST /ingestion/files/{id}/inventory-replay`), pero el panel
+  sólo aparece en el flujo post-confirm de la sesión: un archivo confirmado la semana pasada hoy
+  no tiene por dónde. Se expone el impacto pendiente desde la lista de archivos, reusando el
+  `dry_run` que el panel ya usa para descubrir hojas. **Sin backfill automático:** aplicar mueve
+  stock, y hacerlo en bloque sobre todos los archivos históricos de todos los tenants es
+  literalmente el movimiento que dejó la lección de don pedro. Lo aplica el usuario, archivo por
+  archivo, viendo el número.
+
+#### La venta sin respaldo sigue yendo a «Otros» (decisión del usuario, 2026-08-12)
+
+El flip tiene una consecuencia que el plan no había anticipado: el gate de F-H3.d pasa a correr
+para todos. Una venta del 10/03 cuyo único respaldo es una compra del 20/03 dejó de importarse
+con el aviso `historial_insuficiente` — va a «Otros». Eso ya pasaba, pero sólo si el usuario
+elegía el replay a mano.
+
+Consultado, el usuario **ratificó lo que había decidido en F-H3.d**: el stock no queda negativo
+y la fila no entra como venta; se completa el inventario y se registra desde «Otros». Se
+descartaron las dos alternativas (importarla con el descuento pendiente, o hacerlo depender de si
+el archivo declara saldo). Queda declarado el riesgo que acompaña a la decisión: un archivo
+histórico de un negocio que nunca registró sus compras viejas cae entero a la bandeja.
+
+`historial_insuficiente` no muere: sigue vivo para las hojas que no mueven unidades (una venta
+con producto pero sin columna de cantidad), que son las que no pasan por el gate.
+
+#### Lo que NO cambia (para no re-litigarlo)
+
+El ancla del catálogo sigue sin fecha y se aplica **antes** de todos los eventos: es la
+condición que habilita el flip, no un detalle · las compras suman en cualquier modo (V16) ·
+`stock_treatment` sigue siendo el eje contable, separado · una venta sin respaldo sigue yendo a
+«Otros» (F-H3.d) o quedando pendiente y contada (F-F.2) · `inventory_integrity_service` **no
+cambia de lógica**: decide por el ledger, no por el modo; sólo su docstring nombra
+`informational`.
+
+**Aceptación:** un archivo de UNA hoja de ventas con producto y cantidad descuenta stock al
+confirmar sin que el usuario toque nada · ninguna pantalla dice «no afecta el inventario», y la
+hoja de Gastos_Fijos no muestra ninguna línea de inventario · un confirm con `"informational"`
+en el payload no se cae · relectura ×2 = mismo stock que ×1, incluidas las filas editadas ·
+`default_effect_for` no devuelve modo para una hoja que no mueve unidades · el caso don pedro
+sigue en rojo si se rompe el anclaje o el orden por fecha.
+
 ---
 
 # F-A · Preservar primero, clasificar después

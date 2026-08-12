@@ -26,11 +26,12 @@ así que sumar también el movimiento del ledger duplicaría. Ignorarlos (en vez
 deja a los productos vendidos EN VIVO evaluables por el chequeo.
 
 **Pero no toda venta descuenta stock, y la fórmula no puede asumir que sí** (F-H3.d.1).
-Una venta importada sólo mueve inventario si el usuario aplicó el replay de esa hoja: el
-default (`informational`) importa la historia sin tocar el stock, a propósito. Restar esas
-ventas reportaría como divergencia una decisión deliberada — y sobre un tenant con
-historia importada (10.931 ventas en el caso real que originó esto) sería una divergencia
-falsa por producto. Entonces se resta:
+Desde F-F.4 una hoja de mercadería descuenta al confirmar, pero eso no vuelve universal el
+supuesto: la venta cuya hoja no habla de unidades no descuenta, la que se quedó sin stock
+que la respalde queda pendiente (F-F.2), y sobre todo **los imports anteriores a F-F.4
+siguen sin descontar** — un tenant con 10.931 ventas históricas importadas bajo el modo que
+no tocaba stock daría una divergencia falsa por producto. Por eso la fuente sigue siendo el
+ledger y no el modo. Entonces se resta:
 
 - toda venta **en vivo** (`source_upload_id IS NULL`): siempre debió descontar, y si su
   movimiento no está, eso ES la divergencia que este chequeo existe para encontrar;

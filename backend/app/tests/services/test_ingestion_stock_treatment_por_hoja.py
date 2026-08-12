@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
+from app.domain.inventory_effect import CURRENT_SNAPSHOT, HISTORICAL_REPLAY
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -159,16 +160,17 @@ async def test_sin_declarar_nada_el_default_sigue_siendo_apertura(
     assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
 
 
-async def test_informational_en_ventas_no_frena_la_apertura_ni_la_compra(
+async def test_el_eje_de_ventas_no_frena_la_apertura_ni_la_compra(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """El modo de inventario es de la HOJA DE VENTAS, no del archivo (**V16**).
+    """El efecto de inventario es de la HOJA DE VENTAS, no del archivo (**V16**).
 
-    Un libro con catálogo + compras + ventas donde el usuario declara la hoja de
-    ventas `informational` NO puede leerse como "este archivo no toca stock": la
-    apertura y la compra aplican siempre — el eje gobierna las ventas. Y el
-    confirm no descuenta la venta bajo ningún modo (F-H3.c): el ledger queda con
-    apertura + compra y ningún movimiento `sale`.
+    Un libro con catálogo + compras + ventas: la apertura y la compra aplican
+    SIEMPRE, gobierne lo que gobierne el eje — que sólo manda sobre las ventas.
+
+    Y el descuento de la venta no lo hace el importador: lo hace la segunda pasada
+    del confirm (F-F.3), que acá no corre porque se llama al servicio directo. Por
+    eso el ledger queda con apertura + compra y ningún movimiento `sale`.
     """
     fila_catalogo = {
         "producto": "Vela aromática",
@@ -262,7 +264,11 @@ async def test_informational_en_ventas_no_frena_la_apertura_ni_la_compra(
             "sheet:ventas": True,
         },
         stock_treatment={"sheet:catalogo": "opening_balance"},
-        inventory_effect={"sheet:ventas": "informational"},
+        inventory_effect={
+            "sheet:catalogo": CURRENT_SNAPSHOT,
+            "sheet:compras": HISTORICAL_REPLAY,
+            "sheet:ventas": HISTORICAL_REPLAY,
+        },
     )
     await db_session.flush()
 
@@ -278,8 +284,8 @@ async def test_informational_en_ventas_no_frena_la_apertura_ni_la_compra(
         for m in (await db_session.execute(select(InventoryMovement))).scalars()
     )
     assert movimientos == [("adjustment", 10), ("purchase", 5)]
-    # La venta igual entró a los libros: informational es "no toques stock",
-    # no "no importes la hoja".
+    # La venta igual entró a los libros: el eje decide qué le pasa al STOCK,
+    # nunca si la hoja se importa.
     from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
 
     ventas = (await db_session.execute(select(SaleEntry))).scalars().all()

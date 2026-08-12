@@ -154,11 +154,11 @@ export interface InventoryReplayResult {
 }
 
 /**
- * F-H3.e — qué le hace al INVENTARIO cada hoja, y entre qué puede elegir el
- * usuario. Lo calcula el backend a partir del mapeo borrador: el default y las
- * opciones dependen de la entidad de la hoja y de los campos que el mapeo cubre
- * (sin `cantidad` mapeada, la hoja no mueve unidades). Una tabla fija acá sería
- * una copia de una regla de dominio — el defecto que rompió el mapeo de columnas.
+ * F-F.4 — qué le hace al INVENTARIO cada hoja. Ya no se elige: lo DEDUCE el
+ * backend a partir de la entidad efectiva de la hoja y de los campos que el mapeo
+ * borrador cubre (sin `cantidad` mapeada, la hoja no mueve unidades; reasignar la
+ * sección la cambia). Una tabla fija acá sería una copia de una regla de dominio
+ * — el defecto que rompió el mapeo de columnas.
  */
 export interface InventoryEffectOption {
   value: string;
@@ -170,8 +170,9 @@ export interface SheetInventoryEffect {
   context_id: string;
   /** Nombre legible de la hoja, nunca el `context_id` crudo. */
   label: string;
-  default: string;
-  /** Siempre incluye `default`. Con un solo elemento no hay nada que elegir. */
+  /** `null` = esta hoja no habla de inventario y no se muestra nada. */
+  default: string | null;
+  /** Vacío, o el único efecto de la hoja. Nunca hay más de uno que mostrar. */
   options: InventoryEffectOption[];
 }
 
@@ -624,9 +625,10 @@ export const ingestionService = {
     stockTreatment?: StockTreatment | Record<string, StockTreatment>,
     // F8c: decisiones del usuario sobre columnas riesgosas (drop / enrutar a Otros).
     columnRiskDecisions?: ColumnRiskDecision[],
-    // F-H3.e: qué le hace al inventario cada hoja, `{context_id: modo}`. Sin esto
-    // el backend aplica el default de cada hoja y `historical_replay` —el único
-    // modo que escribe stock— era inalcanzable desde la pantalla.
+    // OBSOLETO desde F-F.4: el efecto se deduce del contenido de la hoja y esta
+    // pantalla ya no lo manda (queda en la firma porque el backend lo sigue
+    // aceptando). Mandarlo desde acá volvería a tener dos fuentes de la misma
+    // regla.
     inventoryEffect?: Record<string, string>,
     // F-H6.b: qué hacer con los envíos sin comprobante, por hoja. Sin entrada
     // para una hoja, sus envíos sin comprobante no se registran.

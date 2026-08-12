@@ -36,6 +36,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
+from app.domain.inventory_effect import HISTORICAL_REPLAY
 from app.persistence.models.memory import OperationFingerprint
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -57,6 +58,12 @@ _MAPPINGS: dict[str, dict[str, str]] = {
         "categoria": "category",
         "monto": "amount",
     },
+}
+#: Igual, pero con la ventas mapeando `cantidad`. Desde F-F.4 es lo que separa
+#: una hoja de ventas que mueve inventario de una que no habla de unidades.
+_MAPPINGS_VENTA_CON_CANTIDAD: dict[str, dict[str, str]] = {
+    **_MAPPINGS,
+    _VENTAS: {**_MAPPINGS[_VENTAS], "cantidad": "quantity"},
 }
 _CONFIRMED = {_VENTAS: True, _COMPRAS: True}
 
@@ -81,13 +88,24 @@ def _summary(
     fecha_venta: str,
     fecha_compra: str,
     ventas_primero: bool = True,
+    venta_con_cantidad: bool = False,
 ) -> dict[str, Any]:
     """Un libro con una hoja de Ventas y una de Compras del mismo producto.
 
     La compra es de mercadería (categoría del vertical + cantidad), que es el
     camino por el que una compra DECLARA un producto.
     """
-    ventas_ctx = _ctx(_VENTAS, "sale", "Ventas", ["fecha", "producto", "monto"])
+    headers_ventas = ["fecha", "producto", "monto"]
+    fila_venta: dict[str, Any] = {
+        "fecha": fecha_venta,
+        "producto": _PRODUCTO,
+        "monto": "2100",
+        "__context__": _VENTAS,
+    }
+    if venta_con_cantidad:
+        headers_ventas.insert(2, "cantidad")
+        fila_venta["cantidad"] = "1"
+    ventas_ctx = _ctx(_VENTAS, "sale", "Ventas", headers_ventas)
     compras_ctx = _ctx(
         _COMPRAS,
         "expense",
@@ -103,14 +121,7 @@ def _summary(
         "has_venta": True,
         "has_gasto": True,
         "row_count": 2,
-        "ventas_detectadas": [
-            {
-                "fecha": fecha_venta,
-                "producto": _PRODUCTO,
-                "monto": "2100",
-                "__context__": _VENTAS,
-            }
-        ],
+        "ventas_detectadas": [fila_venta],
         "gastos_detectados": [
             {
                 "fecha": fecha_compra,
@@ -125,21 +136,33 @@ def _summary(
     }
 
 
+#: F-F.4 — el efecto que el confirm DEDUCE para este libro, no uno inventado.
+#:
+#: La hoja de compras identifica producto y cantidad: mercadería, mueve stock. La
+#: de ventas mapea producto y monto pero **no cantidad**, así que no habla de
+#: unidades y no tiene efecto — por eso no figura. Declararla igual sería armar un
+#: dict que el confirm nunca produce y probar un mundo que no existe.
+_EFECTOS = {_COMPRAS: HISTORICAL_REPLAY}
+
+
 async def _importar(
     db: AsyncSession,
     tenant: Tenant,
     summary: dict[str, Any],
     *,
     file_id: uuid.UUID | None = None,
+    inventory_effect: dict[str, str] | None = None,
+    context_mappings: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return await importer.insert_confirmed_data(
         db,
         tenant.tenant_id,
         summary,
         {"ventas": True, "gastos": True},
-        context_mappings=_MAPPINGS,
+        context_mappings=context_mappings or _MAPPINGS,
         context_confirmed=_CONFIRMED,
         uploaded_file_id=file_id,
+        inventory_effect=_EFECTOS if inventory_effect is None else inventory_effect,
     )
 
 
@@ -296,20 +319,26 @@ class TestInvarianteTemporal:
 
 
 class TestProyeccionDeInventario:
-    """F-H3.b: el import calcula el impacto sobre el stock, y no lo aplica.
+    """F-H3.b: el import calcula el impacto sobre el stock. F-F.4: y lo aplica.
 
-    Las dos mitades importan igual. Que la cuenta sea correcta sirve de poco si
-    aplicarla no era la intención; que no se aplique sirve de poco si la cuenta
-    que se muestra está mal.
+    Que la cuenta sea correcta sirve de poco si se aplica otra cosa, y al revés.
+
+    **La hoja de ventas de esta clase mapea `cantidad`** —a diferencia de la del
+    resto del archivo— porque desde F-F.4 es lo único que hace que una hoja de
+    ventas hable de unidades. Sin esa columna no habría impacto que proyectar, así
+    que probarlo sobre la otra hoja mediría un archivo que la pantalla ya no
+    produce.
     """
 
-    async def test_calcula_el_impacto_sin_mover_el_stock(
+    async def test_calcula_el_impacto_de_lo_que_el_archivo_declara(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
         counts = await _importar(
             db_session,
             sample_tenant,
-            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05"),
+            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05", venta_con_cantidad=True),
+            context_mappings=_MAPPINGS_VENTA_CON_CANTIDAD,
+            inventory_effect={_VENTAS: HISTORICAL_REPLAY, _COMPRAS: HISTORICAL_REPLAY},
         )
 
         producto = (await db_session.execute(select(Product))).scalars().one()
@@ -317,7 +346,6 @@ class TestProyeccionDeInventario:
         assert len(impacto) == 1
         fila = impacto[0]
         assert fila["product_id"] == str(producto.id)
-        # La compra trae 5; la venta, 1 (sin columna de cantidad → 1).
         assert fila["compradas"] == 5
         assert fila["vendidas"] == 1
         # ABSOLUTOS, no `final == inicial + 4`: el saldo de apertura tiene que ser
@@ -328,45 +356,61 @@ class TestProyeccionDeInventario:
         assert fila["saldo_inicial"] == 0
         assert fila["saldo_final"] == 4
 
-        # Y el stock REAL: la compra sí suma (comportamiento de siempre), la venta
-        # NO descuenta. El default es `informational` y nadie pidió el replay.
+        # El stock REAL después del import: la compra suma 5. El descuento de la
+        # venta lo aplica la segunda pasada del CONFIRM (F-F.3), que no corre acá
+        # —esto llama al importador directo—, así que en este punto son 5.
         assert producto.stock_units == 5
 
-    async def test_una_venta_anterior_a_su_compra_proyecta_negativo(
+    async def test_una_venta_anterior_a_su_compra_no_entra(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """El caso que el aviso tiene que poder nombrar.
+        """Vender el 10/03 lo que se compró el 20/03: la fila va a «Otros».
 
-        Vender el 10/03 lo que se compró el 20/03 deja el saldo abajo de cero en
-        el medio, aunque termine en positivo: falta la compra vieja.
+        Antes de F-F.4 esta venta entraba a los libros y el impacto la mostraba
+        tocando -1 en el medio; el replay era opcional, así que el saldo negativo
+        se reportaba y nadie lo aplicaba. Con el replay como default vuelve a regir
+        la decisión de F-H3.d: **el stock no queda negativo y la fila no entra como
+        venta** — se completa el inventario y se registra desde «Otros».
+
+        Que el impacto quede sin negativos no es que se dejó de calcular: es que la
+        fila que lo producía ya no está entre las ventas.
         """
         counts = await _importar(
             db_session,
             sample_tenant,
-            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-20"),
+            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-20", venta_con_cantidad=True),
+            context_mappings=_MAPPINGS_VENTA_CON_CANTIDAD,
+            inventory_effect={_VENTAS: HISTORICAL_REPLAY, _COMPRAS: HISTORICAL_REPLAY},
         )
 
-        assert counts["stock_proyectado_negativo"] == 1
-        fila = counts["impacto_inventario"][0]
-        assert fila["primer_negativo_en"] == "2024-03-10"
-        assert fila["minimo"] == -1
-        # Termina bien: 0 − 1 + 5 = 4. Tocar negativo ≠ quedar negativo.
-        assert fila["saldo_final"] == 4
+        assert counts["ventas"] == 0
+        assert counts["ventas_sin_stock"] == 1
+        assert counts["stock_proyectado_negativo"] == 0
+        assert await _contar(db_session, SaleEntry) == 0
 
-    async def test_nadie_pidio_el_replay(
+    async def test_las_hojas_que_mueven_unidades_se_cuentan(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
+        """`hojas_con_replay` sale del registrador, no del payload.
+
+        Antes daba 0 porque el replay había que pedirlo. Ahora cuenta las hojas de
+        mercadería del archivo, que es lo que el confirm resolvió.
+        """
         counts = await _importar(
             db_session,
             sample_tenant,
             _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05"),
         )
-        assert counts["hojas_con_replay"] == 0
+        assert counts["hojas_con_replay"] == 1
 
-    async def test_una_hoja_no_inventory_no_entra_en_la_proyeccion(
+    async def test_una_hoja_que_no_habla_de_inventario_no_entra_en_la_proyeccion(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """Declarar que una hoja no habla de inventario la saca de la cuenta."""
+        """Ninguna hoja declarada = ninguna hoja habla de inventario.
+
+        F-F.4 cambió cómo se dice: antes era el modo `no_inventory` por hoja,
+        ahora es la ausencia de la hoja en el dict resuelto.
+        """
         counts = await importer.insert_confirmed_data(
             db_session,
             sample_tenant.tenant_id,
@@ -374,7 +418,7 @@ class TestProyeccionDeInventario:
             {"ventas": True, "gastos": True},
             context_mappings=_MAPPINGS,
             context_confirmed=_CONFIRMED,
-            inventory_effect={_VENTAS: "no_inventory", _COMPRAS: "no_inventory"},
+            inventory_effect={},
         )
         assert counts["impacto_inventario"] == []
 
@@ -437,6 +481,9 @@ class TestProyeccionEnArchivoDeUnaSolaHoja:
                 "cantidad": "quantity",
                 "monto": "amount",
             },
+            # F-F.4: el archivo sin hojas identificadas usa `""` como contexto —
+            # la clave que el recorder ya usaba para el contexto ausente.
+            inventory_effect={"": HISTORICAL_REPLAY},
         )
 
         impacto = counts["impacto_inventario"]
@@ -473,6 +520,9 @@ class TestProyeccionEnArchivoDeUnaSolaHoja:
                 "cantidad": "quantity",
                 "monto": "amount",
             },
+            # F-F.4: el archivo sin hojas identificadas usa `""` como contexto —
+            # la clave que el recorder ya usaba para el contexto ausente.
+            inventory_effect={"": HISTORICAL_REPLAY},
         )
 
         assert counts["stock_proyectado_negativo"] == 1
