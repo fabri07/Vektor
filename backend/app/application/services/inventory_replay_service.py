@@ -1,8 +1,19 @@
 """F-H3.d.4 — aplicar al inventario la historia de ventas de un archivo importado.
 
-El confirm **no** toca stock (decisión de F-H3.c: confirmar → revisar → aplicar).
-Este servicio es el segundo paso: descuenta las ventas que el archivo trajo, por
-hoja, cuando el usuario lo pide.
+**F-F.3 — quién llama a esto.** Dos momentos, un solo núcleo:
+
+1. El **confirm**, en una segunda pasada dentro de su savepoint, para las hojas
+   resueltas como ``historical_replay``. Hasta F-F.2 no lo hacía: regía la
+   decisión de F-H3.c (confirmar → revisar → aplicar), que existía porque el
+   replay no se podía validar por fecha. Con el gate cronológico esa condición
+   dejó de existir y pedir un segundo clic no compraba nada.
+2. El **endpoint** ``POST /ingestion/files/{id}/inventory-replay``, que sigue
+   siendo la vía de lo que quedó **pendiente**: el usuario carga el inventario
+   que faltaba y vuelve a aplicar, sin volver a importar el archivo.
+
+Los dos entran por ``run_inventory_replay``, y no por una copia adaptada: lo que
+se aplica en el confirm y lo que se aplica después tienen que ser la misma
+operación, o el segundo intento podría descontar distinto que el primero.
 
 **El número se recalcula acá adentro, nunca se lee del confirm.** Entre confirmar
 y aplicar pueden haber pasado ventas en vivo, otro import o una corrección
@@ -20,11 +31,13 @@ veces, y una venta ya descontada en vivo no se vuelve a descontar acá (**V13**)
 borrar el archivo lo voidea con todo lo demás que ese archivo creó, incremental
 (**V15**).
 
-**Qué pasa si ya no alcanza el stock.** Al confirmar, una venta sin respaldo ni
-siquiera entra (F-H3.d.3). Acá la venta YA está en los libros y anularla cambiaría
-facturación confirmada, así que su descuento queda **pendiente** y se informa: el
-usuario carga el inventario que falta y vuelve a aplicar. Es la única salida que
-no rompe ni el inventario ni la contabilidad.
+**Qué pasa si ya no alcanza el stock.** La venta sin respaldo cuyo producto tiene
+saldo conocido ni siquiera entra: la saca el gate al confirmar (F-H3.d.3). La que
+llega hasta acá sin unidades es la del producto cuyo saldo NO se sabe (F-F.2) o
+la de un stock que se movió entre dos corridas — y en los dos casos ya está en los
+libros, así que anularla cambiaría facturación confirmada. Su descuento queda
+**pendiente** y se informa: el usuario carga el inventario que falta y vuelve a
+aplicar. Es la única salida que no rompe ni el inventario ni la contabilidad.
 """
 
 from __future__ import annotations

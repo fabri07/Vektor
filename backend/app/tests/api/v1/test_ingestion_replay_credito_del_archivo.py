@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
+from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -609,8 +610,19 @@ class TestUnSaldoDesconocidoNoSacaLaVentaDeLosLibros:
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
         assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0
         assert any(
-            "sin validar contra el stock" in w for w in response.json()["warnings"]
+            "sin descontar del inventario" in w for w in response.json()["warnings"]
         ), response.json()["warnings"]
+        # F-F.3: el confirm ahora descuenta, así que "pendiente" tiene que ser
+        # verificable en el estado y no sólo en el texto — el producto sigue en cero
+        # (no en −6) y no hay un movimiento de venta que diga lo contrario.
+        assert await _cuantas(db_session, sample_tenant, InventoryMovement) == 0
+        producto = (
+            await db_session.execute(
+                select(Product).where(Product.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalar_one()
+        await db_session.refresh(producto)
+        assert int(producto.stock_units) == 0
 
     async def test_con_inventario_cargado_la_venta_sin_respaldo_si_sale(
         self,
@@ -647,5 +659,5 @@ class TestUnSaldoDesconocidoNoSacaLaVentaDeLosLibros:
         assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
         assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 1
         assert not any(
-            "sin validar contra el stock" in w for w in response.json()["warnings"]
+            "sin descontar del inventario" in w for w in response.json()["warnings"]
         )
