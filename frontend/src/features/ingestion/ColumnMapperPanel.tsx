@@ -41,6 +41,8 @@ import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
 import { MappingOriginHint } from "./MappingOriginHint";
 import { TargetSelect } from "./TargetSelect";
+import { AmbiguityHint } from "./AmbiguityHint";
+import { StatusDot } from "./StatusDot";
 import {
   customFieldCollisions,
   explainMissing,
@@ -163,82 +165,12 @@ function handleTransientConfirmError(
   return false;
 }
 
-/**
- * F-M: por qué una columna no se mapeó sola, y entre qué elegir.
- *
- * Vive en UN solo lugar porque el panel renderiza columnas en tres caminos
- * distintos (multi-hoja, lista de revisión y tabla única) y este repo ya pagó
- * el precio de que dos de ellos divergieran.
- *
- * `duda` viaja también sin `options`: son los casos donde Véktor entendió el
- * encabezado y esta hoja no tiene campo donde ponerlo. Ahí no hay entre qué
- * elegir, pero explicarlo es la diferencia entre un hueco y un hueco con motivo.
- */
-function AmbiguityHint({
-  suggestion,
-  fields,
-  onPick,
-}: {
-  suggestion: ColumnMappingSuggestion;
-  fields: FieldCatalogEntry[];
-  onPick: (target: string) => void;
-}) {
-  if (!suggestion.duda) return null;
-  const options = suggestion.options ?? [];
-  const labelFor = (value: string) => fields.find((f) => f.value === value)?.label ?? value;
-  return (
-    <div className="rounded border border-vk-blue/30 bg-vk-blue/5 px-2 py-1.5">
-      <p className="text-[11px] leading-snug text-vk-text-secondary">{suggestion.duda}</p>
-      {options.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1">
-          {options.map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => onPick(option)}
-              className="rounded border border-vk-blue/40 bg-vk-bg-light px-2 py-0.5 text-[11px] text-vk-text-primary hover:border-vk-blue hover:bg-vk-blue/10"
-            >
-              {labelFor(option)}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
 const PURPOSE_OPTIONS: Array<{ value: string; label: string; field: "ventas" | "gastos" | "productos" }> = [
   { value: "ventas", label: "Ventas", field: "ventas" },
   { value: "gastos", label: "Gastos", field: "gastos" },
   { value: "stock", label: "Productos / Stock", field: "productos" },
 ];
-
-function StatusDot({ status }: { status: ColumnMappingSuggestion["status"] }) {
-  if (status === "mapped") {
-    return <span className="h-2 w-2 rounded-full bg-vk-success shrink-0" title="Mapeado" />;
-  }
-  // F-M: entender la columna y no poder decidir NO es lo mismo que no
-  // entenderla. Si cayera al punto de "Sin mapear" de abajo, la pantalla
-  // borraría justamente la distinción que el backend calcula.
-  if (status === "ambiguo") {
-    return (
-      <span
-        className="h-2 w-2 rounded-full bg-vk-blue shrink-0"
-        title="Necesita que elijas entre dos lecturas"
-      />
-    );
-  }
-  if (status === "required_missing") {
-    return (
-      <span
-        className="h-2 w-2 rounded-full bg-vk-danger shrink-0"
-        title="Campo requerido faltante"
-      />
-    );
-  }
-  return <span className="h-2 w-2 rounded-full bg-vk-warning shrink-0" title="Sin mapear" />;
-}
 
 // Modal secuencial para columnas sin mapear
 function UnmappedModal({
@@ -295,18 +227,17 @@ function UnmappedModal({
             Asignar a un campo de Véktor
           </button>
           {mode === "field" && (
-            <select
-              value={selected}
-              onChange={(e) => setSelected(e.target.value)}
+            <TargetSelect
+              target={selected}
+              onChange={setSelected}
+              fields={fields}
+              placeholderLabel="Elegir campo..."
+              // «Ignorar» y «campo personalizado» son botones propios de este
+              // modal; ofrecerlos también adentro del select los duplicaría.
+              showIgnoreOption={false}
+              unknownTarget="custom-only"
               className="w-full rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary focus:border-vk-blue focus:outline-none"
-            >
-              <option value="">Elegir campo...</option>
-              {fields.map((f) => (
-                <option key={f.value} value={f.value}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
+            />
           )}
 
           <button

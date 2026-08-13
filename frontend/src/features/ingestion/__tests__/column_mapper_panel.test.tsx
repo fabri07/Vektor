@@ -2423,3 +2423,111 @@ describe("ColumnMapperPanel — F-B.1: la procedencia se dice en castellano", ()
     }
   });
 });
+
+describe("ColumnMapperPanel — B.1: el modal de columnas sin mapear usa el selector único", () => {
+  // Este modal era el CUARTO lugar que dibujaba un `<select>` de destino, y el
+  // único sin tests: los otros tres ya se habían unificado en `TargetSelect`.
+  // Sin estas pruebas, "los tests pasan sin tocarse" no dice nada sobre él.
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["Fecha", "Monto", "Sucursal"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2026-03-01"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["1000"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      // La que dispara el modal: sin destino.
+      {
+        source_column: "Sucursal",
+        normalized_column: "sucursal",
+        sample_values: ["Centro"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "unmapped",
+      },
+    ]);
+  });
+
+  async function abrirModal() {
+    renderPanel();
+    // Esperar a que las sugerencias estén EN PANTALLA, no sólo a que el botón
+    // exista: con la lista todavía vacía no hay columnas sin mapear, el botón
+    // ya está habilitado y el click confirma de una sin abrir el modal.
+    await screen.findByText("Confirmar (1 sin mapear)");
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar \(1 sin mapear\)/i }));
+    // Acotado al modal: el panel de atrás sigue montado con sus propios selects.
+    const titulo = await screen.findByText("Columna sin mapear");
+    return titulo.closest("div.fixed") as HTMLElement;
+  }
+
+  test("ofrece los campos del catálogo bajo «Elegir campo...»", async () => {
+    const modal = await abrirModal();
+    expect(within(modal).getByText("Sucursal")).toBeInTheDocument();
+
+    const select = within(modal).getByRole("combobox") as HTMLSelectElement;
+    const opciones = Array.from(select.options).map((o) => o.textContent);
+    expect(opciones[0]).toBe("Elegir campo...");
+    expect(opciones).toEqual(expect.arrayContaining(["Monto de venta", "Fecha de venta"]));
+  });
+
+  test("no duplica adentro del select las acciones que ya son botones propios", async () => {
+    // «Ignorar esta columna» y «Guardar como campo personalizado» viven como
+    // botones del modal. `TargetSelect` las ofrece por default, así que
+    // unificar sin apagarlas le habría agregado dos opciones que nunca tuvo.
+    const modal = await abrirModal();
+    const select = within(modal).getByRole("combobox") as HTMLSelectElement;
+    const valores = Array.from(select.options).map((o) => o.value);
+    expect(valores).not.toContain("ignore");
+    expect(valores).not.toContain("__custom__");
+    expect(Array.from(select.options).map((o) => o.textContent)).not.toContain("Sin mapear");
+
+    // Y siguen estando como botones, que es de donde no se movieron.
+    expect(
+      within(modal).getByRole("button", { name: /Ignorar esta columna/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(modal).getByRole("button", { name: /Guardar como campo personalizado/i }),
+    ).toBeInTheDocument();
+  });
+
+  test("elegir un campo lo manda en el confirm", async () => {
+    const modal = await abrirModal();
+    const select = within(modal).getByRole("combobox") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "notes" } });
+    fireEvent.click(within(modal).getByRole("button", { name: /^Confirmar$/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    // `confirmFile(fileId, confirmedFields, columnMappings, …)` — posicional.
+    const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+    expect(enviado).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source_column: "Sucursal", target_field: "notes" }),
+      ]),
+    );
+  });
+});

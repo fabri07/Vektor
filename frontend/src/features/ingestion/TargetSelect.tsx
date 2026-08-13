@@ -46,6 +46,8 @@ export function TargetSelect({
   disabled,
   editingCustom = false,
   ignoreLabel = "— Ignorar —",
+  showIgnoreOption = true,
+  placeholderLabel = "Sin mapear",
   showCustomFieldOption = false,
   unknownTarget = "custom-always",
   dataSheet,
@@ -66,6 +68,18 @@ export function TargetSelect({
   /** El usuario está escribiendo el nombre de un campo propio para esta columna. */
   editingCustom?: boolean;
   ignoreLabel?: string;
+  /**
+   * Ofrece «ignorar» dentro del `<select>`. El modal de columnas sin mapear la
+   * expone como botón aparte, así que la apaga: sin esto, unificar el cuarto
+   * selector le agregaría una opción que hoy no tiene.
+   */
+  showIgnoreOption?: boolean;
+  /**
+   * Texto de la opción vacía. En las filas del panel el vacío significa «esta
+   * columna no está mapeada»; en el modal significa «todavía no elegiste», que
+   * es otra frase para el mismo valor.
+   */
+  placeholderLabel?: string;
   /** Ofrece crear un campo propio (emite el centinela `__custom__`). */
   showCustomFieldOption?: boolean;
   unknownTarget?: UnknownTargetMode;
@@ -113,8 +127,8 @@ export function TargetSelect({
       disabled={disabled}
       className={className}
     >
-      <option value="">Sin mapear</option>
-      <option value="ignore">{ignoreLabel}</option>
+      <option value="">{placeholderLabel}</option>
+      {showIgnoreOption && <option value="ignore">{ignoreLabel}</option>}
       {fields.map((f) => (
         <option key={f.value} value={f.value}>
           {f.label}
