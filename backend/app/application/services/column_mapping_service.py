@@ -10,7 +10,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.header_keys import custom_field_slug, match_key
+from app.domain.header_keys import custom_field_slug, fold_header, match_key
 from app.domain.header_semantics import analyze_header
 
 # F-C.c3: los conjuntos que definen "esta hoja mueve unidades" ya viven en el
@@ -25,6 +25,7 @@ from app.domain.inventory_effect import (
     _QUANTITY_FIELDS,
     SheetInventoryProfile,
 )
+from app.domain.text_norm import repair_mojibake
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -714,12 +715,17 @@ def _normalize_col(col: str) -> str:
     cada tenant). Cambiar la forma normalizada dejaría huérfano todo lo aprendido.
     Para ajustar el matching heurístico está ``_match_key``, que deriva de acá y
     NO se persiste.
+
+    En particular NO saca acentos: por eso conserva la tilde que trajo el archivo
+    que enseñó el alias. La tolerancia al acento se resuelve al LEER el historial
+    (índice plegado por ``fold_header`` en ``suggest_mappings``), no al escribirlo.
     """
     return col.lower().strip().replace(" ", "_").replace("-", "_")
 
 
 def _match_key(normalized: str) -> str:
-    """Clave de matching heurístico: el header normalizado sin preposiciones.
+    """Clave de matching heurístico: el header normalizado sin preposiciones ni
+    acentos.
 
     Existe por un empate real. ``_heuristic_match`` gana con el keyword MÁS LARGO
     y solo reemplaza si es estrictamente mayor, así que sobre ``precio_de_compra``
@@ -728,6 +734,11 @@ def _match_key(normalized: str) -> str:
     compra entraba como precio de venta (incidente ASTERIA). Con la clave
     ``precio_compra`` el keyword ``precio_compra`` (13) le gana a ``precio`` (6) y
     el desempate deja de depender del orden de un dict.
+
+    También pliega acentos y ñ (``Descripción`` ≡ ``Descripcion``, ``Año`` ≡
+    ``Ano``), incluyendo NFC vs NFD. Por eso este es el único lugar donde los
+    acentos se pueden sacar: ``_normalize_col`` no puede, porque es lo que se
+    persiste, así que la tolerancia tiene que vivir en la clave derivada.
 
     Deliberadamente NO se toca ``_normalize_col``: esa alimenta el historial
     persistido por tenant.
@@ -1417,11 +1428,15 @@ def _fuzzy_match(normalized: str, entity_type: str) -> tuple[str | None, float]:
         return None, 0.0
 
     heuristics = _HEURISTICS.get(entity_type, {})
+    # Se compara plegado contra plegado: sin esto un acento contaba como un
+    # carácter distinto y bajaba el ratio de un header que es LA MISMA palabra
+    # ("comisión" vs "comision"), llegando a caer por debajo del umbral de 0.70.
+    n = fold_header(normalized)
     best_target: str | None = None
     best_ratio = 0.0
     for target_field, keywords in heuristics.items():
         for kw in keywords:
-            ratio = fuzz.ratio(normalized, kw) / 100.0
+            ratio = fuzz.ratio(n, fold_header(kw)) / 100.0
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_target = target_field
@@ -1468,9 +1483,30 @@ class ColumnMappingService:
                 TenantColumnMapping.entity_type == entity_type,
             )
         )
-        history: dict[str, TenantColumnMapping] = {
-            row.source_column: row for row in result.scalars().all()
-        }
+        history: dict[str, TenantColumnMapping] = {}
+        #: El mismo historial indexado por clave PLEGADA (sin acentos ni ñ). El
+        #: alias se persiste con la forma acentuada que trajo el archivo que lo
+        #: enseñó, así que un tenant que mapeó "Descripción" no encontraba nada
+        #: al subir después un archivo con "Descripcion" — la columna volvía a
+        #: preguntarse como si nunca la hubiera confirmado. Se resuelve al LEER
+        #: en vez de migrar lo escrito: las filas viejas siguen sirviendo y no se
+        #: toca dato persistido de ningún tenant.
+        history_folded: dict[str, TenantColumnMapping] = {}
+        for alias in result.scalars().all():
+            history[alias.source_column] = alias
+            fk = fold_header(alias.source_column)
+            previo = history_folded.get(fk)
+            # Dos alias que pliegan igual ("descripcion" y "descripción") pueden
+            # coexistir y apuntar a campos distintos. Gana el más confirmado, y
+            # a igual confirmaciones el visto más recientemente; el último
+            # desempate es alfabético para que el resultado no dependa del orden
+            # en que la base devolvió las filas.
+            if previo is None or (
+                alias.confirmed_count,
+                alias.last_seen_at,
+                alias.source_column,
+            ) > (previo.confirmed_count, previo.last_seen_at, previo.source_column):
+                history_folded[fk] = alias
 
         required = set(REQUIRED_FIELDS.get(entity_type, []))
         suggestions: list[dict[str, Any]] = []
@@ -1481,7 +1517,12 @@ class ColumnMappingService:
         sin_desambiguar: set[int] = set()
 
         for header in headers:
-            normalized = _normalize_col(header)
+            # La reparación va ANTES de bajar a minúsculas, y no puede hacerse
+            # más adentro: la firma del mojibake vive en el caso de sus bytes
+            # ("Ã³" es U+00C3 U+00B3) y `_normalize_col` la destruye al pasar a
+            # "ã³" (U+00E3), que ya no es reparable. Sobre un encabezado sano es
+            # identidad, así que ninguna forma normal cambia de valor.
+            normalized = _normalize_col(repair_mojibake(header))
 
             # Extraer sample values (hasta 5 no-nulos)
             sample_vals: list[str] = []
@@ -1498,11 +1539,13 @@ class ColumnMappingService:
             options: tuple[str, ...] = ()
             duda: str | None = None
 
-            # 1. Historial del tenant (prioridad máxima)
-            if normalized in history:
-                rec = history[normalized]
-                target_field = rec.target_field
-                confidence = min(0.99, 0.5 + rec.confirmed_count / 20.0)
+            # 1. Historial del tenant (prioridad máxima). Coincidencia exacta
+            # primero y recién después por clave plegada: si el tenant tiene el
+            # alias tal cual vino el header, ese gana sobre cualquier variante.
+            aprendido = history.get(normalized) or history_folded.get(fold_header(normalized))
+            if aprendido is not None:
+                target_field = aprendido.target_field
+                confidence = min(0.99, 0.5 + aprendido.confirmed_count / 20.0)
                 source = "tenant_history"
 
             # 2. El reconocedor de encabezados (F-M)

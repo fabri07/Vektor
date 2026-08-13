@@ -55,7 +55,7 @@ BATERIA: list[tuple[str, str, str | None, str, str]] = [
     ),
     ("sale", "Cantidad", "quantity", OK, ""),
     ("sale", "Producto", "product_name", OK, ""),
-    ("sale", "Artículo", None, FALTA, "el vocabulario dice `articulo`, sin tilde"),
+    ("sale", "Artículo", "product_name", OK, ""),
     ("sale", "Cliente", "customer_name", OK, ""),
     ("sale", "DNI", "customer_dni", OK, ""),
     ("sale", "CUIT", "customer_cuit", OK, ""),
@@ -80,7 +80,7 @@ BATERIA: list[tuple[str, str, str | None, str, str]] = [
     ("expense", "Costo", "amount", OK, ""),
     ("expense", "Compra", "amount", OK, ""),
     ("expense", "Total", "amount", OK, ""),
-    ("expense", "Categoría", None, FALTA, "el vocabulario dice `categoria`, sin tilde"),
+    ("expense", "Categoría", "category", OK, ""),
     ("expense", "Rubro", "category", OK, ""),
     ("expense", "Proveedor", "supplier_name", OK, ""),
     ("expense", "Forma de pago", "payment_method", OK, ""),
@@ -93,7 +93,7 @@ BATERIA: list[tuple[str, str, str | None, str, str]] = [
     ("expense", "Nro comprobante", "invoice_number", OK, ""),
     ("expense", "Nro factura", "invoice_number", OK, ""),
     ("expense", "Remito", "invoice_number", OK, ""),
-    ("expense", "Envío", None, FALTA, "el vocabulario dice `envio`, sin tilde"),
+    ("expense", "Envío", "shipping_cost", OK, ""),
     ("expense", "Flete", "shipping_cost", OK, ""),
     ("expense", "Descuento", None, SIN_CAMPO, "`discount` todavía no existe"),
     ("expense", "Bonificación", None, SIN_CAMPO, "ídem"),
@@ -151,14 +151,7 @@ BATERIA: list[tuple[str, str, str | None, str, str]] = [
     # ── catálogo de productos ────────────────────────────────────────────────
     ("product", "SKU", "sku", OK, ""),
     ("product", "Código", "sku", OK, ""),
-    (
-        "product",
-        "Código de barras",
-        "sku",
-        MAL,
-        "empate `código`(6) vs `barras`(6): el código de barras entra como SKU. "
-        "Sin la tilde el header matchea exacto y resuelve bien — con tilde, no",
-    ),
+    ("product", "Código de barras", "barcode", OK, ""),
     ("product", "EAN", "barcode", OK, ""),
     ("product", "Nombre", "name", OK, ""),
     ("product", "Producto", "name", OK, ""),
@@ -169,7 +162,7 @@ BATERIA: list[tuple[str, str, str | None, str, str]] = [
     ("product", "Costo", "unit_cost_ars", OK, ""),
     ("product", "Costo unitario", "unit_cost_ars", OK, ""),
     ("product", "Stock", "stock_units", OK, ""),
-    ("product", "Categoría", None, FALTA, "tilde"),
+    ("product", "Categoría", "category", OK, ""),
     (
         "product",
         "Descripción",
@@ -227,11 +220,16 @@ def test_el_tamano_del_problema_esta_medido() -> None:
     for _, _, _, veredicto, _ in BATERIA:
         conteo[veredicto] = conteo.get(veredicto, 0) + 1
 
-    assert conteo[MAL] == 8
-    assert conteo[FALTA] == 7
+    # El plegado de acentos/ñ en la clave de matching movió 5 filas a OK: los
+    # cuatro `FALTA` cuyo motivo escrito era literalmente "el vocabulario dice
+    # X, sin tilde" (Artículo, Categoría ×2, Envío) y el `MAL` de "Código de
+    # barras", donde la tilde impedía la coincidencia exacta y el header caía al
+    # empate `código`(6) vs `barras`(6) resuelto por orden de declaración.
+    assert conteo[MAL] == 7
+    assert conteo[FALTA] == 3
     assert conteo[AMBIGUO] == 3
     assert conteo[SIN_CAMPO] == 5
-    assert conteo[OK] == 67
+    assert conteo[OK] == 72
     assert len(BATERIA) == 90
 
 

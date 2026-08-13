@@ -12,9 +12,9 @@ exactamente la revisión que un cambio así merece.
 
 La lectura de esta compuerta, medida:
 
-- **67 filas resuelven igual que hoy** — y son, una por una, las 67 que la
+- **72 filas resuelven igual que hoy** — y son, una por una, las 72 que la
   batería marcó ``OK``. Cero regresiones.
-- **23 cambian** — las 8 ``MAL``, las 3 ``AMBIGUO``, las 7 ``FALTA`` y las 5
+- **18 cambian** — las 7 ``MAL``, las 3 ``AMBIGUO``, las 3 ``FALTA`` y las 5
   ``SIN_CAMPO``. Ninguna fila que ya andaba bien se movió.
 """
 
@@ -33,7 +33,6 @@ LECTURA_NUEVA: dict[tuple[str, str], tuple[str, object]] = {
     # ── Empates que resolvía el orden de declaración del dict ────────────────
     ("sale", "Fecha de venta"): ("unico", "transaction_date"),
     ("expense", "Fecha del gasto"): ("unico", "expense_date"),
-    ("product", "Código de barras"): ("unico", "barcode"),
     ("product", "Descripción"): ("unico", "description"),
     # ── El modificador ya no se lleva el campo ───────────────────────────────
     # F-M.7: los dos reconocían el concepto y no tenían dónde ponerlo. Ahora
@@ -44,11 +43,13 @@ LECTURA_NUEVA: dict[tuple[str, str], tuple[str, object]] = {
     ("expense", "Envío unitario"): ("sin_evidencia", None),
     ("expense", "Costo final por producto"): ("ambiguo", ("amount", "unit_price")),
     ("expense", "Total factura sin impuestos"): ("sin_evidencia", None),
-    # ── Los acentos dejan de ser un agujero ──────────────────────────────────
-    ("sale", "Artículo"): ("unico", "product_name"),
-    ("expense", "Categoría"): ("unico", "category"),
-    ("product", "Categoría"): ("unico", "category"),
-    ("expense", "Envío"): ("unico", "shipping_cost"),
+    # ── Los acentos ya NO son un diff ────────────────────────────────────────
+    # `Artículo`, `Categoría` (venta y producto), `Envío` y `Código de barras`
+    # estaban declarados acá: F-M los leía bien y la capa heurística no, porque
+    # su clave de matching no plegaba acentos. Ahora sí los pliega, así que las
+    # dos capas coinciden y estas filas dejaron de ser un cambio entre motores
+    # — no porque F-M dejara de resolverlas, sino porque el viejo se puso a la
+    # par. Declararlas seguiría afirmando una diferencia que ya no existe.
     # ── `con`/`sin` describen la inclusión, no el concepto ───────────────────
     ("expense", "Precio con IVA"): ("ambiguo", ("amount", "unit_price")),
     ("expense", "Precio sin IVA"): ("ambiguo", ("amount", "unit_price")),
@@ -107,11 +108,13 @@ class TestCeroRegresiones:
             assert veredicto == OK, f"{entidad}/{header} sigue igual y estaba mal: {por_que}"
             assert _lectura(_leer(entidad, header)) == ("unico", viejo)
 
-    def test_las_67_lecturas_correctas_siguen_intactas(self) -> None:
+    def test_las_72_lecturas_correctas_siguen_intactas(self) -> None:
         intactas = [
             (e, h) for e, h, _viejo, v, _p in BATERIA if v == OK and (e, h) not in LECTURA_NUEVA
         ]
-        assert len(intactas) == 67
+        # Eran 67 hasta que el plegado de acentos en la clave de matching
+        # sumó 5 filas al lado OK (ver la nota de LECTURA_NUEVA).
+        assert len(intactas) == 72
 
 
 class TestLoQueNoResuelveConservaLaColumna:
@@ -147,4 +150,4 @@ class TestLoQueNoResuelveConservaLaColumna:
                 continue
             revisadas += 1
             assert _leer(entidad, header).target != viejo, f"{entidad}/{header}"
-        assert revisadas == 11, "8 `mal` + 3 `ambiguo`: si baja, la batería perdió casos"
+        assert revisadas == 10, "7 `mal` + 3 `ambiguo`: si baja, la batería perdió casos"

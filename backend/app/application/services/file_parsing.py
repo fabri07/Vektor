@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from decimal import Decimal
 
 from app.domain.expense_categories import strip_accents
-from app.domain.header_keys import match_key
+from app.domain.header_keys import fold_header, match_key
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -67,6 +67,10 @@ EXTENSION_TO_MIME = {
 
 SUPPORTED_TYPES_LABEL = "xlsx, csv, txt, pdf, docx, pptx, jpg, png, heic"
 
+# TODOS los sets de keywords de este módulo se comparan contra encabezados ya
+# pasados por `fold_header` (minúsculas, sin acentos ni ñ), así que se declaran
+# SIEMPRE en su forma sin tilde. Escribir además la variante acentuada no agrega
+# cobertura: es código muerto que no puede matchear nunca.
 # Columnas que indican transacciones de venta (monto cobrado)
 VENTA_COLS = {
     "precio_venta",
@@ -101,11 +105,11 @@ FECHA_COLS = {"fecha", "date", "dia", "mes", "periodo"}
 # maestro de clientes con "Fecha de nacimiento" activaba `has_fecha` (match por
 # substring de "fecha") y no podía clasificar como clientes — aunque
 # `fecha_nacimiento` esté listada como señal de cliente más abajo.
-FECHA_NO_TRANSACCIONAL_COLS = {"nacimiento", "cumpleanos", "cumpleaños", "cumple"}
+FECHA_NO_TRANSACCIONAL_COLS = {"nacimiento", "cumpleanos", "cumple"}
 
 # FASE 3: señales de compra de mercadería/insumos para reventa (→ inventario, no gasto).
 # Conservador: solo se rerutea a stock si HAY mercadería Y una columna de cantidad.
-MERCADERIA_COLS = {"mercaderia", "mercadería", "insumo", "insumos", "reposicion", "reposición"}
+MERCADERIA_COLS = {"mercaderia", "insumo", "insumos", "reposicion"}
 CANTIDAD_COLS = {"cantidad", "unidades", "unidad", "qty", "cant"}
 
 # FASE 3: clasificación CONTEXTUAL venta vs gasto. Las columnas de dinero genéricas
@@ -122,16 +126,16 @@ MONEY_COLS = {"monto", "importe", "total", "precio", "valor", "monto_total", "im
 # vive en FORMA_PAGO_COLS/`has_forma_pago`, que es lo que usa esa regla.
 VENTA_SIGNAL_COLS = {
     "venta", "ventas", "vendido", "vendida", "ingreso", "ingresos", "facturacion",
-    "facturación", "factura_emitida", "ticket", "cliente", "consumidor", "cobro",
+    "factura_emitida", "ticket", "cliente", "consumidor", "cobro",
     "cobrado", "caja", "fecha_venta",
 }
 # Señales fuertes de gasto/egreso (proveedor, categoría, concepto, servicio, etc.).
 # Nota: "pago" suelto NO se incluye — colisiona con "metodo/medio_pago" (señal de venta).
 GASTO_SIGNAL_COLS = {
-    "gasto", "gastos", "egreso", "egresos", "proveedor", "categoria", "categoría",
+    "gasto", "gastos", "egreso", "egresos", "proveedor", "categoria",
     "rubro", "concepto", "servicio", "alquiler", "sueldo", "salario", "impuesto",
-    "honorarios", "mantenimiento", "comision", "comisión", "flete", "logistica",
-    "logística", "factura_recibida", "compra", "costo", "deuda",
+    "honorarios", "mantenimiento", "comision", "flete", "logistica",
+    "factura_recibida", "compra", "costo", "deuda",
 }
 
 # Señales transaccionales para desambiguar un LIBRO DE COMPRAS de un CATÁLOGO.
@@ -144,10 +148,10 @@ GASTO_SIGNAL_COLS = {
 # monto de operación.
 TRANSACCION_MONTO_COLS = {"total", "monto", "importe", "monto_total", "importe_total"}
 # Columna de método/forma de pago (efectivo, transferencia, tarjeta…). Se matchea
-# contra la CLAVE del header (`match_key`), que colapsa preposiciones, así que
-# alcanza con la forma canónica: "medio_de_pago" entra por "medio_pago". La
-# variante con tilde sí hay que declararla — la clave no normaliza acentos.
-FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago", "método_pago"}
+# contra la CLAVE del header (`match_key`), que colapsa preposiciones Y acentos,
+# así que alcanza con la forma canónica sin tilde: "Medio de Pago" entra por
+# "medio_pago" y "Método de Pago" por "metodo_pago".
+FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago"}
 # Columna de proveedor (contraparte de una compra). Se matchea por SUBSTRING: en
 # los archivos reales el header casi nunca viene pelado — "Proveedor (tal cual se
 # anotó)", "Nombre del Proveedor" o "Razón Social Proveedor" son todos la misma
@@ -162,7 +166,7 @@ PROVEEDOR_COLS = {"proveedor", "proveedores"}
 # "facturacion"/"factura_emitida" quedan afuera a propósito: son columnas de total
 # facturado (señal de VENTA), no el identificador del documento.
 COMPROBANTE_COLS = {"remito", "factura", "comprobante", "recibo"}
-COMPROBANTE_EXCLUDE_KEYS = {"facturacion", "facturación", "factura_emitida"}
+COMPROBANTE_EXCLUDE_KEYS = {"facturacion", "factura_emitida"}
 
 # Columnas que nombran un PRECIO. Aparecen en el catálogo tanto como en una
 # transacción, así que una señal de venta/gasto que salga de una de ellas
@@ -182,7 +186,7 @@ PRECIO_COL_KEYS = {"precio", "costo", "valor"}
 # clientes — corregible desde el selector de sección de la hoja, y mejor que el
 # "stock" que daba antes.
 CLIENTE_SIGNAL_COLS = {
-    "cliente", "clientes", "consumidor", "dni", "documento", "cumpleanos", "cumpleaños",
+    "cliente", "clientes", "consumidor", "dni", "documento", "cumpleanos",
     "fecha_nacimiento",
 }
 PROVEEDOR_MASTER_COLS = {"proveedor", "proveedores", "cuil", "contacto"}
@@ -190,14 +194,14 @@ PROVEEDOR_MASTER_COLS = {"proveedor", "proveedores", "cuil", "contacto"}
 # junto con "nombre" y la ausencia de señales transaccionales indica que la hoja
 # es un maestro de identidad (no una lista de precios ni un libro de compras).
 IDENTIDAD_CONTACTO_COLS = {
-    "cuit", "razon_social", "razón_social", "email", "telefono", "teléfono",
-    "direccion", "dirección", "localidad", "provincia", "codigo_postal", "cp",
+    "cuit", "razon_social", "email", "telefono",
+    "direccion", "localidad", "provincia", "codigo_postal", "cp",
     "apellido",
 }
 
 VENTA_CTX = {"venta", "ingreso", "cobro", "ticket", "recibo", "pago recibido", "cobrado"}
 GASTO_CTX = {"gasto", "compra", "pago", "factura", "proveedor", "egreso", "gaste"}
-STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia", "mercadería"}
+STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia"}
 
 AMOUNT_RE = re.compile(r"\$\s*[\d.,]+")
 
@@ -417,7 +421,10 @@ def infer_source_format(filename: str, mime: str) -> str:
 
 def analyze_headers(headers: list[str]) -> dict[str, Any]:
     """Classify headers and infer spreadsheet type."""
-    normalized = [h.lower().strip().replace(" ", "_") for h in headers]
+    # `fold_header` saca acentos y ñ además de bajar a minúsculas: los sets de
+    # keywords de abajo se declaran SIN tilde y matchean igual una hoja que
+    # escriba "Descripción", "Mercadería" o "Cumpleaños".
+    normalized = [fold_header(h) for h in headers]
     # Clave heurística (sin preposiciones) para las señales que matchean EXACTO:
     # "medio_de_pago" y "medio_pago" son el mismo header. Se usa solo donde hace
     # falta — el resto de las señales sigue matcheando contra `normalized`.
@@ -1050,7 +1057,9 @@ def _sniff_delimiter(sample: str) -> str:
 
 
 def classify_line(line: str) -> str:
-    low = line.lower()
+    # Sin tildes: una línea suelta de un .txt escribe "mercadería" tanto como
+    # "mercaderia", y los *_CTX se declaran en la forma sin acento.
+    low = strip_accents(line.lower())
     if any(k in low for k in VENTA_CTX):
         return "venta"
     if any(k in low for k in GASTO_CTX):
