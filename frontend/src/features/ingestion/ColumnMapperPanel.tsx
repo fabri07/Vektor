@@ -165,6 +165,22 @@ function handleTransientConfirmError(
   return false;
 }
 
+/**
+ * F-A — el `target_label` de una columna, si hay uno, listo para spreadear.
+ *
+ * Devuelve `{}` cuando no hay etiqueta en vez de `{ target_label: undefined }`:
+ * el backend distingue "no lo mandó" (cae a `source_column`) de un valor
+ * explícito, y mandar la clave en `undefined` la serializa como `null`.
+ */
+function etiquetaDe(
+  labels: Record<string, Record<string, string>>,
+  ctxId: string,
+  col: string,
+): { target_label?: string } {
+  const label = labels[ctxId]?.[col];
+  return label ? { target_label: label } : {};
+}
+
 // Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
 const PURPOSE_OPTIONS: Array<{ value: string; label: string; field: "ventas" | "gastos" | "productos" }> = [
   { value: "ventas", label: "Ventas", field: "ventas" },
@@ -421,6 +437,7 @@ function SheetMapperSection({
   warnings,
   onIncludeChange,
   onMappingsChange,
+  onLabelsChange,
   onEntityChange,
   onColumnTouched,
   isColumnTouched,
@@ -443,6 +460,8 @@ function SheetMapperSection({
   warnings: string[];
   onIncludeChange: (ctxId: string, included: boolean) => void;
   onMappingsChange: (ctxId: string, mappings: Record<string, string>) => void;
+  // F-A: etiquetas legibles de los campos propios propuestos, por columna.
+  onLabelsChange?: (ctxId: string, labels: Record<string, string>) => void;
   onEntityChange: (ctxId: string, entity: string) => void;
   // F8c: se llama SOLO en cambios manuales de mapeo (marca user_selected).
   onColumnTouched?: (ctxId: string, col: string) => void;
@@ -584,6 +603,22 @@ function SheetMapperSection({
   useEffect(() => {
     onMappingsChange(context.context_id, mappings);
   }, [mappings, context.context_id, onMappingsChange]);
+
+  // F-A: y las etiquetas de los campos propios que propuso el backend. Sólo
+  // cuando el destino actual SIGUE siendo el sugerido: si la persona lo cambió,
+  // la etiqueta de aquella sugerencia ya no describe nada. Va aparte del mapeo
+  // porque el estado es `columna → target` y meterle un objeto obligaría a
+  // tocar los cuatro lugares que lo leen.
+  useEffect(() => {
+    const labels: Record<string, string> = {};
+    for (const sug of suggestions) {
+      const actual = mappings[sug.source_column];
+      if (actual && actual === sug.target_field && sug.target_label) {
+        labels[sug.source_column] = sug.target_label;
+      }
+    }
+    onLabelsChange?.(context.context_id, labels);
+  }, [mappings, suggestions, context.context_id, onLabelsChange]);
   // Requeridos REALES de la entidad: un requerido está cubierto solo si alguna
   // columna lo mapea a su campo canónico. Antes esto miraba el `status` que
   // mandó el backend por columna, así que mover la columna del nombre a un
@@ -1028,6 +1063,16 @@ function MultiContextMapper({
     [],
   );
 
+  // F-A: etiquetas de los campos propios, espejo de `mappingsRef`. No dispara
+  // re-render: sólo se lee al armar el payload del confirm.
+  const labelsRef = useRef<Record<string, Record<string, string>>>({});
+  const handleLabelsChange = useCallback(
+    (ctxId: string, labels: Record<string, string>) => {
+      labelsRef.current[ctxId] = labels;
+    },
+    [],
+  );
+
   // Problemas por hoja (requerido descubierto / colisión escalar). Los reporta
   // cada sección con las MISMAS reglas que valida el confirm del backend, así el
   // bloqueo se ve acá y no aparece recién como un 422.
@@ -1183,6 +1228,7 @@ function MultiContextMapper({
           context_id: ctx.context_id,
           entity_type: ent,
           user_selected: touchedRef.current.has(riskKey(ctx.context_id, src)),
+          ...etiquetaDe(labelsRef.current, ctx.context_id, src),
         });
       }
     }
@@ -1345,6 +1391,7 @@ function MultiContextMapper({
             context_id: ctx.context_id,
             entity_type: ent,
             user_selected: touchedRef.current.has(riskKey(ctx.context_id, src)),
+            ...etiquetaDe(labelsRef.current, ctx.context_id, src),
           });
         }
       }
@@ -1474,6 +1521,7 @@ function MultiContextMapper({
             warnings={warningsByCtx[ctx.context_id] ?? []}
             onIncludeChange={handleIncludeChange}
             onMappingsChange={handleMappingsChange}
+            onLabelsChange={handleLabelsChange}
             onEntityChange={handleEntityChange}
             onColumnTouched={handleColumnTouched}
             isColumnTouched={isColumnTouched}
@@ -1959,6 +2007,16 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   }
 
   function doConfirm(currentMappings: Record<string, string>) {
+    // F-A: etiquetas de los campos propios que propuso el backend, sólo mientras
+    // el destino siga siendo el sugerido (si la persona lo cambió, esa etiqueta
+    // ya no describe nada). Misma regla que la sección multi-hoja.
+    const etiquetasPlanas: Record<string, string> = {};
+    for (const sug of suggestions) {
+      const actual = currentMappings[sug.source_column];
+      if (actual && actual === sug.target_field && sug.target_label) {
+        etiquetasPlanas[sug.source_column] = sug.target_label;
+      }
+    }
     const columnMappings: ColumnMapping[] = Object.entries(currentMappings)
       .filter(([, target]) => Boolean(target))
       .map(([src, target]) => ({
@@ -1967,6 +2025,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         // F8c: mismo touched-set que el recompute — user_selected solo si el
         // usuario cambió el mapeo a mano (no si vino de una sugerencia).
         user_selected: touchedRef.current.has(riskKey("table", src)),
+        // F-A: la etiqueta del campo propio, mientras el destino siga siendo el
+        // que propuso el backend.
+        ...etiquetaDe({ table: etiquetasPlanas }, "table", src),
         // F-H3.e: la columna dice a qué hoja pertenece. Sin esto el confirm
         // entra por la rama de mapeos planos, donde el efecto de inventario no
         // se puede resolver contra ninguna hoja y el backend lo rechaza con 422

@@ -2531,3 +2531,109 @@ describe("ColumnMapperPanel — B.1: el modal de columnas sin mapear usa el sele
     );
   });
 });
+
+describe("ColumnMapperPanel — F-A: la etiqueta del campo propio llega al confirm", () => {
+  // El recorrido del label es sugerencia → estado → payload → backend. Los
+  // tests del backend cubren las dos puntas; este cubre el tramo del medio, que
+  // es el que el plan rector no contemplaba: sin él, el confirm derivaba la
+  // etiqueta de `source_column` y coincidían sólo por casualidad.
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["Fecha", "Monto", "Sucursal"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2026-03-01"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["1000"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Sucursal",
+        normalized_column: "sucursal",
+        sample_values: ["Centro"],
+        target_field: "custom_field:sucursal",
+        target_label: "Sucursal",
+        confidence: 0,
+        source: "auto_custom",
+        status: "mapped",
+      },
+    ]);
+  });
+
+  async function confirmar() {
+    renderPanel();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Confirmar importación/i })).toBeEnabled(),
+    );
+    // Esperar a que las sugerencias estén en pantalla: confirmar antes manda un
+    // mapeo vacío (la trampa que destapó B.1).
+    await screen.findByTitle("Sucursal");
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/i }));
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    return mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+  }
+
+  test("el campo propio propuesto viaja con su etiqueta", async () => {
+    const enviado = await confirmar();
+    expect(enviado).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source_column: "Sucursal",
+          target_field: "custom_field:sucursal",
+          target_label: "Sucursal",
+        }),
+      ]),
+    );
+  });
+
+  test("una columna canónica no arrastra etiqueta", async () => {
+    // El label es del campo propio. Un canónico ya tiene la suya en el
+    // catálogo, y mandar otra abriría dos fuentes para el mismo nombre.
+    const enviado = await confirmar();
+    const fecha = enviado.find((m) => m.source_column === "Fecha")!;
+    expect(fecha.target_label).toBeUndefined();
+  });
+
+  test("si la persona cambia el destino, la etiqueta vieja no lo sigue", async () => {
+    renderPanel();
+    await screen.findByTitle("Sucursal");
+    const select = document.querySelector<HTMLSelectElement>(
+      'select[data-suggests="custom_field:sucursal"]',
+    );
+    // El camino plano no estampa `data-suggests`; se busca el select por su valor.
+    const selects = Array.from(document.querySelectorAll("select"));
+    const elegido =
+      select ?? selects.find((s) => s.value === "custom_field:sucursal")!;
+    fireEvent.change(elegido, { target: { value: "notes" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/i }));
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+    const sucursal = enviado.find((m) => m.source_column === "Sucursal")!;
+    expect(sucursal.target_field).toBe("notes");
+    // La etiqueta describía al campo propio que ya no es el destino.
+    expect(sucursal.target_label).toBeUndefined();
+  });
+});

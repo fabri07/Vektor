@@ -113,7 +113,16 @@ async def test_llm_ignore_does_not_override() -> None:
 
     rara = suggestions[0]
     assert rara["source"] != "llm"  # "ignore" no pisa el resultado determinístico
-    assert rara["status"] == "unmapped"
+    assert rara["target_field"] != "ignore"
+    # Antes de F-A esto además afirmaba `status == "unmapped"`. Dejó de valer, y
+    # no porque el LLM haya ganado: la columna la conserva la propuesta de campo
+    # propio, que corre después. Es lo que pide el invariante de F-0 —«una
+    # columna desconocida nunca se descarta sola; `ignore` sólo por acción
+    # explícita del usuario»—, y un `ignore` sugerido por el LLM no es una
+    # acción del usuario. La afirmación que importa es la de arriba: el destino
+    # que propuso el LLM no se aplicó.
+    assert rara["target_field"] == "custom_field:colrara99"
+    assert rara["source"] == "auto_custom"
 
 
 # ── FASE 2 (A2): traza de la decisión LLM en pipeline_events ──────────────────

@@ -148,6 +148,7 @@ export type MappingOrigin =
   | "heuristic"
   | "fuzzy"
   | "llm"
+  | "auto_custom"
   | null;
 
 /**
@@ -167,12 +168,24 @@ export function mappingOrigin(
   suggestion: Pick<ColumnMappingSuggestion, "source" | "target_field">,
   currentTarget: string,
 ): MappingOrigin {
-  const actual = currentTarget?.trim() ?? "";
+  const actual = normalizarTarget(currentTarget);
   if (!actual || actual === "ignore") return null;
   // `target_field` viaja como `null` cuando el backend no propuso nada; ahí
   // cualquier destino actual es del usuario.
-  if (actual !== (suggestion.target_field ?? "")) return "user";
+  //
+  // Los dos lados se normalizan igual que en `customFieldCollisions`: sin eso
+  // `"custom_field: obs"` y `"custom_field:obs"` son strings distintos y la
+  // comparación devuelve "Lo elegiste vos" sobre una sugerencia que la persona
+  // nunca tocó. El backend ya trata a las dos como la misma clave.
+  if (actual !== normalizarTarget(suggestion.target_field ?? "")) return "user";
   return suggestion.source === "none" ? null : suggestion.source;
+}
+
+/** El target comparable: recorta el valor y, si es un campo propio, su clave. */
+function normalizarTarget(target: string): string {
+  const valor = target?.trim() ?? "";
+  if (!valor.startsWith(CUSTOM_FIELD_PREFIX)) return valor;
+  return `${CUSTOM_FIELD_PREFIX}${valor.slice(CUSTOM_FIELD_PREFIX.length).trim()}`;
 }
 
 const CUSTOM_FIELD_PREFIX = "custom_field:";

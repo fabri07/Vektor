@@ -21,6 +21,11 @@ const ORIGIN_LABELS: Record<Exclude<MappingOrigin, null>, string> = {
   heuristic: "Sugerido por el nombre de la columna",
   fuzzy: "Sugerido por un nombre parecido",
   llm: "Sugerido por Véktor",
+  // F-A: nadie reconoció el encabezado. La frase dice lo que va a pasar —el
+  // dato se conserva con el nombre que trae el archivo— en vez de afirmar un
+  // reconocimiento que no hubo. Es la diferencia entre «lo entendí» y «no lo
+  // entendí, pero no lo pierdo».
+  auto_custom: "Se guarda con el nombre del archivo",
 };
 
 /**

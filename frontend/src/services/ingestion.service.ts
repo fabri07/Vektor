@@ -344,7 +344,11 @@ export interface ColumnMappingSuggestion {
   target_field: string | null;
   confidence: number;
   // FASE 2 (A2): "llm" = la 4ª capa LLM desambiguó esta columna.
-  source: "tenant_history" | "heuristic" | "fuzzy" | "llm" | "none";
+  // F-A: "auto_custom" = nadie reconoció el encabezado y Véktor propone
+  // conservarlo como campo propio con el nombre del archivo. Espejo del
+  // `Literal` de `schemas/ingestion.py` — ya divergió una vez (F-M.5) y el
+  // modo de falla es mudo: la clave viaja y la pantalla no la sabe leer.
+  source: "tenant_history" | "heuristic" | "fuzzy" | "llm" | "none" | "auto_custom";
   // F-M: `ambiguo` = Véktor entendió el encabezado y, con eso entendido, hay más
   // de una lectura razonable. No es `unmapped`, que significa que no reconoció
   // nada — y la pantalla las muestra distinto porque para la persona no son lo
@@ -356,6 +360,13 @@ export interface ColumnMappingSuggestion {
   // Por qué no alcanza, en castellano. Viaja también en `unmapped` cuando el
   // concepto se reconoció pero esta hoja no tiene campo donde ponerlo.
   duda?: string | null;
+  // F-A: cómo se llama la columna en el archivo, para MOSTRAR. Viaja separado
+  // del target porque el slug perdió acentos, mayúsculas y puntuación: desde
+  // `custom_field:ano_fiscal` no se vuelve a «Año Fiscal».
+  target_label?: string | null;
+  // F-A/V10: QUÉ requerido falta cuando `status === "required_missing"`. Sin
+  // esto la pantalla ve un punto rojo y tiene que adivinar cuál es.
+  missing_field?: string | null;
 }
 
 export interface ColumnMapping {
@@ -367,6 +378,10 @@ export interface ColumnMapping {
   // manualmente. El backend nunca lo infiere — es distinto de `source`/
   // `mapping_source` (que indican de dónde salió la sugerencia).
   user_selected?: boolean;
+  // F-A: cómo se llama la columna para mostrar, cuando va a un campo propio.
+  // Cierra el recorrido del label hasta `ensure_custom_field_exists`; si no se
+  // manda, el backend cae a `source_column` como hacía antes.
+  target_label?: string;
 }
 
 /** Contexto de mapeo: una hoja/tabla/grupo detectado dentro de un archivo. */

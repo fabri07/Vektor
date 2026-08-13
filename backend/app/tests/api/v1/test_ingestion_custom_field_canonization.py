@@ -231,3 +231,54 @@ class TestNombreSinNadaUsable:
         )
         assert [d for d in definiciones if not d.field_key] == []
         assert (await db_session.execute(select(Product))).scalars().all() == []
+
+
+class TestElLabelLlegaHastaLaDefinicion:
+    """F-A — el recorrido del label termina en `ensure_custom_field_exists`.
+
+    Es el tramo que el plan rector no cubría: `target_label` existía en la
+    sugerencia y el confirm igual derivaba la etiqueta de `source_column`. Los
+    dos coinciden sólo mientras nadie renombre la columna en pantalla.
+    """
+
+    async def test_se_persiste_el_label_que_mando_la_pantalla(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        catalog_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        mapping = _mapping("Obs.", "custom_field:notas_del_cliente")
+        mapping["target_label"] = "Notas del cliente"
+
+        response = await _confirm(client, catalog_file.id, auth_headers, [mapping])
+        assert response.status_code == 200, response.text
+
+        definicion = (
+            (await db_session.execute(select(TenantCustomFieldDefinition))).scalars().one()
+        )
+        assert definicion.field_key == "notas_del_cliente"
+        # Y NO "Obs.", que es como se llama la columna en el archivo.
+        assert definicion.override_label == "Notas del cliente"
+
+    async def test_sin_label_cae_al_nombre_de_la_columna(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        catalog_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        """Un cliente viejo que no manda `target_label` sigue funcionando.
+
+        El campo es opcional a propósito: agregarlo no puede romper a quien ya
+        está confirmando archivos.
+        """
+        response = await _confirm(
+            client, catalog_file.id, auth_headers, [_mapping("Obs.", "custom_field:obs")]
+        )
+        assert response.status_code == 200, response.text
+
+        definicion = (
+            (await db_session.execute(select(TenantCustomFieldDefinition))).scalars().one()
+        )
+        assert definicion.override_label == "Obs."

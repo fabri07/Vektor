@@ -1059,3 +1059,56 @@ class TestColumnMappingsEntityOverride:
             headers=auth_headers,
         )
         assert response.status_code == 422
+
+
+class TestElLabelViajaPorElCable:
+    """F-A — `target_label` tiene que LLEGAR, no sólo calcularse.
+
+    Va por HTTP y no contra el servicio por una razón medida en F-M.5: el dict
+    de sugerencias se expande con ``**s`` dentro de ``ColumnMappingSuggestion``,
+    y una clave que el schema no declara **no rompe nada, se ignora en
+    silencio**. El modo de falla es que el dato exista del lado del servicio y
+    nunca llegue a la pantalla, que es justo lo que un unitario no ve.
+    """
+
+    async def _pedir(
+        self, client: AsyncClient, auth_headers: dict[str, Any], f: UploadedFile
+    ) -> dict[str, Any]:
+        response = await client.get(
+            f"/api/v1/ingestion/files/{f.id}/column-mappings?entity_type=sale",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        return {s["source_column"]: s for s in response.json()}
+
+    async def test_la_columna_que_no_se_reconoce_llega_como_campo_propio(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        s = (await self._pedir(client, auth_headers, ambiguous_file))["ColRara99"]
+        assert s["target_field"] == "custom_field:colrara99"
+        assert s["status"] == "mapped"
+
+    async def test_con_su_nombre_original_para_mostrar(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        s = (await self._pedir(client, auth_headers, ambiguous_file))["ColRara99"]
+        # Desde `colrara99` no se puede reconstruir «ColRara99»: el slug perdió
+        # las mayúsculas. Por eso el label viaja aparte.
+        assert s["target_label"] == "ColRara99"
+
+    async def test_el_origen_no_se_disfraza_de_reconocimiento(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        s = (await self._pedir(client, auth_headers, ambiguous_file))["ColRara99"]
+        # `heuristic` haría que la pantalla dijera «sugerido por el nombre de la
+        # columna» sobre algo que nadie reconoció.
+        assert s["source"] == "auto_custom"
+
+    async def test_lo_reconocido_no_arrastra_label(
+        self, client: AsyncClient, auth_headers: dict[str, Any], ambiguous_file: UploadedFile
+    ) -> None:
+        # Control: el label es del campo propio. Un canónico ya tiene su etiqueta
+        # en el catálogo, y mandar otra abriría dos fuentes para el mismo nombre.
+        s = (await self._pedir(client, auth_headers, ambiguous_file))["Fecha"]
+        assert s["target_field"] == "transaction_date"
+        assert s["target_label"] is None

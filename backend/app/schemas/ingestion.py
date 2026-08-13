@@ -181,7 +181,12 @@ class ColumnMappingSuggestion(BaseModel):
     sample_values: list[str]
     target_field: str | None
     confidence: float
-    source: Literal["tenant_history", "heuristic", "fuzzy", "llm", "none"]
+    #: F-A: `auto_custom` = Véktor no reconoció el encabezado y propone
+    #: conservarlo como campo propio con el nombre del archivo. Es un origen
+    #: propio y no `heuristic`: nadie reconoció nada, y la pantalla tiene que
+    #: poder decir «se guarda con el nombre del archivo» en vez de «sugerido
+    #: por el nombre de la columna», que sería mentir sobre qué pasó.
+    source: Literal["tenant_history", "heuristic", "fuzzy", "llm", "none", "auto_custom"]
     status: Literal["mapped", "unmapped", "ambiguo", "required_missing"]
     # Contexto al que pertenece la sugerencia (hoja/tabla). None = archivo de un solo contexto.
     context_id: str | None = None
@@ -195,6 +200,17 @@ class ColumnMappingSuggestion(BaseModel):
     # «no entiendo esto» y «entiendo qué es pero no tengo dónde ponerlo» son dos
     # mensajes distintos para la persona, aunque para el importador sean lo mismo.
     duda: str | None = None
+    #: F-A. Cómo se llama la columna en el archivo, para mostrar. Viaja SEPARADO
+    #: del target porque el slug pierde acentos, mayúsculas y puntuación: desde
+    #: `custom_field:ano_fiscal` no se puede volver a «Año Fiscal». Es lo único
+    #: con lo que la persona reconoce su columna en el ERD y en la pantalla de
+    #: campos propios.
+    target_label: str | None = None
+    #: F-A/V10. QUÉ requerido falta cuando `status == "required_missing"`, no
+    #: sólo que falta alguno: el estado describe el campo DESTINO, y sin
+    #: nombrarlo la pantalla tiene que adivinar cuál de los requeridos es este
+    #: punto rojo.
+    missing_field: str | None = None
 
 
 class ConditionalRequirement(BaseModel):
@@ -347,6 +363,14 @@ class ColumnMapping(BaseModel):
     # sugerencia). Solo True vuelve accionable un target OPCIONAL en el protocolo de
     # riesgo. El backend nunca lo infiere de la mera presencia del mapping.
     user_selected: bool = False
+    # F-A: cómo se llama esta columna para mostrar, cuando va a un campo propio.
+    # Cierra el recorrido del label: sugerencia → pantalla → confirm →
+    # `ensure_custom_field_exists`. Sin esto el label se derivaba de
+    # `source_column` en el confirm, que coincide sólo mientras nadie renombre la
+    # columna en pantalla — y no coincide nunca si el slug se desambiguó
+    # (`obs` y `obs_2` comparten nombre de origen y son campos distintos).
+    # Opcional: un cliente viejo que no lo mande sigue cayendo a `source_column`.
+    target_label: str | None = None
 
 
 class ColumnRiskRequest(BaseModel):

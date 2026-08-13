@@ -10,7 +10,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.header_keys import match_key
+from app.domain.header_keys import custom_field_slug, match_key
 from app.domain.header_semantics import analyze_header
 
 # F-C.c3: los conjuntos que definen "esta hoja mueve unidades" ya viven en el
@@ -1551,6 +1551,13 @@ class ColumnMappingService:
                     "status": status,
                     "options": list(options),
                     "duda": duda,
+                    # F-A: los completa la pasada de campos propios / requeridos
+                    # de abajo. Se declaran acá para que la forma del dict no
+                    # dependa de qué rama corrió — el schema los expande con
+                    # `**s` y una clave ausente en unos y presente en otros es
+                    # justo lo que hace divergir a los consumidores.
+                    "target_label": None,
+                    "missing_field": None,
                 }
             )
 
@@ -1568,9 +1575,20 @@ class ColumnMappingService:
             )
 
         # Segunda pasada: detectar required_missing
-        mapped_targets = {
-            s["target_field"] for s in suggestions if s["status"] == "mapped"
-        }
+        #
+        # V10 — acá NO hace falta filtrar por target canónico, y conviene dejar
+        # escrito por qué: se probó a agregarlo y ninguna mutación lo mata. La
+        # cobertura es una resta de conjuntos entre nombres de campo, y
+        # `"custom_field:amount"` nunca es igual a `"amount"` — un campo propio
+        # no puede colarse como requerido cubierto por más que se llame igual.
+        # Filtrar sería código defensivo inalcanzable disfrazado de protección.
+        #
+        # Lo que SÍ sostiene V10 con F-A puesto es la regla de abajo: la columna
+        # candidata a un requerido no se auto-propone como campo propio. Si se
+        # auto-propusiera, no quedaría ninguna `unmapped` donde poner la marca.
+        # Y río abajo el confirm valida con `missing_required_fields`, que sí
+        # filtra explícitamente porque ahí el caller le pasa targets mezclados.
+        mapped_targets = {s["target_field"] for s in suggestions if s["status"] == "mapped"}
         missing_required = required - mapped_targets
 
         # Si hay campos requeridos sin cubrir, marcar la primera columna sin mapear
@@ -1584,8 +1602,66 @@ class ColumnMappingService:
                         req_keywords = _HEURISTICS.get(entity_type, {}).get(req_field, set())
                         if any(k in norm for k in req_keywords):
                             s["status"] = "required_missing"
+                            # Qué campo falta, no sólo que falta algo: el estado
+                            # describe el CAMPO DESTINO, y sin nombrarlo la
+                            # pantalla tiene que adivinar cuál de los requeridos
+                            # es este punto rojo.
+                            s["missing_field"] = req_field
                             missing_required.discard(req_field)
                             break
+
+        # F-A — preservar primero, clasificar después.
+        #
+        # Lo que no se reconoce deja de desaparecer detrás de un «Sin mapear»:
+        # se propone conservarlo como campo propio, con el NOMBRE ORIGINAL de la
+        # columna como etiqueta. La queja que abrió la fase era tener que
+        # renombrar prácticamente todas las columnas de un archivo real.
+        #
+        # Va DESPUÉS del LLM y de la pasada de requeridos, y saltea dos casos a
+        # propósito:
+        #  - cualquier columna con `duda`: el reconocedor entendió el encabezado
+        #    y tiene algo que decir — sea que hay más de una lectura (`ambiguo`)
+        #    o que esta hoja no tiene campo donde poner ese concepto, que llega
+        #    como `unmapped` CON duda. Archivarla como campo propio taparía la
+        #    explicación, y rompería el invariante de F-M de que una columna
+        #    `mapped` no arrastra una duda (hay tests que lo fijan).
+        #  - `required_missing`: esta columna es la candidata a un requerido sin
+        #    cubrir. Proponer «guardala como campo propio» es ofrecer tirar la
+        #    fecha de la venta a un campo suelto — el default tiene que ser que
+        #    la persona decida, no que Véktor la archive.
+        #
+        # Y no propone sin una sola muestra: una columna sin valores no es un
+        # dato a conservar, es una columna vacía (el resto de esa política vive
+        # en el confirm, que dropea las 100% vacías del archivo completo).
+        slugs_usados: set[str] = {
+            parse_target(s["target_field"]).field
+            for s in suggestions
+            if parse_target(s["target_field"]).kind == "custom"
+        }
+        for s in suggestions:
+            if s["status"] != "unmapped" or not s["sample_values"] or s["duda"]:
+                continue
+            slug = custom_field_slug(s["source_column"])
+            if slug is None:
+                continue
+            # Desambiguación determinística por orden de aparición: "Obs." y
+            # "Obs" dan el mismo slug, y sin sufijo la segunda columna pisaría a
+            # la primera. El 422 de F-0 sigue siendo el cinturón duro; esto evita
+            # llegar a él por una colisión que Véktor mismo se creó.
+            if slug in slugs_usados:
+                n = 2
+                while f"{slug}_{n}" in slugs_usados:
+                    n += 1
+                slug = f"{slug}_{n}"
+            slugs_usados.add(slug)
+            s["target_field"] = f"custom_field:{slug}"
+            # La etiqueta viaja aparte y NO se reconstruye desde el slug: el
+            # slug pierde acentos, mayúsculas y puntuación, así que "Año Fiscal"
+            # volvería como "ano fiscal". Es lo único con lo que la persona
+            # reconoce su columna en el ERD y en la pantalla de campos propios.
+            s["target_label"] = s["source_column"]
+            s["status"] = "mapped"
+            s["source"] = "auto_custom"
 
         return suggestions
 

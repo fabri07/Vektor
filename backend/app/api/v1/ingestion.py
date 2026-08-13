@@ -2584,7 +2584,12 @@ async def confirm_file(
                         tenant.tenant_id,
                         _entity_for(_mapping),
                         _field_key,
-                        _mapping.source_column,  # nombre de la columna como label inicial
+                        # F-A: el label que eligió la pantalla; `source_column`
+                        # sólo como fallback para un cliente que no lo mande.
+                        # No coinciden cuando el slug se desambiguó: `obs` y
+                        # `obs_2` vienen de la misma columna de origen y son dos
+                        # campos distintos.
+                        _mapping.target_label or _mapping.source_column,
                     )
 
         # Un checkpoint propio: crear las definiciones de campos personalizados
