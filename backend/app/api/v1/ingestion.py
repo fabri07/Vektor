@@ -110,12 +110,12 @@ from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
 from app.domain.inventory_effect import (
     EFFECT_LABELS,
-    HISTORICAL_REPLAY,
     InvalidInventoryEffectError,
     SheetInventoryProfile,
     default_effect_for,
     discard_legacy_overrides,
     options_for,
+    replay_scope,
     resolve_inventory_effects,
 )
 from app.domain.purchase_cost import CENTAVO
@@ -2581,6 +2581,13 @@ async def confirm_file(
         # para que una relectura posterior conserve la decisión sin volver a preguntar.
         if body.stock_treatment is not None:
             updated_summary["stock_treatment"] = body.stock_treatment
+        # F-F.4: y el efecto de inventario RESUELTO, por la misma razón y en el
+        # mismo lugar. La relectura re-importa las ventas del archivo y tiene que
+        # descontarlas igual que el confirm; sin esto tendría que volver a
+        # deducirlo por su cuenta, y un archivo cuyo mapeo cambió desde entonces
+        # se descontaría distinto de como se importó.
+        if _inventory_effects:
+            updated_summary["inventory_effect"] = _inventory_effects
 
         explicit_mappings: dict[str, str] | None = None
         if _flat_mappings:
@@ -2748,22 +2755,13 @@ async def confirm_file(
         # `source_upload_id` no vería ni una de las ventas recién agregadas y el
         # confirm dejaría de descontar EN SILENCIO. Los tests no lo agarrarían: su
         # sesión se arma en el conftest sin ese parámetro, o sea con autoflush.
-        _hojas_replay = [
-            _cid for _cid, _ef in _inventory_effects.items() if _ef == HISTORICAL_REPLAY
-        ]
-        # F-F.4 — el archivo sin hojas identificadas se aplica ENTERO.
-        #
-        # El perfil del camino plano lleva `context_id=""` (la clave que el
-        # recorder usa para el contexto ausente), y por eso mismo el importador no
-        # estampa hoja en esas ventas: `_ctx_inline` la descarta por falsy. Filtrar
-        # el replay por `[""]` no matchearía ninguna —`_contexto_de` devuelve
-        # `__sin_hoja__` para la venta sin estampar— y el confirm dejaría de
-        # descontar EN SILENCIO, que es exactamente la clase de falla que F-H3.e ya
-        # pagó. `None` es "todas las ventas del archivo", que para un archivo de una
-        # sola tabla es la misma cosa dicha sin traducir claves.
-        _replay_todas = _hojas_replay == [""]
+        # F-F.4 — el alcance sale del dominio (`replay_scope`), no de un filtro
+        # inline: la relectura hace lo mismo y una traducción reescrita ahí se
+        # separaría de ésta. Ver `ReplayScope` sobre por qué el archivo sin hojas
+        # identificadas se aplica entero en vez de filtrarse por la clave vacía.
+        _alcance_replay = replay_scope(_inventory_effects)
         _replay_outcome: ReplayOutcome | None = None
-        if _hojas_replay:
+        if _alcance_replay.corre:
             # `stage()` y no `mark()`, por lo mismo que el import: si explota, su
             # tiempo igual queda en la traza del rechazo.
             with _timings.stage("replay_inventario") as _etapa_replay:
@@ -2772,7 +2770,7 @@ async def confirm_file(
                     session,
                     tenant.tenant_id,
                     file_id,
-                    context_ids=None if _replay_todas else _hojas_replay,
+                    context_ids=_alcance_replay.context_ids,
                     apply=True,
                 )
                 # Las ventas que la pasada MIRÓ, no sólo las que descontó: una

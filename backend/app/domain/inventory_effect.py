@@ -179,6 +179,35 @@ def options_for(profile: SheetInventoryProfile) -> list[str]:
     return [] if default is None else [default]
 
 
+@dataclass(frozen=True)
+class ReplayScope:
+    """A qué ventas de un archivo hay que aplicarles el descuento.
+
+    ``context_ids=None`` significa **todas las ventas del archivo**, y no es lo
+    mismo que la lista vacía: el archivo sin hojas identificadas lleva su efecto
+    bajo la clave ``""`` y el importador NO estampa esa hoja en sus ventas
+    (``_ctx_inline`` la descarta por falsy), así que filtrar por ``[""]`` no
+    matchearía ninguna y el descuento se perdería en silencio.
+    """
+
+    corre: bool
+    context_ids: list[str] | None
+
+
+def replay_scope(effects: Mapping[str, str] | None) -> ReplayScope:
+    """Traduce los efectos resueltos al alcance del replay.
+
+    Vive acá y no en cada llamador porque son DOS —el confirm y la relectura— y
+    la traducción de la clave vacía es justo la clase de detalle que se
+    reimplementa distinto en el segundo. Misma razón por la que F-F.3 compartió
+    ``run_inventory_replay`` en vez de copiarlo.
+    """
+    hojas = [cid for cid, ef in (effects or {}).items() if ef == HISTORICAL_REPLAY]
+    if not hojas:
+        return ReplayScope(corre=False, context_ids=[])
+    return ReplayScope(corre=True, context_ids=None if hojas == [""] else hojas)
+
+
 class InvalidInventoryEffectError(ValueError):
     """Valor o contexto inválido en el `inventory_effect` que mandó el cliente."""
 
