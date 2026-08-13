@@ -1893,8 +1893,11 @@ async def confirm_file(
         compra", "Precio de lista" y "Precio de venta final" caían las tres en
         ``sale_price_ars``).
 
-        Solo aplica a los campos donde una colisión corrompe plata
-        (``SINGLE_VALUE_FIELDS``); los demás admiten varias columnas.
+        Solo aplica a los campos declarados de valor único
+        (``SINGLE_VALUE_FIELDS``); los demás admiten varias columnas. No son sólo
+        los de plata: la identidad de un maestro (CUIT, teléfono, nombre) se pisa
+        con el mismo mecanismo y se descubre peor — un monto equivocado salta en
+        un total, un teléfono equivocado no salta en ningún lado.
         """
         scalars = SINGLE_VALUE_FIELDS.get(entity_type, frozenset())
         by_target: dict[str, list[str]] = defaultdict(list)

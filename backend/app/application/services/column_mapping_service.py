@@ -1203,8 +1203,45 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
     "product": frozenset(
         {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units"}
     ),
-    "customer": frozenset(),
-    "supplier": frozenset(),
+    # Los maestros quedaron sin ningún campo escalar hasta acá, y no porque sus
+    # campos admitan varias columnas: un proveedor tiene UN CUIL y UN teléfono
+    # igual que una venta tiene UN monto. La guarda se había pensado para "no
+    # corromper plata", y una identidad no es plata — pero se pisa igual y se
+    # descubre peor: un monto equivocado salta en un total, un teléfono
+    # equivocado no salta en ningún lado.
+    #
+    # El caso que lo destapó: una hoja de proveedores con «Contacto» (col 6) y
+    # «Teléfono» (col 7). Las dos resuelven a `phone` —`contacto` es keyword de
+    # `phone` a propósito— y `_resolve_target_cols` es first-wins por orden de
+    # columna, así que el teléfono del proveedor quedaba siendo el NOMBRE de la
+    # persona de contacto. Ahora se le pregunta al usuario cuál es cuál, y la
+    # otra columna puede ir a un campo propio en vez de perderse.
+    #
+    # `notes` queda AFUERA, igual que en `sale`/`expense`/`product`: es texto
+    # libre, no un dato de identidad, y es el único de estos campos donde tener
+    # dos columnas («Observaciones» y «Comentarios») es una forma razonable de
+    # llenar una ficha y no un empate que haya que desempatar.
+    "customer": frozenset(
+        {
+            "customer_type",
+            "name",
+            "last_name",
+            "doc_type",
+            "dni",
+            "cuit",
+            "iva_condition",
+            "email",
+            "phone",
+            "address",
+            "locality",
+            "province",
+            "postal_code",
+            "birthday",
+        }
+    ),
+    "supplier": frozenset(
+        {"name", "last_name", "cuil", "payment_method", "email", "phone"}
+    ),
 }
 
 
