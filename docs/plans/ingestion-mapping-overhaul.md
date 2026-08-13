@@ -74,11 +74,11 @@ F-M  reconocimiento de encabezados en dos capas                     ✅ entregad
 F-H6 costos de compra agrupados (envío, costo final)  a·b·c·d       ✅ entregado
 F-H6.e el flete de línea genera su gasto                            ✅ entregado
 F-C  obligatorios explicados                                        ✅ entregado
-F-T  medir el confirm antes de agregarle trabajo
-F-F  fechas mandan: todo movimiento afecta el inventario
-F-O  «Otros» y la relectura (.1 y .2 entregadas)
-F-A  nombre original + preservación de edición
-F-B  claridad visual + extracción del monolito
+F-T  medir el confirm antes de agregarle trabajo                     ✅ entregado
+F-F  fechas mandan: todo movimiento afecta el inventario (.1→.4)     ✅ entregado
+F-O  «Otros» y la relectura (.1 y .2)                                ✅ entregado
+F-A  nombre original + preservación de edición                       ◐ sólo la preservación al cambiar de sección (60d400f8)
+F-B  claridad visual + extracción del monolito                       ◐ TargetSelect/MappingOriginHint (2cbbd0d1) + fuera el % (4a0f2d8d)
 F-I  identidad por código: IDs y comprobantes
 F-N  nombre y apellido en una sola columna
 F-D  ruteo cross-sección
