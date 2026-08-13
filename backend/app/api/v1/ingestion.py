@@ -108,6 +108,7 @@ from app.application.services.score_trigger_service import (
 )
 from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
+from app.domain.header_keys import custom_field_slug
 from app.domain.inventory_effect import (
     EFFECT_LABELS,
     InvalidInventoryEffectError,
@@ -1785,6 +1786,45 @@ async def confirm_file(
                 file_id=str(file_id),
                 motivo=motivo,
             )
+
+    # ── F-A: canonizar los `custom_field:` UNA sola vez ──────────────────────
+    # `parse_target` es un PARSER, no un canonizador: de la clave sólo hace
+    # `.strip()`. De acá para abajo hay siete consumidores que la vuelven a
+    # parsear por su cuenta y dos que comparan el string crudo sin parsearlo
+    # (`_trae_maestros` y el aprendizaje de alias). Con cada uno viendo una forma
+    # distinta de la MISMA columna, el campo termina creándose con una clave y
+    # validándose contra otra.
+    #
+    # Se muta EN EL LUGAR, sobre los mismos objetos que `_flat_mappings` y
+    # `_ctx_mappings` ya referencian: reasignar las listas dejaría a todo lo que
+    # ya las capturó leyendo la versión sin canonizar, que es exactamente el
+    # problema que esta pasada viene a cerrar.
+    _custom_sin_clave: list[str] = []
+    for _m in body.column_mappings:
+        _parsed_custom = parse_target(_m.target_field)
+        if _parsed_custom.kind != "custom":
+            continue
+        _slug = custom_field_slug(_parsed_custom.field)
+        if _slug is None:
+            _custom_sin_clave.append(_m.source_column)
+            continue
+        _m.target_field = f"custom_field:{_slug}"
+
+    if _custom_sin_clave:
+        # Sin una sola letra ni dígito no hay identificador posible. Antes esto
+        # creaba una definición con `field_key` vacío y todas las columnas así
+        # colapsaban en la misma.
+        await _emit_validation_reject(
+            "custom_field_sin_clave", {"columnas": _custom_sin_clave}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Estas columnas se van a guardar como campo propio pero el nombre "
+                f"elegido no tiene letras ni números: {', '.join(_custom_sin_clave)}. "
+                "Poneles un nombre con al menos una letra."
+            ),
+        )
 
     # Override del usuario para reasignar la entidad de un contexto completo
     # (ej. una hoja "general"/producto pasada a venta/gasto). Fuente única con

@@ -51,6 +51,9 @@ TOLERANCIA = Decimal("0.01")
 #: (``custom_field_slug()``, que normaliza a ``[a-z0-9_]`` y nunca arranca con
 #: guión bajo). Sin el namespace, una planilla con una columna "amount source"
 #: pisaría la evidencia de por qué el monto quedó como quedó.
+#: Esa garantía la sostiene `app/tests/domain/test_custom_field_slug.py` — cuando
+#: se escribió este comentario la función todavía no existía, así que el
+#: namespace descansaba sobre una promesa que nada verificaba.
 AMOUNT_ORIGINAL_FIELD = "_vektor_amount_original"
 AMOUNT_SOURCE_FIELD = "_vektor_amount_source"
 
