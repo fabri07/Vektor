@@ -61,6 +61,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
+    UNCLASSIFIED_ROW_REF_PREFIX,
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
 )
@@ -618,7 +619,7 @@ async def _otros_clasificados_revertidos(
     anular las ventas y gastos del archivo, así que exigir "vivo" no devolvería
     ninguna. Lo que importa es la existencia del vínculo, no su estado.
     """
-    prefijo = "unclassified:"
+    prefijo = UNCLASSIFIED_ROW_REF_PREFIX
     refs: set[str] = set()
     for modelo in (SaleEntry, ExpenseEntry):
         res = await session.execute(

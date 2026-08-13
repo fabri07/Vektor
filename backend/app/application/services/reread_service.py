@@ -123,6 +123,7 @@ from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_DISMISSED,
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
+    is_unclassified_row_ref,
 )
 from app.schemas.ingestion import ColumnRiskDecision
 
@@ -191,6 +192,8 @@ class RereadPreview:
     file_id: uuid.UUID
     to_update: int = 0
     preserved: int = 0
+    #: F-O.1 — ver el campo homónimo de ``RereadApplyResult``.
+    preserved_from_others: int = 0
     new: int = 0
     to_void: int = 0
     # Filas cuya huella ya está registrada (import previo): el reimport las saltea
@@ -211,6 +214,7 @@ class RereadPreview:
         return {
             "to_update": self.to_update,
             "preserved": self.preserved,
+            "preserved_from_others": self.preserved_from_others,
             "new": self.new,
             "to_void": self.to_void,
             "unchanged": self.unchanged,
@@ -226,6 +230,10 @@ class RereadApplyResult:
     file_id: uuid.UUID
     to_update: int = 0
     preserved: int = 0
+    #: F-O.1 — de los preservados, cuántos lo fueron por venir de "Otros" (una
+    #: decisión de clasificación) y no por una edición manual. Son dos motivos
+    #: distintos y el informe tiene que poder decir cuál.
+    preserved_from_others: int = 0
     new: int = 0
     voided: int = 0
     inserted: int = 0
@@ -587,6 +595,12 @@ class _Reconciliation:
     legacy_records: list[SaleEntry | ExpenseEntry]
     preserved_count: int
     legacy_fallback: bool
+    #: F-O.1 — preservados por venir de "Otros", no por edición manual. Se cuentan
+    #: aparte de ``preserved_count`` porque son dos motivos distintos: uno es "el
+    #: usuario corrigió este registro", el otro "el usuario decidió qué ERA esta
+    #: fila". Sumarlos haría que el informe de la relectura no pueda explicar por
+    #: qué no tocó algo.
+    preserved_from_others: int = 0
 
 
 def _split_records(
@@ -603,6 +617,7 @@ def _split_records(
     non_edited_with_ref: list[SaleEntry | ExpenseEntry] = []
     legacy_records: list[SaleEntry | ExpenseEntry] = []
     preserved = 0
+    preserved_from_others = 0
     legacy_fallback = False
 
     for rec in all_records:
@@ -613,6 +628,30 @@ def _split_records(
                 edited_refs.add(ref)
             else:
                 legacy_fallback = True
+            continue
+        if is_unclassified_row_ref(ref):
+            # F-O.1 — el registro que nació de clasificar a mano una fila de
+            # "Otros" NO se voidea.
+            #
+            # Medido antes de tocarlo: se voideaba como cualquier no-editado, y el
+            # reimport no lo reponía —para el parser esa fila SIGUE sin poder
+            # leerse, por eso había caído a "Otros"—; encima su
+            # ``UnclassifiedRecord`` ya estaba en IMPORTED, así que tampoco volvía
+            # a la bandeja. La venta desaparecía del sistema: se perdía el trabajo
+            # del usuario Y el dato.
+            #
+            # Su ``source_row_ref`` es ``unclassified:{id}``, que no corresponde a
+            # ninguna fila del archivo: el camino exacto de la reconciliación no
+            # tiene con qué emparejarlo. Se preserva por la misma razón que una
+            # fila editada — es una decisión humana sobre esa fila—, y también se
+            # preserva su efecto sobre el stock (ver ``preserved_sale_events``).
+            #
+            # Límite declarado: si la relectura AHORA sí sabe leer esa fila, la
+            # importa además, y quedan las dos. Cerrar eso necesita un vínculo
+            # fila↔registro que hoy no se persiste — es F-O.2, y es lo que le
+            # permitirá a la relectura MODIFICAR el registro en vez de convivir.
+            preserved += 1
+            preserved_from_others += 1
             continue
         if ref:
             non_edited.append(rec)
@@ -629,6 +668,7 @@ def _split_records(
         legacy_records=legacy_records,
         preserved_count=preserved,
         legacy_fallback=legacy_fallback,
+        preserved_from_others=preserved_from_others,
     )
 
 
@@ -740,10 +780,19 @@ async def _reconcile(
     # Refs de las filas EDITADAS (preservadas): el reimport las saltea, así que su
     # InventoryMovement NO debe voidearse (si lo voidáramos sin recrearlo, el stock
     # quedaría subestimado). Se preservan movimiento + registro juntos.
+    def _se_preserva(rec: SaleEntry | ExpenseEntry) -> bool:
+        """Los DOS motivos por los que el reimport no toca un registro.
+
+        Se pregunta una sola vez y desde acá, porque cada guard que lo re-derive
+        por su cuenta puede quedarse con la mitad: fue exactamente lo que pasó con
+        el movimiento de la venta editada (V28).
+        """
+        return bool(getattr(rec, "has_user_edits", False)) or is_unclassified_row_ref(
+            rec.source_row_ref
+        )
+
     preserved_refs: set[str] = {
-        rec.source_row_ref
-        for rec in all_existing
-        if getattr(rec, "has_user_edits", False) and rec.source_row_ref
+        rec.source_row_ref for rec in all_existing if _se_preserva(rec) and rec.source_row_ref
     }
     # F-F.4 — la MISMA regla para el descuento de una venta preservada.
     #
@@ -761,7 +810,7 @@ async def _reconcile(
     preserved_sale_events: set[str] = {
         sale_source_event_id(rec.id)
         for rec in all_existing
-        if getattr(rec, "has_user_edits", False) and isinstance(rec, SaleEntry)
+        if _se_preserva(rec) and isinstance(rec, SaleEntry)
     }
 
     # ── Fallback legacy: recomputar anchors del archivo y borrar los que NO
@@ -996,6 +1045,7 @@ async def _reconcile(
         file_id=file_id,
         to_update=update_count,
         preserved=recon.preserved_count,
+        preserved_from_others=recon.preserved_from_others,
         new=new_count,
         voided=voided,
         inserted=inserted,
@@ -1384,6 +1434,7 @@ def _estimate_reread(
         file_id=file_id,
         to_update=update_count,
         preserved=recon.preserved_count,
+        preserved_from_others=recon.preserved_from_others,
         new=new_count,
         to_void=len(recon.non_edited),
         unchanged=unchanged_count,

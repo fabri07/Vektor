@@ -76,6 +76,7 @@ F-H6.e el flete de línea genera su gasto                            ✅ entrega
 F-C  obligatorios explicados                                        ✅ entregado
 F-T  medir el confirm antes de agregarle trabajo
 F-F  fechas mandan: todo movimiento afecta el inventario
+F-O  «Otros» y la relectura (.1 entregada · .2 pendiente)
 F-A  nombre original + preservación de edición
 F-B  claridad visual + extracción del monolito
 F-I  identidad por código: IDs y comprobantes
@@ -990,6 +991,60 @@ Copy: **"Para importar ventas, Véktor necesita saber qué columna contiene la f
 El 422 pasa a usar labels humanos (`CANONICAL_FIELDS[entity][field]`), como ya hace `_collision_detail`.
 
 **Test:** todo campo de `REQUIRED_FIELDS` tiene motivo no vacío. El copy no puede afirmar lo que el importador no hace: sin fecha la fila va a /otros, **sin monto se descarta** (`:4186-4187`).
+
+---
+
+# F-O · «Otros» y la relectura
+
+**Lo que pidió el usuario:** *«toda venta o compra que haya caído a Otros y fue redirigida a
+alguna sección de Véktor, al realizar relectura también tiene que modificarse»*.
+
+**Lo que se midió antes de diseñar** (sonda sobre un CSV de dos filas, la segunda con la fecha
+ilegible): no es que no se modifique — **la relectura la BORRA**. La venta clasificada a mano
+queda anulada con `REREAD_REIMPORT` y nadie la repone: para el parser esa fila sigue sin poder
+leerse (por eso había caído a «Otros») y su `UnclassifiedRecord` ya está en `IMPORTED`, así que
+tampoco vuelve a la bandeja. Se pierde el trabajo del usuario **y** el dato. Es previo a F-F.4.
+
+**Causa:** el registro nace con `source_row_ref = "unclassified:{id}"` y `has_user_edits=False`,
+así que `_split_records` lo manda al bucket «no editado» → void + esperar que el reimport lo
+reponga. El reimport no puede reponerlo, y ese ref **no corresponde a ninguna fila del archivo**:
+el camino exacto de la reconciliación no tiene con qué emparejarlo.
+
+**Decisión del usuario para el caso en que la relectura SÍ pueda leer la fila:** gana la
+relectura — el registro se actualiza con lo que dice el archivo. Se descartaron «gana lo tuyo» y
+«gana la relectura salvo los campos que editaste».
+
+## F-O.1 — dejar de perder el dato (entregada)
+
+El registro nacido de «Otros» se preserva, por la misma razón que una fila editada a mano: es una
+decisión humana sobre una fila que el archivo no explica solo.
+
+- **La identidad del ref se extrajo a un lugar único** (`models/unclassified_record`:
+  `UNCLASSIFIED_ROW_REF_PREFIX` + `unclassified_row_ref()` + `is_unclassified_row_ref()`). Estaba
+  escrita a mano en tres lugares —el que la estampa, el borrado por procedencia y ahora la
+  relectura—, y su desacuerdo no da error: da comportamiento distinto.
+- **Los dos motivos de preservación se preguntan desde una sola función** (`_se_preserva`). Cada
+  guard que lo re-derive por su cuenta puede quedarse con la mitad: es exactamente lo que pasó
+  con el movimiento de la venta editada (V28), así que el guard del `InventoryMovement` usa la
+  misma.
+- **Se cuentan aparte** (`preserved_from_others`): preservar por edición y preservar por
+  clasificación son dos motivos, y el informe tiene que poder decir cuál.
+
+**Límite declarado:** si la relectura ahora sí sabe leer esa fila, la importa **además**, y quedan
+las dos. Cerrarlo es F-O.2.
+
+## F-O.2 — que la relectura la modifique (pendiente)
+
+Necesita un vínculo fila↔registro que hoy no se persiste: `unclassified_records` guarda los
+valores crudos pero no el ancla de la fila (la excepción son las capturadas por el protocolo de
+riesgo, que llevan `__risk_ref__` en `row_data`). El plan: persistir el ancla al capturar
+—aditivo, una clave más en `row_data`, sin migración— y, después del reimport, resolver por ahí:
+si la relectura importó esa fila, el registro nuevo **reemplaza** al clasificado; si no, el
+clasificado se conserva (F-O.1).
+
+El costo real está en los **18 call sites** de `_capture_unclassified`. La alternativa barata
+—matchear por el contenido crudo, que ya tiene precedente en el fallback legacy de la
+relectura— es best-effort: dos filas idénticas en el archivo se vuelven indistinguibles.
 
 ---
 
