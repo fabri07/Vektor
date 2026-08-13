@@ -81,6 +81,7 @@ from app.application.services._ledger_restore import (
     restore_from_before,
     snapshot_master,
 )
+from app.application.services.column_mapping_service import parse_target
 from app.application.services.column_risk import (
     AppliedColumnRisk,
     apply_column_risk_decisions,
@@ -93,11 +94,18 @@ from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
     insert_confirmed_data,
 )
+from app.application.services.inventory_replay_service import run_inventory_replay
 from app.application.services.stock_service import (
+    sale_source_event_id,
     unvoid_movement,
     void_movement,
 )
 from app.domain.ingestion_version import INGESTION_VERSION
+from app.domain.inventory_effect import (
+    SheetInventoryProfile,
+    replay_scope,
+    resolve_inventory_effects,
+)
 from app.integrations.s3 import S3Client
 from app.observability.logger import get_logger
 from app.persistence.models.file import (
@@ -652,6 +660,48 @@ def _content_key(rec: SaleEntry | ExpenseEntry) -> tuple[str, str, str]:
     return (amount, day, descr)
 
 
+async def _deduce_inventory_effect(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    summary: dict[str, Any],
+) -> dict[str, str]:
+    """F-F.4 — qué le hace al inventario cada hoja de lo que se acaba de releer.
+
+    Arma los mismos ``SheetInventoryProfile`` que el confirm y los resuelve con la
+    misma función: si la regla se reimplementara acá, una relectura descontaría
+    con un criterio y el confirm con otro sobre el MISMO archivo.
+
+    El mapeo sale de ``derive_context_mapping_entries`` —el que la relectura ya usa
+    para el riesgo de columnas— porque el mapeo de transacciones no se persiste: la
+    relectura re-importa por autodetección, así que la fuente de verdad sobre qué
+    columna es qué es la misma derivación que gobierna esa importación.
+
+    Falla blanda a ``{}``: quedarse sin efecto significa no descontar, que es el
+    estado en el que la relectura vivió hasta F-F.4. Un error acá no puede tumbar
+    una relectura que por lo demás está bien.
+    """
+    try:
+        entries, entities = await derive_context_mapping_entries(session, tenant_id, summary)
+    except Exception:  # noqa: BLE001 — ver el fail-soft del docstring
+        logger.warning("reread.inventory_effect.derivacion_fallida", exc_info=True)
+        return {}
+    perfiles = [
+        SheetInventoryProfile(
+            context_id=context_id,
+            entity=entities.get(context_id),
+            # Sólo campos CANÓNICOS, igual que el confirm: un `custom_field:` guarda
+            # el dato y el importador no lo lee como cantidad.
+            mapped_fields=frozenset(
+                e.target_field
+                for e in items
+                if parse_target(e.target_field).kind == "canonical"
+            ),
+        )
+        for context_id, items in entries.items()
+    ]
+    return resolve_inventory_effects(perfiles)
+
+
 async def _reconcile(
     session: AsyncSession,
     file: UploadedFile,
@@ -694,6 +744,24 @@ async def _reconcile(
         rec.source_row_ref
         for rec in all_existing
         if getattr(rec, "has_user_edits", False) and rec.source_row_ref
+    }
+    # F-F.4 — la MISMA regla para el descuento de una venta preservada.
+    #
+    # El movimiento de descuento no lleva `source_row_ref` (lo identifica
+    # `source_event_id = "sale:{id}"`), así que la regla de arriba no lo protegía:
+    # se voideaba, y quien tenía que restituirlo era el replay posterior. Eso sólo
+    # funciona si el filtro por hoja del replay alcanza a esa venta — y no la
+    # alcanza, porque la venta preservada conserva el sello del import ANTERIOR y
+    # la relectura deduce sus hojas de nuevo. Resultado: la venta editada a mano se
+    # quedaba en los libros y sus unidades volvían al stock.
+    #
+    # Se protege igual que la fila: si el reimport no la toca, su efecto sobre el
+    # stock tampoco se toca. La reversa deja de depender de que dos derivaciones
+    # distintas coincidan.
+    preserved_sale_events: set[str] = {
+        sale_source_event_id(rec.id)
+        for rec in all_existing
+        if getattr(rec, "has_user_edits", False) and isinstance(rec, SaleEntry)
     }
 
     # ── Fallback legacy: recomputar anchors del archivo y borrar los que NO
@@ -751,8 +819,12 @@ async def _reconcile(
     )
     for mov in prev_movements_res.scalars().all():
         # No voidear el movimiento de una fila editada preservada: el reimport la saltea,
-        # así que su stock debe quedar intacto (si no, se subestimaría).
+        # así que su stock debe quedar intacto (si no, se subestimaría). Las dos
+        # señales, porque los movimientos se identifican de dos formas: la compra
+        # por la fila que la trajo, el descuento de venta por su `source_event_id`.
         if mov.source_row_ref and mov.source_row_ref in preserved_refs:
+            continue
+        if mov.source_event_id and mov.source_event_id in preserved_sale_events:
             continue
         mov_snap = _snapshot_movement(mov)
         await void_movement(mov, session)
@@ -776,6 +848,20 @@ async def _reconcile(
     # Preservar la elección de tratamiento del stock (apertura vs compra) que el usuario
     # hizo en el confirm original: vive en el summary guardado, no en el crudo re-parseado.
     _stored_treatment = (file.parsed_summary_json or {}).get("stock_treatment")
+    # F-F.4: el efecto de inventario se DEDUCE de lo que esta relectura acaba de
+    # leer, no del que resolvió el confirm original.
+    #
+    # Es la razón de ser de la relectura: puede detectar cantidades donde antes no
+    # las veía, o ventas y gastos que la lectura anterior no había leído. Si el
+    # efecto saliera del summary guardado, esas filas entrarían **sin mover
+    # stock** —el dict viejo no las conoce— y la relectura habría importado una
+    # venta de mercadería que no descuenta, que es justo lo que F-F.4 elimina.
+    # Deducirlo de nuevo también es lo consistente con la fase: el efecto es
+    # consecuencia del contenido, y acá el contenido se volvió a leer.
+    #
+    # Consecuencia declarada y elegida por el usuario: un archivo importado ANTES
+    # de F-F.4 —cuyas ventas nunca descontaron— queda al día en cuanto se relee.
+    _stored_effect = await _deduce_inventory_effect(session, tenant_id, fresh)
     _reimport_detail = await insert_confirmed_data(
         session,
         tenant_id,
@@ -784,6 +870,7 @@ async def _reconcile(
         source="reread",
         uploaded_file_id=file_id,
         stock_treatment=_stored_treatment,
+        inventory_effect=_stored_effect,
         # Revisión final F9b (Hallazgo 2): en preview (dry_run=True) el detalle
         # nunca se consume (ver el bloque `if not dry_run` de abajo) — pedirlo
         # igual dispara N `session.get`/`refresh` en
@@ -815,6 +902,32 @@ async def _reconcile(
                     confidence="HIGH",
                 )
             )
+        await session.flush()
+
+    # F-F.4 — la relectura DESCUENTA, con el mismo núcleo que el confirm.
+    #
+    # Hasta acá la relectura re-importaba las ventas y no tocaba una unidad: el
+    # void de más arriba había revertido los descuentos del import anterior
+    # (`void_movement` sobre todo movimiento vivo del archivo, incluidos los del
+    # replay) y nada los volvía a aplicar, así que releer un archivo BAJABA el
+    # stock de golpe. Se llama a `run_inventory_replay` —el mismo que el confirm y
+    # el panel— por la razón de siempre: lo que descuenta un camino y lo que
+    # descuenta el otro tienen que ser la misma operación.
+    #
+    # **Va ANTES de auditar los movimientos nuevos, y no es un detalle de orden:**
+    # el bloque de abajo es el que los deja revertibles por el undo. Corriendo
+    # después, el descuento quedaría fuera del `DataRepairItem` y el undo dejaría
+    # el stock descontado sin las ventas que lo justifican.
+    _alcance_replay = replay_scope(_stored_effect)
+    if _alcance_replay.corre:
+        await session.flush()
+        await run_inventory_replay(
+            session,
+            tenant_id,
+            file_id,
+            context_ids=_alcance_replay.context_ids,
+            apply=not dry_run,
+        )
         await session.flush()
 
     # Auditar los movimientos de inventario recién insertados por el reimport

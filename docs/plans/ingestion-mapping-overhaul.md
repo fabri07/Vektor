@@ -843,13 +843,51 @@ ninguna intención que siga existiendo. Un modo desconocido de verdad sigue sien
   `ColumnMapperPanel` **elimina** el estado de elección (`effectByCtx`, `efectoDe`, el
   `effectElegido` del camino plano) y deja de mandar `inventory_effect`; no se toca la
   preservación de mapeos de F-A (`60d400f8`), que vive en otro estado.
-- **d · la relectura descuenta.** `reread_service:779` llama a `insert_confirmed_data` **sin
-  efecto de inventario**, así que hoy re-importa ventas que no descuentan. El efecto pasa a
-  persistirse en `parsed_summary_json` al confirmar —el mismo lugar de donde la relectura ya
-  saca `stock_treatment` (`:778`), mismo precedente, misma lectura—, y después del reimport la
-  relectura corre `run_inventory_replay` sobre las hojas que mueven unidades: la misma función
-  que el confirm y que el panel, por la misma razón que F-F.3 la compartió. Un archivo viejo sin
-  el dato recalcula el default, que ahora es descontar.
+- **d · la relectura descuenta.** `reread_service` llamaba a `insert_confirmed_data` **sin efecto
+  de inventario**, así que re-importaba ventas que no descontaban — y eso no era neutral: el void
+  previo revierte todo movimiento vivo del archivo (incluidos los `sale` del replay del confirm),
+  así que **releer DEVOLVÍA el stock descontado**. Después del reimport corre
+  `run_inventory_replay`, la misma función que el confirm y el panel.
+  - **El efecto se DEDUCE de lo que la relectura acaba de leer**, no del que guardó el confirm.
+    Lo pidió el usuario y es la razón de ser de la relectura: *«tiene que poder modificar si
+    detecta variaciones de cantidades, o registrar gastos o ventas si las hay y previamente no
+    fueron detectadas; también puede darse el caso de que no lea algo diferente»*. Con el dict
+    viejo, una cantidad recién detectada entraría **sin mover stock** — el dict no la conoce—, o
+    sea una venta de mercadería que no descuenta, justo lo que F-F.4 elimina. Deducirlo de nuevo
+    también es lo consistente: el efecto es consecuencia del contenido, y acá el contenido se
+    volvió a leer. `_deduce_inventory_effect` arma los mismos `SheetInventoryProfile` que el
+    confirm sobre `derive_context_mapping_entries` —la misma derivación que gobierna esa
+    importación— y los resuelve con la misma función; falla blanda a `{}` (no descontar).
+  - **Consecuencia elegida por el usuario:** un archivo importado ANTES de F-F.4, cuyas ventas
+    nunca descontaron, **queda al día en cuanto se lo relee**. Se descartaron «avisar antes» y
+    «sólo lo nuevo que detecte». También hace innecesario el sub-commit **e** para el caso más
+    común: releer alcanza para cerrar un archivo viejo.
+  - El efecto resuelto se sigue persistiendo en `parsed_summary_json` al confirmar (al lado de
+    `stock_treatment`), como traza de con qué entró el archivo — ya no como fuente de la
+    relectura.
+  - **El alcance sale de `replay_scope`** (`domain/inventory_effect`), no de un filtro reescrito
+    en cada llamador: son dos, y la traducción de la clave vacía —la del archivo sin hojas
+    identificadas, que se aplica entero— es justo lo que el segundo habría implementado distinto.
+  - **El orden no es estético:** el replay va ANTES del bloque que audita los movimientos nuevos
+    como `REREAD_INSERT`. Puesto después, el descuento quedaría fuera del `DataRepairItem` y el
+    undo dejaría el stock descontado sin las ventas que lo justifican. Hay un assert que lo fija.
+  - **Bug encontrado por el test de la fila editada a mano (V28).** La relectura preserva esa
+    fila, pero su movimiento de descuento no lleva `source_row_ref` —lo identifica
+    `source_event_id`— así que el guard de preservación no lo protegía: se voideaba, y quien
+    tenía que restituirlo era el replay posterior. Eso sólo funciona si el filtro por hoja del
+    replay alcanza a esa venta, **y no la alcanza**: la venta preservada conserva el sello del
+    import ANTERIOR y la relectura deduce sus hojas de nuevo. Resultado: la venta editada se
+    quedaba en los libros y sus unidades volvían al stock. Se arregla protegiendo el movimiento
+    con la misma regla que la fila (`preserved_sale_events`), en vez de hacer que la reversa
+    dependa de que dos derivaciones distintas coincidan.
+
+  ⚠️ **Hallazgo colateral, NO reparado acá:** la relectura re-importa las transacciones **por
+  autodetección** — a diferencia de los maestros, que sí conservan su mapeo
+  (`master_column_mappings`), el mapeo de columnas de ventas/gastos no se persiste. Un archivo
+  importado con un mapeo explícito puede re-importarse resolviendo otras columnas, y desde F-F.4
+  eso además mueve stock. Es previo a esta fase; se documenta acá porque la fase le sube el
+  precio. El test de F-F.4 lo esquiva a propósito (usa un CSV que el importador autodetecta) para
+  medir el descuento y no la autodetección.
   **La reversa ya existe y hay que probarla, no asumirla:** la relectura voidea todos los
   movimientos vivos con `source_upload_id == file_id` (`:748-760`), y los del replay lo llevan
   (`inventory_replay_service:304`), así que se revierten. El caso a fijar con test es la venta
