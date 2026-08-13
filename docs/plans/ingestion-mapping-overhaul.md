@@ -76,7 +76,7 @@ F-H6.e el flete de línea genera su gasto                            ✅ entrega
 F-C  obligatorios explicados                                        ✅ entregado
 F-T  medir el confirm antes de agregarle trabajo
 F-F  fechas mandan: todo movimiento afecta el inventario
-F-O  «Otros» y la relectura (.1 entregada · .2 pendiente)
+F-O  «Otros» y la relectura (.1 y .2 entregadas)
 F-A  nombre original + preservación de edición
 F-B  claridad visual + extracción del monolito
 F-I  identidad por código: IDs y comprobantes
@@ -1030,21 +1030,41 @@ decisión humana sobre una fila que el archivo no explica solo.
 - **Se cuentan aparte** (`preserved_from_others`): preservar por edición y preservar por
   clasificación son dos motivos, y el informe tiene que poder decir cuál.
 
-**Límite declarado:** si la relectura ahora sí sabe leer esa fila, la importa **además**, y quedan
-las dos. Cerrarlo es F-O.2.
+**Límite que tenía F-O.1 sola:** si la relectura ahora sí sabía leer la fila, la importaba
+**además** y quedaban las dos. Lo cierra F-O.2.
 
-## F-O.2 — que la relectura la modifique (pendiente)
+## F-O.2 — que la relectura la modifique (entregada)
 
-Necesita un vínculo fila↔registro que hoy no se persiste: `unclassified_records` guarda los
-valores crudos pero no el ancla de la fila (la excepción son las capturadas por el protocolo de
-riesgo, que llevan `__risk_ref__` en `row_data`). El plan: persistir el ancla al capturar
-—aditivo, una clave más en `row_data`, sin migración— y, después del reimport, resolver por ahí:
-si la relectura importó esa fila, el registro nuevo **reemplaza** al clasificado; si no, el
-clasificado se conserva (F-O.1).
+El vínculo fila↔registro se persiste al capturar: `ROW_REF_KEY` (`__row_ref__`) en `row_data`
+guarda el `source_row_ref` que le habría tocado a la fila, o sea **la clave exacta con la que el
+reimport la insertaría**. Aditivo, sin migración, y bajo el prefijo `__` que `/otros` ya oculta
+del render (mismo criterio que `__risk_ref__` de F8). Se guarda el ref ya derivado y no sus
+componentes: recomputarlo del otro lado sería una segunda derivación que puede quedar distinta.
 
-El costo real está en los **18 call sites** de `_capture_unclassified`. La alternativa barata
-—matchear por el contenido crudo, que ya tiene precedente en el fallback legacy de la
-relectura— es best-effort: dos filas idénticas en el archivo se vuelven indistinguibles.
+**La pieza que faltaba no era el vínculo: era la huella.** Medido — con el vínculo puesto, la
+fila seguía sin re-importarse. La captura a «Otros» es output persistido y **registra su huella
+de idempotencia**, así que el reimport salteaba esa fila para siempre y la pregunta «¿ya la sabés
+leer?» no llegaba a hacerse. Se libera antes del reimport, que es el mismo movimiento que F8 hace
+con las filas de riesgo corregidas (`_reconcile_column_risk` borra su huella para que entren en
+el mismo reimport).
+
+Secuencia: **liberar la huella → el reimport procesa la fila → resolver**. Si entró, el registro
+clasificado se anula (gana la relectura) con su movimiento de stock y su auditoría. Si no entró
+—sigue ilegible y volvió a «Otros»— esa captura nueva se marca `DISMISSED`: la clasificación del
+usuario sigue mandando, y pedirle que clasifique dos veces lo mismo es ruido. Liberar la huella
+no cuesta nada por sí solo, justamente por esa segunda mitad.
+
+**El cableado salió barato:** `_add_sale`, `_add_expense`, `_add_product` y el merge de catálogo
+**ya recibían el ref de la fila**, así que ninguno de los 18 call sites cambió de firma; 15
+recibieron el argumento y 3 se quedan sin ancla (tabla sin clasificar, documento de texto sin
+fecha, hoja entera sin clasificar) y degradan a F-O.1 — se preservan, que no pierde nada.
+
+**V29 — bug propio, introducido por F-F.4.d y encontrado acá.** El bloque que audita «los
+movimientos nuevos» tomaba TODO movimiento vivo del archivo, con el comentario «tras el void
+anterior, cualquier movimiento vivo es nuevo». Dejó de ser cierto en cuanto el void empezó a
+PRESERVAR movimientos (V28 y F-O.1): quedaban vivos sin que la relectura los hubiera creado, se
+auditaban como inserción y **el undo los anulaba** — devolvía stock que la relectura nunca tocó y
+dejaba la venta viva sin su movimiento. Se excluyen explícitamente, con test propio.
 
 ---
 
