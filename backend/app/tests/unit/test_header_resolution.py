@@ -7,11 +7,15 @@ contable — que es lo que convertía un flete en un precio de compra.
 
 from __future__ import annotations
 
+import uuid
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
     RESOLUCION,
+    ColumnMappingService,
     _normalize_col,
     read_header,
 )
@@ -558,3 +562,80 @@ class TestLaHoraYElMesNoLeRobanEncabezadosAlResto:
     )
     def test_el_header_sigue_en_su_campo(self, header: str, entidad: str, target: str) -> None:
         assert _leer(header, entidad).target == target
+
+
+class TestContactoNoEsUnTelefono:
+    """«Contacto» estaba declarado como keyword de `phone`, y no lo es.
+
+    En un archivo real de una distribuidora, la hoja de proveedores traía
+    «Contacto» (con "Marcelo Ibarra") y «Teléfono» (con "351-455-1122"). Las dos
+    resolvían a `phone` y `_resolve_target_cols` es first-wins por orden de
+    columna, así que el teléfono del proveedor quedaba siendo el nombre de la
+    persona.
+
+    La guarda escalar (SINGLE_VALUE_FIELDS) ahora frena esa colisión, pero eso
+    trata el síntoma: mientras «Contacto» siga significando teléfono, una hoja
+    que traiga SÓLO esa columna mete un nombre en el campo del teléfono sin que
+    nada colisione ni pregunte nada.
+    """
+
+    def test_contacto_solo_no_se_resuelve_a_telefono(self) -> None:
+        lectura = _leer("Contacto", "supplier")
+        assert lectura.target is None
+        assert lectura.outcome != "unico"
+
+    def test_y_lo_explica_en_vez_de_quedarse_mudo(self) -> None:
+        """Reconocer el concepto y no tener campo es un mensaje distinto de «no
+        entiendo esto». Sin la `duda`, el usuario ve un hueco sin motivo."""
+        duda = _leer("Contacto", "supplier").duda
+        assert duda, "«Contacto» se reconoce como concepto: tiene que explicar por qué no mapea"
+        assert "teléfono" in duda.lower()
+
+    def test_telefono_sigue_resolviendo(self) -> None:
+        """Sacar `contacto` no puede llevarse puesto el keyword que sí es."""
+        for header in ("Teléfono", "Telefono", "Celular", "WhatsApp"):
+            assert _leer(header, "supplier").target == "phone", header
+
+    async def test_la_cadena_completa_no_lo_devuelve_como_telefono(self) -> None:
+        """El test que importa, y el que casi me falta.
+
+        `read_header` no mira `_HEURISTICS`: esa tabla alimenta `_fuzzy_match`,
+        que es la 3ª capa y es POR DONDE ENTRABA el bug —«contacto» matcheaba su
+        propio keyword con ratio 1.0—. Un test que sólo llame a `read_header`
+        queda verde aunque alguien devuelva `contacto` a los keywords de `phone`
+        (comprobado revirtiendo el fix: los otros tres de esta clase no se
+        enteraron). La compuerta tiene que ser `suggest_mappings`, que es lo que
+        corre en producción.
+        """
+        db = AsyncMock()
+        resultado = MagicMock()
+        resultado.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(return_value=resultado)
+
+        sugerencias = await ColumnMappingService(db).suggest_mappings(
+            uuid.uuid4(),
+            "supplier",
+            ["Razón Social", "Contacto", "Teléfono"],
+            [{"Razón Social": "Distribuidora Norte", "Contacto": "Marcelo Ibarra",
+              "Teléfono": "351-455-1122"}],
+        )
+
+        por_col = {s["source_column"]: s["target_field"] for s in sugerencias}
+        assert por_col["Teléfono"] == "phone"
+        assert por_col["Contacto"] != "phone", (
+            "«Contacto» trae el nombre de la persona: mapearlo a phone pisa el "
+            "teléfono real por orden de columna"
+        )
+
+    def test_la_contrapartida_esta_escrita(self) -> None:
+        """Lo que se pierde: «Contacto WhatsApp» es inequívocamente un teléfono y
+        antes lo rescataba el fuzzy por el keyword `contacto`. Ahora hay dos
+        núcleos —contacto y telefono— y F-M no elige entre núcleos, así que el
+        usuario lo mapea a mano.
+
+        Se acepta a propósito: `phone` no es requerido, el panel muestra la duda,
+        y el costo de la alternativa era meter un nombre propio en el teléfono.
+        Está escrito para que, si algún día molesta, se sepa que fue una decisión
+        y no un descuido.
+        """
+        assert _leer("Contacto WhatsApp", "supplier").target is None

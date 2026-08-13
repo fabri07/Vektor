@@ -621,7 +621,18 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "forma_pago", "forma_de_pago", "medio_pago", "condicion_pago", "payment",
         },
         "email": {"email", "correo", "mail"},
-        "phone": {"telefono", "teléfono", "celular", "whatsapp", "contacto"},
+        # «contacto» NO está acá: no nombra un teléfono sino a la persona con la
+        # que se habla, y con «Contacto» y «Teléfono» en la misma hoja el fuzzy
+        # lo matcheaba con ratio 1.0 y el nombre terminaba en el teléfono del
+        # proveedor.
+        #
+        # Sacarlo es defensa en profundidad, NO la pieza que sostiene el fix: lo
+        # que corta de verdad es el concepto `contacto` de `header_semantics` con
+        # su `duda`, porque `suggest_mappings` saltea el fuzzy en cuanto la
+        # lectura trae una duda. Comprobado mutando: devolver este keyword solo
+        # deja la suite verde; hay que sacar además el concepto para que se
+        # ponga roja.
+        "phone": {"telefono", "teléfono", "celular", "whatsapp"},
         "notes": {"notas", "observaciones", "obs", "comentarios"},
     },
     "product": {
@@ -851,6 +862,18 @@ _MARGEN_ES_DERIVADO = (
     "sobre el costo y no sobre el precio). Se guarda como campo propio."
 )
 
+#: «Contacto» en un padrón de proveedores/clientes. No se resuelve a `phone`
+#: aunque a veces traiga un número: en las planillas reales esa columna trae
+#: tanto el nombre de la persona como su teléfono, y el encabezado no distingue.
+#: Adivinar acá no es gratis — con «Contacto» y «Teléfono» juntos, el nombre
+#: pisaba el teléfono del proveedor por orden de columna.
+_CONTACTO_NO_DICE_QUE_DATO_ES = (
+    "Es el contacto del proveedor, pero el encabezado no dice qué dato es: puede "
+    "ser el nombre de la persona con la que se habla o su teléfono. Véktor no "
+    "tiene campo de persona de contacto, así que se guarda como campo propio; si "
+    "la columna trae el número, mapeala a mano a Teléfono."
+)
+
 RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
     "sale": {
         "fecha": (_r(target="transaction_date"),),
@@ -1038,6 +1061,7 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "telefono": (_r(target="phone"),),
         "metodo_pago": (_r(target="payment_method"),),
         "nota": (_r(target="notes"),),
+        "contacto": (_r(duda=_CONTACTO_NO_DICE_QUE_DATO_ES),),
     },
 }
 

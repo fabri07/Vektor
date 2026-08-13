@@ -123,6 +123,14 @@ CONCEPTOS: dict[str, str] = {
     "recurring": "recurrencia",
     "frecuencia": "recurrencia",
     "marca": "marca",
+    # «Contacto» es un concepto propio y NO un teléfono. En las planillas reales
+    # esa columna tanto trae el NOMBRE de la persona con la que se habla
+    # ("Marcelo Ibarra") como su número, y el encabezado no lo dice. Estaba
+    # declarado como keyword de `phone`, así que una hoja con «Contacto» y
+    # «Teléfono» mandaba el nombre de la persona al teléfono del proveedor.
+    # Adónde va lo decide la tabla de resolución: a ningún campo, porque Véktor
+    # no tiene ficha de persona de contacto.
+    "contacto": "contacto",
     # El margen es un concepto propio y NO una magnitud de dinero (ver MAGNITUDES):
     # es lo que queda ENTRE el costo y el precio. Por eso «Margen sobre costo» es
     # un margen —y no el costo, que es lo que resolvía antes de reconocerlo—.
