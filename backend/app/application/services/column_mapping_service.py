@@ -127,6 +127,8 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "name": "Nombre",
         "last_name": "Apellido",
         "cuil": "CUIL",
+        "cuit": "CUIT",
+        "iva_condition": "Condición de IVA",
         "payment_method": "Método de pago",
         "email": "Email",
         "phone": "Teléfono",
@@ -617,6 +619,8 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
         "name": {"nombre", "proveedor", "razon_social", "razón_social"},
         "last_name": {"apellido"},
         "cuil": {"cuil"},
+        "cuit": {"cuit"},
+        "iva_condition": {"condicion_iva", "condición_iva", "situacion_iva", "iva"},
         "payment_method": {
             "forma_pago", "forma_de_pago", "medio_pago", "condicion_pago", "payment",
         },
@@ -1057,6 +1061,11 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "nombre": (_r(target="name"),),
         "apellido": (_r(target="last_name"),),
         "cuil": (_r(target="cuil"),),
+        # Espejo de customer: el CUIT es un identificador propio, y «IVA» /
+        # «Condición IVA» acá no nombran un monto de impuesto sino la condición
+        # frente a AFIP.
+        "cuit": (_r(target="cuit"),),
+        "impuesto": (_r(target="iva_condition"),),
         "email": (_r(target="email"),),
         "telefono": (_r(target="phone"),),
         "metodo_pago": (_r(target="payment_method"),),
@@ -1264,7 +1273,8 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "supplier": frozenset(
-        {"name", "last_name", "cuil", "payment_method", "email", "phone"}
+        {"name", "last_name", "cuil", "cuit", "iva_condition", "payment_method",
+         "email", "phone"}
     ),
 }
 

@@ -22,6 +22,8 @@ from app.persistence.models._sentinel import (
 # (sin deps ORM), así que importarlo no arma ciclo.
 from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY, PROVISIONAL_FLAG_KEY
 from app.schemas._ar_fiscal import validate_cuit as _validate_cuil
+from app.schemas._ar_fiscal import validate_cuit as _validate_cuit
+from app.schemas._ar_fiscal import validate_iva_condition as _validate_iva
 
 
 class SupplierResponse(BaseModel):
@@ -32,6 +34,10 @@ class SupplierResponse(BaseModel):
     name: str
     last_name: str | None = None
     cuil: str | None = None
+    # `cuit` e `iva_condition` (mig 20260813_0001): una empresa proveedora no
+    # tiene CUIL, tiene CUIT — y era la mayoría de los proveedores de una PYME.
+    cuit: str | None = None
+    iva_condition: str | None = None
     payment_method: str | None = None
     email: str | None
     phone: str | None
@@ -82,6 +88,8 @@ class CreateSupplierRequest(BaseModel):
     name: str = Field(min_length=1, max_length=300)
     last_name: str | None = Field(default=None, max_length=200)
     cuil: str | None = Field(default=None, max_length=13)
+    cuit: str | None = Field(default=None, max_length=13)
+    iva_condition: str | None = Field(default=None, max_length=25)
     payment_method: str | None = Field(default=None, max_length=30)
     email: str | None = Field(default=None, max_length=320)
     phone: str | None = Field(default=None, max_length=50)
@@ -94,6 +102,16 @@ class CreateSupplierRequest(BaseModel):
     @classmethod
     def _check_cuil(cls, v: str | None) -> str | None:
         return _validate_cuil(v)
+
+    @field_validator("cuit")
+    @classmethod
+    def _check_cuit(cls, v: str | None) -> str | None:
+        return _validate_cuit(v)
+
+    @field_validator("iva_condition")
+    @classmethod
+    def _check_iva(cls, v: str | None) -> str | None:
+        return _validate_iva(v)
 
 
 class SupplierProductPurchaseResponse(BaseModel):
@@ -254,6 +272,8 @@ class UpdateSupplierRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=300)
     last_name: str | None = Field(default=None, max_length=200)
     cuil: str | None = Field(default=None, max_length=13)
+    cuit: str | None = Field(default=None, max_length=13)
+    iva_condition: str | None = Field(default=None, max_length=25)
     payment_method: str | None = Field(default=None, max_length=30)
     email: str | None = Field(default=None, max_length=320)
     phone: str | None = Field(default=None, max_length=50)
@@ -266,3 +286,13 @@ class UpdateSupplierRequest(BaseModel):
     @classmethod
     def _check_cuil(cls, v: str | None) -> str | None:
         return _validate_cuil(v)
+
+    @field_validator("cuit")
+    @classmethod
+    def _check_cuit(cls, v: str | None) -> str | None:
+        return _validate_cuit(v)
+
+    @field_validator("iva_condition")
+    @classmethod
+    def _check_iva(cls, v: str | None) -> str | None:
+        return _validate_iva(v)

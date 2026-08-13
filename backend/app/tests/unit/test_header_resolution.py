@@ -639,3 +639,66 @@ class TestContactoNoEsUnTelefono:
         y no un descuido.
         """
         assert _leer("Contacto WhatsApp", "supplier").target is None
+
+
+class TestUnProveedorPuedeGuardarSuCUIT:
+    """La Reforma de Proveedores le dio a `suppliers` un solo campo fiscal,
+    `cuil`, pensado para el proveedor persona física. Pero la mayoría de los
+    proveedores de una PYME son empresas, y una empresa no tiene CUIL: tiene
+    CUIT — así que el dato fiscal del proveedor típico no se podía guardar.
+
+    Lo encontró `scripts/diag_unmapped_headers.py` sobre encabezados reales: en
+    un padrón de proveedores, «CUIT» y «Condición IVA» quedaban sin destino. F-M
+    los entendía y contestaba "esta hoja no tiene un campo para eso" — honesto,
+    y por eso el fuzzy no llegó a meter el CUIT en `cuil` ni la condición de IVA
+    en `payment_method`, que es lo que habría hecho. El dato igual se perdía.
+    """
+
+    @pytest.mark.parametrize(
+        ("header", "esperado"),
+        [
+            ("CUIT", "cuit"),
+            ("CUIL", "cuil"),
+            ("Condición IVA", "iva_condition"),
+            ("Condicion IVA", "iva_condition"),
+            ("Situación IVA", "iva_condition"),
+            ("IVA", "iva_condition"),
+        ],
+    )
+    def test_el_padron_de_proveedores_resuelve_sus_campos_fiscales(
+        self, header: str, esperado: str
+    ) -> None:
+        assert _leer(header, "supplier").target == esperado
+
+    def test_cuit_y_cuil_son_campos_distintos(self) -> None:
+        """No se colapsan: comparten formato y dígito verificador, pero no
+        significan lo mismo, y derivar uno del otro sobre datos ya cargados sería
+        inventar cuál es cuál."""
+        assert _leer("CUIT", "supplier").target != _leer("CUIL", "supplier").target
+
+    def test_los_dos_estan_en_el_catalogo_y_son_escalares(self) -> None:
+        from app.application.services.column_mapping_service import (
+            SINGLE_VALUE_FIELDS,
+        )
+
+        assert "cuit" in CANONICAL_FIELDS["supplier"]
+        assert "iva_condition" in CANONICAL_FIELDS["supplier"]
+        # Escalares por el mismo motivo que el resto de la identidad: dos
+        # columnas al CUIT no se desempatan solas.
+        assert "cuit" in SINGLE_VALUE_FIELDS["supplier"]
+        assert "iva_condition" in SINGLE_VALUE_FIELDS["supplier"]
+
+    def test_el_import_los_escribe(self) -> None:
+        """El catálogo no alcanza: si el import no los tiene en su lista de
+        campos escribibles, el mapeo resuelve y el dato igual no llega a la base.
+        """
+        from app.application.services.supplier_import_service import (
+            _DOC_FIELDS,
+            _IMPORTABLE_FIELDS,
+        )
+
+        assert "cuit" in _IMPORTABLE_FIELDS
+        assert "iva_condition" in _IMPORTABLE_FIELDS
+        # Y el CUIT es clave de identidad: dos filas con el mismo CUIT son el
+        # mismo proveedor, igual que pasa con el CUIT de un cliente.
+        assert "cuit" in _DOC_FIELDS

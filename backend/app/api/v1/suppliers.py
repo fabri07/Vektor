@@ -90,6 +90,8 @@ def _supplier_snapshot(supplier: Supplier) -> dict[str, object]:
         "name": supplier.name,
         "last_name": supplier.last_name,
         "cuil": supplier.cuil,
+        "cuit": supplier.cuit,
+        "iva_condition": supplier.iva_condition,
         "payment_method": supplier.payment_method,
         "email": supplier.email,
         "phone": supplier.phone,

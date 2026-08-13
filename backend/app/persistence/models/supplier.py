@@ -58,7 +58,13 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # va en ``last_name``; para empresas queda NULL (la razón social va en name).
     name: Mapped[str] = mapped_column(String(300), nullable=False)
     last_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Los DOS conviven a propósito (mig `20260813_0001`): un proveedor persona
+    # física monotributista tiene CUIL; una empresa —que es la mayoría de los
+    # proveedores de una PYME— tiene CUIT. Hasta acá sólo existía `cuil`, así que
+    # el dato fiscal del proveedor típico no se podía guardar.
     cuil: Mapped[str | None] = mapped_column(String(13), nullable=True)
+    cuit: Mapped[str | None] = mapped_column(String(13), nullable=True)
+    iva_condition: Mapped[str | None] = mapped_column(String(25), nullable=True)
     payment_method: Mapped[str | None] = mapped_column(String(30), nullable=True)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)

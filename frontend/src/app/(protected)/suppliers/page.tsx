@@ -20,8 +20,10 @@ import {
 import {
   PAYMENT_METHOD_OPTIONS,
   isValidCuil,
+  isValidCuit,
   paymentLabel,
 } from "@/lib/suppliers";
+import { IVA_CONDITION_OPTIONS, ivaConditionLabel } from "@/lib/fiscal";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
@@ -73,11 +75,26 @@ const COLUMNS = [
     csvValue: (v: unknown) => String(v ?? "").trim(),
   },
   {
+    key: "cuit",
+    header: "CUIT",
+    hideable: true,
+    render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
+  },
+  {
     key: "cuil",
     header: "CUIL",
     hideable: true,
     render: (v: unknown) => String(v ?? "").trim() || "—",
     csvValue: (v: unknown) => String(v ?? "").trim(),
+  },
+  {
+    key: "iva_condition",
+    header: "Condición IVA",
+    hideable: true,
+    defaultVisible: false,
+    render: (v: unknown) => (v ? ivaConditionLabel(String(v)) : "—"),
+    csvValue: (v: unknown) => (v ? ivaConditionLabel(String(v)) : ""),
   },
   {
     key: "payment_method",
@@ -356,6 +373,8 @@ interface SupplierFormState {
   name: string;
   last_name: string;
   cuil: string;
+  cuit: string;
+  iva_condition: string;
   payment_method: string;
   email: string;
   phone: string;
@@ -368,6 +387,8 @@ function toFormState(supplier: SupplierResponse | null): SupplierFormState {
     name: supplier?.name ?? "",
     last_name: supplier?.last_name ?? "",
     cuil: supplier?.cuil ?? "",
+    cuit: supplier?.cuit ?? "",
+    iva_condition: supplier?.iva_condition ?? "",
     payment_method: supplier?.payment_method ?? "",
     email: supplier?.email ?? "",
     phone: supplier?.phone ?? "",
@@ -419,6 +440,7 @@ function SupplierFormModal({
     e.preventDefault();
     const name = form.name.trim();
     const cuil = form.cuil.trim();
+    const cuit = form.cuit.trim();
     if (!name) {
       setError("El nombre o razón social es requerido.");
       return;
@@ -426,8 +448,15 @@ function SupplierFormModal({
     if (!isSentinel) {
       if (!form.email.trim()) return setError("El email es requerido.");
       if (!form.phone.trim()) return setError("El teléfono es requerido.");
-      if (!cuil) return setError("El CUIL es requerido.");
+      // Uno de los dos alcanza: una empresa tiene CUIT y una persona física
+      // CUIL. Exigir CUIL obligaba a poner el CUIT de una SRL en el campo
+      // equivocado, que es lo que este cambio viene a arreglar.
+      if (!cuit && !cuil) return setError("Cargá el CUIT (empresa) o el CUIL (persona).");
       if (!form.payment_method) return setError("La forma de pago es requerida.");
+    }
+    if (cuit && !isValidCuit(cuit)) {
+      setError("CUIT inválido: revisá el número (dígito verificador no coincide).");
+      return;
     }
     if (cuil && !isValidCuil(cuil)) {
       setError("CUIL inválido: revisá el número (dígito verificador no coincide).");
@@ -437,6 +466,8 @@ function SupplierFormModal({
       name,
       last_name: form.last_name.trim() || null,
       cuil: cuil || null,
+      cuit: cuit || null,
+      iva_condition: form.iva_condition || null,
       payment_method: form.payment_method || null,
       email: form.email.trim() || null,
       phone: form.phone.trim() || null,
@@ -476,11 +507,30 @@ function SupplierFormModal({
         </div>
         <div className="grid grid-cols-2 gap-4">
           <Input
-            label="CUIL / CUIT"
+            label="CUIT (empresa)"
+            type="text"
+            placeholder="30-71234567-8"
+            value={form.cuit}
+            onChange={set("cuit")}
+          />
+          <Input
+            label="CUIL (persona)"
             type="text"
             placeholder="20-12345678-6"
             value={form.cuil}
             onChange={set("cuil")}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <Select
+            label="Condición de IVA (opcional)"
+            placeholder="Elegí una opción"
+            options={IVA_CONDITION_OPTIONS}
+            value={form.iva_condition}
+            onChange={(value) => {
+              setForm((prev) => ({ ...prev, iva_condition: value }));
+              if (error) setError(null);
+            }}
           />
           <Select
             label="Forma de pago"

@@ -72,3 +72,25 @@ def normalize_phone(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+#: Condición frente al IVA. Catálogo cerrado, compartido por clientes y
+#: proveedores: vivía sólo en ``schemas/customer.py`` y cuando la ficha fiscal
+#: llegó a proveedores hubiera quedado una segunda copia — que es como los dos
+#: catálogos se van separando sin que nadie lo note.
+IVA_CONDITIONS = frozenset(
+    {"consumidor_final", "monotributo", "responsable_inscripto", "exento"}
+)
+
+
+def validate_iva_condition(v: str | None) -> str | None:
+    """Condición de IVA contra el catálogo cerrado. NULL/vacío → None."""
+    if v is None or v == "":
+        return None
+    if v not in IVA_CONDITIONS:
+        raise PydanticCustomError(
+            "iva_condition_invalid",
+            "iva_condition inválida: consumidor_final | monotributo | "
+            "responsable_inscripto | exento.",
+        )
+    return v

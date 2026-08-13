@@ -17,6 +17,7 @@ import {
 } from "@/features/suppliers/BrandGroupedProducts";
 import { suppliersService } from "@/services/suppliers.service";
 import { paymentLabel, whatsappDigits } from "@/lib/suppliers";
+import { ivaConditionLabel } from "@/lib/fiscal";
 import { formatARS } from "@/features/dashboard/dashboardData";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -114,8 +115,20 @@ export default function SupplierDetailPage() {
             </div>
           ) : null}
           <div>
-            <p className="text-xs text-vk-text-muted">CUIL / CUIT</p>
-            <p className="text-vk-text-primary">{supplier.cuil?.trim() || "—"}</p>
+            <p className="text-xs text-vk-text-muted">CUIT</p>
+            <p className="text-vk-text-primary">{supplier.cuit?.trim() || "—"}</p>
+          </div>
+          {supplier.cuil?.trim() ? (
+            <div>
+              <p className="text-xs text-vk-text-muted">CUIL</p>
+              <p className="text-vk-text-primary">{supplier.cuil}</p>
+            </div>
+          ) : null}
+          <div>
+            <p className="text-xs text-vk-text-muted">Condición de IVA</p>
+            <p className="text-vk-text-primary">
+              {supplier.iva_condition ? ivaConditionLabel(supplier.iva_condition) : "—"}
+            </p>
           </div>
           <div>
             <p className="text-xs text-vk-text-muted">Forma de pago</p>

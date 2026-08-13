@@ -202,10 +202,16 @@ def test_canonical_fields_all_entities() -> None:
     assert "name" in CANONICAL_FIELDS["product"]
     assert "dni" in CANONICAL_FIELDS["customer"]
     assert "cuit" in CANONICAL_FIELDS["customer"]
+    # CUIL y CUIT conviven (mig `20260813_0001`): un proveedor persona física
+    # tiene CUIL y una empresa CUIT, y la empresa es el caso mayoritario — hasta
+    # esa migración el dato fiscal del proveedor típico no tenía dónde ir.
     assert "cuil" in CANONICAL_FIELDS["supplier"]
-    # Supplier acotado a lo que persiste el modelo hoy: sin domicilio/condición IVA.
+    assert "cuit" in CANONICAL_FIELDS["supplier"]
+    # `iva_condition` entró con el CUIT, por el mismo motivo: un padrón de
+    # proveedores trae «Condición IVA» y quedaba sin destino.
+    assert "iva_condition" in CANONICAL_FIELDS["supplier"]
+    # El domicilio sigue afuera: el modelo `Supplier` no lo persiste.
     assert "address" not in CANONICAL_FIELDS["supplier"]
-    assert "iva_condition" not in CANONICAL_FIELDS["supplier"]
     # Campos de referencia en las entidades transaccionales.
     assert "customer_dni" in CANONICAL_FIELDS["sale"]
     assert "supplier_cuil" in CANONICAL_FIELDS["expense"]
