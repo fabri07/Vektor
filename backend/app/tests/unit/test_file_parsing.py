@@ -1198,3 +1198,54 @@ def test_hoja_con_nombre_no_derivado_se_sigue_clasificando() -> None:
 
     assert by_label["Ventas Marzo"]["entity_type"] == "sale"
     assert by_label["Gastos Fijos"]["entity_type"] == "expense"
+
+
+def test_articulo_no_es_senal_inequivoca_de_catalogo() -> None:
+    """`articulo` e `item` son cómo se llama la columna del ítem VENDIDO en media
+    exportación de ventas de un kiosco, no sólo la del catálogo.
+
+    La regla 1 decía "inequívocamente catálogo" y cortaba antes de mirar ninguna
+    señal de operación, así que un libro de ventas con "Artículo" volvía `stock` y
+    no se importaba una sola venta — mientras que el MISMO archivo con la columna
+    llamada "Producto" entraba bien, porque la señal de nombre (regla 5) sí tenía
+    la excepción por evidencia transaccional y la fuerte no.
+
+    La asimetría estaba tapada por los acentos: "Artículo" con tilde no matcheaba
+    el keyword `articulo` y se salvaba de rebote. Al plegar acentos quedó a la
+    vista, y se arregla igualando las dos reglas contra el mismo predicado.
+    """
+    ventas = ["Fecha", "Cantidad", "Método de Pago", "Total", "Cliente"]
+    for columna_del_item in ("Artículo", "Articulo", "Item", "Producto", "Detalle"):
+        headers = [ventas[0], columna_del_item, *ventas[1:]]
+        assert analyze_headers(headers)["inferred_type"] == "ventas", columna_del_item
+
+
+def test_un_catalogo_con_articulo_sigue_siendo_catalogo() -> None:
+    """El otro lado: la excepción exige las TRES señales de operación juntas, así
+    que aflojar la regla 1 no arrastra ningún catálogo a ventas."""
+    # Lista de precios pelada.
+    assert analyze_headers(["Código", "Artículo", "Precio", "Stock"])["inferred_type"] == "stock"
+    # Con fecha de alta: falta el monto de la operación.
+    assert (
+        analyze_headers(["Código", "Artículo", "Precio", "Stock", "Fecha de alta"])[
+            "inferred_type"
+        ]
+        == "stock"
+    )
+    # Con fecha de alta Y "Total" (valuación del stock): el contexto sale de una
+    # columna de precio, así que no cuenta como operación.
+    assert (
+        analyze_headers(["SKU", "Artículo", "Precio de venta", "Stock", "Total", "Fecha de alta"])[
+            "inferred_type"
+        ]
+        == "stock"
+    )
+    # Inventario puro, sin fecha ni monto.
+    assert analyze_headers(["SKU", "Inventario", "Cantidad"])["inferred_type"] == "stock"
+
+
+def test_un_libro_de_compras_con_articulo_sigue_siendo_gasto() -> None:
+    """La regla -1 corre ANTES que la 1 y no la toca este cambio: una compra de
+    mercadería sigue siendo gasto (COGS + salida de caja), no venta."""
+    headers = ["Fecha", "Proveedor", "Artículo", "Cantidad", "Total", "Forma de Pago"]
+    assert analyze_headers(headers)["inferred_type"] == "gastos"

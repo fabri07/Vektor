@@ -568,7 +568,9 @@ def infer_spreadsheet_type(
         que las reglas de catálogo débiles (2-4, basadas en "nombre") para que un
         maestro con columna "nombre" no se confunda con una lista de precios.
     0. Compra de mercadería/insumos + cantidad → inventario (FASE 3, conservador).
-    1. Señal fuerte de catálogo (sku/codigo/inventario/articulo) → siempre stock.
+    1. Señal fuerte de catálogo (sku/codigo/inventario/articulo/item) → stock, salvo
+       que haya evidencia transaccional completa (misma excepción que la regla 5:
+       "Artículo"/"Item" también nombran el ítem vendido en un libro de ventas).
     2. Señal de nombre/producto sin venta explícita → stock.
     3. Señal de nombre/producto sin fecha → stock (lista de precios, catálogo).
     4. Señal de nombre/producto + precio ambiguo (no venta transaccional) → stock.
@@ -653,8 +655,29 @@ def infer_spreadsheet_type(
     if has_mercaderia and has_cantidad:
         return "stock"
 
-    # Señal fuerte (sku, inventario, articulo, codigo, item) → inequívocamente catálogo
-    if has_catalogo_fuerte:
+    # Evidencia de que el archivo registra OPERACIONES y no describe un catálogo:
+    # fecha + monto DE LA TRANSACCIÓN + contexto de venta/gasto que no salga de una
+    # columna de precio. Las tres juntas, y ninguna alcanza sola: un catálogo tiene
+    # fecha de alta, y "precio_venta" activa el contexto por substring.
+    #
+    # La usan las reglas 1 y 5 con el mismo significado, y por eso se calcula una
+    # sola vez: son la misma pregunta hecha sobre dos señales de catálogo distintas
+    # (la fuerte y la de nombre), y tenerlas escritas por separado fue justamente
+    # lo que las dejó divergir.
+    evidencia_transaccional = has_fecha and has_monto_transaccion and has_contexto_operacion
+
+    # Señal fuerte (sku, inventario, articulo, codigo, item) → catálogo, SALVO que
+    # el archivo traiga la evidencia transaccional completa.
+    #
+    # La excepción existe porque la regla no era cierta como estaba escrita
+    # ("inequívocamente catálogo"): `articulo` e `item` son cómo se llama la columna
+    # del ítem VENDIDO en media exportación de ventas de un kiosco, no sólo la del
+    # catálogo. Un libro de ventas con "Artículo" volvía stock y no se importaba
+    # ninguna venta, mientras que el MISMO archivo con la columna llamada "Producto"
+    # entraba bien — porque la señal de nombre (regla 5) sí tenía esta excepción y
+    # la fuerte no. La asimetría estaba tapada por los acentos: "Artículo" con tilde
+    # no matcheaba el keyword `articulo` y se salvaba de rebote.
+    if has_catalogo_fuerte and not evidencia_transaccional:
         return "stock"
 
     # Nombre/producto sin venta explícita → catálogo (descripcion en ventas suele ir con monto)
@@ -682,9 +705,7 @@ def infer_spreadsheet_type(
     # El contexto tiene que ser fuerte: un catálogo con "precio_venta" ya activa
     # `has_venta` por substring, y si además trae fecha de alta y una columna "Total"
     # (valuación del stock) tendría las tres señales sin ser una transacción.
-    if has_nombre and not (
-        has_fecha and has_monto_transaccion and has_contexto_operacion
-    ):
+    if has_nombre and not evidencia_transaccional:
         return "stock"
 
     # FASE 3: discriminación venta vs gasto por CONTEXTO (scoring de señales fuertes).
