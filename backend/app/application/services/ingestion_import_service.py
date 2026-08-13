@@ -797,6 +797,23 @@ _IMPORT_ROW_ACTION = "IMPORT_ROW"
 # del render. Valor = JSON string (``json.dumps({context_id, row_index})``).
 RISK_REF_KEY = "__risk_ref__"
 
+# F-O.2: el `source_row_ref` que le habría correspondido a esta fila si se hubiera
+# podido importar. Es el vínculo fila↔registro que le falta a "Otros": el registro
+# que nace de clasificarla a mano lleva `unclassified:{id}`, que no dice QUÉ fila
+# del archivo era, así que sin esto la relectura no puede saber que la fila que
+# ahora sí sabe leer es la misma que el usuario ya clasificó — y la importa además,
+# duplicada.
+#
+# Mismo criterio que `RISK_REF_KEY`: PII-free, prefijo `__` (interno, no dato de
+# negocio) y `/otros` lo oculta del render. Se guarda el ref YA derivado (sha256) y
+# no sus componentes, porque es el valor exacto contra el que se compara: recomputar
+# del otro lado es una segunda derivación que puede quedar distinta.
+#
+# Ausente cuando el ancla no está en el scope de la captura (p. ej. la hoja entera
+# sin clasificar): esas filas degradan al comportamiento de F-O.1 —el registro
+# clasificado se preserva para siempre— que es seguro, no silencioso.
+ROW_REF_KEY = "__row_ref__"
+
 _ROW_FINGERPRINT_CONFLICT = unique_violation_classifier(
     "fingerprint",
     constraint="uq_operation_fingerprints_tenant_fp",
@@ -1064,6 +1081,7 @@ def _capture_unclassified(
     context_label: str | None = None,
     suggested_entity: str | None = None,
     match_candidates: list[dict[str, Any]] | None = None,
+    row_ref: str | None = None,
 ) -> int:
     """FASE F: persiste filas no clasificadas en la bandeja "Otros".
 
@@ -1073,6 +1091,14 @@ def _capture_unclassified(
 
     F2-T2: ``match_candidates`` (solo para filas de producto ambiguas o en
     conflicto de identidad) — forma ``{id, matched_by, name, sku, barcode}``.
+
+    F-O.2: ``row_ref`` es el ``source_row_ref`` que le habría correspondido a la
+    fila. Se guarda bajo ``ROW_REF_KEY`` y es lo que le permite a la relectura
+    reconocer, cuando por fin sepa leerla, que esa fila YA fue clasificada a mano
+    (ver el comentario de la constante). Aplica a todas las filas de la llamada:
+    casi todos los callers capturan de a una, y el que capture un lote no tiene
+    una fila puntual que referenciar — pasa ``None`` y esas filas degradan al
+    comportamiento de F-O.1.
 
     La procedencia se NORMALIZA contra el set de la CHECK: el importador recibe
     ``source`` libre y la relectura se nombra ``"reread"``, que la columna no
@@ -1094,6 +1120,12 @@ def _capture_unclassified(
         row_data = {k: v for k, v in row.items() if k != "__context__"}
         if not row_data:
             continue
+        _persistido = {k: ("" if v is None else str(v)) for k, v in row_data.items()}
+        # Se agrega DESPUÉS del volcado para que una columna del archivo que se
+        # llamara igual no pueda pisar el vínculo (ni al revés): la clave reservada
+        # es del sistema, no del archivo.
+        if row_ref and len(rows) == 1:
+            _persistido[ROW_REF_KEY] = row_ref
         session.add(
             UnclassifiedRecord(
                 tenant_id=tenant_id,
@@ -1101,7 +1133,7 @@ def _capture_unclassified(
                 source=_source,
                 context_label=(context_label or None),
                 headers=list(headers) if headers else None,
-                row_data={k: ("" if v is None else str(v)) for k, v in row_data.items()},
+                row_data=_persistido,
                 suggested_entity=suggested_entity,
                 match_candidates=match_candidates,
             )
@@ -1179,6 +1211,9 @@ async def _capture_column_risk_rows(
             uploaded_file_id=uploaded_file_id,
             context_label=context_label,
             suggested_entity=entity_type,
+            row_ref=_source_row_ref(
+                _import_row_anchor(tenant_id, uploaded_file_id, context_id, row_index)
+            ),
         )
         if captured == 0:
             # Fila combinada vacía (nada que capturar): no hay nada persistido,
@@ -3725,6 +3760,7 @@ async def _insert_confirmed_data_impl(
                             "operación sin inventar la fecha"
                         ),
                         suggested_entity="sale" if _venta_amount is not None else "expense",
+                        row_ref=_source_row_ref(_row_anchor),
                     )
                     _captured_to_otros_rows.add(row_index)
                     _captured_to_otros = True
@@ -3753,6 +3789,7 @@ async def _insert_confirmed_data_impl(
                         f"{_falta_stock.qty}"
                     ),
                     suggested_entity="sale",
+                    row_ref=_source_row_ref(_row_anchor),
                 )
                 counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                 _captured_to_otros_rows.add(row_index)
@@ -4060,6 +4097,7 @@ async def _insert_confirmed_data_impl(
                                 "con varios productos del catálogo",
                                 suggested_entity="expense",
                                 match_candidates=_cands,
+                                row_ref=_source_row_ref(_row_anchor),
                             )
                             _captured_to_otros_rows.add(row_index)
                             _captured_to_otros = True
@@ -4197,6 +4235,7 @@ async def _insert_confirmed_data_impl(
                         "que Véktor lo calcule"
                     ),
                     suggested_entity="sale" if wants_ventas else "expense",
+                    row_ref=_source_row_ref(_row_anchor),
                 )
                 counts["filas_sin_monto"] += 1
                 _captured_to_otros_rows.add(row_index)
@@ -4293,6 +4332,7 @@ async def _insert_confirmed_data_impl(
                             "mano: revisá y completá antes de importar"
                         ),
                         suggested_entity="product",
+                        row_ref=_source_row_ref(_row_anchor),
                     )
                     if _prod_capture_anchor is not None:
                         await _register_import_row_fingerprint(
@@ -4568,6 +4608,7 @@ async def _insert_confirmed_data_impl(
                             context_label=_context_label,
                             suggested_entity="product",
                             match_candidates=_resolution.candidates,
+                            row_ref=_prod_row_ref,
                         )
                         # F6-B (review): la captura ambigua también es output
                         # PERSISTIDO → registrar la huella para que una relectura no
@@ -4647,6 +4688,7 @@ async def _insert_confirmed_data_impl(
                             "y el SKU apuntan a productos distintos",
                             suggested_entity="product",
                             match_candidates=_candidates_from_conflict(_conflict),
+                            row_ref=_prod_row_ref,
                         )
                         # F6-B (review): idempotencia de la captura (ver arriba).
                         if _prod_capture_anchor is not None:
@@ -5156,6 +5198,7 @@ async def _insert_multisheet_data(
                     "para que Véktor lo calcule"
                 ),
                 suggested_entity="sale",
+                row_ref=row_ref,
             )
             counts["filas_sin_monto"] += 1
             return True
@@ -5174,6 +5217,7 @@ async def _insert_multisheet_data(
                 uploaded_file_id=uploaded_file_id,
                 context_label="Fila sin fecha reconocible: no se puede registrar la venta",
                 suggested_entity="sale",
+                row_ref=row_ref,
             )
             return True
         qty = _venta_cantidad(row, cols)
@@ -5507,6 +5551,7 @@ async def _insert_multisheet_data(
                 uploaded_file_id=uploaded_file_id,
                 context_label="Fila sin fecha reconocible: no se puede registrar el gasto",
                 suggested_entity="expense",
+                row_ref=row_ref,
             )
             return True
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
@@ -5675,6 +5720,7 @@ async def _insert_multisheet_data(
                     "varios productos del catálogo",
                     suggested_entity="expense",
                     match_candidates=_cands,
+                    row_ref=row_ref,
                 )
                 # Review F2 #6: la captura a Otros es output PERSISTIDO → devolver
                 # True para que el caller registre el fingerprint (re-subir el
@@ -5872,6 +5918,7 @@ async def _insert_multisheet_data(
                     "revisá y completá antes de importar"
                 ),
                 suggested_entity="product",
+                row_ref=row_ref,
             )
             return True
         # F2-T2: resolución de identidad por claves independientes
@@ -6034,6 +6081,7 @@ async def _insert_multisheet_data(
                 context_label=context_label,
                 suggested_entity="product",
                 match_candidates=candidates,
+                row_ref=row_ref,
             )
 
         existing = _lookup_product_identity_cache(
@@ -6493,6 +6541,7 @@ async def _insert_multisheet_data(
                             f"{_falta.disponible} unidades y la venta es de {_falta.qty}"
                         ),
                         suggested_entity="sale",
+                        row_ref=_row_ref,
                     )
                     counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                     _did_insert = True

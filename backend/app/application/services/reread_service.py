@@ -120,6 +120,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
+    UNCLASSIFIED_ROW_REF_PREFIX,
     UNCLASSIFIED_STATUS_DISMISSED,
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
@@ -154,6 +155,7 @@ _load_product_index = _iis._load_product_index
 _capture_column_risk_rows = _iis._capture_column_risk_rows
 _risk_row_anchor = _iis._risk_row_anchor
 _RISK_REF_KEY = _iis.RISK_REF_KEY
+_ROW_REF_KEY = _iis.ROW_REF_KEY
 
 logger = get_logger(__name__)
 
@@ -601,6 +603,9 @@ class _Reconciliation:
     #: fila". Sumarlos haría que el informe de la relectura no pueda explicar por
     #: qué no tocó algo.
     preserved_from_others: int = 0
+    #: F-O.2 — los registros en sí, no sólo cuántos: después del reimport hay que
+    #: preguntarle a cada uno si la fila que representa volvió a entrar.
+    others_records: list[SaleEntry | ExpenseEntry] = field(default_factory=list)
 
 
 def _split_records(
@@ -618,6 +623,7 @@ def _split_records(
     legacy_records: list[SaleEntry | ExpenseEntry] = []
     preserved = 0
     preserved_from_others = 0
+    others_records: list[SaleEntry | ExpenseEntry] = []
     legacy_fallback = False
 
     for rec in all_records:
@@ -652,6 +658,7 @@ def _split_records(
             # permitirá a la relectura MODIFICAR el registro en vez de convivir.
             preserved += 1
             preserved_from_others += 1
+            others_records.append(rec)
             continue
         if ref:
             non_edited.append(rec)
@@ -669,6 +676,7 @@ def _split_records(
         preserved_count=preserved,
         legacy_fallback=legacy_fallback,
         preserved_from_others=preserved_from_others,
+        others_records=others_records,
     )
 
 
@@ -742,6 +750,189 @@ async def _deduce_inventory_effect(
     return resolve_inventory_effects(perfiles)
 
 
+async def _refs_de_filas_clasificadas(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    clasificados: list[SaleEntry | ExpenseEntry],
+) -> dict[uuid.UUID, str]:
+    """F-O.2 — ``{id del registro clasificado: source_row_ref de su fila}``.
+
+    El vínculo lo guarda la captura en ``ROW_REF_KEY``: es el ``source_row_ref``
+    que le habría tocado a la fila, o sea la clave con la que el reimport la
+    insertaría. Una fila capturada por un camino que no tenía el ancla a mano no
+    lo trae y queda fuera del dict — degrada a F-O.1 (se preserva), que no pierde
+    nada.
+    """
+    if not clasificados:
+        return {}
+    por_registro: dict[uuid.UUID, uuid.UUID] = {}
+    for rec in clasificados:
+        try:
+            por_registro[rec.id] = uuid.UUID(
+                str(rec.source_row_ref).removeprefix(UNCLASSIFIED_ROW_REF_PREFIX)
+            )
+        except (ValueError, AttributeError):
+            # Prefijo sin uuid detrás: no resuelve a ninguna fila. Se preserva.
+            continue
+    if not por_registro:
+        return {}
+    filas = (
+        (
+            await session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.id.in_(list(por_registro.values())),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    ref_de_fila = {
+        fila.id: str((fila.row_data or {}).get(_ROW_REF_KEY) or "") for fila in filas
+    }
+    return {
+        rec_id: ref_de_fila.get(fila_id, "")
+        for rec_id, fila_id in por_registro.items()
+        if ref_de_fila.get(fila_id)
+    }
+
+
+async def _superseder_clasificados_de_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    clasificados: list[SaleEntry | ExpenseEntry],
+    refs_de_otros: dict[uuid.UUID, str],
+    refs_reimportadas: set[str],
+    run: DataRepairRun,
+    dry_run: bool,
+) -> int:
+    """F-O.2 — la fila que la relectura YA sabe leer reemplaza a la clasificada.
+
+    F-O.1 preserva el registro nacido de "Otros" porque el reimport no podía
+    reponerlo. Cuando SÍ puede —el parser mejoró, o el archivo se corrigió—
+    preservarlo dejaría dos: el que cargó el usuario y el que acaba de entrar.
+
+    **Gana la relectura**, decisión explícita del usuario: el archivo es la fuente
+    y lo que se lee reemplaza lo cargado a mano. Por eso se anula sin comparar
+    campo por campo — comparar sólo tendría sentido si la clasificación pudiera
+    ganar en algo, y no puede.
+
+    Se anula el movimiento de inventario junto con la venta: el guard de
+    preservación lo salvó del void general (V28) porque en ese momento la fila se
+    conservaba, y ahora ya no.
+
+    Las que NO fueron reemplazadas dejan su captura nueva en DISMISSED: la huella
+    se liberó antes del reimport, así que una fila que sigue sin poder leerse
+    volvió a "Otros" — y ofrecerle al usuario clasificar de nuevo algo que ya
+    clasificó es ruido, no información.
+    """
+    if not clasificados:
+        return 0
+
+    reemplazados = 0
+    ahora = datetime.now(UTC)
+    refs_conservadas: set[str] = set()
+    for rec in clasificados:
+        ref = refs_de_otros.get(rec.id)
+        if not ref:
+            continue
+        if ref not in refs_reimportadas:
+            refs_conservadas.add(ref)
+            continue
+        snapshot = (
+            _snapshot_sale(rec) if isinstance(rec, SaleEntry) else _snapshot_expense(rec)
+        )
+        rec.voided_at = ahora
+        rec.void_reason = VOID_REASON_REREAD
+        rec.voided_by_repair_run_id = run.id
+        reemplazados += 1
+        if isinstance(rec, SaleEntry):
+            movimientos = (
+                (
+                    await session.execute(
+                        select(InventoryMovement).where(
+                            InventoryMovement.tenant_id == tenant_id,
+                            InventoryMovement.source_upload_id == file_id,
+                            InventoryMovement.source_event_id
+                            == sale_source_event_id(rec.id),
+                            InventoryMovement.voided_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for mov in movimientos:
+                mov_snap = _snapshot_movement(mov)
+                await void_movement(mov, session)
+                if not dry_run:
+                    session.add(
+                        DataRepairItem(
+                            run_id=run.id,
+                            tenant_id=tenant_id,
+                            source_file_id=file_id,
+                            sale_entry_id=None,
+                            action=ACTION_VOID,
+                            before_json=mov_snap,
+                            after_json=None,
+                            confidence="HIGH",
+                        )
+                    )
+        if not dry_run:
+            session.add(
+                DataRepairItem(
+                    run_id=run.id,
+                    tenant_id=tenant_id,
+                    source_file_id=file_id,
+                    sale_entry_id=rec.id if isinstance(rec, SaleEntry) else None,
+                    action=ACTION_VOID,
+                    before_json=snapshot,
+                    after_json=None,
+                    confidence="HIGH",
+                )
+            )
+
+    if refs_conservadas:
+        await _descartar_recapturas_ya_clasificadas(
+            session, tenant_id, file_id, refs_conservadas, ahora
+        )
+    return reemplazados
+
+
+async def _descartar_recapturas_ya_clasificadas(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    refs: set[str],
+    ahora: datetime,
+) -> None:
+    """La fila que sigue sin poder leerse volvió a "Otros": se descarta la copia.
+
+    DISMISSED y no borrado, mismo criterio que F8 con las filas de riesgo
+    resueltas: queda el rastro de que la relectura la volvió a ver y no supo
+    leerla. El registro que el usuario ya clasificó sigue vivo y es el que manda.
+    """
+    pendientes = (
+        (
+            await session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.uploaded_file_id == file_id,
+                    UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for fila in pendientes:
+        if str((fila.row_data or {}).get(_ROW_REF_KEY) or "") in refs:
+            fila.status = UNCLASSIFIED_STATUS_DISMISSED
+            fila.resolved_at = ahora
+
+
 async def _reconcile(
     session: AsyncSession,
     file: UploadedFile,
@@ -813,6 +1004,23 @@ async def _reconcile(
         if _se_preserva(rec) and isinstance(rec, SaleEntry)
     }
 
+    # F-O.2 — liberar la huella de las filas que el usuario clasificó desde "Otros".
+    #
+    # Sin esto la relectura NUNCA puede volver a leerlas: la captura a "Otros" es
+    # output persistido y registra su huella de idempotencia, así que el reimport
+    # saltea esa fila para siempre y la pregunta "¿ya la sabés leer?" no llega a
+    # hacerse. Es el mismo movimiento que F8 hace con las filas de riesgo
+    # corregidas (``_reconcile_column_risk`` borra su huella para que entren en el
+    # mismo reimport).
+    #
+    # Liberarla no importa nada por sí solo: si la fila sigue sin poder leerse,
+    # vuelve a "Otros" y la captura re-registra la huella — y la de más abajo
+    # descarta esa captura nueva, porque el usuario ya la resolvió.
+    refs_de_otros = await _refs_de_filas_clasificadas(
+        session, tenant_id, recon.others_records
+    )
+    fingerprints_to_delete |= {ref for ref in refs_de_otros.values() if ref}
+
     # ── Fallback legacy: recomputar anchors del archivo y borrar los que NO
     # matcheen por contenido a un registro editado. (Best-effort; la primera
     # relectura migra todo a source_row_ref exacto.) ──
@@ -866,14 +1074,17 @@ async def _reconcile(
             InventoryMovement.voided_at.is_(None),
         )
     )
+    movimientos_preservados: set[uuid.UUID] = set()
     for mov in prev_movements_res.scalars().all():
         # No voidear el movimiento de una fila editada preservada: el reimport la saltea,
         # así que su stock debe quedar intacto (si no, se subestimaría). Las dos
         # señales, porque los movimientos se identifican de dos formas: la compra
         # por la fila que la trajo, el descuento de venta por su `source_event_id`.
         if mov.source_row_ref and mov.source_row_ref in preserved_refs:
+            movimientos_preservados.add(mov.id)
             continue
         if mov.source_event_id and mov.source_event_id in preserved_sale_events:
+            movimientos_preservados.add(mov.id)
             continue
         mov_snap = _snapshot_movement(mov)
         await void_movement(mov, session)
@@ -979,9 +1190,16 @@ async def _reconcile(
         )
         await session.flush()
 
-    # Auditar los movimientos de inventario recién insertados por el reimport
-    # (tras el void anterior, cualquier movimiento vivo del archivo es nuevo). Se
-    # audita como REREAD_INSERT (kind=movement) para poder revertirlo en el undo.
+    # Auditar los movimientos de inventario recién insertados por el reimport, para
+    # poder revertirlos en el undo.
+    #
+    # "Vivo y de este archivo" ya NO alcanza como definición de "nuevo": desde que
+    # hay movimientos que el void PRESERVA —el de una fila editada a mano (V28) y
+    # el de una clasificada desde "Otros" (F-O.1)— quedan vivos sin que esta
+    # relectura los haya creado. Auditarlos como inserción hacía que el undo los
+    # anulara: devolvía un stock que la relectura nunca tocó, y encima de forma
+    # irreversible desde el punto de vista del usuario (la venta seguía ahí, sin su
+    # movimiento). Se excluyen explícitamente.
     if not dry_run:
         new_movements_res = await session.execute(
             select(InventoryMovement).where(
@@ -991,6 +1209,8 @@ async def _reconcile(
             )
         )
         for mov in new_movements_res.scalars().all():
+            if mov.id in movimientos_preservados:
+                continue
             session.add(
                 DataRepairItem(
                     run_id=run.id,
@@ -1009,6 +1229,24 @@ async def _reconcile(
     before_ids = {rec.id for rec in all_existing}
     inserted_items, inserted = await _audit_inserts(
         session, tenant_id, file_id, run, before_ids=before_ids, dry_run=dry_run
+    )
+
+    # F-O.2: la fila que el reimport SÍ pudo leer reemplaza a la que el usuario
+    # había clasificado desde "Otros". Corre acá y no antes porque la pregunta es
+    # "¿entró esta fila?", y eso recién se sabe con lo que el reimport insertó.
+    _refs_reimportadas = {
+        str((item.after_json or {}).get("source_row_ref") or "")
+        for item in inserted_items
+    }
+    _reemplazados_de_otros = await _superseder_clasificados_de_otros(
+        session,
+        tenant_id,
+        file_id,
+        recon.others_records,
+        refs_de_otros,
+        _refs_reimportadas,
+        run,
+        dry_run,
     )
 
     # ``new`` = inserciones que no corresponden a un registro voldado (su ref no
@@ -1044,10 +1282,10 @@ async def _reconcile(
         dry_run=run.dry_run,
         file_id=file_id,
         to_update=update_count,
-        preserved=recon.preserved_count,
-        preserved_from_others=recon.preserved_from_others,
+        preserved=recon.preserved_count - _reemplazados_de_otros,
+        preserved_from_others=recon.preserved_from_others - _reemplazados_de_otros,
         new=new_count,
-        voided=voided,
+        voided=voided + _reemplazados_de_otros,
         inserted=inserted,
         legacy_fallback=recon.legacy_fallback,
         items=void_items_payload + items_payload,
