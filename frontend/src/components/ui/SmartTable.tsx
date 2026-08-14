@@ -110,6 +110,10 @@ export function SmartTable<T extends object>({
           key: "__actions",
           header: "Acciones",
           render: (_: unknown, row: T) => renderActions(row),
+          // F-V.1: fija a la derecha. Era la columna que el scroll horizontal
+          // cortaba —y es la que tiene los botones—, así que quedaba fuera de
+          // alcance justo cuando la tabla no entraba.
+          stickyRight: true,
         },
       ]
     : visibleColumns;
