@@ -70,6 +70,7 @@ from app.domain.line_amount import (
     LineAmount,
     resolve_line_amount,
 )
+from app.domain.product_alias import product_aliases
 from app.domain.product_categories import (
     infer_product_category_from_name,
     normalize_product_category,
@@ -1272,29 +1273,48 @@ async def _load_product_index(
     Evita N queries (una por fila). Devuelve `(by_sku, by_name, by_token)`:
     - `by_sku[sku_lower] = product_id`
     - `by_name[norm_name] = product_id` o `None` si el nombre normalizado es
-      ambiguo (varios productos lo comparten → no se vincula).
+      ambiguo (varios productos lo comparten → no se vincula). Incluye tanto
+      `Product.name` como los alias guardados en `custom_fields["_aliases"]`
+      (F-S.0, ver `app.domain.product_alias`): un alias que otro producto
+      también reclama es igual de ambiguo que un nombre real repetido.
     - `by_token[token] = {product_id, ...}` para match conservador por tokens
       (Mejora B): token ≥3 chars del nombre, sin stopwords genéricos de unidad.
+      Sólo del nombre real, no de los alias — el tier de tokens ya es el más
+      débil (intersección conservadora) y un alias corto sumaría ruido a un
+      tier pensado para desambiguar, no para ampliar candidatos.
     """
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.persistence.models.product import Product  # noqa: PLC0415
 
     result = await session.execute(
-        select(Product.id, Product.name, Product.sku).where(Product.tenant_id == tenant_id)
+        select(Product.id, Product.name, Product.sku, Product.custom_fields).where(
+            Product.tenant_id == tenant_id
+        )
     )
     by_sku: dict[str, uuid.UUID] = {}
     by_name: dict[str, uuid.UUID | None] = {}
     by_token: dict[str, set[uuid.UUID]] = {}
-    for pid, pname, psku in result.all():
+    for pid, pname, psku, pcustom in result.all():
         # F2-T4: clave de SKU canónica (``normalize_sku``), misma que el motor de
         # identidad — antes era ``str(psku).strip().lower()`` (sin NFKD/colapso).
         sku_key = normalize_sku(psku)
         if sku_key:
             by_sku[sku_key] = pid
-        norm = _normalize_name(pname or "")
-        if norm:
-            by_name[norm] = pid if norm not in by_name else None  # None = ambiguo
+        # F-S.0: un producto puede aportar VARIAS claves de nombre (el real +
+        # sus alias) — el `else None` de abajo compara contra el `pid` de esta
+        # MISMA iteración, no sólo contra "ya estaba ocupado", para que el
+        # nombre real y un alias del mismo producto (o dos alias del mismo
+        # producto) que normalizan igual NO se marquen ambiguos consigo
+        # mismos. Mismo patrón que `_register_product_transaction_indexes`.
+        for candidate_name in (pname, *product_aliases(pcustom)):
+            norm = _normalize_name(candidate_name or "")
+            if not norm:
+                continue
+            if norm not in by_name:
+                by_name[norm] = pid
+            elif by_name[norm] != pid:
+                by_name[norm] = None  # ambiguo entre DOS productos distintos
         for tok in _product_name_tokens(pname or ""):
             by_token.setdefault(tok, set()).add(pid)
     return by_sku, by_name, by_token
