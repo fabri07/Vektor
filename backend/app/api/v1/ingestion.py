@@ -3501,6 +3501,15 @@ async def reread_apply(
                 "correspondence": asdict(exc.correspondence),
             },
         ) from exc
+    except reread_service.RereadCorrespondenceUnavailableError as exc:
+        # Fail-closed: no se pudo leer el archivo para verificar qué se pierde.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "No se pudo leer el archivo para verificar qué cambiaría la "
+                "relectura. Reintentá en unos segundos."
+            ),
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)

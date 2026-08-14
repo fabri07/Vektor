@@ -3195,14 +3195,26 @@ class TestRereadApplyEnqueueEndpoint:
         auth_headers: dict[str, Any],
         db_session: AsyncSession,
         sample_tenant: Tenant,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """F9b Task 2: si ``.delay()`` falla al encolar la relectura en
         background, el ``DataRepairRun`` que ``start_background_apply`` dejó
         en RUNNING debe pasar a FAILED — si no, queda un run RUNNING
-        fantasma que bloquea el guard anti-duplicado para siempre."""
+        fantasma que bloquea el guard anti-duplicado para siempre.
+
+        El archivo se sirve mockeado desde F-R: la compuerta de correspondencia
+        lo descarga para verificar qué se perdería, y sin mock el test moría en
+        S3 antes de llegar a lo que quiere probar (el broker caído).
+        """
         from app.application.services.reread_service import REPAIR_TYPE_REREAD
+        from app.integrations.s3 import S3Client
         from app.jobs.reread_worker import reread_apply as reread_apply_task
         from app.persistence.models.repair import DataRepairRun
+
+        async def _fake_download(self: S3Client, key: str) -> bytes:  # noqa: ARG001
+            return b"fecha,monto\n2026-01-05,1500\n"
+
+        monkeypatch.setattr(S3Client, "download", _fake_download)
 
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,

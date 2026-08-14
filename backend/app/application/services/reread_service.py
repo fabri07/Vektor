@@ -2310,6 +2310,14 @@ class RereadWouldLoseDataError(Exception):
         )
 
 
+class RereadCorrespondenceUnavailableError(Exception):
+    """No se pudo calcular la correspondencia (típicamente: el archivo no se pudo
+    descargar). Fail-closed: sin poder probar que el apply es seguro no se
+    encola. El apply necesita el mismo archivo, así que igual iba a fallar —
+    pero adentro del worker y como run FAILED, que el usuario tiene que ir a
+    buscar. Cortar acá le da el error en el momento."""
+
+
 async def start_background_apply(
     session: AsyncSession,
     file_id: uuid.UUID,
@@ -2361,7 +2369,21 @@ async def start_background_apply(
     # inexistente siga dando 404 y no un 409 confuso) y ANTES de crear el run,
     # para no dejar un RUNNING huérfano que bloquee al siguiente intento.
     if not accept_data_loss:
-        preview = await preview_reread(session, file_id, tenant_id, s3)
+        try:
+            preview = await preview_reread(session, file_id, tenant_id, s3)
+        except RereadWouldLoseDataError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Fail-closed: si no se puede leer el archivo no se puede probar que
+            # el apply sea seguro, y el apply necesita ese mismo archivo — así
+            # que igual iba a fallar, pero en el worker y como run FAILED. Cortar
+            # acá da un error accionable en el momento en vez de un run muerto.
+            logger.warning(
+                "reread.correspondence_check_failed",
+                file_id=str(file_id),
+                error=str(exc),
+            )
+            raise RereadCorrespondenceUnavailableError(str(exc)) from exc
         if preview.correspondence.bloquea:
             raise RereadWouldLoseDataError(preview.correspondence)
 
