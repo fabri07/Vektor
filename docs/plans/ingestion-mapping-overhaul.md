@@ -1107,6 +1107,42 @@ Read-only, sobre `backend/scripts/diag_asteria_import.py` (sólo SELECT, nunca i
 **Es compuerta:** la limpieza de F-O.4 y los backfills de F-S y F-CAT no se ejecutan antes de leer
 esta salida. Si la distribución contradice la hipótesis, se rediseña la fase — no se fuerza.
 
+## Lo que midió el Paso 0 sobre ASTERIA (2026-08-14) — y qué cambió
+
+Corrida real contra Neon. **Un solo archivo** (`ASTERIA_home_deco.xlsx`) es el origen de todo, con
+cabecera de catálogo `Tienda · Productos · Especificaciones · Stock · Precio de compra · % Envio ·
+compra+envio · Precio de lista · col_8 · Precio de venta final`.
+
+**1. «Otros» — hipótesis refutada.** Ver F-O.4: no eran filas en blanco (13%), eran dos hojas
+enteras (99,6%). La fase se rediseñó y el peso pasó a F-O.3.
+
+**2. Clientes y proveedores: no hay dato que identificar.** `_customer_resolution` da `anonymous` en
+**1939 de 1939** ventas. `anonymous` no es "no matcheó": es que la fila **no traía ninguna referencia
+de cliente**. Y `supplier_name` es NULL en las 624 filas de gastos. **Consecuencia para el plan: ni
+F-I ni F-E van a hacer aparecer un cliente en ASTERIA** — falta el dato, no el código. Prometer lo
+contrario sería vender una fase por un defecto que no arregla. Lo que sí corresponde: que la pantalla
+**diga** que todas las ventas son de mostrador porque el archivo no trae cliente, en vez de mostrar
+«Local» en 1939 filas como si algo hubiera fallado.
+
+**2-bis. La excepción: `Tienda` ES el proveedor.** Confirmado por el usuario: la columna dice dónde
+compra cada producto. O sea que el archivo **sí** trae proveedores, en la hoja de catálogo — el único
+lugar del que hoy está prohibido sacarlos. Ver F-E.2.
+
+**3. Productos: 0 de 398 con SKU, 0 con código de barras, 0 con categoría.** Confirma el orden
+F-CAT → F-S (si se numera antes, los 398 nacen `GEN-xxxx`). Y el archivo **no tiene columna de
+categoría**: para ASTERIA la rama "mapear" de F-CAT no tiene nada que mapear, queda sólo la
+inferencia por nombre con evidencia.
+
+**4. Ventas: 1403 de 1939 (72%) sin producto, sobre 1128 nombres distintos.** Ese número mata el
+diseño de "cola agrupada por nombre" tal como estaba: 1128 decisiones a mano no son una cola. Y en el
+propio top aparecen `alfombra felpuda exterior` (6) y `alfombra felpudo exterior` (4) — el mismo
+producto escrito de dos formas, que el tier de tokens no une (`felpuda` ≠ `felpudo`). Por eso el
+diagnóstico incorporó la **forma de la cola**: clasifica cada nombre con el motor real en `exacto` /
+`token único` / `varios candidatos` / `sin candidato`. La distinción decide la fase: lo que cae en
+`exacto`/`token único` **el motor de hoy ya lo resolvería**, así que estar sin vincular sería un bug
+de linkeo (se arregla re-resolviendo, sin trabajo humano); sólo `varios candidatos` es cola real, y
+`sin candidato` no se vincula ni se adivina. **F-S.0 no se termina de diseñar hasta leer ese corte.**
+
 ---
 
 # F-R · La relectura tiene que probar su correspondencia
@@ -1259,7 +1295,13 @@ que matchea dos categorías no se infiere · el informe dice cuántos quedaron s
 
 ---
 
-# F-O.3 · «Otros» dice por qué está cada fila
+# F-O.3 · «Otros» dice por qué está cada fila — y agrupa
+
+**Subió de prioridad con la medición del Paso 0** (ver F-O.4): es la fase que vuelve manejable una
+bandeja de 2.282 pendientes, porque el 99,6% son dos hojas y agrupadas son dos líneas. Además del
+motivo por fila, la pantalla necesita **agrupar por archivo × hoja/motivo** y ofrecer **descarte e
+importación en bloque por grupo**.
+
 
 El backend ya devuelve `context_label` (el motivo textual), `headers` y `uploaded_file_id`
 (`api/v1/others.py:86-107`) y la pantalla no renderiza ninguno de los tres
@@ -1273,21 +1315,46 @@ motivos con su conteo.
 
 ---
 
-# F-O.4 · Una fila en blanco no es un pendiente
+# F-O.4 · Rediseñada por la compuerta (2026-08-14): no eran filas en blanco
 
-`rows_to_dicts` (`file_parsing.py:729-746`) no descarta las filas totalmente vacías de una planilla,
-y `_capture_unclassified` (`:1120-1122`) saltea la fila sólo si el dict **no tiene claves** — no si
-todos sus valores están vacíos. Una planilla con filas en blanco al final produce exactamente lo que
-muestra la captura: registro creado, detalle vacío, monto vacío, sin destino sugerido.
+**La hipótesis original se midió y se cayó.** El Paso 0 sobre ASTERIA (2.282 pendientes):
 
-Se corrige **en la captura, no en el parser**: `rows_to_dicts` alimenta los `row_index` que usan las
-anclas de idempotencia y las decisiones de riesgo de columnas — descartar aguas arriba desplazaría
-todos los índices. El descarte se cuenta (`counts["filas_en_blanco"]`) para que sea visible y no
-silencioso.
+| Motivo | Filas |
+|---|---|
+| `Ganancias` | 1840 |
+| `ganancias 2` | 433 |
+| `LD 2026 — Movimientos ambiguos` | 4 |
+| `Fila sin fecha reconocible` | 3 |
+| `LD 2025 — Movimientos ambiguos` | 2 |
 
-Limpieza de lo ya cargado: `scripts/dismiss_empty_unclassified.py`, dry-run → `--apply`,
-`--tenant`/`--all-active`, marca `DISMISSED` (no borra), auditado y reversible. **Sujeto a la
-compuerta del Paso 0.**
+Vacías del todo: **314 (13%)** — no dominan. El **99,6%** son **dos hojas enteras volcadas fila por
+fila**: ese `context_label` no es un motivo, es el NOMBRE de la hoja, escrito por el capture de
+`ingestion_import_service.py:6444-6453`, que cuando no puede clasificar una hoja crea un pendiente
+por cada fila. Y `ganancias 2` no es ni venta ni gasto ni producto: es una **liquidación de haberes
+entre socios** (columnas `col_2`=nombre, `col_3`=0.5, y un `Período: Liquidación de Haberes`).
+
+**Decisión del usuario sobre qué hacer con una hoja ilegible:** seguir guardando las filas —cero
+riesgo de perder dato— y que la bandeja las **agrupe**. O sea que el trabajo pesado lo hace **F-O.3**,
+que ya estaba planificada: agrupando por archivo × hoja, 2.282 filas son 5 grupos, y se descartan las
+2.273 de «Ganancias» en una acción. Se descartan las alternativas de "un registro por hoja" (cambia
+el modelo y obliga a migrar lo existente) y "no guardar nada" (rompe la promesa de que ninguna fila
+se pierde en silencio).
+
+**Lo que queda como F-O.4, ya secundario:**
+- **a) Filas 100% vacías no se capturan.** Siguen siendo 314 reales. `rows_to_dicts`
+  (`file_parsing.py:729-746`) no las descarta y `_capture_unclassified` (`:1120-1122`) saltea sólo si
+  el dict **no tiene claves**, no si todos los valores están vacíos. Se corrige **en la captura, no
+  en el parser**: los `row_index` alimentan las anclas de idempotencia y las decisiones de riesgo, y
+  descartar aguas arriba los desplazaría. El descarte se cuenta (`counts["filas_en_blanco"]`).
+- **b) Una fila de agregado no es un movimiento** (hallazgo de la muestra): se capturó
+  `{"fecha": "Subtotal", "dinero_egreso": "18334679.59", …}`. Una fila cuya celda de fecha dice
+  `Subtotal`/`Total` es un resumen de la planilla, y tratarla como operación suma dos veces.
+- **c) Descarte en bloque por grupo** desde «Otros», que es lo que vuelve accionable el punto
+  anterior sin 46 páginas de trabajo manual.
+
+La limpieza por script (`dismiss_empty_unclassified.py`) queda **sólo para las 314 vacías**: las
+2.273 de «Ganancias» las descarta el usuario desde la pantalla, porque son una decisión de negocio
+("esta hoja no va"), no un defecto de captura.
 
 ---
 
@@ -1437,6 +1504,29 @@ documento → email → teléfono, **el nombre nunca es clave**):
 - Un nombre **no es identidad**: "Juan Perez", "juan perez", "Juan Pérez" y "J. Perez" crearían 4 clientes. Clave fuerte = documento válido (`validate_dni`/`validate_cuit`) | email | teléfono.
 
 **Sentinelas — "Local" y "No identificado":** no se renombran, no se enriquecen con datos importados, no se fusionan, no se eliminan, **no se usan como prueba de identidad**. "Local" sigue siendo la vía del comprador al paso. Los dos tests de "Local" verifican **inmutabilidad e imposibilidad de merge/enrichment**.
+
+## F-E.2 · El proveedor declarado desde el catálogo
+
+**El caso que lo motiva, confirmado por el usuario (2026-08-14):** la columna `Tienda` del catálogo
+de ASTERIA es **dónde compra cada producto** — el proveedor. Es el único lugar del archivo donde
+están, y es justamente el lugar del que hoy está prohibido sacarlos: la Reforma de Proveedores cerró
+`catálogo → proveedor` porque los catálogos venían creando un proveedor por cada MARCA, y hubo que
+limpiarlo con `deactivate_brand_suppliers.py` y el flag `_brand_collapsed`.
+
+**La distinción que habilita la excepción sin reabrir el desastre:** lo que creó las
+marcas-como-proveedor fue la detección **automática por heurística de encabezado**. Una columna que
+el usuario **mapea explícitamente** a proveedor es una declaración, no una adivinanza — y el
+principio ya está escrito en F-0: *una sugerencia automática nunca equivale a una confirmación*.
+
+- La ruta `product → supplier` se habilita **sólo por mapeo explícito**, nunca por heurística: ningún
+  encabezado la sugiere solo. El prohibido de F-D sigue vigente para todo lo automático.
+- Qué hace con el valor lo gobierna `SUPPLIER_REFERENCE_CREATION_MODE`, igual que una compra: en
+  `link_only` vincula contra un proveedor existente y no crea; en `legacy` crea. **No se inventa un
+  tercer comportamiento** para esta ruta.
+- Una fila cuyo proveedor no resuelve va al centinela «No identificado» con traza, como cualquier
+  otra referencia sin match — no se descarta ni se inventa.
+- Test congelado: sin mapeo explícito del usuario, **ninguna** columna de un catálogo crea ni vincula
+  proveedores, por más que se llame «Tienda», «Proveedor» o «Marca».
 
 ---
 
