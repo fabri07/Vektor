@@ -11,6 +11,7 @@ import hashlib
 import time
 import uuid
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, cast
@@ -192,7 +193,9 @@ from app.schemas.ingestion import (
     PurchaseGroupLine,
     PurchaseGroupsRequest,
     PurchaseGroupsResponse,
+    RereadApplyRequest,
     RereadApplyStartResponse,
+    RereadCorrespondenceResponse,
     RereadCounts,
     RereadItem,
     RereadPreviewResponse,
@@ -3445,6 +3448,9 @@ async def reread_preview(
         counts=RereadCounts(**preview.counts()),
         legacy_fallback=preview.legacy_fallback,
         sample_changes=preview.sample_changes,
+        correspondence=RereadCorrespondenceResponse(
+            **asdict(preview.correspondence)
+        ),
     )
 
 
@@ -3460,22 +3466,40 @@ async def reread_preview(
 )
 async def reread_apply(
     file_id: uuid.UUID,
+    payload: RereadApplyRequest | None = None,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> RereadApplyStartResponse:
     """El apply puede insertar miles de filas (minutos). Corre en background: se
     crea el run, se encola la task y se devuelve el ``run_id`` para que el frontend
     haga polling de ``GET /reread/runs/{run_id}``. Guard anti-duplicado: una sola
-    relectura RUNNING por tenant."""
+    relectura RUNNING por tenant.
+
+    **F-R:** si la relectura anularía registros que el archivo fresco ya no
+    repone, responde **409 `REREAD_WOULD_LOSE_DATA`** con el desglose por entidad
+    en vez de aplicar. Reintentar con ``accept_data_loss=true`` la aplica igual —
+    la decisión es del usuario, el silencio no."""
     from app.application.services import reread_service  # noqa: PLC0415
 
     try:
         run = await reread_service.start_background_apply(
-            session, file_id, tenant.tenant_id
+            session,
+            file_id,
+            tenant.tenant_id,
+            accept_data_loss=bool(payload and payload.accept_data_loss),
         )
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
+        ) from exc
+    except reread_service.RereadWouldLoseDataError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "REREAD_WOULD_LOSE_DATA",
+                "message": str(exc),
+                "correspondence": asdict(exc.correspondence),
+            },
         ) from exc
     except ValueError as exc:
         raise HTTPException(

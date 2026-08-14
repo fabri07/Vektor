@@ -738,11 +738,43 @@ class RereadCounts(BaseModel):
     products_restock: int = 0
 
 
+class RereadCorrespondenceResponse(BaseModel):
+    """F-R: qué le pasa a cada registro vivo del archivo, no sólo cuántos se anulan.
+
+    ``to_void`` y ``to_update`` cuentan las MISMAS filas (anular y reimportar
+    corregido es el mecanismo de actualizar). Lo que hay que mirar antes de
+    aplicar es ``sin_reemplazo``: registros que se anulan y el archivo ya no
+    repone. Es lo único que representa una pérdida.
+    """
+
+    reemplazado: int = 0
+    preservado: int = 0
+    sin_reemplazo: int = 0
+    #: Importados antes de que existiera ``source_row_ref``: no se pueden
+    #: emparejar ni a favor ni en contra, y por eso no bloquean.
+    legacy_sin_ancla: int = 0
+    por_entidad: dict[str, dict[str, int]] = Field(default_factory=dict)
+    nuevas_por_entidad: dict[str, int] = Field(default_factory=dict)
+
+
 class RereadPreviewResponse(BaseModel):
     file_id: UUID
     counts: RereadCounts
     legacy_fallback: bool = False
     sample_changes: list[dict[str, Any]] = Field(default_factory=list)
+    correspondence: RereadCorrespondenceResponse = Field(
+        default_factory=RereadCorrespondenceResponse
+    )
+
+
+class RereadApplyRequest(BaseModel):
+    """F-R: aplicar una relectura que pierde registros exige decirlo explícitamente.
+
+    Default ``False`` a propósito: el cliente que no conoce el campo no puede
+    aplicar por accidente una relectura destructiva.
+    """
+
+    accept_data_loss: bool = False
 
 
 class RereadItem(BaseModel):
