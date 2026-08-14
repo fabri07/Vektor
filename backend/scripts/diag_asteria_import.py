@@ -7,6 +7,27 @@ Usage:
 
 ONLY runs SELECT statements. No writes. Safe against production.
 NUNCA imprime la connection URL ni la DATABASE_URL (sale de _db.py / el shell).
+
+## Paso 0 del plan de ingesta (2026-08-14) — este script es una COMPUERTA
+
+Además del estado general, mide las tres cosas de las que dependen las fases nuevas.
+Ninguna limpieza ni backfill se ejecuta antes de leer esta salida:
+
+- **F-S / F-CAT** — cuánto del catálogo tiene SKU, barcode y categoría propios. Es la
+  línea de base del backfill y lo que decide cuántos productos nacerían ``GEN-xxxx``.
+- **F-S.0** — cuántos NOMBRES distintos hay entre las ventas sin producto vinculado.
+  Ése es el tamaño real de la cola de vinculación: resolver N nombres una vez arregla
+  las N×k filas que los repiten. Más ``_customer_resolution`` y el conteo de maestros,
+  que dicen si el problema de clientes/proveedores es de datos o de contrato (F-E).
+- **F-O.3 / F-O.4** — el reparto de los pendientes de «Otros» por motivo × archivo, y
+  cuántos están REALMENTE vacíos. Si "todo vacío" no domina, la hipótesis de F-O.4 se
+  cae y la fase se rediseña en vez de forzarse.
+
+El tercer corte del Paso 0 no vive acá porque ya existe: la duplicación del catálogo la
+mide el dry-run del dedup, que persiste el plan sin tocar negocio —
+
+    DATABASE_URL='...' .venv/bin/python scripts/dedupe_products_by_name.py \
+        --tenant <uuid> --out plan.csv
 """
 
 import asyncio
@@ -145,6 +166,36 @@ async def run(
     print(f"  desactivados (deactivated_at IS NOT NULL): {prod['desactivados']}")
     print(f"  total filas: {prod['total']}")
 
+    # ── IDENTIDAD DE PRODUCTO (F-S / F-S.0) ──────────────────────────────────
+    # Cuánto del catálogo tiene código propio hoy: es la línea de base del
+    # backfill de SKU y lo que decide cuántos van a nacer con prefijo GEN.
+    ident = await conn.fetchrow(
+        "SELECT "
+        "  count(*) AS activos, "
+        "  count(*) FILTER (WHERE sku IS NOT NULL AND btrim(sku) <> '') AS con_sku, "
+        "  count(*) FILTER (WHERE barcode IS NOT NULL AND btrim(barcode) <> '') AS con_barcode, "
+        "  count(*) FILTER (WHERE category IS NOT NULL AND btrim(category) <> '') AS con_categoria "
+        "FROM products WHERE tenant_id=$1 AND is_active AND deactivated_at IS NULL",
+        tid,
+    )
+    _act = ident["activos"] or 1
+    print(f"\n  IDENTIDAD (sobre {ident['activos']} activos):")
+    print(f"    con SKU: {ident['con_sku']}  ({100 * ident['con_sku'] // _act}%)")
+    print(f"    con barcode: {ident['con_barcode']}")
+    print(f"    con categoría: {ident['con_categoria']}  "
+          f"→ sin categoría: {ident['activos'] - ident['con_categoria']} "
+          f"(nacerían GEN-xxxx si se numera antes de F-CAT)")
+    pcat = await conn.fetch(
+        "SELECT coalesce(nullif(btrim(category), ''), '(sin categoría)') AS category, "
+        "       count(*) AS n "
+        "FROM products WHERE tenant_id=$1 AND is_active AND deactivated_at IS NULL "
+        "GROUP BY 1 ORDER BY n DESC LIMIT 20",
+        tid,
+    )
+    print("    distribución por category (top 20):")
+    for r in pcat:
+        print(f"       {r['category']!r}: {r['n']}")
+
     # ── STOCK VALORIZADO ─────────────────────────────────────────────────────
     p(f"STOCK VALORIZADO  (tenant {tid})")
     stock = await conn.fetchrow(
@@ -173,6 +224,59 @@ async def run(
     )
     print(f"  total: {ventas['total']}")
     print(f"  con product_id NULL: {ventas['sin_product']}")
+
+    # ── F-S.0: el tamaño REAL del trabajo de vinculación ─────────────────────
+    # No son las filas sin producto: son los NOMBRES distintos que hay entre
+    # ellas. Resolver N nombres una vez arregla las N*k filas que los repiten.
+    nombres = await conn.fetchrow(
+        "SELECT count(DISTINCT lower(btrim(notes))) AS distintos "
+        "FROM sales_entries "
+        "WHERE tenant_id=$1 AND voided_at IS NULL AND product_id IS NULL "
+        "  AND notes IS NOT NULL AND btrim(notes) <> ''",
+        tid,
+    )
+    print(f"  → nombres DISTINTOS entre las ventas sin producto: {nombres['distintos']} "
+          f"(es el tamaño real de la cola de F-S.0)")
+    top_nombres = await conn.fetch(
+        "SELECT lower(btrim(notes)) AS nombre, count(*) AS n "
+        "FROM sales_entries "
+        "WHERE tenant_id=$1 AND voided_at IS NULL AND product_id IS NULL "
+        "  AND notes IS NOT NULL AND btrim(notes) <> '' "
+        "GROUP BY 1 ORDER BY n DESC LIMIT 15",
+        tid,
+    )
+    if top_nombres:
+        print("  top 15 nombres sin vincular (nombre → cuántas ventas):")
+        for r in top_nombres:
+            print(f"     {r['nombre']!r}: {r['n']}")
+
+    # ── F-E / F-I: cómo resolvió el cliente cada venta importada ─────────────
+    # matched = vinculó / anonymous = la fila no traía referencia (mostrador) /
+    # unresolved = traía una y no matcheó → «Local» con el dato crudo guardado.
+    cres = await conn.fetch(
+        "SELECT coalesce(custom_fields->>'_customer_resolution', '(sin marca)') AS r, "
+        "       count(*) AS n "
+        "FROM sales_entries WHERE tenant_id=$1 AND voided_at IS NULL "
+        "GROUP BY 1 ORDER BY n DESC",
+        tid,
+    )
+    print("  resolución de cliente (_customer_resolution):")
+    for r in cres:
+        print(f"     {r['r']}: {r['n']}")
+    maestros = await conn.fetchrow(
+        "SELECT "
+        "  (SELECT count(*) FROM customers WHERE tenant_id=$1) AS clientes, "
+        "  (SELECT count(*) FROM customers WHERE tenant_id=$1 "
+        "     AND coalesce(custom_fields->>'_sentinel','') = 'true') AS clientes_centinela, "
+        "  (SELECT count(*) FROM suppliers WHERE tenant_id=$1) AS proveedores, "
+        "  (SELECT count(*) FROM suppliers WHERE tenant_id=$1 "
+        "     AND coalesce(custom_fields->>'_sentinel','') = 'true') AS prov_centinela",
+        tid,
+    )
+    print(f"  maestros: clientes={maestros['clientes']} "
+          f"(centinela «Local»: {maestros['clientes_centinela']}) · "
+          f"proveedores={maestros['proveedores']} "
+          f"(centinela «No identificado»: {maestros['prov_centinela']})")
 
     # ── GASTOS ───────────────────────────────────────────────────────────────
     p(f"GASTOS  (expense_entries, voided_at IS NULL)  (tenant {tid})")
@@ -218,6 +322,90 @@ async def run(
         f"{r['suggested_entity']}={r['n']}" for r in by_entity
     ))
     print("  por status: " + ", ".join(f"{r['status']}={r['n']}" for r in by_status))
+
+    # ── F-O.3: POR QUÉ está cada fila acá ────────────────────────────────────
+    # `context_label` lo setean los 19 sitios de captura y la pantalla no lo
+    # muestra: 46 páginas de filas indistinguibles. Acá se ve el reparto real.
+    por_motivo = await conn.fetch(
+        "SELECT coalesce(u.context_label, '(sin motivo)') AS motivo, "
+        "       coalesce(f.original_filename, '(sin archivo)') AS archivo, "
+        "       count(*) AS n "
+        "FROM unclassified_records u "
+        "LEFT JOIN uploaded_files f ON f.id = u.uploaded_file_id "
+        "WHERE u.tenant_id=$1 AND u.status='PENDING' "
+        "GROUP BY 1, 2 ORDER BY n DESC LIMIT 30",
+        tid,
+    )
+    print("\n  PENDIENTES por motivo × archivo (top 30):")
+    for r in por_motivo:
+        print(f"     [{r['n']:>6}]  {r['archivo']}  ←  {r['motivo']}")
+
+    # ── F-O.4 (COMPUERTA): ¿cuántos de estos pendientes están realmente vacíos?
+    # Hipótesis a confirmar o refutar ANTES de escribir la limpieza: una fila
+    # 100% en blanco del xlsx se captura igual, porque `_capture_unclassified`
+    # chequea que el dict tenga CLAVES, no que sus valores tengan algo.
+    # Las claves reservadas (prefijo `__`) no cuentan como contenido: son
+    # metadata del sistema, no columnas del archivo.
+    vacios = await conn.fetchrow(
+        "WITH pend AS ("
+        "  SELECT id, row_data FROM unclassified_records "
+        "  WHERE tenant_id=$1 AND status='PENDING'"
+        "), val AS ("
+        "  SELECT p.id, kv.key AS k, coalesce(kv.value, '') AS v "
+        "  FROM pend p, LATERAL jsonb_each_text(p.row_data) AS kv(key, value) "
+        "  WHERE left(kv.key, 2) <> '__'"
+        ") "
+        "SELECT "
+        "  (SELECT count(*) FROM pend) AS pendientes, "
+        "  (SELECT count(*) FROM pend p WHERE NOT EXISTS ("
+        "     SELECT 1 FROM val v WHERE v.id = p.id)) AS sin_columnas, "
+        "  (SELECT count(*) FROM pend p WHERE EXISTS ("
+        "     SELECT 1 FROM val v WHERE v.id = p.id) AND NOT EXISTS ("
+        "     SELECT 1 FROM val v WHERE v.id = p.id "
+        "       AND btrim(replace(v.v, chr(160), ' ')) <> '')) AS todo_vacio, "
+        "  (SELECT count(*) FROM pend p WHERE EXISTS ("
+        "     SELECT 1 FROM val v WHERE v.id = p.id "
+        "       AND v.v <> '' AND btrim(replace(v.v, chr(160), ' ')) = '')"
+        "   AND NOT EXISTS ("
+        "     SELECT 1 FROM val v WHERE v.id = p.id "
+        "       AND btrim(replace(v.v, chr(160), ' ')) <> '')) AS solo_invisibles",
+        tid,
+    )
+    _p = vacios["pendientes"] or 1
+    print("\n  CONTENIDO REAL de los pendientes (compuerta de F-O.4):")
+    print(f"     pendientes: {vacios['pendientes']}")
+    print(f"     sin ninguna columna propia (dict vacío o sólo claves __): "
+          f"{vacios['sin_columnas']}")
+    print(f"     con columnas pero TODOS los valores vacíos: {vacios['todo_vacio']}  "
+          f"({100 * vacios['todo_vacio'] // _p}%)")
+    print(f"        ↳ de ésos, los que traen sólo espacios/invisibles: "
+          f"{vacios['solo_invisibles']}")
+    con_contenido = vacios["pendientes"] - vacios["todo_vacio"] - vacios["sin_columnas"]
+    print(f"     CON contenido real: {con_contenido}")
+    print("     → si 'todo vacío' no domina, la hipótesis de F-O.4 se cae y la "
+          "fase se rediseña.")
+
+    # Muestra de pendientes CON contenido real: los vacíos ya están contados
+    # arriba y no hay nada que mirar en ellos. Lo que importa es qué son los
+    # que SÍ traen datos — si son ventas o gastos legibles, el problema no es
+    # de filas en blanco sino de clasificación, y la fase cambia.
+    muestra = await conn.fetch(
+        "SELECT u.context_label, u.suggested_entity, u.row_data "
+        "FROM unclassified_records u "
+        "WHERE u.tenant_id=$1 AND u.status='PENDING' AND EXISTS ("
+        "  SELECT 1 FROM jsonb_each_text(u.row_data) AS kv(k, v) "
+        "  WHERE left(kv.k, 2) <> '__' "
+        "    AND btrim(replace(coalesce(kv.v, ''), chr(160), ' ')) <> '') "
+        "ORDER BY u.created_at DESC LIMIT 5",
+        tid,
+    )
+    print("\n     muestra de pendientes CON contenido real (hasta 5):")
+    for m in muestra:
+        rd = _summary_dict(m["row_data"]) or {}
+        visible = {k: v for k, v in rd.items() if not k.startswith("__")}
+        print(f"\n     · motivo={m['context_label']!r} entity={m['suggested_entity']}")
+        print(f"       row_data (sin claves __): "
+              f"{json.dumps(visible, ensure_ascii=False)[:300]}")
 
     # ── UPLOADED FILES ───────────────────────────────────────────────────────
     p(f"UPLOADED FILES  (tenant {tid})")
