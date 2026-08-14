@@ -35,9 +35,15 @@ import json
 import os
 import sys
 from collections import Counter
+from typing import Any
 
 import asyncpg
 from _db import normalize_dsn
+
+# `app` importable desde scripts/ (sys.path[0] es el dir del script, no el CWD):
+# la forma de la cola de F-S.0 se mide con el MISMO motor que usa el importador,
+# no con una aproximación. Mismo patrón que dedupe_products_by_name.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_EMAIL = "agustinalahora4@gmail.com"
 
@@ -126,6 +132,109 @@ async def resolve_tenant(
             f"{k}={v}" for k, v in dict(t).items() if k != "tenant_id"
         )[:400])
     return str(tid)
+
+
+async def _forma_de_la_cola(conn: asyncpg.Connection, tid: str) -> None:
+    """F-S.0: qué forma tiene la cola de vinculación venta↔producto.
+
+    No alcanza con saber CUÁNTOS nombres distintos hay sin vincular: hay que
+    saber si el catálogo tiene con qué resolverlos. Cada nombre se clasifica con
+    **el mismo motor que usa el importador** (``_resolve_product``: nombre
+    normalizado exacto → intersección conservadora de tokens), no con una
+    aproximación en SQL — si acá se usara otra normalización, el informe diría
+    que algo resuelve cuando el importador no lo resuelve.
+
+    La lectura que importa:
+
+    - ``exacto`` / ``token único`` — el motor SÍ los resolvería hoy. Que estén
+      sin vincular no es falta de vocabulario: es que algo del import no linkeó.
+      Se arreglan re-resolviendo, sin trabajo humano.
+    - ``varios candidatos`` — el motor se abstiene a propósito. Es la cola real:
+      una persona tiene que elegir.
+    - ``sin candidato`` — el producto no está en el catálogo. Ni vincular ni
+      adivinar: o se da de alta, o la venta queda sin producto.
+    """
+    from app.application.services.ingestion_import_service import (  # noqa: PLC0415
+        _normalize_name,
+        _product_name_tokens,
+    )
+
+    catalogo = await conn.fetch(
+        "SELECT id, name FROM products "
+        "WHERE tenant_id=$1 AND is_active AND deactivated_at IS NULL",
+        tid,
+    )
+    sin_vincular = await conn.fetch(
+        "SELECT lower(btrim(notes)) AS nombre, count(*) AS n "
+        "FROM sales_entries "
+        "WHERE tenant_id=$1 AND voided_at IS NULL AND product_id IS NULL "
+        "  AND notes IS NOT NULL AND btrim(notes) <> '' "
+        "GROUP BY 1",
+        tid,
+    )
+    if not sin_vincular:
+        return
+
+    by_name: dict[str, set[Any]] = {}
+    by_token: dict[str, set[Any]] = {}
+    for prod in catalogo:
+        norm = _normalize_name(prod["name"] or "")
+        if norm:
+            by_name.setdefault(norm, set()).add(prod["id"])
+        for tok in _product_name_tokens(prod["name"] or ""):
+            by_token.setdefault(tok, set()).add(prod["id"])
+
+    buckets: Counter[str] = Counter()
+    ventas: Counter[str] = Counter()
+    ejemplos: dict[str, list[str]] = {}
+    for row in sin_vincular:
+        nombre = row["nombre"]
+        n = row["n"]
+        norm = _normalize_name(nombre)
+        hit = by_name.get(norm)
+        if hit:
+            bucket = "exacto" if len(hit) == 1 else "exacto ambiguo"
+        else:
+            # Espejo exacto del tier 3 de `_resolve_product`: intersección de los
+            # productos que comparten CADA token; acepta sólo si queda uno.
+            candidatos: set[Any] | None = None
+            for tok in sorted(_product_name_tokens(nombre), key=len, reverse=True):
+                ids = by_token.get(tok)
+                if not ids:
+                    continue
+                candidatos = set(ids) if candidatos is None else (candidatos & ids)
+                if not candidatos:
+                    break
+            if candidatos is None or not candidatos:
+                bucket = "sin candidato"
+            elif len(candidatos) == 1:
+                bucket = "token unico"
+            else:
+                bucket = "varios candidatos"
+        buckets[bucket] += 1
+        ventas[bucket] += n
+        ejemplos.setdefault(bucket, [])
+        if len(ejemplos[bucket]) < 4:
+            ejemplos[bucket].append(f"{nombre!r} (×{n})")
+
+    total_nombres = sum(buckets.values())
+    print(f"\n  FORMA DE LA COLA DE F-S.0 (motor real, {len(catalogo)} productos "
+          f"de catálogo vs {total_nombres} nombres):")
+    for bucket in ("exacto", "token unico", "exacto ambiguo",
+                   "varios candidatos", "sin candidato"):
+        if not buckets.get(bucket):
+            continue
+        pct = 100 * buckets[bucket] // max(total_nombres, 1)
+        print(f"     {bucket:<18} {buckets[bucket]:>5} nombres ({pct:>3}%) "
+              f"→ {ventas[bucket]:>5} ventas")
+        print(f"        ej: {', '.join(ejemplos[bucket])}")
+    resolubles = buckets.get("exacto", 0) + buckets.get("token unico", 0)
+    if resolubles:
+        print(f"     ⚠ {resolubles} nombres los resolvería el motor de HOY: estar sin "
+              f"vincular no es vocabulario faltante, es que el import no linkeó.")
+    humano = buckets.get("varios candidatos", 0) + buckets.get("exacto ambiguo", 0)
+    print(f"     → cola humana real (hay que elegir): {humano} nombres · "
+          f"sin candidato en el catálogo: {buckets.get('sin candidato', 0)}")
 
 
 async def run(
@@ -249,6 +358,8 @@ async def run(
         print("  top 15 nombres sin vincular (nombre → cuántas ventas):")
         for r in top_nombres:
             print(f"     {r['nombre']!r}: {r['n']}")
+
+    await _forma_de_la_cola(conn, tid)
 
     # ── F-E / F-I: cómo resolvió el cliente cada venta importada ─────────────
     # matched = vinculó / anonymous = la fila no traía referencia (mostrador) /
