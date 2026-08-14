@@ -15,13 +15,29 @@ Fusionarlos —que es lo que proponía el plan original con la equivalencia
 esta hoja descuentan stock" declare **en silencio** que su catálogo genera COGS
 y baja de caja. Son dos decisiones y el usuario toma las dos por separado.
 
-**El default nunca es ``historical_replay``.** Aplicar el histórico
-automáticamente es peligroso cuando el archivo puede estar incompleto o
-solaparse con saldos ya cargados: un archivo real de 10.931 ventas movería el
-inventario entero en una sola confirmación, y la parte que ya estaba contada en
-el saldo de apertura se descontaría dos veces. Véktor calcula el impacto y lo
-muestra; el replay es una elección explícita por hoja. La regla está clavada en
-``test_historical_replay_nunca_es_un_default``.
+**F-F.4 — el eje dejó de ser una pregunta.** Hasta F-F.3 había cuatro modos y el
+default de todo lo que movía unidades era ``informational``: se calculaba el
+impacto y el stock no se tocaba hasta que el usuario lo pidiera hoja por hoja.
+Eso desapareció, y no por conveniencia. Dos cosas lo hacen posible, y si alguna
+se cae hay que volver atrás:
+
+1. **El ancla del catálogo se aplica antes de todos los eventos.** Un catálogo
+   declara un absoluto sin fecha de negocio (``inventory_temporal_service`` lo
+   documenta), así que entra como saldo de apertura y la cronología gobierna sólo
+   a compras y ventas entre sí. Ésa es la pieza que faltaba en el incidente don
+   pedro, donde la parte ya contada en el saldo se descontó dos veces.
+2. **El replay ordena por FECHA, no por solapa** (F-F.1): las compras del propio
+   archivo entran como créditos datados, así que una compra del 20/03 no respalda
+   una venta del 10/03.
+
+Con las dos puestas, seguir preguntando «¿estas ventas modifican el stock?» era
+pedirle al usuario que decidiera algo que el contenido de la hoja ya responde:
+si es compra o venta de mercadería, mueve inventario. El eje pasa a **derivarse**
+de la entidad efectiva de la hoja y de los campos que el mapeo cubre.
+
+**Lo que el usuario sigue eligiendo** (y esto NO se toca acá): a qué sección
+corresponde cada hoja, el mapeo de cada columna, y ``stock_treatment`` — que es
+la pregunta contable de al lado, no ésta.
 """
 
 from __future__ import annotations
@@ -30,50 +46,57 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-#: Calcula el impacto y lo reporta, SIN tocar stock. Default de todo lo que
-#: mueve unidades: es el único modo que no puede arruinar un inventario.
-INFORMATIONAL = "informational"
-#: Compras suman y ventas restan: el stock final refleja la historia del archivo.
-#: NUNCA por default — sólo por elección explícita del usuario para esa hoja.
+#: Compras suman y ventas restan: el stock refleja la historia del archivo.
+#: Es lo que le pasa a toda hoja de compra o venta de mercadería.
 HISTORICAL_REPLAY = "historical_replay"
 #: El archivo declara el saldo ABSOLUTO final (un catálogo con el stock de hoy).
 #: No es una secuencia de movimientos: es una foto.
 CURRENT_SNAPSHOT = "current_snapshot"
-#: La cantidad es un dato transaccional que no habla de inventario (una venta de
-#: servicios, un resumen contable, el libro diario).
-NO_INVENTORY = "no_inventory"
+
+#: Los dos modos que F-F.4 eliminó, y que no se reemplazan por otro modo.
+#:
+#: ``informational`` era una DECISIÓN («calculá el impacto pero no toques el
+#: stock») y se elimina porque dejó de existir como decisión. ``no_inventory``
+#: era otra cosa: un modo que representaba la AUSENCIA de inventario, y su
+#: reemplazo no es un valor sino ``None`` — la hoja no tiene efecto porque no
+#: habla de unidades, y eso se dice no diciendo nada.
+#:
+#: Se siguen aceptando en el payload y se DESCARTAN (ver
+#: ``discard_legacy_overrides``): Railway y Vercel redespliegan en paralelo y sin
+#: orden garantizado, así que durante la ventana de deploy un frontend viejo los
+#: manda contra un backend nuevo. Rechazarlos tiraría abajo el confirm por un
+#: valor que ya no significa nada.
+LEGACY_EFFECTS: frozenset[str] = frozenset({"informational", "no_inventory"})
 
 #: Clave de ``custom_fields`` donde una venta importada guarda de QUÉ HOJA vino
 #: (F-H3.d.2). No existe otro link: ``source_row_ref`` es el sha256 del ancla y no
 #: se puede volver atrás. Sin esto el replay sólo podría aplicarse al archivo
-#: entero, y un libro con una hoja `informational` y otra `historical_replay`
-#: terminaría aplicando las dos — o sea, ignorando lo que el usuario declaró.
+#: entero, y un libro con una hoja de servicios y otra de mercadería terminaría
+#: descontando las dos.
 IMPORT_CONTEXT_FIELD = "_import_context"
 
 InventoryEffect = Literal[
-    "informational",
     "historical_replay",
     "current_snapshot",
-    "no_inventory",
 ]
 
-VALID_EFFECTS: frozenset[str] = frozenset(
-    {INFORMATIONAL, HISTORICAL_REPLAY, CURRENT_SNAPSHOT, NO_INVENTORY}
-)
+VALID_EFFECTS: frozenset[str] = frozenset({HISTORICAL_REPLAY, CURRENT_SNAPSHOT})
 
 #: Etiquetas para los mensajes de error y la UI. En castellano, describiendo lo
 #: que PASA con el stock, no el nombre técnico del modo.
 #:
 #: **El alcance es la HOJA, no el archivo.** Un catálogo en `current_snapshot` y
-#: una hoja de ventas en `informational` conviven en el mismo libro: el catálogo
-#: deja el stock en su saldo y las ventas no lo descuentan. Decir "este archivo no
-#: modifica el inventario" sería falso —lo modificó la otra hoja—, así que las
+#: una hoja de ventas en `historical_replay` conviven en el mismo libro: el
+#: catálogo deja el stock en su saldo y las ventas lo descuentan desde ahí. Decir
+#: algo sobre "este archivo" sería falso para alguna de las dos, así que las
 #: etiquetas hablan de las filas de ESTA hoja.
+#:
+#: Están en INDICATIVO y no en infinitivo: desde F-F.4 describen lo que va a
+#: pasar, no una opción que se ofrece. "Aplicar la historia" era el nombre de un
+#: botón; ya no hay botón.
 EFFECT_LABELS: dict[str, str] = {
-    INFORMATIONAL: "Estas filas no modificarán el inventario (se calcula el impacto y se muestra)",
-    HISTORICAL_REPLAY: "Aplicar la historia: las compras suman y las ventas restan",
+    HISTORICAL_REPLAY: "Las compras suman y las ventas restan del inventario",
     CURRENT_SNAPSHOT: "El archivo declara el stock actual (saldo absoluto)",
-    NO_INVENTORY: "Estas cantidades no afectan el inventario",
 }
 
 #: Campos de mapeo que identifican al producto de una fila. Sin ninguno de estos,
@@ -86,7 +109,7 @@ _QUANTITY_FIELDS: frozenset[str] = frozenset({"quantity", "stock_units"})
 
 @dataclass(frozen=True)
 class SheetInventoryProfile:
-    """Lo que se sabe de una hoja para elegir su default. Sin sesión ni ORM."""
+    """Lo que se sabe de una hoja para deducir su efecto. Sin sesión ni ORM."""
 
     context_id: str
     #: `sale` | `expense` | `product` | `customer` | `supplier` | None
@@ -113,85 +136,144 @@ class SheetInventoryProfile:
         return self.identifies_product and self.has_quantity
 
 
-def default_effect_for(profile: SheetInventoryProfile) -> str:
-    """El modo que Véktor propone para una hoja. Nunca ``historical_replay``.
+def default_effect_for(profile: SheetInventoryProfile) -> str | None:
+    """Qué le hace al inventario esta hoja. ``None`` = no habla de inventario.
 
-    - Un **catálogo** declara el stock que hay hoy → ``current_snapshot``. Es una
-      foto, no una secuencia: aplicarle un replay sería leer un saldo como si
-      fuera un movimiento.
-    - Ventas y compras **históricas** → ``informational``. Se calcula el impacto
-      y se muestra; el usuario decide si lo aplica.
-    - Todo lo demás —una venta sin producto, un resumen contable, una hoja de
-      maestros— → ``no_inventory``.
+    - Un **catálogo** con cantidad declara el stock que hay hoy →
+      ``current_snapshot``. Es una foto, no una secuencia: aplicarle un replay
+      sería leer un saldo como si fuera un movimiento.
+    - Compra o venta de **mercadería** —producto identificable y cantidad— →
+      ``historical_replay``. Es la función central: lo que se compró suma y lo que
+      se vendió resta, en el orden en que pasó.
+    - Todo lo demás —una venta de servicios sin producto, una lista de precios,
+      una hoja de gastos fijos, un maestro de clientes— → ``None``. No es un modo
+      que dice "no toques el stock": es que la pregunta no aplica.
+
+    El ``None`` NO es un descuido de tipos: es lo que reemplaza a ``no_inventory``
+    y lo que permite que la pantalla no muestre una línea sobre inventario en una
+    hoja que no habla de eso.
     """
     if profile.entity == "product":
         # Un catálogo SIN cantidad es una lista de precios: no declara saldo.
-        return CURRENT_SNAPSHOT if profile.has_quantity else NO_INVENTORY
+        return CURRENT_SNAPSHOT if profile.has_quantity else None
     if profile.entity in ("sale", "expense") and profile.moves_units:
-        return INFORMATIONAL
-    return NO_INVENTORY
+        return HISTORICAL_REPLAY
+    return None
 
 
 def options_for(profile: SheetInventoryProfile) -> list[str]:
-    """Modos que tiene sentido ofrecerle al usuario para ESTA hoja.
+    """Lo que la pantalla muestra para esta hoja: su efecto, o nada.
 
-    `resolve_inventory_effects` valida el valor y que la hoja exista, pero no la
-    combinación: elegir `current_snapshot` en una hoja de ventas entra sin 422 y
-    hace cualquier cosa. Ofrecer los cuatro modos siempre traslada al usuario una
-    decisión que el archivo ya responde — la hoja de ventas no declara un saldo
-    absoluto, y un catálogo no tiene ventas que restar.
+    **Ya no ofrece: explica.** Hasta F-F.3 devolvía entre dos y tres modos y el
+    usuario elegía. Desde F-F.4 el efecto se deriva del contenido de la hoja, así
+    que la lista tiene exactamente un elemento —el efecto— o ninguno.
 
-    Acotar acá y no en la UI es lo mismo que ya se hizo con el catálogo de campos:
-    la pantalla renderiza lo que el dominio ofrece. Una copia en el frontend se
-    desactualiza y termina mostrando opciones que el importador no honra.
-
-    El default de la hoja SIEMPRE está en la lista: sin eso, la pantalla no podría
-    representar el estado en el que el archivo entra si el usuario no toca nada.
+    Se conserva como LISTA, y no se reemplaza por el escalar, por una razón
+    concreta: `/inventory-effects` la sirve tal cual y el frontend la consume. Un
+    frontend viejo (la ventana de deploy, que en este repo es real porque Vercel y
+    Railway redespliegan en paralelo) renderiza una lista de un elemento como una
+    línea informativa, que es exactamente lo correcto. Cambiar la forma lo
+    rompería para no ganar nada.
     """
     default = default_effect_for(profile)
-    if not profile.moves_units and profile.entity != "product":
-        # Nada que decidir: sin producto o sin cantidad, estas filas no hablan de
-        # unidades. Se muestra el modo y no se ofrece cambiarlo.
-        return [default]
-    if profile.entity == "product":
-        # Un catálogo declara una foto del stock. "Aplicar la historia" no aplica:
-        # un saldo no es una secuencia de movimientos.
-        opciones = [CURRENT_SNAPSHOT, NO_INVENTORY]
-    else:
-        # Ventas y compras: informar el impacto (default) o aplicarlo. Declarar un
-        # saldo absoluto desde un movimiento no tiene sentido.
-        opciones = [INFORMATIONAL, HISTORICAL_REPLAY, NO_INVENTORY]
-    return opciones if default in opciones else [default, *opciones]
+    return [] if default is None else [default]
+
+
+@dataclass(frozen=True)
+class ReplayScope:
+    """A qué ventas de un archivo hay que aplicarles el descuento.
+
+    ``context_ids=None`` significa **todas las ventas del archivo**, y no es lo
+    mismo que la lista vacía: el archivo sin hojas identificadas lleva su efecto
+    bajo la clave ``""`` y el importador NO estampa esa hoja en sus ventas
+    (``_ctx_inline`` la descarta por falsy), así que filtrar por ``[""]`` no
+    matchearía ninguna y el descuento se perdería en silencio.
+    """
+
+    corre: bool
+    context_ids: list[str] | None
+
+
+def replay_scope(effects: Mapping[str, str] | None) -> ReplayScope:
+    """Traduce los efectos resueltos al alcance del replay.
+
+    Vive acá y no en cada llamador porque son DOS —el confirm y la relectura— y
+    la traducción de la clave vacía es justo la clase de detalle que se
+    reimplementa distinto en el segundo. Misma razón por la que F-F.3 compartió
+    ``run_inventory_replay`` en vez de copiarlo.
+    """
+    hojas = [cid for cid, ef in (effects or {}).items() if ef == HISTORICAL_REPLAY]
+    if not hojas:
+        return ReplayScope(corre=False, context_ids=[])
+    return ReplayScope(corre=True, context_ids=None if hojas == [""] else hojas)
 
 
 class InvalidInventoryEffectError(ValueError):
     """Valor o contexto inválido en el `inventory_effect` que mandó el cliente."""
 
 
+def discard_legacy_overrides(
+    overrides: Mapping[str, str] | None,
+) -> tuple[dict[str, str], list[str]]:
+    """Saca del payload los modos que F-F.4 eliminó. Devuelve ``(limpios, descartados)``.
+
+    Se separa de ``resolve_inventory_effects`` —que sigue siendo estricta— porque
+    son dos situaciones distintas: un modo DESCONOCIDO es un bug del cliente y
+    tiene que explotar; ``informational``/``no_inventory`` son un cliente viejo
+    durante la ventana de deploy y descartarlos no pierde ninguna intención que
+    siga existiendo (dejaron de ser decisiones).
+
+    El caller loguea los descartados: acá no, porque este módulo es puro.
+    """
+    if not overrides:
+        return {}, []
+    limpios = {k: v for k, v in overrides.items() if v not in LEGACY_EFFECTS}
+    descartados = [k for k, v in overrides.items() if v in LEGACY_EFFECTS]
+    return limpios, descartados
+
+
 def resolve_inventory_effects(
     profiles: list[SheetInventoryProfile],
     overrides: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Modo EFECTIVO por hoja: el default de Véktor, pisado por lo que eligió el usuario.
+    """Efecto EFECTIVO por hoja. Las hojas sin efecto NO entran en el dict.
 
-    Levanta ``InvalidInventoryEffectError`` si un override trae un modo desconocido o
-    apunta a una hoja que no existe en el archivo. Un override que no se puede
-    honrar no se ignora en silencio: significa que el usuario cree haber decidido
-    algo sobre el inventario que no va a pasar.
+    Que la hoja sin efecto se omita (en vez de mapear a un valor) es lo que hace
+    que ``"sin dato"`` deje de ser ambiguo aguas abajo: hasta F-F.3 significaba a
+    la vez «caller viejo que no mandó el modo» y «hoja que no habla de
+    inventario», y el recorder tenía que adivinar cuál.
+
+    Los ``overrides`` sobreviven por compatibilidad de API, pero ya no pueden
+    cambiar nada: el efecto se deriva, así que lo único que un override puede
+    hacer es coincidir. Se levanta ``InvalidInventoryEffectError`` si trae un modo
+    desconocido, si apunta a una hoja que no existe, o si **contradice** el efecto
+    derivado — los tres casos significan que el cliente cree haber decidido algo
+    sobre el inventario que no va a pasar, y eso no se ignora en silencio. Los
+    modos legacy hay que sacarlos ANTES con ``discard_legacy_overrides``.
     """
-    resolved = {p.context_id: default_effect_for(p) for p in profiles}
+    resolved = {
+        p.context_id: efecto
+        for p in profiles
+        if (efecto := default_effect_for(p)) is not None
+    }
     if not overrides:
         return resolved
+    conocidos = {p.context_id for p in profiles}
     for context_id, effect in overrides.items():
         if effect not in VALID_EFFECTS:
             raise InvalidInventoryEffectError(
                 f"«{effect}» no es un efecto de inventario válido. "
                 f"Opciones: {', '.join(sorted(VALID_EFFECTS))}."
             )
-        if context_id not in resolved:
+        if context_id not in conocidos:
             raise InvalidInventoryEffectError(
                 f"El efecto de inventario apunta a una hoja que no está en el archivo "
                 f"(«{context_id}»)."
             )
-        resolved[context_id] = effect
+        if resolved.get(context_id) != effect:
+            raise InvalidInventoryEffectError(
+                f"El efecto de inventario de «{context_id}» ya no se elige: se deduce "
+                f"de lo que la hoja contiene. Si es compra o venta de mercadería, mueve "
+                f"el inventario; si no, no habla de inventario."
+            )
     return resolved

@@ -1,10 +1,9 @@
 """F-H3.d — la venta importada tiene que saber de qué hoja vino.
 
 Sin esto el replay sólo podría aplicarse al archivo entero. Un libro con una hoja
-de ventas viejas marcada `informational` y otra de ventas del mes marcada
-`historical_replay` terminaría descontando las dos, que es exactamente lo que el
-eje por hoja vino a evitar. `source_row_ref` no sirve para reconstruirlo: es el
-sha256 del ancla y no se puede volver atrás (V18).
+de servicios y otra de mercadería terminaría descontando las dos, que es
+exactamente lo que el eje por hoja vino a evitar. `source_row_ref` no sirve para
+reconstruirlo: es el sha256 del ancla y no se puede volver atrás (V18).
 
 Los DOS caminos de inserción tienen que estamparlo. El de una sola tabla no
 recorre contextos —no tiene por qué, hay uno solo—, y por eso venía perdiendo el
@@ -24,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
-from app.domain.inventory_effect import IMPORT_CONTEXT_FIELD
+from app.domain.inventory_effect import HISTORICAL_REPLAY, IMPORT_CONTEXT_FIELD
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
@@ -110,7 +109,7 @@ class TestLaVentaGuardaSuHoja:
             {"ventas": True},
             context_mappings={_VENTAS: _MAPPING_VENTAS},
             context_confirmed={_VENTAS: True},
-            inventory_effect={_VENTAS: "informational"},
+            inventory_effect={_VENTAS: HISTORICAL_REPLAY},
         )
         await db_session.flush()
 
@@ -137,7 +136,7 @@ class TestLaVentaGuardaSuHoja:
             summary,
             {"ventas": True},
             column_mappings=_MAPPING_VENTAS,
-            inventory_effect={_TABLA: "informational"},
+            inventory_effect={_TABLA: HISTORICAL_REPLAY},
         )
         await db_session.flush()
 
@@ -161,14 +160,17 @@ class TestLaVentaGuardaSuHoja:
 
 
 class TestElEfectoDeclaradoLlegaALaProyeccion:
-    async def test_una_sola_tabla_honra_no_inventory(
+    async def test_una_sola_tabla_honra_la_hoja_sin_efecto(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """`no_inventory` en un archivo plano tiene que sacar la fila de la proyección.
+        """Una hoja AUSENTE del dict de efectos sale de la proyección.
 
         Es el caso que delata el bug: sin pasarle el contexto al registrador, la
-        hoja caía al default y el producto aparecía igual en el impacto, con el
-        usuario habiendo declarado lo contrario.
+        hoja caía al default y el producto aparecía igual en el impacto.
+
+        F-F.4 cambió cómo se dice «esta hoja no habla de inventario»: antes era el
+        modo `no_inventory`, ahora es no estar en el dict. Lo que se prueba sigue
+        siendo lo mismo — que el camino plano MIRE el contexto declarado.
         """
         await _crear_producto(db_session, sample_tenant)
         summary = {
@@ -186,16 +188,20 @@ class TestElEfectoDeclaradoLlegaALaProyeccion:
             summary,
             {"ventas": True},
             column_mappings=_MAPPING_VENTAS,
-            inventory_effect={_TABLA: "no_inventory"},
+            # Vacío = ninguna hoja de este archivo mueve unidades. NO se puede
+            # probar con `{"otra_hoja": ...}`: el camino plano adopta como propia
+            # la única clave del dict (`_ctx_inline`), así que un dict de un
+            # elemento se aplicaría a esta hoja aunque nombre a otra.
+            inventory_effect={},
         )
 
         assert counts["ventas"] == 1
         assert counts["impacto_inventario"] == []
 
-    async def test_control_sin_declaracion_la_fila_si_proyecta(
+    async def test_control_con_la_hoja_declarada_la_fila_si_proyecta(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """Control del anterior: con el default, la misma fila SÍ entra al impacto.
+        """Control del anterior: declarada, la misma fila SÍ entra al impacto.
 
         Sin esto, "no aparece en el impacto" no probaría nada — podría no aparecer
         porque el producto no resolvió o porque la proyección no corre en este camino.
@@ -216,7 +222,7 @@ class TestElEfectoDeclaradoLlegaALaProyeccion:
             summary,
             {"ventas": True},
             column_mappings=_MAPPING_VENTAS,
-            inventory_effect={_TABLA: "informational"},
+            inventory_effect={_TABLA: HISTORICAL_REPLAY},
         )
 
         assert [p["product_name"] for p in counts["impacto_inventario"]] == [_PRODUCTO]
@@ -351,7 +357,7 @@ class TestVentaSinRespaldoNoEntra:
             db_session,
             sample_tenant,
             _summary_dos_ventas(fecha_primera="2024-03-03", fecha_segunda="2024-03-10"),
-            {_VENTAS: "informational"},
+            {},
         )
         await db_session.flush()
 
@@ -489,16 +495,17 @@ class TestElGateTambienCorreEnElArchivoPlano:
         db: AsyncSession,
         tenant: Tenant,
         summary: dict[str, Any],
-        efecto: str,
+        efecto: str | None,
         confirmados: dict[str, bool] | None = None,
     ) -> dict[str, Any]:
+        """`efecto=None` = la hoja no habla de inventario (no figura en el dict)."""
         return await importer.insert_confirmed_data(
             db,
             tenant.tenant_id,
             summary,
             confirmados or {"ventas": True},
             column_mappings=_MAPPING_VENTAS,
-            inventory_effect={_TABLA: efecto},
+            inventory_effect={_TABLA: efecto} if efecto else {},
         )
 
     async def test_manda_a_otros_la_que_no_se_puede_cubrir(
@@ -517,34 +524,39 @@ class TestElGateTambienCorreEnElArchivoPlano:
             "%Y-%m-%d"
         ) == "2024-03-03"
 
-    async def test_con_el_default_entran_las_dos(
+    async def test_si_la_hoja_no_habla_de_inventario_entran_las_dos(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
+        """El control: el gate corre por HOJA, no siempre.
+
+        Antes acá decía "con el default", porque el default no aplicaba la
+        historia. Desde F-F.4 el default de una hoja de mercadería SÍ la aplica, y
+        la única forma de que el gate no corra es que la hoja no hable de unidades.
+        """
         await _crear_producto(db_session, sample_tenant, stock=10)
 
         counts = await self._importar(
-            db_session, sample_tenant, self._summary("6", "6"), "informational"
+            db_session, sample_tenant, self._summary("6", "6"), None
         )
         await db_session.flush()
 
         assert counts["ventas"] == 2
         assert counts.get("ventas_sin_stock", 0) == 0
 
-    async def test_si_el_archivo_tambien_carga_productos_degrada_y_no_dice_que_aplico(
+    async def test_que_el_archivo_tambien_cargue_productos_ya_no_apaga_el_gate(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """F-H3.d.6 — el respaldo del importador, no el camino normal.
+        """F-F — acá vivía la degradación a `informational` (F-H3.d.6).
 
-        No hay pasadas separadas acá: el stock que el archivo declara todavía no
-        existe cuando el gate mira, así que rechazaría ventas contra un saldo que el
-        propio archivo está por cargar. Ese archivo el confirm lo rechaza con 422
-        antes de tomar el lease (ver `test_ingestion_replay_no_gateable.py`); si
-        igual llega hasta acá —el confirm mira el mapeo declarado y el importador
-        las columnas ya resueltas— la hoja se degrada a `informational`.
+        Mientras el gate miraba un saldo estático, un archivo que además declaraba
+        stock no se podía validar: el saldo contra el cual hacerlo lo cargaba el
+        propio archivo. Se degradaba la hoja y las dos ventas entraban.
 
-        Antes se abstenía y seguía marcada como `historical_replay`: las ventas sin
-        respaldo entraban a los libros igual y el import se reportaba como un replay.
-        Lo que se afirma acá es lo segundo — que NO se reporta como replay aplicado.
+        Ahora las compras del archivo entran como créditos datados, así que la
+        degradación desapareció junto con su contador. El producto de este caso ya
+        existe con 10 unidades y el archivo no declara compras, de modo que el gate
+        corre con ese saldo: de las dos ventas de 6 entra la primera y la segunda
+        queda en «Otros».
         """
         await _crear_producto(db_session, sample_tenant, stock=10)
         summary = self._summary("6", "6")
@@ -559,12 +571,8 @@ class TestElGateTambienCorreEnElArchivoPlano:
         )
         await db_session.flush()
 
-        assert counts["replay_degradado"] == 1
-        # La degradación tiene que verse en el contador que el confirm traza: si
-        # dijera 1, la traza afirmaría un replay que no ocurrió.
-        assert counts["hojas_con_replay"] == 0
-        assert "replay_sin_gatear" not in counts
-        # El import se preserva entero (no se aborta) y ninguna venta se rechaza:
-        # sin saldo previo confiable, rechazar sería inventar el criterio.
-        assert counts["ventas"] == 2
-        assert counts.get("ventas_sin_stock", 0) == 0
+        assert "replay_degradado" not in counts
+        # El replay se reporta como lo que es: una hoja que sí lo aplicó.
+        assert counts["hojas_con_replay"] == 1
+        assert counts["ventas"] == 1
+        assert counts["ventas_sin_stock"] == 1

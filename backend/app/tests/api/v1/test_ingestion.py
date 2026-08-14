@@ -670,7 +670,15 @@ class TestConfirmEndpoint:
         data = response.json()
         assert data["status"] == PROCESSING_STATUS_DONE
         assert "recalculada" in data["message"]
-        mock_score_trigger.assert_called_once()
+        # El confirm ya NO habla con el broker dentro del handler: encolar ahí
+        # hacía esperar al usuario y, peor, salía con la transacción abierta (el
+        # worker abre su propia sesión y podía leer el estado previo al import).
+        # Ahora el encolado se agenda en el `after_commit` y corre después de la
+        # respuesta — camino que este harness no puede observar, porque el
+        # fixture `client` pisa `get_db_session` por una sesión que no comitea.
+        # El contrato está cubierto en `test_score_trigger_after_commit.py`; acá
+        # lo que se vigila es que no haya vuelto una llamada en línea.
+        mock_score_trigger.assert_not_called()
 
     async def test_confirm_wrong_status_returns_409(
         self,
@@ -3325,7 +3333,7 @@ class TestEfectoDeInventarioPorHoja:
             body["inventory_effect"] = inventory_effect
         return body
 
-    async def test_el_default_queda_en_la_traza_sin_que_el_cliente_lo_mande(
+    async def test_el_efecto_deducido_queda_en_la_traza(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
@@ -3333,10 +3341,10 @@ class TestEfectoDeInventarioPorHoja:
         sample_tenant: Tenant,
         mock_score_trigger: unittest.mock.MagicMock,
     ) -> None:
-        """El confirm viejo (sin el campo) sigue andando y deja dicho qué se aplicó.
+        """El confirm sin el campo anda, y deja dicho qué se aplicó.
 
-        El default no viaja en el payload, así que sin esto no habría forma de
-        saber después por qué el stock quedó como quedó.
+        Desde F-F.4 el efecto NUNCA viaja en el payload —se deduce—, así que la
+        traza es el único lugar donde queda por qué el stock quedó como quedó.
         """
         record = await self._archivo(db_session, sample_tenant)
 
@@ -3361,7 +3369,7 @@ class TestEfectoDeInventarioPorHoja:
         )
         assert eventos
         detalle = eventos[-1].detail or {}
-        assert detalle["inventory_effect"] == {"sheet:Ventas": "informational"}
+        assert detalle["inventory_effect"] == {"sheet:Ventas": "historical_replay"}
 
     async def test_una_hoja_de_ventas_no_toca_stock_por_default(
         self,
@@ -3443,9 +3451,9 @@ class TestEfectoDeInventarioPorHoja:
 
 
 class TestImpactoDeInventarioEnLaRespuesta:
-    """F-H3.c: el confirm devuelve el impacto proyectado para mostrarlo."""
+    """F-H3.c: el confirm devuelve el impacto por producto para mostrarlo."""
 
-    async def test_devuelve_el_impacto_por_producto_sin_tocar_stock(
+    async def test_devuelve_el_impacto_y_descuenta_sin_context_id(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
@@ -3515,9 +3523,15 @@ class TestImpactoDeInventarioEnLaRespuesta:
         assert fila["saldo_final"] == 6
         assert fila["primer_negativo_en"] is None
 
-        # El stock REAL no se movió: el default es `informational`.
+        # F-F.4 — y el stock REAL se movió, sin que el cliente declare nada.
+        #
+        # Este payload manda las columnas SIN `context_id`: es el camino que se
+        # quedaba afuera del descuento, porque el efecto sólo se resolvía cuando
+        # había hojas identificadas. Que acá queden 6 y no 10 es la prueba de que
+        # el flip alcanza también a ese envío — sin esto la regla estaría escrita
+        # y sería inalcanzable, que es el agujero exacto que ya costó F-H3.e.
         await db_session.refresh(producto)
-        assert producto.stock_units == 10
+        assert producto.stock_units == 6
 
     async def test_el_total_no_miente_cuando_la_lista_se_corta(
         self,

@@ -7,11 +7,15 @@ contable — que es lo que convertía un flete en un precio de compra.
 
 from __future__ import annotations
 
+import uuid
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
     RESOLUCION,
+    ColumnMappingService,
     _normalize_col,
     read_header,
 )
@@ -344,3 +348,357 @@ class TestLosTresCostosDeUnaCompra:
         assert r.outcome == "sin_evidencia"
         assert r.concept == "envio"
         assert r.duda
+
+
+class TestElMargenSeReconoceYSeExplica:
+    """F-B — el margen no tiene campo, y eso es una decisión, no un campo que falte.
+
+    Sale de restar el costo al precio de venta. Importarlo ADEMÁS como dato deja
+    dos números para la misma métrica sin ninguna regla para saber cuál gana —lo
+    que el invariante de una sola fuente por métrica viene a evitar—, así que la
+    columna se reconoce, se explica y se guarda como campo propio. Callarse era lo
+    único inaceptable: el usuario veía la columna caer a campo propio sin motivo.
+    """
+
+    @pytest.mark.parametrize(
+        "header",
+        ["Margen %", "% Margen", "Margen", "Margen bruto", "Margen de ganancia",
+         "Rentabilidad", "Ganancia", "Markup"],
+    )
+    def test_el_margen_de_un_catalogo_se_reconoce_sin_darle_campo(self, header: str) -> None:
+        r = _leer(header, "product")
+        assert r.outcome == "sin_evidencia"
+        assert r.target is None
+        assert r.concept == "margen"
+        # Y la explicación es la del margen, no el genérico "esta hoja no tiene un
+        # campo para eso": lo que hay que decir es POR QUÉ no lo va a tener.
+        assert r.duda
+        assert "lo calcula" in r.duda
+
+    @pytest.mark.parametrize("entidad", ["sale", "expense"])
+    def test_tambien_en_ventas_y_gastos_por_el_mismo_motivo(self, entidad: str) -> None:
+        """Una hoja de ventas con «Margen» plantea el mismo problema que un
+        catálogo: el número ya sale de los datos de la fila. Sin la entrada, la
+        pantalla decía «esta hoja no tiene un campo para eso», que insinúa que
+        alguna otra hoja sí — y ninguna lo tiene."""
+        r = _leer("Margen", entidad)
+        assert r.concept == "margen"
+        assert r.duda
+        assert "lo calcula" in r.duda
+
+    def test_margen_sobre_costo_es_un_margen_y_no_el_costo(self) -> None:
+        """El calificador no se lleva el campo. Antes de reconocer el concepto,
+        `costo` quedaba de núcleo y la columna entraba a `unit_cost_ars`: un
+        porcentaje pisando el costo unitario del producto."""
+        r = _leer("Margen sobre costo", "product")
+        assert r.concept == "margen"
+        assert r.target is None
+        assert "de_costo" in r.qualifiers
+
+
+class TestUnaHoraNoEsUnMonto:
+    """El bug más grave de esta tanda: `Hora de venta` resolvía a `amount`.
+
+    Pasaba porque `hora` no estaba en el vocabulario: el encabezado se quedaba sin
+    núcleo y ganaba el débil `venta`, que solo dice de qué operación habla. Una
+    columna con `14:35` entraba al campo de DINERO de la venta — la misma clase de
+    bug que F10 cerró cuando el costo entraba como precio de venta.
+    """
+
+    @pytest.mark.parametrize("entidad", ["sale", "expense", "product"])
+    def test_la_hora_de_una_venta_no_es_el_monto_de_la_venta(self, entidad: str) -> None:
+        r = _leer("Hora de venta", entidad)
+        assert r.concept == "hora"
+        assert r.target is None
+        # Y en particular ninguno de los campos de dinero de ninguna hoja.
+        assert r.target not in ("amount", "unit_price", "sale_price_ars", "unit_cost_ars")
+
+    @pytest.mark.parametrize("header", ["Hora", "Horario", "Hora de cierre"])
+    def test_la_hora_se_reconoce_y_se_explica(self, header: str) -> None:
+        """Antes no se reconocía nada: la columna caía en silencio. Reconocerla sin
+        darle campo es honesto; prometer que se combina con la fecha no lo sería,
+        porque eso lo tendría que hacer el importador y todavía no lo hace."""
+        r = _leer(header, "sale")
+        assert r.outcome == "sin_evidencia"
+        assert r.concept == "hora"
+        assert r.duda
+        assert "hora" in r.duda.lower()
+
+    @pytest.mark.parametrize(
+        ("header", "entidad", "concepto"),
+        [
+            ("Precio hora", "expense", "precio"),
+            ("Precio por hora", "product", "precio"),
+            ("Costo hora", "expense", "costo"),
+        ],
+    )
+    def test_y_un_precio_por_hora_sigue_siendo_un_precio(
+        self, header: str, entidad: str, concepto: str
+    ) -> None:
+        """Acá la hora no es un momento sino la granularidad, igual que `unitario`
+        en «Envío unitario». Sin hacerla ceder, la regla de MAGNITUDES —que hace
+        ceder al dinero ante cualquier otro concepto— le daba el encabezado a la
+        hora y el precio desaparecía."""
+        assert _leer(header, entidad).concept == concepto
+
+    @pytest.mark.parametrize("header", ["Total hs", "Horas trabajadas"])
+    def test_una_cantidad_de_horas_no_es_una_hora(self, header: str) -> None:
+        """`hs`/`horas` en plural nombran cuántas horas, no qué hora. Se dejan sin
+        reconocer a propósito: darles el mensaje de la hora del movimiento sería
+        explicarle mal la columna al usuario."""
+        assert _leer(header, "expense").concept != "hora"
+
+    def test_pero_fecha_y_hora_juntas_siguen_siendo_la_fecha(self) -> None:
+        """`transaction_date` es DATETIME: una columna «Fecha y hora» ES la fecha.
+        Si la hora nueva le ganara, la hoja se quedaría sin columna de fecha."""
+        r = _leer("Fecha y hora", "sale")
+        assert r.target == "transaction_date"
+        # Y se conserva que el encabezado también nombraba la hora.
+        assert "de_hora" in r.qualifiers
+
+
+class TestUnMesEsUnPeriodoNoUnaFecha:
+    """`Mes` reclamaba el campo de fecha, y eso choca de dos maneras.
+
+    En la hoja real conviven «Mes» y «Fecha de Pago»: las dos resolvían a
+    `expense_date`, que es escalar, así que el confirm cortaba con un 422 y el
+    usuario tenía que mandar `Mes` a un campo propio a mano. Y de fondo: «Marzo»
+    no dice qué día, y completarlo es inventar el dato.
+    """
+
+    @pytest.mark.parametrize(
+        ("entidad", "campo_de_fecha"),
+        [("sale", "transaction_date"), ("expense", "expense_date"), ("product", "acquired_at")],
+    )
+    def test_el_mes_no_se_queda_con_el_campo_de_fecha(
+        self, entidad: str, campo_de_fecha: str
+    ) -> None:
+        r = _leer("Mes", entidad)
+        assert r.concept == "mes"
+        assert r.target != campo_de_fecha
+        assert r.target is None
+
+    def test_y_se_explica_que_un_mes_no_dice_el_dia(self) -> None:
+        r = _leer("Mes", "expense")
+        assert r.outcome == "sin_evidencia"
+        assert r.duda
+        assert "día" in r.duda
+
+    def test_el_mes_deja_de_disputarle_el_campo_a_la_fecha_real(self) -> None:
+        """La hoja `Gastos_Fijos` del archivo real. Dos columnas al mismo campo
+        escalar son un 422 en el confirm; ahora solo una lo reclama."""
+        targets = [_leer(h, "expense").target for h in ("Mes", "Fecha de Pago")]
+        assert targets == [None, "expense_date"]
+
+
+class TestElMargenNoLeRobaEncabezadosAlDinero:
+    """No-regresión de colisiones: el concepto nuevo comparte familia semántica con
+    precio, costo y monto, que son los encabezados más comunes que existen."""
+
+    @pytest.mark.parametrize(
+        ("header", "entidad", "target"),
+        [
+            ("precio_de_venta", "product", "sale_price_ars"),
+            ("precio_de_compra", "product", "unit_cost_ars"),
+            ("precio_de_compra", "expense", "unit_price"),
+            ("costo_unitario", "product", "unit_cost_ars"),
+            ("costo_unitario", "expense", "unit_price"),
+            ("total", "sale", "amount"),
+            ("total", "expense", "amount"),
+            ("importe", "sale", "amount"),
+            ("importe", "expense", "amount"),
+        ],
+    )
+    def test_los_encabezados_de_dinero_siguen_en_su_campo(
+        self, header: str, entidad: str, target: str
+    ) -> None:
+        assert _leer(header, entidad).target == target
+
+    @pytest.mark.parametrize("header", ["Impuesto a las ganancias", "IVA", "Percepciones"])
+    def test_un_impuesto_que_nombra_la_ganancia_sigue_siendo_un_impuesto(
+        self, header: str
+    ) -> None:
+        """Por esto `ganancia` es un débil y no un núcleo fuerte: como fuerte era
+        rival de `impuesto`, el encabezado quedaba ambiguo y la columna dejaba de
+        llegar a `taxes`."""
+        r = _leer(header, "expense")
+        assert r.concept == "impuesto"
+        assert r.target == "taxes"
+
+
+class TestLaHoraYElMesNoLeRobanEncabezadosAlResto:
+    """No-regresión de los dos conceptos nuevos.
+
+    `hora` y `mes` entran en la familia de la fecha y de la operación, que son los
+    encabezados más comunes que existen. El caso caro es `venta`/`compra` a secas:
+    el arreglo de «Hora de venta» toca justo el débil que los resuelve.
+    """
+
+    @pytest.mark.parametrize(
+        ("header", "entidad", "target"),
+        [
+            # Fechas: ninguna se vuelve una hora ni un mes.
+            ("fecha", "sale", "transaction_date"),
+            ("fecha", "expense", "expense_date"),
+            ("fecha_de_venta", "sale", "transaction_date"),
+            ("fecha_de_pago", "expense", "expense_date"),
+            ("fecha_del_gasto", "expense", "expense_date"),
+            # Dinero.
+            ("total", "sale", "amount"),
+            ("total", "expense", "amount"),
+            ("importe", "sale", "amount"),
+            ("monto", "expense", "amount"),
+            ("precio_de_venta", "product", "sale_price_ars"),
+            ("precio_de_compra", "product", "unit_cost_ars"),
+            ("precio_de_compra", "expense", "unit_price"),
+            ("costo_unitario", "product", "unit_cost_ars"),
+            ("costo_unitario", "expense", "unit_price"),
+            # Los dos débiles que el arreglo de «Hora de venta» podía romper.
+            ("venta", "sale", "amount"),
+            ("venta", "product", "sale_price_ars"),
+            ("compra", "expense", "amount"),
+            ("compra", "product", "unit_cost_ars"),
+        ],
+    )
+    def test_el_header_sigue_en_su_campo(self, header: str, entidad: str, target: str) -> None:
+        assert _leer(header, entidad).target == target
+
+
+class TestContactoNoEsUnTelefono:
+    """«Contacto» estaba declarado como keyword de `phone`, y no lo es.
+
+    En un archivo real de una distribuidora, la hoja de proveedores traía
+    «Contacto» (con "Marcelo Ibarra") y «Teléfono» (con "351-455-1122"). Las dos
+    resolvían a `phone` y `_resolve_target_cols` es first-wins por orden de
+    columna, así que el teléfono del proveedor quedaba siendo el nombre de la
+    persona.
+
+    La guarda escalar (SINGLE_VALUE_FIELDS) ahora frena esa colisión, pero eso
+    trata el síntoma: mientras «Contacto» siga significando teléfono, una hoja
+    que traiga SÓLO esa columna mete un nombre en el campo del teléfono sin que
+    nada colisione ni pregunte nada.
+    """
+
+    def test_contacto_solo_no_se_resuelve_a_telefono(self) -> None:
+        lectura = _leer("Contacto", "supplier")
+        assert lectura.target is None
+        assert lectura.outcome != "unico"
+
+    def test_y_lo_explica_en_vez_de_quedarse_mudo(self) -> None:
+        """Reconocer el concepto y no tener campo es un mensaje distinto de «no
+        entiendo esto». Sin la `duda`, el usuario ve un hueco sin motivo."""
+        duda = _leer("Contacto", "supplier").duda
+        assert duda, "«Contacto» se reconoce como concepto: tiene que explicar por qué no mapea"
+        assert "teléfono" in duda.lower()
+
+    def test_telefono_sigue_resolviendo(self) -> None:
+        """Sacar `contacto` no puede llevarse puesto el keyword que sí es."""
+        for header in ("Teléfono", "Telefono", "Celular", "WhatsApp"):
+            assert _leer(header, "supplier").target == "phone", header
+
+    async def test_la_cadena_completa_no_lo_devuelve_como_telefono(self) -> None:
+        """El test que importa, y el que casi me falta.
+
+        `read_header` no mira `_HEURISTICS`: esa tabla alimenta `_fuzzy_match`,
+        que es la 3ª capa y es POR DONDE ENTRABA el bug —«contacto» matcheaba su
+        propio keyword con ratio 1.0—. Un test que sólo llame a `read_header`
+        queda verde aunque alguien devuelva `contacto` a los keywords de `phone`
+        (comprobado revirtiendo el fix: los otros tres de esta clase no se
+        enteraron). La compuerta tiene que ser `suggest_mappings`, que es lo que
+        corre en producción.
+        """
+        db = AsyncMock()
+        resultado = MagicMock()
+        resultado.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(return_value=resultado)
+
+        sugerencias = await ColumnMappingService(db).suggest_mappings(
+            uuid.uuid4(),
+            "supplier",
+            ["Razón Social", "Contacto", "Teléfono"],
+            [{"Razón Social": "Distribuidora Norte", "Contacto": "Marcelo Ibarra",
+              "Teléfono": "351-455-1122"}],
+        )
+
+        por_col = {s["source_column"]: s["target_field"] for s in sugerencias}
+        assert por_col["Teléfono"] == "phone"
+        assert por_col["Contacto"] != "phone", (
+            "«Contacto» trae el nombre de la persona: mapearlo a phone pisa el "
+            "teléfono real por orden de columna"
+        )
+
+    def test_la_contrapartida_esta_escrita(self) -> None:
+        """Lo que se pierde: «Contacto WhatsApp» es inequívocamente un teléfono y
+        antes lo rescataba el fuzzy por el keyword `contacto`. Ahora hay dos
+        núcleos —contacto y telefono— y F-M no elige entre núcleos, así que el
+        usuario lo mapea a mano.
+
+        Se acepta a propósito: `phone` no es requerido, el panel muestra la duda,
+        y el costo de la alternativa era meter un nombre propio en el teléfono.
+        Está escrito para que, si algún día molesta, se sepa que fue una decisión
+        y no un descuido.
+        """
+        assert _leer("Contacto WhatsApp", "supplier").target is None
+
+
+class TestUnProveedorPuedeGuardarSuCUIT:
+    """La Reforma de Proveedores le dio a `suppliers` un solo campo fiscal,
+    `cuil`, pensado para el proveedor persona física. Pero la mayoría de los
+    proveedores de una PYME son empresas, y una empresa no tiene CUIL: tiene
+    CUIT — así que el dato fiscal del proveedor típico no se podía guardar.
+
+    Lo encontró `scripts/diag_unmapped_headers.py` sobre encabezados reales: en
+    un padrón de proveedores, «CUIT» y «Condición IVA» quedaban sin destino. F-M
+    los entendía y contestaba "esta hoja no tiene un campo para eso" — honesto,
+    y por eso el fuzzy no llegó a meter el CUIT en `cuil` ni la condición de IVA
+    en `payment_method`, que es lo que habría hecho. El dato igual se perdía.
+    """
+
+    @pytest.mark.parametrize(
+        ("header", "esperado"),
+        [
+            ("CUIT", "cuit"),
+            ("CUIL", "cuil"),
+            ("Condición IVA", "iva_condition"),
+            ("Condicion IVA", "iva_condition"),
+            ("Situación IVA", "iva_condition"),
+            ("IVA", "iva_condition"),
+        ],
+    )
+    def test_el_padron_de_proveedores_resuelve_sus_campos_fiscales(
+        self, header: str, esperado: str
+    ) -> None:
+        assert _leer(header, "supplier").target == esperado
+
+    def test_cuit_y_cuil_son_campos_distintos(self) -> None:
+        """No se colapsan: comparten formato y dígito verificador, pero no
+        significan lo mismo, y derivar uno del otro sobre datos ya cargados sería
+        inventar cuál es cuál."""
+        assert _leer("CUIT", "supplier").target != _leer("CUIL", "supplier").target
+
+    def test_los_dos_estan_en_el_catalogo_y_son_escalares(self) -> None:
+        from app.application.services.column_mapping_service import (
+            SINGLE_VALUE_FIELDS,
+        )
+
+        assert "cuit" in CANONICAL_FIELDS["supplier"]
+        assert "iva_condition" in CANONICAL_FIELDS["supplier"]
+        # Escalares por el mismo motivo que el resto de la identidad: dos
+        # columnas al CUIT no se desempatan solas.
+        assert "cuit" in SINGLE_VALUE_FIELDS["supplier"]
+        assert "iva_condition" in SINGLE_VALUE_FIELDS["supplier"]
+
+    def test_el_import_los_escribe(self) -> None:
+        """El catálogo no alcanza: si el import no los tiene en su lista de
+        campos escribibles, el mapeo resuelve y el dato igual no llega a la base.
+        """
+        from app.application.services.supplier_import_service import (
+            _DOC_FIELDS,
+            _IMPORTABLE_FIELDS,
+        )
+
+        assert "cuit" in _IMPORTABLE_FIELDS
+        assert "iva_condition" in _IMPORTABLE_FIELDS
+        # Y el CUIT es clave de identidad: dos filas con el mismo CUIT son el
+        # mismo proveedor, igual que pasa con el CUIT de un cliente.
+        assert "cuit" in _DOC_FIELDS

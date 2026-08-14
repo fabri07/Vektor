@@ -26,12 +26,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.inventory_effect import HISTORICAL_REPLAY, INFORMATIONAL, NO_INVENTORY
+from app.domain.inventory_effect import HISTORICAL_REPLAY
 from app.domain.inventory_projection import (
     ImportImpact,
     ProductProjection,
     project_import_impact,
 )
+from app.domain.inventory_replay_gate import CreditEvent
 
 
 class ImportProjectionRecorder:
@@ -49,39 +50,36 @@ class ImportProjectionRecorder:
         self._product_cache = product_cache
         self._inventory_effect = inventory_effect or {}
         self._proyecciones: dict[uuid.UUID, ProductProjection] = {}
+        #: F-F — las unidades que este archivo hace ENTRAR, con su fecha. Alimentan
+        #: el gate de respaldo (`rows_without_stock_backing`), que sin ellas mira un
+        #: saldo estático y manda a "Otros" ventas que las compras del propio
+        #: archivo respaldan.
+        self._creditos: list[CreditEvent] = []
 
-    def effect_for(self, context_id: str | None) -> str:
-        """Modo resuelto de la hoja. Sin dato → ``informational``.
+    def effect_for(self, context_id: str | None) -> str | None:
+        """Efecto resuelto de la hoja. ``None`` = esta hoja no habla de inventario.
 
-        NUNCA cae a ``historical_replay``: un caller viejo que no manda el modo
-        no puede terminar aplicando la historia entera de un archivo por omisión.
+        F-F.4: el default dejó de ser un valor. Hasta F-F.3 la ausencia caía a
+        ``informational`` y ese "sin dato" significaba dos cosas a la vez —«el
+        caller no mandó el modo» y «esta hoja no mueve unidades»—, así que había
+        que elegir un modo seguro para cubrir las dos. Ahora
+        ``resolve_inventory_effects`` omite del dict exactamente las hojas sin
+        efecto, y la ausencia dice una sola cosa.
         """
-        return self._inventory_effect.get(context_id or "", INFORMATIONAL)
-
-    def degradar_a_informational(self, context_id: str | None) -> None:
-        """Baja una hoja a ``informational`` cuando su replay no se pudo validar.
-
-        Es el respaldo de F-H3.d.6, no el camino normal: el confirm rechaza esos
-        archivos antes de tomar el lease. Acá la operación ya está en curso y
-        abortarla sería peor, así que se degrada y el importador lo deja contado
-        (``replay_degradado``) — nunca reportado como un replay que se aplicó.
-
-        Copia el dict antes de tocarlo: el original es el que armó el confirm y
-        también lo lee para trazar. Un import no puede cambiarle el payload al
-        caller de rebote.
-        """
-        self._inventory_effect = {**self._inventory_effect, (context_id or ""): INFORMATIONAL}
+        return self._inventory_effect.get(context_id or "")
 
     def hojas_con_replay(self) -> int:
-        """Cuántas hojas van a aplicar la historia, DESPUÉS de degradaciones.
+        """Cuántas hojas van a aplicar la historia.
 
-        Contarlo sobre el dict de entrada diría que hubo un replay donde el
-        respaldo justamente lo desactivó.
+        F-F: acá al lado vivía ``degradar_a_informational``, que bajaba una hoja
+        cuyo replay no se podía validar. Ya no existe esa situación —las compras del
+        archivo entran al gate como créditos datados—, así que este contador vuelve
+        a ser simplemente lo que el confirm resolvió.
         """
         return sum(1 for efecto in self._inventory_effect.values() if efecto == HISTORICAL_REPLAY)
 
     def _cuenta_inventario(self, context_id: str | None) -> bool:
-        return self.effect_for(context_id) != NO_INVENTORY
+        return self.effect_for(context_id) is not None
 
     async def _producto(self, product_id: uuid.UUID) -> Any:
         """El ``Product``, del cache primero.
@@ -137,14 +135,48 @@ class ImportProjectionRecorder:
         context_id: str | None = None,
     ) -> None:
         """Llamar ANTES de ``_apply_purchase_to_stock`` (ver el docstring del módulo)."""
-        if product_id is None or qty <= 0 or not self._cuenta_inventario(context_id):
+        if product_id is None or qty <= 0:
             return
         producto = await self._producto(product_id)
         if producto is None:
             return
-        self._proyeccion(
-            product_id, producto.name, int(producto.stock_units)
-        ).agregar_compra(day, qty)
+        # El saldo previo se captura SIEMPRE, aunque la hoja no cuente para la
+        # proyección: es lo que el gate usa como apertura, y sin él tendría que
+        # leer el stock de hoy —que ya incluye esta compra— y contarla dos veces.
+        proyeccion = self._proyeccion(product_id, producto.name, int(producto.stock_units))
+        # F-F: el crédito del gate tampoco mira el efecto de la hoja. La compra
+        # sube stock en cualquier modo (V16: `inventory_effect` gobierna el
+        # descuento de las VENTAS, no la suma de las compras), así que un gate que
+        # no la viera mandaría a "Otros" ventas que sí están respaldadas.
+        self._creditos.append(CreditEvent(product_id=product_id, day=day, qty=qty))
+        if not self._cuenta_inventario(context_id):
+            return
+        proyeccion.agregar_compra(day, qty)
+
+    def creditos(self) -> list[CreditEvent]:
+        """Las unidades que el archivo hace entrar, con fecha, para el gate."""
+        return list(self._creditos)
+
+    def productos_que_el_archivo_declara(self) -> set[uuid.UUID]:
+        """Productos sobre cuyas unidades el archivo dice ALGO.
+
+        F-F.2: o declara su saldo (una hoja de catálogo) o le compra unidades. En
+        los dos casos el cero de ese producto deja de ser "no sé cuánto había".
+        """
+        return {
+            pid
+            for pid, proyeccion in self._proyecciones.items()
+            if proyeccion.saldo_declarado is not None
+        } | {c.product_id for c in self._creditos}
+
+    def apertura_de(self, product_id: uuid.UUID) -> int | None:
+        """Saldo del que parte el replay de ese producto: lo declarado, o el previo.
+
+        ``None`` = este archivo todavía no tocó el producto, así que su stock de
+        hoy ES el previo y el caller lo lee de la DB.
+        """
+        proyeccion = self._proyecciones.get(product_id)
+        return None if proyeccion is None else proyeccion.apertura
 
     async def registrar_venta(
         self,

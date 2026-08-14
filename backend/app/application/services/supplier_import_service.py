@@ -29,10 +29,15 @@ from app.persistence.repositories.supplier_repository import SupplierRepository
 from app.schemas._ar_fiscal import validate_cuit
 
 # Campos del proveedor que el import puede setear/actualizar (subconjunto del modelo).
-_IMPORTABLE_FIELDS = ("name", "last_name", "cuil", "payment_method", "email", "phone", "notes")
+_IMPORTABLE_FIELDS = (
+    "name", "last_name", "cuil", "cuit", "iva_condition", "payment_method",
+    "email", "phone", "notes",
+)
 
-# Proveedor solo tiene CUIL como documento (sin DNI, a diferencia de cliente).
-_DOC_FIELDS = ("cuil",)
+# Documentos del proveedor: CUIT (empresa) y CUIL (persona física). No tiene DNI,
+# a diferencia de cliente. `cuit` va PRIMERO porque es el caso mayoritario en un
+# padrón de proveedores y el orden fija la prioridad de la clave de identidad.
+_DOC_FIELDS = ("cuit", "cuil")
 
 
 @dataclass
@@ -92,24 +97,27 @@ def _record_keys(record: dict[str, Any]) -> list[IdentityKey]:
 def _validate_record(record: dict[str, Any]) -> list[str]:
     """Diagnóstico de una fila de import. Lista vacía = válida.
 
-    Reglas: nombre/razón social obligatorio; si trae CUIL, tiene que ser válido. NO
-    exige CUIL — una fila sin CUIL pero con email/teléfono es candidata a matchear por
-    esas claves, y una fila sin ninguna clave fuerte cae en needs_review (no invalid).
+    Reglas: nombre/razón social obligatorio; si trae CUIT o CUIL, tiene que ser
+    válido. NO exige documento — una fila sin él pero con email/teléfono es
+    candidata a matchear por esas claves, y una fila sin ninguna clave fuerte cae
+    en needs_review (no invalid).
     """
     issues: list[str] = []
     if not (record.get("name") or "").strip():
         issues.append("Falta nombre o razón social.")
-    cuil = (record.get("cuil") or "").strip()
-    if cuil:
-        try:
-            validate_cuit(record.get("cuil"))
-        except PydanticCustomError as exc:
-            issues.append(str(exc))
+    # CUIT y CUIL comparten formato y dígito verificador (módulo 11): el mismo
+    # validador sirve para los dos.
+    for campo in _DOC_FIELDS:
+        if (record.get(campo) or "").strip():
+            try:
+                validate_cuit(record.get(campo))
+            except PydanticCustomError as exc:
+                issues.append(str(exc))
     return issues
 
 
 def _supplier_record(sup: Supplier) -> dict[str, Any]:
-    return {"cuil": sup.cuil, "email": sup.email, "phone": sup.phone}
+    return {"cuit": sup.cuit, "cuil": sup.cuil, "email": sup.email, "phone": sup.phone}
 
 
 def _existing_index(existing: list[Supplier]) -> dict[IdentityKey, Supplier]:

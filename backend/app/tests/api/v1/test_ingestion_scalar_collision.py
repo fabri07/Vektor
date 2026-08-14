@@ -434,3 +434,177 @@ class TestUnaDecisionDeCostoQueNoSePuedeHonrar:
             headers=auth_headers,
         )
         assert response.status_code == 422
+
+
+# ── Maestros: la identidad se pisa con el mismo mecanismo que la plata ────────
+
+_PROV_HEADERS = [
+    "ID",
+    "Razón Social (correcta)",
+    "CUIT",
+    "Contacto",
+    "Teléfono",
+    "Email",
+    "Variantes de nombre vistas en remitos/WhatsApp",
+]
+
+
+def _proveedores_summary() -> dict[str, Any]:
+    rows = [
+        {
+            "ID": "PROV-01",
+            "Razón Social (correcta)": "Distribuidora Norte SRL",
+            "CUIT": "30-71234567-8",
+            "Contacto": "Marcelo Ibarra",
+            "Teléfono": "351-455-1122",
+            "Email": "ventas@distribuidoranorte.com",
+            "Variantes de nombre vistas en remitos/WhatsApp": "Distrib. Norte, DISTRI NORTE",
+            "__context__": "sheet:Proveedores",
+        }
+    ]
+    return {
+        "confidence": "HIGH",
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "row_count": 1,
+        # El importador de maestros lee las filas de acá (`_ENTITY_TO_SUMMARY_KEY`),
+        # no de `preview_rows` del contexto.
+        "proveedores_detectados": rows,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Proveedores",
+                "label": "Proveedores",
+                "source_kind": "sheet",
+                "entity_type": "supplier",
+                "headers": _PROV_HEADERS,
+                "fields": None,
+                "preview_rows": rows,
+                "row_count": 1,
+            }
+        ],
+    }
+
+
+@pytest_asyncio.fixture
+async def proveedores_file(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    record = UploadedFile(
+        tenant_id=sample_tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="Vektor_Test_DistribuidoraLimpieza_3meses.xlsx",
+        s3_key="uploads/test/uuid/distribuidora.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=93470,
+        purpose="ingestion",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        parsed_summary_json=_proveedores_summary(),
+    )
+    db_session.add(record)
+    await db_session.commit()
+    return record
+
+
+def _prov_mapping(source: str, target: str) -> dict[str, Any]:
+    return {
+        "source_column": source,
+        "target_field": target,
+        "context_id": "sheet:Proveedores",
+        "entity_type": "supplier",
+    }
+
+
+class TestColisionEnMaestros:
+    """La guarda escalar no cubría `customer` ni `supplier`: los dos entity_type
+    tenían el frozenset vacío, así que TODOS sus campos caían en el first-wins
+    silencioso de ``_resolve_target_cols``.
+
+    El caso real: una hoja de proveedores con «Contacto» (col 4) y «Teléfono»
+    (col 5). Las dos resuelven a `phone` —`contacto` es keyword de `phone` a
+    propósito— y como gana la primera del orden del archivo, el teléfono del
+    proveedor terminaba siendo el NOMBRE de la persona de contacto. Un monto
+    equivocado salta en un total; un teléfono equivocado no salta en ningún lado.
+    """
+
+    async def test_contacto_y_telefono_al_mismo_phone_rechaza_con_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        proveedores_file: UploadedFile,
+        db_session: AsyncSession,
+    ) -> None:
+        body = {
+            "column_mappings": [
+                _prov_mapping("Razón Social (correcta)", "name"),
+                _prov_mapping("Contacto", "phone"),
+                _prov_mapping("Teléfono", "phone"),
+            ],
+            "confirmed_fields": {"proveedores": True},
+            "context_confirmed": {"sheet:Proveedores": True},
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{proveedores_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "Contacto" in detail
+        assert "Teléfono" in detail
+
+        # Nada se importó: el rechazo es previo a cualquier escritura.
+        from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+        creados = (await db_session.execute(select(Supplier))).scalars().all()
+        assert [s for s in creados if not s.is_sentinel] == []
+
+    async def test_dos_columnas_al_nombre_rechaza_con_422(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        proveedores_file: UploadedFile,
+    ) -> None:
+        """«Variantes de nombre vistas en remitos/WhatsApp» resuelve a `name` por
+        su núcleo `nombre`, igual que «Razón Social». En el archivo real esto era
+        benigno de casualidad —Razón Social está antes— pero con las columnas en
+        otro orden el nombre del proveedor sería una lista de alias."""
+        body = {
+            "column_mappings": [
+                _prov_mapping("Variantes de nombre vistas en remitos/WhatsApp", "name"),
+                _prov_mapping("Razón Social (correcta)", "name"),
+            ],
+            "confirmed_fields": {"proveedores": True},
+            "context_confirmed": {"sheet:Proveedores": True},
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{proveedores_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+        assert "Razón Social (correcta)" in response.json()["detail"]
+
+    async def test_la_salida_es_mandar_la_otra_columna_a_un_campo_propio(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        proveedores_file: UploadedFile,
+    ) -> None:
+        """La guarda no obliga a tirar la columna: le da destino. Es lo que
+        distingue preguntar de bloquear."""
+        body = {
+            "column_mappings": [
+                _prov_mapping("Razón Social (correcta)", "name"),
+                _prov_mapping("Teléfono", "phone"),
+                _prov_mapping("Contacto", "custom_field:contacto"),
+            ],
+            "confirmed_fields": {"proveedores": True},
+            "context_confirmed": {"sheet:Proveedores": True},
+        }
+        response = await client.post(
+            f"/api/v1/ingestion/files/{proveedores_file.id}/confirm",
+            json=body,
+            headers=auth_headers,
+        )
+        assert response.status_code != 422, response.text

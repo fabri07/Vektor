@@ -8,6 +8,7 @@
  */
 
 import type {
+  ColumnMappingSuggestion,
   EntityFieldCatalog,
   FieldCatalogEntry,
 } from "@/services/ingestion.service";
@@ -133,6 +134,58 @@ export function scalarCollisions(
       label: escalares.get(target) ?? target,
       columns,
     }));
+}
+
+/**
+ * De dónde salió el destino que hoy tiene una columna.
+ *
+ * `null` = no hay nada que contar (la columna no quedó mapeada, o el backend no
+ * reconoció nada y el usuario tampoco eligió).
+ */
+export type MappingOrigin =
+  | "user"
+  | "tenant_history"
+  | "heuristic"
+  | "fuzzy"
+  | "llm"
+  | "auto_custom"
+  | null;
+
+/**
+ * F-B.1 — quién decidió el destino de esta columna.
+ *
+ * Se resuelve COMPARANDO el destino actual contra el que sugirió el backend, no
+ * con un flag de "el usuario tocó esto". La diferencia importa: si alguien abre
+ * el select, prueba otro campo y termina dejando el mismo que había sugerido
+ * Véktor, un flag `touched` diría «Lo elegiste vos» sobre un dato que no salió
+ * de esa persona. Comparar el valor no puede mentir — o coincide con la
+ * sugerencia o no.
+ *
+ * Una columna sin destino, o mandada a «Ignorar», no tiene procedencia que
+ * contar: el importador no va a guardar nada desde ahí.
+ */
+export function mappingOrigin(
+  suggestion: Pick<ColumnMappingSuggestion, "source" | "target_field">,
+  currentTarget: string,
+): MappingOrigin {
+  const actual = normalizarTarget(currentTarget);
+  if (!actual || actual === "ignore") return null;
+  // `target_field` viaja como `null` cuando el backend no propuso nada; ahí
+  // cualquier destino actual es del usuario.
+  //
+  // Los dos lados se normalizan igual que en `customFieldCollisions`: sin eso
+  // `"custom_field: obs"` y `"custom_field:obs"` son strings distintos y la
+  // comparación devuelve "Lo elegiste vos" sobre una sugerencia que la persona
+  // nunca tocó. El backend ya trata a las dos como la misma clave.
+  if (actual !== normalizarTarget(suggestion.target_field ?? "")) return "user";
+  return suggestion.source === "none" ? null : suggestion.source;
+}
+
+/** El target comparable: recorta el valor y, si es un campo propio, su clave. */
+function normalizarTarget(target: string): string {
+  const valor = target?.trim() ?? "";
+  if (!valor.startsWith(CUSTOM_FIELD_PREFIX)) return valor;
+  return `${CUSTOM_FIELD_PREFIX}${valor.slice(CUSTOM_FIELD_PREFIX.length).trim()}`;
 }
 
 const CUSTOM_FIELD_PREFIX = "custom_field:";

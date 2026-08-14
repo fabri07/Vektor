@@ -39,6 +39,10 @@ import { PurchaseGroupsPreview } from "./PurchaseGroupsPreview";
 import { useToastStore } from "@/stores/toastStore";
 import { MasterPreviewPanel } from "./MasterPreviewPanel";
 import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
+import { MappingOriginHint } from "./MappingOriginHint";
+import { TargetSelect } from "./TargetSelect";
+import { AmbiguityHint } from "./AmbiguityHint";
+import { StatusDot } from "./StatusDot";
 import {
   customFieldCollisions,
   explainMissing,
@@ -112,14 +116,6 @@ const ENTITY_OPTIONS_TEXTO = [
 // decidiera.
 const ENTITY_UNSET = "";
 
-const SOURCE_LABELS: Record<string, string> = {
-  tenant_history: "Historial",
-  heuristic: "Heurística",
-  fuzzy: "Similar",
-  llm: "IA",
-  none: "—",
-};
-
 // F4: un error de confirm que NO es de mapeo — 409 (confirm concurrente / archivo
 // ya importado o importándose) o timeout del cliente (el import sigue en curso en
 // el backend). No debe pintar el banner rojo de "revisá los campos".
@@ -169,55 +165,20 @@ function handleTransientConfirmError(
   return false;
 }
 
-// FASE 2 (A2)/A3: color de la confianza del mapeo (verde alto / ámbar medio / rojo bajo).
-function confidenceColor(confidence: number): string {
-  if (confidence >= 0.75) return "text-vk-success";
-  if (confidence >= 0.5) return "text-vk-warning";
-  return "text-vk-danger";
-}
-
 /**
- * F-M: por qué una columna no se mapeó sola, y entre qué elegir.
+ * F-A — el `target_label` de una columna, si hay uno, listo para spreadear.
  *
- * Vive en UN solo lugar porque el panel renderiza columnas en tres caminos
- * distintos (multi-hoja, lista de revisión y tabla única) y este repo ya pagó
- * el precio de que dos de ellos divergieran.
- *
- * `duda` viaja también sin `options`: son los casos donde Véktor entendió el
- * encabezado y esta hoja no tiene campo donde ponerlo. Ahí no hay entre qué
- * elegir, pero explicarlo es la diferencia entre un hueco y un hueco con motivo.
+ * Devuelve `{}` cuando no hay etiqueta en vez de `{ target_label: undefined }`:
+ * el backend distingue "no lo mandó" (cae a `source_column`) de un valor
+ * explícito, y mandar la clave en `undefined` la serializa como `null`.
  */
-function AmbiguityHint({
-  suggestion,
-  fields,
-  onPick,
-}: {
-  suggestion: ColumnMappingSuggestion;
-  fields: FieldCatalogEntry[];
-  onPick: (target: string) => void;
-}) {
-  if (!suggestion.duda) return null;
-  const options = suggestion.options ?? [];
-  const labelFor = (value: string) => fields.find((f) => f.value === value)?.label ?? value;
-  return (
-    <div className="rounded border border-vk-blue/30 bg-vk-blue/5 px-2 py-1.5">
-      <p className="text-[11px] leading-snug text-vk-text-secondary">{suggestion.duda}</p>
-      {options.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1">
-          {options.map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => onPick(option)}
-              className="rounded border border-vk-blue/40 bg-vk-bg-light px-2 py-0.5 text-[11px] text-vk-text-primary hover:border-vk-blue hover:bg-vk-blue/10"
-            >
-              {labelFor(option)}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function etiquetaDe(
+  labels: Record<string, Record<string, string>>,
+  ctxId: string,
+  col: string,
+): { target_label?: string } {
+  const label = labels[ctxId]?.[col];
+  return label ? { target_label: label } : {};
 }
 
 // Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
@@ -226,32 +187,6 @@ const PURPOSE_OPTIONS: Array<{ value: string; label: string; field: "ventas" | "
   { value: "gastos", label: "Gastos", field: "gastos" },
   { value: "stock", label: "Productos / Stock", field: "productos" },
 ];
-
-function StatusDot({ status }: { status: ColumnMappingSuggestion["status"] }) {
-  if (status === "mapped") {
-    return <span className="h-2 w-2 rounded-full bg-vk-success shrink-0" title="Mapeado" />;
-  }
-  // F-M: entender la columna y no poder decidir NO es lo mismo que no
-  // entenderla. Si cayera al punto de "Sin mapear" de abajo, la pantalla
-  // borraría justamente la distinción que el backend calcula.
-  if (status === "ambiguo") {
-    return (
-      <span
-        className="h-2 w-2 rounded-full bg-vk-blue shrink-0"
-        title="Necesita que elijas entre dos lecturas"
-      />
-    );
-  }
-  if (status === "required_missing") {
-    return (
-      <span
-        className="h-2 w-2 rounded-full bg-vk-danger shrink-0"
-        title="Campo requerido faltante"
-      />
-    );
-  }
-  return <span className="h-2 w-2 rounded-full bg-vk-warning shrink-0" title="Sin mapear" />;
-}
 
 // Modal secuencial para columnas sin mapear
 function UnmappedModal({
@@ -308,18 +243,17 @@ function UnmappedModal({
             Asignar a un campo de Véktor
           </button>
           {mode === "field" && (
-            <select
-              value={selected}
-              onChange={(e) => setSelected(e.target.value)}
+            <TargetSelect
+              target={selected}
+              onChange={setSelected}
+              fields={fields}
+              placeholderLabel="Elegir campo..."
+              // «Ignorar» y «campo personalizado» son botones propios de este
+              // modal; ofrecerlos también adentro del select los duplicaría.
+              showIgnoreOption={false}
+              unknownTarget="custom-only"
               className="w-full rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary focus:border-vk-blue focus:outline-none"
-            >
-              <option value="">Elegir campo...</option>
-              {fields.map((f) => (
-                <option key={f.value} value={f.value}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
+            />
           )}
 
           <button
@@ -471,6 +405,28 @@ function effectiveStatus(
   return s.status;
 }
 
+/**
+ * F-A: ¿el target que el usuario eligió a mano sigue teniendo sentido en la
+ * entidad nueva?
+ *
+ * «Sin mapear», «Ignorar» y los campos personalizados NO pertenecen a ningún
+ * schema, así que sobreviven a cualquier cambio de sección. Un campo canónico
+ * sobrevive sólo si el catálogo de la entidad nueva lo tiene: conservar
+ * `amount` en una hoja de Productos dejaría el `<select>` mostrando «(campo
+ * desconocido)» — exactamente el síntoma que cerró el catálogo de fuente única.
+ * Cuando no sigue siendo elegible, la columna cae a la sugerencia nueva; no se
+ * inventa ningún reemplazo.
+ */
+function targetSobreviveALaEntidad(
+  target: string,
+  fields: FieldCatalogEntry[],
+): boolean {
+  if (!target || target === "ignore" || target.startsWith("custom_field:")) {
+    return true;
+  }
+  return fields.some((f) => f.value === target);
+}
+
 // ── Mapeo multi-contexto (multi-hoja): una sección por hoja/grupo ──────────────
 
 function SheetMapperSection({
@@ -481,14 +437,14 @@ function SheetMapperSection({
   warnings,
   onIncludeChange,
   onMappingsChange,
+  onLabelsChange,
   onEntityChange,
   onColumnTouched,
+  isColumnTouched,
   onIssuesChange,
   stockTreatment,
   onStockTreatmentChange,
   inventoryEffect,
-  effectValue,
-  onEffectChange,
   shippingValue,
   onShippingChange,
   costoValue,
@@ -504,9 +460,15 @@ function SheetMapperSection({
   warnings: string[];
   onIncludeChange: (ctxId: string, included: boolean) => void;
   onMappingsChange: (ctxId: string, mappings: Record<string, string>) => void;
+  // F-A: etiquetas legibles de los campos propios propuestos, por columna.
+  onLabelsChange?: (ctxId: string, labels: Record<string, string>) => void;
   onEntityChange: (ctxId: string, entity: string) => void;
   // F8c: se llama SOLO en cambios manuales de mapeo (marca user_selected).
   onColumnTouched?: (ctxId: string, col: string) => void;
+  // F-A: lectura del mismo touched-set que escribe `onColumnTouched`. Sin él la
+  // sección no puede distinguir lo que eligió el usuario de lo que quedó de una
+  // sugerencia, y al cambiar de sección pisaría las dos cosas por igual.
+  isColumnTouched?: (ctxId: string, col: string) => boolean;
   // Problemas que impiden importar ESTA hoja. El padre los junta para decidir si
   // habilita Confirmar — así el bloqueo usa las mismas reglas que el confirm del
   // backend en vez de descubrirse recién con un 422.
@@ -514,11 +476,10 @@ function SheetMapperSection({
   // Origen del stock de ESTA hoja (solo se pregunta si es de productos).
   stockTreatment: StockTreatment;
   onStockTreatmentChange: (ctxId: string, value: StockTreatment) => void;
-  // F-H3.e: qué le hace al inventario ESTA hoja. Lo sirve el backend con el
-  // mapeo borrador; `undefined` mientras la consulta está en vuelo.
+  // F-F.4: qué le hace al inventario ESTA hoja. Lo DEDUCE el backend con el mapeo
+  // borrador y la entidad efectiva; `undefined` mientras la consulta está en
+  // vuelo. Se informa, no se elige — por eso no hay `onChange`.
   inventoryEffect?: SheetInventoryEffect;
-  effectValue: string;
-  onEffectChange: (ctxId: string, value: string) => void;
   // F-H6.b: decisión sobre los envíos sin comprobante de ESTA hoja.
   // `null` = todavía no eligió → no se registran.
   shippingValue: ShippingAction | null;
@@ -585,28 +546,79 @@ function SheetMapperSection({
     enabled: included && !isText && entityChosen,
   });
 
+  // El catálogo se lee ANTES de inicializar el mapeo: la inicialización necesita
+  // saber qué campos existen en la entidad nueva para no conservar un target que
+  // allá no existe (ver `targetSobreviveALaEntidad`).
+  const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
+  const fields = catalog?.[entity]?.fields ?? [];
+
   // Inicializar mapeos desde sugerencias, una vez POR SECCIÓN: si el usuario
   // reasigna la hoja (p. ej. de Ventas a Productos), las sugerencias vienen de
-  // otro schema y el mapeo viejo ya no aplica. Un flag booleano dejaba pegado el
-  // mapeo del schema anterior.
+  // otro schema. Un flag booleano dejaba pegado el mapeo del schema anterior.
+  //
+  // F-A: es un MERGE, no un reemplazo. Reemplazar todo borraba las columnas que
+  // la persona había mapeado a mano —veinte columnas de trabajo perdidas por
+  // corregir la sección de la hoja—, así que lo tocado manda sobre la sugerencia
+  // nueva y lo no tocado se recalcula, que es lo correcto: viene de otro schema.
   useEffect(() => {
-    if (suggestions.length > 0 && initializedFor !== entity) {
-      const initial: Record<string, string> = {};
+    if (suggestions.length === 0 || initializedFor === entity) return;
+    // Sin catálogo no se puede afirmar que un target tocado ya no es elegible, y
+    // asumirlo lo descartaría por no encontrarlo. Este efecto vuelve a correr
+    // cuando el catálogo llega.
+    if (loadingCatalog) return;
+    setMappings((prev) => {
+      const next: Record<string, string> = {};
       for (const s of suggestions) {
-        if (s.target_field) initial[s.source_column] = s.target_field;
+        const col = s.source_column;
+        const elegido = prev[col] ?? "";
+        if (
+          isColumnTouched?.(context.context_id, col) &&
+          targetSobreviveALaEntidad(elegido, fields)
+        ) {
+          // Incluye el caso de un «Sin mapear» explícito: si la persona sacó esa
+          // columna a propósito, cambiar de sección no es motivo para volver a
+          // meterla.
+          if (elegido) next[col] = elegido;
+          continue;
+        }
+        if (s.target_field) next[col] = s.target_field;
       }
-      setMappings(initial);
-      setInitializedFor(entity);
-    }
-  }, [suggestions, initializedFor, entity]);
+      return next;
+    });
+    setInitializedFor(entity);
+    // `fields` es un array nuevo en cada render: se depende de `catalog`, que sí
+    // es estable (react-query), y de `loadingCatalog` para reintentar al llegar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    suggestions,
+    initializedFor,
+    entity,
+    catalog,
+    loadingCatalog,
+    context.context_id,
+    isColumnTouched,
+  ]);
 
   // Reportar mapeos al padre cuando cambian (vacío en texto/imagen).
   useEffect(() => {
     onMappingsChange(context.context_id, mappings);
   }, [mappings, context.context_id, onMappingsChange]);
 
-  const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
-  const fields = catalog?.[entity]?.fields ?? [];
+  // F-A: y las etiquetas de los campos propios que propuso el backend. Sólo
+  // cuando el destino actual SIGUE siendo el sugerido: si la persona lo cambió,
+  // la etiqueta de aquella sugerencia ya no describe nada. Va aparte del mapeo
+  // porque el estado es `columna → target` y meterle un objeto obligaría a
+  // tocar los cuatro lugares que lo leen.
+  useEffect(() => {
+    const labels: Record<string, string> = {};
+    for (const sug of suggestions) {
+      const actual = mappings[sug.source_column];
+      if (actual && actual === sug.target_field && sug.target_label) {
+        labels[sug.source_column] = sug.target_label;
+      }
+    }
+    onLabelsChange?.(context.context_id, labels);
+  }, [mappings, suggestions, context.context_id, onLabelsChange]);
   // Requeridos REALES de la entidad: un requerido está cubierto solo si alguna
   // columna lo mapea a su campo canónico. Antes esto miraba el `status` que
   // mandó el backend por columna, así que mover la columna del nombre a un
@@ -814,16 +826,6 @@ function SheetMapperSection({
             {suggestions.map((s) => {
               const target = mappings[s.source_column] ?? "";
               const eff = effectiveStatus(s, target);
-              const isCustom = target.startsWith("custom_field:");
-              // El target del estado no existe entre las opciones: sin una
-              // `<option>` propia el DOM caería a la primera («Sin mapear») y la
-              // pantalla mostraría algo distinto de lo que se va a enviar.
-              const isUnknown =
-                !!target &&
-                target !== "ignore" &&
-                !isCustom &&
-                fields.length > 0 &&
-                !fields.some((f) => f.value === target);
               return (
                 <div
                   key={s.source_column}
@@ -841,35 +843,18 @@ function SheetMapperSection({
                     </span>
                   </div>
                   <div className="flex flex-col gap-1">
-                    <select
-                      value={customFor === s.source_column ? "__custom__" : target}
-                      onChange={(e) => selectTarget(s.source_column, e.target.value)}
-                      // Por dónde entra el salto del banner de faltantes: dice a
-                      // qué hoja pertenece este select y qué campo SUGERÍA
-                      // Véktor para esta columna. Se busca por atributo y no por
-                      // `id` porque el nombre de la columna es texto libre del
-                      // archivo (espacios, acentos, comillas).
-                      data-sheet={context.context_id}
-                      data-suggests={s.target_field ?? ""}
-                      // Deshabilitado —no vacío— mientras carga el catálogo: un
-                      // select sin opciones es justamente el fallo que se está
-                      // corrigiendo (mostraría "Sin mapear" sobre un target real).
+                    <TargetSelect
+                      target={target}
+                      editingCustom={customFor === s.source_column}
+                      onChange={(value) => selectTarget(s.source_column, value)}
+                      fields={fields}
+                      dataSheet={context.context_id}
+                      dataSuggests={s.target_field ?? ""}
                       disabled={loadingCatalog}
+                      showCustomFieldOption
+                      unknownTarget="custom-always"
                       className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
-                    >
-                      <option value="">Sin mapear</option>
-                      <option value="ignore">— Ignorar —</option>
-                      {fields.map((f) => (
-                        <option key={f.value} value={f.value}>
-                          {f.label}
-                        </option>
-                      ))}
-                      {isCustom && <option value={target}>{target}</option>}
-                      {isUnknown && (
-                        <option value={target}>{target} (campo desconocido)</option>
-                      )}
-                      <option value="__custom__">+ Campo personalizado…</option>
-                    </select>
+                    />
                     {customFor === s.source_column && (
                       <div className="flex gap-1">
                         <input
@@ -898,15 +883,12 @@ function SheetMapperSection({
                       fields={fields}
                       onPick={(t) => selectTarget(s.source_column, t)}
                     />
-                    {/* A3: source + confidence (mismo criterio que el flujo single). */}
-                    {eff === "mapped" && s.source !== "none" && (
-                      <p className="text-[10px] text-vk-text-muted">
-                        {SOURCE_LABELS[s.source] ?? s.source} ·{" "}
-                        <span className={confidenceColor(s.confidence)}>
-                          {Math.round(s.confidence * 100)}%
-                        </span>
-                      </p>
-                    )}
+                    {/* Procedencia del destino (mismo criterio que el flujo single). */}
+                    <MappingOriginHint
+                      suggestion={s}
+                      mapped={eff === "mapped"}
+                      currentTarget={target}
+                    />
                   </div>
                 </div>
               );
@@ -983,8 +965,6 @@ function SheetMapperSection({
       {included && inventoryEffect && (
         <InventoryEffectChoice
           hoja={inventoryEffect}
-          value={effectValue}
-          onChange={(v) => onEffectChange(context.context_id, v)}
           className="border-t border-vk-border-w bg-vk-bg-light/40 px-3 py-2.5"
         />
       )}
@@ -1035,16 +1015,6 @@ function MultiContextMapper({
       setStockTreatmentByCtx((prev) => ({ ...prev, [ctxId]: value })),
     [],
   );
-  // F-H3.e: efecto de inventario ELEGIDO por hoja. Sólo lo que el usuario tocó;
-  // el default lo pone el backend y se aplica al render (`efectoDe`), no
-  // copiándolo acá: los defaults cambian mientras se mapea, y un estado
-  // inicializado una vez quedaría mostrando un modo que ya no corresponde.
-  const [effectByCtx, setEffectByCtx] = useState<Record<string, string>>({});
-  const handleEffectChange = useCallback(
-    (ctxId: string, value: string) =>
-      setEffectByCtx((prev) => ({ ...prev, [ctxId]: value })),
-    [],
-  );
   // F-H6.b: decisión de envío por hoja. Sólo lo que el usuario eligió: la
   // ausencia ES la decisión por default (no registrar), así que no se
   // inicializa con nada.
@@ -1093,6 +1063,16 @@ function MultiContextMapper({
     [],
   );
 
+  // F-A: etiquetas de los campos propios, espejo de `mappingsRef`. No dispara
+  // re-render: sólo se lee al armar el payload del confirm.
+  const labelsRef = useRef<Record<string, Record<string, string>>>({});
+  const handleLabelsChange = useCallback(
+    (ctxId: string, labels: Record<string, string>) => {
+      labelsRef.current[ctxId] = labels;
+    },
+    [],
+  );
+
   // Problemas por hoja (requerido descubierto / colisión escalar). Los reporta
   // cada sección con las MISMAS reglas que valida el confirm del backend, así el
   // bloqueo se ve acá y no aparece recién como un 422.
@@ -1113,6 +1093,14 @@ function MultiContextMapper({
     touchedRef.current.add(riskKey(ctxId, col));
     setMappingsVersion((v) => v + 1);
   }, []);
+
+  // F-A: lado de LECTURA del mismo set. Que sea un ref —y por lo tanto no
+  // dispare re-render— está bien: se consulta dentro del efecto que re-inicializa
+  // el mapeo, que ya corre cuando cambian la sección o las sugerencias.
+  const isColumnTouched = useCallback(
+    (ctxId: string, col: string) => touchedRef.current.has(riskKey(ctxId, col)),
+    [],
+  );
 
   const { byContext: warningsByCtx, general: generalWarnings } = useMemo(
     () => splitWarningsByContext(parserWarnings, contexts),
@@ -1240,6 +1228,7 @@ function MultiContextMapper({
           context_id: ctx.context_id,
           entity_type: ent,
           user_selected: touchedRef.current.has(riskKey(ctx.context_id, src)),
+          ...etiquetaDe(labelsRef.current, ctx.context_id, src),
         });
       }
     }
@@ -1282,24 +1271,6 @@ function MultiContextMapper({
     () => Object.fromEntries(inventoryEffects.map((h) => [h.context_id, h])),
     [inventoryEffects],
   );
-  /**
-   * Modo EFECTIVO de una hoja: lo que eligió el usuario si sigue estando entre
-   * las opciones, y si no el default de Véktor. La comprobación importa: sacar
-   * la columna de cantidad puede dejar a la hoja sin poder mover inventario, y
-   * mandar el modo viejo sería mandar algo que el backend ya no ofrece.
-   */
-  const efectoDe = useCallback(
-    (ctxId: string): string => {
-      const hoja = effectsByCtx[ctxId];
-      if (!hoja) return "";
-      const elegido = effectByCtx[ctxId];
-      return elegido && hoja.options.some((o) => o.value === elegido)
-        ? elegido
-        : hoja.default;
-    },
-    [effectsByCtx, effectByCtx],
-  );
-
   /**
    * F-H6.d: las decisiones de costo tal como las eligió el usuario, para PEDIR
    * el reparto.
@@ -1381,8 +1352,8 @@ function MultiContextMapper({
   /**
    * Reparto EFECTIVO de una hoja: lo que eligió el usuario sólo si el servidor
    * dice que esa hoja se puede repartir; si no, el default que no toca ningún
-   * costo. Mismo criterio que `efectoDe`: mandar un modo que el backend ya no
-   * ofrece sería mandar algo que no va a pasar.
+   * costo: mandar un modo que el backend ya no ofrece sería pedir algo que no
+   * va a pasar.
    */
   const compartidoDe = useCallback(
     (ctxId: string): PurchaseSharedShipping =>
@@ -1420,16 +1391,9 @@ function MultiContextMapper({
             context_id: ctx.context_id,
             entity_type: ent,
             user_selected: touchedRef.current.has(riskKey(ctx.context_id, src)),
+            ...etiquetaDe(labelsRef.current, ctx.context_id, src),
           });
         }
-      }
-      // F-H3.e: el efecto SÓLO de las hojas que viajan. Mandar el de una hoja
-      // excluida da 422 ("apunta a una hoja que no está en el archivo"), porque
-      // el backend arma los perfiles con los mapeos recibidos.
-      const inventoryEffectPayload: Record<string, string> = {};
-      for (const ctxId of Object.keys(contextEntity)) {
-        const modo = efectoDe(ctxId);
-        if (modo) inventoryEffectPayload[ctxId] = modo;
       }
       // F-H6.b: sólo las hojas donde el usuario eligió. Sin entrada, sus envíos
       // sin comprobante no se registran — que es el default seguro.
@@ -1462,9 +1426,12 @@ function MultiContextMapper({
         // INCLUIDAS; `undefined` si no hay ninguna (el backend asume apertura).
         stockTreatmentPayload,
         riskDecisions,
-        Object.keys(inventoryEffectPayload).length > 0
-          ? inventoryEffectPayload
-          : undefined,
+        // F-F.4: el efecto de inventario ya no viaja. Lo deduce el backend de la
+        // entidad efectiva de cada hoja y de los campos mapeados — que es lo
+        // mismo que esta pantalla acaba de mandar. Repetirlo desde acá sería
+        // tener dos fuentes de la misma regla, que es exactamente por donde el
+        // catálogo de campos se desincronizó.
+        undefined,
         envioPayload,
         costoPayload,
       );
@@ -1554,14 +1521,14 @@ function MultiContextMapper({
             warnings={warningsByCtx[ctx.context_id] ?? []}
             onIncludeChange={handleIncludeChange}
             onMappingsChange={handleMappingsChange}
+            onLabelsChange={handleLabelsChange}
             onEntityChange={handleEntityChange}
             onColumnTouched={handleColumnTouched}
+            isColumnTouched={isColumnTouched}
             onIssuesChange={handleIssuesChange}
             stockTreatment={stockTreatmentByCtx[ctx.context_id] ?? "opening_balance"}
             onStockTreatmentChange={handleStockTreatmentChange}
             inventoryEffect={effectsByCtx[ctx.context_id]}
-            effectValue={efectoDe(ctx.context_id)}
-            onEffectChange={handleEffectChange}
             shippingValue={shippingByCtx[ctx.context_id] ?? null}
             grupos={gruposByCtx[ctx.context_id]}
             resaltada={hojaResaltada === ctx.context_id}
@@ -1810,23 +1777,20 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     [fileId, riskRecomputeInput],
   );
 
-  // F-H3.e: mismo contrato que en el camino multi-hoja. Este camino manda sus
-  // mapeos con `context_id: "table"`, así que también tiene una hoja a la que
-  // declararle un efecto — sin esto, un archivo de una sola tabla entraba
-  // siempre con el default y nunca podía aplicar su historia.
+  // F-F.4: mismo contrato que en el camino multi-hoja. Este camino manda sus
+  // mapeos con `context_id: "table"`, así que también tiene una hoja cuyo efecto
+  // el backend puede deducir y esta pantalla mostrar.
   const { data: inventoryEffects = [] } = useQuery({
     queryKey: ["inventory-effects", fileId, riskRecomputeKey],
     queryFn: ({ signal }) =>
       ingestionService.fetchInventoryEffects(fileId, riskRecomputeInput, signal),
     // La clave incluye el mapeo, así que cambia con cada edición. Sin conservar
-    // lo anterior, el selector DESAPARECE en cada recálculo —y el confirm que
-    // caiga en esa ventana viaja sin efecto declarado, que es peor que el
-    // parpadeo—. Lo que se muestra mientras tanto es el modo de un mapeo
-    // ligeramente viejo; la respuesta nueva lo corrige apenas llega.
+    // lo anterior, la línea PARPADEA en cada recálculo. Lo que se muestra
+    // mientras tanto es el efecto de un mapeo ligeramente viejo; la respuesta
+    // nueva lo corrige apenas llega.
     placeholderData: (prev) => prev,
   });
   const hojaEfecto = inventoryEffects[0];
-  const [effectElegido, setEffectElegido] = useState<string | null>(null);
   /**
    * Este camino NO puede traer costos de compra, y por eso no los ofrece.
    *
@@ -1859,10 +1823,6 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   ];
   // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
   // cantidad puede dejar a la hoja sin poder mover inventario.
-  const efectoActual =
-    effectElegido && hojaEfecto?.options.some((o) => o.value === effectElegido)
-      ? effectElegido
-      : (hojaEfecto?.default ?? "");
 
   function choosePurpose(value: string) {
     setPurpose(value);
@@ -1937,9 +1897,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         undefined,
         hasStock ? stockTreatment : undefined,
         riskDecisions,
-        hojaEfecto && efectoActual
-          ? { [hojaEfecto.context_id]: efectoActual }
-          : undefined,
+        // F-F.4: el efecto ya no viaja — lo deduce el backend (ver el camino
+        // multi-hoja, misma razón).
+        undefined,
         undefined,
         // Nunca. El importador plano no aplica las decisiones de costo, y el
         // confirm rechaza el archivo con 422 en cuanto ve una: mandar algo acá
@@ -2047,6 +2007,16 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   }
 
   function doConfirm(currentMappings: Record<string, string>) {
+    // F-A: etiquetas de los campos propios que propuso el backend, sólo mientras
+    // el destino siga siendo el sugerido (si la persona lo cambió, esa etiqueta
+    // ya no describe nada). Misma regla que la sección multi-hoja.
+    const etiquetasPlanas: Record<string, string> = {};
+    for (const sug of suggestions) {
+      const actual = currentMappings[sug.source_column];
+      if (actual && actual === sug.target_field && sug.target_label) {
+        etiquetasPlanas[sug.source_column] = sug.target_label;
+      }
+    }
     const columnMappings: ColumnMapping[] = Object.entries(currentMappings)
       .filter(([, target]) => Boolean(target))
       .map(([src, target]) => ({
@@ -2055,6 +2025,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         // F8c: mismo touched-set que el recompute — user_selected solo si el
         // usuario cambió el mapeo a mano (no si vino de una sugerencia).
         user_selected: touchedRef.current.has(riskKey("table", src)),
+        // F-A: la etiqueta del campo propio, mientras el destino siga siendo el
+        // que propuso el backend.
+        ...etiquetaDe({ table: etiquetasPlanas }, "table", src),
         // F-H3.e: la columna dice a qué hoja pertenece. Sin esto el confirm
         // entra por la rama de mapeos planos, donde el efecto de inventario no
         // se puede resolver contra ninguna hoja y el backend lo rechaza con 422
@@ -2225,32 +2198,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                       >
                         {s.source_column}
                       </span>
-                      <select
-                        value={target}
-                        onChange={(e) => setMappingForColumn(s.source_column, e.target.value)}
+                      <TargetSelect
+                        target={target}
+                        onChange={(value) => setMappingForColumn(s.source_column, value)}
+                        fields={fields}
                         disabled={loadingCatalog}
+                        unknownTarget="catalog-guarded"
                         className="min-w-0 flex-1 rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
-                      >
-                        <option value="">Sin mapear</option>
-                        <option value="ignore">— Ignorar —</option>
-                        {fields.map((f) => (
-                          <option key={f.value} value={f.value}>
-                            {f.label}
-                          </option>
-                        ))}
-                        {/* Sin esta opción el DOM cae a la primera y la pantalla
-                            muestra "Sin mapear" sobre un target real. */}
-                        {target &&
-                          target !== "ignore" &&
-                          fields.length > 0 &&
-                          !fields.some((f) => f.value === target) && (
-                            <option value={target}>
-                              {target.startsWith("custom_field:")
-                                ? target
-                                : `${target} (campo desconocido)`}
-                            </option>
-                          )}
-                      </select>
+                      />
                       <AmbiguityHint
                         suggestion={s}
                         fields={fields}
@@ -2329,22 +2284,14 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                       {(isMapped || isIgnored) && !isCustom && (
                         <ArrowRight className="h-3 w-3 shrink-0 text-vk-text-muted" />
                       )}
-                      <select
-                        value={currentTarget}
-                        onChange={(e) => setMappingForColumn(s.source_column, e.target.value)}
+                      <TargetSelect
+                        target={currentTarget}
+                        onChange={(value) => setMappingForColumn(s.source_column, value)}
+                        fields={fields}
+                        ignoreLabel="— Ignorar columna —"
+                        unknownTarget="custom-only"
                         className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"
-                      >
-                        <option value="">Sin mapear</option>
-                        <option value="ignore">— Ignorar columna —</option>
-                        {fields.map((f) => (
-                          <option key={f.value} value={f.value}>
-                            {f.label}
-                          </option>
-                        ))}
-                        {isCustom && (
-                          <option value={currentTarget}>{currentTarget}</option>
-                        )}
-                      </select>
+                      />
                     </div>
                     <div className="mt-1">
                       <AmbiguityHint
@@ -2353,14 +2300,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                         onPick={(t) => setMappingForColumn(s.source_column, t)}
                       />
                     </div>
-                    {isMapped && s.source !== "none" && (
-                      <p className="mt-0.5 pl-5 text-[10px] text-vk-text-muted">
-                        {SOURCE_LABELS[s.source] ?? s.source} ·{" "}
-                        <span className={confidenceColor(s.confidence)}>
-                          {Math.round(s.confidence * 100)}%
-                        </span>
-                      </p>
-                    )}
+                    <MappingOriginHint
+                      suggestion={s}
+                      mapped={isMapped}
+                      currentTarget={currentTarget}
+                      className="mt-0.5 pl-5"
+                    />
                   </div>
                 </div>
               );
@@ -2466,14 +2411,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         />
       )}
 
-      {/* F-H3.e: qué le hace al inventario esta tabla. Eje separado del de
+      {/* F-F.4: qué le hace al inventario esta tabla. Eje separado del de
           arriba: aquel decide si el stock inicial genera un gasto, éste qué
-          pasa con las unidades. */}
+          pasa con las unidades — y a diferencia de aquel, no se elige. */}
       {hojaEfecto && !needsPurpose && (
         <InventoryEffectChoice
           hoja={hojaEfecto}
-          value={efectoActual}
-          onChange={setEffectElegido}
           className="mb-3 rounded-lg border border-vk-border-w bg-vk-bg-light/40 p-3"
         />
       )}

@@ -1,9 +1,9 @@
 """F-H3.d.3 — qué ventas de un archivo NO tienen stock que las respalde.
 
 Decide, sin sesión ni ORM, cuáles filas de venta se quedan sin unidades cuando se
-reproduce la historia que declara el archivo. Sólo corre para las hojas que el
-usuario marcó ``historical_replay``: con el default (``informational``) el archivo
-entra entero y esto no se ejecuta.
+reproduce la historia que declara el archivo. Corre para las hojas resueltas como
+``historical_replay``, que desde F-F.4 son todas las de compra y venta de
+mercadería: una hoja que no habla de unidades no llega hasta acá.
 
 **Por qué existir, en vez de simplemente dejar el stock en negativo.** Las dos
 alternativas obvias están mal por el mismo motivo: el descuento y el movimiento
@@ -24,92 +24,35 @@ No decide identidad: cada fila llega con su producto ya resuelto (F-H1/F-H2). El
 saldo de apertura tampoco se calcula acá — lo trae el caller, que es el único que
 sabe leer la DB.
 
-**Dónde NO se puede gatear todavía, y por qué se rechaza en vez de seguir.** En un
-archivo de UNA sola tabla que declara el stock *y* las ventas, no hay saldo contra
-el cual evaluar: el stock que respaldaría a esas ventas lo está cargando el propio
-archivo, en la misma pasada. Da igual si lo declara dando de alta productos o
-comprando mercadería — las dos suman unidades, y el gate plano se calcula antes de
-que ninguna de las dos se aplique. El camino
-multi-hoja no tiene el problema —recorre catálogos → compras → ventas y calcula el
-gate al llegar a la primera hoja de ventas—, así que esto es un límite del archivo
-plano, no del dominio. Es **transitorio**: se levanta el día que el import prepare
-identidades y saldos provisionales en memoria antes de construir los movimientos
-(ver `docs/plans/ingestion-mapping-overhaul.md`). Hasta entonces el confirm lo
-rechaza antes de tomar el lease: elegir ``historical_replay`` es pedir que Véktor
-valide cada venta contra el stock, y degradar eso en silencio a "importé todo sin
-validar nada" es peor que no dejar confirmar.
+**F-F — las compras del propio archivo entran como créditos datados.** Antes esto
+recibía un saldo ESTÁTICO y por eso un archivo de una sola tabla que declaraba el
+stock *y* las ventas no se podía gatear: el stock que respaldaba a esas ventas lo
+cargaba el mismo archivo, en la misma pasada, y el confirm lo rechazaba. Con los
+créditos como eventos con fecha, ese caso se evalúa igual que cualquier otro —los
+"saldos provisionales en memoria" que ese rechazo esperaba no son más que esto— y
+además se gana la propiedad que el usuario pidió: **una compra del 10/03 ya no
+respalda una venta del 03/03**. Antes sí lo hacía, porque toda compra del archivo
+estaba metida en el saldo inicial sin fecha.
+
+**El saldo que se pasa es el PREVIO al archivo.** Si el caller pasara el stock de
+hoy —que en el camino multi-hoja ya incluye las compras que el import aplicó— y
+además los créditos, cada compra se contaría dos veces y respaldaría el doble de
+ventas de las que puede. Es el mismo cuidado que documenta
+``domain/inventory_projection``, y por eso los dos leen la misma apertura.
+
+**El ancla del catálogo no es un crédito.** Un catálogo declara un ABSOLUTO sin
+fecha de negocio: entra como saldo de apertura, antes de todos los eventos.
+Tratarlo como un crédito datado lo pondría después de las ventas anteriores a la
+fecha del import y las marcaría como sin respaldo — el falso positivo que
+``inventory_temporal_service`` documenta y evita.
 """
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Container, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
-
-#: Motivo del rechazo en la traza (`STAGE_REJECT`) y en el contador del respaldo.
-#: Uno solo para los dos lugares: si el confirm y el importador nombraran distinto
-#: la misma situación, buscarla en `pipeline_events` daría la mitad de los casos.
-MOTIVO_REPLAY_NO_GATEABLE = "replay_no_gateable"
-
-#: Lo que se le dice al usuario. Explica QUÉ pasa con su archivo y ofrece las dos
-#: salidas reales, en vez de nombrar el modo técnico que eligió.
-#:
-#: La primera salida es la que resuelve el caso en dos pasos y por eso va primero:
-#: el replay del panel **se recalcula contra el stock del momento**, así que ahí sí
-#: hay saldo para validar. Lo único que se pierde respecto de gatear al confirmar
-#: es dónde queda la venta que no se puede respaldar — por el panel entra a los
-#: libros y su descuento queda pendiente, en vez de irse a "Otros". Decirlo es
-#: parte del mensaje: sin eso, mandar a reestructurar el archivo suena a que no
-#: hay otro camino, y sí lo hay.
-MENSAJE_REPLAY_NO_GATEABLE = (
-    "En la hoja «{hoja}»: el archivo carga stock (da de alta productos o compra "
-    "mercadería) y además trae ventas en las mismas filas. Véktor puede "
-    "analizarlo y "
-    "mostrarte el impacto, pero todavía no puede validar cada venta contra el "
-    "stock en una sola confirmación: ese stock lo está cargando este mismo "
-    "archivo. Importalo sin que las ventas modifiquen el inventario y después "
-    "aplicá el histórico desde el panel de impacto —ahí el cálculo corre contra "
-    "el stock ya cargado—, teniendo en cuenta que una venta sin respaldo va a "
-    "entrar igual y su descuento va a quedar pendiente. Si preferís que esas "
-    "ventas ni entren, separá el saldo inicial de los movimientos en hojas "
-    "distintas."
-)
-
-
-def replay_no_gateable(
-    *,
-    hoja_unica: bool,
-    pide_replay: bool,
-    da_de_alta_productos: bool,
-    trae_ventas: bool,
-    trae_compras: bool = False,
-) -> bool:
-    """¿Este confirm pide un replay que no se puede validar?
-
-    Los datos los arma cada caller con lo que tiene a mano, y ahí está la única
-    diferencia entre los dos: el confirm los deriva del mapeo declarado y de las
-    señales del parseo —antes del lease, que es donde un rechazo no deja nada a
-    medias—, y el importador de las columnas ya resueltas, que incluyen las
-    autodetectadas sin mapeo explícito. Por eso el importador conserva su propio
-    respaldo: puede ver una alta de productos que el confirm no llegó a ver.
-
-    **``trae_compras`` es la misma situación que el alta de productos, por otra
-    puerta.** El problema del archivo de una tabla no es dar de alta un producto:
-    es que el stock contra el cual habría que validar lo está declarando el propio
-    archivo, en la misma pasada. Una compra de mercadería suma unidades igual que
-    un catálogo, así que un libro plano con compras y ventas tiene el mismo
-    defecto: el gate mira el saldo de ANTES del archivo y manda a "Otros" ventas
-    que las compras de la fila de abajo respaldan. El mismo libro partido en dos
-    hojas importa bien, porque ahí el orden de pasada (catálogos → compras →
-    ventas) garantiza que el stock ya esté.
-    """
-    return (
-        hoja_unica
-        and pide_replay
-        and trae_ventas
-        and (da_de_alta_productos or trae_compras)
-    )
 
 
 @dataclass(frozen=True)
@@ -134,6 +77,22 @@ class ReplayRow:
 
 
 @dataclass(frozen=True)
+class CreditEvent:
+    """Unidades que ENTRAN en una fecha: una compra de mercadería del archivo.
+
+    Es la contracara de ``ReplayRow``. No lleva ``key`` porque a nadie le importa
+    cuál crédito respaldó cuál venta: lo único que se reporta es la venta que se
+    quedó sin unidades.
+    """
+
+    product_id: UUID
+    day: date
+    qty: int
+    #: Mismo rol que en ``ReplayRow``: desempata entre créditos de la misma fecha.
+    sheet_rank: int = 0
+
+
+@dataclass(frozen=True)
 class UnbackedRow:
     """Una venta que se queda sin unidades, con el número que lo explica."""
 
@@ -145,15 +104,53 @@ class UnbackedRow:
     disponible: int
 
 
+def productos_con_saldo_conocido(
+    candidatos: Iterable[UUID],
+    *,
+    saldo_previo: Mapping[UUID, int],
+    declarados_por_el_archivo: Container[UUID],
+    con_historial: Container[UUID],
+) -> frozenset[UUID]:
+    """Los productos cuyo saldo es un DATO, no la ausencia de un dato.
+
+    F-F.2 — la diferencia entre «sé que no hay» y «no sé». Las dos se ven iguales
+    en la base (``stock_units = 0``) y no significan lo mismo: la primera justifica
+    no importar una venta que no se puede respaldar; la segunda es un producto del
+    que nunca se cargó inventario, y tratar ese cero como "no hay" sería inventar el
+    dato que falta — exactamente lo que la regla de no-invención prohíbe.
+
+    Un saldo cuenta como conocido si se cumple cualquiera de estas, que son las
+    formas que tiene un cero de haber sido AFIRMADO:
+
+    - ``saldo_previo > 0``: hay unidades, así que alguien las cargó;
+    - el archivo declara su stock o le compra unidades (``declarados_por_el_archivo``);
+    - el producto tiene movimientos vivos en el ledger (``con_historial``): su saldo
+      es el resultado de una historia registrada, no un renglón nunca tocado.
+
+    Lo que queda afuera es el producto en cero, sin movimientos y del que el archivo
+    no dice nada sobre unidades. De ese no se sabe cuánto había.
+    """
+    return frozenset(
+        pid
+        for pid in candidatos
+        if saldo_previo.get(pid, 0) > 0
+        or pid in declarados_por_el_archivo
+        or pid in con_historial
+    )
+
+
 def rows_without_stock_backing(
     rows: list[ReplayRow],
     saldo_por_producto: dict[UUID, int],
+    credits: Sequence[CreditEvent] = (),
 ) -> list[UnbackedRow]:
-    """Las filas que no se pueden respaldar, en orden cronológico.
+    """Las filas que no se pueden respaldar, evaluadas en orden cronológico.
 
-    ``saldo_por_producto`` es lo que hay ANTES de aplicar estas ventas — o sea, el
-    stock ya con los catálogos y las compras del archivo adentro (que sí se
-    aplican al confirmar, **V16**). Un producto ausente del dict cuenta como 0.
+    ``saldo_por_producto`` es el stock PREVIO al archivo (o el absoluto que declara
+    su catálogo, que pisa al previo). Un producto ausente del dict cuenta como 0.
+    ``credits`` son las unidades que el archivo hace entrar, con su fecha: las
+    compras de mercadería. Ver el docstring del módulo — pasar un saldo que ya las
+    incluya y además pasarlas acá las contaría dos veces.
 
     Una fila rechazada **no consume** stock: el saldo que ve la siguiente es el
     mismo. Si no, una venta grande imposible de cubrir se llevaría puestas a todas
@@ -161,11 +158,30 @@ def rows_without_stock_backing(
     """
     disponible = dict(saldo_por_producto)
     sin_respaldo: list[UnbackedRow] = []
-    # `sorted` es estable: a igual fecha y hoja, el desempate final es el orden en
-    # que el caller las entregó, que es el orden de fila del archivo. No se ordena
-    # por la clave — es opaca (una tupla al confirmar, un UUID al aplicar) y
-    # ordenar por ella haría que la decisión dependa de un id aleatorio.
-    for row in sorted(rows, key=lambda r: (r.day, r.sheet_rank)):
+    # Un solo flujo cronológico con créditos y débitos intercalados. La clave de
+    # orden es (fecha, crédito antes que débito, hoja, orden de llegada) — el mismo
+    # criterio que `inventory_temporal_service.replay_timeline`, para que una compra
+    # del mismo día que la venta la respalde en vez de generar un falso negativo.
+    #
+    # Se ordena una lista de TUPLAS y nunca el evento: la clave de `ReplayRow` es
+    # opaca (una tupla al confirmar, un UUID al aplicar) y ordenar por ella haría
+    # que la decisión dependa de un id aleatorio. El índice de llegada preserva el
+    # orden de fila del archivo dentro del mismo día y la misma hoja.
+    eventos: list[tuple[date, int, int, int]] = [
+        *((c.day, 0, c.sheet_rank, i) for i, c in enumerate(credits)),
+        *((r.day, 1, r.sheet_rank, i) for i, r in enumerate(rows)),
+    ]
+    eventos.sort()
+    for _, es_venta, _, indice in eventos:
+        if not es_venta:
+            credito = credits[indice]
+            if credito.qty <= 0:
+                continue
+            disponible[credito.product_id] = (
+                disponible.get(credito.product_id, 0) + credito.qty
+            )
+            continue
+        row = rows[indice]
         if row.qty <= 0:
             continue
         saldo = disponible.get(row.product_id, 0)

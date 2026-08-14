@@ -22,6 +22,30 @@ UNCLASSIFIED_STATUS_DISMISSED = "DISMISSED"
 
 UNCLASSIFIED_SOURCES = ("ingestion", "chat", "reanalysis")
 
+#: Prefijo del ``source_row_ref`` que se estampa en la venta/gasto nacido de
+#: clasificar a mano una fila de "Otros" (``unclassified:{record_id}``).
+#:
+#: Es una IDENTIDAD, no un formato: distingue un registro cuya procedencia es una
+#: decisión humana sobre una fila que el parser no supo leer, de uno que el
+#: importador derivó del archivo. Vivía escrita a mano en tres lugares —el que la
+#: estampa, el borrado por procedencia y ahora la relectura—, que es una copia de
+#: más para algo cuyo desacuerdo no da error sino comportamiento distinto.
+UNCLASSIFIED_ROW_REF_PREFIX = "unclassified:"
+
+
+def unclassified_row_ref(record_id: uuid.UUID) -> str:
+    """El ``source_row_ref`` de un registro nacido de clasificar esta fila.
+
+    Se deriva del id del ``UnclassifiedRecord`` y no de sus valores: es estable
+    aunque el usuario corrija un campo antes de clasificar.
+    """
+    return f"{UNCLASSIFIED_ROW_REF_PREFIX}{record_id}"
+
+
+def is_unclassified_row_ref(ref: str | None) -> bool:
+    """¿Este registro nació de una clasificación manual desde "Otros"?"""
+    return bool(ref) and str(ref).startswith(UNCLASSIFIED_ROW_REF_PREFIX)
+
 #: Procedencias que los callers nombran con otra palabra. La relectura se
 #: identifica a sí misma como ``"reread"`` (``insert_confirmed_data(...,
 #: source="reread")``) y ese valor NO está en la CHECK: cualquier fila capturada

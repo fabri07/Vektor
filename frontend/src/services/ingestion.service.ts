@@ -154,11 +154,11 @@ export interface InventoryReplayResult {
 }
 
 /**
- * F-H3.e — qué le hace al INVENTARIO cada hoja, y entre qué puede elegir el
- * usuario. Lo calcula el backend a partir del mapeo borrador: el default y las
- * opciones dependen de la entidad de la hoja y de los campos que el mapeo cubre
- * (sin `cantidad` mapeada, la hoja no mueve unidades). Una tabla fija acá sería
- * una copia de una regla de dominio — el defecto que rompió el mapeo de columnas.
+ * F-F.4 — qué le hace al INVENTARIO cada hoja. Ya no se elige: lo DEDUCE el
+ * backend a partir de la entidad efectiva de la hoja y de los campos que el mapeo
+ * borrador cubre (sin `cantidad` mapeada, la hoja no mueve unidades; reasignar la
+ * sección la cambia). Una tabla fija acá sería una copia de una regla de dominio
+ * — el defecto que rompió el mapeo de columnas.
  */
 export interface InventoryEffectOption {
   value: string;
@@ -170,8 +170,9 @@ export interface SheetInventoryEffect {
   context_id: string;
   /** Nombre legible de la hoja, nunca el `context_id` crudo. */
   label: string;
-  default: string;
-  /** Siempre incluye `default`. Con un solo elemento no hay nada que elegir. */
+  /** `null` = esta hoja no habla de inventario y no se muestra nada. */
+  default: string | null;
+  /** Vacío, o el único efecto de la hoja. Nunca hay más de uno que mostrar. */
   options: InventoryEffectOption[];
 }
 
@@ -343,7 +344,11 @@ export interface ColumnMappingSuggestion {
   target_field: string | null;
   confidence: number;
   // FASE 2 (A2): "llm" = la 4ª capa LLM desambiguó esta columna.
-  source: "tenant_history" | "heuristic" | "fuzzy" | "llm" | "none";
+  // F-A: "auto_custom" = nadie reconoció el encabezado y Véktor propone
+  // conservarlo como campo propio con el nombre del archivo. Espejo del
+  // `Literal` de `schemas/ingestion.py` — ya divergió una vez (F-M.5) y el
+  // modo de falla es mudo: la clave viaja y la pantalla no la sabe leer.
+  source: "tenant_history" | "heuristic" | "fuzzy" | "llm" | "none" | "auto_custom";
   // F-M: `ambiguo` = Véktor entendió el encabezado y, con eso entendido, hay más
   // de una lectura razonable. No es `unmapped`, que significa que no reconoció
   // nada — y la pantalla las muestra distinto porque para la persona no son lo
@@ -355,6 +360,13 @@ export interface ColumnMappingSuggestion {
   // Por qué no alcanza, en castellano. Viaja también en `unmapped` cuando el
   // concepto se reconoció pero esta hoja no tiene campo donde ponerlo.
   duda?: string | null;
+  // F-A: cómo se llama la columna en el archivo, para MOSTRAR. Viaja separado
+  // del target porque el slug perdió acentos, mayúsculas y puntuación: desde
+  // `custom_field:ano_fiscal` no se vuelve a «Año Fiscal».
+  target_label?: string | null;
+  // F-A/V10: QUÉ requerido falta cuando `status === "required_missing"`. Sin
+  // esto la pantalla ve un punto rojo y tiene que adivinar cuál es.
+  missing_field?: string | null;
 }
 
 export interface ColumnMapping {
@@ -366,6 +378,10 @@ export interface ColumnMapping {
   // manualmente. El backend nunca lo infiere — es distinto de `source`/
   // `mapping_source` (que indican de dónde salió la sugerencia).
   user_selected?: boolean;
+  // F-A: cómo se llama la columna para mostrar, cuando va a un campo propio.
+  // Cierra el recorrido del label hasta `ensure_custom_field_exists`; si no se
+  // manda, el backend cae a `source_column` como hacía antes.
+  target_label?: string;
 }
 
 /** Contexto de mapeo: una hoja/tabla/grupo detectado dentro de un archivo. */
@@ -624,9 +640,10 @@ export const ingestionService = {
     stockTreatment?: StockTreatment | Record<string, StockTreatment>,
     // F8c: decisiones del usuario sobre columnas riesgosas (drop / enrutar a Otros).
     columnRiskDecisions?: ColumnRiskDecision[],
-    // F-H3.e: qué le hace al inventario cada hoja, `{context_id: modo}`. Sin esto
-    // el backend aplica el default de cada hoja y `historical_replay` —el único
-    // modo que escribe stock— era inalcanzable desde la pantalla.
+    // OBSOLETO desde F-F.4: el efecto se deduce del contenido de la hoja y esta
+    // pantalla ya no lo manda (queda en la firma porque el backend lo sigue
+    // aceptando). Mandarlo desde acá volvería a tener dos fuentes de la misma
+    // regla.
     inventoryEffect?: Record<string, string>,
     // F-H6.b: qué hacer con los envíos sin comprobante, por hoja. Sin entrada
     // para una hoja, sus envíos sin comprobante no se registran.

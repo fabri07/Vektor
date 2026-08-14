@@ -39,19 +39,20 @@ const mockInventoryEffects = ingestionService.fetchInventoryEffects as jest.Mock
 const mockPurchaseGroups = ingestionService.fetchPurchaseGroups as jest.Mock;
 
 /**
- * F-H3.e — lo que el backend ofrece para una hoja de ventas con producto y
- * cantidad mapeados. Las opciones y sus textos los sirve `/inventory-effects`:
- * el frontend no tiene lista propia.
+ * F-F.4 — lo que el backend DEDUCE para una hoja de ventas de mercadería. El
+ * texto lo sirve `/inventory-effects`: el frontend no tiene lista propia, y
+ * desde F-F.4 tampoco tiene qué elegir — viene una sola opción.
  */
 const EFECTOS_VENTAS = [
   {
     context_id: "table",
     label: "Ventas",
-    default: "informational",
+    default: "historical_replay",
     options: [
-      { value: "informational", label: "Estas filas no modificarán el inventario" },
-      { value: "historical_replay", label: "Aplicar la historia: las compras suman y las ventas restan" },
-      { value: "no_inventory", label: "Estas cantidades no afectan el inventario" },
+      {
+        value: "historical_replay",
+        label: "Las compras suman y las ventas restan del inventario",
+      },
     ],
   },
 ];
@@ -229,7 +230,7 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     expect(screen.queryByText(/^1% vacío/)).not.toBeInTheDocument();
   });
 
-  test("muestra el source 'llm' como IA con su confianza", async () => {
+  test("el source 'llm' se cuenta como «Sugerido por Véktor», sin porcentaje", async () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
@@ -250,10 +251,12 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
 
     renderPanel();
 
+    // F-B.1: la capa que resolvió el mapeo se cuenta en castellano y sin el
+    // porcentaje, que no medía nada.
     await waitFor(() => {
-      expect(screen.getByText(/IA/)).toBeInTheDocument();
+      expect(screen.getByText("Sugerido por Véktor")).toBeInTheDocument();
     });
-    expect(screen.getByText(/80%/)).toBeInTheDocument();
+    expect(screen.queryByText(/80\s*%/)).not.toBeInTheDocument();
   });
 
   test("confirm con 409 → toast amable (ya se está importando / ya se importó)", async () => {
@@ -562,11 +565,12 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     });
     expect(screen.getByText("obs")).toBeInTheDocument();
     expect(screen.getByText(/80% vacío/i)).toBeInTheDocument();
-    // source llm visible en al menos una sección de hoja.
+    // source llm visible en al menos una sección de hoja, contado en castellano
+    // y sin el porcentaje de confianza (F-B.1).
     await waitFor(() => {
-      expect(screen.getAllByText(/IA/).length).toBeGreaterThan(0);
+      expect(screen.getAllByText("Sugerido por Véktor").length).toBeGreaterThan(0);
     });
-    expect(screen.getAllByText(/77%/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/77\s*%/)).not.toBeInTheDocument();
   });
 
   test("user_selected: sugerencia inicial NO cuenta como manual; cambiar el mapeo sí", async () => {
@@ -719,12 +723,15 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
   });
 
   /**
-   * F-H3.e — la regresión de la fase: el panel NO mandaba `inventory_effect`, así
-   * que `historical_replay` (el único modo que escribe stock) era inalcanzable
-   * desde la pantalla y todo archivo entraba con el default de cada hoja. Todo lo
-   * demás estaba cableado y probado punta a punta contra el endpoint.
+   * F-F.4 — el panel dejó de mandar `inventory_effect`.
+   *
+   * F-H3.e lo había cableado justamente porque sin eso `historical_replay` era
+   * inalcanzable desde la pantalla. Ahora el backend lo deduce del mismo mapeo
+   * que este confirm ya manda, así que repetirlo desde acá sería tener dos
+   * fuentes de la misma regla — y la que se desincroniza es siempre la del
+   * frontend (el catálogo de campos, el incidente ASTERIA).
    */
-  test("el efecto de inventario elegido viaja en el confirm", async () => {
+  test("el efecto de inventario ya no viaja en el confirm", async () => {
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
@@ -772,26 +779,25 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
 
     renderPanel();
 
-    // El modo se elige con el texto que mandó el backend, no con uno de acá.
-    const aplicar = await screen.findByRole("button", {
-      name: EFECTOS_VENTAS[0]!.options[1]!.label,
-    });
-    fireEvent.click(aplicar);
+    // La línea informativa ya está: el efecto llegó del backend y se muestra.
+    await screen.findByText(EFECTOS_VENTAS[0]!.options[0]!.label);
+    // Y no hay nada que elegir.
+    expect(
+      screen.queryByRole("button", { name: EFECTOS_VENTAS[0]!.options[0]!.label }),
+    ).not.toBeInTheDocument();
+
     fireEvent.click(
       screen.getByRole("button", { name: /Confirmar importación/i }),
     );
 
     await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
     // `inventory_effect` es el 8º argumento posicional (índice 7).
-    expect(mockConfirmFile.mock.calls[0][7]).toEqual({
-      table: "historical_replay",
-    });
+    expect(mockConfirmFile.mock.calls[0][7]).toBeUndefined();
   });
 
-  test("sin tocar nada viaja el default que muestra la pantalla", async () => {
-    // Si el panel mandara `undefined`, el backend aplicaría su propio default y
-    // coincidiría por casualidad. Mandarlo explícito es lo que hace que el
-    // `STAGE_CONFIRM` registre con qué modo entró cada hoja.
+  test("la pantalla muestra el efecto que dedujo el backend", async () => {
+    // El texto sale del backend y no de una tabla de acá: es la misma regla que
+    // decide el import, así que una copia local puede mostrar lo que no pasa.
     mockGetPreview.mockResolvedValue({
       file_id: "file-1",
       processing_status: "NEEDS_CONFIRMATION",
@@ -839,16 +845,9 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
 
     renderPanel();
 
-    // El selector ya está: recién ahí el panel sabe qué efecto mandar.
-    await screen.findByRole("button", {
-      name: EFECTOS_VENTAS[0]!.options[0]!.label,
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: /Confirmar importación/i }),
-    );
-
-    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
-    expect(mockConfirmFile.mock.calls[0][7]).toEqual({ table: "informational" });
+    expect(
+      await screen.findByText(EFECTOS_VENTAS[0]!.options[0]!.label),
+    ).toBeInTheDocument();
   });
 
   test("touched-set: resetear el mapeo (checkbox de confirmedFields) limpia el touched-set", async () => {
@@ -2081,5 +2080,560 @@ describe("ColumnMapperPanel — F-C: el banner de faltantes nombra, explica y ll
         screen.getByText(/falta un dato obligatorio y hay dos columnas para el mismo campo/),
       ).toBeInTheDocument();
     });
+  });
+});
+
+/**
+ * F-A — cambiar de sección no puede borrar lo que la persona ya mapeó.
+ *
+ * La inicialización del mapeo era un REEMPLAZO: al reasignar la hoja (Ventas →
+ * Gastos) el estado entero se pisaba con las sugerencias de la entidad nueva, y
+ * veinte columnas mapeadas a mano se perdían por corregir la sección.
+ *
+ * Ahora es un merge con una condición que no es obvia: lo tocado se conserva
+ * SÓLO si sigue siendo elegible en la entidad nueva. Preservar a ciegas un
+ * canónico que allá no existe reintroduce el «(campo desconocido)» que cerró el
+ * catálogo de fuente única.
+ */
+describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a mano", () => {
+  const PREVIEW = {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: {
+      inferred_type: "mixed",
+      mapping_contexts: [
+        {
+          context_id: "hoja1",
+          label: "Movimientos",
+          source_kind: "sheet",
+          entity_type: "sale",
+          headers: ["Fecha", "Monto", "Detalle"],
+          fields: null,
+          preview_rows: [],
+          row_count: 12,
+        },
+      ],
+    },
+    columns_at_risk: [],
+  };
+
+  function sugerencia(source_column: string, target_field: string | null) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["x"],
+      target_field,
+      confidence: 0.9,
+      source: target_field ? "heuristic" : "none",
+      status: target_field ? "mapped" : "unmapped",
+      context_id: "hoja1",
+    };
+  }
+
+  // Las sugerencias de cada sección salen de schemas distintos: la misma columna
+  // «Fecha» es `transaction_date` en Ventas y `expense_date` en Gastos. Eso es
+  // justo lo que SÍ tiene que recalcularse al cambiar de sección.
+  const POR_ENTIDAD: Record<string, ReturnType<typeof sugerencia>[]> = {
+    sale: [
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "notes"),
+    ],
+    expense: [
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "category"),
+    ],
+  };
+
+  /** El `<select>` de una columna, ubicado por el nombre de la columna. */
+  function selectDe(columna: string): HTMLSelectElement {
+    const fila = screen.getByTitle(columna).closest(".grid");
+    return within(fila as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+  }
+
+  function cambiarSeccion(a: string) {
+    fireEvent.change(screen.getByLabelText("Sección de la hoja Movimientos"), {
+      target: { value: a },
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue(PREVIEW);
+    mockGetColumnMappings.mockImplementation((_fileId: string, entity: string) =>
+      Promise.resolve(POR_ENTIDAD[entity] ?? []),
+    );
+  });
+
+  test("lo elegido a mano sobrevive; lo no tocado se recalcula", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `payment_method` existe en Ventas y en Gastos: sigue siendo elegible.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "payment_method" } });
+
+    cambiarSeccion("expense");
+
+    await waitFor(() => {
+      // La columna que nadie tocó adopta la sugerencia del schema nuevo.
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    // Y la que la persona eligió a mano queda como la dejó.
+    expect(selectDe("Detalle").value).toBe("payment_method");
+  });
+
+  test("un target que la sección nueva no tiene NO se conserva", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `product_name` sólo existe en Ventas.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "product_name" } });
+
+    cambiarSeccion("expense");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    // Conservarlo dejaría el select en «(campo desconocido)»: cae a la
+    // sugerencia de Gastos, sin inventar ningún reemplazo.
+    expect(selectDe("Detalle").value).not.toBe("product_name");
+    expect(selectDe("Detalle").value).toBe("category");
+  });
+
+  test("un campo personalizado sobrevive: no pertenece a ningún schema", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    fireEvent.change(selectDe("Detalle"), { target: { value: "__custom__" } });
+    const entrada = screen.getByPlaceholderText("nombre_del_campo");
+    fireEvent.change(entrada, { target: { value: "obs libres" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("custom_field:obs_libres");
+    });
+
+    cambiarSeccion("expense");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("custom_field:obs_libres");
+  });
+
+  test("sin tocar nada, todo se recalcula con el schema nuevo", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("transaction_date");
+    });
+
+    cambiarSeccion("expense");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("category");
+    expect(selectDe("Monto").value).toBe("amount");
+  });
+});
+
+/**
+ * F-B.1 — la procedencia de un mapeo se cuenta en castellano, sin porcentaje.
+ *
+ * El «Heurística · 75%» de abajo de cada columna fue lo primero que el usuario
+ * reportó no entender, y con razón: el 75% está hardcodeado para TODO lo que
+ * resuelve la heurística (`column_mapping_service.py`) y el fuzzy escala su
+ * ratio a un techo de 65%, así que ningún fuzzy podía superar nunca a ningún
+ * heurístico. El número no era la probabilidad calibrada de nada.
+ */
+describe("ColumnMapperPanel — F-B.1: la procedencia se dice en castellano", () => {
+  const PREVIEW = {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: { inferred_type: "ventas", headers: ["Monto"] },
+    columns_at_risk: [],
+  };
+
+  function sugerencia(
+    source: string,
+    target_field: string | null,
+    confidence = 0.75,
+  ) {
+    return {
+      source_column: "Monto",
+      normalized_column: "monto",
+      sample_values: ["1500"],
+      target_field,
+      confidence,
+      source,
+      status: target_field ? "mapped" : "unmapped",
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetPreview.mockResolvedValue(PREVIEW);
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+  });
+
+  test("no queda NINGÚN porcentaje visible en el panel", async () => {
+    // Es el criterio de aceptación de F-B.1 y lo que evita que el número
+    // vuelva por descuido: cualquier reintroducción del `%` rompe acá.
+    mockGetPreview.mockResolvedValue({
+      ...PREVIEW,
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["Monto", "Fecha", "Detalle", "ColX"],
+      },
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      { ...sugerencia("heuristic", "amount"), source_column: "Monto" },
+      {
+        ...sugerencia("tenant_history", "transaction_date", 0.95),
+        source_column: "Fecha",
+        normalized_column: "fecha",
+      },
+      {
+        ...sugerencia("fuzzy", "notes", 0.46),
+        source_column: "Detalle",
+        normalized_column: "detalle",
+      },
+      {
+        ...sugerencia("llm", "payment_method", 0.8),
+        source_column: "ColX",
+        normalized_column: "colx",
+      },
+    ]);
+
+    const { container } = renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Sugerido por el nombre de la columna"),
+      ).toBeInTheDocument();
+    });
+    expect(container.textContent ?? "").not.toMatch(/\d+\s*%/);
+  });
+
+  test.each([
+    ["tenant_history", "Usado antes por tu negocio"],
+    ["heuristic", "Sugerido por el nombre de la columna"],
+    // «nombre parecido» y no «los valores»: `_fuzzy_match` compara el NOMBRE
+    // normalizado del encabezado contra los keywords, nunca las celdas.
+    ["fuzzy", "Sugerido por un nombre parecido"],
+    ["llm", "Sugerido por Véktor"],
+  ])("source %s → «%s»", async (source, frase) => {
+    mockGetColumnMappings.mockResolvedValue([sugerencia(source, "amount")]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(frase)).toBeInTheDocument();
+    });
+  });
+
+  test("elegir otro destino dice «Lo elegiste vos», y volver al sugerido NO", async () => {
+    // El caso que obliga a comparar valores en vez de llevar un flag `touched`:
+    // si alguien prueba otro campo y termina dejando el que propuso Véktor, ese
+    // dato no salió de esa persona y la pantalla no puede decir que sí.
+    mockGetColumnMappings.mockResolvedValue([sugerencia("heuristic", "amount")]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Sugerido por el nombre de la columna"),
+      ).toBeInTheDocument();
+    });
+
+    const select = screen.getAllByRole("combobox")[0]!;
+    fireEvent.change(select, { target: { value: "quantity" } });
+    await waitFor(() => {
+      expect(screen.getByText("Lo elegiste vos")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Sugerido por el nombre de la columna"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "amount" } });
+    await waitFor(() => {
+      expect(
+        screen.getByText("Sugerido por el nombre de la columna"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Lo elegiste vos")).not.toBeInTheDocument();
+  });
+
+  test("mandar la columna a «Ignorar» no cuenta ninguna procedencia", async () => {
+    mockGetColumnMappings.mockResolvedValue([sugerencia("heuristic", "amount")]);
+
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Sugerido por el nombre de la columna"),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getAllByRole("combobox")[0]!, {
+      target: { value: "ignore" },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("Sugerido por el nombre de la columna"),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText("Lo elegiste vos")).not.toBeInTheDocument();
+  });
+
+  test("una columna sin mapear y sin procedencia no renderiza nada", async () => {
+    mockGetColumnMappings.mockResolvedValue([sugerencia("none", null, 0)]);
+
+    renderPanel();
+
+    // La columna se dibuja; lo que no aparece es la línea de procedencia.
+    await waitFor(() =>
+      expect(screen.getAllByText("Monto").length).toBeGreaterThan(0),
+    );
+    for (const frase of [
+      "Lo elegiste vos",
+      "Usado antes por tu negocio",
+      "Sugerido por el nombre de la columna",
+      "Sugerido por un nombre parecido",
+      "Sugerido por Véktor",
+    ]) {
+      expect(screen.queryByText(frase)).not.toBeInTheDocument();
+    }
+  });
+});
+
+describe("ColumnMapperPanel — B.1: el modal de columnas sin mapear usa el selector único", () => {
+  // Este modal era el CUARTO lugar que dibujaba un `<select>` de destino, y el
+  // único sin tests: los otros tres ya se habían unificado en `TargetSelect`.
+  // Sin estas pruebas, "los tests pasan sin tocarse" no dice nada sobre él.
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["Fecha", "Monto", "Sucursal"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2026-03-01"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["1000"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      // La que dispara el modal: sin destino.
+      {
+        source_column: "Sucursal",
+        normalized_column: "sucursal",
+        sample_values: ["Centro"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "unmapped",
+      },
+    ]);
+  });
+
+  async function abrirModal() {
+    renderPanel();
+    // Esperar a que las sugerencias estén EN PANTALLA, no sólo a que el botón
+    // exista: con la lista todavía vacía no hay columnas sin mapear, el botón
+    // ya está habilitado y el click confirma de una sin abrir el modal.
+    await screen.findByText("Confirmar (1 sin mapear)");
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar \(1 sin mapear\)/i }));
+    // Acotado al modal: el panel de atrás sigue montado con sus propios selects.
+    const titulo = await screen.findByText("Columna sin mapear");
+    return titulo.closest("div.fixed") as HTMLElement;
+  }
+
+  test("ofrece los campos del catálogo bajo «Elegir campo...»", async () => {
+    const modal = await abrirModal();
+    expect(within(modal).getByText("Sucursal")).toBeInTheDocument();
+
+    const select = within(modal).getByRole("combobox") as HTMLSelectElement;
+    const opciones = Array.from(select.options).map((o) => o.textContent);
+    expect(opciones[0]).toBe("Elegir campo...");
+    expect(opciones).toEqual(expect.arrayContaining(["Monto de venta", "Fecha de venta"]));
+  });
+
+  test("no duplica adentro del select las acciones que ya son botones propios", async () => {
+    // «Ignorar esta columna» y «Guardar como campo personalizado» viven como
+    // botones del modal. `TargetSelect` las ofrece por default, así que
+    // unificar sin apagarlas le habría agregado dos opciones que nunca tuvo.
+    const modal = await abrirModal();
+    const select = within(modal).getByRole("combobox") as HTMLSelectElement;
+    const valores = Array.from(select.options).map((o) => o.value);
+    expect(valores).not.toContain("ignore");
+    expect(valores).not.toContain("__custom__");
+    expect(Array.from(select.options).map((o) => o.textContent)).not.toContain("Sin mapear");
+
+    // Y siguen estando como botones, que es de donde no se movieron.
+    expect(
+      within(modal).getByRole("button", { name: /Ignorar esta columna/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(modal).getByRole("button", { name: /Guardar como campo personalizado/i }),
+    ).toBeInTheDocument();
+  });
+
+  test("elegir un campo lo manda en el confirm", async () => {
+    const modal = await abrirModal();
+    const select = within(modal).getByRole("combobox") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "notes" } });
+    fireEvent.click(within(modal).getByRole("button", { name: /^Confirmar$/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    // `confirmFile(fileId, confirmedFields, columnMappings, …)` — posicional.
+    const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+    expect(enviado).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source_column: "Sucursal", target_field: "notes" }),
+      ]),
+    );
+  });
+});
+
+describe("ColumnMapperPanel — F-A: la etiqueta del campo propio llega al confirm", () => {
+  // El recorrido del label es sugerencia → estado → payload → backend. Los
+  // tests del backend cubren las dos puntas; este cubre el tramo del medio, que
+  // es el que el plan rector no contemplaba: sin él, el confirm derivaba la
+  // etiqueta de `source_column` y coincidían sólo por casualidad.
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["Fecha", "Monto", "Sucursal"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2026-03-01"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Monto",
+        normalized_column: "monto",
+        sample_values: ["1000"],
+        target_field: "amount",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Sucursal",
+        normalized_column: "sucursal",
+        sample_values: ["Centro"],
+        target_field: "custom_field:sucursal",
+        target_label: "Sucursal",
+        confidence: 0,
+        source: "auto_custom",
+        status: "mapped",
+      },
+    ]);
+  });
+
+  async function confirmar() {
+    renderPanel();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Confirmar importación/i })).toBeEnabled(),
+    );
+    // Esperar a que las sugerencias estén en pantalla: confirmar antes manda un
+    // mapeo vacío (la trampa que destapó B.1).
+    await screen.findByTitle("Sucursal");
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/i }));
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    return mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+  }
+
+  test("el campo propio propuesto viaja con su etiqueta", async () => {
+    const enviado = await confirmar();
+    expect(enviado).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source_column: "Sucursal",
+          target_field: "custom_field:sucursal",
+          target_label: "Sucursal",
+        }),
+      ]),
+    );
+  });
+
+  test("una columna canónica no arrastra etiqueta", async () => {
+    // El label es del campo propio. Un canónico ya tiene la suya en el
+    // catálogo, y mandar otra abriría dos fuentes para el mismo nombre.
+    const enviado = await confirmar();
+    const fecha = enviado.find((m) => m.source_column === "Fecha")!;
+    expect(fecha.target_label).toBeUndefined();
+  });
+
+  test("si la persona cambia el destino, la etiqueta vieja no lo sigue", async () => {
+    renderPanel();
+    await screen.findByTitle("Sucursal");
+    const select = document.querySelector<HTMLSelectElement>(
+      'select[data-suggests="custom_field:sucursal"]',
+    );
+    // El camino plano no estampa `data-suggests`; se busca el select por su valor.
+    const selects = Array.from(document.querySelectorAll("select"));
+    const elegido =
+      select ?? selects.find((s) => s.value === "custom_field:sucursal")!;
+    fireEvent.change(elegido, { target: { value: "notes" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/i }));
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+    const sucursal = enviado.find((m) => m.source_column === "Sucursal")!;
+    expect(sucursal.target_field).toBe("notes");
+    // La etiqueta describía al campo propio que ya no es el destino.
+    expect(sucursal.target_label).toBeUndefined();
   });
 });

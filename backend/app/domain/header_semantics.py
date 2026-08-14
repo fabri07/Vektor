@@ -34,8 +34,23 @@ CONCEPTOS: dict[str, str] = {
     "fecha": "fecha",
     "date": "fecha",
     "dia": "fecha",
-    "mes": "fecha",
+    # Un mes es un PERÍODO, no una fecha: «Marzo» no dice qué día, y completarlo
+    # es inventar el dato que la regla de no-invención prohíbe. Como `fecha`
+    # además le disputaba el campo a la columna de fecha real de la hoja —las dos
+    # son escalares, así que conviven en un 422— y el usuario tenía que mandar
+    # `Mes` a un campo propio a mano. Adónde va lo decide la tabla de resolución.
+    "mes": "mes",
     "periodo": "fecha",
+    # La hora es un concepto propio y no ruido a ignorar: sin reconocerla,
+    # «Hora de venta» se quedaba sin núcleo, ganaba el débil `venta` y una
+    # columna con `14:35` entraba al MONTO de la venta. Misma clase de bug que
+    # F10 cerró cuando el costo entraba como precio de venta.
+    #
+    # SÓLO el singular: `hs`/`horas` no nombran un momento sino una CANTIDAD de
+    # horas («Total Hs», «Horas trabajadas»), que es otra cosa y merecería otro
+    # mensaje. Reconocerlas acá sería explicarle mal la columna al usuario.
+    "hora": "hora",
+    "horario": "hora",
     "vencimiento": "vencimiento",
     "caducidad": "vencimiento",
     "cumpleanos": "cumpleanos",
@@ -108,6 +123,22 @@ CONCEPTOS: dict[str, str] = {
     "recurring": "recurrencia",
     "frecuencia": "recurrencia",
     "marca": "marca",
+    # «Contacto» es un concepto propio y NO un teléfono. En las planillas reales
+    # esa columna tanto trae el NOMBRE de la persona con la que se habla
+    # ("Marcelo Ibarra") como su número, y el encabezado no lo dice. Estaba
+    # declarado como keyword de `phone`, así que una hoja con «Contacto» y
+    # «Teléfono» mandaba el nombre de la persona al teléfono del proveedor.
+    # Adónde va lo decide la tabla de resolución: a ningún campo, porque Véktor
+    # no tiene ficha de persona de contacto.
+    "contacto": "contacto",
+    # El margen es un concepto propio y NO una magnitud de dinero (ver MAGNITUDES):
+    # es lo que queda ENTRE el costo y el precio. Por eso «Margen sobre costo» es
+    # un margen —y no el costo, que es lo que resolvía antes de reconocerlo—.
+    # Adónde va lo decide la tabla de resolución: a ningún campo, porque Véktor lo
+    # calcula (invariante 2c, una sola fuente por métrica).
+    "margen": "margen",
+    "rentabilidad": "margen",
+    "markup": "margen",
 }
 
 #: Bigramas que son UN concepto y no la suma de sus partes. Se buscan antes que
@@ -141,6 +172,21 @@ ESPECIALIZA: dict[str, str] = {
     "cumpleanos": "fecha",
 }
 
+#: Concepto → los conceptos ante los que CEDE cuando comparten encabezado.
+#:
+#: No es la relación de ``ESPECIALIZA``, donde gana el específico: acá el
+#: subordinado se retira y queda como calificador. Sólo, en cambio, sigue siendo
+#: el núcleo — por eso cede en vez de no reconocerse.
+#:
+#: La hora cede ante los tres por motivos distintos y convergentes. Ante la
+#: FECHA porque «Fecha y hora» es la fecha —el campo ya guarda la hora adentro,
+#: ``transaction_date`` es DATETIME— y leerlo como una hora suelta dejaría a la
+#: hoja sin columna de fecha. Ante el PRECIO y el COSTO porque ahí la hora no es
+#: un momento sino la granularidad —«Precio hora» es un precio POR hora, igual
+#: que «Envío unitario» es un envío—, y la regla de MAGNITUDES, que hace ceder al
+#: dinero ante cualquier otro concepto, se la llevaba puesta.
+SUBORDINA: dict[str, frozenset[str]] = {"hora": frozenset({"fecha", "precio", "costo"})}
+
 # ── Débiles: concepto si están solos, calificador si hay otro núcleo ─────────
 # Token → (concepto cuando es el único núcleo, calificador cuando acompaña).
 #
@@ -161,6 +207,17 @@ DEBILES: dict[str, tuple[str, str]] = {
     "compra": ("monto", "de_compra"),
     "venta": ("monto", "de_venta"),
     "pago": ("monto", "de_pago"),
+    # `ganancia` es débil y no un concepto fuerte por «Impuesto a las ganancias»:
+    # ahí la palabra sólo dice de qué es el impuesto. Como núcleo fuerte quedaba de
+    # rival de `impuesto`, el encabezado se volvía ambiguo y una columna que hoy
+    # llega a `taxes` dejaba de mapear. Sola sí es el margen.
+    #
+    # SÓLO el singular, a propósito: en castellano rioplatense el plural es del
+    # léxico fiscal («Retención Ganancias», «Percepción Ganancias»), donde ni
+    # `retención` ni `percepción` alcanzan para que gane `impuesto`. Reconocerlo
+    # como margen sería explicarle mal al usuario una columna de impuestos; una
+    # columna de margen por fila se llama en singular.
+    "ganancia": ("margen", "de_margen"),
     # Entidades: nunca identifican el concepto de la columna, sólo lo ubican.
     "producto": ("producto", "de_producto"),
     "articulo": ("producto", "de_producto"),
@@ -325,6 +382,18 @@ def analyze_header(normalized: str, entity_type: str = "") -> HeaderAnalysis:
         generos = {ESPECIALIZA[c] for c in candidatos if c in ESPECIALIZA}
         if generos:
             candidatos = [c for c in candidatos if c not in generos] or candidatos
+        # R3-bis-2: un concepto subordinado cede ante el que manda cuando los dos
+        # están (ver SUBORDINA). Va ANTES que R3-ter porque la hora no es una
+        # magnitud y ésa haría ceder al precio, que es al revés. Se conserva como
+        # calificador para poder explicar la lectura: «Fecha y hora» resuelve a
+        # la fecha, y lo dice.
+        if len(candidatos) > 1:
+            subordinados = [
+                c for c in candidatos if SUBORDINA.get(c, frozenset()) & set(candidatos)
+            ]
+            if subordinados:
+                calificadores.update(f"de_{c}" for c in subordinados)
+                candidatos = [c for c in candidatos if c not in subordinados]
         # R3-ter: una magnitud de dinero junto a otra cosa sólo dice cuánto de
         # esa otra cosa; entre magnitudes gana la más específica. Ver MAGNITUDES.
         if len(candidatos) > 1:

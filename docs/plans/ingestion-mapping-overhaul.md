@@ -74,12 +74,25 @@ F-M  reconocimiento de encabezados en dos capas                     ✅ entregad
 F-H6 costos de compra agrupados (envío, costo final)  a·b·c·d       ✅ entregado
 F-H6.e el flete de línea genera su gasto                            ✅ entregado
 F-C  obligatorios explicados                                        ✅ entregado
-F-A  nombre original + preservación de edición
-F-B  claridad visual + extracción del monolito
+F-T  medir el confirm antes de agregarle trabajo                     ✅ entregado
+F-F  fechas mandan: todo movimiento afecta el inventario (.1→.4)     ✅ entregado
+F-O  «Otros» y la relectura (.1 y .2)                                ✅ entregado
+F-A  nombre original + preservación de edición                       ◐ sólo la preservación al cambiar de sección (60d400f8)
+F-B  claridad visual + extracción del monolito                       ◐ TargetSelect/MappingOriginHint (2cbbd0d1) + fuera el % (4a0f2d8d)
+F-I  identidad por código: IDs y comprobantes
+F-N  nombre y apellido en una sola columna
 F-D  ruteo cross-sección
 F-E  simetría cliente/proveedor (paralelo desde F-0; no se activa hasta cerrar defaults)
 F-H6.f el camino plano cobra el envío y honra las decisiones de costo
 ```
+
+**F-T, F-F, F-I y F-N se agregaron el 2026-08-10**, después de que el usuario probara un
+archivo real de 9 hojas y 1.187 ventas (`Vektor_Test_DistribuidoraLimpieza_3meses.xlsx`).
+El orden no es el que él enunció: pidió la velocidad primero, y va primera **la medición** de
+lo que está lento, porque las otras tres fases le agregan trabajo al confirm y sin línea de
+base no se puede distinguir «lo aceleré» de «lo empeoré tanto que se comió la mejora».
+F-A y F-B quedan entre F-F y F-I porque tocan la misma pantalla que F-F acaba de simplificar:
+hacerlo al revés es pintarla dos veces.
 
 **F-M** se insertó a mitad de F-H6.c y no estaba en el plan original: su plan propio
 vive en `docs/plans/header-recognition-fm.md`.
@@ -93,7 +106,9 @@ decisión explícita) salen globales. Ver `docs/runbooks/purchase_cost_rollout.m
 
 ### Alcance de migraciones — declaración explícita
 
-**El programa F-0 → F-E es aditivo y sin migraciones.** Todo viaja en columnas existentes (`target_field` es `String`, `inventory_movements` ya tiene `qty`/`unit_cost`/`source_type`), en el payload del confirm o en `custom_fields`.
+**El programa F-0 → F-E era aditivo y sin migraciones**, y dejó de serlo con **F-I**. Todo lo demás sigue viajando en columnas existentes (`target_field` es `String`, `inventory_movements` ya tiene `qty`/`unit_cost`/`source_type`), en el payload del confirm o en `custom_fields`.
+
+**La excepción es F-I y es deliberada:** un código externo (`CLI-01`, `PROV-03`) es identidad, y la identidad no puede vivir en `custom_fields` — necesita un índice único por tenant para que re-importar el mismo archivo no duplique maestros, y `custom_fields` es JSONB sin restricción de unicidad. Migración aditiva: columna `external_code` en `customers`, `suppliers` y `products` (detalle en F-I). Se declara acá para que la promesa de "sin migraciones" no se lea como vigente cuando ya no lo es.
 
 **F-H6-b queda FUERA de este programa.** Es una fase analítica posterior con migración aditiva, no una excepción interna. Los dos alcances:
 
@@ -208,7 +223,7 @@ F-H3.d  replay a un clic + fórmula de integridad reconciliada (V14) — juntos
         d.3 gate al confirmar (cola + /otros) ✅ entregado
         d.4 endpoint de apply                 ✅ entregado
         d.5 botón en el panel de impacto      ✅ entregado
-        d.6 el replay que no se puede validar no se confirma  ✅ entregado
+        d.6 el replay que no se puede validar no se confirma  ⛔ REVERTIDO por F-F.1
 F-H3.e  selector de efecto por hoja en la UI                      ✅ entregado
 ```
 
@@ -295,6 +310,12 @@ F-H3.e  selector de efecto por hoja en la UI                      ✅ entregado
 > La 3 es la que sale gratis con lo ya entregado, pero convierte el replay en una acción posterior al import en vez de una opción del confirm. **Es una decisión de producto, no técnica.**
 >
 > **Resuelto: se eligió la 3.** El confirm no toca stock y devuelve el impacto; el replay es un paso posterior. **Regla que F-H3.d hereda:** el impacto que se muestre al aplicar se **recalcula dentro de la transacción del apply**, nunca se lee de lo que devolvió el confirm. Entre confirmar y aplicar el stock pudo cambiar, y mostrar un número viejo para una operación que va a escribir otro es exactamente lo que ya pagó F11 (por eso ahí el DELETE recalcula y su resultado es el autoritativo, no el del preview).
+>
+> **Superada por F-F.3 (2026-08-11): el confirm APLICA.** La opción 3 no era una preferencia de UX, era la salida a una limitación: sin cola cronológica el gate miraba un saldo estático, el archivo plano ni siquiera se podía gatear y aplicar al confirmar habría escrito descuentos que nadie podía validar. F-F.1 (créditos datados + ancla del catálogo antes de todos los eventos) y F-F.2 (saldo conocido ≠ saldo ausente) eliminaron esa limitación, y con ella la razón del segundo clic: las ventas que el gate deja entrar son exactamente las que la cronología respalda.
+>
+> Lo que **no** cambia y es lo que hace defendible aplicar sin preguntar: el movimiento lleva `source_upload_id`, así que borrar el archivo lo deshace (F11), y lleva `source_event_id="sale:{id}"`, así que aplicar de nuevo no descuenta de nuevo. **La regla heredada sigue en pie, y ahora rige a los dos llamadores:** el número se recalcula adentro de la transacción que escribe. Por eso el confirm no reusa el conteo del gate para avisar qué quedó pendiente — lo toma del outcome del núcleo.
+>
+> `POST /inventory-replay` **no** desaparece: es la vía de lo que quedó pendiente (el producto sin saldo conocido de F-F.2, o un stock que se movió entre corridas). Deja de ser el camino normal y pasa a ser el de la excepción.
 
 > **Decisiones de F-H3.d (2026-08-06), tomadas por el usuario sobre los hallazgos V16–V18.**
 >
@@ -441,6 +462,16 @@ Evidencia preservada sin migración: el monto original discrepante va a la traza
 
 `_add_sale`/`_add_expense` pasan de `bool` a `RowOutcome(inserted, product_id, customer_id, supplier_id)`. **Riesgo alto:** `_did_insert` alimenta `_register_import_row_fingerprint`. Test de idempotencia **antes** de tocar la firma.
 
+**Re-scope tras F-F.3 (2026-08-11).** Tres de las cinco piezas de arriba ya están entregadas por otra fase, y conviene anotarlo antes de estimar lo que queda:
+
+| Pieza | Estado |
+|---|---|
+| Cola cronológica de movimientos en memoria | ✅ F-F.1 (`rows_without_stock_backing` con `CreditEvent` datados) |
+| Filas rechazadas por falta de respaldo, con trazabilidad | ✅ F-H3.d.3 + F-F.2 (van a «Otros» con motivo; el pendiente se avisa) |
+| El stock resultante de F-H3 | ✅ F-F.3 — ya no es un preview a mostrar antes: el confirm lo **aplica** y lo informa |
+
+**Lo que sigue siendo F-H5, y es lo caro:** el `RowOutcome` (que es un refactor de firma con riesgo sobre las huellas de idempotencia) y el **preview final previo a escribir**. Y ese preview hay que re-justificarlo: nació para que el usuario viera el impacto de inventario antes de confirmar, y ese impacto ahora se aplica y se revierte borrando el archivo. Si lo único que queda del preview es "cuántas filas van a rebotar", eso ya se responde después, en «Otros», con la fila a la vista.
+
 ## F-H6 · Costos de compra agrupados
 
 ### Entregado: a (campos) + b (el envío se cobra una vez)
@@ -553,6 +584,360 @@ Dos piezas, las dos dentro de F-H6.c/d:
 
 ---
 
+# F-T · Tiempo de confirmación
+
+**Medir antes de tocar.** El usuario reportó que el traspaso de la pantalla de mapeo a la
+importación es lento, y al preguntarle dónde duele contestó: **en el confirm**. No al abrir el
+mapeo, no al tocarlo.
+
+Instrumentar `POST /files/{id}/confirm` por etapa y publicar el desglose en `pipeline_events`,
+que ya es la traza del pipeline: `STAGE_CONFIRM` se emite en `api/v1/ingestion.py`, y
+`_emit_confirm_failure` ya distingue las fases `lease_lost` / `import`. Etapas: lectura del
+summary · validaciones pre-lease · resolución de maestros · inserción por hoja · decisiones de
+costo · derivados post-commit.
+
+**Va primera porque F-F, F-I y F-N le agregan trabajo al confirm** —replay por fechas,
+resolución por código, split por fila—. Sin línea de base, la próxima vez que el usuario diga
+"sigue lento" nadie va a poder decir si el trabajo nuevo se comió la mejora o si nunca hubo
+mejora.
+
+**Sospechas anotadas para atacar DESPUÉS de medir, nunca antes:** la resolución de maestros
+fila por fila, y el recálculo de score que se encola en el `after_commit`
+(`score_trigger_service.trigger_score_recalculation_after_commit`). Cualquiera de las dos puede
+ser irrelevante; el orden "medir → optimizar" existe justamente porque la intuición sobre
+dónde se va el tiempo suele estar mal.
+
+**Aceptación:** el confirm publica su desglose por etapa · hay un número antes y otro después,
+sobre el mismo archivo real (9 hojas, 1.187 ventas, 162 compras, 30 productos).
+
+---
+
+# F-F · Fechas mandan: todo movimiento afecta el inventario
+
+**Lo que pidió el usuario, textual:** «eliminá todo lo que dice "no afecta el inventario"
+porque todos los movimientos afectan el inventario; es vital detectar las fechas, lo que se
+compró primero y lo que se vendió después, en períodos de tiempo».
+
+`inventory_effect` baja de cuatro modos a dos:
+
+| Modo | Cuándo es default |
+|---|---|
+| `historical_replay` — las compras suman y las ventas restan | ventas y compras que mueven unidades |
+| `current_snapshot` — el archivo declara el saldo absoluto | catálogo con cantidad |
+
+Desaparecen `INFORMATIONAL` y `NO_INVENTORY` de `domain/inventory_effect.py` y de sus
+consumidores: `schemas/ingestion.py`, `api/v1/ingestion.py`, `ingestion_import_service.py`,
+`_import_projection.py`, `inventory_integrity_service.py`, `domain/inventory_replay_gate.py`,
+`jobs/recalculate_health_score.py`, `InventoryImpactPanel.tsx`.
+
+**Una hoja que no identifica producto Y cantidad no muestra la pregunta**
+(`SheetInventoryProfile.moves_units` ya sabe decidirlo). Hoy Gastos_Fijos, Clientes y
+Proveedores muestran «Estas cantidades no afectan el inventario», que es el cartel que el
+usuario pidió sacar. Y tiene razón en el fondo: el problema no es que la frase sea falsa, es
+que esas hojas **no hablan de inventario**, así que la respuesta correcta es no preguntar.
+
+**El ancla del catálogo sigue ignorando su fecha, y eso NO es una omisión.**
+`inventory_temporal_service` lo declara: `catalog_initial_stock` es un snapshot sin fecha de
+negocio, y anclarlo en la fecha del import marcaría como divergentes todas las ventas
+anteriores. Se aplica como saldo de apertura **antes de todos los eventos**; la cronología
+gobierna a las compras y ventas **entre sí**. Esa separación es la que evita el doble descuento
+del incidente don pedro, y es exactamente la condición que faltaba para poder cambiar el
+default.
+
+**La parte grande: levantar el límite del archivo plano.** `inventory_replay_gate` hoy rechaza
+pre-lease un archivo de una sola tabla que declara stock *y* ventas, porque no hay saldo contra
+el cual validar: lo está cargando el propio archivo en la misma pasada. Con `historical_replay`
+por default, ese rechazo dejaría de ser excepcional y rompería archivos que hoy importan bien.
+El importador tiene que armar **identidades y saldos provisionales en memoria antes de
+construir los movimientos** — el arreglo que el docstring del gate ya anticipaba como
+definitivo, y que el camino multi-hoja hace de facto (catálogos → compras → ventas).
+
+**Lo que se re-litiga y por qué, para que no vuelva a discutirse.** El test
+`test_historical_replay_nunca_es_un_default` y el docstring de `inventory_effect.py` congelaron
+el default después del incidente don pedro: un archivo de 10.931 ventas movió el inventario
+entero en una confirmación y la parte ya contada en el saldo de apertura se descontó dos veces.
+La regla **no se levanta por conveniencia ni porque el usuario lo pidió**: se levanta porque el
+replay pasa a aplicarse por fecha y el ancla se aplica antes de todo, que era la condición que
+en su momento no existía. Si alguna de esas dos piezas se cae, el default tiene que volver.
+
+### Entregado: F-F.3 — el confirm aplica (2026-08-11)
+
+Una **segunda pasada dentro del savepoint del confirm**, después del import, que llama al mismo
+`run_inventory_replay` que el endpoint del panel. Reusar el núcleo no es prolijidad: lo que
+descuenta el confirm y lo que descuenta el segundo intento tienen que ser la misma operación, o
+el reintento podría descontar distinto que el primero. Sale acotada a las hojas resueltas como
+`historical_replay`, con etapa propia `replay_inventario` en el desglose de F-T.
+
+Esto **deroga la decisión de F-H3.c** (confirmar → revisar → aplicar), que no era una preferencia
+de UX sino la salida a una limitación ya levantada. El detalle está en el bloque de F-H3.c.
+
+**Los avisos pasan a ser de hechos consumados**, y el número de lo que quedó pendiente sale del
+outcome recalculado adentro de la transacción que escribió, no del contador del gate: el confirm
+tiene dos momentos —gatear e insertar— y publicar el número del primero para describir lo que
+hizo el segundo es la misma clase de error que F11 ya pagó. En particular «No se modificó el
+stock» se eliminó del aviso de proyección negativa: era el único lugar del confirm que negaba lo
+que el confirm acababa de hacer.
+
+**Medido antes de dar por buena la forma** (100 ventas, contando sentencias en el propio
+confirm): la pasada cuesta **~4 sentencias SQL y 1 envío al broker por venta** —`SELECT` de
+balance, `UPDATE` de balance, `INSERT` del movimiento, `UPDATE` del producto, más el advisory
+lock por llamada en Postgres—. Sobre el archivo real (1.187 ventas) son ~4.700 sentencias y
+1.187 mensajes a Redis **dentro del request**, que es exactamente la clase de demora que F-T
+existe para no volver a introducir a ciegas. Por eso el batch va en **F-F.3.b**, adentro del
+núcleo compartido y no en el llamador.
+
+**Alcance declarado:** aplica el **confirm**. Los otros cuatro puntos que insertan ventas
+—relectura (`reread_service`), los dos de chat (`pending_action_service`) y
+`data_repair_service`— no descuentan. La relectura entra en **F-F.4**, donde además hay que
+sellar `updated_at` (es el único camino que lo captura en el ledger, así que ahí el guard de V27
+sí se prendería). Chat y reparación quedan afuera a propósito: no son imports de archivo con
+efecto de inventario declarado por hoja.
+
+### Entregado: F-F.3.b — el costo pasa a depender de los productos, no de las ventas (2026-08-12)
+
+`stock_service.decrement_stock_bulk()`: el lote vive en el **núcleo**, no en el llamador, por la
+misma razón que F-F.3 comparte `run_inventory_replay` — un lote armado del lado del caller
+volvería a separar lo que aplica el confirm de lo que aplica el reintento del panel.
+
+**Medido con el mismo instrumento antes y después** (100 ventas de 10 productos, contando
+sentencias en el propio confirm):
+
+| | sentencias SQL en TODO el confirm | envíos al broker |
+|---|---|---|
+| antes | 671 | 100 |
+| después | **87** | **1** |
+
+Lo que se colapsa: el advisory pasa de dos por venta a uno por corrida (es transaccional, así que
+retomarlo no agregaba exclusión, sólo sentencias); el `SELECT` de balance por venta pasa a uno
+por chunk; los `UPDATE` de balance y producto pasan de uno por venta a uno por **producto**; y
+los `INSERT` de movimiento entran por `executemany`. La traza no se toca: sigue habiendo un
+movimiento por venta.
+
+**El orden importa y no es estético:** primero el movimiento, después el saldo. El movimiento es
+lo único que puede chocar (índice único de `source_event_id`), así que resolverlo antes deja el
+saldo calculado sobre lo que *realmente* entró; al revés habría que adivinar cuánto revertir.
+
+**La carrera se paga por lote, no por archivo.** Si una venta en vivo descontó el mismo registro
+entre el pre-chequeo y el INSERT, el lote entero se rechaza y se rehace **de a una por el camino
+de siempre**: las demás entran igual y la conflictiva cuenta como ya aplicada. Se rehace el lote
+completo —no se lo parte— porque la colisión es rara y el camino de a una es el que ya estaba
+probado.
+
+**El clamp se replica paso a paso**, no al final: `stock_units` no baja de cero, así que una
+venta que pasa por el piso deja las siguientes restando desde 0, y colapsarlo en un solo
+`max(0, …)` sobre el total daría otro número justo en el caso que el clamp existe para cubrir.
+`current_qty` del balance sigue sin clamp a propósito: ahí un negativo es el dato de que la
+historia del archivo no cierra.
+
+**Los avisos al broker dejan de escalar con las ventas.** `events.stock_decreased` sólo encola el
+recálculo de score del tenant: emitirlo por venta encolaba 1.187 veces el mismo recálculo del
+mismo negocio. Pasa a uno por corrida. `STOCK_ALERT_CREATED` pasa a uno por producto que queda
+bajo el umbral — antes un producto con cuarenta ventas que cruzaba en la doceava emitía
+veintinueve alertas idénticas.
+
+**Hallazgo colateral, no reparado acá:** el índice `uq_inventory_movements_live_sale_event` lo
+crea la migración `20260729_0001` y **sólo en Postgres**; el schema de los tests sale de
+`Base.metadata.create_all`, que no lo conoce. Es decir que **el camino de colisión nunca estuvo
+cubierto por la suite** —ni antes ni después de este cambio—: en SQLite el INSERT duplicado
+entra. El test de la carrera crea el índice con el mismo predicado que la migración para correr
+contra la condición real. Declararlo en el modelo ORM es otra discusión (cambiaría el schema de
+todos los tests a la vez).
+
+**Aceptación:** ningún archivo se rechaza por ser plano · el orden de aplicación es por fecha y
+no por solapa (dos libros con las mismas ventas y las solapas invertidas dan el mismo
+resultado) · una hoja sin producto+cantidad no muestra una sola línea sobre inventario · el
+caso don pedro sigue en rojo si se rompe el anclaje.
+
+### F-F.4 — el eje deja de ser una pregunta (plan, no entregado)
+
+**Lo que dijo el usuario y gobierna esta sub-fase:** *«los archivos informacional no tienen
+razón de ser, porque para eso estamos editando el sistema: para que toda ingesta tenga
+movimiento de inventario, que es una de las principales funciones de Véktor»* y, precisando el
+alcance: *«se tiene que poder elegir como hasta ahora a qué sección corresponde cada hoja de un
+archivo de Excel, pero todo lo que sea compra y venta de mercadería tiene que tener impacto en
+el stock»*.
+
+Eso es más fuerte que «cambiá el default» y más acotado que «sacá las preguntas». Lo que
+desaparece es **la segunda pregunta**: hoy, además de decir que una hoja es de ventas, hay que
+contestar si esas ventas modifican el stock. La primera ya responde la segunda — si la hoja es
+compra o venta de mercadería, mueve inventario.
+
+**Sigue eligiendo el usuario, y no se toca:** a qué sección corresponde cada hoja (el
+`context_entity` que resuelve `_entity_for`), el mapeo de cada columna, y `stock_treatment`
+—apertura vs compra—, que es la pregunta contable de al lado. Como el efecto se deriva de la
+entidad **efectiva**, reasignar una solapa a «ventas» hace que esa hoja empiece a descontar: la
+sección sigue siendo decisión suya y el impacto en stock deja de ser una segunda pregunta sobre
+lo mismo.
+
+#### El modelo nuevo: dos modos derivados y un tercer estado que no es un modo
+
+| Qué contiene la hoja | Qué le pasa al inventario |
+|---|---|
+| ventas/compras con producto **y** cantidad | `historical_replay` — las compras suman y las ventas restan, por fecha |
+| catálogo con cantidad | `current_snapshot` — el archivo declara el saldo absoluto |
+| todo lo demás (Gastos_Fijos, Clientes, Proveedores, servicios sin producto) | **no aplica** — no se pregunta, no se informa, no se muestra |
+
+`INFORMATIONAL` y `NO_INVENTORY` desaparecen de `domain/inventory_effect.py`. Y desaparecen de
+distinta manera, que es lo que hay que hacer bien: `informational` era una **decisión** que se
+elimina; `no_inventory` era un **modo que representaba la ausencia de inventario**, y su
+reemplazo no es otro modo sino la **ausencia de valor**. `default_effect_for` pasa a devolver
+`str | None`, y la hoja que no mueve unidades simplemente no entra en el dict de efectos.
+
+**Por qué importa la diferencia.** Hoy `_import_projection.effect_for()` cae a `INFORMATIONAL`
+cuando no hay dato, y ese «sin dato» significa dos cosas a la vez: «caller viejo que no mandó el
+modo» y «hoja que no habla de inventario». Con el dict resuelto por hoja el «sin dato» queda
+unívoco, y `_cuenta_inventario` pasa a ser `effect_for(...) is not None` — un booleano que se
+lee igual que la pregunta que responde.
+
+#### El payload sin `context_id` tiene que entrar, o el flip no llega a todos
+
+`_inventory_effects` se calcula **sólo si hay `_ctx_mappings`**. Sin ellos el recorder cae a su
+default y el archivo no descuenta. **No es «el archivo de una sola tabla»** —la pantalla ya
+califica ese caso con `context_id: "table"` desde F-H3.e—: es el summary sin `mapping_contexts`
+y el caller de API directa. Si el flip se hiciera sólo en `default_effect_for`, esos envíos
+seguirían sin descontar: el agujero exacto de F-H3.e (la regla escrita e inalcanzable), por
+segunda vez.
+
+F-F.4 arma un `SheetInventoryProfile` con `context_id=""` —la misma clave que `effect_for` ya usa
+para el contexto ausente— a partir de los mapeos planos. El 422 `efecto_de_inventario_sin_hoja`
+se conserva para un override que **nombra** una hoja inexistente: eso sigue siendo una decisión
+que no se puede honrar.
+
+**Y el replay de ese camino se pide sin filtrar por hoja.** El importador no estampa contexto en
+esas ventas (`_ctx_inline` descarta la clave vacía por falsy), así que filtrar por `[""]` no
+matchearía ninguna —`_contexto_de` devuelve `__sin_hoja__`— y el confirm dejaría de descontar en
+silencio. Se pasa `context_ids=None`, que es «todas las ventas del archivo»: para un archivo sin
+hojas identificadas, la misma cosa dicha sin traducir claves.
+
+#### Los overrides legacy no rompen el confirm durante el deploy
+
+Railway y Vercel redespliegan en paralelo y sin orden garantizado, así que durante la ventana un
+frontend viejo va a mandar `{"ctx": "informational"}` contra el backend nuevo. Con
+`VALID_EFFECTS` reducido eso es un 422 y el confirm se cae.
+
+`"informational"` y `"no_inventory"` se aceptan como **alias legacy que se descartan** (la hoja
+toma su modo derivado) con `logger.info`. No es una concesión: es la traducción exacta de la
+decisión del usuario —esos valores dejaron de ser decisiones—, así que descartarlos no pierde
+ninguna intención que siga existiendo. Un modo desconocido de verdad sigue siendo 422.
+
+#### Sub-commits
+
+- **a · el dominio pierde los dos modos.** `inventory_effect.py`: dos constantes, `Literal` de
+  dos, `EFFECT_LABELS` de dos (y el de replay deja de sonar a opción: describe lo que va a
+  pasar). `default_effect_for → str | None`; `options_for` deja de ofrecer y pasa a explicar.
+  Se reescriben `test_historical_replay_nunca_es_un_default` y el docstring del módulo
+  **declarando por qué se levanta la regla** —el ancla se aplica antes de todos los eventos y el
+  replay ordena por fecha, que son las dos condiciones que en don pedro no existían—, y se
+  conserva la compuerta del doble descuento: si alguna de las dos piezas se cae, el default
+  tiene que volver.
+- **b · el confirm aplica siempre que la hoja mueva unidades.** El mecanismo ya está (F-F.3
+  aplica dentro del savepoint, F-F.3.b lo hace por producto y no por venta): lo que cambia es
+  **cuántas hojas caen ahí**. Entra el camino plano. Se revisan los avisos que todavía mandan al
+  usuario a aplicar desde el panel algo que el confirm ya aplicó.
+- **c · la pantalla deja de preguntar por el efecto** (el selector de SECCIÓN queda igual).
+  `InventoryEffectChoice` pasa de selector a línea informativa; la hoja sin efecto no muestra
+  **nada** (hoy muestra el cartel que el usuario pidió sacar). `/inventory-effects` sigue
+  existiendo y sigue siendo la única fuente —la regla es de dominio y una copia en la UI se
+  desactualiza (el defecto ya pagado con el catálogo de campos)—, pero pasa a explicar en vez de
+  ofrecer. La respuesta se mantiene **aditiva** (`options` con un elemento o vacío) para que un
+  frontend viejo muestre la línea correcta durante la ventana de deploy en lugar de romperse.
+  `ColumnMapperPanel` **elimina** el estado de elección (`effectByCtx`, `efectoDe`, el
+  `effectElegido` del camino plano) y deja de mandar `inventory_effect`; no se toca la
+  preservación de mapeos de F-A (`60d400f8`), que vive en otro estado.
+- **d · la relectura descuenta.** `reread_service` llamaba a `insert_confirmed_data` **sin efecto
+  de inventario**, así que re-importaba ventas que no descontaban — y eso no era neutral: el void
+  previo revierte todo movimiento vivo del archivo (incluidos los `sale` del replay del confirm),
+  así que **releer DEVOLVÍA el stock descontado**. Después del reimport corre
+  `run_inventory_replay`, la misma función que el confirm y el panel.
+  - **El efecto se DEDUCE de lo que la relectura acaba de leer**, no del que guardó el confirm.
+    Lo pidió el usuario y es la razón de ser de la relectura: *«tiene que poder modificar si
+    detecta variaciones de cantidades, o registrar gastos o ventas si las hay y previamente no
+    fueron detectadas; también puede darse el caso de que no lea algo diferente»*. Con el dict
+    viejo, una cantidad recién detectada entraría **sin mover stock** — el dict no la conoce—, o
+    sea una venta de mercadería que no descuenta, justo lo que F-F.4 elimina. Deducirlo de nuevo
+    también es lo consistente: el efecto es consecuencia del contenido, y acá el contenido se
+    volvió a leer. `_deduce_inventory_effect` arma los mismos `SheetInventoryProfile` que el
+    confirm sobre `derive_context_mapping_entries` —la misma derivación que gobierna esa
+    importación— y los resuelve con la misma función; falla blanda a `{}` (no descontar).
+  - **Consecuencia elegida por el usuario:** un archivo importado ANTES de F-F.4, cuyas ventas
+    nunca descontaron, **queda al día en cuanto se lo relee**. Se descartaron «avisar antes» y
+    «sólo lo nuevo que detecte». También hace innecesario el sub-commit **e** para el caso más
+    común: releer alcanza para cerrar un archivo viejo.
+  - El efecto resuelto se sigue persistiendo en `parsed_summary_json` al confirmar (al lado de
+    `stock_treatment`), como traza de con qué entró el archivo — ya no como fuente de la
+    relectura.
+  - **El alcance sale de `replay_scope`** (`domain/inventory_effect`), no de un filtro reescrito
+    en cada llamador: son dos, y la traducción de la clave vacía —la del archivo sin hojas
+    identificadas, que se aplica entero— es justo lo que el segundo habría implementado distinto.
+  - **El orden no es estético:** el replay va ANTES del bloque que audita los movimientos nuevos
+    como `REREAD_INSERT`. Puesto después, el descuento quedaría fuera del `DataRepairItem` y el
+    undo dejaría el stock descontado sin las ventas que lo justifican. Hay un assert que lo fija.
+  - **Bug encontrado por el test de la fila editada a mano (V28).** La relectura preserva esa
+    fila, pero su movimiento de descuento no lleva `source_row_ref` —lo identifica
+    `source_event_id`— así que el guard de preservación no lo protegía: se voideaba, y quien
+    tenía que restituirlo era el replay posterior. Eso sólo funciona si el filtro por hoja del
+    replay alcanza a esa venta, **y no la alcanza**: la venta preservada conserva el sello del
+    import ANTERIOR y la relectura deduce sus hojas de nuevo. Resultado: la venta editada se
+    quedaba en los libros y sus unidades volvían al stock. Se arregla protegiendo el movimiento
+    con la misma regla que la fila (`preserved_sale_events`), en vez de hacer que la reversa
+    dependa de que dos derivaciones distintas coincidan.
+
+  ⚠️ **Hallazgo colateral, NO reparado acá:** la relectura re-importa las transacciones **por
+  autodetección** — a diferencia de los maestros, que sí conservan su mapeo
+  (`master_column_mappings`), el mapeo de columnas de ventas/gastos no se persiste. Un archivo
+  importado con un mapeo explícito puede re-importarse resolviendo otras columnas, y desde F-F.4
+  eso además mueve stock. Es previo a esta fase; se documenta acá porque la fase le sube el
+  precio. El test de F-F.4 lo esquiva a propósito (usa un CSV que el importador autodetecta) para
+  medir el descuento y no la autodetección.
+  **La reversa ya existe y hay que probarla, no asumirla:** la relectura voidea todos los
+  movimientos vivos con `source_upload_id == file_id` (`:748-760`), y los del replay lo llevan
+  (`inventory_replay_service:304`), así que se revierten. El caso a fijar con test es la venta
+  **editada preservada**: su movimiento no lleva `source_row_ref`, así que el void no lo saltea,
+  y quien lo tiene que restituir es el re-apply por idempotencia de `source_event_id`. Relectura
+  ×N = mismo stock, o el descuento se pierde justo en las filas que el usuario corrigió a mano.
+- **e · los archivos que quedaron sin aplicar.** Sus ventas están importadas y no descontadas, y
+  la vía para cerrarlos existe (`POST /ingestion/files/{id}/inventory-replay`), pero el panel
+  sólo aparece en el flujo post-confirm de la sesión: un archivo confirmado la semana pasada hoy
+  no tiene por dónde. Se expone el impacto pendiente desde la lista de archivos, reusando el
+  `dry_run` que el panel ya usa para descubrir hojas. **Sin backfill automático:** aplicar mueve
+  stock, y hacerlo en bloque sobre todos los archivos históricos de todos los tenants es
+  literalmente el movimiento que dejó la lección de don pedro. Lo aplica el usuario, archivo por
+  archivo, viendo el número.
+
+#### La venta sin respaldo sigue yendo a «Otros» (decisión del usuario, 2026-08-12)
+
+El flip tiene una consecuencia que el plan no había anticipado: el gate de F-H3.d pasa a correr
+para todos. Una venta del 10/03 cuyo único respaldo es una compra del 20/03 dejó de importarse
+con el aviso `historial_insuficiente` — va a «Otros». Eso ya pasaba, pero sólo si el usuario
+elegía el replay a mano.
+
+Consultado, el usuario **ratificó lo que había decidido en F-H3.d**: el stock no queda negativo
+y la fila no entra como venta; se completa el inventario y se registra desde «Otros». Se
+descartaron las dos alternativas (importarla con el descuento pendiente, o hacerlo depender de si
+el archivo declara saldo). Queda declarado el riesgo que acompaña a la decisión: un archivo
+histórico de un negocio que nunca registró sus compras viejas cae entero a la bandeja.
+
+`historial_insuficiente` no muere: sigue vivo para las hojas que no mueven unidades (una venta
+con producto pero sin columna de cantidad), que son las que no pasan por el gate.
+
+#### Lo que NO cambia (para no re-litigarlo)
+
+El ancla del catálogo sigue sin fecha y se aplica **antes** de todos los eventos: es la
+condición que habilita el flip, no un detalle · las compras suman en cualquier modo (V16) ·
+`stock_treatment` sigue siendo el eje contable, separado · una venta sin respaldo sigue yendo a
+«Otros» (F-H3.d) o quedando pendiente y contada (F-F.2) · `inventory_integrity_service` **no
+cambia de lógica**: decide por el ledger, no por el modo; sólo su docstring nombra
+`informational`.
+
+**Aceptación:** un archivo de UNA hoja de ventas con producto y cantidad descuenta stock al
+confirmar sin que el usuario toque nada · ninguna pantalla dice «no afecta el inventario», y la
+hoja de Gastos_Fijos no muestra ninguna línea de inventario · un confirm con `"informational"`
+en el payload no se cae · relectura ×2 = mismo stock que ×1, incluidas las filas editadas ·
+`default_effect_for` no devuelve modo para una hoja que no mueve unidades · el caso don pedro
+sigue en rojo si se rompe el anclaje o el orden por fecha.
+
+---
+
 # F-A · Preservar primero, clasificar después
 
 Cada columna arranca visible **con su nombre original**.
@@ -606,6 +991,144 @@ Copy: **"Para importar ventas, Véktor necesita saber qué columna contiene la f
 El 422 pasa a usar labels humanos (`CANONICAL_FIELDS[entity][field]`), como ya hace `_collision_detail`.
 
 **Test:** todo campo de `REQUIRED_FIELDS` tiene motivo no vacío. El copy no puede afirmar lo que el importador no hace: sin fecha la fila va a /otros, **sin monto se descarta** (`:4186-4187`).
+
+---
+
+# F-O · «Otros» y la relectura
+
+**Lo que pidió el usuario:** *«toda venta o compra que haya caído a Otros y fue redirigida a
+alguna sección de Véktor, al realizar relectura también tiene que modificarse»*.
+
+**Lo que se midió antes de diseñar** (sonda sobre un CSV de dos filas, la segunda con la fecha
+ilegible): no es que no se modifique — **la relectura la BORRA**. La venta clasificada a mano
+queda anulada con `REREAD_REIMPORT` y nadie la repone: para el parser esa fila sigue sin poder
+leerse (por eso había caído a «Otros») y su `UnclassifiedRecord` ya está en `IMPORTED`, así que
+tampoco vuelve a la bandeja. Se pierde el trabajo del usuario **y** el dato. Es previo a F-F.4.
+
+**Causa:** el registro nace con `source_row_ref = "unclassified:{id}"` y `has_user_edits=False`,
+así que `_split_records` lo manda al bucket «no editado» → void + esperar que el reimport lo
+reponga. El reimport no puede reponerlo, y ese ref **no corresponde a ninguna fila del archivo**:
+el camino exacto de la reconciliación no tiene con qué emparejarlo.
+
+**Decisión del usuario para el caso en que la relectura SÍ pueda leer la fila:** gana la
+relectura — el registro se actualiza con lo que dice el archivo. Se descartaron «gana lo tuyo» y
+«gana la relectura salvo los campos que editaste».
+
+## F-O.1 — dejar de perder el dato (entregada)
+
+El registro nacido de «Otros» se preserva, por la misma razón que una fila editada a mano: es una
+decisión humana sobre una fila que el archivo no explica solo.
+
+- **La identidad del ref se extrajo a un lugar único** (`models/unclassified_record`:
+  `UNCLASSIFIED_ROW_REF_PREFIX` + `unclassified_row_ref()` + `is_unclassified_row_ref()`). Estaba
+  escrita a mano en tres lugares —el que la estampa, el borrado por procedencia y ahora la
+  relectura—, y su desacuerdo no da error: da comportamiento distinto.
+- **Los dos motivos de preservación se preguntan desde una sola función** (`_se_preserva`). Cada
+  guard que lo re-derive por su cuenta puede quedarse con la mitad: es exactamente lo que pasó
+  con el movimiento de la venta editada (V28), así que el guard del `InventoryMovement` usa la
+  misma.
+- **Se cuentan aparte** (`preserved_from_others`): preservar por edición y preservar por
+  clasificación son dos motivos, y el informe tiene que poder decir cuál.
+
+**Límite que tenía F-O.1 sola:** si la relectura ahora sí sabía leer la fila, la importaba
+**además** y quedaban las dos. Lo cierra F-O.2.
+
+## F-O.2 — que la relectura la modifique (entregada)
+
+El vínculo fila↔registro se persiste al capturar: `ROW_REF_KEY` (`__row_ref__`) en `row_data`
+guarda el `source_row_ref` que le habría tocado a la fila, o sea **la clave exacta con la que el
+reimport la insertaría**. Aditivo, sin migración, y bajo el prefijo `__` que `/otros` ya oculta
+del render (mismo criterio que `__risk_ref__` de F8). Se guarda el ref ya derivado y no sus
+componentes: recomputarlo del otro lado sería una segunda derivación que puede quedar distinta.
+
+**La pieza que faltaba no era el vínculo: era la huella.** Medido — con el vínculo puesto, la
+fila seguía sin re-importarse. La captura a «Otros» es output persistido y **registra su huella
+de idempotencia**, así que el reimport salteaba esa fila para siempre y la pregunta «¿ya la sabés
+leer?» no llegaba a hacerse. Se libera antes del reimport, que es el mismo movimiento que F8 hace
+con las filas de riesgo corregidas (`_reconcile_column_risk` borra su huella para que entren en
+el mismo reimport).
+
+Secuencia: **liberar la huella → el reimport procesa la fila → resolver**. Si entró, el registro
+clasificado se anula (gana la relectura) con su movimiento de stock y su auditoría. Si no entró
+—sigue ilegible y volvió a «Otros»— esa captura nueva se marca `DISMISSED`: la clasificación del
+usuario sigue mandando, y pedirle que clasifique dos veces lo mismo es ruido. Liberar la huella
+no cuesta nada por sí solo, justamente por esa segunda mitad.
+
+**El cableado salió barato:** `_add_sale`, `_add_expense`, `_add_product` y el merge de catálogo
+**ya recibían el ref de la fila**, así que ninguno de los 18 call sites cambió de firma; 15
+recibieron el argumento y 3 se quedan sin ancla (tabla sin clasificar, documento de texto sin
+fecha, hoja entera sin clasificar) y degradan a F-O.1 — se preservan, que no pierde nada.
+
+**V29 — bug propio, introducido por F-F.4.d y encontrado acá.** El bloque que audita «los
+movimientos nuevos» tomaba TODO movimiento vivo del archivo, con el comentario «tras el void
+anterior, cualquier movimiento vivo es nuevo». Dejó de ser cierto en cuanto el void empezó a
+PRESERVAR movimientos (V28 y F-O.1): quedaban vivos sin que la relectura los hubiera creado, se
+auditaban como inserción y **el undo los anulaba** — devolvía stock que la relectura nunca tocó y
+dejaba la venta viva sin su movimiento. Se excluyen explícitamente, con test propio.
+
+---
+
+# F-I · Identidad por código: IDs y comprobantes
+
+**El síntoma que la motiva.** En el archivo real, la columna `ID` de Proveedores y de Clientes
+termina en `custom_field:id_proveedor` con el cartel «esta hoja no tiene un campo para eso
+(codigo)». Véktor entiende el concepto y no tiene dónde ponerlo. Mientras tanto, «Almacén Doña
+Rosa», «Almacen Doña Rosa» y «ALMACEN D ROSA» —las tres variantes que el propio archivo declara
+en la columna *Variantes de nombre vistas en ventas*— son tres clientes distintos.
+
+**Migración aditiva** (la excepción declarada arriba): columna `external_code VARCHAR(64) NULL`
+en `customers`, `suppliers` y `products`, con índice único parcial por `(tenant_id,
+external_code)` donde no es null. Verificado: hoy no existe ninguna columna equivalente en los
+tres modelos.
+
+**Jerarquía del resolvedor de maestros:** `código externo → documento/CUIT → nombre
+normalizado`. Un código siempre le gana a un nombre parecido. Espeja lo que `_resolve_product`
+ya hace con `barcode → sku → nombre+marca` (F2): la regla no es nueva, faltaba la clave.
+
+**Vínculo entre hojas**, que es lo que resuelve el archivo real: una venta cuya columna Cliente
+trae `CLI-01` encuentra al cliente que la hoja Clientes declaró con ese ID. El orden
+maestro→transacción ya existe (F7c); lo que falta es la clave por la cual buscar. Lo mismo con
+el Nº de comprobante: las líneas que lo comparten son **una** compra — el agrupamiento ya existe
+en F-H6 y se reusa, no se reescribe.
+
+**Targets nuevos** en `GET /ingestion/field-catalog` para las tres entidades, más el target de
+referencia cruzada del lado de la transacción. Sin eso la columna sigue cayendo a campo propio.
+
+**Dos códigos iguales dentro del mismo archivo → 422 legible**, nunca last-wins. Misma regla que
+`SINGLE_VALUE_FIELDS`: si el archivo se contradice, lo dice, no elige por orden de fila.
+
+**Límite honesto:** un código es identidad **dentro de un tenant**. `CLI-01` de dos negocios
+distintos son dos clientes distintos, y por eso el índice lleva `tenant_id`. Un archivo sin
+columna de ID sigue resolviendo por documento y nombre como hoy — F-I no vuelve obligatorio
+tener códigos.
+
+**Aceptación:** re-importar el mismo archivo no duplica maestros · una venta con código resuelve
+al cliente correcto aunque el nombre venga escrito distinto · el código se ve en la ficha ·
+borrar el archivo revierte lo que creó (F11 sigue valiendo sobre las entidades nuevas).
+
+---
+
+# F-N · Nombre y apellido en una sola columna
+
+**Parte sólo si la ficha es persona**: por la columna Tipo, o porque el documento es DNI y no
+CUIT. Empresa o comercio → el nombre queda entero como razón social. Es lo correcto para
+`Almacén Doña Rosa` y `Kiosco El Sol`, que partidos por el primer espacio darían el apellido
+«Doña Rosa».
+
+**Si no se puede saber, no parte y lo dice en pantalla.** Misma regla de no-invención que ya
+gobierna las fechas (F6-A2), las filas sin monto (F-H4) y el envío sin comprobante (F-H6.b):
+entre elegir mal y no elegir, Véktor conserva el dato y pregunta.
+
+**Corte:** con coma, lo de antes es el apellido (`Pérez, Juan`); sin coma, primera palabra
+nombre y el resto apellido, con las partículas (`de`, `del`, `de la`, `van`) pegadas al
+apellido.
+
+**Sin migración:** `last_name` ya existe en `customers` y `suppliers`, nullable, con el
+docstring que dice que para empresas queda NULL. F-N usa lo que ya está.
+
+**Aceptación:** una razón social nunca se parte · una persona con DNI sí · el caso indecidible
+se ve en pantalla y no se resuelve solo · el split es visible antes de confirmar, no una sorpresa
+en la ficha.
 
 ---
 
@@ -690,7 +1213,7 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H3.d.3 ✅ | el gate corre para el ARCHIVO, no por hoja: dos hojas de ventas comparten el mismo stock (mutation-testeado) |
 | F-H3.d.3 ✅ | una fila rechazada NO consume stock: no arrastra a las que sí entraban |
 | F-H3.d.3 ✅ | re-confirmar no duplica la captura en `/otros` (mutation-testeado: sin huella → dos filas) |
-| F-H3.d.3 ✅ | el archivo plano gatea igual; si además crea productos, ver F-H3.d.6 |
+| F-H3.d.3 ✅ | el archivo plano gatea igual; si además crea productos, ver las filas de F-F.1 |
 | F-H3.d.4 ✅ | aplicar dos veces no descuenta dos veces (`source_event_id="sale:{id}"`, mutation-testeado) |
 | F-H3.d.4 ✅ | una venta ya descontada EN VIVO no se vuelve a descontar acá (**V13**) |
 | F-H3.d.4 ✅ | el impacto que devuelve el apply se recalcula contra el stock actual, no el del confirm |
@@ -700,12 +1223,27 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H3.d.4 ✅ | `dry_run` calcula y no escribe; sólo aplica las hojas pedidas; una venta sin hoja registrada lo **declara** |
 | F-H3.d.5 ✅ | el panel sin `fileId` es sólo informativo; con sólo compras no ofrece aplicar (no hay nada que hacer) |
 | F-H3.d.5 ✅ | tras aplicar muestra lo que devolvió el SERVIDOR, y dice que las ventas sin stock **no se anularon** |
-| F-H3.d.6 ✅ | archivo plano que crea productos + `historical_replay` → **422 antes del lease**, con la hoja y las dos salidas en el mensaje (mutation-testeado) |
-| F-H3.d.6 ✅ | el rechazo deja `STAGE_REJECT` con `motivo=replay_no_gateable`; nada a medio importar |
-| F-H3.d.6 ✅ | el MISMO archivo en `informational` entra: la salida que el mensaje ofrece existe |
-| F-H3.d.6 ✅ | sin alta de productos el gate corre normalmente (control: si no, el bloqueo apagó el replay entero) |
-| F-H3.d.6 ✅ | el respaldo del importador degrada a `informational`, cuenta `replay_degradado` y deja `hojas_con_replay=0` (mutation-testeado) |
+| ~~F-H3.d.6~~ | **REVERTIDO POR F-F.1.** El rechazo pre-lease del archivo plano (422 `replay_no_gateable`), su `STAGE_REJECT` y la degradación a `informational` del importador (`replay_degradado`) se eliminaron: existían porque el gate miraba un saldo estático, y las compras del archivo ahora entran como créditos datados. Las filas de abajo son las que las reemplazan. |
 | F-H3.d.6 ✅ | archivo de UNA tabla con mapeo por contexto: `quantity` llega al importador (antes se perdía y toda venta valía 1 unidad) |
+| F-F.1 ✅ | ningún archivo se rechaza por ser plano: el que declara stock y ventas juntas se confirma, y no deja `STAGE_REJECT` (control por el otro lado) |
+| F-F.1 ✅ | la compra del archivo del **01/03** respalda la venta del 10/03; con las fechas invertidas (compra 20/03) la misma venta se va a «Otros» (mutation-testeado: créditos sin fecha → rojo) |
+| F-F.1 ✅ | a igual fecha el crédito entra antes que el débito, mismo desempate que `replay_timeline` |
+| F-F.1 ✅ | el saldo de partida es el PREVIO al archivo, no el de hoy: pasar un saldo que ya incluye las compras **y** los créditos las contaría dos veces |
+| F-F.1 ✅ | que el archivo también cargue productos ya no apaga el gate ni degrada la hoja (`hojas_con_replay=1`) |
+| F-F.2 ✅ | producto en cero, sin movimientos vivos y que el archivo no declara: la venta **entra**, su descuento queda pendiente y el confirm lo avisa (mutation-testeado: "todo saldo es conocido" → rojo) |
+| F-F.2 ✅ | control con el mismo archivo y 2 unidades cargadas: la venta de 6 sí se va a «Otros» y NO se avisa de pendiente (si no, la regla estaría apagando el gate entero) |
+| F-F.2 ✅ | cuenta como conocido: saldo previo > 0, lo que el archivo declara o compra, o cualquier movimiento vivo en el ledger |
+| F-F.3 ✅ | el confirm de una hoja `historical_replay` deja el stock ya descontado (no hace falta un segundo clic) y lo avisa |
+| F-F.3 ✅ | borrar el archivo devuelve las unidades y responde `fully_reverted: true`: el movimiento del confirm lleva `source_upload_id` y el guard del ledger no se prende por el `updated_at` que mueve el descuento |
+| F-F.3 ✅ | tocar «aplicar» en el panel después de ese confirm es un no-op (`ya_aplicadas`), no un segundo descuento: los dos caminos comparten `sale:{id}` |
+| F-F.3 ✅ | la hoja `informational` sigue sin tocar una unidad, y la etapa `replay_inventario` ni siquiera aparece en la traza |
+| F-F.3 ✅ | el descuento se aplica también con la sesión de producción (`autoflush=False`), que la del conftest no reproduce |
+| F-F.3 ✅ | el desglose F-T declara `replay_inventario` con su denominador de filas |
+| F-F.3.b ✅ | 100 ventas de 10 productos: 671 → 87 sentencias en el confirm y 100 → 1 envío al broker, con el MISMO instrumento en las dos corridas |
+| F-F.3.b ✅ | varias ventas del mismo producto dejan el saldo acumulado y **un movimiento por venta** (el lote ahorra viajes, no traza) |
+| F-F.3.b ✅ | el clamp corre paso a paso (mutation-testeado: clamp al final → rojo) y `current_qty` sigue pudiendo ser negativo |
+| F-F.3.b ✅ | la carrera con una venta en vivo rehace el lote de a una: las otras entran, la conflictiva cuenta como ya aplicada y NO se crea un segundo movimiento (mutation-testeado: sin fallback → rojo) |
+| F-F.3.b ✅ | un `STOCK_DECREASED` por corrida y una `STOCK_ALERT_CREATED` por producto bajo umbral, no una por venta |
 | F-H3.d | idempotencia del import intacta tras pasar a dos pasadas |
 | **F-H3** ✅ | **`historical_replay`: apertura 10 + compra 5 − venta 4 → `stock_units` final = 11, cruzando `.xlsx` real → confirm → apply → saldo persistido** |
 | F-H3 ✅ | re-confirmar el mismo archivo no aplica el movimiento dos veces |
@@ -714,7 +1252,7 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H3.e ✅ | el endpoint propone un modo por hoja y sólo ofrece los que tienen sentido para esa hoja |
 | F-H3.e ✅ | sacar `cantidad` del mapeo deja a la hoja sin poder aplicar su historia (el default se recalcula con el borrador) |
 | F-H3.e ✅ | el modo elegido VIAJA en el confirm — argumento del componente y cuerpo del POST, mutation-testeado por capa |
-| F-H3.e ✅ | el 422 de d.6 se alcanza desde el payload que manda la pantalla, no sólo desde un curl |
+| F-H3.e ✅ | el modo que ofrece el selector CAMBIA lo que hace el confirm, desde el payload que manda la pantalla y no sólo desde un curl (antes se verificaba contra el 422 de d.6; ahora contra el gate corriendo) |
 | F-H3 | `current_snapshot` fija absoluto; `no_inventory` no crea movimiento |
 | F-H3 | replay histórico negativo → advertencia, **no** `InsufficientStockError` |
 | **F-H4** ✅ | **las 7 filas de la tabla de precio, incluida la discrepancia con tolerancia de 1 centavo** |
@@ -734,6 +1272,15 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-H6.b ✅ | re-confirmar no cobra el flete dos veces, tampoco con «cada fila es un envío» |
 | F-H6.b ✅ | una decisión sobre una hoja sin columna de envío → 422 antes del lease |
 | F-H6 | distribución por subtotal cuadra al centavo; no distribuido no toca `unit_cost_ars`; el gasto atribuido a inventario no se cuenta dos veces |
+| F-T | el confirm publica su desglose por etapa en `pipeline_events`, con el mismo archivo antes y después |
+| F-F | dos libros con las mismas ventas y las solapas invertidas dan el mismo stock final |
+| F-F | un archivo plano con stock y ventas juntos **importa**: ya no se rechaza pre-lease |
+| F-F | una hoja sin producto+cantidad no renderiza ninguna pregunta ni cartel de inventario |
+| F-F | el ancla del catálogo se aplica antes de todos los eventos: el caso don pedro no descuenta dos veces |
+| F-I | re-importar el mismo archivo no duplica maestros (el código externo matchea) |
+| F-I | una venta con `CLI-01` resuelve al cliente aunque su nombre esté escrito de tres formas distintas |
+| F-I | dos filas con el mismo código en el mismo archivo → 422, nunca last-wins |
+| F-N | `Almacén Doña Rosa` no se parte; `Pérez, Juan` sí; el indecidible se ve en pantalla |
 | F-A | una hoja cuya única columna candidata a fecha se auto-propone como custom **sigue** reportando `required_missing` (**V10**) |
 | F-A | cambiar la sección preserva lo tocado |
 | F-B | no aparece ningún `%` en el DOM del panel |

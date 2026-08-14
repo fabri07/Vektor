@@ -15,7 +15,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, cast
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from sqlalchemy import func, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -88,25 +98,26 @@ from app.application.services.ingestion_lease_service import (
     finalize_import_lease,
     release_import_lease,
 )
+from app.application.services.inventory_replay_service import (
+    ReplayOutcome,
+    run_inventory_replay,
+)
 from app.application.services.llm_file_type_detector import maybe_detect_file_type
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
 from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
+from app.domain.header_keys import custom_field_slug
 from app.domain.inventory_effect import (
     EFFECT_LABELS,
-    HISTORICAL_REPLAY,
     InvalidInventoryEffectError,
     SheetInventoryProfile,
     default_effect_for,
+    discard_legacy_overrides,
     options_for,
+    replay_scope,
     resolve_inventory_effects,
-)
-from app.domain.inventory_replay_gate import (
-    MENSAJE_REPLAY_NO_GATEABLE,
-    MOTIVO_REPLAY_NO_GATEABLE,
-    replay_no_gateable,
 )
 from app.domain.purchase_cost import CENTAVO
 from app.domain.purchase_cost_decision import (
@@ -120,6 +131,7 @@ from app.domain.purchase_group import (
     MOTIVO_SIN_ENVIO_COMPARTIDO,
     MOTIVO_SIN_IDENTIDAD,
 )
+from app.domain.stage_timing import StageTimings
 from app.integrations.s3 import S3Client
 from app.jobs.ingestion_worker import (
     process_image_ocr,
@@ -1160,6 +1172,7 @@ async def get_deletion_preview(
 )
 async def delete_file(
     file_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     confirm: bool = Query(
         default=False,
         description=(
@@ -1252,9 +1265,11 @@ async def delete_file(
         # Los scores quedaban calculados sobre datos que este borrado acaba de
         # revertir. Se dispara DESPUÉS del commit: el worker abre su propia
         # sesión, así que encolarlo antes lo haría leer un estado que todavía no
-        # existe — o que un rollback va a descartar.
+        # existe — o que un rollback va a descartar. Y con `background`, el
+        # `.delay()` sale del camino de la respuesta: el borrado ya terminó, el
+        # usuario no tiene por qué esperar al broker.
         trigger_score_recalculation_after_commit(
-            session, str(tenant.tenant_id), "file_deleted"
+            session, str(tenant.tenant_id), "file_deleted", background=background_tasks
         )
     await session.commit()
 
@@ -1412,23 +1427,48 @@ async def get_field_catalog(
 )
 async def get_column_mappings(
     file_id: uuid.UUID,
-    entity_type: str = Query(
-        default="sale",
-        description="Tipo de entidad: sale | expense | product | customer | supplier",
+    entity_type: str | None = Query(
+        default=None,
+        description="Override explícito de la entidad: sale | expense | product | "
+        "customer | supplier. Si se manda, GANA sobre la entidad del contexto — es "
+        "la entidad que el usuario eligió en el selector de sección. Si se omite, "
+        "se usa la del contexto (o 'sale' en archivos planos).",
     ),
     context_id: str | None = Query(
         default=None,
         description="Contexto (hoja/tabla) en archivos multi-contexto. Si se da, "
-        "se usan sus headers/preview y su entity_type (se ignora el param entity_type).",
+        "se usan sus headers/preview y, salvo override, su entity_type.",
     ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ColumnMappingSuggestion]:
+    """Sugerencias de mapeo para las columnas de un archivo (o de una de sus hojas).
+
+    La entidad efectiva se resuelve con la MISMA prioridad que la inserción real
+    (ver ``derive_context_mapping_entries`` y el confirm): **override del usuario →
+    entidad original del ``mapping_contexts`` → default ``"sale"``**.
+
+    El override es obligatorio acá porque el frontend renderiza los targets contra
+    el catálogo de la entidad que el usuario eligió en el selector de sección.
+    Mientras este endpoint invertía la prioridad (la entidad del summary le ganaba
+    al param), devolvía sugerencias de la entidad ORIGINAL: el ``<select>`` no tenía
+    esas opciones, la pantalla mostraba "(campo desconocido)" y los requeridos de la
+    entidad elegida quedaban sin cubrir → 422 al confirmar.
+    """
     # F7d: "customer"/"supplier" sumados — sin esto, un archivo flat (legacy, sin
     # mapping_contexts) de clientes/proveedores no podía pedir sugerencias de
     # mapeo (context_id resuelve el entity_type real igual, pero el query param
     # por default "sale" ya rebotaba acá antes de llegar a esa resolución).
-    if entity_type not in ("sale", "expense", "product", "inventory", "customer", "supplier"):
+    # `None` = "no lo mandó" (se cae a la entidad del contexto), distinto de
+    # mandar "sale" explícitamente, que sí es un override.
+    if entity_type is not None and entity_type not in (
+        "sale",
+        "expense",
+        "product",
+        "inventory",
+        "customer",
+        "supplier",
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
@@ -1445,7 +1485,7 @@ async def get_column_mappings(
     summary = record.parsed_summary_json or {}
 
     # Resolver headers/sample_rows/entity_type por contexto si se pidió uno.
-    resolved_entity = entity_type
+    resolved_entity = entity_type or "sale"
     if context_id:
         ctx = next(
             (
@@ -1465,7 +1505,10 @@ async def get_column_mappings(
             return []
         headers = ctx["headers"]
         sample_rows = ctx.get("preview_rows") or []
-        resolved_entity = ctx.get("entity_type") or entity_type
+        # Override del usuario primero: es la entidad EFECTIVA de la sección, la
+        # misma que el frontend usa para renderizar los targets y la misma que el
+        # confirm usa para insertar.
+        resolved_entity = entity_type or ctx.get("entity_type") or "sale"
     else:
         headers = summary.get("headers", [])
         sample_rows = (
@@ -1570,9 +1613,16 @@ def _sanitize_error_message(exc: BaseException) -> str:
 async def confirm_file(
     file_id: uuid.UUID,
     body: ConfirmIngestionRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> ConfirmIngestionResponse:
+    # F-T: el reloj arranca acá, no en el import. `latency_ms` medía sólo
+    # `insert_confirmed_data`, así que un confirm que tarda 30 s en validar y 1 s
+    # en insertar se reportaba como "1 s" — y la persona que esperó los 31
+    # tenía razón. Los checkpoints se cierran con `mark()` para no re-indentar
+    # las ~800 líneas de validación.
+    _timings = StageTimings()
     repo = FileRepository(session)
     record = await repo.get_by_id(file_id, tenant.tenant_id)
     if not record:
@@ -1719,6 +1769,11 @@ async def confirm_file(
                     "http_status": status.HTTP_422_UNPROCESSABLE_ENTITY,
                     "motivo": motivo,
                     "confirmed_fields": body.confirmed_fields,
+                    # F-T: cuánto costó llegar al rechazo. Un 422 también hace
+                    # esperar, y con nueve hojas la validación no es gratis: sin
+                    # esto, "rebotó" y "rebotó después de veinte segundos" se leen
+                    # igual en la traza.
+                    "timings_ms": _timings.as_detail(),
                     **detalle,
                 },
             )
@@ -1731,6 +1786,45 @@ async def confirm_file(
                 file_id=str(file_id),
                 motivo=motivo,
             )
+
+    # ── F-A: canonizar los `custom_field:` UNA sola vez ──────────────────────
+    # `parse_target` es un PARSER, no un canonizador: de la clave sólo hace
+    # `.strip()`. De acá para abajo hay siete consumidores que la vuelven a
+    # parsear por su cuenta y dos que comparan el string crudo sin parsearlo
+    # (`_trae_maestros` y el aprendizaje de alias). Con cada uno viendo una forma
+    # distinta de la MISMA columna, el campo termina creándose con una clave y
+    # validándose contra otra.
+    #
+    # Se muta EN EL LUGAR, sobre los mismos objetos que `_flat_mappings` y
+    # `_ctx_mappings` ya referencian: reasignar las listas dejaría a todo lo que
+    # ya las capturó leyendo la versión sin canonizar, que es exactamente el
+    # problema que esta pasada viene a cerrar.
+    _custom_sin_clave: list[str] = []
+    for _m in body.column_mappings:
+        _parsed_custom = parse_target(_m.target_field)
+        if _parsed_custom.kind != "custom":
+            continue
+        _slug = custom_field_slug(_parsed_custom.field)
+        if _slug is None:
+            _custom_sin_clave.append(_m.source_column)
+            continue
+        _m.target_field = f"custom_field:{_slug}"
+
+    if _custom_sin_clave:
+        # Sin una sola letra ni dígito no hay identificador posible. Antes esto
+        # creaba una definición con `field_key` vacío y todas las columnas así
+        # colapsaban en la misma.
+        await _emit_validation_reject(
+            "custom_field_sin_clave", {"columnas": _custom_sin_clave}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Estas columnas se van a guardar como campo propio pero el nombre "
+                f"elegido no tiene letras ni números: {', '.join(_custom_sin_clave)}. "
+                "Poneles un nombre con al menos una letra."
+            ),
+        )
 
     # Override del usuario para reasignar la entidad de un contexto completo
     # (ej. una hoja "general"/producto pasada a venta/gasto). Fuente única con
@@ -1799,8 +1893,11 @@ async def confirm_file(
         compra", "Precio de lista" y "Precio de venta final" caían las tres en
         ``sale_price_ars``).
 
-        Solo aplica a los campos donde una colisión corrompe plata
-        (``SINGLE_VALUE_FIELDS``); los demás admiten varias columnas.
+        Solo aplica a los campos declarados de valor único
+        (``SINGLE_VALUE_FIELDS``); los demás admiten varias columnas. No son sólo
+        los de plata: la identidad de un maestro (CUIT, teléfono, nombre) se pisa
+        con el mismo mecanismo y se descubre peor — un monto equivocado salta en
+        un total, un teléfono equivocado no salta en ningún lado.
         """
         scalars = SINGLE_VALUE_FIELDS.get(entity_type, frozenset())
         by_target: dict[str, list[str]] = defaultdict(list)
@@ -2023,11 +2120,28 @@ async def confirm_file(
                         ),
                     )
 
-    # ── F-H3.a: efecto de inventario por hoja ───────────────────────────────────
+    # ── F-F.4: qué le hace al inventario cada hoja ──────────────────────────────
     # Se resuelve ANTES del lease, con el mapeo ya validado, por la misma razón que
     # el resto de las validaciones de esta zona: un rechazo acá no deja nada a medio
-    # importar. El default NUNCA es `historical_replay` — ver domain/inventory_effect.
+    # importar. El efecto ya no se elige: se DEDUCE de lo que la hoja contiene, y
+    # toda compra o venta de mercadería mueve stock — ver domain/inventory_effect.
+    #
+    # La entidad del perfil sale de `_entity_for`, la MISMA resolución que usa la
+    # inserción real (override del usuario → contexto del summary → payload). Con
+    # cualquier otra, reasignar una hoja a "ventas" en la pantalla cambiaría lo que
+    # se importa sin cambiar lo que se deduce sobre su inventario.
+    _effect_overrides, _effects_legacy = discard_legacy_overrides(body.inventory_effect)
+    if _effects_legacy:
+        # No es un error: es un cliente anterior a F-F.4 mandando modos que dejaron
+        # de ser decisiones. Queda en el log porque durante la ventana de deploy es
+        # la única señal de que todavía hay frontends viejos hablando.
+        logger.info(
+            "ingestion.inventory_effect.modo_legacy_descartado",
+            file_id=str(file_id),
+            contextos=_effects_legacy,
+        )
     _inventory_effects: dict[str, str] = {}
+    _perfiles: list[SheetInventoryProfile] = []
     if _ctx_mappings:
         _perfiles = [
             SheetInventoryProfile(
@@ -2041,8 +2155,31 @@ async def confirm_file(
             )
             for _cid, _ms in _mappings_por_contexto.items()
         ]
+    elif _flat_mappings:
+        # F-F.4 — el payload SIN `context_id` también deduce su efecto.
+        #
+        # No es "el archivo de una sola tabla": la pantalla ya califica ese caso
+        # con `context_id: "table"` (F-H3.e) y entra por la rama de arriba. Acá cae
+        # el summary sin `mapping_contexts` y el caller de API directa. Sin esto,
+        # esos imports quedaban afuera del descuento — el mismo agujero que F-H3.e
+        # tuvo que cerrar: la regla escrita y nunca alcanzada.
+        #
+        # `""` es la clave que `ImportProjectionRecorder.effect_for` ya usa para el
+        # contexto ausente, así que el recorder la encuentra sin traducción.
+        _perfiles = [
+            SheetInventoryProfile(
+                context_id="",
+                entity=_entity_for(_flat_mappings[0]),
+                mapped_fields=frozenset(
+                    m.target_field
+                    for m in _flat_mappings
+                    if parse_target(m.target_field).kind == "canonical"
+                ),
+            )
+        ]
+    if _ctx_mappings or not _effect_overrides:
         try:
-            _inventory_effects = resolve_inventory_effects(_perfiles, body.inventory_effect)
+            _inventory_effects = resolve_inventory_effects(_perfiles, _effect_overrides)
         except InvalidInventoryEffectError as exc:
             await _emit_validation_reject(
                 "efecto_de_inventario_invalido",
@@ -2052,12 +2189,11 @@ async def confirm_file(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
-    elif body.inventory_effect:
-        # Mapeos planos (sin `context_id`): no hay hojas contra las cuales resolver
-        # el efecto, así que el `inventory_effect` que mandó el cliente no se puede
-        # honrar. Antes se descartaba en silencio y el import salía con el default:
-        # el usuario elegía reconstruir su inventario y no pasaba nada, sin error ni
-        # aviso. Misma regla que `resolve_inventory_effects`.
+    else:
+        # Mapeos planos (sin `context_id`) CON un override que nombra hojas: el
+        # efecto se deduce igual (arriba), pero lo que el cliente nombró no existe
+        # en este envío. Se rechaza con su propio mensaje en vez del genérico de
+        # `resolve_inventory_effects`, porque acá se puede decir qué hacer.
         _detalle_plano = (
             "El efecto de inventario se declara por hoja, y este envío manda las "
             "columnas sin identificar a qué hoja pertenecen. Volvé a mapear las "
@@ -2329,76 +2465,12 @@ async def confirm_file(
         if d.action == "drop_column"
     }
 
-    # ── F-H3.d.6: un replay que no se puede validar no se confirma ──────────────
-    # En el archivo de UNA sola tabla que además da de alta productos, el gate de
-    # `historical_replay` no tiene saldo contra el cual evaluar: lo carga el mismo
-    # archivo en la misma pasada. Antes se abstenía y las ventas sin respaldo
-    # entraban igual a los libros, o sea justo lo contrario de lo que el modo
-    # promete. Se rechaza acá —pre-lease, sin nada a medio importar— en vez de
-    # degradar a `informational` en silencio: el usuario eligió que Véktor validara
-    # cada venta contra el stock, y cambiarle eso sin decírselo lo deja creyendo que
-    # su inventario se reconstruyó. Ver `domain/inventory_replay_gate` para el
-    # límite y por qué es transitorio.
-    #
-    # Va acá, pegado al lease y no junto a la resolución del efecto, porque
-    # necesita `_dropped_pairs` — el MISMO set de columnas eliminadas que se le
-    # pasa al importador. Filtrar con las decisiones crudas dejaba fuera una
-    # columna que el importador sí iba a ver (las de contextos no incluidos no
-    # cuentan), y esa divergencia va en la peor dirección: el confirm no bloquea y
-    # el respaldo termina degradando con el lease ya tomado.
-    if _inventory_effects and len(_inventory_effects) == 1:
-        _cid_unico, _efecto_unico = next(iter(_inventory_effects.items()))
-        # Sobre el mapeo EFECTIVO, igual que la colisión de escalares: una columna
-        # que las decisiones de riesgo (F8) van a dropear no da de alta nada, y
-        # bloquear por ella sería bloquear por un mapeo que no va a existir.
-        # Misma convención de clave que `context_mappings`, que es lo que
-        # efectivamente viaja al importador: `context_id or "table"`.
-        _targets_unicos = {
-            m.target_field
-            for m in _mappings_por_contexto.get(_cid_unico, [])
-            if (m.context_id or "table", m.source_column) not in _dropped_pairs
-        }
-        if replay_no_gateable(
-            hoja_unica=_plano,
-            pide_replay=_efecto_unico == HISTORICAL_REPLAY,
-            # Espejo de `wants_productos` / `wants_ventas` del importador, con la
-            # columna leída del mapeo declarado (lo único disponible antes del
-            # lease). Cuando la columna viene autodetectada y sin mapeo, esto no la
-            # ve y el respaldo del importador es el que actúa.
-            da_de_alta_productos=bool(
-                body.confirmed_fields.get("productos")
-                and (_summary_for_ctx.get("has_producto") or _inferred_type == "stock")
-                and _targets_unicos & {"product_name", "name"}
-            ),
-            trae_ventas=bool(
-                _inferred_type != "stock"
-                and body.confirmed_fields.get("ventas")
-                and (
-                    _summary_for_ctx.get("has_venta")
-                    or _inferred_type in ("ventas", "general")
-                )
-                and "amount" in _targets_unicos
-            ),
-            # Espejo de `wants_gastos`: una compra de mercadería declara stock que
-            # todavía no existe cuando el gate mira, igual que un catálogo.
-            trae_compras=bool(
-                _inferred_type != "stock"
-                and body.confirmed_fields.get("gastos")
-                and (
-                    _summary_for_ctx.get("has_gasto")
-                    or _inferred_type in ("gastos", "general")
-                )
-                and "amount" in _targets_unicos
-            ),
-        ):
-            await _emit_validation_reject(
-                MOTIVO_REPLAY_NO_GATEABLE,
-                {"context_id": _cid_unico, "inventory_effect": _efecto_unico},
-            )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=MENSAJE_REPLAY_NO_GATEABLE.format(hoja=_hoja(_cid_unico)),
-            )
+    # F-F: acá vivía el rechazo pre-lease del archivo de UNA sola tabla que declara
+    # el stock y las ventas juntas (F-H3.d.6). Ya no hace falta: el gate recibe las
+    # compras del archivo como créditos DATADOS, así que el saldo contra el cual
+    # validar deja de depender de que esas compras ya estén aplicadas. Ver el
+    # docstring de `domain/inventory_replay_gate`. Un archivo plano no se rechaza
+    # más por serlo.
 
     # ── F4: tomar el lease per-file ANTES de cualquier escritura ────────────────
     # CAS atómico NEEDS_CONFIRMATION→IMPORTING (o takeover si quedó stale),
@@ -2407,12 +2479,14 @@ async def confirm_file(
     # rowcount==0 → otro intento tiene el lease vivo → 409. Se toma DESPUÉS de las
     # validaciones puras (una request que va a rebotar por 422 nunca lo toma) y
     # ANTES de la creación de custom fields (primera escritura).
+    _timings.mark("validaciones_pre_lease")
     _import_token = uuid.uuid4()
     if not await acquire_import_lease(session, tenant.tenant_id, file_id, _import_token):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="El archivo ya se está importando o ya se importó.",
         )
+    _timings.mark("lease")
 
     # `_trace_id` ya quedó resuelto arriba, antes del PRIMER guard de validación:
     # la traza del fallo lo necesita y el import puede reventar mucho antes de la
@@ -2455,6 +2529,14 @@ async def confirm_file(
             "contexts_included": sorted(
                 cid for cid, incluido in (body.context_confirmed or {}).items() if incluido
             ),
+            # F-T: un confirm que muere es donde más importa saber dónde tardó —
+            # si se fue en validar o en insertar cambia por completo qué mirar.
+            # Las etapas cerradas están registradas, y el import además está
+            # envuelto en `stage()`, que anota en `finally`: si explota ahí, su
+            # tiempo queda. Un `mark()` NO lo haría —no es un context manager—, y
+            # por eso el import no usa uno: era la etapa más larga y más probable
+            # de fallar, o sea la única que no podía faltar.
+            "timings_ms": _timings.as_detail(),
         }
         if isinstance(exc, HTTPException):
             detail["http_status"] = exc.status_code
@@ -2505,8 +2587,18 @@ async def confirm_file(
                         tenant.tenant_id,
                         _entity_for(_mapping),
                         _field_key,
-                        _mapping.source_column,  # nombre de la columna como label inicial
+                        # F-A: el label que eligió la pantalla; `source_column`
+                        # sólo como fallback para un cliente que no lo mande.
+                        # No coinciden cuando el slug se desambiguó: `obs` y
+                        # `obs_2` vienen de la misma columna de origen y son dos
+                        # campos distintos.
+                        _mapping.target_label or _mapping.source_column,
                     )
+
+        # Un checkpoint propio: crear las definiciones de campos personalizados
+        # cuesta un round-trip POR mapeo `custom_field:`, y sin este corte ese
+        # tiempo se le cargaba al snapshot de maestros, que puede ni haber corrido.
+        _timings.mark("campos_propios")
 
         # ── F8b (Task 4): aplicar las decisiones de riesgo sobre una COPIA del
         # summary, DENTRO del savepoint. drop_column filtra columnas del summary
@@ -2523,6 +2615,11 @@ async def confirm_file(
             else None
         )
 
+        # `apply_column_risk_decisions` recorre el summary ENTERO (todas las hojas,
+        # todas las filas) para recalcular las afectadas: con un archivo grande no
+        # es despreciable y merece su propia etiqueta.
+        _timings.mark("riesgo_columnas")
+
         # Insert parsed rows into business tables, then mark done
         updated_summary = (
             _applied.summary if _applied is not None else dict(record.parsed_summary_json or {})
@@ -2532,6 +2629,13 @@ async def confirm_file(
         # para que una relectura posterior conserve la decisión sin volver a preguntar.
         if body.stock_treatment is not None:
             updated_summary["stock_treatment"] = body.stock_treatment
+        # F-F.4: y el efecto de inventario RESUELTO, por la misma razón y en el
+        # mismo lugar. La relectura re-importa las ventas del archivo y tiene que
+        # descontarlas igual que el confirm; sin esto tendría que volver a
+        # deducirlo por su cuenta, y un archivo cuyo mapeo cambió desde entonces
+        # se descontaría distinto de como se importó.
+        if _inventory_effects:
+            updated_summary["inventory_effect"] = _inventory_effects
 
         explicit_mappings: dict[str, str] | None = None
         if _flat_mappings:
@@ -2609,44 +2713,124 @@ async def confirm_file(
             _before_customers, _before_suppliers = await snapshot_masters_before_import(
                 session, tenant.tenant_id
             )
+        # Se marca SIEMPRE, traiga maestros o no. Con los checkpoints previos
+        # (`campos_propios`, `riesgo_columnas`) esta etapa ya mide sólo el
+        # snapshot y el armado del summary efectivo, así que un valor chico acá
+        # es interpretable; sin ellos cargaba trabajo ajeno y no se podía leer.
+        _timings.mark("snapshot_maestros")
 
-        _t0 = time.monotonic()
-        counts = await insert_confirmed_data(
-            session,
-            tenant.tenant_id,
-            updated_summary,
-            body.confirmed_fields,
-            column_mappings=explicit_mappings,
-            context_mappings=context_mappings,
-            context_confirmed=body.context_confirmed or None,
-            context_entity=cast("dict[str, str]", body.context_entity) or None,
-            source="ingestion",
-            uploaded_file_id=file_id,
-            # El schema lo tipa con Literals (valida la entrada); el importador
-            # acepta el tipo ancho porque también lee el valor guardado en el
-            # summary por una relectura anterior, que llega como str/dict plano.
-            stock_treatment=cast("str | dict[str, str] | None", body.stock_treatment),
-            # F-H3: el efecto RESUELTO (default + override), no el crudo del body:
-            # el default no viaja en el payload y el importador no sabe calcularlo.
-            inventory_effect=_inventory_effects,
-            # F-H6.b: sin decisión para una hoja, sus envíos sin comprobante no
-            # se cobran. El dict va tal cual: acá no hay default que resolver.
-            shipping_decisions={d.context_id: d.action for d in body.shipping_decisions},
-            purchase_cost_decisions={
-                d.context_id: CostDecision(
-                    context_id=d.context_id,
-                    base=d.base,
-                    shared_shipping=d.shared_shipping,
-                    line_shipping=d.line_shipping,
+        # `stage()` y no `mark()`: registra en `finally`, así que un import que
+        # EXPLOTA igual deja su tiempo. Con `mark()` la etapa más larga y más
+        # probable de fallar era justo la única que no quedaba en la traza del
+        # rechazo — medido: el 500 por la FK de proveedor no dejó ningún `import`.
+        with _timings.stage("import") as _etapa_import:
+            counts = await insert_confirmed_data(
+                session,
+                tenant.tenant_id,
+                updated_summary,
+                body.confirmed_fields,
+                column_mappings=explicit_mappings,
+                context_mappings=context_mappings,
+                context_confirmed=body.context_confirmed or None,
+                context_entity=cast("dict[str, str]", body.context_entity) or None,
+                source="ingestion",
+                uploaded_file_id=file_id,
+                # El schema lo tipa con Literals (valida la entrada); el importador
+                # acepta el tipo ancho porque también lee el valor guardado en el
+                # summary por una relectura anterior, que llega como str/dict plano.
+                stock_treatment=cast("str | dict[str, str] | None", body.stock_treatment),
+                # F-H3: el efecto RESUELTO (default + override), no el crudo del body:
+                # el default no viaja en el payload y el importador no sabe calcularlo.
+                inventory_effect=_inventory_effects,
+                # F-H6.b: sin decisión para una hoja, sus envíos sin comprobante no
+                # se cobran. El dict va tal cual: acá no hay default que resolver.
+                shipping_decisions={d.context_id: d.action for d in body.shipping_decisions},
+                purchase_cost_decisions={
+                    d.context_id: CostDecision(
+                        context_id=d.context_id,
+                        base=d.base,
+                        shared_shipping=d.shared_shipping,
+                        line_shipping=d.line_shipping,
+                    )
+                    for d in body.purchase_cost_decisions
+                },
+                # Ledger de reversa: `products` no tiene columna de origen, así que
+                # sin este detalle no hay forma de saber qué productos creó este
+                # archivo — y borrarlo no podría deshacerlos.
+                return_details=True,
+            )
+            # Las filas que el import REALMENTE procesó, incluidas las que
+            # terminaron en "Otros": son trabajo hecho, y dejarlas afuera daba un
+            # denominador más chico que el real justo en los archivos ambiguos,
+            # que son los que más tardan.
+            _etapa_import.rows = (
+                counts["ventas"]
+                + counts["gastos"]
+                + counts["productos"]
+                + counts["clientes"]
+                + counts["proveedores"]
+                + counts.get("otros", 0)
+            )
+        # `latency_ms` del evento NO cambia de significado: sigue siendo el import
+        # y sólo el import. Redefinirlo a "todo el confirm" volvería incomparables
+        # las filas ya escritas, que son la única serie histórica que hay. El
+        # desglose completo viaja aparte, en `detail.timings_ms`.
+        _confirm_latency_ms = _timings.as_detail()["stages"]["import"]["ms"]
+
+        # ── F-F.3: el confirm APLICA el descuento de las ventas que acaba de
+        # importar, en una segunda pasada dentro de ESTE savepoint.
+        #
+        # Hasta acá regía la decisión de F-H3.c ("confirmar → revisar → aplicar"),
+        # que existía porque el replay no se podía validar por fecha: el gate leía
+        # un saldo estático y el archivo plano ni siquiera se podía gatear. Esa
+        # condición ya no existe (F-F.1: las compras del archivo entran como
+        # créditos datados; el ancla del catálogo se aplica antes de todos los
+        # eventos), así que las ventas que el gate dejó entrar son exactamente las
+        # que la cronología respalda y no hay razón para pedir un segundo clic.
+        #
+        # Se reusa el MISMO núcleo que el endpoint de replay, sin una segunda
+        # implementación: idempotencia por `source_event_id="sale:{id}"` (una venta
+        # ya descontada no se descuenta otra vez) y reversa por `source_upload_id`
+        # (borrar el archivo la deshace). El núcleo recalcula el respaldo contra el
+        # stock de AHORA, así que la venta que entró sin saldo conocido (F-F.2)
+        # queda **pendiente** en vez de dejar el inventario en negativo.
+        #
+        # `flush()` explícito, y NO es redundante por casualidad: hoy
+        # `insert_confirmed_data` termina con un flush propio, así que sacarlo no
+        # pone rojo nada (medido). Se deja porque la alternativa es que la segunda
+        # pasada dependa de un detalle interno del importador que nadie declara —
+        # con la sessionmaker de producción (`autoflush=False`) el `SELECT` por
+        # `source_upload_id` no vería ni una de las ventas recién agregadas y el
+        # confirm dejaría de descontar EN SILENCIO. Los tests no lo agarrarían: su
+        # sesión se arma en el conftest sin ese parámetro, o sea con autoflush.
+        # F-F.4 — el alcance sale del dominio (`replay_scope`), no de un filtro
+        # inline: la relectura hace lo mismo y una traducción reescrita ahí se
+        # separaría de ésta. Ver `ReplayScope` sobre por qué el archivo sin hojas
+        # identificadas se aplica entero en vez de filtrarse por la clave vacía.
+        _alcance_replay = replay_scope(_inventory_effects)
+        _replay_outcome: ReplayOutcome | None = None
+        if _alcance_replay.corre:
+            # `stage()` y no `mark()`, por lo mismo que el import: si explota, su
+            # tiempo igual queda en la traza del rechazo.
+            with _timings.stage("replay_inventario") as _etapa_replay:
+                await session.flush()
+                _replay_outcome = await run_inventory_replay(
+                    session,
+                    tenant.tenant_id,
+                    file_id,
+                    context_ids=_alcance_replay.context_ids,
+                    apply=True,
                 )
-                for d in body.purchase_cost_decisions
-            },
-            # Ledger de reversa: `products` no tiene columna de origen, así que
-            # sin este detalle no hay forma de saber qué productos creó este
-            # archivo — y borrarlo no podría deshacerlos.
-            return_details=True,
-        )
-        _confirm_latency_ms = int((time.monotonic() - _t0) * 1000)
+                # Las ventas que la pasada MIRÓ, no sólo las que descontó: una
+                # corrida que deja todo pendiente hizo el mismo trabajo de lectura.
+                _etapa_replay.rows = (
+                    _replay_outcome.aplicadas
+                    + _replay_outcome.ya_aplicadas
+                    + len(_replay_outcome.sin_stock)
+                )
+            counts["descuentos_aplicados"] = _replay_outcome.aplicadas
+            counts["descuentos_ya_aplicados"] = _replay_outcome.ya_aplicadas
+            counts["descuentos_pendientes"] = len(_replay_outcome.sin_stock)
 
         # `product_details` sale de `counts` ANTES de cualquier otra cosa: más
         # abajo `counts` se serializa entero en `compact_summary`, y meter ahí el
@@ -2675,6 +2859,7 @@ async def confirm_file(
             product_details=_product_details,
             master_details=_master_details,
         )
+        _timings.mark("ledger_reversa")
 
         # ── F8b (Task 4) + F8c (Minor 1): capturar en "Otros" las filas
         # ruteadas por columna riesgosa + counters + auditoría AGREGADA, todo
@@ -2740,6 +2925,12 @@ async def confirm_file(
                     )
                 )
 
+        # La captura de "Otros" hace un insert POR FILA ruteada, más el audit log:
+        # en un archivo ambiguo son miles y no pueden viajar dentro de
+        # "aprendizaje_mapeos", que hace un puñado de upserts — leer eso mandaba a
+        # optimizar el código equivocado.
+        _timings.mark("captura_otros")
+
         # Import vacío → 422; el compensador (except) restaura NEEDS_CONFIRMATION
         # y limpia el lease para reintentar con mapeo manual. F8c: las filas
         # capturadas en "Otros" (``routed_to_others``) cuentan como manejadas —
@@ -2800,6 +2991,7 @@ async def confirm_file(
                 )
             for _ent, _confirmed in _learn.items():
                 await mapping_svc.save_mappings(tenant.tenant_id, _ent, _confirmed)
+        _timings.mark("aprendizaje_mapeos")
 
         # Transición final IMPORTING→DONE, token-checked, en la MISMA transacción
         # que los inserts. Si un takeover nos robó el lease → ImportLeaseLostError
@@ -2807,6 +2999,7 @@ async def confirm_file(
         await finalize_import_lease(
             session, tenant.tenant_id, file_id, _import_token, compact_summary
         )
+        _timings.mark("finalize_lease")
 
         # F8c: cuántos contextos (hojas/grupos) tuvieron una decisión de riesgo
         # EFECTIVA — ruteo con filas reales o drop de columna. Sin PII (solo
@@ -2838,6 +3031,12 @@ async def confirm_file(
             detail={
                 "imported_counts": counts,
                 "confirmed_fields": body.confirmed_fields,
+                # F-T: dónde se fue el tiempo. `latency_ms` (arriba) sigue siendo
+                # sólo el import, por compatibilidad con las filas viejas; acá está
+                # el confirm entero, etapa por etapa y con las filas que movió cada
+                # una. Un tiempo sin su denominador no se puede comparar entre
+                # archivos.
+                "timings_ms": _timings.as_detail(),
                 # Con qué mapeo se importó de verdad. Sin esto, saber si un
                 # producto quedó con el costo cargado como precio de venta exigía
                 # INFERIRLO de los alias aprendidos del tenant, que pudieron
@@ -2895,23 +3094,30 @@ async def confirm_file(
         await _emit_confirm_failure(exc, phase="import")
         raise
 
+    # Recálculo de score — el BSL agrega los datos recién confirmados.
+    #
+    # Dos motivos para no llamar a `.delay()` acá, que es lo que hacía antes:
+    # (1) se encolaba con la transacción del request TODAVÍA abierta (commitea
+    # `get_db_session` al salir), así que el worker —que abre su propia sesión—
+    # podía leer el estado PREVIO al import y persistir un score que no
+    # correspondía; (2) F-T: hablar con el broker dentro del request hace esperar
+    # al usuario por una operación que ya terminó, y es la clase de demora que
+    # nadie atribuiría al confirm.
+    # Con `background`, el encolado se agenda en el commit y corre después de que
+    # la respuesta salió. Ya no hay etapa que medir acá: el desglose F-T termina
+    # en `finalize_lease`.
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), str(file_id), background=background_tasks
+    )
+
     logger.info(
         "ingestion.confirm.done",
         file_id=str(file_id),
         ventas=counts["ventas"],
         gastos=counts["gastos"],
         productos=counts["productos"],
+        timings=_timings.as_detail(),
     )
-
-    # Enqueue score recalculation — BSL will aggregate newly confirmed data
-    from app.application.services.score_trigger_service import (  # noqa: PLC0415
-        trigger_score_recalculation,
-    )
-
-    try:
-        trigger_score_recalculation.delay(str(tenant.tenant_id), str(file_id))
-    except Exception:
-        logger.warning("ingestion.confirm.score_trigger_failed", file_id=str(file_id))
 
     parts: list[str] = []
     if counts["ventas"]:
@@ -3053,25 +3259,38 @@ async def confirm_file(
             "columnas riesgosas se enviaron a «Otros» para que las completes."
         )
 
-    # F-H3.d.6: el respaldo se activó. No debería llegar acá —el confirm rechaza
-    # antes del lease— pero si el importador vio un alta de productos que la
-    # validación no llegó a ver, la hoja se degradó y hay que DECIRLO: un replay
-    # que no se aplicó y no se avisa se lee como un replay que se aplicó.
-    if counts.get("replay_degradado"):
+    # F-F.3: el descuento ya se aplicó en el confirm, así que los dos avisos son de
+    # hechos consumados y no de intenciones. Los números salen del outcome
+    # **recalculado adentro de la transacción que escribió**, nunca del contador del
+    # gate (`ventas_descuento_pendiente`, que queda en `counts` como dato de traza):
+    # entre gatear e insertar el saldo puede moverse, y publicar el número del
+    # preview para una operación que escribió otro es exactamente lo que ya se pagó
+    # en el borrado por procedencia.
+    #
+    # La clave existe (aunque valga 0) si y sólo si la pasada corrió: es lo que
+    # distingue "no había nada que descontar" de "acá no se descuenta".
+    _replay_corrio = "descuentos_aplicados" in counts
+    if counts.get("descuentos_aplicados"):
         warnings.append(
-            "Estas ventas no modificaron el inventario: el archivo también da de "
-            "alta productos, así que no había stock previo contra el cual validar "
-            "cada venta. Se calculó el impacto y quedó a la vista. Para aplicarlo, "
-            "usá «Aplicar las ventas al inventario» en el panel de impacto: ahí el "
-            "cálculo corre contra el stock ya cargado. Las ventas que no alcancen a "
-            "cubrirse quedarán con el descuento pendiente."
+            f"Se descontaron del inventario {counts['descuentos_aplicados']} venta(s) "
+            "importada(s), cada una en su fecha."
+        )
+    if counts.get("descuentos_pendientes"):
+        warnings.append(
+            f"{counts['descuentos_pendientes']} venta(s) se importaron sin descontar del "
+            "inventario: de esos productos no hay stock cargado ni compras registradas, "
+            "así que no se sabe cuántas unidades había. El descuento queda pendiente — "
+            "cargá el inventario y aplicalo desde el panel de impacto."
         )
 
-    # F-H3.b: el impacto que el archivo TENDRÍA sobre el stock. Nada se aplicó —
-    # el default es `informational`—, así que el aviso dice qué pasaría, no qué
-    # pasó. Un saldo que se va abajo de cero al reproducir la historia casi
-    # siempre significa que faltan compras viejas, no que el stock de hoy esté
-    # mal: por eso informa y no bloquea.
+    # F-F: acá vivía el aviso de la degradación a `informational` (F-H3.d.6). El
+    # importador ya no degrada ninguna hoja: las compras del archivo entran al gate
+    # como créditos datados, así que "no había stock previo contra el cual validar"
+    # dejó de ser una situación posible.
+
+    # F-H3.b: el impacto del archivo sobre el stock. Un saldo que se va abajo de
+    # cero al reproducir la historia casi siempre significa que faltan compras
+    # viejas, no que el stock de hoy esté mal: por eso informa y no bloquea.
     if counts.get("stock_proyectado_negativo"):
         _impacto = counts.get("impacto_inventario") or []
         _neg = [p for p in _impacto if p.get("primer_negativo_en")]
@@ -3079,11 +3298,25 @@ async def confirm_file(
         _resto = len(_neg) - 3
         if _resto > 0:
             _muestra += f" y {_resto} más"
+        # F-F.3: "No se modificó el stock" dejó de ser cierto cuando la hoja aplica
+        # su historia al confirmar. Mantenerlo habría convertido el aviso en el
+        # único lugar del confirm que niega lo que el confirm acaba de hacer.
+        #
+        # F-F.4: la rama `else` quedó como red y ya casi no se alcanza — para
+        # proyectar hace falta una hoja CON efecto, y la única que proyecta sin
+        # replay es un catálogo, que declara saldos y no puede dar negativo. Se
+        # conserva porque el precio de equivocarse es publicar el contrario de lo
+        # que pasó, no porque se sepa de un caso vivo.
+        _cierre = (
+            "Las ventas que se quedaron sin unidades no se descontaron y su descuento "
+            "quedó pendiente: probablemente falten compras anteriores."
+            if _replay_corrio
+            else "No se modificó el stock: probablemente falten compras anteriores. "
+            "Revisá el detalle antes de aplicar el histórico."
+        )
         warnings.append(
-            f"Si se aplicara la historia de este archivo, {len(_neg)} producto(s) "
-            f"quedarían con stock negativo en algún momento ({_muestra}). No se "
-            "modificó el stock: probablemente falten compras anteriores. Revisá el "
-            "detalle antes de aplicar el histórico."
+            f"Al reproducir la historia de este archivo, {len(_neg)} producto(s) "
+            f"quedan con stock negativo en algún momento ({_muestra}). {_cierre}"
         )
 
     # F-H2: vincular una venta a un producto es resolver su IDENTIDAD, no afirmar
@@ -3318,6 +3551,7 @@ async def reread_run_status(
 )
 async def reread_undo(
     file_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> RereadUndoResponse:
@@ -3333,7 +3567,9 @@ async def reread_undo(
         )
 
     try:
-        result = await reread_service.undo_reread(session, run.id, tenant.tenant_id)
+        result = await reread_service.undo_reread(
+            session, run.id, tenant.tenant_id, background=background_tasks
+        )
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Relectura no encontrada."
@@ -3367,10 +3603,13 @@ async def inventory_replay(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> InventoryReplayResponse:
-    """F-H3.d.4 — el segundo paso de "confirmar → revisar → aplicar".
+    """F-H3.d.4 — aplicar al inventario las ventas de un archivo ya importado.
 
-    Confirmar no toca stock (`inventory_effect` default: `informational`); acá el
-    usuario aplica la historia de las hojas que eligió.
+    **Vía de excepción desde F-F.3/F-F.4, no el camino normal.** El confirm aplica
+    el descuento de las hojas de mercadería en su propia transacción; acá quedan
+    dos casos: la venta que no tenía stock que la respaldara y quedó pendiente
+    (F-F.2), y los archivos importados ANTES de F-F.4, cuya historia nunca se
+    aplicó porque entonces el default no tocaba stock.
 
     Gateado con ``require_modify_access`` (PIN) porque mueve inventario en masa:
     es la misma clase de operación que la relectura, no un alta de datos.
@@ -3389,11 +3628,11 @@ async def inventory_replay(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         )
 
-    # El eje de inventario se declara POR HOJA al confirmar, así que ESCRIBIR sin
-    # decir sobre cuáles contradice esa declaración: un libro con una hoja de
-    # ventas de servicios (`no_inventory`) y otra de mercadería descontaría las
-    # dos. El preview sí puede correr sobre todo el archivo — es read-only y es la
-    # forma en que la pantalla descubre qué hojas hay para ofrecerlas.
+    # El eje de inventario es POR HOJA, así que ESCRIBIR sin decir sobre cuáles lo
+    # contradice: un libro con una hoja de ventas de servicios —que no habla de
+    # unidades— y otra de mercadería descontaría las dos. El preview sí puede
+    # correr sobre todo el archivo: es read-only y es la forma en que la pantalla
+    # descubre qué hojas hay para ofrecerlas.
     if not body.dry_run and not body.context_ids:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

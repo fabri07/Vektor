@@ -10,7 +10,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.header_keys import match_key
+from app.domain.header_keys import custom_field_slug, fold_header, match_key
 from app.domain.header_semantics import analyze_header
 
 # F-C.c3: los conjuntos que definen "esta hoja mueve unidades" ya viven en el
@@ -25,6 +25,7 @@ from app.domain.inventory_effect import (
     _QUANTITY_FIELDS,
     SheetInventoryProfile,
 )
+from app.domain.text_norm import repair_mojibake
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -126,6 +127,8 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "name": "Nombre",
         "last_name": "Apellido",
         "cuil": "CUIL",
+        "cuit": "CUIT",
+        "iva_condition": "Condición de IVA",
         "payment_method": "Método de pago",
         "email": "Email",
         "phone": "Teléfono",
@@ -456,7 +459,13 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "total",
             "valor",
         },
-        "transaction_date": {"fecha", "date", "dia", "mes", "periodo"},
+        # `mes` NO está: un mes es un período y no dice qué día (ver el concepto
+        # `mes` en `header_semantics`). Como keyword seguía afirmando lo
+        # contrario en las dos capas de abajo — fuzzy le pondría el campo a un
+        # «Meses», y el aviso de requerido-sin-cubrir señalaría la columna «Mes»
+        # como la candidata a ser la fecha, empujando al usuario justo al mapeo
+        # que el reconocedor acaba de declarar indemostrable.
+        "transaction_date": {"fecha", "date", "dia", "periodo"},
         "quantity": {"cantidad", "qty", "unidades", "cant", "items", "unidad"},
         # Precio REALMENTE vendido en esta fila (≠ `amount`, que es el total de la
         # venta, y ≠ `Product.sale_price_ars`, que es el vigente configurado).
@@ -503,7 +512,8 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "total",
             "valor",
         },
-        "expense_date": {"fecha", "date", "dia", "mes", "periodo"},
+        # Sin `mes`, por el mismo motivo que en `sale`.
+        "expense_date": {"fecha", "date", "dia", "periodo"},
         "category": {"categoria", "tipo", "rubro", "clasificacion", "concepto"},
         "payment_method": {
             "forma_pago",
@@ -609,11 +619,24 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
         "name": {"nombre", "proveedor", "razon_social", "razón_social"},
         "last_name": {"apellido"},
         "cuil": {"cuil"},
+        "cuit": {"cuit"},
+        "iva_condition": {"condicion_iva", "condición_iva", "situacion_iva", "iva"},
         "payment_method": {
             "forma_pago", "forma_de_pago", "medio_pago", "condicion_pago", "payment",
         },
         "email": {"email", "correo", "mail"},
-        "phone": {"telefono", "teléfono", "celular", "whatsapp", "contacto"},
+        # «contacto» NO está acá: no nombra un teléfono sino a la persona con la
+        # que se habla, y con «Contacto» y «Teléfono» en la misma hoja el fuzzy
+        # lo matcheaba con ratio 1.0 y el nombre terminaba en el teléfono del
+        # proveedor.
+        #
+        # Sacarlo es defensa en profundidad, NO la pieza que sostiene el fix: lo
+        # que corta de verdad es el concepto `contacto` de `header_semantics` con
+        # su `duda`, porque `suggest_mappings` saltea el fuzzy en cuanto la
+        # lectura trae una duda. Comprobado mutando: devolver este keyword solo
+        # deja la suite verde; hay que sacar además el concepto para que se
+        # ponga roja.
+        "phone": {"telefono", "teléfono", "celular", "whatsapp"},
         "notes": {"notas", "observaciones", "obs", "comentarios"},
     },
     "product": {
@@ -707,12 +730,17 @@ def _normalize_col(col: str) -> str:
     cada tenant). Cambiar la forma normalizada dejaría huérfano todo lo aprendido.
     Para ajustar el matching heurístico está ``_match_key``, que deriva de acá y
     NO se persiste.
+
+    En particular NO saca acentos: por eso conserva la tilde que trajo el archivo
+    que enseñó el alias. La tolerancia al acento se resuelve al LEER el historial
+    (índice plegado por ``fold_header`` en ``suggest_mappings``), no al escribirlo.
     """
     return col.lower().strip().replace(" ", "_").replace("-", "_")
 
 
 def _match_key(normalized: str) -> str:
-    """Clave de matching heurístico: el header normalizado sin preposiciones.
+    """Clave de matching heurístico: el header normalizado sin preposiciones ni
+    acentos.
 
     Existe por un empate real. ``_heuristic_match`` gana con el keyword MÁS LARGO
     y solo reemplaza si es estrictamente mayor, así que sobre ``precio_de_compra``
@@ -721,6 +749,11 @@ def _match_key(normalized: str) -> str:
     compra entraba como precio de venta (incidente ASTERIA). Con la clave
     ``precio_compra`` el keyword ``precio_compra`` (13) le gana a ``precio`` (6) y
     el desempate deja de depender del orden de un dict.
+
+    También pliega acentos y ñ (``Descripción`` ≡ ``Descripcion``, ``Año`` ≡
+    ``Ano``), incluyendo NFC vs NFD. Por eso este es el único lugar donde los
+    acentos se pueden sacar: ``_normalize_col`` no puede, porque es lo que se
+    persiste, así que la tolerancia tiene que vivir en la clave derivada.
 
     Deliberadamente NO se toca ``_normalize_col``: esa alimenta el historial
     persistido por tenant.
@@ -798,10 +831,58 @@ _MONTO_DEL_COMPROBANTE = (
     "Parece el total del comprobante, no el de esta línea. Importarlo como el monto "
     "de la fila repetiría el total en cada línea del remito."
 )
+#: Un mes es un período: no dice el día, y el día no se completa solo. Mapearlo
+#: al campo de fecha además le disputaba el campo a la columna de fecha real de
+#: la hoja —«Mes» y «Fecha de Pago» conviven en la misma planilla de gastos fijos
+#: y las dos son escalares, así que el confirm cortaba con un 422— y el usuario
+#: terminaba mandando `Mes` a un campo propio a mano. Se reconoce, se explica, y
+#: si de verdad trae fechas la elige la persona: es la única que puede saberlo.
+_MES_NO_DICE_EL_DIA = (
+    "Es un mes, que es un período y no una fecha: «Marzo» no dice qué día. Véktor "
+    "no completa el día que falta, así que no la toma como la fecha de la hoja. Si "
+    "la columna en realidad trae fechas, elegí el campo de fecha a mano; si no, se "
+    "guarda como campo propio."
+)
+#: `transaction_date`/`expense_date` son DATETIME (migración `20260625_0001`)
+#: justamente para soportar intradía, así que la hora TIENE dónde vivir — lo que
+#: todavía no existe es el paso que combina una columna de hora con una de fecha,
+#: y eso es del importador. Prometerlo acá sería mentir; callarlo dejaba el
+#: encabezado sin ninguna lectura (y a «Hora de venta» entrando como monto).
+_HORA_NO_SE_COMBINA_CON_LA_FECHA = (
+    "Es la hora del movimiento. Véktor guarda la fecha con hora, pero todavía no "
+    "combina una columna de hora con una de fecha: se guarda como campo propio, "
+    "aparte de la fecha."
+)
+#: El margen NO tiene campo canónico, y no es un campo que falte: es una decisión.
+#: Sale de restar el costo al precio de venta, así que importarlo además como dato
+#: deja dos números para la misma métrica y ninguna regla para saber cuál gana —
+#: exactamente lo que el invariante de una sola fuente por métrica viene a evitar
+#: (``FactsService``). Se reconoce y se explica; el valor se conserva como campo
+#: propio, que es lo mismo que se hace con la marca.
+_MARGEN_ES_DERIVADO = (
+    "Es el margen de ganancia. Véktor lo calcula desde el costo y el precio de "
+    "venta: si además se importa como dato, quedan dos números para lo mismo que "
+    "pueden no coincidir (redondeo, un valor viejo, o un porcentaje calculado "
+    "sobre el costo y no sobre el precio). Se guarda como campo propio."
+)
+
+#: «Contacto» en un padrón de proveedores/clientes. No se resuelve a `phone`
+#: aunque a veces traiga un número: en las planillas reales esa columna trae
+#: tanto el nombre de la persona como su teléfono, y el encabezado no distingue.
+#: Adivinar acá no es gratis — con «Contacto» y «Teléfono» juntos, el nombre
+#: pisaba el teléfono del proveedor por orden de columna.
+_CONTACTO_NO_DICE_QUE_DATO_ES = (
+    "Es el contacto del proveedor, pero el encabezado no dice qué dato es: puede "
+    "ser el nombre de la persona con la que se habla o su teléfono. Véktor no "
+    "tiene campo de persona de contacto, así que se guarda como campo propio; si "
+    "la columna trae el número, mapeala a mano a Teléfono."
+)
 
 RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
     "sale": {
         "fecha": (_r(target="transaction_date"),),
+        "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
+        "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "monto": (
             _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
             _r(
@@ -832,9 +913,12 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "metodo_pago": (_r(target="payment_method"),),
         "nota": (_r(target="notes"),),
         "descripcion": (_r(target="product_name"),),
+        "margen": (_r(duda=_MARGEN_ES_DERIVADO),),
     },
     "expense": {
         "fecha": (_r(target="expense_date"),),
+        "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
+        "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "monto": (
             _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
             _r(target="amount"),
@@ -892,6 +976,7 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "telefono": (_r(target="supplier_phone"),),
         "nota": (_r(target="notes"),),
         "descripcion": (_r(target="notes"),),
+        "margen": (_r(duda=_MARGEN_ES_DERIVADO),),
     },
     "product": {
         "precio": (
@@ -929,6 +1014,11 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "descripcion": (_r(target="description"),),
         "vencimiento": (_r(target="expiry_date"),),
         "fecha": (_r(target="acquired_at"),),
+        # Sin la entrada explícita, el genérico dice «esta hoja no tiene un campo
+        # para eso», que acá es falso: el catálogo TIENE `acquired_at`. Lo que no
+        # se puede es derivarlo de un mes ni de una hora sueltos.
+        "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
+        "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "marca": (
             _r(
                 duda=(
@@ -938,6 +1028,7 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
                 )
             ),
         ),
+        "margen": (_r(duda=_MARGEN_ES_DERIVADO),),
     },
     "customer": {
         # Una columna «Cliente» en un padrón de clientes ES el nombre; «Tipo
@@ -970,10 +1061,16 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "nombre": (_r(target="name"),),
         "apellido": (_r(target="last_name"),),
         "cuil": (_r(target="cuil"),),
+        # Espejo de customer: el CUIT es un identificador propio, y «IVA» /
+        # «Condición IVA» acá no nombran un monto de impuesto sino la condición
+        # frente a AFIP.
+        "cuit": (_r(target="cuit"),),
+        "impuesto": (_r(target="iva_condition"),),
         "email": (_r(target="email"),),
         "telefono": (_r(target="phone"),),
         "metodo_pago": (_r(target="payment_method"),),
         "nota": (_r(target="notes"),),
+        "contacto": (_r(duda=_CONTACTO_NO_DICE_QUE_DATO_ES),),
     },
 }
 
@@ -1139,8 +1236,46 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
     "product": frozenset(
         {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units"}
     ),
-    "customer": frozenset(),
-    "supplier": frozenset(),
+    # Los maestros quedaron sin ningún campo escalar hasta acá, y no porque sus
+    # campos admitan varias columnas: un proveedor tiene UN CUIL y UN teléfono
+    # igual que una venta tiene UN monto. La guarda se había pensado para "no
+    # corromper plata", y una identidad no es plata — pero se pisa igual y se
+    # descubre peor: un monto equivocado salta en un total, un teléfono
+    # equivocado no salta en ningún lado.
+    #
+    # El caso que lo destapó: una hoja de proveedores con «Contacto» (col 6) y
+    # «Teléfono» (col 7). Las dos resuelven a `phone` —`contacto` es keyword de
+    # `phone` a propósito— y `_resolve_target_cols` es first-wins por orden de
+    # columna, así que el teléfono del proveedor quedaba siendo el NOMBRE de la
+    # persona de contacto. Ahora se le pregunta al usuario cuál es cuál, y la
+    # otra columna puede ir a un campo propio en vez de perderse.
+    #
+    # `notes` queda AFUERA, igual que en `sale`/`expense`/`product`: es texto
+    # libre, no un dato de identidad, y es el único de estos campos donde tener
+    # dos columnas («Observaciones» y «Comentarios») es una forma razonable de
+    # llenar una ficha y no un empate que haya que desempatar.
+    "customer": frozenset(
+        {
+            "customer_type",
+            "name",
+            "last_name",
+            "doc_type",
+            "dni",
+            "cuit",
+            "iva_condition",
+            "email",
+            "phone",
+            "address",
+            "locality",
+            "province",
+            "postal_code",
+            "birthday",
+        }
+    ),
+    "supplier": frozenset(
+        {"name", "last_name", "cuil", "cuit", "iva_condition", "payment_method",
+         "email", "phone"}
+    ),
 }
 
 
@@ -1364,11 +1499,15 @@ def _fuzzy_match(normalized: str, entity_type: str) -> tuple[str | None, float]:
         return None, 0.0
 
     heuristics = _HEURISTICS.get(entity_type, {})
+    # Se compara plegado contra plegado: sin esto un acento contaba como un
+    # carácter distinto y bajaba el ratio de un header que es LA MISMA palabra
+    # ("comisión" vs "comision"), llegando a caer por debajo del umbral de 0.70.
+    n = fold_header(normalized)
     best_target: str | None = None
     best_ratio = 0.0
     for target_field, keywords in heuristics.items():
         for kw in keywords:
-            ratio = fuzz.ratio(normalized, kw) / 100.0
+            ratio = fuzz.ratio(n, fold_header(kw)) / 100.0
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_target = target_field
@@ -1415,9 +1554,30 @@ class ColumnMappingService:
                 TenantColumnMapping.entity_type == entity_type,
             )
         )
-        history: dict[str, TenantColumnMapping] = {
-            row.source_column: row for row in result.scalars().all()
-        }
+        history: dict[str, TenantColumnMapping] = {}
+        #: El mismo historial indexado por clave PLEGADA (sin acentos ni ñ). El
+        #: alias se persiste con la forma acentuada que trajo el archivo que lo
+        #: enseñó, así que un tenant que mapeó "Descripción" no encontraba nada
+        #: al subir después un archivo con "Descripcion" — la columna volvía a
+        #: preguntarse como si nunca la hubiera confirmado. Se resuelve al LEER
+        #: en vez de migrar lo escrito: las filas viejas siguen sirviendo y no se
+        #: toca dato persistido de ningún tenant.
+        history_folded: dict[str, TenantColumnMapping] = {}
+        for alias in result.scalars().all():
+            history[alias.source_column] = alias
+            fk = fold_header(alias.source_column)
+            previo = history_folded.get(fk)
+            # Dos alias que pliegan igual ("descripcion" y "descripción") pueden
+            # coexistir y apuntar a campos distintos. Gana el más confirmado, y
+            # a igual confirmaciones el visto más recientemente; el último
+            # desempate es alfabético para que el resultado no dependa del orden
+            # en que la base devolvió las filas.
+            if previo is None or (
+                alias.confirmed_count,
+                alias.last_seen_at,
+                alias.source_column,
+            ) > (previo.confirmed_count, previo.last_seen_at, previo.source_column):
+                history_folded[fk] = alias
 
         required = set(REQUIRED_FIELDS.get(entity_type, []))
         suggestions: list[dict[str, Any]] = []
@@ -1428,7 +1588,12 @@ class ColumnMappingService:
         sin_desambiguar: set[int] = set()
 
         for header in headers:
-            normalized = _normalize_col(header)
+            # La reparación va ANTES de bajar a minúsculas, y no puede hacerse
+            # más adentro: la firma del mojibake vive en el caso de sus bytes
+            # ("Ã³" es U+00C3 U+00B3) y `_normalize_col` la destruye al pasar a
+            # "ã³" (U+00E3), que ya no es reparable. Sobre un encabezado sano es
+            # identidad, así que ninguna forma normal cambia de valor.
+            normalized = _normalize_col(repair_mojibake(header))
 
             # Extraer sample values (hasta 5 no-nulos)
             sample_vals: list[str] = []
@@ -1445,11 +1610,13 @@ class ColumnMappingService:
             options: tuple[str, ...] = ()
             duda: str | None = None
 
-            # 1. Historial del tenant (prioridad máxima)
-            if normalized in history:
-                rec = history[normalized]
-                target_field = rec.target_field
-                confidence = min(0.99, 0.5 + rec.confirmed_count / 20.0)
+            # 1. Historial del tenant (prioridad máxima). Coincidencia exacta
+            # primero y recién después por clave plegada: si el tenant tiene el
+            # alias tal cual vino el header, ese gana sobre cualquier variante.
+            aprendido = history.get(normalized) or history_folded.get(fold_header(normalized))
+            if aprendido is not None:
+                target_field = aprendido.target_field
+                confidence = min(0.99, 0.5 + aprendido.confirmed_count / 20.0)
                 source = "tenant_history"
 
             # 2. El reconocedor de encabezados (F-M)
@@ -1498,6 +1665,13 @@ class ColumnMappingService:
                     "status": status,
                     "options": list(options),
                     "duda": duda,
+                    # F-A: los completa la pasada de campos propios / requeridos
+                    # de abajo. Se declaran acá para que la forma del dict no
+                    # dependa de qué rama corrió — el schema los expande con
+                    # `**s` y una clave ausente en unos y presente en otros es
+                    # justo lo que hace divergir a los consumidores.
+                    "target_label": None,
+                    "missing_field": None,
                 }
             )
 
@@ -1515,9 +1689,20 @@ class ColumnMappingService:
             )
 
         # Segunda pasada: detectar required_missing
-        mapped_targets = {
-            s["target_field"] for s in suggestions if s["status"] == "mapped"
-        }
+        #
+        # V10 — acá NO hace falta filtrar por target canónico, y conviene dejar
+        # escrito por qué: se probó a agregarlo y ninguna mutación lo mata. La
+        # cobertura es una resta de conjuntos entre nombres de campo, y
+        # `"custom_field:amount"` nunca es igual a `"amount"` — un campo propio
+        # no puede colarse como requerido cubierto por más que se llame igual.
+        # Filtrar sería código defensivo inalcanzable disfrazado de protección.
+        #
+        # Lo que SÍ sostiene V10 con F-A puesto es la regla de abajo: la columna
+        # candidata a un requerido no se auto-propone como campo propio. Si se
+        # auto-propusiera, no quedaría ninguna `unmapped` donde poner la marca.
+        # Y río abajo el confirm valida con `missing_required_fields`, que sí
+        # filtra explícitamente porque ahí el caller le pasa targets mezclados.
+        mapped_targets = {s["target_field"] for s in suggestions if s["status"] == "mapped"}
         missing_required = required - mapped_targets
 
         # Si hay campos requeridos sin cubrir, marcar la primera columna sin mapear
@@ -1531,8 +1716,66 @@ class ColumnMappingService:
                         req_keywords = _HEURISTICS.get(entity_type, {}).get(req_field, set())
                         if any(k in norm for k in req_keywords):
                             s["status"] = "required_missing"
+                            # Qué campo falta, no sólo que falta algo: el estado
+                            # describe el CAMPO DESTINO, y sin nombrarlo la
+                            # pantalla tiene que adivinar cuál de los requeridos
+                            # es este punto rojo.
+                            s["missing_field"] = req_field
                             missing_required.discard(req_field)
                             break
+
+        # F-A — preservar primero, clasificar después.
+        #
+        # Lo que no se reconoce deja de desaparecer detrás de un «Sin mapear»:
+        # se propone conservarlo como campo propio, con el NOMBRE ORIGINAL de la
+        # columna como etiqueta. La queja que abrió la fase era tener que
+        # renombrar prácticamente todas las columnas de un archivo real.
+        #
+        # Va DESPUÉS del LLM y de la pasada de requeridos, y saltea dos casos a
+        # propósito:
+        #  - cualquier columna con `duda`: el reconocedor entendió el encabezado
+        #    y tiene algo que decir — sea que hay más de una lectura (`ambiguo`)
+        #    o que esta hoja no tiene campo donde poner ese concepto, que llega
+        #    como `unmapped` CON duda. Archivarla como campo propio taparía la
+        #    explicación, y rompería el invariante de F-M de que una columna
+        #    `mapped` no arrastra una duda (hay tests que lo fijan).
+        #  - `required_missing`: esta columna es la candidata a un requerido sin
+        #    cubrir. Proponer «guardala como campo propio» es ofrecer tirar la
+        #    fecha de la venta a un campo suelto — el default tiene que ser que
+        #    la persona decida, no que Véktor la archive.
+        #
+        # Y no propone sin una sola muestra: una columna sin valores no es un
+        # dato a conservar, es una columna vacía (el resto de esa política vive
+        # en el confirm, que dropea las 100% vacías del archivo completo).
+        slugs_usados: set[str] = {
+            parse_target(s["target_field"]).field
+            for s in suggestions
+            if parse_target(s["target_field"]).kind == "custom"
+        }
+        for s in suggestions:
+            if s["status"] != "unmapped" or not s["sample_values"] or s["duda"]:
+                continue
+            slug = custom_field_slug(s["source_column"])
+            if slug is None:
+                continue
+            # Desambiguación determinística por orden de aparición: "Obs." y
+            # "Obs" dan el mismo slug, y sin sufijo la segunda columna pisaría a
+            # la primera. El 422 de F-0 sigue siendo el cinturón duro; esto evita
+            # llegar a él por una colisión que Véktor mismo se creó.
+            if slug in slugs_usados:
+                n = 2
+                while f"{slug}_{n}" in slugs_usados:
+                    n += 1
+                slug = f"{slug}_{n}"
+            slugs_usados.add(slug)
+            s["target_field"] = f"custom_field:{slug}"
+            # La etiqueta viaja aparte y NO se reconstruye desde el slug: el
+            # slug pierde acentos, mayúsculas y puntuación, así que "Año Fiscal"
+            # volvería como "ano fiscal". Es lo único con lo que la persona
+            # reconoce su columna en el ERD y en la pantalla de campos propios.
+            s["target_label"] = s["source_column"]
+            s["status"] = "mapped"
+            s["source"] = "auto_custom"
 
         return suggestions
 
@@ -1686,12 +1929,46 @@ class ColumnMappingService:
 
         now = datetime.now(tz=UTC)
 
+        # Una columna aparece TANTAS veces como hojas de esta entidad la traigan:
+        # un libro con Compras_Mercaderia + Compras_Insumos + Gastos_Fijos manda
+        # tres `fecha`. Procesarlas de a una rompía de dos formas distintas:
+        #
+        #  1. El `SELECT` de abajo no ve la fila que la vuelta anterior dejó
+        #     PENDIENTE (producción corre con `autoflush=False`), así que insertaba
+        #     una segunda con la misma clave → UniqueViolationError y 500 al
+        #     confirmar. Es leer lo que uno mismo acaba de escribir.
+        #  2. Aun sin reventar, `confirmed_count` subía una vez por hoja: un solo
+        #     archivo le daba a un alias la confianza de tres archivos distintos.
+        #
+        # Tres hojas del mismo archivo son UNA confirmación. Y si no coinciden en
+        # el destino, la columna NO se aprende: evidencia contradictoria dentro de
+        # un mismo archivo es ambigüedad, no una preferencia — quedarse con una
+        # sería elegir por orden de hoja, el last-wins silencioso que este
+        # pipeline existe para evitar.
+        # El filtro de no-aprendibles va ANTES de buscar contradicciones: si una
+        # hoja manda `fecha → expense_date` y otra `fecha → ignore`, no hay
+        # conflicto que resolver. Ignorar una columna en una hoja no dice nada
+        # sobre qué significa esa columna, y tratarlo como contradicción
+        # descartaba el mapeo bueno y dejaba el alias ya aprendido sin refrescar.
+        # Un conflicto real es entre dos destinos REALES.
+        colapsado: dict[str, str | None] = {}
         for mapping in confirmed:
-            source_col = _normalize_col(mapping["source_column"])
-            target = mapping["target_field"]
+            tgt = mapping["target_field"]
+            if parse_target(tgt).kind in ("ignore", "none", "custom"):
+                continue
+            col = _normalize_col(mapping["source_column"])
+            if col in colapsado and colapsado[col] != tgt:
+                colapsado[col] = None  # contradicción: no se aprende
+            elif col not in colapsado:
+                colapsado[col] = tgt
 
-            # No aprendemos "ignore" ni custom_fields
-            if parse_target(target).kind in ("ignore", "none", "custom"):
+        for source_col, target in colapsado.items():
+            if target is None:
+                logger.info(
+                    "column_mapping.learning_skipped_conflict",
+                    entity_type=entity_type,
+                    source_column=source_col,
+                )
                 continue
 
             result = await self.db.execute(

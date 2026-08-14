@@ -56,6 +56,7 @@ slowapi==0.1.9
 python-dateutil==2.9.0.post0
 tenacity==9.0.0
 rapidfuzz==3.10.1                # fuzzy matching para IntentRescue (Sprint 17)
+ftfy==6.3.1                      # repara mojibake de encabezados en la ingesta (text_norm)
 spacy>=3.7.0,<4.0.0             # NLP en español para NlpPreprocessor (normalización argentina)
 # Post-install: python -m spacy download es_core_news_sm
 

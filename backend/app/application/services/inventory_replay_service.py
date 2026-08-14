@@ -1,8 +1,19 @@
 """F-H3.d.4 — aplicar al inventario la historia de ventas de un archivo importado.
 
-El confirm **no** toca stock (decisión de F-H3.c: confirmar → revisar → aplicar).
-Este servicio es el segundo paso: descuenta las ventas que el archivo trajo, por
-hoja, cuando el usuario lo pide.
+**F-F.3 — quién llama a esto.** Dos momentos, un solo núcleo:
+
+1. El **confirm**, en una segunda pasada dentro de su savepoint, para las hojas
+   resueltas como ``historical_replay``. Hasta F-F.2 no lo hacía: regía la
+   decisión de F-H3.c (confirmar → revisar → aplicar), que existía porque el
+   replay no se podía validar por fecha. Con el gate cronológico esa condición
+   dejó de existir y pedir un segundo clic no compraba nada.
+2. El **endpoint** ``POST /ingestion/files/{id}/inventory-replay``, que sigue
+   siendo la vía de lo que quedó **pendiente**: el usuario carga el inventario
+   que faltaba y vuelve a aplicar, sin volver a importar el archivo.
+
+Los dos entran por ``run_inventory_replay``, y no por una copia adaptada: lo que
+se aplica en el confirm y lo que se aplica después tienen que ser la misma
+operación, o el segundo intento podría descontar distinto que el primero.
 
 **El número se recalcula acá adentro, nunca se lee del confirm.** Entre confirmar
 y aplicar pueden haber pasado ventas en vivo, otro import o una corrección
@@ -20,11 +31,13 @@ veces, y una venta ya descontada en vivo no se vuelve a descontar acá (**V13**)
 borrar el archivo lo voidea con todo lo demás que ese archivo creó, incremental
 (**V15**).
 
-**Qué pasa si ya no alcanza el stock.** Al confirmar, una venta sin respaldo ni
-siquiera entra (F-H3.d.3). Acá la venta YA está en los libros y anularla cambiaría
-facturación confirmada, así que su descuento queda **pendiente** y se informa: el
-usuario carga el inventario que falta y vuelve a aplicar. Es la única salida que
-no rompe ni el inventario ni la contabilidad.
+**Qué pasa si ya no alcanza el stock.** La venta sin respaldo cuyo producto tiene
+saldo conocido ni siquiera entra: la saca el gate al confirmar (F-H3.d.3). La que
+llega hasta acá sin unidades es la del producto cuyo saldo NO se sabe (F-F.2) o
+la de un stock que se movió entre dos corridas — y en los dos casos ya está en los
+libros, así que anularla cambiaría facturación confirmada. Su descuento queda
+**pendiente** y se informa: el usuario carga el inventario que falta y vuelve a
+aplicar. Es la única salida que no rompe ni el inventario ni la contabilidad.
 """
 
 from __future__ import annotations
@@ -37,12 +50,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import stock_service
-from app.application.services._savepoint import SavepointConflictError, guarded_savepoint
 from app.application.services.inventory_movement_origin import SOURCE_HISTORICAL_REPLAY
-from app.application.services.stock_service import (
-    LIVE_SALE_EVENT_CONFLICT,
-    sale_source_event_id,
-)
+from app.application.services.stock_service import sale_source_event_id
 from app.domain.inventory_effect import IMPORT_CONTEXT_FIELD
 from app.domain.inventory_projection import (
     ImportImpact,
@@ -269,24 +278,34 @@ async def run_inventory_replay(
     if not apply:
         return resultado
 
-    for venta, producto in aplicables:
-        try:
-            async with guarded_savepoint(session, LIVE_SALE_EVENT_CONFLICT):
-                await stock_service.decrement_stock(
-                    product_id=producto.id,
-                    tenant_id=tenant_id,
-                    qty=int(venta.quantity or 0),
-                    source_event_id=sale_source_event_id(venta.id),
-                    db=session,
-                    occurred_at=venta.transaction_date,
-                    source_upload_id=file_id,
-                    source_type=SOURCE_HISTORICAL_REPLAY,
-                )
-            resultado.aplicadas += 1
-        except SavepointConflictError:
-            # La otra rama (una venta en vivo del mismo registro) ya lo creó: no-op
-            # idempotente, no un error. Ver `decrement_for_sale`.
-            resultado.ya_aplicadas += 1
+    # F-F.3.b: por lote, no venta por venta. Aplicar de a una costaba ~4 sentencias
+    # y un envío al broker por venta —sobre el archivo real, ~4.700 sentencias
+    # adentro del request del confirm—, que es exactamente la demora que F-T existe
+    # para no reintroducir. El lote vive en `stock_service` y no acá: lo que aplica
+    # el confirm y lo que aplica el reintento del panel tienen que ser la misma
+    # operación, y un lote armado del lado del caller volvería a separarlas.
+    #
+    # Las ventas ya descontadas ni siquiera llegan hasta acá (las sacó el chequeo de
+    # `_ya_descontadas`), así que `ya_aplicadas` sólo suma lo que aparezca en la
+    # CARRERA: una venta en vivo que se descontó entre aquel SELECT y este INSERT.
+    # El lote la resuelve rehaciéndose de a una, que es el camino de siempre.
+    bulk = await stock_service.decrement_stock_bulk(
+        tenant_id,
+        [
+            stock_service.BulkDecrementItem(
+                product=producto,
+                qty=int(venta.quantity or 0),
+                source_event_id=sale_source_event_id(venta.id),
+                occurred_at=venta.transaction_date,
+            )
+            for venta, producto in aplicables
+        ],
+        session,
+        source_upload_id=file_id,
+        source_type=SOURCE_HISTORICAL_REPLAY,
+    )
+    resultado.aplicadas += bulk.applied
+    resultado.ya_aplicadas += bulk.already_applied
 
     logger.info(
         "ingestion.inventory_replay.applied",

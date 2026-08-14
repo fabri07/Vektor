@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from decimal import Decimal
 
 from app.domain.expense_categories import strip_accents
-from app.domain.header_keys import match_key
+from app.domain.header_keys import fold_header, match_key
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -67,6 +67,10 @@ EXTENSION_TO_MIME = {
 
 SUPPORTED_TYPES_LABEL = "xlsx, csv, txt, pdf, docx, pptx, jpg, png, heic"
 
+# TODOS los sets de keywords de este módulo se comparan contra encabezados ya
+# pasados por `fold_header` (minúsculas, sin acentos ni ñ), así que se declaran
+# SIEMPRE en su forma sin tilde. Escribir además la variante acentuada no agrega
+# cobertura: es código muerto que no puede matchear nunca.
 # Columnas que indican transacciones de venta (monto cobrado)
 VENTA_COLS = {
     "precio_venta",
@@ -101,11 +105,11 @@ FECHA_COLS = {"fecha", "date", "dia", "mes", "periodo"}
 # maestro de clientes con "Fecha de nacimiento" activaba `has_fecha` (match por
 # substring de "fecha") y no podía clasificar como clientes — aunque
 # `fecha_nacimiento` esté listada como señal de cliente más abajo.
-FECHA_NO_TRANSACCIONAL_COLS = {"nacimiento", "cumpleanos", "cumpleaños", "cumple"}
+FECHA_NO_TRANSACCIONAL_COLS = {"nacimiento", "cumpleanos", "cumple"}
 
 # FASE 3: señales de compra de mercadería/insumos para reventa (→ inventario, no gasto).
 # Conservador: solo se rerutea a stock si HAY mercadería Y una columna de cantidad.
-MERCADERIA_COLS = {"mercaderia", "mercadería", "insumo", "insumos", "reposicion", "reposición"}
+MERCADERIA_COLS = {"mercaderia", "insumo", "insumos", "reposicion"}
 CANTIDAD_COLS = {"cantidad", "unidades", "unidad", "qty", "cant"}
 
 # FASE 3: clasificación CONTEXTUAL venta vs gasto. Las columnas de dinero genéricas
@@ -122,16 +126,16 @@ MONEY_COLS = {"monto", "importe", "total", "precio", "valor", "monto_total", "im
 # vive en FORMA_PAGO_COLS/`has_forma_pago`, que es lo que usa esa regla.
 VENTA_SIGNAL_COLS = {
     "venta", "ventas", "vendido", "vendida", "ingreso", "ingresos", "facturacion",
-    "facturación", "factura_emitida", "ticket", "cliente", "consumidor", "cobro",
+    "factura_emitida", "ticket", "cliente", "consumidor", "cobro",
     "cobrado", "caja", "fecha_venta",
 }
 # Señales fuertes de gasto/egreso (proveedor, categoría, concepto, servicio, etc.).
 # Nota: "pago" suelto NO se incluye — colisiona con "metodo/medio_pago" (señal de venta).
 GASTO_SIGNAL_COLS = {
-    "gasto", "gastos", "egreso", "egresos", "proveedor", "categoria", "categoría",
+    "gasto", "gastos", "egreso", "egresos", "proveedor", "categoria",
     "rubro", "concepto", "servicio", "alquiler", "sueldo", "salario", "impuesto",
-    "honorarios", "mantenimiento", "comision", "comisión", "flete", "logistica",
-    "logística", "factura_recibida", "compra", "costo", "deuda",
+    "honorarios", "mantenimiento", "comision", "flete", "logistica",
+    "factura_recibida", "compra", "costo", "deuda",
 }
 
 # Señales transaccionales para desambiguar un LIBRO DE COMPRAS de un CATÁLOGO.
@@ -144,12 +148,25 @@ GASTO_SIGNAL_COLS = {
 # monto de operación.
 TRANSACCION_MONTO_COLS = {"total", "monto", "importe", "monto_total", "importe_total"}
 # Columna de método/forma de pago (efectivo, transferencia, tarjeta…). Se matchea
-# contra la CLAVE del header (`match_key`), que colapsa preposiciones, así que
-# alcanza con la forma canónica: "medio_de_pago" entra por "medio_pago". La
-# variante con tilde sí hay que declararla — la clave no normaliza acentos.
-FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago", "método_pago"}
-# Columna de proveedor (contraparte de una compra).
+# contra la CLAVE del header (`match_key`), que colapsa preposiciones Y acentos,
+# así que alcanza con la forma canónica sin tilde: "Medio de Pago" entra por
+# "medio_pago" y "Método de Pago" por "metodo_pago".
+FORMA_PAGO_COLS = {"forma_pago", "medio_pago", "metodo_pago"}
+# Columna de proveedor (contraparte de una compra). Se matchea por SUBSTRING: en
+# los archivos reales el header casi nunca viene pelado — "Proveedor (tal cual se
+# anotó)", "Nombre del Proveedor" o "Razón Social Proveedor" son todos la misma
+# columna. Con coincidencia exacta, un libro de compras con el header decorado
+# perdía la señal de contraparte y sólo entraba en la regla -1 si además traía
+# "Forma de Pago"; sin esa columna volvía a clasificarse como catálogo.
 PROVEEDOR_COLS = {"proveedor", "proveedores"}
+# Nº de comprobante de la operación (remito, factura, recibo). Es el discriminante
+# más fuerte contra un catálogo: una lista de precios no numera comprobantes. Se
+# usa como evidencia ALTERNATIVA al monto de la operación — un libro de compras
+# que factura por remito puede no traer una columna "Total".
+# "facturacion"/"factura_emitida" quedan afuera a propósito: son columnas de total
+# facturado (señal de VENTA), no el identificador del documento.
+COMPROBANTE_COLS = {"remito", "factura", "comprobante", "recibo"}
+COMPROBANTE_EXCLUDE_KEYS = {"facturacion", "factura_emitida"}
 
 # Columnas que nombran un PRECIO. Aparecen en el catálogo tanto como en una
 # transacción, así que una señal de venta/gasto que salga de una de ellas
@@ -169,7 +186,7 @@ PRECIO_COL_KEYS = {"precio", "costo", "valor"}
 # clientes — corregible desde el selector de sección de la hoja, y mejor que el
 # "stock" que daba antes.
 CLIENTE_SIGNAL_COLS = {
-    "cliente", "clientes", "consumidor", "dni", "documento", "cumpleanos", "cumpleaños",
+    "cliente", "clientes", "consumidor", "dni", "documento", "cumpleanos",
     "fecha_nacimiento",
 }
 PROVEEDOR_MASTER_COLS = {"proveedor", "proveedores", "cuil", "contacto"}
@@ -177,14 +194,14 @@ PROVEEDOR_MASTER_COLS = {"proveedor", "proveedores", "cuil", "contacto"}
 # junto con "nombre" y la ausencia de señales transaccionales indica que la hoja
 # es un maestro de identidad (no una lista de precios ni un libro de compras).
 IDENTIDAD_CONTACTO_COLS = {
-    "cuit", "razon_social", "razón_social", "email", "telefono", "teléfono",
-    "direccion", "dirección", "localidad", "provincia", "codigo_postal", "cp",
+    "cuit", "razon_social", "email", "telefono",
+    "direccion", "localidad", "provincia", "codigo_postal", "cp",
     "apellido",
 }
 
 VENTA_CTX = {"venta", "ingreso", "cobro", "ticket", "recibo", "pago recibido", "cobrado"}
 GASTO_CTX = {"gasto", "compra", "pago", "factura", "proveedor", "egreso", "gaste"}
-STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia", "mercadería"}
+STOCK_CTX = {"stock", "inventario", "unidades", "cantidad", "mercaderia"}
 
 AMOUNT_RE = re.compile(r"\$\s*[\d.,]+")
 
@@ -404,7 +421,10 @@ def infer_source_format(filename: str, mime: str) -> str:
 
 def analyze_headers(headers: list[str]) -> dict[str, Any]:
     """Classify headers and infer spreadsheet type."""
-    normalized = [h.lower().strip().replace(" ", "_") for h in headers]
+    # `fold_header` saca acentos y ñ además de bajar a minúsculas: los sets de
+    # keywords de abajo se declaran SIN tilde y matchean igual una hoja que
+    # escriba "Descripción", "Mercadería" o "Cumpleaños".
+    normalized = [fold_header(h) for h in headers]
     # Clave heurística (sin preposiciones) para las señales que matchean EXACTO:
     # "medio_de_pago" y "medio_pago" son el mismo header. Se usa solo donde hace
     # falta — el resto de las señales sigue matcheando contra `normalized`.
@@ -452,7 +472,12 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     # para no disparar con sufijos espurios.
     has_monto_transaccion = any(col in TRANSACCION_MONTO_COLS for col in normalized)
     has_forma_pago = any(key in FORMA_PAGO_COLS for key in collapsed)
-    has_proveedor = any(col in PROVEEDOR_COLS for col in normalized)
+    has_proveedor = any(any(k in col for k in PROVEEDOR_COLS) for col in normalized)
+    has_comprobante = any(
+        any(k in col for k in COMPROBANTE_COLS)
+        and not any(x in col for x in COMPROBANTE_EXCLUDE_KEYS)
+        for col in normalized
+    )
 
     # F7a: señales de maestro de clientes/proveedores (identidad fiscal/contacto).
     cliente_score = sum(any(k in col for k in CLIENTE_SIGNAL_COLS) for col in normalized)
@@ -480,6 +505,7 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         has_monto_transaccion=has_monto_transaccion,
         has_forma_pago=has_forma_pago,
         has_proveedor=has_proveedor,
+        has_comprobante=has_comprobante,
         cliente_score=cliente_score,
         proveedor_master_score=proveedor_master_score,
         has_identidad_contacto=has_identidad_contacto,
@@ -514,6 +540,7 @@ def infer_spreadsheet_type(
     has_monto_transaccion: bool = False,
     has_forma_pago: bool = False,
     has_proveedor: bool = False,
+    has_comprobante: bool = False,
     cliente_score: int = 0,
     proveedor_master_score: int = 0,
     has_identidad_contacto: bool = False,
@@ -523,11 +550,12 @@ def infer_spreadsheet_type(
     """Determina el tipo más probable del archivo tabular.
 
     Reglas (en orden de prioridad):
-    -1. LIBRO DE COMPRAS: catálogo (sku/producto/cantidad) + monto de transacción +
-        fecha + (forma de pago O proveedor) Y contexto de gasto dominante → gastos,
-        aunque traiga sku/cantidad/costo_unitario. Una compra de mercadería es a la vez
-        gasto (COGS) y salida de caja; el catálogo no la captura. CONSERVADOR: solo se
-        dispara cuando, sin esta regla, el archivo caería en "stock" por error.
+    -1. LIBRO DE COMPRAS: catálogo (sku/producto/cantidad) + (monto de transacción O
+        nº de comprobante) + fecha + (forma de pago O proveedor) Y contexto de gasto
+        dominante → gastos, aunque traiga sku/cantidad/costo_unitario. Una compra de
+        mercadería es a la vez gasto (COGS) y salida de caja; el catálogo no la captura.
+        CONSERVADOR: solo se dispara cuando, sin esta regla, el archivo caería en
+        "stock" por error.
     -0.5 (F7a). MAESTRO DE CLIENTES/PROVEEDORES: señal de identidad fiscal/contacto
         (dni/documento/cliente para clientes; cuil/proveedor para proveedores) SIN
         ninguna señal transaccional (monto de operación, cantidad, fecha de
@@ -540,7 +568,9 @@ def infer_spreadsheet_type(
         que las reglas de catálogo débiles (2-4, basadas en "nombre") para que un
         maestro con columna "nombre" no se confunda con una lista de precios.
     0. Compra de mercadería/insumos + cantidad → inventario (FASE 3, conservador).
-    1. Señal fuerte de catálogo (sku/codigo/inventario/articulo) → siempre stock.
+    1. Señal fuerte de catálogo (sku/codigo/inventario/articulo/item) → stock, salvo
+       que haya evidencia transaccional completa (misma excepción que la regla 5:
+       "Artículo"/"Item" también nombran el ítem vendido en un libro de ventas).
     2. Señal de nombre/producto sin venta explícita → stock.
     3. Señal de nombre/producto sin fecha → stock (lista de precios, catálogo).
     4. Señal de nombre/producto + precio ambiguo (no venta transaccional) → stock.
@@ -563,16 +593,26 @@ def infer_spreadsheet_type(
     # como "stock" y se perdería el gasto (COGS) y la salida de caja. Solo se dispara si:
     #   (a) hay señal de catálogo (sku/articulo/… o producto/nombre o cantidad) — si no la
     #       hay, el scoring venta/gasto de abajo ya resuelve bien y no hay que intervenir;
-    #   (b) hay monto de transacción + fecha + (forma de pago O proveedor) — patrón de
-    #       operación, no de lista de precios; y
+    #   (b) hay evidencia de operación documentada (monto de transacción O nº de
+    #       comprobante) + fecha + (forma de pago O proveedor) — patrón de operación, no
+    #       de lista de precios; y
     #   (c) el contexto de GASTO domina al de VENTA (gasto_score > venta_score) — así una
     #       venta con cliente+forma_pago+total NO cae acá.
     # Un catálogo real (precio_venta/stock_actual/stock_minimo, sin forma_pago/proveedor
     # ni monto de operación) NO cumple (b) y sigue siendo "stock".
+    #
+    # El comprobante entra como alternativa al monto porque un libro de compras que
+    # factura por remito puede no traer una columna "Total" — y numerar remitos es algo
+    # que un catálogo no hace nunca. Sin esa alternativa, la regla dependía de que el
+    # archivo trajera JUSTO las columnas pelada "total" y "forma de pago": un libro real
+    # (fecha + nº de remito + proveedor + cantidad + costo) volvía a caer en "stock",
+    # perdiendo el COGS, la salida de caja y los movimientos de stock fechados que
+    # respaldan las ventas del mismo archivo.
     has_catalogo_signal_any = has_catalogo_fuerte or has_nombre or has_cantidad
+    has_operacion_documentada = has_monto_transaccion or has_comprobante
     if (
         has_catalogo_signal_any
-        and has_monto_transaccion
+        and has_operacion_documentada
         and has_fecha
         and (has_forma_pago or has_proveedor)
         and gasto_score > venta_score
@@ -615,8 +655,29 @@ def infer_spreadsheet_type(
     if has_mercaderia and has_cantidad:
         return "stock"
 
-    # Señal fuerte (sku, inventario, articulo, codigo, item) → inequívocamente catálogo
-    if has_catalogo_fuerte:
+    # Evidencia de que el archivo registra OPERACIONES y no describe un catálogo:
+    # fecha + monto DE LA TRANSACCIÓN + contexto de venta/gasto que no salga de una
+    # columna de precio. Las tres juntas, y ninguna alcanza sola: un catálogo tiene
+    # fecha de alta, y "precio_venta" activa el contexto por substring.
+    #
+    # La usan las reglas 1 y 5 con el mismo significado, y por eso se calcula una
+    # sola vez: son la misma pregunta hecha sobre dos señales de catálogo distintas
+    # (la fuerte y la de nombre), y tenerlas escritas por separado fue justamente
+    # lo que las dejó divergir.
+    evidencia_transaccional = has_fecha and has_monto_transaccion and has_contexto_operacion
+
+    # Señal fuerte (sku, inventario, articulo, codigo, item) → catálogo, SALVO que
+    # el archivo traiga la evidencia transaccional completa.
+    #
+    # La excepción existe porque la regla no era cierta como estaba escrita
+    # ("inequívocamente catálogo"): `articulo` e `item` son cómo se llama la columna
+    # del ítem VENDIDO en media exportación de ventas de un kiosco, no sólo la del
+    # catálogo. Un libro de ventas con "Artículo" volvía stock y no se importaba
+    # ninguna venta, mientras que el MISMO archivo con la columna llamada "Producto"
+    # entraba bien — porque la señal de nombre (regla 5) sí tenía esta excepción y
+    # la fuerte no. La asimetría estaba tapada por los acentos: "Artículo" con tilde
+    # no matcheaba el keyword `articulo` y se salvaba de rebote.
+    if has_catalogo_fuerte and not evidencia_transaccional:
         return "stock"
 
     # Nombre/producto sin venta explícita → catálogo (descripcion en ventas suele ir con monto)
@@ -644,9 +705,7 @@ def infer_spreadsheet_type(
     # El contexto tiene que ser fuerte: un catálogo con "precio_venta" ya activa
     # `has_venta` por substring, y si además trae fecha de alta y una columna "Total"
     # (valuación del stock) tendría las tres señales sin ser una transacción.
-    if has_nombre and not (
-        has_fecha and has_monto_transaccion and has_contexto_operacion
-    ):
+    if has_nombre and not evidencia_transaccional:
         return "stock"
 
     # FASE 3: discriminación venta vs gasto por CONTEXTO (scoring de señales fuertes).
@@ -739,8 +798,15 @@ _LD_SUB_EGRESO = {"egreso", "egresos", "salida", "salidas"}
 _LD_DETALLE_KEYS = {"detalle", "descripcion", "concepto", "glosa", "movimiento", "observa"}
 # Filas de cierre que no son movimientos (subtotales del libro).
 _LD_TOTAL_PREFIXES = ("total", "subtotal", "saldo", "acumulado")
-# Hojas derivadas del Libro Diario: importarlas además duplicaría las ventas.
-_LD_DERIVED_SHEET_PREFIXES = ("ganancia", "resumen", "balance")
+# Hojas DERIVADAS: agregados que Véktor recalcula solo desde los movimientos
+# (resúmenes por medio de pago, ganancias, balances). Importarlas además de las
+# hojas de movimientos del mismo archivo suma esos totales por segunda vez —
+# facturación fantasma, y encima con la fila "TOTAL" sumando otra vez las de
+# arriba. Mismo criterio que el margen en `column_mapping_service`: lo que el
+# sistema CALCULA no se importa como dato. No se descartan: se preservan sin
+# clasificar y destildadas, así el usuario puede asignarles sección a mano si de
+# verdad las quiere (la regla cambia el default, no el permiso).
+_DERIVED_SHEET_PREFIXES = ("ganancia", "resumen", "balance")
 
 
 def _ld_norm_cell(value: Any) -> str:
@@ -1012,7 +1078,9 @@ def _sniff_delimiter(sample: str) -> str:
 
 
 def classify_line(line: str) -> str:
-    low = line.lower()
+    # Sin tildes: una línea suelta de un .txt escribe "mercadería" tanto como
+    # "mercaderia", y los *_CTX se declaran en la forma sin acento.
+    low = strip_accents(line.lower())
     if any(k in low for k in VENTA_CTX):
         return "venta"
     if any(k in low for k in GASTO_CTX):
@@ -1292,9 +1360,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             contexts: list[dict[str, Any]] = []
             total_rows = 0
 
-            # Pre-pass: materializar hojas y detectar Libro Diario antes de
-            # clasificar — las hojas derivadas ("Ganancias", "Resumen") solo se
-            # excluyen si el libro fuente está presente en el mismo archivo.
+            # Pre-pass: materializar cada hoja junto con su detección de Libro
+            # Diario, para no volver a leer el workbook durante la clasificación.
             sheets_data: list[tuple[str, list[list[Any]], tuple[int, dict[str, int]] | None]] = []
             for sheet_name in sheet_names:
                 ws = workbook[sheet_name]
@@ -1302,7 +1369,6 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                 if len(rows) < 2:
                     continue
                 sheets_data.append((sheet_name, rows, detect_libro_diario_header(rows)))
-            has_libro_diario = any(ld is not None for _, _, ld in sheets_data)
 
             for sheet_name, rows, ld in sheets_data:
                 if ld is not None:
@@ -1313,12 +1379,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                     )
                     total_rows += sum(len(v) for v in parsed.values())
                     continue
-                if has_libro_diario and _ld_norm_cell(sheet_name).startswith(
-                    _LD_DERIVED_SHEET_PREFIXES
-                ):
-                    # Hoja derivada del Libro Diario (resumen/ganancias):
-                    # importarla además del libro duplicaría los movimientos.
-                    # Se preserva sin clasificar por si el usuario la quiere.
+                if _ld_norm_cell(sheet_name).startswith(_DERIVED_SHEET_PREFIXES):
+                    # Hoja derivada (resumen/ganancias/balance): es un agregado de
+                    # los movimientos que ya vienen en el archivo, así que importarla
+                    # los contaría dos veces. Se preserva sin clasificar por si el
+                    # usuario la quiere.
                     _hdr = _detect_header_row(rows)
                     _headers = [
                         str(c) if c is not None else f"col_{i}"
@@ -1343,9 +1408,11 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                         {**d, "__context__": context_id} for d in _dicts
                     )
                     summary["warnings"].append(
-                        f"La hoja '{sheet_name}' parece derivada del Libro Diario "
-                        "(resumen): no se importa automáticamente para no duplicar "
-                        "movimientos. Podés reclasificarla manualmente si hace falta."
+                        f"La hoja '{sheet_name}' es un resumen que Véktor calcula solo "
+                        "desde tus movimientos. Importarla sumaría esos totales otra "
+                        "vez, encima de los movimientos del mismo archivo. Por eso no "
+                        "se importa; podés asignarle una sección a mano si de verdad "
+                        "la necesitás."
                     )
                     continue
 

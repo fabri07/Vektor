@@ -299,6 +299,85 @@ def test_csv_end_to_end_infiere_el_tipo(csv: bytes, filename: str, esperado: str
     assert summary["inferred_type"] == esperado
 
 
+# Encabezados REALES de Vektor_Test_DistribuidoraLimpieza_3meses.xlsx, tal cual
+# los devuelve openpyxl (con "Nº", tildes y las aclaraciones entre paréntesis que
+# el usuario escribió). Se parte de los headers y no de las banderas porque el
+# bug de esta familia vive justo ahí: las banderas se derivan del texto del
+# encabezado, y un header "decorado" ("Proveedor (tal cual se anotó)") no matchea
+# igual que el pelado ("Proveedor").
+_COMPRAS_MERCADERIA_HEADERS = [
+    "Fecha",
+    "Nº Remito/Factura",
+    "Proveedor (tal cual se anotó)",
+    "Producto (tal cual se anotó)",
+    "Cantidad",
+    "Costo Unitario",
+    "Total",
+    "Forma de Pago",
+]
+
+
+@pytest.mark.parametrize(
+    ("headers", "esperado"),
+    [
+        # El caso reportado: un libro de compras de mercadería es una OPERACIÓN
+        # (fecha + comprobante + proveedor + forma de pago + cantidad + costo),
+        # no un catálogo — aunque nombre productos. Si cae en "stock" no genera
+        # movimientos de stock fechados y las ventas que respalda se quedan sin
+        # respaldo → "Otros".
+        pytest.param(
+            _COMPRAS_MERCADERIA_HEADERS,
+            "gastos",
+            id="test_compras_mercaderia_headers_reales_son_gastos",
+        ),
+        # Mismo libro SIN "Forma de Pago": el proveedor sigue estando, con el
+        # header decorado. Con match exacto de "proveedor" esta hoja caía en
+        # "stock" — el caso reportado estaba a UNA columna de fallar.
+        pytest.param(
+            [h for h in _COMPRAS_MERCADERIA_HEADERS if h != "Forma de Pago"],
+            "gastos",
+            id="test_compras_mercaderia_sin_forma_de_pago_sigue_siendo_gastos",
+        ),
+        # Mismo libro SIN "Total": el Nº de remito/factura alcanza como evidencia
+        # de que hay una operación documentada. Un catálogo no numera comprobantes.
+        pytest.param(
+            [h for h in _COMPRAS_MERCADERIA_HEADERS if h != "Total"],
+            "gastos",
+            id="test_compras_mercaderia_sin_total_sigue_siendo_gastos",
+        ),
+        # No-regresión: el catálogo del MISMO archivo sigue siendo productos.
+        pytest.param(
+            ["SKU", "Nombre Canónico", "Categoría", "Precio Costo", "Precio Venta", "Margen %"],
+            "stock",
+            id="test_productos_catalogo_headers_reales_siguen_siendo_stock",
+        ),
+        # No-regresión: las compras de insumos del MISMO archivo siguen siendo gastos.
+        pytest.param(
+            ["Fecha", "Nº Factura", "Ítem", "Cantidad", "Precio Unitario", "Total", "Proveedor"],
+            "gastos",
+            id="test_compras_insumos_headers_reales_siguen_siendo_gastos",
+        ),
+        # El discriminante es la OPERACIÓN, no el costo: un catálogo con costo
+        # unitario sigue siendo catálogo mientras no traiga fecha de operación,
+        # comprobante ni forma de pago.
+        pytest.param(
+            ["Producto", "Costo Unitario", "Precio Venta", "Stock"],
+            "stock",
+            id="test_catalogo_con_costo_sin_operacion_sigue_siendo_stock",
+        ),
+        # Idem con SKU y columna de proveedor (quién lo distribuye): sin señales
+        # de operación es catálogo, no un libro de compras ni un maestro.
+        pytest.param(
+            ["SKU", "Producto", "Costo Unitario", "Precio Venta", "Stock", "Proveedor"],
+            "stock",
+            id="test_catalogo_con_costo_y_proveedor_sin_operacion_sigue_siendo_stock",
+        ),
+    ],
+)
+def test_analyze_headers_libro_de_compras_vs_catalogo(headers: list[str], esperado: str) -> None:
+    assert analyze_headers(headers)["inferred_type"] == esperado
+
+
 def test_product_csv_parse_with_date_and_price_infers_stock(csv_bytes: bytes) -> None:
     """CSV con columnas fecha+nombre+precio → inferred_type='stock' (bug regression end-to-end)."""
     product_csv = (
@@ -1004,9 +1083,12 @@ def _build_multisheet_with_unclassified() -> bytes:
     ventas.title = "Ventas"
     ventas.append(["fecha", "monto"])
     ventas.append(["2026-01-15", "50000"])
-    resumen = wb.create_sheet("Resumen")  # nombre + headers no clasificables
-    resumen.append(["Titulo", "Observaciones", "Estado"])
-    resumen.append(["Total mes", "sin novedad", "ok"])
+    # Nombre + headers no clasificables. No puede llamarse "Resumen": ese prefijo
+    # lo captura antes la regla de hojas derivadas, que es otro camino y otro
+    # mensaje — el test dejaría de probar lo que dice probar.
+    notas = wb.create_sheet("Notas Internas")
+    notas.append(["Titulo", "Observaciones", "Estado"])
+    notas.append(["Total mes", "sin novedad", "ok"])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -1021,9 +1103,149 @@ def test_multisheet_unclassified_sheet_preserved_with_warning() -> None:
     # La hoja clasificable entra normal.
     assert by_label["Ventas"]["entity_type"] == "sale"
 
-    # La hoja "Resumen" NO se descarta: queda como contexto unclassified + warning.
-    assert "Resumen" in by_label
-    assert by_label["Resumen"]["entity_type"] is None
-    assert by_label["Resumen"]["unclassified"] is True
-    assert by_label["Resumen"]["row_count"] == 1
-    assert any("Resumen" in w for w in summary["warnings"])
+    # La hoja no clasificable NO se descarta: queda como contexto unclassified + warning.
+    assert "Notas Internas" in by_label
+    assert by_label["Notas Internas"]["entity_type"] is None
+    assert by_label["Notas Internas"]["unclassified"] is True
+    assert by_label["Notas Internas"]["row_count"] == 1
+    assert any(
+        "Notas Internas" in w and "no se pudo clasificar" in w for w in summary["warnings"]
+    )
+
+
+# ── Hojas derivadas: lo que Véktor calcula no se importa ────────────────────────
+
+
+def _build_ventas_mas_resumen_xlsx() -> bytes:
+    """Caso real: un archivo de ventas que además trae el resumen por medio de pago.
+
+    La hoja de resumen es un agregado de las MISMAS ventas de la hoja anterior
+    (incluida la fila "TOTAL", que vuelve a sumar las de arriba). No es un Libro
+    Diario: el archivo no tiene doble encabezado Dinero/Mercadería.
+    """
+    return _build_multisheet_xlsx(
+        {
+            "Ventas": [
+                ["fecha", "total", "cliente", "medio de pago"],
+                ["2026-03-02", "4500", "Juan Pérez", "Efectivo"],
+                ["2026-03-03", "7200", "Ana Gómez", "Débito"],
+            ],
+            "Resumen_Medios_Pago": [
+                ["Medio de Pago", "Total $", "Cantidad de Ventas", "% del Total"],
+                ["Débito", "7200", "1", "61.5"],
+                ["Efectivo", "4500", "1", "38.5"],
+                ["TOTAL", "11700", "2", None],
+            ],
+        }
+    )
+
+
+def test_hoja_resumen_no_se_importa_como_ventas_sin_libro_diario() -> None:
+    """Un resumen por medio de pago NO entra como ventas: duplicaría la facturación.
+
+    Antes, la regla de hojas derivadas vivía dentro de la rama del Libro Diario,
+    así que en un archivo común la hoja "Resumen_Medios_Pago" se clasificaba como
+    `sale` y sus 4 filas —incluida "TOTAL"— sumaban facturación fantasma encima de
+    las ventas reales del mismo archivo.
+    """
+    summary = parse_uploaded_content(
+        _build_ventas_mas_resumen_xlsx(), _XLSX_MIME, "distribuidora.xlsx"
+    )
+    by_label = {c["label"]: c for c in summary["mapping_contexts"]}
+
+    assert by_label["Resumen_Medios_Pago"]["entity_type"] is None
+    assert by_label["Resumen_Medios_Pago"]["unclassified"] is True
+    # Ninguna fila del resumen llegó al bucket de ventas.
+    assert all(
+        r.get("__context__") != "sheet:Resumen_Medios_Pago"
+        for r in summary["ventas_detectadas"]
+    )
+    # El motivo viaja con el nombre de la hoja (así lo rutea splitWarningsByContext).
+    assert any(
+        "Resumen_Medios_Pago" in w and "sumaría esos totales otra vez" in w
+        for w in summary["warnings"]
+    )
+
+
+def test_hoja_de_ventas_del_mismo_archivo_sigue_entrando() -> None:
+    """La regla apunta sólo a la hoja derivada: las ventas reales no se tocan."""
+    summary = parse_uploaded_content(
+        _build_ventas_mas_resumen_xlsx(), _XLSX_MIME, "distribuidora.xlsx"
+    )
+    by_label = {c["label"]: c for c in summary["mapping_contexts"]}
+
+    assert by_label["Ventas"]["entity_type"] == "sale"
+    assert by_label["Ventas"]["row_count"] == 2
+    assert len(summary["ventas_detectadas"]) == 2
+
+
+def test_hoja_con_nombre_no_derivado_se_sigue_clasificando() -> None:
+    """La regla mira el prefijo del nombre: "Ventas Marzo" no es un derivado."""
+    content = _build_multisheet_xlsx(
+        {
+            "Ventas Marzo": [
+                ["fecha", "total", "cliente"],
+                ["2026-03-02", "4500", "Juan Pérez"],
+            ],
+            "Gastos Fijos": [
+                ["fecha", "monto", "categoria", "descripcion"],
+                ["2026-03-02", "12000", "alquiler", "Alquiler local"],
+            ],
+        }
+    )
+    summary = parse_uploaded_content(content, _XLSX_MIME, "normal.xlsx")
+    by_label = {c["label"]: c for c in summary["mapping_contexts"]}
+
+    assert by_label["Ventas Marzo"]["entity_type"] == "sale"
+    assert by_label["Gastos Fijos"]["entity_type"] == "expense"
+
+
+def test_articulo_no_es_senal_inequivoca_de_catalogo() -> None:
+    """`articulo` e `item` son cómo se llama la columna del ítem VENDIDO en media
+    exportación de ventas de un kiosco, no sólo la del catálogo.
+
+    La regla 1 decía "inequívocamente catálogo" y cortaba antes de mirar ninguna
+    señal de operación, así que un libro de ventas con "Artículo" volvía `stock` y
+    no se importaba una sola venta — mientras que el MISMO archivo con la columna
+    llamada "Producto" entraba bien, porque la señal de nombre (regla 5) sí tenía
+    la excepción por evidencia transaccional y la fuerte no.
+
+    La asimetría estaba tapada por los acentos: "Artículo" con tilde no matcheaba
+    el keyword `articulo` y se salvaba de rebote. Al plegar acentos quedó a la
+    vista, y se arregla igualando las dos reglas contra el mismo predicado.
+    """
+    ventas = ["Fecha", "Cantidad", "Método de Pago", "Total", "Cliente"]
+    for columna_del_item in ("Artículo", "Articulo", "Item", "Producto", "Detalle"):
+        headers = [ventas[0], columna_del_item, *ventas[1:]]
+        assert analyze_headers(headers)["inferred_type"] == "ventas", columna_del_item
+
+
+def test_un_catalogo_con_articulo_sigue_siendo_catalogo() -> None:
+    """El otro lado: la excepción exige las TRES señales de operación juntas, así
+    que aflojar la regla 1 no arrastra ningún catálogo a ventas."""
+    # Lista de precios pelada.
+    assert analyze_headers(["Código", "Artículo", "Precio", "Stock"])["inferred_type"] == "stock"
+    # Con fecha de alta: falta el monto de la operación.
+    assert (
+        analyze_headers(["Código", "Artículo", "Precio", "Stock", "Fecha de alta"])[
+            "inferred_type"
+        ]
+        == "stock"
+    )
+    # Con fecha de alta Y "Total" (valuación del stock): el contexto sale de una
+    # columna de precio, así que no cuenta como operación.
+    assert (
+        analyze_headers(["SKU", "Artículo", "Precio de venta", "Stock", "Total", "Fecha de alta"])[
+            "inferred_type"
+        ]
+        == "stock"
+    )
+    # Inventario puro, sin fecha ni monto.
+    assert analyze_headers(["SKU", "Inventario", "Cantidad"])["inferred_type"] == "stock"
+
+
+def test_un_libro_de_compras_con_articulo_sigue_siendo_gasto() -> None:
+    """La regla -1 corre ANTES que la 1 y no la toca este cambio: una compra de
+    mercadería sigue siendo gasto (COGS + salida de caja), no venta."""
+    headers = ["Fecha", "Proveedor", "Artículo", "Cantidad", "Total", "Forma de Pago"]
+    assert analyze_headers(headers)["inferred_type"] == "gastos"

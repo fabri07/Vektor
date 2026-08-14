@@ -181,7 +181,12 @@ class ColumnMappingSuggestion(BaseModel):
     sample_values: list[str]
     target_field: str | None
     confidence: float
-    source: Literal["tenant_history", "heuristic", "fuzzy", "llm", "none"]
+    #: F-A: `auto_custom` = Véktor no reconoció el encabezado y propone
+    #: conservarlo como campo propio con el nombre del archivo. Es un origen
+    #: propio y no `heuristic`: nadie reconoció nada, y la pantalla tiene que
+    #: poder decir «se guarda con el nombre del archivo» en vez de «sugerido
+    #: por el nombre de la columna», que sería mentir sobre qué pasó.
+    source: Literal["tenant_history", "heuristic", "fuzzy", "llm", "none", "auto_custom"]
     status: Literal["mapped", "unmapped", "ambiguo", "required_missing"]
     # Contexto al que pertenece la sugerencia (hoja/tabla). None = archivo de un solo contexto.
     context_id: str | None = None
@@ -195,6 +200,17 @@ class ColumnMappingSuggestion(BaseModel):
     # «no entiendo esto» y «entiendo qué es pero no tengo dónde ponerlo» son dos
     # mensajes distintos para la persona, aunque para el importador sean lo mismo.
     duda: str | None = None
+    #: F-A. Cómo se llama la columna en el archivo, para mostrar. Viaja SEPARADO
+    #: del target porque el slug pierde acentos, mayúsculas y puntuación: desde
+    #: `custom_field:ano_fiscal` no se puede volver a «Año Fiscal». Es lo único
+    #: con lo que la persona reconoce su columna en el ERD y en la pantalla de
+    #: campos propios.
+    target_label: str | None = None
+    #: F-A/V10. QUÉ requerido falta cuando `status == "required_missing"`, no
+    #: sólo que falta alguno: el estado describe el campo DESTINO, y sin
+    #: nombrarlo la pantalla tiene que adivinar cuál de los requeridos es este
+    #: punto rojo.
+    missing_field: str | None = None
 
 
 class ConditionalRequirement(BaseModel):
@@ -312,21 +328,27 @@ class InventoryEffectOption(BaseModel):
 
 
 class SheetInventoryEffect(BaseModel):
-    """F-H3.e — qué propone Véktor para una hoja y entre qué puede elegir el usuario.
+    """F-H3.e — qué le hace al inventario una hoja, para mostrarlo.
 
-    El default y las opciones salen de `domain/inventory_effect` (`default_effect_for`
-    / `options_for`), que dependen de la entidad de la hoja y de los campos que el
-    mapeo BORRADOR ya cubre. Por eso se calcula del lado del servidor y con el mapeo
-    en curso, en vez de una tabla fija en la UI: cambiar una columna a `quantity`
-    cambia lo que la hoja puede hacerle al inventario.
+    Sale de `domain/inventory_effect` (`default_effect_for` / `options_for`), que
+    dependen de la entidad de la hoja y de los campos que el mapeo BORRADOR ya
+    cubre. Por eso se calcula del lado del servidor y con el mapeo en curso, en vez
+    de una tabla fija en la UI: mapear una columna a `quantity` cambia lo que la
+    hoja le hace al inventario, y cambiar la SECCIÓN de la hoja también.
+
+    **F-F.4 — informa, ya no ofrece.** `options` trae exactamente un elemento (el
+    efecto de la hoja) o ninguno (la hoja no habla de inventario). Se conserva la
+    forma de lista, en vez de reemplazarla por el escalar, porque un frontend viejo
+    durante la ventana de deploy la renderiza como línea informativa; cambiarla lo
+    rompería para no ganar nada.
     """
 
     context_id: str
     #: Nombre legible de la hoja (nunca el `context_id` crudo).
     label: str
-    default: str
-    #: Siempre incluye `default`. Con un solo elemento no hay nada que elegir: la
-    #: hoja no habla de unidades y la UI sólo informa el modo.
+    #: `None` = esta hoja no habla de inventario y no hay nada que mostrar.
+    default: str | None
+    #: Vacío, o el único efecto de la hoja.
     options: list[InventoryEffectOption]
 
 
@@ -341,6 +363,14 @@ class ColumnMapping(BaseModel):
     # sugerencia). Solo True vuelve accionable un target OPCIONAL en el protocolo de
     # riesgo. El backend nunca lo infiere de la mera presencia del mapping.
     user_selected: bool = False
+    # F-A: cómo se llama esta columna para mostrar, cuando va a un campo propio.
+    # Cierra el recorrido del label: sugerencia → pantalla → confirm →
+    # `ensure_custom_field_exists`. Sin esto el label se derivaba de
+    # `source_column` en el confirm, que coincide sólo mientras nadie renombre la
+    # columna en pantalla — y no coincide nunca si el slug se desambiguó
+    # (`obs` y `obs_2` comparten nombre de origen y son campos distintos).
+    # Opcional: un cliente viejo que no lo mande sigue cayendo a `source_column`.
+    target_label: str | None = None
 
 
 class ColumnRiskRequest(BaseModel):
@@ -543,28 +573,26 @@ class ConfirmIngestionRequest(BaseModel):
             "significando 'para todas las hojas de producto' (compatibilidad)."
         ),
     )
-    inventory_effect: (
-        dict[
-            str,
-            Literal["informational", "historical_replay", "current_snapshot", "no_inventory"],
-        ]
-        | None
-    ) = Field(
+    inventory_effect: dict[str, str] | None = Field(
         default=None,
         description=(
-            "F-H3: qué le hace al INVENTARIO cada hoja, como `{context_id: modo}`.\n\n"
-            "- `informational`: calcula el impacto y lo reporta, sin tocar stock.\n"
-            "- `historical_replay`: las compras suman y las ventas restan.\n"
-            "- `current_snapshot`: el archivo declara el saldo absoluto (una foto).\n"
-            "- `no_inventory`: la cantidad no habla de inventario.\n\n"
+            "OBSOLETO desde F-F.4 — se acepta, no hace falta mandarlo.\n\n"
+            "Qué le hace al INVENTARIO cada hoja ya no se elige: se deduce de lo que "
+            "la hoja contiene. Compra o venta de mercadería (producto y cantidad "
+            "mapeados) → `historical_replay`: las compras suman y las ventas restan. "
+            "Catálogo con cantidad → `current_snapshot`: el archivo declara el saldo "
+            "absoluto. Cualquier otra hoja no habla de inventario y no tiene modo.\n\n"
             "Eje SEPARADO de `stock_treatment`, que es contable (¿el stock inicial "
-            "del catálogo genera COGS y baja de caja?). Fusionarlos haría que elegir "
-            "'las ventas descuentan' declare en silencio que el catálogo genera COGS.\n\n"
-            "Si se omite, cada hoja toma su default; el default NUNCA es "
-            "`historical_replay`: aplicar el histórico de un archivo que puede estar "
-            "incompleto o solaparse con saldos ya cargados es una decisión del "
-            "usuario, hoja por hoja. Un modo inválido o una hoja inexistente se "
-            "rechazan con 422 en vez de ignorarse."
+            "del catálogo genera COGS y baja de caja?) y **ese sí se sigue eligiendo**.\n\n"
+            "Un valor que coincide con el deducido es un no-op. Los modos que F-F.4 "
+            "eliminó (`informational`, `no_inventory`) se descartan sin error, para no "
+            "voltear el confirm de un frontend viejo durante un deploy. Un modo "
+            "desconocido, una hoja inexistente o un modo que CONTRADICE el contenido "
+            "de la hoja se rechazan con 422: quien los manda cree haber decidido algo "
+            "sobre el inventario que no va a pasar.\n\n"
+            "El tipo es `str` y no un `Literal` a propósito: los valores legacy tienen "
+            "que llegar al dominio para que los descarte con su regla, y un `Literal` "
+            "los convertiría en un 422 de Pydantic antes de eso."
         ),
     )
     column_risk_decisions: list[ColumnRiskDecision] = Field(
@@ -597,10 +625,14 @@ class ConfirmIngestionRequest(BaseModel):
 
 
 class InventoryImpactItem(BaseModel):
-    """F-H3.c: qué le PASARÍA al stock de un producto si se aplicara el archivo.
+    """F-H3.c: qué le pasó al stock de un producto con este archivo.
 
-    Nada de esto se aplicó: con el default (`informational`) el import calcula y
-    reporta. Los números son los del replay por fecha, no un neto de unidades:
+    **En pasado desde F-F.3/F-F.4**: el confirm aplica el descuento de las hojas
+    de mercadería en la misma transacción, así que esto describe un hecho
+    consumado y no una proyección. Lo que puede quedar pendiente es la venta que
+    no tiene stock que la respalde (F-F.2), y eso se cuenta aparte.
+
+    Los números son los del replay por fecha, no un neto de unidades:
     ``minimo``/``primer_negativo_en`` sólo existen porque se reprodujo la
     secuencia día por día.
     """

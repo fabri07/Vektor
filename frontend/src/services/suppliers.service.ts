@@ -4,6 +4,8 @@ export interface CreateSupplierPayload {
   name: string;
   last_name?: string | null;
   cuil?: string | null;
+  cuit?: string | null;
+  iva_condition?: string | null;
   payment_method?: string | null;
   email?: string | null;
   phone?: string | null;
@@ -21,6 +23,8 @@ export interface SupplierResponse {
   name: string;
   last_name: string | null;
   cuil: string | null;
+  cuit: string | null;
+  iva_condition: string | null;
   payment_method: string | null;
   email: string | null;
   phone: string | null;

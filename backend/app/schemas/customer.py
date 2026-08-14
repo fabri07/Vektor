@@ -8,16 +8,13 @@ from uuid import UUID
 from pydantic import BaseModel, Field, computed_field, field_validator
 from pydantic_core import PydanticCustomError
 
-from app.schemas._ar_fiscal import validate_cuit, validate_dni
+from app.schemas._ar_fiscal import validate_cuit, validate_dni, validate_iva_condition
 
 # Valores canónicos. La obligatoriedad (qué campos exigir) la aplica el endpoint
 # manual vía ``require_complete``; el schema solo valida formato/enum siempre, para
 # no romper los caminos internos (sentinela, import, reclasificación de "Otros").
 CUSTOMER_TYPES = frozenset({"person", "company"})
 DOC_TYPES = frozenset({"dni", "cuit"})
-IVA_CONDITIONS = frozenset(
-    {"consumidor_final", "monotributo", "responsable_inscripto", "exento"}
-)
 
 
 def _check_customer_type(v: str | None) -> str | None:
@@ -38,16 +35,10 @@ def _check_doc_type(v: str | None) -> str | None:
     return v
 
 
-def _check_iva(v: str | None) -> str | None:
-    if v is None or v == "":
-        return None
-    if v not in IVA_CONDITIONS:
-        raise PydanticCustomError(
-            "iva_condition_invalid",
-            "iva_condition inválida: consumidor_final | monotributo | "
-            "responsable_inscripto | exento.",
-        )
-    return v
+#: Alias local: la implementación se movió a `_ar_fiscal` cuando proveedores
+#: también pasó a tener condición de IVA — dos copias del catálogo es como se
+#: separan sin que nadie lo note.
+_check_iva = validate_iva_condition
 
 
 class CustomerResponse(BaseModel):

@@ -66,6 +66,7 @@ from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_IMPORTED,
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
+    unclassified_row_ref,
 )
 from app.persistence.models.user import User
 from app.persistence.repositories.product_repository import ProductRepository
@@ -397,7 +398,7 @@ async def reclassify_record(
     # `source_row_ref` se deriva del id del UnclassifiedRecord, no de sus valores:
     # es estable aunque el usuario corrija un campo antes de clasificar.
     _upload_id = record.uploaded_file_id
-    _row_ref = f"unclassified:{record.id}" if _upload_id else None
+    _row_ref = unclassified_row_ref(record.id) if _upload_id else None
 
     try:
         if body.entity_type == "sale":

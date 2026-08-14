@@ -30,12 +30,17 @@ from app.application.services.file_parsing import (
 # Campos del proveedor que el import puede setear/actualizar — mismo subconjunto que
 # persiste el modelo ``Supplier`` (ver ``models/supplier.py`` y
 # ``CANONICAL_FIELDS["supplier"]`` en column_mapping_service).
-SUPPLIER_FIELDS = ("name", "last_name", "cuil", "payment_method", "email", "phone", "notes")
+SUPPLIER_FIELDS = (
+    "name", "last_name", "cuil", "cuit", "iva_condition", "payment_method",
+    "email", "phone", "notes",
+)
 
 _FIELD_MAXLEN = {
     "name": 300,
     "last_name": 200,
     "cuil": 13,
+    "cuit": 13,
+    "iva_condition": 25,
     "payment_method": 30,
     "email": 320,
     "phone": 50,
@@ -135,9 +140,12 @@ def parse_supplier_records(
         warnings.append(
             "No se identificó la columna de nombre/razón social. Revisá el encabezado."
         )
-    if "cuil" not in colmap.values():
+    # CUIT o CUIL: alcanza con cualquiera de los dos como dato fuerte. Antes se
+    # avisaba sólo por CUIL, así que un padrón de empresas —que trae CUIT— veía
+    # una advertencia que no correspondía.
+    if not {"cuil", "cuit"} & set(colmap.values()):
         warnings.append(
-            "No se identificó una columna de CUIL. Se puede importar igual por "
+            "No se identificó una columna de CUIT ni de CUIL. Se puede importar igual por "
             "email/teléfono, pero sin ningún dato fuerte la fila queda pendiente de revisión."
         )
 

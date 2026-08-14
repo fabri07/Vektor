@@ -144,6 +144,10 @@ async def ensure_custom_field_exists(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        # Gana el label que ya está, a propósito: `/settings` deja renombrar un
+        # campo propio, y pisarlo en cada import devolvería el encabezado del
+        # archivo encima del nombre que la persona eligió. El header es el valor
+        # INICIAL, no la fuente de verdad permanente.
         return
 
     now = datetime.now(UTC)
