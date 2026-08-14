@@ -57,6 +57,16 @@ class TestFieldCatalog:
         assert fields["list_price_ars"]["label"] == "Precio de lista (sugerido)"
         assert fields["sale_price_ars"]["label"] == "Precio de venta"
 
+    async def test_venta_puede_declarar_sku_y_barcode_del_producto(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """F-S.0: `sale` no tenía sku/barcode — el motor de resolución
+        (`_venta_producto_id`) ya sabía leerlos, faltaba el target."""
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        valores = {f["value"] for f in response.json()["sale"]["fields"]}
+        assert "sku" in valores
+        assert "barcode" in valores
+
     async def test_marca_los_campos_de_valor_unico(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:

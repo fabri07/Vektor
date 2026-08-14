@@ -138,6 +138,17 @@ def test_heuristic_match_product_barcode() -> None:
     assert _heuristic_match("codigo", "product") == "sku"
 
 
+def test_heuristic_match_sale_sku_barcode() -> None:
+    """F-S.0: el fallback fuzzy (`_HEURISTICS`) también los tiene, mismo set
+    conservador que `expense` — sin "codigo" a secas acá tampoco, ese target
+    lo resuelve el layer primario (`RESOLUCION["sale"]`, ver
+    test_header_resolution.py), no el fuzzy."""
+    assert _heuristic_match("sku", "sale") == "sku"
+    assert _heuristic_match("codigo_producto", "sale") == "sku"
+    assert _heuristic_match("ean", "sale") == "barcode"
+    assert _heuristic_match("codigo_de_barras", "sale") == "barcode"
+
+
 def test_heuristic_match_none_for_unknown() -> None:
     assert _heuristic_match("xyz_desconocido_123", "sale") is None
     assert _heuristic_match("color", "product") is None
@@ -322,8 +333,17 @@ async def test_suggest_mappings_unknown_header() -> None:
     db.execute = AsyncMock(return_value=mock_result)
 
     svc = ColumnMappingService(db)
-    headers = ["codigo_interno_xz99"]
-    sample_rows = [{"codigo_interno_xz99": "abc"}]
+    # F-S.0: "codigo_interno_xz99" dejó de servir de ejemplo — desde que
+    # 'sale' reconoce el concepto "codigo" (→ sku), ese header pasa a
+    # resolver. Lo que el test necesita pinear es distinto de "sin concepto":
+    # es un concepto que SÍ se reconoce pero no tiene campo en 'sale'
+    # (`RESOLUCION["sale"]` no tiene "vencimiento" — es de 'product') — eso
+    # produce una duda que bloquea el auto-custom (ver el loop de
+    # `auto_custom` más abajo en `suggest_mappings`, que sólo promueve
+    # columnas SIN duda). Un header realmente sin concepto ("campo_arbitrario")
+    # cae en auto_custom y queda 'mapped', que ya no prueba lo mismo.
+    headers = ["vencimiento_xz99"]
+    sample_rows = [{"vencimiento_xz99": "abc"}]
 
     suggestions = await svc.suggest_mappings(uuid.uuid4(), "sale", headers, sample_rows)
 

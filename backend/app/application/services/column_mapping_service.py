@@ -52,6 +52,14 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "customer_email": "Cliente — Email",
         "customer_phone": "Cliente — Teléfono",
         "customer_name": "Cliente — Nombre",
+        # F-S.0: identifican el producto de ESTA venta, igual que ya hacen en
+        # 'expense' (abajo). El motor de resolución ya los lee
+        # (`_venta_producto_id`, `_resolve_product`) — faltaba el target para
+        # que el usuario pudiera mapear la columna, y la regla de
+        # reconocimiento de encabezado (`RESOLUCION["sale"]`) para que se
+        # sugiriera sola.
+        "sku": "Código (SKU)",
+        "barcode": "Código de barras (EAN/UPC)",
     },
     "expense": {
         "amount": "Monto del gasto",
@@ -498,6 +506,21 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "telefono_cliente", "cliente_telefono", "telefono", "teléfono", "whatsapp_cliente",
         },
         "customer_name": {"cliente", "nombre_cliente", "cliente_nombre"},
+        # F-S.0: mismo set conservador que 'expense' (abajo) para el fallback
+        # fuzzy — SIN "codigo" a secas acá tampoco: este layer compara por
+        # similitud aproximada, no por concepto exacto como RESOLUCION, así
+        # que un keyword corto y genérico es más riesgoso de colisionar.
+        "sku": {"sku", "codigo_producto", "cod_producto"},
+        "barcode": {
+            "barcode",
+            "ean",
+            "upc",
+            "gtin",
+            "barras",
+            "codigo_de_barras",
+            "cod_barra",
+            "codigo_barra",
+        },
     },
     "expense": {
         "amount": {
@@ -914,6 +937,13 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "nota": (_r(target="notes"),),
         "descripcion": (_r(target="product_name"),),
         "margen": (_r(duda=_MARGEN_ES_DERIVADO),),
+        # F-S.0: mismo criterio que 'expense'/'product' (líneas de abajo) —
+        # "codigo" a secas en una venta no compite con nada más en esta
+        # entidad (a diferencia de 'expense', donde puede ser el número de
+        # comprobante), así que resuelve directo a sku.
+        "sku": (_r(target="sku"),),
+        "codigo": (_r(target="sku"),),
+        "barcode": (_r(target="barcode"),),
     },
     "expense": {
         "fecha": (_r(target="expense_date"),),
