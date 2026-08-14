@@ -70,7 +70,10 @@ from app.domain.line_amount import (
     LineAmount,
     resolve_line_amount,
 )
-from app.domain.product_categories import normalize_product_category
+from app.domain.product_categories import (
+    infer_product_category_from_name,
+    normalize_product_category,
+)
 from app.domain.purchase_cost import (
     ATRIBUIDO_A_INVENTARIO_FIELD,
     COMPARTIDO_SUBTOTAL,
@@ -1665,6 +1668,7 @@ async def _resolve_purchase_identity(
     indexes: ProductIdentityIndexes,
     cache: dict[str, Product],
     product_cache: dict[uuid.UUID, Any] | None = None,
+    vertical: Vertical | None = None,
 ) -> tuple[str, uuid.UUID | None, list[dict[str, Any]]]:
     """Resuelve el producto de una COMPRA de mercadería con el motor unificado.
 
@@ -1688,7 +1692,17 @@ async def _resolve_purchase_identity(
         return "otros", None, res.candidates
     try:
         new_id, created = await build_incomplete_product(
-            session, tenant_id, name, sku, unit_cost, product_cache, barcode=barcode
+            session,
+            tenant_id,
+            name,
+            sku,
+            unit_cost,
+            product_cache,
+            barcode=barcode,
+            # F-CAT: una compra no declara la categoría del producto (la columna
+            # `category` de un gasto es su código de GASTO, no el rubro del
+            # artículo). Lo único disponible es el nombre, y sólo si alcanza.
+            vertical=vertical,
         )
     except ProductIdentityConflictError as conflict:
         # Ambigüedad detectada por la DB (barcode y sku en productos distintos): mismo
@@ -1969,12 +1983,22 @@ async def build_incomplete_product(
     product_cache: dict[uuid.UUID, Any] | None = None,
     *,
     barcode: str | None = None,
+    category: str | None = None,
+    vertical: Vertical | None = None,
 ) -> tuple[uuid.UUID | None, bool]:
     """Construye y agrega a la sesión un ``Product`` vendible INCOMPLETO desde una
     compra de mercadería, devolviendo ``(id, creado)``.
 
-    Un producto nacido de una compra no trae precio de venta ni categoría de
-    catálogo: nace ``requires_completion=True``, ``sale_price_ars=0``,
+    **F-CAT — la categoría deja de nacer siempre vacía.** Se resuelve en dos
+    pasos, y ninguno inventa: ``category`` es lo que la fila DECLARA (columna
+    mapeada, ya normalizada por el caller) y gana siempre; si no vino, se intenta
+    inferir del nombre con ``infer_product_category_from_name``, que sólo
+    contesta cuando hay una única categoría posible. Sin ninguna de las dos, el
+    producto sigue naciendo sin categoría — que es lo honesto y lo que lo deja
+    visible en el filtro «Sin categoría».
+
+    Un producto nacido de una compra no trae precio de venta: nace
+    ``requires_completion=True``, ``sale_price_ars=0``,
     ``unit_cost_ars`` del costo si vino, ``stock_units=0`` (el stock lo incrementa
     quien corresponda después). Único lugar donde se materializa este patrón de
     "producto desde compra", reusado por el import (``_ensure_product_for_purchase``)
@@ -2011,6 +2035,13 @@ async def build_incomplete_product(
     clean_sku = _clean_str(sku, 99)
     clean_barcode = _clean_str(barcode, 64)  # F2-T5
 
+    # F-CAT: declarada > inferida > ninguna. La categoría de PRODUCTO (vertical)
+    # NO es el código de gasto de la línea: el caller pasa la del catálogo del
+    # vertical, ya normalizada, o nada.
+    clean_category = _clean_str(category, 50)
+    if not clean_category and vertical is not None:
+        clean_category = infer_product_category_from_name(clean_name, vertical)
+
     new_id = uuid.uuid4()
     product = Product(
         id=new_id,
@@ -2021,8 +2052,7 @@ async def build_incomplete_product(
         sale_price_ars=Decimal("0"),  # una compra no trae precio de venta
         unit_cost_ars=unit_cost,
         stock_units=0,  # el incremento lo hace quien corresponda después
-        # category de PRODUCTO (vertical) ≠ código de gasto → None (incompleto).
-        category=None,
+        category=clean_category,
         low_stock_threshold_units=None,
         provenance="REAL",
         requires_completion=True,  # falta precio de venta → completar
@@ -4080,6 +4110,7 @@ async def _insert_confirmed_data_impl(
                             indexes=_identity_indexes,
                             cache=products_by_identity_key,
                             product_cache=_product_cache,
+                            vertical=_vertical,
                         )
                         if _action == "otros":
                             # Review F2 #1/#3: compra con producto ambiguo/en conflicto
@@ -5705,6 +5736,7 @@ async def _insert_multisheet_data(
                 indexes=_identity_indexes,
                 cache=products_by_identity_key,
                 product_cache=product_cache,
+                vertical=_vertical,
             )
             if _action == "otros":
                 # Review F2 #1: compra ambigua/en conflicto NO crea un 3er producto

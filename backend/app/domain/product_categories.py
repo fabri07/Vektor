@@ -363,6 +363,48 @@ def _get_normalizer(vertical: Vertical) -> CategoryNormalizer:
     return _normalizers[vertical]
 
 
+def infer_product_category_from_name(name: str | None, vertical: Vertical) -> str | None:
+    """F-CAT: categoría inferida desde el NOMBRE del producto, sólo con evidencia.
+
+    Devuelve el código **únicamente si el nombre contiene el alias de exactamente
+    una** categoría del vertical. Dos categorías posibles o ninguna → ``None``.
+
+    Tres decisiones que la separan de ``normalize_product_category``:
+
+    - **Ambiguo no se resuelve, se abstiene.** El normalizador desempata por
+      alias más largo porque ahí el usuario declaró una categoría y hay que
+      elegir una; acá nadie declaró nada. "Vela aromática para el baño" no es
+      AROMAS ni BAÑO: es un caso que decide una persona.
+    - **Nunca devuelve ``OTHER``.** "Otros" es una categoría real del catálogo, y
+      usarla de tacho para lo que no se pudo inferir la convierte en mentira: el
+      producto quedaría clasificado sin que nadie lo haya clasificado. Sin
+      evidencia, el producto se queda **sin categoría** y se ve como tal.
+    - **Sin fuzzy.** Un typo dentro de un nombre no es evidencia de un rubro.
+
+    El vocabulario es el MISMO de ``normalize_product_category`` (la tabla de
+    alias por vertical): acá no se agrega ni una palabra, sólo cambia qué se hace
+    cuando hay más de una respuesta.
+    """
+    candidatos = product_category_candidates(name, vertical)
+    return candidatos.pop() if len(candidatos) == 1 else None
+
+
+def product_category_candidates(name: str | None, vertical: Vertical) -> set[str]:
+    """Categorías del vertical cuyo alias aparece en el nombre (sin ``OTHER``).
+
+    La usa ``infer_product_category_from_name`` para decidir, y el backfill para
+    poder **reportar cobertura honesta**: un conjunto vacío es "no hay evidencia"
+    y uno de dos es "hay demasiada". Colapsar los dos casos en un ``None`` haría
+    que el informe dijera "no pude" donde en realidad la respuesta es "decidilo
+    vos", que es trabajo humano distinto.
+    """
+    if not name:
+        return set()
+    codigos = _get_normalizer(vertical).codes_present(name)
+    codigos.discard("OTHER")
+    return codigos
+
+
 def product_category_catalog(vertical: Vertical) -> list[dict[str, str]]:
     """Catálogo del vertical como lista [{code, label}] (para la API/frontend)."""
     return [
