@@ -1745,6 +1745,9 @@ def _register_product_transaction_indexes(
     by_sku: dict[str, uuid.UUID],
     by_name: dict[str, uuid.UUID | None],
     by_token: dict[str, set[uuid.UUID]],
+    *,
+    barcode: str | None = None,
+    by_barcode: dict[str, list[uuid.UUID]] | None = None,
 ) -> None:
     """Registra un producto (creado o resuelto por compra) en los índices
     transaccionales del `_resolve_product` para que ventas/gastos POSTERIORES del
@@ -1755,6 +1758,13 @@ def _register_product_transaction_indexes(
     Ambiguity-safe (a diferencia del viejo `_ensure_product_for_purchase`, que
     sobrescribía a ciegas): si el nombre normalizado ya apuntaba a OTRO producto,
     queda marcado ambiguo (`None`) en vez de resolverse arbitrariamente al nuevo.
+
+    F-S.0: `barcode`/`by_barcode` son opcionales (keyword-only, retrocompatibles)
+    porque antes esta función no propagaba el código de barras — un producto
+    creado por catálogo en la MISMA corrida quedaba vinculable por sku/nombre
+    para las ventas de ese archivo (esto de arriba) pero NO por barcode, hasta
+    la corrida siguiente (cuando `_load_product_identity_indexes` lo recarga de
+    la base). Justo el caso central de F-S.0: catálogo + ventas en un archivo.
     """
     sku_key = normalize_sku(sku)
     if sku_key:
@@ -1769,6 +1779,12 @@ def _register_product_transaction_indexes(
                 by_name[norm] = None  # nombre ya ambiguo → no resolver a ciegas
         for tok in _product_name_tokens(clean_name):
             by_token.setdefault(tok, set()).add(product_id)
+    if barcode and by_barcode is not None:
+        bc_key = normalize_barcode(barcode)
+        if bc_key:
+            by_barcode.setdefault(bc_key, [])
+            if product_id not in by_barcode[bc_key]:
+                by_barcode[bc_key].append(product_id)
 
 
 def _resolve_product(
@@ -4143,7 +4159,9 @@ async def _insert_confirmed_data_impl(
                             # POSTERIORES del mismo archivo puedan vincularlo.
                             if _pid is not None:
                                 _register_product_transaction_indexes(
-                                    _pid, _exp_name, _exp_sku, _by_sku, _by_name, _by_token
+                                    _pid, _exp_name, _exp_sku, _by_sku, _by_name, _by_token,
+                                    barcode=_exp_barcode,
+                                    by_barcode=_identity_indexes.by_barcode,
                                 )
                     # Review F2 #4: la cola de "aplicar el gasto" se saltea SIN
                     # `continue` (así el bloque de fingerprint del final igual corre).
@@ -5769,7 +5787,9 @@ async def _insert_multisheet_data(
             # ventas/gastos POSTERIORES del mismo archivo puedan vincularlo.
             if _pid is not None:
                 _register_product_transaction_indexes(
-                    _pid, _exp_name, _exp_sku, _by_sku, _by_name, _by_token
+                    _pid, _exp_name, _exp_sku, _by_sku, _by_name, _by_token,
+                    barcode=_exp_barcode,
+                    by_barcode=_identity_indexes.by_barcode,
                 )
         # F-H2: una compra posterior de un producto que este archivo ya declaró
         # no lo "re-declara", pero si viene con fecha más temprana la adelanta.
@@ -6216,7 +6236,9 @@ async def _insert_multisheet_data(
             # de catálogo no, así que una venta nunca vinculaba contra el
             # catálogo que venía adjunto, sin importar el orden de las solapas.
             _register_product_transaction_indexes(
-                _new_id, name, sku, _by_sku, _by_name, _by_token
+                _new_id, name, sku, _by_sku, _by_name, _by_token,
+                barcode=barcode,
+                by_barcode=_identity_indexes.by_barcode,
             )
             # F-H2: el catálogo declara el producto. Su fecha es la de adquisición
             # SI la trae; un catálogo sin esa columna —el caso común— declara
