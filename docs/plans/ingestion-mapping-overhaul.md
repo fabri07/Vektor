@@ -79,12 +79,31 @@ F-F  fechas mandan: todo movimiento afecta el inventario (.1→.4)     ✅ entre
 F-O  «Otros» y la relectura (.1 y .2)                                ✅ entregado
 F-A  nombre original + preservación de edición                       ◐ sólo la preservación al cambiar de sección (60d400f8)
 F-B  claridad visual + extracción del monolito                       ◐ TargetSelect/MappingOriginHint (2cbbd0d1) + fuera el % (4a0f2d8d)
-F-I  identidad por código: IDs y comprobantes
+─── reordenado el 2026-08-14 tras la prueba de ASTERIA en producción ───
+Paso 0 medir (read-only) — COMPUERTA de toda limpieza y todo backfill
+F-R  la relectura prueba su correspondencia                          ← bloqueante
+F-S.0 catálogo↔transacciones en la MISMA carga                       ← bloqueante
+F-S  el SKU es el identificador persistente del producto
+F-CAT categorías: mapear, normalizar, inferir con evidencia, backfill
+F-I  identidad por código: IDs de cliente/proveedor y comprobantes
+F-E  simetría cliente/proveedor — ADELANTADA (era la última)
+F-O.3 «Otros» dice por qué está cada fila
+F-O.4 una fila en blanco no es un pendiente
+F-V  lo que la pantalla ofrece tiene que existir (scroll, filtros)
+F-A/F-B  cerrar lo pendiente del panel de mapeo
 F-N  nombre y apellido en una sola columna
 F-D  ruteo cross-sección
-F-E  simetría cliente/proveedor (paralelo desde F-0; no se activa hasta cerrar defaults)
 F-H6.f el camino plano cobra el envío y honra las decisiones de costo
 ```
+
+**Por qué se reordenó (2026-08-14).** El usuario probó la relectura de `ASTERIA_home_deco.xlsx` en
+producción y reportó seis defectos con capturas. Tres no tenían fase: la relectura que propone anular
+2.563 registros, la vinculación catálogo↔ventas de la misma carga, y las categorías. Los otros tres
+(«Otros» ilegible, tabla que no se puede recorrer, filtro que ofrece categorías que nadie tiene) eran
+huecos de pantalla sin dueño. **F-E se adelanta** porque sin definir qué crea maestros y qué sólo los
+vincula, F-I puede terminarse y la pantalla seguir mostrando «Local» y «No identificado» — F-I sola no
+hace aparecer ningún proveedor. F-A/F-B bajan: son pulido del panel, y lo de arriba es pérdida o
+invisibilidad de datos.
 
 **F-T, F-F, F-I y F-N se agregaron el 2026-08-10**, después de que el usuario probara un
 archivo real de 9 hojas y 1.187 ventas (`Vektor_Test_DistribuidoraLimpieza_3meses.xlsx`).
@@ -108,7 +127,9 @@ decisión explícita) salen globales. Ver `docs/runbooks/purchase_cost_rollout.m
 
 **El programa F-0 → F-E era aditivo y sin migraciones**, y dejó de serlo con **F-I**. Todo lo demás sigue viajando en columnas existentes (`target_field` es `String`, `inventory_movements` ya tiene `qty`/`unit_cost`/`source_type`), en el payload del confirm o en `custom_fields`.
 
-**La excepción es F-I y es deliberada:** un código externo (`CLI-01`, `PROV-03`) es identidad, y la identidad no puede vivir en `custom_fields` — necesita un índice único por tenant para que re-importar el mismo archivo no duplique maestros, y `custom_fields` es JSONB sin restricción de unicidad. Migración aditiva: columna `external_code` en `customers`, `suppliers` y `products` (detalle en F-I). Se declara acá para que la promesa de "sin migraciones" no se lea como vigente cuando ya no lo es.
+**La excepción es F-I y es deliberada:** un código externo (`CLI-01`, `PROV-03`) es identidad, y la identidad no puede vivir en `custom_fields` — necesita un índice único por tenant para que re-importar el mismo archivo no duplique maestros, y `custom_fields` es JSONB sin restricción de unicidad. Migración aditiva: columna `external_code` en `customers` y `suppliers` (detalle en F-I). Se declara acá para que la promesa de "sin migraciones" no se lea como vigente cuando ya no lo es.
+
+**`products` NO recibe `external_code`** (corregido el 2026-08-14; el borrador anterior lo incluía). El producto ya tiene su columna de identidad: `products.sku`, con `sku_normalized` y **índice único parcial por tenant sobre activos** (`uq_products_tenant_sku_norm`, `models/product.py:127-136`), y ya es el tier 1 del resolvedor (`_resolve_product`: barcode → sku → nombre → tokens). Agregar una segunda columna de código sería un segundo eje de identidad para la misma entidad, sin nadie que arbitre cuál gana. Lo que el producto necesita no es una columna nueva sino **llenar la que tiene**: eso es F-S, y vincular las transacciones de la misma carga es F-S.0.
 
 **F-H6-b queda FUERA de este programa.** Es una fase analítica posterior con migración aditiva, no una excepción interna. Los dos alcances:
 
@@ -1068,6 +1089,230 @@ dejaba la venta viva sin su movimiento. Se excluyen explícitamente, con test pr
 
 ---
 
+# Paso 0 · Medir antes de tocar (compuerta)
+
+Mismo principio que F-T: no se le agrega trabajo —ni se le saca dato— a algo que no se midió.
+Read-only, sobre `backend/scripts/diag_asteria_import.py` (sólo SELECT, nunca imprime la URL):
+
+1. **«Otros»**: distribución por `context_label` × archivo; de los pendientes, cuántos tienen TODOS
+   los valores vacíos, cuántos sólo espacios o caracteres invisibles (`strip()` vacío con longitud
+   > 0), y cuántos son `"Tabla sin clasificar"` **con** contenido real.
+2. **Identidad**: ventas con `product_id IS NULL` y —lo que importa— **cuántos NOMBRES distintos**
+   hay entre ellas: ése es el tamaño real del trabajo de F-S.0, no la cantidad de filas.
+   Distribución de `custom_fields._customer_resolution`, de `products.category` y de SKU
+   presente/ausente.
+3. **Duplicación**: `scripts/dedupe_products_by_name.py --tenant <uuid> --out plan.csv` (dry-run, ya
+   persiste el plan sin tocar negocio) y su `coverage()`.
+
+**Es compuerta:** la limpieza de F-O.4 y los backfills de F-S y F-CAT no se ejecutan antes de leer
+esta salida. Si la distribución contradice la hipótesis, se rediseña la fase — no se fuerza.
+
+---
+
+# F-R · La relectura tiene que probar su correspondencia
+
+**El síntoma.** La relectura de ASTERIA ofrece `2563 a actualizar / 2563 a anular / 0 preservados /
+6 nuevos`, y lo primero que muestra son tarjetas «Anulado → Después: —» sueltas.
+
+**Lo que se midió antes de escribir la fase:** los dos 2.563 son **las mismas filas**. En
+`reread_service.py:1673-1677`, `to_void = len(recon.non_edited)` y `to_update` cuenta las filas
+frescas cuya huella está entre las que se van a anular — anular y reimportar corregido *es* el
+mecanismo de actualizar. En esa corrida no hay pérdida neta. **El defecto no es el número: es que
+nada lo garantiza y la pantalla no lo explica.**
+
+- `to_update` sale del parse **nuevo**. Si el archivo cambia de clasificación —el escenario del bug
+  vivo de `has_catalogo_fuerte`— o cambia el mapeo, `to_void` se queda en 2.563 y `to_update` cae a
+  cero. **Hoy nada frena ese apply.**
+- El orden de `sample_changes` (`void_samples + update_samples + new_samples`, `:1667`) muestra las
+  anulaciones primero y sin su contraparte: el usuario ve destrucción donde hay reemplazo.
+
+**Qué entrega la fase:**
+- **Correspondencia explícita** por `source_row_ref` (hoja + índice de fila): cada registro a anular
+  se clasifica en **reemplazado / preservado / sin reemplazo**. Los legacy sin ref no se pueden
+  emparejar — son la excepción honesta que ya señala `legacy_fallback` y se cuentan aparte, nunca
+  disfrazados de reemplazados.
+- **Compuerta antes de aplicar:** con `sin_reemplazo > 0`, el apply se bloquea con el número y la
+  entidad de lo que desaparece, y exige aceptación explícita. Anular sin reponer es legítimo (el
+  archivo cambió de verdad); hacerlo **en silencio** no.
+- **Conteos por entidad, antes/después** — ventas, gastos, productos, clientes y proveedores. Hoy
+  sólo se estima el impacto en productos (`_estimate_products`).
+- **El preview deja de asustar de más:** se muestra el par antes/después de la MISMA fila, y la
+  tarjeta «Anulado / Después: —» queda reservada para lo que de verdad no tiene reemplazo.
+
+**Aceptación:** releer el mismo archivo sin cambios da correspondencia 1:1, cero pérdida neta y cero
+duplicados · un archivo cuya hoja cambia de clasificación **no puede aplicarse** sin aceptación
+explícita · los conteos por entidad cuadran antes y después.
+
+---
+
+# F-S.0 · Catálogo y transacciones se vinculan en la MISMA carga
+
+**El síntoma.** En `/sales` de ASTERIA la columna Producto está casi toda en «—»: de ocho ventas
+visibles, dos linkearon. Y el catálogo tiene 398 productos.
+
+**Lo que se midió:** `CANONICAL_FIELDS["expense"]` tiene `sku` y `barcode`
+(`column_mapping_service.py:77-78`); **`CANONICAL_FIELDS["sale"]` no tiene ninguno de los dos**
+(`:35-55`). Una compra puede declarar la identidad del producto que compra y una venta no: lo único
+que le queda a una venta es el nombre. Ésa es la raíz, y **ningún SKU generado después la arregla**
+—por eso F-S.0 va antes que F-S—.
+
+Cuatro mecanismos, en orden de fuerza:
+
+1. **El código que el archivo ya trae.** `sku` y `barcode` como targets de `sale`, con su heurística
+   de encabezado. El resolvedor ya los prioriza (`_resolve_product`, tier barcode → sku → nombre →
+   tokens): falta el target, no el motor.
+2. **Referencia exacta entre hojas.** Cuando el archivo trae catálogo y ventas juntos, el código de
+   la venta resuelve contra los productos que ese archivo declaró, no sólo contra la base. El orden
+   maestro→transacción (F7c) y el índice por corrida (`_load_product_identity_indexes`) ya existen.
+3. **Alias explícito, persistido.** Cuando el usuario vincula a mano un nombre a un producto, ese
+   nombre queda como alias del producto (`custom_fields["_aliases"]`, sin migración) y entra al
+   índice `by_name` de las corridas siguientes. Sin esto cada import repite el mismo trabajo manual.
+   El alias es del tenant y **sólo lo crea una decisión humana** — no se infiere.
+4. **Cola de revisión agrupada por NOMBRE, no por fila.** Una venta que no resuelve producto hoy
+   queda con `product_id = NULL` en silencio. Pasa a contarse (`counts["ventas_sin_producto"]`) y a
+   ofrecerse para vincular agrupada por nombre distinto: 2.563 ventas son N nombres, y resolver N
+   nombres una vez arregla las 2.563. Reusa `match_candidates` + el VINCULAR de «Otros» (F2-T2b).
+
+**Límite declarado:** sin código y sin nombre suficiente, Véktor **no adivina** — la venta queda sin
+producto, contada y visible en la cola. Misma regla que las fechas (F6-A2), las filas sin monto
+(F-H4) y el envío sin comprobante (F-H6.b).
+
+---
+
+# F-S · El SKU es el identificador persistente del producto
+
+**Decisión de producto del usuario (2026-08-14):** el SKU funciona como el id de producto para
+vincular las tablas de Véktor. Si el negocio ya tiene SKU, se usa el suyo; si no —el caso de
+ASTERIA—, Véktor lo genera. **Sin migración:** usa `products.sku` + `uq_products_tenant_sku_norm`.
+
+**Formato elegido:** `PREFIJO-NNNN` con prefijo de categoría (`TEX-0001`), correlativo por
+`(tenant, prefijo)`. Sin categoría → `GEN`.
+
+**Invariantes:**
+1. **Un SKU que trajo el negocio no se pisa nunca.** El generado se marca
+   `custom_fields["_sku_origin"] = "vektor"` (mismo patrón que `_vektor_costo_base`, `_sentinel`,
+   `_brand_collapsed`) y sí puede ser reemplazado cuando un archivo posterior traiga el código real.
+   Sin la marca no se puede distinguir "código del negocio" de "código nuestro".
+2. **El prefijo se estampa una vez y no se reescribe solo.** Completar la categoría después **no**
+   renumera: renumerar rompería cualquier planilla o export que ya use ese código. Consecuencia
+   directa: **F-CAT corre antes del backfill de SKU**, porque cada categoría resuelta antes de
+   numerar es un `GEN` menos.
+3. **Prefijos curados a mano por vertical**, con test que exige unicidad dentro del vertical y
+   cobertura total del catálogo: agregar una categoría sin prefijo **falla el CI**, no cae a `GEN`
+   en silencio. Hay una colisión a resolver a mano: `PRENDAS_SUPERIORES` / `PRENDAS_INFERIORES`
+   (indumentaria). Categoría custom del tenant y producto sin categoría → `GEN`.
+4. **Dos productos nunca comparten SKU.** La garantía dura es el índice único parcial; ante
+   `IntegrityError` se reintenta con el siguiente número, nunca se degrada a "sin SKU".
+
+**S.1 — consolidar antes de numerar, sin código nuevo.** El motor de dedup ya existe entero
+(`product_dedup_service.py`: plan → apply → revert, lease observable, fingerprint por grupo,
+auditoría; CLI `scripts/dedupe_products_by_name.py`) y su regla ya es la elegida: fusiona por barcode
+(fuerte) y por SKU (medio), y **nombre+marca va a revisión, no fusiona** (`build_groups`). No se
+escribe un segundo motor ni se toca `build_edges`. Lo que queda en revisión recibe su SKU igual, como
+producto propio.
+
+**S.2 — asignar.** `app/application/services/sku_service.py`: `sku_prefix_for()` puro +
+`assign_sku_if_missing()` con caché de correlativo por corrida (un `MAX` por prefijo, no un `SELECT`
+por producto — el catálogo real tiene 1.258 filas) y reintento ante colisión. Backfill
+`scripts/backfill_product_sku.py`, dry-run/`--apply`, `--tenant`/`--all-active`, auditado,
+idempotente; aborta si `count_active_products_missing_identity() > 0` (misma guarda que el dedup).
+
+**S.3 — que nazcan con SKU.** Cubrir los sitios de alta (`api/v1/products.py`, `api/v1/others.py`,
+los tres del importador vía `add_product_or_reuse`, `purchase_service`, `remito_extraction_service`,
+`pending_action_service`) con un test que falle si aparece uno nuevo sin cubrir. **No sirve un
+`before_insert`** en el modelo: necesita consultar el correlativo y la sesión es async.
+
+**S.4 — exponerlo.** Columna SKU visible por default en `/products` (hoy `defaultVisible: false`), en
+el CSV y en la ficha; y documentar en la pantalla de carga el círculo **exportar → pegar la columna
+en la planilla → importar**, que a partir de acá vincula exacto.
+
+**Aceptación:** ningún SKU del negocio pisado · cero SKU repetidos por tenant · el backfill corrido
+dos veces no cambia nada · un producto nuevo por cualquier vía nace con SKU · export → re-import
+vincula por código.
+
+---
+
+# F-CAT · Categorías: mapear, normalizar, inferir con evidencia, backfillear
+
+**El síntoma.** En `/products` la columna Categoría está casi toda en «—», y el desplegable ofrece
+Textiles, Iluminación, Muebles… que no devuelven nada.
+
+**Lo que se midió:** la normalización ya existe — `normalize_product_category`
+(`domain/product_categories.py:374`) resuelve alias por vertical más los labels canónicos, con
+fallback `OTHER`, y el importador la aplica cuando la hoja **trae** columna de categoría. Lo que
+falta es que el producto creado desde una línea de compra nace con `category=None`
+(`build_incomplete_product`) y nunca se completa.
+
+1. **Mapear** — la línea de compra que crea el producto le pasa la categoría de esa fila.
+2. **Normalizar** — reusar `normalize_product_category`. No se escribe un segundo normalizador; si
+   faltan alias reales del rubro, se agregan a la tabla curada.
+3. **Inferir sólo con evidencia** — desde el NOMBRE del producto, y únicamente cuando contiene el
+   alias de **exactamente una** categoría. Dos posibles o ninguna → **queda sin categoría**, nunca
+   `OTHER`: «Otros» es una categoría real del catálogo y usarla de tacho la convierte en mentira. El
+   producto sin resolver se marca para completar y aparece en el filtro «Sin categoría».
+4. **Backfill** — `scripts/backfill_product_category.py`, dry-run/`--apply`,
+   `--tenant`/`--all-active`, auditado, que reporta **cobertura** (resueltos por mapeo / por
+   inferencia / sin evidencia), no sólo cuántos tocó. Corre **antes** del backfill de SKU.
+
+**Aceptación:** un producto creado desde una compra con categoría en la fila la conserva · un nombre
+que matchea dos categorías no se infiere · el informe dice cuántos quedaron sin evidencia.
+
+---
+
+# F-O.3 · «Otros» dice por qué está cada fila
+
+El backend ya devuelve `context_label` (el motivo textual), `headers` y `uploaded_file_id`
+(`api/v1/others.py:86-107`) y la pantalla no renderiza ninguno de los tres
+(`otros/page.tsx:211-267`): con 2.282 registros en 46 páginas, la bandeja es inusable. Todos los
+sitios de captura setean `context_label`, así que el dato existe para el 100% de las filas.
+
+`GET /others/summary` agrupado por archivo × motivo (con el nombre del archivo resuelto desde
+`uploaded_files.original_filename`), filtros por archivo y por motivo en `GET /others`, y en la
+pantalla el motivo por fila más el archivo de origen. **Aceptación:** de 46 páginas a una lista de
+motivos con su conteo.
+
+---
+
+# F-O.4 · Una fila en blanco no es un pendiente
+
+`rows_to_dicts` (`file_parsing.py:729-746`) no descarta las filas totalmente vacías de una planilla,
+y `_capture_unclassified` (`:1120-1122`) saltea la fila sólo si el dict **no tiene claves** — no si
+todos sus valores están vacíos. Una planilla con filas en blanco al final produce exactamente lo que
+muestra la captura: registro creado, detalle vacío, monto vacío, sin destino sugerido.
+
+Se corrige **en la captura, no en el parser**: `rows_to_dicts` alimenta los `row_index` que usan las
+anclas de idempotencia y las decisiones de riesgo de columnas — descartar aguas arriba desplazaría
+todos los índices. El descarte se cuenta (`counts["filas_en_blanco"]`) para que sea visible y no
+silencioso.
+
+Limpieza de lo ya cargado: `scripts/dismiss_empty_unclassified.py`, dry-run → `--apply`,
+`--tenant`/`--all-active`, marca `DISMISSED` (no borra), auditado y reversible. **Sujeto a la
+compuerta del Paso 0.**
+
+---
+
+# F-V · Lo que la pantalla ofrece tiene que existir
+
+**V.1 — recorrer la tabla.** `Table.tsx:34` tiene `overflow-x-auto`, pero el contenedor no es
+focuseable (las flechas del teclado no hacen nada) y los dos gradientes laterales (`:24-32`) están
+**siempre** encendidos: decoran, no indican. La barra de 6px existe (`globals.css:110-121`) pero vive
+al fondo de un contenedor de 50 filas, o sea fuera de pantalla. Primero **medir en el navegador**
+dónde desborda de verdad (el contenedor o un ancestro); después, sobre `components/ui/Table.tsx` —que
+es la base de todas las tablas—: contenedor focuseable (`tabIndex={0}`, `role="region"`,
+`aria-label`), gradientes condicionados a la posición real del scroll, barra alcanzable y **columna
+de acciones siempre visible**. Probado a la resolución de la captura (1440 CSS px), no sólo en
+desktop ancho.
+
+**V.2 — filtros honestos.** `GET /products/categories` devuelve el catálogo del vertical más las
+custom del tenant (`api/v1/products.py:282-295`), no las categorías que los productos tienen; el
+filtro compara contra el código (`products/page.tsx:288`). Se cuenta por categoría sobre los datos ya
+cargados y se muestra el número (`Textiles (0)`) o se deshabilita la opción vacía, con empty state
+explícito. En Gastos el conteo va sobre el período seleccionado y el mensaje tiene que decirlo
+(`expenses/page.tsx:232-239`). **V.2 no sustituye a F-CAT**: vuelve honesto el filtro; quien
+identifica las categorías es F-CAT.
+
+---
+
 # F-I · Identidad por código: IDs y comprobantes
 
 **El síntoma que la motiva.** En el archivo real, la columna `ID` de Proveedores y de Clientes
@@ -1077,9 +1322,13 @@ Rosa», «Almacen Doña Rosa» y «ALMACEN D ROSA» —las tres variantes que el
 en la columna *Variantes de nombre vistas en ventas*— son tres clientes distintos.
 
 **Migración aditiva** (la excepción declarada arriba): columna `external_code VARCHAR(64) NULL`
-en `customers`, `suppliers` y `products`, con índice único parcial por `(tenant_id,
-external_code)` donde no es null. Verificado: hoy no existe ninguna columna equivalente en los
-tres modelos.
+en `customers` y `suppliers`, con índice único parcial por `(tenant_id, external_code)` donde no es
+null. Verificado: hoy no existe ninguna columna equivalente en esos dos modelos.
+
+**`products` queda afuera** (corregido el 2026-08-14): ya tiene `sku` con índice único parcial por
+tenant y es el tier 1 de su resolvedor. Llenarlo es F-S; usarlo para vincular las transacciones de la
+misma carga es F-S.0. Dos columnas de código para la misma entidad serían dos ejes de identidad sin
+árbitro.
 
 **Jerarquía del resolvedor de maestros:** `código externo → documento/CUIT → nombre
 normalizado`. Un código siempre le gana a un nombre parecido. Espeja lo que `_resolve_product`
@@ -1152,11 +1401,37 @@ Esto corrige el borrador previo, que excluía `sale → product:name` por ese pr
 
 ---
 
-# F-E · Simetría cliente/proveedor
+# F-E · Simetría cliente/proveedor  (ADELANTADA el 2026-08-14)
 
-**No se activa hasta cerrar la contradicción de configuración.** El default de código de `SUPPLIER_REFERENCE_CREATION_MODE` es `"legacy"` (**V11**); hay que confirmar contra Railway antes de asumir nada.
+**Por qué se adelantó:** F-I puede terminarse entera y la pantalla seguir mostrando «Local» y «No
+identificado». Medido sobre el código: una venta **nunca** crea cliente
+(`ingestion_import_service.py:3866-3881`) y un catálogo de productos **nunca** crea proveedor
+(Reforma marca≠proveedor). Sin este contrato, ASTERIA no ve aparecer un solo proveedor por más
+códigos externos que se agreguen.
+
+**El contrato, que hoy vive repartido en tres lugares y hay que fijar en tabla y testear:**
+
+| Hoja | Clientes | Proveedores |
+|---|---|---|
+| Maestra (clientes / proveedores) | crea y actualiza | crea y actualiza |
+| Transacción (venta / compra) | **sólo vincula**; sin match → «Local» con traza | según el modo: `legacy` crea, `link_only` sólo vincula; sin dato → «No identificado» |
+| Catálogo de productos | no aplica | **nunca**, ni crea ni vincula (la marca va a `custom_fields["marca"]`) |
+
+**Los cuatro casos de una venta, medidos** (`_classify_row_reference:467-512`; las claves fuertes son
+documento → email → teléfono, **el nombre nunca es clave**):
+
+| La venta… | Hoy | Falta |
+|---|---|---|
+| trae nombre, sin código ni documento | `unresolved` → «Local»; el nombre queda en `custom_fields._customer_reference_raw` | una cola que lo muestre y permita crear en bloque |
+| no tiene hoja maestra de clientes detrás | todo `anonymous`/`unresolved` → «Local» | **es ASTERIA hoy** |
+| usa una variante del nombre de un cliente que existe | `unresolved` → «Local» **aunque el cliente exista** | sin documento ni código, la variante no matchea jamás — lo resuelve F-I |
+| no trae el código que sí está en el maestro | cae a nombre → `unresolved` | el código tiene que viajar en la transacción, no sólo en el maestro |
+
+**No se activa hasta cerrar la contradicción de configuración.** El default de código de `SUPPLIER_REFERENCE_CREATION_MODE` es `"legacy"` (**V11**); hay que confirmar contra Railway antes de asumir nada — es lo PRIMERO de la fase, no un pendiente lateral (cuarto intento).
 
 - Agregar `CUSTOMER_REFERENCE_CREATION_MODE`, default `link_only`.
+- **Cola de `unresolved`** con acción de crear en bloque desde ahí: es la salida que hoy no existe
+  para el caso «trae nombre y no matchea», y sin ella «sólo vincula» significa «se pierde».
 - Pasar proveedor a `link_only` sólo con rollout explícito y observable.
 - En ambos casos: desde una transacción **se vincula**; no se crean maestros en silencio; la creación explícita ocurre desde su sección o flujo dedicado.
 - Un nombre **no es identidad**: "Juan Perez", "juan perez", "Juan Pérez" y "J. Perez" crearían 4 clientes. Clave fuerte = documento válido (`validate_dni`/`validate_cuit`) | email | teléfono.
@@ -1277,6 +1552,22 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-F | un archivo plano con stock y ventas juntos **importa**: ya no se rechaza pre-lease |
 | F-F | una hoja sin producto+cantidad no renderiza ninguna pregunta ni cartel de inventario |
 | F-F | el ancla del catálogo se aplica antes de todos los eventos: el caso don pedro no descuenta dos veces |
+| F-R | releer el mismo archivo sin cambios da correspondencia 1:1: cero pérdida neta, cero duplicados |
+| F-R | una hoja que cambia de clasificación **no puede aplicarse** sin aceptación explícita (`sin_reemplazo > 0`) |
+| F-R | los conteos por entidad (ventas/gastos/productos/clientes/proveedores) cuadran antes y después |
+| F-S.0 | catálogo y ventas en la MISMA carga vinculan por el código que trae el archivo |
+| F-S.0 | vincular un nombre a mano una vez resuelve todas las ventas que lo repiten (alias persistido) |
+| F-S.0 | una venta sin producto resoluble queda contada y visible, nunca linkeada por adivinanza |
+| F-S | ningún SKU traído por el negocio se pisa; cero SKU repetidos por tenant |
+| F-S | el backfill corrido dos veces no cambia nada; un producto nuevo por cualquier vía nace con SKU |
+| F-S | agregar una categoría al catálogo sin prefijo de SKU **rompe el CI** (no cae a `GEN` en silencio) |
+| F-CAT | un nombre que matchea dos categorías **no** se infiere; el informe dice cuántos quedaron sin evidencia |
+| F-CAT | un producto creado desde una línea de compra con categoría en la fila la conserva |
+| F-O.3 | cada fila de «Otros» dice su motivo y su archivo; el resumen agrupa 46 páginas en una lista de motivos |
+| F-O.4 | una planilla con filas en blanco al final no genera pendientes, y el descarte se cuenta |
+| F-V | la tabla se recorre con teclado y la columna de acciones no queda tapada a 1440 CSS px |
+| F-V | el filtro no ofrece una categoría que ningún producto tiene sin decir que está vacía |
+| F-E | una venta con nombre que no matchea deja el dato visible en una cola, no sólo en «Local» |
 | F-I | re-importar el mismo archivo no duplica maestros (el código externo matchea) |
 | F-I | una venta con `CLI-01` resuelve al cliente aunque su nombre esté escrito de tres formas distintas |
 | F-I | dos filas con el mismo código en el mismo archivo → 422, nunca last-wins |
@@ -1293,5 +1584,7 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 
 ## Pendiente del usuario
 
-- **Confirmar contra Railway** el valor real de `SUPPLIER_REFERENCE_CREATION_MODE` (**V11**) — condiciona el default de F-E.
+- **Confirmar contra Railway** el valor real de `SUPPLIER_REFERENCE_CREATION_MODE` (**V11**) — condiciona el default de F-E, que ahora es una fase adelantada y no la última.
+- **Correr el Paso 0** contra Neon (el usuario provee `DATABASE_URL` desde su shell): es compuerta de la limpieza de F-O.4 y de los backfills de F-S y F-CAT.
+- **Decidir `has_catalogo_fuerte`.** En `file_parsing.py::infer_spreadsheet_type`, `articulo`/`producto` sin tilde se tratan como señal inequívoca de catálogo y cortan con `return "stock"` antes de mirar cualquier señal de venta: una planilla con `Fecha + Cliente + Facturación + Método de pago` se clasifica como catálogo por nombrar su columna «Artículo». **Ya está en producción** — el fix de tildes de PR #47 sacó la excepción que la tilde le daba por accidente— y es exactamente el escenario que F-R tiene que bloquear. Dos caminos: dejarlo como deuda declarada, o que `has_catalogo_fuerte` no gane cuando hay contexto de operación fuerte (recomendado). Toca el clasificador central del que dependen las reglas de maestros (F7a) y el libro de compras, para TODOS los tenants — no se decide solo.
 - Persistir este plan a `docs/plans/` una vez aprobado, para que no dependa de la sesión.
