@@ -92,6 +92,9 @@ interface RereadState {
   result: RereadApplyResponse | null;
   // run del apply en background (fase "applying") para hacer polling del estado.
   runId?: string;
+  // F-R: el backend rechazó el apply porque anularía registros que el archivo ya
+  // no contiene. Presente ⇒ el botón pasa a pedir confirmación explícita.
+  dataLossWarning?: string | null;
 }
 
 export function FileListSection() {
@@ -345,10 +348,13 @@ export function FileListSection() {
   // El apply corre en BACKGROUND: el POST encola y devuelve run_id; pasamos a fase
   // "applying" y hacemos polling del estado (ver rereadStatusQuery + su useEffect).
   const rereadApplyMutation = useMutation({
-    mutationFn: (fileId: string) => ingestionService.rereadApply(fileId),
-    onMutate: (fileId) => {
+    mutationFn: (vars: { fileId: string; acceptDataLoss?: boolean }) =>
+      ingestionService.rereadApply(vars.fileId, vars.acceptDataLoss ?? false),
+    onMutate: (vars) => {
       setReread((prev) =>
-        prev && prev.fileId === fileId ? { ...prev, phase: "applying" } : prev,
+        prev && prev.fileId === vars.fileId
+          ? { ...prev, phase: "applying" }
+          : prev,
       );
     },
     onSuccess: (start) => {
@@ -358,10 +364,32 @@ export function FileListSection() {
           : prev,
       );
     },
-    onError: (_err, fileId) => {
+    onError: (err, vars) => {
+      // F-R: el 409 no es un error, es una pregunta — la relectura anularía
+      // registros que el archivo ya no contiene. Se vuelve al preview con el
+      // aviso y el botón que pide confirmación explícita, en vez de un toast
+      // rojo genérico que no dice qué se pierde.
+      const detail = (
+        err as { response?: { status?: number; data?: { detail?: unknown } } }
+      )?.response;
+      const payload = detail?.data?.detail as
+        | { code?: string; message?: string }
+        | undefined;
+      if (detail?.status === 409 && payload?.code === "REREAD_WOULD_LOSE_DATA") {
+        setReread((prev) =>
+          prev && prev.fileId === vars.fileId
+            ? {
+                ...prev,
+                phase: "preview",
+                dataLossWarning: payload.message ?? null,
+              }
+            : prev,
+        );
+        return;
+      }
       // Volver a la fase preview para que el usuario pueda reintentar.
       setReread((prev) =>
-        prev && prev.fileId === fileId ? { ...prev, phase: "preview" } : prev,
+        prev && prev.fileId === vars.fileId ? { ...prev, phase: "preview" } : prev,
       );
       addToast("No se pudo iniciar la relectura.", "error");
     },
@@ -822,10 +850,18 @@ export function FileListSection() {
             {/* Fase preview: contadores + nota legacy + acciones */}
             {reread.phase === "preview" && reread.preview && (
               <>
+                {/* F-R: «a anular» y «a actualizar» eran las MISMAS filas —
+                    anular y reimportar corregido es cómo se actualiza—, así que
+                    mostrarlas como dos números hacía leer una actualización como
+                    una destrucción. Ahora se muestra qué se reemplaza y, aparte,
+                    lo único que de verdad se pierde. */}
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                   <CountCard
-                    label="A actualizar"
-                    value={reread.preview.counts.to_update}
+                    label="Se actualizan"
+                    value={
+                      reread.preview.correspondence?.reemplazado ??
+                      reread.preview.counts.to_update
+                    }
                     tone="info"
                   />
                   <CountCard
@@ -839,11 +875,37 @@ export function FileListSection() {
                     tone="success"
                   />
                   <CountCard
-                    label="A anular"
-                    value={reread.preview.counts.to_void}
-                    tone="danger"
+                    label="Se pierden"
+                    value={reread.preview.correspondence?.sin_reemplazo ?? 0}
+                    tone={
+                      reread.preview.correspondence?.sin_reemplazo
+                        ? "danger"
+                        : "muted"
+                    }
                   />
                 </div>
+
+                {reread.preview.correspondence &&
+                reread.preview.correspondence.sin_reemplazo > 0 ? (
+                  <div className="rounded-lg border border-vk-danger/40 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
+                    <strong>
+                      {reread.preview.correspondence.sin_reemplazo} registro(s) no
+                      vuelven:
+                    </strong>{" "}
+                    el archivo ya no trae esas filas, así que se anulan y nada las
+                    repone.{" "}
+                    {Object.entries(reread.preview.correspondence.por_entidad)
+                      .filter(([, d]) => (d.sin_reemplazo ?? 0) > 0)
+                      .map(([entidad, d]) => `${d.sin_reemplazo} de ${entidad}`)
+                      .join(", ")}
+                    .
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-vektor-border bg-vektor-surface px-3 py-2 text-xs text-vektor-muted">
+                    Cada registro que se anula vuelve a entrar corregido: así es
+                    como se actualiza una fila. No se pierde nada.
+                  </div>
+                )}
 
                 {/* Impacto en productos + filas ya importadas (sin cambios) */}
                 {(reread.preview.counts.products_new > 0 ||
@@ -901,6 +963,12 @@ export function FileListSection() {
                   sin que tengas que volver a subirlo. Podés deshacerlo después.
                 </p>
 
+                {reread.dataLossWarning && (
+                  <div className="rounded-lg border border-vk-danger/40 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
+                    {reread.dataLossWarning}
+                  </div>
+                )}
+
                 <div className="flex items-center justify-end gap-2">
                   <button
                     type="button"
@@ -911,11 +979,22 @@ export function FileListSection() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => rereadApplyMutation.mutate(reread.fileId)}
+                    onClick={() =>
+                      rereadApplyMutation.mutate({
+                        fileId: reread.fileId,
+                        // Sólo tras ver el aviso: el primer intento nunca acepta
+                        // pérdida, así que nada se pierde por un doble click.
+                        acceptDataLoss: Boolean(reread.dataLossWarning),
+                      })
+                    }
                     disabled={rereadApplyMutation.isPending}
-                    className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-sm font-medium text-white hover:brightness-110 transition-colors disabled:opacity-50"
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-white transition-colors hover:brightness-110 disabled:opacity-50 ${
+                      reread.dataLossWarning ? "bg-vk-danger" : "bg-vk-blue"
+                    }`}
                   >
-                    Aplicar relectura
+                    {reread.dataLossWarning
+                      ? "Aplicar igual y perder esos registros"
+                      : "Aplicar relectura"}
                   </button>
                 </div>
               </>

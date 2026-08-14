@@ -512,3 +512,108 @@ describe("FileListSection — archivo apuntado fuera de la página del listado",
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
+
+// ── F-R: la relectura no puede perder registros en silencio ────────────────
+//
+// «A anular» y «a actualizar» contaban las MISMAS filas: anular y reimportar
+// corregido es el mecanismo de actualizar. Presentarlos como dos números hacía
+// leer una actualización como una destrucción, y —peor— cuando la pérdida era
+// real nada la frenaba.
+
+/** Abre el modal y llega a la fase preview (sin aplicar). */
+async function abrirPreview(user: ReturnType<typeof userEvent.setup>) {
+  await waitFor(() =>
+    expect(screen.getByTitle("Volver a leer este archivo")).toBeInTheDocument(),
+  );
+  await user.click(screen.getByTitle("Volver a leer este archivo"));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /sí, releer/i })).toBeInTheDocument(),
+  );
+  await user.click(screen.getByRole("button", { name: /sí, releer/i }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /aplicar relectura/i })).toBeInTheDocument(),
+  );
+}
+
+function conflicto409() {
+  return {
+    response: {
+      status: 409,
+      data: {
+        detail: {
+          code: "REREAD_WOULD_LOSE_DATA",
+          message:
+            "La relectura anularía 1 registro(s) que el archivo ya no contiene (1 de ventas).",
+          correspondence: { sin_reemplazo: 1 },
+        },
+      },
+    },
+  };
+}
+
+describe("F-R · correspondencia de la relectura", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSearchParams.delete("file");
+  });
+
+  test("sin pérdida, el modal dice que no se pierde nada", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadPreview.mockResolvedValue({
+      ...PREVIEW_RESPONSE,
+      counts: { ...PREVIEW_RESPONSE.counts, to_update: 3, to_void: 3 },
+      correspondence: {
+        reemplazado: 3,
+        preservado: 0,
+        sin_reemplazo: 0,
+        legacy_sin_ancla: 0,
+        por_entidad: {},
+        nuevas_por_entidad: {},
+      },
+    });
+    renderList();
+    await abrirPreview(user);
+
+    expect(screen.getByText(/no se pierde nada/i)).toBeInTheDocument();
+    expect(screen.getByText("Se actualizan")).toBeInTheDocument();
+    // El «3 a anular» que asustaba ya no se muestra como tal.
+    expect(screen.queryByText("A anular")).not.toBeInTheDocument();
+  });
+
+  test("el 409 no es un toast rojo: dice qué se pierde y pide confirmar", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadApply.mockRejectedValueOnce(conflicto409());
+    renderList();
+    await abrirPreview(user);
+
+    await user.click(screen.getByRole("button", { name: /aplicar relectura/i }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/anularía 1 registro\(s\) que el archivo ya no contiene/i),
+      ).toBeInTheDocument(),
+    );
+    // El primer intento NUNCA acepta pérdida: si lo hiciera, un doble click
+    // bastaría para destruir datos.
+    expect(mockRereadApply).toHaveBeenCalledWith("file-1", false);
+    expect(mockAddToast).not.toHaveBeenCalled();
+  });
+
+  test("recién el segundo click, ya avisado, acepta la pérdida", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadApply.mockRejectedValueOnce(conflicto409());
+    renderList();
+    await abrirPreview(user);
+
+    await user.click(screen.getByRole("button", { name: /aplicar relectura/i }));
+    const botonPeligro = await screen.findByRole("button", {
+      name: /aplicar igual y perder esos registros/i,
+    });
+    await user.click(botonPeligro);
+
+    await waitFor(() => expect(mockRereadApply).toHaveBeenCalledWith("file-1", true));
+  });
+});
