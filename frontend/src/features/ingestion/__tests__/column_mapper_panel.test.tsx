@@ -2251,6 +2251,136 @@ describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a m
 });
 
 /**
+ * F-A — mismo mecanismo que "cambiar de sección" arriba, pero del lado del
+ * camino PLANO (archivo ambiguo, un único propósito exclusivo en vez de una
+ * hoja por sección). Antes `choosePurpose` vaciaba `mappings` y limpiaba
+ * `touchedRef` a ciegas — cambiar el propósito de un archivo con 20 columnas
+ * ya corregidas a mano las perdía todas.
+ */
+describe("ColumnMapperPanel — F-A: cambiar de propósito (camino plano) conserva lo mapeado a mano", () => {
+  const PREVIEW_AMBIGUO = {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: {
+      inferred_type: "general",
+      headers: ["Fecha", "Monto", "Detalle"],
+    },
+    columns_at_risk: [],
+  };
+
+  function sugerencia(source_column: string, target_field: string | null) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["x"],
+      target_field,
+      confidence: 0.9,
+      source: target_field ? "heuristic" : "none",
+      status: target_field ? "mapped" : "unmapped",
+    };
+  }
+
+  const POR_ENTIDAD: Record<string, ReturnType<typeof sugerencia>[]> = {
+    sale: [
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "notes"),
+    ],
+    expense: [
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "category"),
+    ],
+  };
+
+  // El camino plano no pone `title` en el nombre de columna (a diferencia de
+  // `SheetMapperSection`) — el nombre vive en un `<span>` de texto plano.
+  function selectDe(columna: string): HTMLSelectElement {
+    const fila = screen.getByText(columna).closest(".grid");
+    return within(fila as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+  }
+
+  // El selector de propósito solo aparece después de que cargue el preview
+  // (isAmbiguous depende de `parsed_summary_json.inferred_type`) — a
+  // diferencia de `cambiarSeccion` (multi-hoja), acá hace falta esperarlo.
+  async function cambiarProposito(nombre: string) {
+    const boton = await screen.findByRole("button", { name: nombre });
+    fireEvent.click(boton);
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue(PREVIEW_AMBIGUO);
+    mockGetColumnMappings.mockImplementation((_fileId: string, entity: string) =>
+      Promise.resolve(POR_ENTIDAD[entity] ?? []),
+    );
+  });
+
+  test("lo elegido a mano sobrevive; lo no tocado se recalcula", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `payment_method` existe en Ventas y en Gastos: sigue siendo elegible.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "payment_method" } });
+
+    await cambiarProposito("Gastos");
+
+    await waitFor(() => {
+      // La columna que nadie tocó adopta la sugerencia del propósito nuevo.
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    // Y la que la persona eligió a mano queda como la dejó.
+    expect(selectDe("Detalle").value).toBe("payment_method");
+  });
+
+  test("un target que el propósito nuevo no tiene NO se conserva", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `customer_name` sólo existe en Ventas.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "customer_name" } });
+
+    await cambiarProposito("Gastos");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    // Conservarlo dejaría el select en «(campo desconocido)»: cae a la
+    // sugerencia de Gastos, sin inventar ningún reemplazo.
+    expect(selectDe("Detalle").value).not.toBe("customer_name");
+    expect(selectDe("Detalle").value).toBe("category");
+  });
+
+  test("sin tocar nada, todo se recalcula con el propósito nuevo", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("transaction_date");
+    });
+
+    await cambiarProposito("Gastos");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("category");
+    expect(selectDe("Monto").value).toBe("amount");
+  });
+});
+
+/**
  * F-B.1 — la procedencia de un mapeo se cuenta en castellano, sin porcentaje.
  *
  * El «Heurística · 75%» de abajo de cada columna fue lo primero que el usuario

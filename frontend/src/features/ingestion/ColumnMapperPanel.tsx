@@ -1837,12 +1837,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         [opt.field]: true,
       });
     }
-    // Re-inicializar el mapeo con el nuevo schema de entidad.
+    // F-A: re-derivar el mapeo contra el nuevo schema de entidad, pero SIN
+    // pisar `mappings`/`touchedRef` — el bloque de fusión de abajo (mismo
+    // criterio que `SheetMapperSection`) conserva lo tocado a mano cuyo
+    // target sigue existiendo en la entidad nueva. Antes acá se vaciaban los
+    // dos y una columna corregida a mano se perdía al cambiar de propósito.
     setInitialized(false);
-    setMappings({});
-    // F8c: el mapeo se re-deriva de las sugerencias del nuevo schema — ninguna
-    // columna quedó tocada a mano en el schema nuevo (evita fuga de user_selected).
-    touchedRef.current.clear();
   }
 
   // Multi-contexto: se usa el mapeo por contexto cuando hay >1 contexto (multi-hoja)
@@ -1874,13 +1874,28 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     enabled: !!fileId && !!preview && !isMultiContext && !needsPurpose,
   });
 
-  // Inicializar mappings desde sugerencias cuando cargan
-  if (suggestions.length > 0 && !initialized) {
-    const initial: Record<string, string> = {};
+  // F-A: MERGE, no reemplazo — mismo criterio que el camino multi-hoja
+  // (`targetSobreviveALaEntidad`, ver `SheetMapperSection`). Sin catálogo no
+  // se puede afirmar que un target tocado dejó de ser elegible: este bloque
+  // vuelve a correr cuando `loadingCatalog` pasa a `false`.
+  if (suggestions.length > 0 && !initialized && !loadingCatalog) {
+    const fields = catalog?.[entityType]?.fields ?? [];
+    const next: Record<string, string> = {};
     for (const s of suggestions) {
-      if (s.target_field) initial[s.source_column] = s.target_field;
+      const col = s.source_column;
+      const elegido = mappings[col] ?? "";
+      if (
+        touchedRef.current.has(riskKey("table", col)) &&
+        targetSobreviveALaEntidad(elegido, fields)
+      ) {
+        // Incluye el «Sin mapear» explícito: si la persona sacó esa columna a
+        // propósito, cambiar de propósito no es motivo para volver a meterla.
+        if (elegido) next[col] = elegido;
+        continue;
+      }
+      if (s.target_field) next[col] = s.target_field;
     }
-    setMappings(initial);
+    setMappings(next);
     setInitialized(true);
   }
 
