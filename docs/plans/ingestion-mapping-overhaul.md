@@ -83,7 +83,7 @@ F-B  claridad visual + extracción del monolito                       ◐ Target
 Paso 0 medir (read-only) — COMPUERTA de toda limpieza y todo backfill      ✅ entregado (corrió contra Neon, refutó la hipótesis de «Otros»)
 F-R  la relectura prueba su correspondencia                          ✅ entregado (06e69626, e8e385aa, 84ae9223)
 F-S.0 catálogo↔transacciones en la MISMA carga                       ✅ entregado — 4 commits, ver abajo
-F-ID identidad transversal en 3 capas (reemplaza F-S, absorbe media F-I) ← bloqueante, siguiente
+F-ID identidad transversal en 3 capas (reemplaza F-S, absorbe media F-I) ◐ ID.0-ID.7 entregados (schema+resolvedor+8 sitios de alta+backfill+bootstrap+wireo ingesta); falta ID.8 dedup/ID.9 frontend/ID.10 agentes
 F-CAT categorías: mapear, normalizar, inferir con evidencia, backfill  ✅ entregado (e9b9df3d), adelantada — corre antes del backfill de código
 F-I  resto: comprobantes + wireo del resolvedor (recortada, ver F-ID.7)
 F-E  simetría cliente/proveedor — ADELANTADA (era la última)
@@ -1422,20 +1422,34 @@ identifica las categorías es F-CAT.
 **Lo que F-I ya no hace** (absorbido por F-ID, arriba): la migración de columna de código externo.
 `entity_identifiers` la reemplaza — soporta VARIOS códigos por entidad con procedencia, no uno.
 
-**Lo que sigue siendo trabajo de F-I** (tarea ID.7 de F-ID): la jerarquía del resolvedor de
-maestros `código externo → documento/CUIT → nombre normalizado` — espeja lo que `_resolve_product`
-ya hace con `barcode → sku → nombre+marca` (F2) — y su wireo en `_classify_row_reference` para que
-una venta cuya columna Cliente trae `CLI-01` encuentre al cliente que la hoja Clientes declaró con
-ese ID (el orden maestro→transacción ya existe, F7c). El Nº de comprobante para agrupar líneas de
-una misma compra reusa F-H6, no se reescribe. Targets nuevos en `GET /ingestion/field-catalog` para
-las tres entidades. Dos códigos iguales dentro del mismo archivo → 422 legible, nunca last-wins
-(misma regla que `SINGLE_VALUE_FIELDS`). Un código es identidad **dentro de un tenant** — un
-archivo sin columna de ID sigue resolviendo por documento y nombre como hoy, F-I no vuelve
-obligatorio tener códigos.
+**Entregado (F-ID.7, 2026-08-15):** el motor F7b (`identity_resolution.py`) ganó un tier `"code"` de
+máxima prioridad (por encima de documento) sin reescribir su lógica de match/conflicto, que ya era
+genérica. Targets nuevos `customer_business_code`/`supplier_business_code` en
+`GET /ingestion/field-catalog` (mismo patrón que F-S.0 con `sku`/`barcode` en venta). El índice de
+referencia de fila resuelve por `vektor_code` propio de la entidad Y por cualquier `business_code`
+ya registrado en `entity_identifiers` (bootstrap F-ID.4 o un import anterior) — nunca sólo el que
+trae la fila actual. Cableado en los 4 call sites reales (2 rutas × cliente/proveedor). Verificado:
+sin columna de código mapeada, cero cambio de comportamiento.
 
-**Aceptación:** re-importar el mismo archivo no duplica maestros · una venta con código resuelve
-al cliente correcto aunque el nombre venga escrito distinto · el código se ve en la ficha ·
-borrar el archivo revierte lo que creó (F11 sigue valiendo sobre las entidades nuevas).
+**Deuda declarada, documentada a propósito:**
+1. No se captura el `business_code` de una fila MATCHEADA por otra vía (ej. documento) hacia
+   `entity_identifiers` para que la PRÓXIMA importación lo reconozca sin bootstrap — habría tocado
+   4 sitios más en caliente por un beneficio incremental; el bootstrap (F-ID.4) y el backfill
+   (F-ID.6) ya cubren el caso principal.
+2. **"Dos códigos iguales dentro del mismo archivo → 422, nunca last-wins" no se implementó** — es
+   una regla de import MASIVO de MAESTROS (`customer_import_service.py`/`supplier_import_service.py`
+   no tienen aún el concepto de `business_code`), no de la resolución de fila que sí se entregó.
+3. El Nº de comprobante para agrupar líneas de una misma compra sigue reusando F-H6 sin cambios —
+   nunca formó parte de este alcance.
+
+Un código sigue siendo identidad **dentro de un tenant** — un archivo sin columna de código sigue
+resolviendo por documento y nombre como siempre, F-I no vuelve obligatorio tener códigos.
+
+**Aceptación (parcial — ver deuda arriba):** ✅ una venta/gasto con código resuelve al cliente/
+proveedor correcto aunque el nombre venga escrito distinto · ✅ el código se ve en la ficha
+(`vektor_code` en `CustomerResponse`/`SupplierResponse`, F-ID.5) · ⬜ re-importar el mismo archivo
+no duplica maestros (depende del import masivo de maestros, fuera de este alcance) · borrar el
+archivo revierte lo que creó (F11 sigue valiendo sobre las entidades nuevas, sin cambios acá).
 
 ---
 
