@@ -121,6 +121,7 @@ from app.domain.text_norm import (
     normalize_sku,
     normalize_text,
 )
+from app.domain.unclassified_capture import is_aggregate_row
 from app.domain.verticals import Vertical, parse_vertical
 from app.observability.logger import get_logger
 
@@ -1266,6 +1267,18 @@ def _fila_con_contenido(row: dict[str, Any]) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class CaptureResult:
+    """F-O.4: retorno explícito de ``_capture_unclassified`` — antes era un
+    ``int`` que solo contaba lo persistido, y no había dónde reportar cuánto
+    se saltea SIN capturar (filas vacías / de agregado) sin que un caller
+    futuro tuviera que recordar filtrarlas por su cuenta."""
+
+    captured: int
+    blank_skipped: int = 0
+    aggregate_skipped: int = 0
+
+
 def _capture_unclassified(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -1277,12 +1290,23 @@ def _capture_unclassified(
     suggested_entity: str | None = None,
     match_candidates: list[dict[str, Any]] | None = None,
     row_ref: str | None = None,
-) -> int:
+    anchor_column: str | None = None,
+) -> CaptureResult:
     """FASE F: persiste filas no clasificadas en la bandeja "Otros".
 
-    Nada se descarta en silencio: lo que no se pudo (o no se quiso) clasificar
-    como venta/gasto/producto queda en ``unclassified_records`` con estado
-    PENDING para que el tenant lo importe o descarte desde /otros.
+    Nada de contenido real se descarta en silencio: lo que no se pudo (o no se
+    quiso) clasificar como venta/gasto/producto queda en ``unclassified_records``
+    con estado PENDING para que el tenant lo importe o descarte desde /otros.
+
+    F-O.4: dos clases de fila NUNCA se capturan, y el filtro vive ACÁ —dentro
+    de la función, no en cada call site— para que ningún caller futuro pueda
+    "olvidarse" del filtro:
+    - 100% vacía (``_fila_con_contenido``): celdas de relleno al final de una
+      hoja, sin ningún dato real.
+    - de agregado (``is_aggregate_row``, ``Subtotal``/``Total``): no es una
+      operación. ``anchor_column`` es la columna fecha/ancla YA resuelta por
+      el caller, si la tiene — sin ella se usa el criterio conservador (ver
+      el docstring de ``is_aggregate_row``).
 
     F2-T2: ``match_candidates`` (solo para filas de producto ambiguas o en
     conflicto de identidad) — forma ``{id, matched_by, name, sku, barcode}``.
@@ -1311,9 +1335,15 @@ def _capture_unclassified(
             "ingestion.otros.source_normalizado", recibido=source, guardado=_source
         )
     count = 0
+    blank_skipped = 0
+    aggregate_skipped = 0
     for row in rows:
         row_data = {k: v for k, v in row.items() if k != "__context__"}
-        if not row_data:
+        if not row_data or not _fila_con_contenido(row_data):
+            blank_skipped += 1
+            continue
+        if is_aggregate_row(row_data, anchor_column=anchor_column):
+            aggregate_skipped += 1
             continue
         _persistido = {k: ("" if v is None else str(v)) for k, v in row_data.items()}
         # Se agrega DESPUÉS del volcado para que una columna del archivo que se
@@ -1334,7 +1364,21 @@ def _capture_unclassified(
             )
         )
         count += 1
-    return count
+    return CaptureResult(
+        captured=count, blank_skipped=blank_skipped, aggregate_skipped=aggregate_skipped
+    )
+
+
+def _apply_capture_result(counts: dict[str, Any], result: CaptureResult) -> int:
+    """Contabiliza ``filas_en_blanco``/``filas_agregado`` y devuelve
+    ``captured``, para que los ~18 call sites de ``_capture_unclassified``
+    sigan siendo una sola línea (`counts["otros"] += _apply_capture_result(
+    counts, _capture_unclassified(...))`) con un único punto de conteo."""
+    if result.blank_skipped:
+        counts["filas_en_blanco"] = counts.get("filas_en_blanco", 0) + result.blank_skipped
+    if result.aggregate_skipped:
+        counts["filas_agregado"] = counts.get("filas_agregado", 0) + result.aggregate_skipped
+    return result.captured
 
 
 async def _capture_column_risk_rows(
@@ -1397,7 +1441,7 @@ async def _capture_column_risk_rows(
                 {"context_id": context_id, "row_index": row_index}
             ),
         }
-        captured = _capture_unclassified(
+        _capture = _capture_unclassified(
             session,
             tenant_id,
             rows=[_payload],
@@ -1410,12 +1454,12 @@ async def _capture_column_risk_rows(
                 _import_row_anchor(tenant_id, uploaded_file_id, context_id, row_index)
             ),
         )
-        if captured == 0:
+        if _capture.captured == 0:
             # Fila combinada vacía (nada que capturar): no hay nada persistido,
             # así que NO se registra la huella — ver docstring.
             continue
         await _register_import_row_fingerprint(session, tenant_id, anchor)
-        created += captured
+        created += _capture.captured
     return created
 
 
@@ -4005,7 +4049,7 @@ async def _insert_confirmed_data_impl(
                     _parse_amount(row.get(gasto_col)) if (wants_gastos and gasto_col) else None
                 )
                 if _venta_amount is not None or _gasto_amount is not None:
-                    counts["otros"] += _capture_unclassified(
+                    counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                         session,
                         tenant_id,
                         rows=[row],
@@ -4018,7 +4062,7 @@ async def _insert_confirmed_data_impl(
                         ),
                         suggested_entity="sale" if _venta_amount is not None else "expense",
                         row_ref=_source_row_ref(_row_anchor),
-                    )
+                    ))
                     _captured_to_otros_rows.add(row_index)
                     _captured_to_otros = True
                     logger.debug(
@@ -4032,7 +4076,7 @@ async def _insert_confirmed_data_impl(
                 # F-H3.d.3: la hoja pidió aplicar su historia y esta venta no tiene
                 # unidades que la respalden → "Otros", no `sales_entries`. Ver el
                 # bloque equivalente del camino multi-hoja.
-                counts["otros"] += _capture_unclassified(
+                counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                     session,
                     tenant_id,
                     rows=[row],
@@ -4047,7 +4091,7 @@ async def _insert_confirmed_data_impl(
                     ),
                     suggested_entity="sale",
                     row_ref=_source_row_ref(_row_anchor),
-                )
+                ))
                 counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                 _captured_to_otros_rows.add(row_index)
                 _captured_to_otros = True
@@ -4392,7 +4436,7 @@ async def _insert_confirmed_data_impl(
                             # NO crea un 3er producto — la fila va a "Otros" (con
                             # match_candidates), el gasto NO se registra, y se marca la
                             # fila para que el bucket de productos NO la recapture.
-                            counts["otros"] += _capture_unclassified(
+                            counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                                 session,
                                 tenant_id,
                                 rows=[row],
@@ -4404,7 +4448,7 @@ async def _insert_confirmed_data_impl(
                                 suggested_entity="expense",
                                 match_candidates=_cands,
                                 row_ref=_source_row_ref(_row_anchor),
-                            )
+                            ))
                             _captured_to_otros_rows.add(row_index)
                             _captured_to_otros = True
                         else:
@@ -4530,7 +4574,7 @@ async def _insert_confirmed_data_impl(
                 and counts["ventas"] + counts["gastos"] == _inserted_before
                 and _fila_con_contenido(row)
             ):
-                counts["otros"] += _capture_unclassified(
+                counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                     session,
                     tenant_id,
                     rows=[row],
@@ -4544,7 +4588,7 @@ async def _insert_confirmed_data_impl(
                     ),
                     suggested_entity="sale" if wants_ventas else "expense",
                     row_ref=_source_row_ref(_row_anchor),
-                )
+                ))
                 counts["filas_sin_monto"] += 1
                 _captured_to_otros_rows.add(row_index)
                 _captured_to_otros = True
@@ -4628,7 +4672,7 @@ async def _insert_confirmed_data_impl(
                 if _product_date_invalid_explicit(
                     _acq_raw, _acquired, _acquired_explicit
                 ) or _product_date_invalid_explicit(_exp_raw, _expiry, _expiry_explicit):
-                    counts["otros"] += _capture_unclassified(
+                    counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                         session,
                         tenant_id,
                         rows=[row],
@@ -4641,7 +4685,7 @@ async def _insert_confirmed_data_impl(
                         ),
                         suggested_entity="product",
                         row_ref=_source_row_ref(_row_anchor),
-                    )
+                    ))
                     if _prod_capture_anchor is not None:
                         await _register_import_row_fingerprint(
                             session, tenant_id, _prod_capture_anchor, seen_fp
@@ -4906,7 +4950,7 @@ async def _insert_confirmed_data_impl(
                             else "Conflicto de identidad: el SKU y el nombre "
                             "apuntan a productos distintos"
                         )
-                        counts["otros"] += _capture_unclassified(
+                        counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                             session,
                             tenant_id,
                             rows=[row],
@@ -4917,7 +4961,7 @@ async def _insert_confirmed_data_impl(
                             suggested_entity="product",
                             match_candidates=_resolution.candidates,
                             row_ref=_prod_row_ref,
-                        )
+                        ))
                         # F6-B (review): la captura ambigua también es output
                         # PERSISTIDO → registrar la huella para que una relectura no
                         # re-cree el UnclassifiedRecord (paridad con multi-context, que
@@ -4985,7 +5029,7 @@ async def _insert_confirmed_data_impl(
                             matched_by=_conflict.matched_by,
                             candidate_ids=[str(p.id) for p in _conflict.candidates],
                         )
-                        counts["otros"] += _capture_unclassified(
+                        counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                             session,
                             tenant_id,
                             rows=[row],
@@ -4997,7 +5041,7 @@ async def _insert_confirmed_data_impl(
                             suggested_entity="product",
                             match_candidates=_candidates_from_conflict(_conflict),
                             row_ref=_prod_row_ref,
-                        )
+                        ))
                         # F6-B (review): idempotencia de la captura (ver arriba).
                         if _prod_capture_anchor is not None:
                             await _register_import_row_fingerprint(
@@ -5088,7 +5132,7 @@ async def _insert_confirmed_data_impl(
         # FASE F: filas ambiguas (otros_detectados) que el usuario NO reasignó a
         # ningún tipo importable → bandeja "Otros" en vez de descartarse.
         if rows_from_otros and not (wants_ventas or wants_gastos or wants_productos):
-            counts["otros"] += _capture_unclassified(
+            counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                 session,
                 tenant_id,
                 rows,
@@ -5096,7 +5140,7 @@ async def _insert_confirmed_data_impl(
                 source,
                 uploaded_file_id,
                 context_label="Tabla sin clasificar",
-            )
+            ))
 
     else:
         # ── Documentos de texto/imagen: inserción por línea (montos detectados) ──
@@ -5118,7 +5162,7 @@ async def _insert_confirmed_data_impl(
             # es un flujo distinto (reread_service) que reprocesa desde cero.
             if not any(_parse_amount(m) for m in entry.get("montos", [])):
                 return
-            counts["otros"] += _capture_unclassified(
+            counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                 session,
                 tenant_id,
                 rows=[entry],
@@ -5130,7 +5174,7 @@ async def _insert_confirmed_data_impl(
                     "fecha antes de importar"
                 ),
                 suggested_entity=suggested,
-            )
+            ))
 
         def _add_text_sale(entry: dict[str, Any]) -> None:
             _route_text_line_to_otros(entry, "sale")
@@ -5493,7 +5537,7 @@ async def _insert_multisheet_data(
             # relectura corregida puede reintentarla).
             if not _fila_con_contenido(row):
                 return False
-            counts["otros"] += _capture_unclassified(
+            counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                 session,
                 tenant_id,
                 rows=[row],
@@ -5507,7 +5551,7 @@ async def _insert_multisheet_data(
                 ),
                 suggested_entity="sale",
                 row_ref=row_ref,
-            )
+            ))
             counts["filas_sin_monto"] += 1
             return True
         amount = _linea.amount
@@ -5516,7 +5560,7 @@ async def _insert_multisheet_data(
             # F6-A2: sin fecha reconocible la venta va a /otros — no se inventa "hoy"
             # (invariante 2d). Devuelve True: la captura es output PERSISTIDO, así el
             # caller registra el fingerprint (re-subir no re-crea el UnclassifiedRecord).
-            counts["otros"] += _capture_unclassified(
+            counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                 session,
                 tenant_id,
                 rows=[row],
@@ -5526,7 +5570,7 @@ async def _insert_multisheet_data(
                 context_label="Fila sin fecha reconocible: no se puede registrar la venta",
                 suggested_entity="sale",
                 row_ref=row_ref,
-            )
+            ))
             return True
         qty = _venta_cantidad(row, cols)
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
@@ -5880,7 +5924,7 @@ async def _insert_multisheet_data(
         if tx_date is None:
             # F6-A2: sin fecha reconocible el gasto va a /otros — no se inventa "hoy"
             # (invariante 2d). Devuelve True para que el caller registre el fingerprint.
-            counts["otros"] += _capture_unclassified(
+            counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                 session,
                 tenant_id,
                 rows=[row],
@@ -5890,7 +5934,7 @@ async def _insert_multisheet_data(
                 context_label="Fila sin fecha reconocible: no se puede registrar el gasto",
                 suggested_entity="expense",
                 row_ref=row_ref,
-            )
+            ))
             return True
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         desc = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
@@ -6064,7 +6108,7 @@ async def _insert_multisheet_data(
             if _action == "otros":
                 # Review F2 #1: compra ambigua/en conflicto NO crea un 3er producto
                 # duplicado — la fila va a "Otros" y el gasto NO se registra.
-                counts["otros"] += _capture_unclassified(
+                counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                     session,
                     tenant_id,
                     rows=[row],
@@ -6076,7 +6120,7 @@ async def _insert_multisheet_data(
                     suggested_entity="expense",
                     match_candidates=_cands,
                     row_ref=row_ref,
-                )
+                ))
                 # Review F2 #6: la captura a Otros es output PERSISTIDO → devolver
                 # True para que el caller registre el fingerprint (re-subir el
                 # archivo no debe re-crear el UnclassifiedRecord).
@@ -6263,7 +6307,7 @@ async def _insert_multisheet_data(
         ) or _product_date_invalid_explicit(
             _exp_raw, _expiry, cols.get("expiry_date") is not None
         ):
-            counts["otros"] += _capture_unclassified(
+            counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                 session,
                 tenant_id,
                 rows=[row],
@@ -6276,7 +6320,7 @@ async def _insert_multisheet_data(
                 ),
                 suggested_entity="product",
                 row_ref=row_ref,
-            )
+            ))
             return True
         # F2-T2: resolución de identidad por claves independientes
         # (barcode→sku→nombre+marca). Caché intra-corrida ANTES del motor —
@@ -6428,7 +6472,7 @@ async def _insert_multisheet_data(
             """La fila ambigua NO se descarta en silencio: queda en /otros con los
             candidatos, para revisión/unificación manual."""
             counts["productos_ambiguos"] += 1
-            counts["otros"] += _capture_unclassified(
+            counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                 session,
                 tenant_id,
                 rows=[row],
@@ -6439,7 +6483,7 @@ async def _insert_multisheet_data(
                 suggested_entity="product",
                 match_candidates=candidates,
                 row_ref=row_ref,
-            )
+            ))
 
         existing = _lookup_product_identity_cache(
             products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
@@ -6802,7 +6846,7 @@ async def _insert_multisheet_data(
                     if r.get("__context__") == ctx_id
                 ]
                 if otros_rows:
-                    counts["otros"] += _capture_unclassified(
+                    counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                         session,
                         tenant_id,
                         otros_rows,
@@ -6810,7 +6854,7 @@ async def _insert_multisheet_data(
                         source,
                         uploaded_file_id,
                         context_label=str(ctx.get("label") or ctx_id or ""),
-                    )
+                    ))
                 continue
             # Inclusión: por contexto si vino context_confirmed; si no, por tipo (legacy)
             if not _hoja_incluida(ctx):
@@ -6889,7 +6933,7 @@ async def _insert_multisheet_data(
                     # output persistido: sin eso, re-confirmar la duplicaría en la
                     # bandeja.
                     _falta = _sin_respaldo[(str(ctx_id or ""), _i)]
-                    counts["otros"] += _capture_unclassified(
+                    counts["otros"] += _apply_capture_result(counts, _capture_unclassified(
                         session,
                         tenant_id,
                         rows=[row],
@@ -6903,7 +6947,7 @@ async def _insert_multisheet_data(
                         ),
                         suggested_entity="sale",
                         row_ref=_row_ref,
-                    )
+                    ))
                     counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                     _did_insert = True
                 elif entity == "sale":
