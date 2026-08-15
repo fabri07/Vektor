@@ -5,15 +5,19 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Connection,
     DateTime,
     ForeignKey,
     Index,
     String,
     Text,
+    event,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, Mapper, mapped_column
 
+from app.domain.text_norm import normalize_external_code
 from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 # Helper del flag de sentinela ahora compartido con clientes (ver models/_sentinel).
@@ -77,8 +81,29 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     api_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Soft-delete: NULL = activo; timestamp = desactivado.
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # F-ID: código Véktor permanente (capa 2 de la identidad transversal), formato
+    # "PRV-0001". Mismo criterio que `Customer.vektor_code` — ver ese modelo.
+    vektor_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    vektor_code_normalized: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
-    __table_args__ = (Index("ix_suppliers_tenant_id", "tenant_id"),)
+    __table_args__ = (
+        Index("ix_suppliers_tenant_id", "tenant_id"),
+        Index("ix_suppliers_tenant_vektor_code_norm", "tenant_id", "vektor_code_normalized"),
+        Index(
+            "uq_suppliers_tenant_vektor_code_norm",
+            "tenant_id",
+            "vektor_code_normalized",
+            unique=True,
+            postgresql_where=text(
+                "deactivated_at IS NULL AND vektor_code_normalized IS NOT NULL "
+                "AND vektor_code_normalized <> ''"
+            ),
+            sqlite_where=text(
+                "deactivated_at IS NULL AND vektor_code_normalized IS NOT NULL "
+                "AND vektor_code_normalized <> ''"
+            ),
+        ),
+    )
 
     @property
     def is_sentinel(self) -> bool:
@@ -97,3 +122,17 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     def __repr__(self) -> str:
         return f"<Supplier tenant={self.tenant_id} name={self.name!r}>"
+
+
+@event.listens_for(Supplier, "before_insert")
+def _supplier_before_insert(
+    mapper: Mapper[Supplier], connection: Connection, target: Supplier
+) -> None:
+    target.vektor_code_normalized = normalize_external_code(target.vektor_code)
+
+
+@event.listens_for(Supplier, "before_update")
+def _supplier_before_update(
+    mapper: Mapper[Supplier], connection: Connection, target: Supplier
+) -> None:
+    target.vektor_code_normalized = normalize_external_code(target.vektor_code)

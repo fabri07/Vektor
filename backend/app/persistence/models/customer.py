@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    Connection,
     Date,
     DateTime,
     ForeignKey,
@@ -13,10 +14,13 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    event,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, Mapper, mapped_column
 
+from app.domain.text_norm import normalize_external_code
 from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.persistence.models._sentinel import SENTINEL_FLAG_KEY, is_sentinel_value
 
@@ -59,8 +63,35 @@ class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     credit_limit: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     # Soft-delete: NULL = activo; timestamp = desactivado.
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # F-ID: código Véktor permanente (capa 2 de la identidad transversal), formato
+    # "CLI-0001". Denormalizado (barato de mostrar/buscar); la fuente de verdad de
+    # PROCEDENCIA y de todo código externo adicional es `entity_identifiers`. Un
+    # sentinela NUNCA recibe código — se aplica en `entity_identity_service`, no acá.
+    vektor_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    vektor_code_normalized: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
-    __table_args__ = (Index("ix_customers_tenant_id", "tenant_id"),)
+    __table_args__ = (
+        Index("ix_customers_tenant_id", "tenant_id"),
+        Index("ix_customers_tenant_vektor_code_norm", "tenant_id", "vektor_code_normalized"),
+        # Parcial: solo entre ACTIVOS y solo con el código presente — mismo criterio
+        # que `uq_products_tenant_sku_norm`. El no-reciclo del VALOR lo garantiza la
+        # secuencia atómica (`entity_code_sequences`), no este índice: éste sólo evita
+        # que dos filas ACTIVAS colisionen por un bug de asignación.
+        Index(
+            "uq_customers_tenant_vektor_code_norm",
+            "tenant_id",
+            "vektor_code_normalized",
+            unique=True,
+            postgresql_where=text(
+                "deactivated_at IS NULL AND vektor_code_normalized IS NOT NULL "
+                "AND vektor_code_normalized <> ''"
+            ),
+            sqlite_where=text(
+                "deactivated_at IS NULL AND vektor_code_normalized IS NOT NULL "
+                "AND vektor_code_normalized <> ''"
+            ),
+        ),
+    )
 
     @property
     def is_sentinel(self) -> bool:
@@ -69,3 +100,17 @@ class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     def __repr__(self) -> str:
         return f"<Customer tenant={self.tenant_id} name={self.name!r}>"
+
+
+@event.listens_for(Customer, "before_insert")
+def _customer_before_insert(
+    mapper: Mapper[Customer], connection: Connection, target: Customer
+) -> None:
+    target.vektor_code_normalized = normalize_external_code(target.vektor_code)
+
+
+@event.listens_for(Customer, "before_update")
+def _customer_before_update(
+    mapper: Mapper[Customer], connection: Connection, target: Customer
+) -> None:
+    target.vektor_code_normalized = normalize_external_code(target.vektor_code)

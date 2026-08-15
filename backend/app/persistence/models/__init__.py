@@ -21,6 +21,7 @@ from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.coverage_gap import ChatCoverageGap
 from app.persistence.models.customer import Customer
 from app.persistence.models.entity_code_sequence import EntityCodeSequence
+from app.persistence.models.entity_identifier import EntityIdentifier
 from app.persistence.models.external_operation_log import ExternalOperationLog
 from app.persistence.models.field_definitions import (
     TenantCustomFieldDefinition,
@@ -77,6 +78,7 @@ __all__ = [
     "Customer",
     "Supplier",
     "EntityCodeSequence",
+    "EntityIdentifier",
     "UnclassifiedRecord",
     "UploadedFile",
     "Notification",
