@@ -66,6 +66,9 @@ class CustomerResponse(BaseModel):
     credit_limit: Decimal | None = None
     created_at: datetime
     deactivated_at: datetime | None = None
+    # F-ID: código Véktor permanente, sólo lectura (asignado por
+    # entity_code_service, nunca editable desde acá).
+    vektor_code: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

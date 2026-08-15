@@ -29,6 +29,12 @@ from app.api.v1.products import (
 )
 from app.application.services import maintenance_lock_service, stock_service
 from app.application.services._ledger_restore import snapshot_master
+from app.application.services.entity_code_service import (
+    CUSTOMER_CODE_SPEC,
+    PRODUCT_CODE_SPEC,
+    SUPPLIER_CODE_SPEC,
+    assign_vektor_code_if_missing,
+)
 from app.application.services.file_deletion_service import (
     ACTION_CREATE_CUSTOMER,
     ACTION_CREATE_PRODUCT,
@@ -457,6 +463,11 @@ async def reclassify_record(
             cust_req = CreateCustomerRequest(**body.fields)
             _nuevo_cliente = Customer(tenant_id=tenant.tenant_id, **cust_req.model_dump())
             session.add(_nuevo_cliente)
+            await session.flush()  # F-ID: necesita el id antes de asignar código
+            if await assign_vektor_code_if_missing(
+                session, _nuevo_cliente, CUSTOMER_CODE_SPEC, tenant.tenant_id
+            ):
+                await session.flush()
             # `Customer` no tiene columna de origen: su procedencia sólo puede
             # vivir en el ledger, igual que la de los productos.
             await _ledger_maestro_creado(
@@ -467,6 +478,11 @@ async def reclassify_record(
             sup_req = CreateSupplierRequest(**body.fields)
             _nuevo_prov = Supplier(tenant_id=tenant.tenant_id, **sup_req.model_dump())
             session.add(_nuevo_prov)
+            await session.flush()  # F-ID: necesita el id antes de asignar código
+            if await assign_vektor_code_if_missing(
+                session, _nuevo_prov, SUPPLIER_CODE_SPEC, tenant.tenant_id
+            ):
+                await session.flush()
             await _ledger_maestro_creado(
                 session, tenant.tenant_id, _upload_id, _nuevo_prov, "supplier"
             )
@@ -533,9 +549,11 @@ async def reclassify_record(
                 raise _duplicate_identity_conflict(
                     existing_product, barcode=data.get("barcode"), sku=data.get("sku")
                 )
-            # Misma normalización que POST /products (catálogo del vertical).
+            # Misma normalización que POST /products (catálogo del vertical). F-ID:
+            # se resuelve siempre (no sólo con categoría) para el prefijo del código
+            # Véktor — GEN si no hay vertical/categoría es un fallback honesto.
+            vertical = await _tenant_vertical(session, tenant.tenant_id)
             if data.get("category"):
-                vertical = await _tenant_vertical(session, tenant.tenant_id)
                 code_p, label_p = normalize_product_category(data["category"], vertical)
                 data["category"] = code_p
                 if label_p:
@@ -565,6 +583,15 @@ async def reclassify_record(
                     conflict, barcode=data.get("barcode"), sku=data.get("sku")
                 ) from conflict
             await session.flush()
+            if await assign_vektor_code_if_missing(
+                session,
+                _nuevo_producto,
+                PRODUCT_CODE_SPEC,
+                tenant.tenant_id,
+                vertical=vertical,
+                category=_nuevo_producto.category,
+            ):
+                await session.flush()
             await _ledger_producto_creado(
                 session, tenant.tenant_id, _upload_id, _nuevo_producto
             )

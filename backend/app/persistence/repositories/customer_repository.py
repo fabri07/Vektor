@@ -6,7 +6,12 @@ from uuid import UUID
 
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.inspection import inspect as sa_inspect
 
+from app.application.services.entity_code_service import (
+    CUSTOMER_CODE_SPEC,
+    assign_vektor_code_if_missing,
+)
 from app.persistence.models._sentinel import SENTINEL_FLAG_KEY
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import SaleEntry
@@ -210,8 +215,19 @@ class CustomerRepository:
         return int(result.scalar_one() or 0)
 
     async def save(self, customer: Customer) -> Customer:
+        # F-ID: sólo un alta GENUINA nace con código — `transient` se pierde en
+        # cuanto `add()` lo asocia a la sesión, así que hay que leerlo ANTES.
+        # Sin esto, cada edición (PATCH) reentraría acá con el objeto ya
+        # persistente y el chequeo perdería sentido.
+        is_new = sa_inspect(customer).transient
         self._session.add(customer)
         await self._session.flush()
+        if is_new:
+            assigned = await assign_vektor_code_if_missing(
+                self._session, customer, CUSTOMER_CODE_SPEC, customer.tenant_id
+            )
+            if assigned:
+                await self._session.flush()
         return customer
 
     async def soft_delete(self, customer: Customer) -> Customer:

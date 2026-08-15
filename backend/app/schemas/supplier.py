@@ -47,6 +47,8 @@ class SupplierResponse(BaseModel):
     api_url: str | None = None
     created_at: datetime
     deactivated_at: datetime | None = None
+    # F-ID: código Véktor permanente, sólo lectura.
+    vektor_code: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

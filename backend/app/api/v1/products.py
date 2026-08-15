@@ -365,8 +365,11 @@ async def create_product(
     if conflict is not None:
         raise conflict
     # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
+    # F-ID: se resuelve el vertical siempre (no sólo cuando hay categoría) para que
+    # el prefijo del código Véktor pueda usar la categoría del producto — GEN si no
+    # hay vertical/categoría es un fallback honesto, no un error.
+    vertical = await _tenant_vertical(session, tenant.tenant_id)
     if data.get("category"):
-        vertical = await _tenant_vertical(session, tenant.tenant_id)
         code, label = await _resolve_category(
             session, tenant.tenant_id, data["category"], vertical
         )
@@ -387,7 +390,7 @@ async def create_product(
             barcode=data.get("barcode"),
             sku=data.get("sku"),
         ):
-            saved = await repo.save(product)
+            saved = await repo.save(product, vertical=vertical)
     except ProductIdentityConflictError as conflict:
         raise _identity_conflict_from_db(
             conflict, barcode=data.get("barcode"), sku=data.get("sku")

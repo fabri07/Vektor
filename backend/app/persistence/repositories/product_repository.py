@@ -5,6 +5,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.inspection import inspect as sa_inspect
 
 # F3-T3 review (MINOR, no bloqueante): import de Application desde Persistence,
 # viola la dirección de capas del repo. Evaluado mover el acquire a cada caller de
@@ -16,6 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # una regresión de correctness no cubierta por tests. Revisar si en algún momento
 # `maintenance_lock_service` se muda a un paquete neutral (ni app ni persistence).
 from app.application.services import maintenance_lock_service
+from app.application.services.entity_code_service import (
+    PRODUCT_CODE_SPEC,
+    assign_vektor_code_if_missing,
+)
+from app.domain.verticals import Vertical
 from app.persistence.models.product import Product
 
 
@@ -87,12 +93,26 @@ class ProductRepository:
             )
         return out
 
-    async def save(self, product: Product) -> Product:
+    async def save(self, product: Product, *, vertical: Vertical | None = None) -> Product:
         # F3-T3: shared lock ANTES de crear/actualizar el producto — barrera de
         # exclusión mutua real contra el dedup (que toma el exclusive). No-op en SQLite.
         await maintenance_lock_service.acquire_write_lock_shared(
             self._session, product.tenant_id
         )
+        # F-ID: mismo criterio que Customer/SupplierRepository.save — `transient`
+        # se pierde en cuanto `add()` lo asocia a la sesión, hay que leerlo ANTES.
+        is_new = sa_inspect(product).transient
         self._session.add(product)
         await self._session.flush()
+        if is_new:
+            assigned = await assign_vektor_code_if_missing(
+                self._session,
+                product,
+                PRODUCT_CODE_SPEC,
+                product.tenant_id,
+                vertical=vertical,
+                category=product.category,
+            )
+            if assigned:
+                await self._session.flush()
         return product

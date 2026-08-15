@@ -25,6 +25,10 @@ from app.application.services._savepoint import (
     unique_violation_classifier,
 )
 from app.application.services.cash_service import normalize_payment_method
+from app.application.services.entity_code_service import (
+    SUPPLIER_CODE_SPEC,
+    assign_vektor_code_if_missing,
+)
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
@@ -289,7 +293,8 @@ async def _resolve_or_create_supplier(
     if hit is not None:
         return hit, clean
     new_id = uuid.uuid4()
-    session.add(Supplier(id=new_id, tenant_id=tenant_id, name=clean))
+    _nuevo_supplier = Supplier(id=new_id, tenant_id=tenant_id, name=clean)
+    session.add(_nuevo_supplier)
     # Flush INMEDIATO: un id explícito alcanza para setear la columna, pero una FK
     # no la satisface un id — la satisface la FILA. `InventoryMovement` no declara
     # `relationship()` hacia `Supplier` (sólo la columna con `ForeignKey`), así que
@@ -303,6 +308,12 @@ async def _resolve_or_create_supplier(
     # proveedor NUEVO, no por fila. En el archivo que destapó el bug son 4 en 1.436
     # filas.
     await session.flush()
+    # F-ID: proveedor GENUINAMENTE nuevo (el `hit is not None` de arriba ya
+    # devolvió antes de llegar acá) — nace con código.
+    if await assign_vektor_code_if_missing(
+        session, _nuevo_supplier, SUPPLIER_CODE_SPEC, tenant_id
+    ):
+        await session.flush()
     # El id se reporta al caller para que entre al LEDGER de reversa. Sin esto,
     # un proveedor creado desde la columna de un gasto quedaba fuera del ledger:
     # borrar el archivo lo dejaba vivo y el DELETE respondía `fully_reverted:
