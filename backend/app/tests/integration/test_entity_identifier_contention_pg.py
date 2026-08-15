@@ -31,7 +31,10 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.inspection import inspect as sa_inspect
 from sqlalchemy.pool import NullPool
 
-from app.application.services.entity_code_service import record_identifier
+from app.application.services.entity_code_service import (
+    EntityIdentifierConflictError,
+    record_identifier,
+)
 from app.persistence.models.entity_identifier import EntityIdentifier
 from app.persistence.models.tenant import Tenant
 
@@ -143,3 +146,47 @@ async def test_llamadas_concurrentes_de_la_misma_entidad_no_revientan_la_transac
         ).scalars().all()
         assert len(rows) == 1
         assert rows[0].entity_id == entity_id
+
+
+async def test_llamadas_concurrentes_de_entidades_distintas_dejan_una_sola_ganadora(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> None:
+    """F-I(A): dos filas de DOS archivos distintos importándose al mismo
+    tiempo, cada una aprendiendo el MISMO `business_code` para una entidad
+    DISTINTA — exactamente la carrera que motiva la degradación a
+    `unresolved` en `_record_row_business_code`. Una gana, la otra recibe
+    `EntityIdentifierConflictError` (nunca gana el primero en silencio ni
+    se corrompe la transacción de la que pierde)."""
+    entity_a = uuid.uuid4()
+    entity_b = uuid.uuid4()
+    results = await asyncio.gather(
+        _record_and_commit(sessionmaker, tenant_id, entity_a),
+        _record_and_commit(sessionmaker, tenant_id, entity_b),
+        return_exceptions=True,
+    )
+
+    successes = [r for r in results if not isinstance(r, BaseException)]
+    conflicts = [r for r in results if isinstance(r, EntityIdentifierConflictError)]
+    other_failures = [
+        r
+        for r in results
+        if isinstance(r, BaseException) and not isinstance(r, EntityIdentifierConflictError)
+    ]
+    assert not other_failures, f"solo se espera EntityIdentifierConflictError o éxito: {results}"
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+
+    async with sessionmaker() as s:
+        rows = (
+            await s.execute(
+                select(EntityIdentifier).where(
+                    EntityIdentifier.tenant_id == tenant_id,
+                    EntityIdentifier.entity_type == "customer",
+                    EntityIdentifier.identifier_type == "business_code",
+                    EntityIdentifier.namespace == "business",
+                    EntityIdentifier.revoked_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].entity_id in (entity_a, entity_b)

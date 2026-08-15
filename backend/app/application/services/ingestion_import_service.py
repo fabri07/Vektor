@@ -7,7 +7,7 @@ import json
 import re
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -27,7 +27,9 @@ from app.application.services._savepoint import (
 from app.application.services.cash_service import normalize_payment_method
 from app.application.services.entity_code_service import (
     SUPPLIER_CODE_SPEC,
+    EntityIdentifierConflictError,
     assign_vektor_code_if_missing,
+    record_identifier,
 )
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
@@ -53,6 +55,7 @@ from app.application.services.product_identity import (
 from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
 from app.domain.date_parsing import parse_business_date, parse_business_datetime
+from app.domain.entity_code import EntityKind
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -113,6 +116,7 @@ from app.domain.purchase_shipping import (
 from app.domain.text_norm import (
     normalize_barcode,
     normalize_brand,
+    normalize_external_code,
     normalize_product_name,
     normalize_sku,
     normalize_text,
@@ -477,6 +481,12 @@ class RowReferenceResolution:
     outcome: str  # "matched" | "anonymous" | "unresolved"
     entity: Any | None = None
     raw_value: str | None = None
+    # F-I(A): la clave GANADORA de resolve_identity (código/doc/email/tel) en un
+    # "matched", o las entidades en pugna cuando el motor F7b devolvió
+    # "conflict" (colapsado acá a "unresolved" para el resto del pipeline, pero
+    # sin perder la traza) — puramente diagnóstico, no cambia ningún outcome.
+    matched_key: IdentityKey | None = None
+    conflicting_entities: list[Any] = field(default_factory=list)
 
 
 def _classify_row_reference(
@@ -525,11 +535,15 @@ def _classify_row_reference(
     resolution = resolve_identity(keys, existing_index)
     if resolution.outcome == "matched":
         assert resolution.entity is not None  # invariante de "matched"
-        return RowReferenceResolution(outcome="matched", entity=resolution.entity)
+        return RowReferenceResolution(
+            outcome="matched", entity=resolution.entity, matched_key=resolution.matched_key
+        )
 
     # unresolved: needs_review (solo nombre débil), none (clave sin match) o
     # conflict (clave ambigua) — todas se tratan igual acá: no identifican sin
-    # ambigüedad, van al sentinela con traza para revisión humana.
+    # ambigüedad, van al sentinela con traza para revisión humana. Cuando el
+    # motor devolvió "conflict", las entidades en pugna viajan igual —
+    # diagnóstico, no cambia que la fila caiga a revisión.
     raw: Any = name_raw
     if raw is None and code_field is not None:
         raw = record.get(code_field)
@@ -541,7 +555,9 @@ def _classify_row_reference(
         else:
             raw = record.get("email") or record.get("phone")
     return RowReferenceResolution(
-        outcome="unresolved", raw_value=str(raw) if raw is not None else None
+        outcome="unresolved",
+        raw_value=str(raw) if raw is not None else None,
+        conflicting_entities=resolution.conflicting_entities,
     )
 
 
@@ -681,6 +697,70 @@ async def _augment_index_with_business_codes(
             # nunca puede compartir slot con el vektor_code de OTRA entidad y
             # taparlo en silencio; ver el docstring de `_KEY_PRIORITY`.
             index.setdefault(IdentityKey("business_code", normalized_value), entity)
+
+
+async def _record_row_business_code(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    entity_type: EntityKind,
+    resolution: RowReferenceResolution,
+    record: dict[str, Any],
+    code_field: str | None,
+    existing_index: dict[IdentityKey, Any],
+    counts: dict[str, Any],
+    counts_prefix: str,
+    uploaded_file_id: uuid.UUID | None,
+) -> RowReferenceResolution:
+    """F-I(A): una fila que matcheó por documento/email/teléfono y TAMBIÉN trae
+    un ``business_code`` no lo aprovechaba — se usaba una sola vez para esta
+    fila y se perdía. Lo persiste en ``entity_identifiers`` para que la
+    PRÓXIMA fila (de este mismo archivo o de una importación futura) resuelva
+    directo por código.
+
+    Nunca vincula a ciegas: si el código ya pertenece a OTRA entidad
+    (``EntityIdentifierConflictError`` — típicamente una carrera real entre
+    dos importaciones concurrentes; el caso same-file ya lo agarra
+    ``resolve_identity`` como ``conflict`` antes de llegar acá, porque el
+    índice se actualiza fila a fila más abajo), la fila se degrada a
+    ``unresolved`` en vez de importarse contra la entidad que matcheó por
+    documento con un código contradictorio sin resolver.
+
+    Same-file learning: si se registra con éxito, la clave se agrega al MISMO
+    ``existing_index`` que usa ``_classify_row_reference`` — una fila
+    posterior del mismo archivo que traiga solo el código (sin documento)
+    resuelve en la misma corrida, no recién en la próxima importación.
+    """
+    if resolution.outcome != "matched" or not code_field:
+        return resolution
+    raw_code = record.get(code_field)
+    if raw_code is None or not str(raw_code).strip():
+        return resolution
+    assert resolution.entity is not None
+    try:
+        await record_identifier(
+            session,
+            tenant_id,
+            entity_type,
+            resolution.entity.id,
+            identifier_type="business_code",
+            namespace="business",
+            raw_value=str(raw_code),
+            origin="business",
+            source_upload_id=uploaded_file_id,
+        )
+    except EntityIdentifierConflictError:
+        counts[f"{counts_prefix}_referencia_conflictiva"] = (
+            counts.get(f"{counts_prefix}_referencia_conflictiva", 0) + 1
+        )
+        return RowReferenceResolution(
+            outcome="unresolved",
+            raw_value=str(raw_code),
+            conflicting_entities=[resolution.entity],
+        )
+    normalized = normalize_external_code(str(raw_code))
+    if normalized:
+        existing_index[IdentityKey("business_code", normalized)] = resolution.entity
+    return resolution
 
 
 async def _load_customer_identity_index(
@@ -4055,12 +4135,28 @@ async def _insert_confirmed_data_impl(
                     # unresolved. Nunca crea: solo vincula contra un cliente
                     # existente (maestro importado arriba o ya en la DB) o cae al
                     # sentinela "Local" con traza si la referencia no matchea.
+                    _cust_record = _customer_reference_record(row, target_to_col)
                     _cust_ref = _classify_row_reference(
-                        _customer_reference_record(row, target_to_col),
+                        _cust_record,
                         doc_fields=_CUSTOMER_DOC_FIELDS,
                         existing_index=_customer_identity_index,
                         anonymous_name_tokens=_ANONYMOUS_CUSTOMER_TOKENS,
                         code_field="code",
+                    )
+                    # F-I(A): persiste el business_code de la fila para que la
+                    # próxima resuelva directo por código — degrada a
+                    # unresolved si el código ya pertenece a otra entidad.
+                    _cust_ref = await _record_row_business_code(
+                        session,
+                        tenant_id,
+                        "customer",
+                        _cust_ref,
+                        _cust_record,
+                        "code",
+                        _customer_identity_index,
+                        counts,
+                        "clientes",
+                        uploaded_file_id,
                     )
                     if _cust_ref.outcome == "matched":
                         assert _cust_ref.entity is not None
@@ -4162,11 +4258,27 @@ async def _insert_confirmed_data_impl(
                         )
                         if _has_supplier_ref_col:
                             _sup_name_raw = row.get(supplier_col) if supplier_col else None
+                            _sup_record = _supplier_reference_record(
+                                row, target_to_col, _sup_name_raw
+                            )
                             _sup_ref = _classify_row_reference(
-                                _supplier_reference_record(row, target_to_col, _sup_name_raw),
+                                _sup_record,
                                 doc_fields=_SUPPLIER_DOC_FIELDS,
                                 existing_index=_supplier_identity_index,
                                 code_field="code",
+                            )
+                            # F-I(A): ver el comentario equivalente del lado cliente.
+                            _sup_ref = await _record_row_business_code(
+                                session,
+                                tenant_id,
+                                "supplier",
+                                _sup_ref,
+                                _sup_record,
+                                "code",
+                                _supplier_identity_index,
+                                counts,
+                                "proveedores",
+                                uploaded_file_id,
                             )
                             if _sup_ref.outcome == "matched":
                                 assert _sup_ref.entity is not None
@@ -5469,12 +5581,27 @@ async def _insert_multisheet_data(
         # F7c: resolución de cliente por fila — matched/anonymous/unresolved.
         # Nunca crea: solo vincula (maestro importado arriba o ya en la DB) o cae
         # al sentinela "Local" con traza si la referencia no matchea.
+        _cust_record = _customer_reference_record(row, cols)
         _cust_ref = _classify_row_reference(
-            _customer_reference_record(row, cols),
+            _cust_record,
             doc_fields=_CUSTOMER_DOC_FIELDS,
             existing_index=_customer_identity_index,
             anonymous_name_tokens=_ANONYMOUS_CUSTOMER_TOKENS,
             code_field="code",
+        )
+        # F-I(A): persiste el business_code de la fila; degrada a unresolved si
+        # ya pertenece a otra entidad (ver el helper para el detalle completo).
+        _cust_ref = await _record_row_business_code(
+            session,
+            tenant_id,
+            "customer",
+            _cust_ref,
+            _cust_record,
+            "code",
+            _customer_identity_index,
+            counts,
+            "clientes",
+            uploaded_file_id,
         )
         if _cust_ref.outcome == "matched":
             assert _cust_ref.entity is not None
@@ -5813,11 +5940,25 @@ async def _insert_multisheet_data(
                 or cols.get("supplier_business_code")
             )
             if _has_supplier_ref_col:
+                _sup_record = _supplier_reference_record(row, cols, _supplier_name_raw)
                 _sup_ref = _classify_row_reference(
-                    _supplier_reference_record(row, cols, _supplier_name_raw),
+                    _sup_record,
                     doc_fields=_SUPPLIER_DOC_FIELDS,
                     existing_index=_supplier_identity_index,
                     code_field="code",
+                )
+                # F-I(A): ver el comentario equivalente del lado cliente.
+                _sup_ref = await _record_row_business_code(
+                    session,
+                    tenant_id,
+                    "supplier",
+                    _sup_ref,
+                    _sup_record,
+                    "code",
+                    _supplier_identity_index,
+                    counts,
+                    "proveedores",
+                    uploaded_file_id,
                 )
                 if _sup_ref.outcome == "matched":
                     assert _sup_ref.entity is not None
