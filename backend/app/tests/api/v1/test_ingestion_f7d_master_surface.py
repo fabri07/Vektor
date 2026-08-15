@@ -278,7 +278,12 @@ class TestConfirmMasterWarningsAndCounts:
             json={"confirmed_fields": {"ventas": True}},
         )
         assert response.status_code == 200, response.text
-        assert response.json()["warnings"] == []
+        # F-S.0: la fila trae "descripcion": "Venta" — el heurístico de nombre
+        # (`_NOMBRE_COLS` incluye "descripcion") la intenta como producto, no
+        # resuelve contra ningún catálogo, y eso SÍ genera un warning propio
+        # (mecanismo 4, no relacionado a cliente). El test es específicamente
+        # sobre warnings de CLIENTE — sigue valiendo que no aparezca ninguno.
+        assert not any("cliente" in w.lower() for w in response.json()["warnings"])
 
     async def test_confirm_rows_out_incluye_clientes_y_proveedores(
         self,

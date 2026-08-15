@@ -86,13 +86,18 @@ class TestLoQueNoSePropone:
         assert s["target_field"] is None
 
     async def test_una_columna_con_duda_conserva_su_explicacion(self) -> None:
-        """`codigo_interno_xz99` se reconoce como `sku` y esta hoja no tiene dónde.
+        """`vencimiento_xz99` se reconoce como el concepto "vencimiento" (F-M) y
+        'sale' no tiene ese campo (es de 'product').
 
         Llega `unmapped` pero CON duda. Archivarla como campo propio taparía la
         explicación y rompería el invariante de F-M de que una columna `mapped`
         no arrastra una duda.
+
+        F-S.0: antes usaba `codigo_interno_xz99` — dejó de servir de ejemplo
+        desde que 'sale' reconoce el concepto "codigo" (→ sku, mismo motivo
+        que en `test_column_mapping_service.py::test_suggest_mappings_unknown_header`).
         """
-        s = (await _sugerir("sale", ["codigo_interno_xz99"]))[0]
+        s = (await _sugerir("sale", ["vencimiento_xz99"]))[0]
         assert s["status"] == "unmapped"
         assert s["duda"]
         assert s["target_field"] is None

@@ -182,6 +182,56 @@ class DateRangeResponse(BaseModel):
     max_date: date | None
 
 
+# ── F-S.0: cola de ventas sin producto vinculado ────────────────────────────────
+
+
+class ProductLinkCandidate(BaseModel):
+    """Candidato sugerido para un grupo de la cola — misma forma que
+    `match_candidates` en `/otros` (F2-T2b), para que el frontend futuro
+    reuse el mismo componente de selección."""
+
+    id: UUID
+    matched_by: list[str]
+    name: str
+    sku: str | None
+    barcode: str | None
+
+
+class ProductLinkQueueGroup(BaseModel):
+    raw_name: str
+    count: int
+    sample_sale_ids: list[UUID]
+    candidates: list[ProductLinkCandidate]
+
+
+class ProductLinkQueueResponse(BaseModel):
+    groups: list[ProductLinkQueueGroup]
+    truncated: bool
+
+
+class LinkProductQueueRequest(BaseModel):
+    raw_name: str = Field(min_length=1, max_length=299)
+    target_product_id: UUID
+
+    @field_validator("raw_name")
+    @classmethod
+    def raw_name_not_blank(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("raw_name no puede ser sólo espacios.")
+        return cleaned
+
+
+class LinkProductQueueResponse(BaseModel):
+    linked: int
+    #: `True` si el grupo tenía MÁS ventas que las vinculadas — el escaneo
+    #: paginado se cortó por `_QUEUE_MAX_MATCHES`/`_QUEUE_MAX_SCAN` antes de
+    #: agotar el grupo entero. Repetir la llamada vincula el resto (idempotente:
+    #: las ya vinculadas no vuelven a aparecer, el flag ya no está en su
+    #: `custom_fields`).
+    truncated: bool
+
+
 # ── Expenses ──────────────────────────────────────────────────────────────────
 
 # Catálogo canónico definido en domain/expense_categories.py (single source of truth).

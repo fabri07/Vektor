@@ -80,16 +80,16 @@ F-O  «Otros» y la relectura (.1 y .2)                                ✅ entre
 F-A  nombre original + preservación de edición                       ◐ sólo la preservación al cambiar de sección (60d400f8)
 F-B  claridad visual + extracción del monolito                       ◐ TargetSelect/MappingOriginHint (2cbbd0d1) + fuera el % (4a0f2d8d)
 ─── reordenado el 2026-08-14 tras la prueba de ASTERIA en producción ───
-Paso 0 medir (read-only) — COMPUERTA de toda limpieza y todo backfill
-F-R  la relectura prueba su correspondencia                          ← bloqueante
-F-S.0 catálogo↔transacciones en la MISMA carga                       ← bloqueante
-F-S  el SKU es el identificador persistente del producto
-F-CAT categorías: mapear, normalizar, inferir con evidencia, backfill
+Paso 0 medir (read-only) — COMPUERTA de toda limpieza y todo backfill      ✅ entregado (corrió contra Neon, refutó la hipótesis de «Otros»)
+F-R  la relectura prueba su correspondencia                          ✅ entregado (06e69626, e8e385aa, 84ae9223)
+F-S.0 catálogo↔transacciones en la MISMA carga                       ✅ entregado — 4 commits, ver abajo
+F-S  el SKU es el identificador persistente del producto             ← bloqueante, siguiente
+F-CAT categorías: mapear, normalizar, inferir con evidencia, backfill  ✅ entregado (e9b9df3d), adelantada — corre antes del backfill de SKU
 F-I  identidad por código: IDs de cliente/proveedor y comprobantes
 F-E  simetría cliente/proveedor — ADELANTADA (era la última)
 F-O.3 «Otros» dice por qué está cada fila
 F-O.4 una fila en blanco no es un pendiente
-F-V  lo que la pantalla ofrece tiene que existir (scroll, filtros)
+F-V  lo que la pantalla ofrece tiene que existir (scroll, filtros)    ✅ entregado (e4558d21), adelantada
 F-A/F-B  cerrar lo pendiente del panel de mapeo
 F-N  nombre y apellido en una sola columna
 F-D  ruteo cross-sección
@@ -1181,7 +1181,61 @@ explícita · los conteos por entidad cuadran antes y después.
 
 ---
 
-# F-S.0 · Catálogo y transacciones se vinculan en la MISMA carga
+# F-S.0 · Catálogo y transacciones se vinculan en la MISMA carga  ✅ ENTREGADO (2026-08-14)
+
+**Entregado en 4 commits** sobre `feat/ingestion-identity-reread-safety`, cada uno un mecanismo:
+`2191dbe5` (sku/barcode target de venta), `4063b33c` (barcode en el índice transaccional
+same-file), `936e3c9d` (alias persistido), y el de la cola de ventas sin producto (`counts` +
+warning + `GET/POST /sales/product-link-queue`). Plan ejecutable con el detalle TDD completo:
+`docs/superpowers/plans/2026-08-14-f-s0-product-link.md`.
+
+**Lo que cambió respecto del plan original, medido durante la implementación (no en el diseño):**
+- **La heurística de encabezado real es `RESOLUCION["sale"]`, no `_HEURISTICS`.** El reconocedor
+  F-M (`read_header`/`analyze_header`) es la capa PRIMARIA que usa `suggest_mappings` en
+  producción; `_HEURISTICS`/`_heuristic_match` es sólo el fallback fuzzy y, medido con grep, ni
+  siquiera lo llama código de producción — sólo tests directos. Se agregó a los dos por
+  completitud, pero el que importa es `RESOLUCION`.
+- **Mecanismo 2 (barcode same-file) era un gap de 3 líneas, no una fase nueva.** F-H1 ya
+  resolvía sku/nombre same-file (`_register_product_transaction_indexes`); sólo faltaba
+  propagar barcode a los 3 call sites. Verificado además con las hojas en orden FÍSICO inverso
+  en el archivo — la garantía la da `_orden_de_pasada` (`product:0, expense:1, sale:2`), no el
+  orden del Excel.
+- **La lógica de ambigüedad del borrador de alias tenía un bug real** (encontrado en revisión,
+  no en producción): iterar `(nombre, *alias)` con `by_name[norm] = pid if norm not in by_name
+  else None` marca a un producto ambiguo CONSIGO MISMO cuando su alias normaliza igual que su
+  nombre. Corregido replicando el patrón ya probado de
+  `_register_product_transaction_indexes:1766-1769` (comparar contra el `pid` de la iteración,
+  no sólo contra "la clave ya estaba ocupada").
+- **La cola de vinculación (mecanismo 4) se endureció bastante sobre el borrador**, con la
+  guía de una revisión previa a implementar: `GET/POST /sales/product-link-queue` van
+  DECLARADAS ANTES de `GET /{sale_id}` (si no, Starlette matchea ahí y 422 en vez de 200); el
+  POST marca `has_user_edits=True` (mismo guard que el `PATCH` manual, para que F-R/F-F no pisen
+  la vinculación en una relectura); una fila de auditoría AGRUPADA por operación
+  (`SALES_PRODUCT_BULK_LINKED`, no una por venta); `trigger_score_recalculation.delay(...)`
+  (Celery, no la función síncrona); `ensure_tenant_not_under_maintenance` +
+  `maintenance_lock_service.acquire_write_lock_shared` (muta `Product.custom_fields`, mismo
+  chokepoint que el resto del catálogo); escaneo paginado por `id` con dos topes independientes
+  (filas que califican vs. filas escaneadas) que reportan `truncated` en vez de cortar en
+  silencio; candidatos sugeridos por grupo (misma forma `{id, matched_by, name, sku, barcode}`
+  que `match_candidates` de "Otros", sin reusar el motor privado de identidad del import).
+- **El warning del confirm no promete una pantalla que no existe todavía**: "no encontraron su
+  producto... quedaron pendientes de completar", sin mencionar una acción/cola clickeable —
+  el frontend de la cola queda fuera de este alcance (ver abajo).
+
+**Fuera de alcance, a propósito:** frontend de la cola (mismo patrón de secuenciación que F-O.3
+en este programa: backend completo primero, ver ese apartado). El endpoint existe y está
+testeado; la pantalla que lo consuma es un fast-follow.
+
+**Deuda declarada, encontrada por `/code-review high` sobre el diff final:** el aprendizaje de
+alias (mecanismo 3) sólo se escribe desde `POST /sales/product-link-queue/link` — la rama
+"vincular a producto existente" de `others.py::reclassify_record` (F2-T2b, la misma acción para
+filas de "Otros") es estructuralmente idéntica pero NO llama a `add_alias`. Un tenant que
+resuelve sus ambigüedades desde "Otros" en vez de la cola nueva no se beneficia: el mismo nombre
+crudo va a fallar de nuevo en la próxima importación. No se resolvió en esta entrega porque
+`others.py` no tiene ahí un string de "nombre crudo" limpio como el que sí tiene la cola —
+`UnclassifiedRecord.row_data` es la fila cruda completa, no un campo extraído — y forzar la
+extracción sin plan propio bajo presión de tiempo era más riesgo que beneficio. Candidato a
+fase corta propia antes de F-S.
 
 **El síntoma.** En `/sales` de ASTERIA la columna Producto está casi toda en «—»: de ocho ventas
 visibles, dos linkearon. Y el catálogo tiene 398 productos.

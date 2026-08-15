@@ -818,6 +818,15 @@ RISK_REF_KEY = "__risk_ref__"
 # clasificado se preserva para siempre— que es seguro, no silencioso.
 ROW_REF_KEY = "__row_ref__"
 
+# F-S.0 mecanismo 4: nombre CRUDO que el archivo usó para una venta que
+# declaró producto y no resolvió contra el catálogo — nunca se inventa un
+# match, se conserva para que la cola de vinculación
+# (``POST /sales/product-link-queue/link``) lo pueda ofrecer agrupado. Público
+# (sin prefijo ``_``) porque `sales.py` lo lee/limpia — una clave declarada en
+# dos lugares distintos es exactamente el tipo de divergencia silenciosa que
+# ya rompió el mapeo de columnas una vez (ver F10, incidente ASTERIA).
+UNLINKED_PRODUCT_NAME_FIELD = "_unlinked_product_name_raw"
+
 _ROW_FINGERPRINT_CONFLICT = unique_violation_classifier(
     "fingerprint",
     constraint="uq_operation_fingerprints_tenant_fp",
@@ -3909,15 +3918,28 @@ async def _insert_confirmed_data_impl(
                         source_upload_id=uploaded_file_id,
                     )
                     # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
+                    _venta_nombre_raw = row.get(nombre_col) if nombre_col else None
                     entry.product_id = _resolve_product(
                         _by_sku,
                         _by_name,
-                        row.get(nombre_col) if nombre_col else None,
+                        _venta_nombre_raw,
                         row.get(sku_col) if sku_col else None,
                         _by_token,
                         by_barcode=_identity_indexes.by_barcode,
                         barcode=row.get(barcode_col) if barcode_col else None,
                     )
+                    # F-S.0: mismo criterio que el path multi-hoja (`_add_sale`)
+                    # — declarado por NOMBRE, SKU o barcode, no sólo nombre.
+                    _venta_declarado_raw = (
+                        _clean_str(_venta_nombre_raw, 299)
+                        or _clean_str(row.get(sku_col) if sku_col else None, 299)
+                        or _clean_str(row.get(barcode_col) if barcode_col else None, 299)
+                    )
+                    if entry.product_id is None and _venta_declarado_raw:
+                        counts["ventas_sin_producto"] = (
+                            counts.get("ventas_sin_producto", 0) + 1
+                        )
+                        cf[UNLINKED_PRODUCT_NAME_FIELD] = _venta_declarado_raw
                     # F-H3.b: la venta entra a la proyección, que es el impacto que
                     # se REPORTA. El descuento lo aplica la segunda pasada del
                     # confirm (F-F.3), no esta línea. Una fila sin fecha ya se fue a
@@ -5313,10 +5335,24 @@ async def _insert_multisheet_data(
         _registrar_monto_derivado(cf, _linea, counts)
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         _venta_producto = _venta_nombre_producto(row, cols)
+        _venta_producto_raw = _clean_str(_venta_producto, 299)
         entry.product_id = _venta_producto_id(row, cols)
+        # F-S.0: la fila DECLARÓ identidad de producto (nombre, sku O barcode
+        # — no sólo nombre: una hoja puede mapear únicamente sku/barcode, sin
+        # columna de nombre) y no resolvió. Se cuenta y se conserva el dato
+        # crudo (el que SÍ vino) para la cola de vinculación
+        # (`POST /sales/product-link-queue/link`). Distinto de una venta que
+        # nunca declaró nada (venta de mostrador): esa no entra acá, no hay
+        # nada que ofrecer para vincular — no-invention rule.
+        _venta_declarado_raw = _venta_producto_raw or _clean_str(
+            _val(row, cols.get("sku"), _SKU_COLS), 299
+        ) or _clean_str(_val(row, cols.get("barcode"), _BARCODE_COLS), 299)
+        if entry.product_id is None and _venta_declarado_raw:
+            counts["ventas_sin_producto"] = counts.get("ventas_sin_producto", 0) + 1
+            cf[UNLINKED_PRODUCT_NAME_FIELD] = _venta_declarado_raw
         # F-H2: la venta se vincula igual; lo que NO se afirma es que hubiera
         # stock. Vincular es identidad, no disponibilidad.
-        _evaluar_historial(entry.product_id, tx_date, _clean_str(_venta_producto, 299))
+        _evaluar_historial(entry.product_id, tx_date, _venta_producto_raw)
         # F-H3.b: la venta entra a la proyección, que es el impacto que se
         # REPORTA; el descuento lo aplica la segunda pasada del confirm (F-F.3).
         # Si el producto no está registrado todavía es porque nada de este archivo

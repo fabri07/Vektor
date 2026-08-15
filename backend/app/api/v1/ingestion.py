@@ -3153,6 +3153,16 @@ async def confirm_file(
             f"{counts['sin_producto']} compra(s) sin producto detallado crearon un producto "
             "incompleto. Completá precio de venta y datos en Productos."
         )
+    # F-S.0: no promete una pantalla que todavía no existe — el backend de la
+    # cola de vinculación (GET/POST /sales/product-link-queue) está listo,
+    # pero sin frontend propio el aviso no puede decir "resolvelas desde la
+    # cola" como si hubiera un botón esperando. Se avisa el hecho, sin la
+    # acción.
+    if counts.get("ventas_sin_producto"):
+        warnings.append(
+            f"{counts['ventas_sin_producto']} venta(s) no encontraron su producto en el "
+            "catálogo y quedaron pendientes de completar."
+        )
     # F7d: taxonomía reconciliada de resolución de referencia. "anonimo" (venta de
     # mostrador / compra sin proveedor informado) NUNCA avisa — es el caso normal.
     # Solo "no_resuelto" (trajo una referencia que no matcheó contra ningún

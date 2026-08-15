@@ -3688,3 +3688,74 @@ class TestInventoryReplayEndpoint:
         assert [(p["saldo_inicial"], p["saldo_final"]) for p in data["impacto"]] == [(10, 6)]
         await db_session.refresh(producto)
         assert producto.stock_units == 10
+
+
+async def test_confirm_avisa_ventas_sin_producto_sin_prometer_una_pantalla_inexistente(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    mock_score_trigger: unittest.mock.MagicMock,
+) -> None:
+    """F-S.0 mecanismo 4: una venta que declaró producto y no resolvió avisa
+    en el confirm — con texto que no implica una acción todavía inaccesible
+    (el backend de la cola existe, el frontend no)."""
+    record = UploadedFile(
+        tenant_id=sample_tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="ventas.xlsx",
+        s3_key="uploads/test/uuid/ventas.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=512,
+        purpose="ventas",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        parsed_summary_json={
+            "confidence": "HIGH",
+            "file_type": "spreadsheet",
+            "inferred_type": "ventas",
+            "has_venta": True,
+            "has_fecha": True,
+            "row_count": 1,
+            "ventas_detectadas": [
+                {
+                    "fecha": "2026-08-01",
+                    "monto": "1500",
+                    "producto": "Producto que no está en ningún catálogo",
+                }
+            ],
+        },
+    )
+    db_session.add(record)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/v1/ingestion/files/{record.id}/confirm",
+        headers=auth_headers,
+        json={
+            "confirmed_fields": {"ventas": True},
+            "column_mappings": [
+                {"source_column": "fecha", "target_field": "transaction_date"},
+                {"source_column": "monto", "target_field": "amount"},
+                {"source_column": "producto", "target_field": "product_name"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    warning = next((w for w in body["warnings"] if "venta" in w.lower()), None)
+    assert warning is not None, body["warnings"]
+    assert "1 venta" in warning
+    assert "catálogo" in warning
+    # No promete un botón/pantalla que hoy no existe.
+    assert "cola" not in warning.lower()
+
+    sale = (
+        await db_session.execute(
+            select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+        )
+    ).scalar_one()
+    assert sale.product_id is None
+    assert sale.custom_fields.get("_unlinked_product_name_raw") == (
+        "Producto que no está en ningún catálogo"
+    )
