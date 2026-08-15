@@ -83,7 +83,7 @@ F-B  claridad visual + extracción del monolito                       ◐ Target
 Paso 0 medir (read-only) — COMPUERTA de toda limpieza y todo backfill      ✅ entregado (corrió contra Neon, refutó la hipótesis de «Otros»)
 F-R  la relectura prueba su correspondencia                          ✅ entregado (06e69626, e8e385aa, 84ae9223)
 F-S.0 catálogo↔transacciones en la MISMA carga                       ✅ entregado — 4 commits, ver abajo
-F-ID identidad transversal en 3 capas (reemplaza F-S, absorbe media F-I) ◐ ID.0-ID.7 entregados (schema+resolvedor+8 sitios de alta+backfill+bootstrap+wireo ingesta); falta ID.8 dedup/ID.9 frontend/ID.10 agentes
+F-ID identidad transversal en 3 capas (reemplaza F-S, absorbe media F-I) ✅ entregado — ID.0-ID.10 completos (schema+resolvedor+8 sitios de alta+backfill+bootstrap+wireo ingesta+dedup transfiere identificadores+código visible en frontend+helper de display para agentes)
 F-CAT categorías: mapear, normalizar, inferir con evidencia, backfill  ✅ entregado (e9b9df3d), adelantada — corre antes del backfill de código
 F-I  resto: comprobantes + wireo del resolvedor (recortada, ver F-ID.7)
 F-E  simetría cliente/proveedor — ADELANTADA (era la última)
@@ -1302,6 +1302,24 @@ F-ID, no una fase aparte.
 negocio se pisa · un identificador externo conserva quién lo trajo y cuándo · dos identificadores
 fuertes contradictorios en la misma fila dan `conflict`, nunca gana el primero · fusionar transfiere
 identificadores, nunca los pierde · re-importar el mismo archivo no duplica maestros.
+
+**Entregado completo (ID.0–ID.10, 2026-08-15):**
+- **ID.8** (`5d4eaccd`) — `product_dedup_service._apply_one_group` re-apunta las filas vigentes de
+  `entity_identifiers` del duplicado al canónico (paso 4b, antes de desactivar). Deuda declarada:
+  `revert_dedup_run` (T6) no revierte la transferencia — reactivar un duplicado fusionado no le
+  devuelve sus identificadores; benigno (no rompe el revert, sólo no lo completa), cubierto por test.
+- **ID.9** (`7f82e8cb`) — `vektor_code` visible en `/customers`+`/suppliers` (columna oculta por
+  default + ficha de detalle), mismo patrón que el SKU de producto. Búsqueda por código exacto salió
+  gratis: `SmartTable` ya busca sobre columnas ocultas.
+- **ID.10** (`dc0a9f90`) — `get_entity_ref()` (`agents/shared/entity_ref.py`), helper de sólo lectura
+  `{id, code, display_name}` para que un agente con un UUID ya resuelto lo muestre con su código
+  ("Juan Pérez (CLI-0042)"). No wireado a ningún agente todavía a propósito — ninguno tiene hoy un
+  caso de uso concreto (decisión ya tomada arriba).
+- Regresión detectada al correr la suite completa tras cerrar ID.8-10 (no causada por ellos, sino por
+  ID.5): `test_catalogo_sin_marca_persiste_custom_fields_vacio_no_null` asertaba `custom_fields == {}`
+  literal — dejó de ser cierto porque un producto auto-numerado ahora trae
+  `custom_fields["_sku_origin"]="vektor"`. Fix en `492f3d19`: el test ajustó la aserción a la forma
+  correcta (sigue cubriendo el bug real, `null` vs dict) y se renombró.
 
 ---
 
