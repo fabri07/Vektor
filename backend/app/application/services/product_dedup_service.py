@@ -1231,6 +1231,75 @@ def _group_source_items(items: list[Any]) -> dict[str, dict[str, Any]]:
     return grouped
 
 
+async def _transfer_identifiers_to_canonical(
+    session: AsyncSession, tenant_id: uuid.UUID, canonical_id: uuid.UUID, duplicate_id: uuid.UUID
+) -> None:
+    """F-ID.8 — re-apunta las filas VIGENTES de ``entity_identifiers`` del
+    duplicado al canónico, para que un código que ya identificaba al
+    duplicado (su propio ``vektor_code``, o un ``business_code`` capturado
+    por F-ID.4/F-ID.7) siga resolviendo tras la fusión.
+
+    Si el canónico YA tiene una fila vigente con el MISMO
+    ``(identifier_type, namespace, normalized_value)``, re-apuntar chocaría
+    contra ``uq_entity_identifiers_active_value`` — en ese caso la fila del
+    duplicado se REVOCA en vez de re-apuntarse: el canónico ya tiene una
+    fila equivalente viva, no hace falta una segunda. Nunca se borra
+    (insert-only, ver el docstring del modelo) — sólo deja de estar vigente.
+    Con el índice único de F-ID vigente, dos entidades DISTINTAS nunca
+    pueden tener el mismo valor activo simultáneamente por ningún camino de
+    escritura sancionado (``record_identifier`` lo impide) — esta rama es,
+    hoy, defensiva: sólo se alcanzaría si un grupo de fusión tiene 3+
+    miembros y dos duplicados del MISMO grupo comparten valor (el primero se
+    transfiere al canónico dentro de ESTA misma pasada; el segundo choca
+    contra esa transferencia recién hecha, no contra un estado previo).
+    Barata de mantener, no se retira aunque no tenga un caso de test
+    realista con los datos de hoy.
+
+    **Fuera de alcance a propósito, deuda declarada:** esta transferencia NO
+    participa del revert de T6 (``_revert_one_group``) — revertir un dedup
+    reactiva el producto duplicado pero sus identificadores quedan apuntando
+    al canónico. Es un fallo BENIGNO (un código deja de resolver hasta
+    corregirse a mano), no una pérdida de datos ni de stock/plata — motivo
+    suficiente para no arriesgar la lógica de colisión de `_revert_one_group`
+    (ya extremadamente ajustada, con su propio historial de incidentes) por
+    esto en la misma entrega.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from app.persistence.models.entity_identifier import EntityIdentifier  # noqa: PLC0415
+
+    rows = (
+        await session.execute(
+            select(EntityIdentifier).where(
+                EntityIdentifier.tenant_id == tenant_id,
+                EntityIdentifier.entity_type == "product",
+                EntityIdentifier.entity_id == duplicate_id,
+                EntityIdentifier.revoked_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    for row in rows:
+        canonical_already_has_it = (
+            await session.execute(
+                select(EntityIdentifier.id).where(
+                    EntityIdentifier.tenant_id == tenant_id,
+                    EntityIdentifier.entity_type == "product",
+                    EntityIdentifier.entity_id == canonical_id,
+                    EntityIdentifier.identifier_type == row.identifier_type,
+                    EntityIdentifier.namespace == row.namespace,
+                    EntityIdentifier.normalized_value == row.normalized_value,
+                    EntityIdentifier.revoked_at.is_(None),
+                )
+            )
+        ).first()
+        if canonical_already_has_it is not None:
+            row.revoked_at = func.now()
+            row.is_primary = False
+        else:
+            row.entity_id = canonical_id
+            row.is_primary = False
+
+
 async def _apply_one_group(
     session: AsyncSession,
     run_id: uuid.UUID,
@@ -1521,6 +1590,16 @@ async def _apply_one_group(
             )
         )
         await session.delete(dbal)
+
+    # 4b) F-ID.8 — TRANSFER_IDENTIFIERS: los códigos externos del duplicado
+    # (vektor_code propio, business_code de entity_identifiers) no pueden
+    # perderse al fusionar — si el archivo que lo trajo se vuelve a importar,
+    # tiene que seguir resolviendo, ahora contra el canónico. Puramente
+    # ADITIVO (no toca stock/FKs/fingerprint, no puede hacer fallar la
+    # validación de arriba) — ver `_transfer_identifiers_to_canonical` por
+    # qué NO participa del revert de T6 (deuda declarada).
+    for d in ordered_dups:
+        await _transfer_identifiers_to_canonical(session, tenant_id, canonical_id, d)
 
     # 5) DEACTIVATE_DUPLICATE — soft-delete con reloj de la DB. NO se pone stock en 0
     # (queda como estaba; la reversa reactiva y resta el delta del canónico).
