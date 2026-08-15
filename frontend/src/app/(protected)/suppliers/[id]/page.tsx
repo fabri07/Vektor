@@ -108,6 +108,10 @@ export default function SupplierDetailPage() {
       {/* Ficha de contacto */}
       <section className="rounded-lg border border-vk-border-w bg-vk-surface-w p-4">
         <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
+          <div>
+            <p className="text-xs text-vk-text-muted">Código</p>
+            <p className="text-vk-text-primary">{supplier.vektor_code?.trim() || "—"}</p>
+          </div>
           {supplier.last_name?.trim() ? (
             <div>
               <p className="text-xs text-vk-text-muted">Apellido</p>

@@ -208,6 +208,10 @@ export default function CustomerDetailPage() {
       <section className="rounded-lg border border-vk-border-w bg-vk-surface-w p-4">
         <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
           <div>
+            <p className="text-xs text-vk-text-muted">Código</p>
+            <p className="text-vk-text-primary">{customer.vektor_code?.trim() || "—"}</p>
+          </div>
+          <div>
             <p className="text-xs text-vk-text-muted">Tipo</p>
             <p className="text-vk-text-primary">{customerTypeLabel(customer.customer_type)}</p>
           </div>

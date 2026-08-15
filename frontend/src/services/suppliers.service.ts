@@ -21,6 +21,8 @@ export interface SupplierResponse {
   id: string;
   tenant_id: string;
   name: string;
+  /** Código Véktor permanente (PRV-0001), asignado una sola vez por F-ID. */
+  vektor_code: string | null;
   last_name: string | null;
   cuil: string | null;
   cuit: string | null;
