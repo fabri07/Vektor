@@ -83,9 +83,9 @@ F-B  claridad visual + extracción del monolito                       ◐ Target
 Paso 0 medir (read-only) — COMPUERTA de toda limpieza y todo backfill      ✅ entregado (corrió contra Neon, refutó la hipótesis de «Otros»)
 F-R  la relectura prueba su correspondencia                          ✅ entregado (06e69626, e8e385aa, 84ae9223)
 F-S.0 catálogo↔transacciones en la MISMA carga                       ✅ entregado — 4 commits, ver abajo
-F-S  el SKU es el identificador persistente del producto             ← bloqueante, siguiente
-F-CAT categorías: mapear, normalizar, inferir con evidencia, backfill  ✅ entregado (e9b9df3d), adelantada — corre antes del backfill de SKU
-F-I  identidad por código: IDs de cliente/proveedor y comprobantes
+F-ID identidad transversal en 3 capas (reemplaza F-S, absorbe media F-I) ← bloqueante, siguiente
+F-CAT categorías: mapear, normalizar, inferir con evidencia, backfill  ✅ entregado (e9b9df3d), adelantada — corre antes del backfill de código
+F-I  resto: comprobantes + wireo del resolvedor (recortada, ver F-ID.7)
 F-E  simetría cliente/proveedor — ADELANTADA (era la última)
 F-O.3 «Otros» dice por qué está cada fila
 F-O.4 una fila en blanco no es un pendiente
@@ -1269,56 +1269,39 @@ producto, contada y visible en la cola. Misma regla que las fechas (F6-A2), las 
 
 ---
 
-# F-S · El SKU es el identificador persistente del producto
+# F-ID · Identidad transversal en tres capas (Producto / Cliente / Proveedor)
 
-**Decisión de producto del usuario (2026-08-14):** el SKU funciona como el id de producto para
-vincular las tablas de Véktor. Si el negocio ya tiene SKU, se usa el suyo; si no —el caso de
-ASTERIA—, Véktor lo genera. **Sin migración:** usa `products.sku` + `uq_products_tenant_sku_norm`.
+**Reemplaza a F-S y a la mitad de F-I** (2026-08-14, ampliación pedida por el usuario tras revisar
+un primer borrador de F-S en aislamiento). El texto completo — tres capas, esquema, resolvedor,
+tareas ID.0–ID.11 — vive en `docs/superpowers/plans/2026-08-15-f-id-entity-identity.md` (persistido
+apenas se dejó de reescribir sólo en chat, ver `[[feedback_persist_plans_to_file]]`). Resumen:
 
-**Formato elegido:** `PREFIJO-NNNN` con prefijo de categoría (`TEX-0001`), correlativo por
-`(tenant, prefijo)`. Sin categoría → `GEN`.
+**Tres capas, no una.** (1) UUID interno (`Product.id`/`Customer.id`/`Supplier.id`) — ya existe, ya
+es la FK de todo, no se toca. (2) Código Véktor permanente, uno por entidad (`PREFIJO-NNNN`,
+`products.sku` para producto —decisión ya cerrada, sin migración—, columna nueva `vektor_code` para
+cliente/proveedor). (3) `entity_identifiers` — tabla transversal, una entidad puede tener VARIOS
+códigos externos de fuentes distintas (namespace `business`/`vektor`/`supplier:<id>`), con
+procedencia, sin colisionar entre fuentes que reusan el mismo valor crudo. La razón de la capa 3:
+generar sólo `CLI-0001` no ayuda a vincular un archivo que nunca conoció ese código — hace falta
+recordar también los códigos que SÍ trae cada archivo.
 
-**Invariantes:**
-1. **Un SKU que trajo el negocio no se pisa nunca.** El generado se marca
-   `custom_fields["_sku_origin"] = "vektor"` (mismo patrón que `_vektor_costo_base`, `_sentinel`,
-   `_brand_collapsed`) y sí puede ser reemplazado cuando un archivo posterior traiga el código real.
-   Sin la marca no se puede distinguir "código del negocio" de "código nuestro".
-2. **El prefijo se estampa una vez y no se reescribe solo.** Completar la categoría después **no**
-   renumera: renumerar rompería cualquier planilla o export que ya use ese código. Consecuencia
-   directa: **F-CAT corre antes del backfill de SKU**, porque cada categoría resuelta antes de
-   numerar es un `GEN` menos.
-3. **Prefijos curados a mano por vertical**, con test que exige unicidad dentro del vertical y
-   cobertura total del catálogo: agregar una categoría sin prefijo **falla el CI**, no cae a `GEN`
-   en silencio. Hay una colisión a resolver a mano: `PRENDAS_SUPERIORES` / `PRENDAS_INFERIORES`
-   (indumentaria). Categoría custom del tenant y producto sin categoría → `GEN`.
-4. **Dos productos nunca comparten SKU.** La garantía dura es el índice único parcial; ante
-   `IntegrityError` se reintenta con el siguiente número, nunca se degrada a "sin SKU".
+**No-reciclo estructural:** secuencia atómica (`entity_code_sequences`, `UPDATE...RETURNING`, nunca
+un `MAX`+reintento) + fila permanente insert-only en `entity_identifiers` (nunca se borra, ni al
+desactivar ni al fusionar la entidad).
 
-**S.1 — consolidar antes de numerar, sin código nuevo.** El motor de dedup ya existe entero
-(`product_dedup_service.py`: plan → apply → revert, lease observable, fingerprint por grupo,
-auditoría; CLI `scripts/dedupe_products_by_name.py`) y su regla ya es la elegida: fusiona por barcode
-(fuerte) y por SKU (medio), y **nombre+marca va a revisión, no fusiona** (`build_groups`). No se
-escribe un segundo motor ni se toca `build_edges`. Lo que queda en revisión recibe su SKU igual, como
-producto propio.
+**Backfill nunca saltea por ambigüedad:** toda entidad real recibe código, ambigua o no —dos
+proveedores de igual nombre reciben `PRV-0012`/`PRV-0013` cada uno— y la detección de posibles
+duplicados es un paso aparte que marca para revisión humana, nunca fusiona sola.
 
-**S.2 — asignar.** `app/application/services/sku_service.py`: `sku_prefix_for()` puro +
-`assign_sku_if_missing()` con caché de correlativo por corrida (un `MAX` por prefijo, no un `SELECT`
-por producto — el catálogo real tiene 1.258 filas) y reintento ante colisión. Backfill
-`scripts/backfill_product_sku.py`, dry-run/`--apply`, `--tenant`/`--all-active`, auditado,
-idempotente; aborta si `count_active_products_missing_identity() > 0` (misma guarda que el dedup).
+**Absorbe la mitad de F-I** (la migración `external_code` que F-I proponía queda reemplazada por
+`entity_identifiers`) y **deja el resto de F-I intacto, ahora más chico**: la jerarquía del
+resolvedor y su wireo en `_classify_row_reference`/`_resolve_product_identity` son la tarea ID.7 de
+F-ID, no una fase aparte.
 
-**S.3 — que nazcan con SKU.** Cubrir los sitios de alta (`api/v1/products.py`, `api/v1/others.py`,
-los tres del importador vía `add_product_or_reuse`, `purchase_service`, `remito_extraction_service`,
-`pending_action_service`) con un test que falle si aparece uno nuevo sin cubrir. **No sirve un
-`before_insert`** en el modelo: necesita consultar el correlativo y la sesión es async.
-
-**S.4 — exponerlo.** Columna SKU visible por default en `/products` (hoy `defaultVisible: false`), en
-el CSV y en la ficha; y documentar en la pantalla de carga el círculo **exportar → pegar la columna
-en la planilla → importar**, que a partir de acá vincula exacto.
-
-**Aceptación:** ningún SKU del negocio pisado · cero SKU repetidos por tenant · el backfill corrido
-dos veces no cambia nada · un producto nuevo por cualquier vía nace con SKU · export → re-import
-vincula por código.
+**Aceptación:** toda entidad real tiene código Véktor y nunca se recicla · ningún código del
+negocio se pisa · un identificador externo conserva quién lo trajo y cuándo · dos identificadores
+fuertes contradictorios en la misma fila dan `conflict`, nunca gana el primero · fusionar transfiere
+identificadores, nunca los pierde · re-importar el mismo archivo no duplica maestros.
 
 ---
 
@@ -1434,43 +1417,21 @@ identifica las categorías es F-CAT.
 
 ---
 
-# F-I · Identidad por código: IDs y comprobantes
+# F-I · Identidad por código: comprobantes y wireo del resolvedor (recortada, ver F-ID)
 
-**El síntoma que la motiva.** En el archivo real, la columna `ID` de Proveedores y de Clientes
-termina en `custom_field:id_proveedor` con el cartel «esta hoja no tiene un campo para eso
-(codigo)». Véktor entiende el concepto y no tiene dónde ponerlo. Mientras tanto, «Almacén Doña
-Rosa», «Almacen Doña Rosa» y «ALMACEN D ROSA» —las tres variantes que el propio archivo declara
-en la columna *Variantes de nombre vistas en ventas*— son tres clientes distintos.
+**Lo que F-I ya no hace** (absorbido por F-ID, arriba): la migración de columna de código externo.
+`entity_identifiers` la reemplaza — soporta VARIOS códigos por entidad con procedencia, no uno.
 
-**Migración aditiva** (la excepción declarada arriba): columna `external_code VARCHAR(64) NULL`
-en `customers` y `suppliers`, con índice único parcial por `(tenant_id, external_code)` donde no es
-null. Verificado: hoy no existe ninguna columna equivalente en esos dos modelos.
-
-**`products` queda afuera** (corregido el 2026-08-14): ya tiene `sku` con índice único parcial por
-tenant y es el tier 1 de su resolvedor. Llenarlo es F-S; usarlo para vincular las transacciones de la
-misma carga es F-S.0. Dos columnas de código para la misma entidad serían dos ejes de identidad sin
-árbitro.
-
-**Jerarquía del resolvedor de maestros:** `código externo → documento/CUIT → nombre
-normalizado`. Un código siempre le gana a un nombre parecido. Espeja lo que `_resolve_product`
-ya hace con `barcode → sku → nombre+marca` (F2): la regla no es nueva, faltaba la clave.
-
-**Vínculo entre hojas**, que es lo que resuelve el archivo real: una venta cuya columna Cliente
-trae `CLI-01` encuentra al cliente que la hoja Clientes declaró con ese ID. El orden
-maestro→transacción ya existe (F7c); lo que falta es la clave por la cual buscar. Lo mismo con
-el Nº de comprobante: las líneas que lo comparten son **una** compra — el agrupamiento ya existe
-en F-H6 y se reusa, no se reescribe.
-
-**Targets nuevos** en `GET /ingestion/field-catalog` para las tres entidades, más el target de
-referencia cruzada del lado de la transacción. Sin eso la columna sigue cayendo a campo propio.
-
-**Dos códigos iguales dentro del mismo archivo → 422 legible**, nunca last-wins. Misma regla que
-`SINGLE_VALUE_FIELDS`: si el archivo se contradice, lo dice, no elige por orden de fila.
-
-**Límite honesto:** un código es identidad **dentro de un tenant**. `CLI-01` de dos negocios
-distintos son dos clientes distintos, y por eso el índice lleva `tenant_id`. Un archivo sin
-columna de ID sigue resolviendo por documento y nombre como hoy — F-I no vuelve obligatorio
-tener códigos.
+**Lo que sigue siendo trabajo de F-I** (tarea ID.7 de F-ID): la jerarquía del resolvedor de
+maestros `código externo → documento/CUIT → nombre normalizado` — espeja lo que `_resolve_product`
+ya hace con `barcode → sku → nombre+marca` (F2) — y su wireo en `_classify_row_reference` para que
+una venta cuya columna Cliente trae `CLI-01` encuentre al cliente que la hoja Clientes declaró con
+ese ID (el orden maestro→transacción ya existe, F7c). El Nº de comprobante para agrupar líneas de
+una misma compra reusa F-H6, no se reescribe. Targets nuevos en `GET /ingestion/field-catalog` para
+las tres entidades. Dos códigos iguales dentro del mismo archivo → 422 legible, nunca last-wins
+(misma regla que `SINGLE_VALUE_FIELDS`). Un código es identidad **dentro de un tenant** — un
+archivo sin columna de ID sigue resolviendo por documento y nombre como hoy, F-I no vuelve
+obligatorio tener códigos.
 
 **Aceptación:** re-importar el mismo archivo no duplica maestros · una venta con código resuelve
 al cliente correcto aunque el nombre venga escrito distinto · el código se ve en la ficha ·
@@ -1702,9 +1663,11 @@ binario, para poder leer qué contiene sin abrirlo con Excel.
 | F-S.0 | catálogo y ventas en la MISMA carga vinculan por el código que trae el archivo |
 | F-S.0 | vincular un nombre a mano una vez resuelve todas las ventas que lo repiten (alias persistido) |
 | F-S.0 | una venta sin producto resoluble queda contada y visible, nunca linkeada por adivinanza |
-| F-S | ningún SKU traído por el negocio se pisa; cero SKU repetidos por tenant |
-| F-S | el backfill corrido dos veces no cambia nada; un producto nuevo por cualquier vía nace con SKU |
-| F-S | agregar una categoría al catálogo sin prefijo de SKU **rompe el CI** (no cae a `GEN` en silencio) |
+| F-ID | ningún código traído por el negocio se pisa; cero códigos repetidos por tenant, nunca reciclados |
+| F-ID | el backfill corrido dos veces no cambia nada; una entidad nueva por cualquier vía nace con código |
+| F-ID | agregar una categoría al catálogo sin prefijo de SKU **rompe el CI** (no cae a `GEN` en silencio) |
+| F-ID | dos identificadores fuertes contradictorios en la misma fila dan `conflict`, nunca gana el primero |
+| F-ID | fusionar dos entidades transfiere sus identificadores al sobreviviente, nunca los pierde |
 | F-CAT | un nombre que matchea dos categorías **no** se infiere; el informe dice cuántos quedaron sin evidencia |
 | F-CAT | un producto creado desde una línea de compra con categoría en la fila la conserva |
 | F-O.3 | cada fila de «Otros» dice su motivo y su archivo; el resumen agrupa 46 páginas en una lista de motivos |
