@@ -142,3 +142,60 @@ class TestBuildExistingIndex:
             entities, to_record=lambda e: {"cuit": e.cuit}, doc_fields=("cuit",)
         )
         assert index[IdentityKey("doc", "20123456786")] is entities[0]
+
+
+class TestCodeField:
+    """F-ID: 'code' es el tier de MÁS prioridad — un código externo/Véktor le
+    gana a documento, email y teléfono."""
+
+    def test_code_field_produces_code_key_first(self) -> None:
+        record = {"vektor_code": "CLI-0001", "cuit": "20-12345678-6"}
+        keys = record_keys(record, doc_fields=("cuit",), code_field="vektor_code")
+        assert [k.type for k in keys] == ["code", "doc"]
+        assert keys[0].value == "cli-0001"
+
+    def test_code_field_ausente_no_agrega_clave(self) -> None:
+        keys = record_keys(
+            {"cuit": "20-12345678-6"}, doc_fields=("cuit",), code_field="vektor_code"
+        )
+        assert [k.type for k in keys] == ["doc"]
+
+    def test_code_gana_sobre_documento_en_match(self) -> None:
+        keys = [IdentityKey("code", "cli-0001"), IdentityKey("doc", "30111222")]
+        index = {
+            IdentityKey("code", "cli-0001"): _ENTITY_A,
+            IdentityKey("doc", "30111222"): _ENTITY_B,
+        }
+        result = resolve_identity(keys, index)
+        # Dos entidades DISTINTAS matcheadas por claves distintas → conflict,
+        # nunca "gana el primero en la lista" en silencio.
+        assert result.outcome == "conflict"
+        assert set(result.conflicting_entities) == {_ENTITY_A, _ENTITY_B}
+
+    def test_code_gana_sobre_documento_cuando_apuntan_a_la_misma_entidad(self) -> None:
+        keys = [IdentityKey("code", "cli-0001"), IdentityKey("doc", "30111222")]
+        index = {
+            IdentityKey("code", "cli-0001"): _ENTITY_A,
+            IdentityKey("doc", "30111222"): _ENTITY_A,
+        }
+        result = resolve_identity(keys, index)
+        assert result.outcome == "matched"
+        assert result.entity is _ENTITY_A
+        assert result.matched_key == IdentityKey("code", "cli-0001")
+
+    def test_build_existing_index_con_code_field(self) -> None:
+        class _Fake:
+            def __init__(self, vektor_code: str) -> None:
+                self.vektor_code = vektor_code
+                self.cuit = None
+                self.email = None
+                self.phone = None
+
+        entities = [_Fake("CLI-0001")]
+        index = build_existing_index(
+            entities,
+            to_record=lambda e: {"vektor_code": e.vektor_code},
+            doc_fields=(),
+            code_field="vektor_code",
+        )
+        assert index[IdentityKey("code", "cli-0001")] is entities[0]

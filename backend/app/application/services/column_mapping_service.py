@@ -52,6 +52,10 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "customer_email": "Cliente — Email",
         "customer_phone": "Cliente — Teléfono",
         "customer_name": "Cliente — Nombre",
+        # F-ID.7: código externo del cliente (de OTRO sistema del negocio, o el
+        # código Véktor si el archivo es una re-importación del propio catálogo
+        # exportado) — el resolvedor lo prioriza sobre DNI/CUIT (F-ID, capa 3).
+        "customer_business_code": "Cliente — Código externo",
         # F-S.0: identifican el producto de ESTA venta, igual que ya hacen en
         # 'expense' (abajo). El motor de resolución ya los lee
         # (`_venta_producto_id`, `_resolve_product`) — faltaba el target para
@@ -109,6 +113,8 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "supplier_cuil": "Proveedor — CUIL",
         "supplier_email": "Proveedor — Email",
         "supplier_phone": "Proveedor — Teléfono",
+        # F-ID.7: mismo criterio que customer_business_code arriba.
+        "supplier_business_code": "Proveedor — Código externo",
     },
     # F7a: maestro de CLIENTES — campos que persiste el modelo Customer.
     "customer": {
@@ -1238,10 +1244,12 @@ MASTER_REFERENCE_TARGETS: frozenset[str] = frozenset(
         "customer_cuit",
         "customer_email",
         "customer_phone",
+        "customer_business_code",
         "supplier_name",
         "supplier_cuil",
         "supplier_email",
         "supplier_phone",
+        "supplier_business_code",
     }
 )
 

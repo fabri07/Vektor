@@ -24,14 +24,17 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
+from app.domain.text_norm import normalize_external_code
+
 T = TypeVar("T")
 
-KeyType = Literal["doc", "email", "phone"]
+KeyType = Literal["code", "doc", "email", "phone"]
 Outcome = Literal["matched", "conflict", "needs_review", "none"]
 
 # Prioridad de match cuando varias claves del mismo record matchean a LA MISMA
-# entidad: documento gana, después email, después teléfono.
-_KEY_PRIORITY: tuple[KeyType, ...] = ("doc", "email", "phone")
+# entidad: código externo primero (F-ID — un código es una decisión explícita,
+# nunca ambigua), después documento, después email, después teléfono.
+_KEY_PRIORITY: tuple[KeyType, ...] = ("code", "doc", "email", "phone")
 
 
 def normalize_digits(value: Any) -> str:
@@ -92,14 +95,24 @@ def record_keys(
     doc_fields: tuple[str, ...],
     email_field: str = "email",
     phone_field: str = "phone",
+    code_field: str | None = None,
 ) -> list[IdentityKey]:
     """Arma las claves candidatas de un record, EN ORDEN DE PRIORIDAD de match.
 
     ``doc_fields`` son los campos de documento del record en orden de prioridad
     (p. ej. ``("cuit", "dni")`` para cliente, ``("cuil",)`` para proveedor).
     Vacías (sin dígitos / sin email) se descartan — no entran como clave.
+
+    ``code_field`` (F-ID) — campo con el código externo/Véktor de la entidad, si
+    el record lo trae. Normaliza igual que ``sku``/``external_code``
+    (``normalize_external_code``): no es dígitos-solamente como documento/
+    teléfono, un código puede ser alfanumérico.
     """
     keys: list[IdentityKey] = []
+    if code_field is not None:
+        code = normalize_external_code(record.get(code_field))
+        if code:
+            keys.append(IdentityKey("code", code))
     for f in doc_fields:
         digits = normalize_digits(record.get(f))
         if digits:
@@ -120,11 +133,18 @@ def build_existing_index(
     doc_fields: tuple[str, ...],
     email_field: str = "email",
     phone_field: str = "phone",
+    code_field: str | None = None,
 ) -> dict[IdentityKey, T]:
     """Índice ``IdentityKey → entidad`` a partir de una lista de entidades existentes.
 
     ``to_record`` convierte cada entidad (ORM u otro) en un dict ``{campo: valor}`` para
     reusar ``record_keys``. El primer registro en ocupar una clave gana (``setdefault``).
+
+    ``code_field`` cubre el código PROPIO de cada entidad (p. ej.
+    ``vektor_code``, single-valued) — un código EXTERNO adicional que una
+    entidad puede acumular de varias fuentes (``entity_identifiers``,
+    multi-valuado) no cabe en este patrón de un dict por entidad; el caller lo
+    agrega aparte con ``index.setdefault(IdentityKey("code", ...), entity)``.
     """
     index: dict[IdentityKey, T] = {}
     for entity in entities:
@@ -133,6 +153,7 @@ def build_existing_index(
             doc_fields=doc_fields,
             email_field=email_field,
             phone_field=phone_field,
+            code_field=code_field,
         ):
             index.setdefault(key, entity)
     return index

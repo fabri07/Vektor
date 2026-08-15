@@ -485,25 +485,31 @@ def _classify_row_reference(
     doc_fields: tuple[str, ...],
     existing_index: dict[IdentityKey, Any],
     anonymous_name_tokens: frozenset[str] | None = None,
+    code_field: str | None = None,
 ) -> RowReferenceResolution:
     """Clasifica la referencia de una fila transaccional en la semántica de 3
     vías de F7c, sobre el motor F7b (``identity_resolution.resolve_identity``):
 
-    - ``matched``: una clave fuerte (documento > email > teléfono) matchea una
-      única entidad existente del índice.
+    - ``matched``: una clave fuerte (código externo F-ID > documento > email >
+      teléfono) matchea una única entidad existente del índice.
     - ``anonymous``: sin ninguna referencia (fila de mostrador — el caso normal,
       SIN warning) o el único dato es un nombre "genérico"
       (``anonymous_name_tokens``, ej. "Consumidor final").
-    - ``unresolved``: hay una referencia (documento/email/teléfono, o un nombre
-      real sin clave fuerte) pero no matchea, o matchea a más de una entidad —
-      se marca para revisión. NUNCA crea.
+    - ``unresolved``: hay una referencia (código/documento/email/teléfono, o un
+      nombre real sin clave fuerte) pero no matchea, o matchea a más de una
+      entidad — se marca para revisión. NUNCA crea.
+
+    ``code_field`` (F-ID.7) — clave del record con el código externo mapeado
+    (``customer_business_code``/``supplier_business_code``), si la hoja lo
+    declaró. ``None`` cuando el archivo no mapeó esa columna: el resolvedor
+    sigue funcionando exactamente igual que antes de F-ID.
     """
     name_raw = record.get("name")
     name_norm = normalize_text(str(name_raw)) if name_raw else ""
     if anonymous_name_tokens is not None and name_norm and name_norm in anonymous_name_tokens:
         return RowReferenceResolution(outcome="anonymous")
 
-    keys = record_keys(record, doc_fields=doc_fields)
+    keys = record_keys(record, doc_fields=doc_fields, code_field=code_field)
     if not keys and not name_norm:
         return RowReferenceResolution(outcome="anonymous")
 
@@ -516,6 +522,8 @@ def _classify_row_reference(
     # conflict (clave ambigua) — todas se tratan igual acá: no identifican sin
     # ambigüedad, van al sentinela con traza para revisión humana.
     raw: Any = name_raw
+    if raw is None and code_field is not None:
+        raw = record.get(code_field)
     if raw is None:
         for f in doc_fields:
             if record.get(f):
@@ -590,6 +598,11 @@ def _customer_reference_record(row: dict[str, Any], cols: dict[str, str]) -> dic
     mapeada, la fila es ``anonymous`` (venta de mostrador), no ``unresolved``.
     """
     return {
+        # F-ID.7: código externo mapeado — el resolvedor lo prioriza sobre
+        # documento (ver `code_field` en `_classify_row_reference`).
+        "code": row.get(cols["customer_business_code"])
+        if cols.get("customer_business_code")
+        else None,
         "cuit": row.get(cols["customer_cuit"]) if cols.get("customer_cuit") else None,
         "dni": row.get(cols["customer_dni"]) if cols.get("customer_dni") else None,
         "email": row.get(cols["customer_email"]) if cols.get("customer_email") else None,
@@ -607,6 +620,9 @@ def _supplier_reference_record(
     dato que usa hoy ``_resolve_or_create_supplier``, no se duplica esa detección).
     """
     return {
+        "code": row.get(cols["supplier_business_code"])
+        if cols.get("supplier_business_code")
+        else None,
         "cuil": row.get(cols["supplier_cuil"]) if cols.get("supplier_cuil") else None,
         "email": row.get(cols["supplier_email"]) if cols.get("supplier_email") else None,
         "phone": row.get(cols["supplier_phone"]) if cols.get("supplier_phone") else None,
@@ -614,40 +630,102 @@ def _supplier_reference_record(
     }
 
 
+async def _augment_index_with_business_codes(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    entity_type: str,
+    index: dict[IdentityKey, Any],
+    by_id: dict[uuid.UUID, Any],
+) -> None:
+    """F-ID.7: agrega al índice los códigos externos (``business_code``,
+    ``entity_identifiers``) de las entidades que YA están en ``by_id``.
+
+    Multi-valuado a propósito (una entidad puede tener varios códigos de
+    fuentes distintas) — por eso no cabe en el patrón de un solo
+    ``to_record`` por entidad que usa ``vektor_code`` (columna denormalizada,
+    single-valued, ver los callers). Sólo agrega códigos de entidades que el
+    índice base YA conoce (activas, no-sentinela) — una fila de
+    ``entity_identifiers`` para una entidad desactivada o el sentinela no
+    puede volver a matchear por acá.
+    """
+    from sqlalchemy import select as _select  # noqa: PLC0415
+
+    from app.persistence.models.entity_identifier import EntityIdentifier  # noqa: PLC0415
+
+    if not by_id:
+        return
+    rows = (
+        await session.execute(
+            _select(EntityIdentifier.entity_id, EntityIdentifier.normalized_value).where(
+                EntityIdentifier.tenant_id == tenant_id,
+                EntityIdentifier.entity_type == entity_type,
+                EntityIdentifier.identifier_type == "business_code",
+                EntityIdentifier.revoked_at.is_(None),
+            )
+        )
+    ).all()
+    for entity_id, normalized_value in rows:
+        entity = by_id.get(entity_id)
+        if entity is not None:
+            index.setdefault(IdentityKey("code", normalized_value), entity)
+
+
 async def _load_customer_identity_index(
     session: AsyncSession, tenant_id: uuid.UUID
 ) -> dict[IdentityKey, Any]:
-    """Índice de identidad de clientes (documento→email→teléfono) para resolver
-    referencias de fila en ventas. Reusa el motor F7b; excluye el sentinela
-    "Local" y los desactivados (``CustomerRepository.list_for_dedup``)."""
+    """Índice de identidad de clientes (código→documento→email→teléfono) para
+    resolver referencias de fila en ventas. Reusa el motor F7b; excluye el
+    sentinela "Local" y los desactivados (``CustomerRepository.list_for_dedup``).
+    """
     from app.persistence.repositories.customer_repository import (  # noqa: PLC0415
         CustomerRepository,
     )
 
     existing = await CustomerRepository(session).list_for_dedup(tenant_id)
-    return build_existing_index(
+    index = build_existing_index(
         existing,
-        to_record=lambda c: {"cuit": c.cuit, "dni": c.dni, "email": c.email, "phone": c.phone},
+        to_record=lambda c: {
+            "cuit": c.cuit,
+            "dni": c.dni,
+            "email": c.email,
+            "phone": c.phone,
+            "code": c.vektor_code,
+        },
         doc_fields=_CUSTOMER_DOC_FIELDS,
+        code_field="code",
     )
+    await _augment_index_with_business_codes(
+        session, tenant_id, "customer", index, {c.id: c for c in existing}
+    )
+    return index
 
 
 async def _load_supplier_identity_index(
     session: AsyncSession, tenant_id: uuid.UUID
 ) -> dict[IdentityKey, Any]:
-    """Índice de identidad de proveedores (CUIL→email→teléfono). Solo se carga en
-    modo ``link_only`` (ver ``SUPPLIER_REFERENCE_CREATION_MODE``) — en "legacy" no
-    hace falta, el comportamiento de compras no cambia."""
+    """Índice de identidad de proveedores (código→CUIL→email→teléfono). Solo se
+    carga en modo ``link_only`` (ver ``SUPPLIER_REFERENCE_CREATION_MODE``) — en
+    "legacy" no hace falta, el comportamiento de compras no cambia."""
     from app.persistence.repositories.supplier_repository import (  # noqa: PLC0415
         SupplierRepository,
     )
 
     existing = await SupplierRepository(session).list_for_dedup(tenant_id)
-    return build_existing_index(
+    index = build_existing_index(
         existing,
-        to_record=lambda s: {"cuil": s.cuil, "email": s.email, "phone": s.phone},
+        to_record=lambda s: {
+            "cuil": s.cuil,
+            "email": s.email,
+            "phone": s.phone,
+            "code": s.vektor_code,
+        },
         doc_fields=_SUPPLIER_DOC_FIELDS,
+        code_field="code",
     )
+    await _augment_index_with_business_codes(
+        session, tenant_id, "supplier", index, {s.id: s for s in existing}
+    )
+    return index
 
 
 async def _import_master_entities(
@@ -3969,6 +4047,7 @@ async def _insert_confirmed_data_impl(
                         doc_fields=_CUSTOMER_DOC_FIELDS,
                         existing_index=_customer_identity_index,
                         anonymous_name_tokens=_ANONYMOUS_CUSTOMER_TOKENS,
+                        code_field="code",
                     )
                     if _cust_ref.outcome == "matched":
                         assert _cust_ref.entity is not None
@@ -4066,6 +4145,7 @@ async def _insert_confirmed_data_impl(
                             or target_to_col.get("supplier_cuil")
                             or target_to_col.get("supplier_email")
                             or target_to_col.get("supplier_phone")
+                            or target_to_col.get("supplier_business_code")
                         )
                         if _has_supplier_ref_col:
                             _sup_name_raw = row.get(supplier_col) if supplier_col else None
@@ -4073,6 +4153,7 @@ async def _insert_confirmed_data_impl(
                                 _supplier_reference_record(row, target_to_col, _sup_name_raw),
                                 doc_fields=_SUPPLIER_DOC_FIELDS,
                                 existing_index=_supplier_identity_index,
+                                code_field="code",
                             )
                             if _sup_ref.outcome == "matched":
                                 assert _sup_ref.entity is not None
@@ -5380,6 +5461,7 @@ async def _insert_multisheet_data(
             doc_fields=_CUSTOMER_DOC_FIELDS,
             existing_index=_customer_identity_index,
             anonymous_name_tokens=_ANONYMOUS_CUSTOMER_TOKENS,
+            code_field="code",
         )
         if _cust_ref.outcome == "matched":
             assert _cust_ref.entity is not None
@@ -5715,12 +5797,14 @@ async def _insert_multisheet_data(
                 or cols.get("supplier_cuil")
                 or cols.get("supplier_email")
                 or cols.get("supplier_phone")
+                or cols.get("supplier_business_code")
             )
             if _has_supplier_ref_col:
                 _sup_ref = _classify_row_reference(
                     _supplier_reference_record(row, cols, _supplier_name_raw),
                     doc_fields=_SUPPLIER_DOC_FIELDS,
                     existing_index=_supplier_identity_index,
+                    code_field="code",
                 )
                 if _sup_ref.outcome == "matched":
                     assert _sup_ref.entity is not None
