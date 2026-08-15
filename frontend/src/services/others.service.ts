@@ -66,12 +66,67 @@ export interface BulkImportResult {
   needs_manual: number; // no parsearon (fecha/monto ilegible) → completar a mano
 }
 
+/** F-O.3: un grupo de "Otros" — mismo archivo × procedencia × motivo × sugerencia × estado. */
+export interface UnclassifiedGroupSummary {
+  uploaded_file_id: string | null;
+  original_filename: string | null;
+  source: "ingestion" | "chat" | "reanalysis";
+  context_label: string | null;
+  suggested_entity: "sale" | "expense" | "product" | null;
+  status: "PENDING" | "IMPORTED" | "DISMISSED";
+  count: number;
+}
+
+export interface OthersListFilters {
+  uploaded_file_id?: string | null;
+  context_label?: string | null;
+  suggested_entity?: string | null;
+  source?: string | null;
+}
+
+export interface DismissGroupPayload {
+  uploaded_file_id: string | null;
+  source: string;
+  context_label: string | null;
+  suggested_entity: string | null;
+  status: string;
+  expected_count: number;
+}
+
 export const othersService = {
-  async getPending(offset = 0, limit = 50): Promise<UnclassifiedRecordResponse[]> {
+  async getPending(
+    offset = 0,
+    limit = 50,
+    filters: OthersListFilters = {},
+  ): Promise<UnclassifiedRecordResponse[]> {
     const res = await api.get<UnclassifiedRecordResponse[]>("/others", {
-      params: { status: "PENDING", limit, offset },
+      params: {
+        status: "PENDING",
+        limit,
+        offset,
+        uploaded_file_id: filters.uploaded_file_id ?? undefined,
+        context_label: filters.context_label ?? undefined,
+        suggested_entity: filters.suggested_entity ?? undefined,
+        source: filters.source ?? undefined,
+      },
     });
     return res.data;
+  },
+
+  /** F-O.3: agrupado por archivo × procedencia × motivo × sugerencia. */
+  async getSummary(): Promise<UnclassifiedGroupSummary[]> {
+    const res = await api.get<UnclassifiedGroupSummary[]>("/others/summary");
+    return res.data;
+  },
+
+  /**
+   * Descarta un grupo entero de una vez. `expected_count` es el conteo que el
+   * usuario vio en `getSummary()` — si cambió (relectura entre medio), el
+   * backend responde 409 en vez de descartar de más o de menos.
+   */
+  async dismissGroup(payload: DismissGroupPayload): Promise<number> {
+    const res = await api.post<{ dismissed: number }>("/others/dismiss-group", payload);
+    return res.data.dismissed;
   },
 
   async getPendingCount(): Promise<number> {

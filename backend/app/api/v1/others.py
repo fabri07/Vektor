@@ -16,10 +16,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import ensure_tenant_not_under_maintenance, get_current_tenant, require_role
+from app.api.v1.deps import (
+    ensure_tenant_not_under_maintenance,
+    get_current_tenant,
+    require_modify_access,
+    require_role,
+)
 from app.api.v1.expenses import _apply_category_label
 from app.api.v1.products import (
     _duplicate_identity_conflict,
@@ -62,7 +67,9 @@ from app.domain.product_categories import (
 )
 from app.domain.product_completion import recompute_requires_completion
 from app.persistence.db.session import get_db_session
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
+from app.persistence.models.file import UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.supplier import Supplier
@@ -111,6 +118,42 @@ class UnclassifiedRecordResponse(BaseModel):
     match_candidates: list[dict[str, Any]] | None = None
     status: str
     created_at: datetime
+
+
+class UnclassifiedGroupSummary(BaseModel):
+    """F-O.3: un grupo de la bandeja «Otros» — mismo archivo × procedencia ×
+    motivo × sugerencia × estado. La clave es COMPUESTA a propósito (no solo
+    archivo+motivo): dos registros que comparten `context_label` pero difieren
+    en `suggested_entity` o `status` no deberían recibir la misma acción
+    masiva de descarte."""
+
+    uploaded_file_id: UUID | None
+    original_filename: str | None
+    source: str
+    context_label: str | None
+    suggested_entity: str | None
+    status: str
+    count: int
+
+
+class DismissGroupRequest(BaseModel):
+    """Descarte en bloque de un grupo entero. `expected_count` es el conteo
+    que el usuario vio en `/others/summary` — si cambió (p.ej. una relectura
+    agregó filas nuevas al mismo grupo entre que abrió la pantalla y
+    confirmó), el backend rechaza en vez de descartar de más."""
+
+    uploaded_file_id: UUID | None = None
+    source: str
+    context_label: str | None = None
+    suggested_entity: str | None = None
+    record_status: str = Field(default=UNCLASSIFIED_STATUS_PENDING, alias="status")
+    expected_count: int = Field(ge=0)
+
+    model_config = {"populate_by_name": True}
+
+
+class DismissGroupResponse(BaseModel):
+    dismissed: int
 
 
 class ReclassifyRequest(BaseModel):
@@ -166,6 +209,11 @@ class BulkImportResponse(BaseModel):
 )
 async def list_unclassified(
     record_status: str = Query(default=UNCLASSIFIED_STATUS_PENDING, alias="status"),
+    # F-O.3: filtros de grupo — navegar desde /others/summary a la lista real.
+    uploaded_file_id: UUID | None = Query(default=None),
+    context_label: str | None = Query(default=None),
+    suggested_entity: str | None = Query(default=None),
+    source: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     tenant: Tenant = Depends(get_current_tenant),
@@ -177,12 +225,21 @@ async def list_unclassified(
         _row_val_categoria,
     )
 
+    conditions = [
+        UnclassifiedRecord.tenant_id == tenant.tenant_id,
+        UnclassifiedRecord.status == record_status,
+    ]
+    if uploaded_file_id is not None:
+        conditions.append(UnclassifiedRecord.uploaded_file_id == uploaded_file_id)
+    if context_label is not None:
+        conditions.append(UnclassifiedRecord.context_label == context_label)
+    if suggested_entity is not None:
+        conditions.append(UnclassifiedRecord.suggested_entity == suggested_entity)
+    if source is not None:
+        conditions.append(UnclassifiedRecord.source == source)
     q = (
         select(UnclassifiedRecord)
-        .where(
-            UnclassifiedRecord.tenant_id == tenant.tenant_id,
-            UnclassifiedRecord.status == record_status,
-        )
+        .where(*conditions)
         .order_by(UnclassifiedRecord.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -229,6 +286,90 @@ async def count_unclassified(
         )
     )
     return {"pending": int(result.scalar_one() or 0)}
+
+
+def _group_key_conditions(
+    tenant_id: UUID,
+    *,
+    record_status: str,
+    uploaded_file_id: UUID | None,
+    source: str,
+    context_label: str | None,
+    suggested_entity: str | None,
+) -> list[Any]:
+    """F-O.3: la clave de grupo compuesta, compartida entre `/summary` (que la
+    agrega) y `/dismiss-group` (que recalcula el conteo del MISMO grupo justo
+    antes de descartar, para no divergir del criterio del summary). NULL se
+    trata como su propio valor de grupo (``.is_(None)``, nunca ``==`` — dos
+    NULL nunca son iguales en SQL)."""
+    return [
+        UnclassifiedRecord.tenant_id == tenant_id,
+        UnclassifiedRecord.status == record_status,
+        UnclassifiedRecord.source == source,
+        UnclassifiedRecord.uploaded_file_id == uploaded_file_id
+        if uploaded_file_id is not None
+        else UnclassifiedRecord.uploaded_file_id.is_(None),
+        UnclassifiedRecord.context_label == context_label
+        if context_label is not None
+        else UnclassifiedRecord.context_label.is_(None),
+        UnclassifiedRecord.suggested_entity == suggested_entity
+        if suggested_entity is not None
+        else UnclassifiedRecord.suggested_entity.is_(None),
+    ]
+
+
+@router.get(
+    "/summary",
+    response_model=list[UnclassifiedGroupSummary],
+    summary="Otros agrupado por archivo × procedencia × motivo × sugerencia",
+)
+async def summary_unclassified(
+    record_status: str = Query(default=UNCLASSIFIED_STATUS_PENDING, alias="status"),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[UnclassifiedGroupSummary]:
+    """F-O.3: de "46 páginas" a una lista de motivos con su conteo. Agrupa por
+    ``uploaded_file_id × source × context_label × suggested_entity`` (más el
+    ``status`` que ya filtra la query) — no solo archivo+motivo, para no
+    mezclar registros que no deberían recibir la misma acción masiva."""
+    q = (
+        select(
+            UnclassifiedRecord.uploaded_file_id,
+            UploadedFile.original_filename,
+            UnclassifiedRecord.source,
+            UnclassifiedRecord.context_label,
+            UnclassifiedRecord.suggested_entity,
+            UnclassifiedRecord.status,
+            func.count(UnclassifiedRecord.id).label("group_count"),
+        )
+        .outerjoin(UploadedFile, UploadedFile.id == UnclassifiedRecord.uploaded_file_id)
+        .where(
+            UnclassifiedRecord.tenant_id == tenant.tenant_id,
+            UnclassifiedRecord.status == record_status,
+        )
+        .group_by(
+            UnclassifiedRecord.uploaded_file_id,
+            UploadedFile.original_filename,
+            UnclassifiedRecord.source,
+            UnclassifiedRecord.context_label,
+            UnclassifiedRecord.suggested_entity,
+            UnclassifiedRecord.status,
+        )
+        .order_by(func.count(UnclassifiedRecord.id).desc())
+    )
+    rows = (await session.execute(q)).all()
+    return [
+        UnclassifiedGroupSummary(
+            uploaded_file_id=row.uploaded_file_id,
+            original_filename=row.original_filename,
+            source=row.source,
+            context_label=row.context_label,
+            suggested_entity=row.suggested_entity,
+            status=row.status,
+            count=row.group_count,
+        )
+        for row in rows
+    ]
 
 
 def _snapshot_producto(producto: Product) -> dict[str, Any]:
@@ -763,3 +904,75 @@ async def dismiss_record(
     record.resolved_at = datetime.now(UTC)
     await session.flush()
     return MessageResponse(message="Registro descartado.")
+
+
+@router.post(
+    "/dismiss-group",
+    response_model=DismissGroupResponse,
+    summary="Descartar en bloque todo un grupo de Otros (F-O.3)",
+)
+async def dismiss_group(
+    body: DismissGroupRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    # F-O.3: más estricto que el descarte de un registro suelto —
+    # require_modify_access (OWNER/can_modify_sensitive + PIN), no solo rol.
+    # Descartar de golpe el grupo dominante de un archivo real (miles de
+    # filas) es una acción material, aunque sea soft-delete.
+    actor: User = Depends(require_modify_access),
+    session: AsyncSession = Depends(get_db_session),
+) -> DismissGroupResponse:
+    conditions = _group_key_conditions(
+        tenant.tenant_id,
+        record_status=body.record_status,
+        uploaded_file_id=body.uploaded_file_id,
+        source=body.source,
+        context_label=body.context_label,
+        suggested_entity=body.suggested_entity,
+    )
+    current_count = int(
+        (
+            await session.execute(select(func.count(UnclassifiedRecord.id)).where(*conditions))
+        ).scalar_one()
+        or 0
+    )
+    # Anti-carrera: el usuario vio `expected_count` en /summary; si el grupo
+    # cambió desde entonces (una relectura agregó filas, otra pestaña ya
+    # descartó parte), no descartamos de más ni de menos en silencio.
+    if current_count != body.expected_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "GROUP_CHANGED",
+                "expected": body.expected_count,
+                "current": current_count,
+            },
+        )
+    if current_count == 0:
+        return DismissGroupResponse(dismissed=0)
+
+    now = datetime.now(UTC)
+    await session.execute(
+        update(UnclassifiedRecord)
+        .where(*conditions)
+        .values(status=UNCLASSIFIED_STATUS_DISMISSED, resolved_at=now)
+    )
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant.tenant_id,
+            decision_type="UNCLASSIFIED_GROUP_DISMISSED",
+            decision_data={
+                "uploaded_file_id": (
+                    str(body.uploaded_file_id) if body.uploaded_file_id else None
+                ),
+                "source": body.source,
+                "context_label": body.context_label,
+                "suggested_entity": body.suggested_entity,
+                "count": current_count,
+            },
+            triggered_by="others:dismiss_group",
+            actor_user_id=actor.user_id,
+            created_at=now,
+        )
+    )
+    await session.flush()
+    return DismissGroupResponse(dismissed=current_count)

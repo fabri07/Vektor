@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AxiosError } from "axios";
-import { Trash2, Pencil, Zap } from "lucide-react";
+import { Trash2, Pencil, Zap, Layers, ArrowLeft } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -15,6 +15,7 @@ import {
   othersService,
   type ProductMatchCandidate,
   type ReclassifyEntityType,
+  type UnclassifiedGroupSummary,
   type UnclassifiedRecordResponse,
 } from "@/services/others.service";
 import { productsService, type ProductCategoryOption } from "@/services/products.service";
@@ -44,16 +45,43 @@ function errorCode(error: unknown): string | null {
 /** Etiqueta corta de un candidato de producto (nombre + sku/barcode si existen). */
 const PAGE_SIZE = 50;
 
+/** F-O.3: filtro de grupo activo — la clave compuesta del grupo que se está mirando. */
+interface GroupFilter {
+  uploaded_file_id: string | null;
+  original_filename: string | null;
+  source: string;
+  context_label: string | null;
+  suggested_entity: string | null;
+  count: number;
+}
+
 export default function OtrosPage() {
   const [reclassifying, setReclassifying] = useState<UnclassifiedRecordResponse | null>(null);
   const [page, setPage] = useState(0);
+  // F-O.3: arranca en "grupos" — de 46 páginas a una lista de motivos.
+  const [view, setView] = useState<"groups" | "list">("groups");
+  const [groupFilter, setGroupFilter] = useState<GroupFilter | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
 
-  const { data: records = [], isLoading, isError } = useQuery({
-    queryKey: ["others-pending", page],
-    queryFn: () => othersService.getPending(page * PAGE_SIZE, PAGE_SIZE),
+  const { data: groups = [], isLoading: isLoadingGroups, isError: isGroupsError } = useQuery({
+    queryKey: ["others-summary"],
+    queryFn: () => othersService.getSummary(),
     staleTime: 60 * 1000,
+    enabled: view === "groups",
+  });
+
+  const { data: records = [], isLoading, isError } = useQuery({
+    queryKey: ["others-pending", page, groupFilter],
+    queryFn: () =>
+      othersService.getPending(page * PAGE_SIZE, PAGE_SIZE, {
+        uploaded_file_id: groupFilter?.uploaded_file_id,
+        context_label: groupFilter?.context_label,
+        suggested_entity: groupFilter?.suggested_entity,
+        source: groupFilter?.source,
+      }),
+    staleTime: 60 * 1000,
+    enabled: view === "list",
   });
 
   const { data: pendingTotal = 0 } = useQuery({
@@ -62,6 +90,25 @@ export default function OtrosPage() {
     staleTime: 60 * 1000,
   });
 
+  const openGroup = (group: UnclassifiedGroupSummary) => {
+    setGroupFilter({
+      uploaded_file_id: group.uploaded_file_id,
+      original_filename: group.original_filename,
+      source: group.source,
+      context_label: group.context_label,
+      suggested_entity: group.suggested_entity,
+      count: group.count,
+    });
+    setPage(0);
+    setView("list");
+  };
+
+  const backToGroups = () => {
+    setGroupFilter(null);
+    setPage(0);
+    setView("groups");
+  };
+
   // Catálogo de categorías de producto del vertical, para el selector del modal.
   const { data: productCategories = [] } = useQuery({
     queryKey: ["product-categories"],
@@ -69,11 +116,17 @@ export default function OtrosPage() {
     staleTime: 30 * 60 * 1000,
   });
 
-  const totalPages = Math.max(1, Math.ceil(pendingTotal / PAGE_SIZE));
+  // Con un grupo activo, la paginación es sobre el TAMAÑO DEL GRUPO (el conteo
+  // global de pendingTotal mezclaría todos los motivos).
+  const totalPages = Math.max(
+    1,
+    Math.ceil((groupFilter ? groupFilter.count : pendingTotal) / PAGE_SIZE),
+  );
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["others-pending"] });
     await queryClient.invalidateQueries({ queryKey: ["others-pending-count"] });
+    await queryClient.invalidateQueries({ queryKey: ["others-summary"] });
   };
 
   const dismissMutation = useMutation({
@@ -83,6 +136,35 @@ export default function OtrosPage() {
       await invalidate();
     },
     onError: () => toast("No se pudo descartar el registro.", "error"),
+  });
+
+  const dismissGroupMutation = useMutation({
+    mutationFn: (group: GroupFilter) =>
+      othersService.dismissGroup({
+        uploaded_file_id: group.uploaded_file_id,
+        source: group.source,
+        context_label: group.context_label,
+        suggested_entity: group.suggested_entity,
+        status: "PENDING",
+        expected_count: group.count,
+      }),
+    onSuccess: async (dismissed) => {
+      toast(`${dismissed} registro(s) descartados.`, "success");
+      backToGroups();
+      await invalidate();
+    },
+    onError: async (error) => {
+      const httpStatus = (error as AxiosError)?.response?.status;
+      if (httpStatus === 409) {
+        toast(
+          "Este grupo cambió desde que lo viste (llegaron filas nuevas) — actualizamos la lista.",
+          "info",
+        );
+        await queryClient.invalidateQueries({ queryKey: ["others-summary"] });
+      } else {
+        toast("No se pudo descartar el grupo. Probá de nuevo.", "error");
+      }
+    },
   });
 
   const bulkImportMutation = useMutation({
@@ -223,6 +305,16 @@ export default function OtrosPage() {
       ),
     },
     {
+      // F-O.3: antes ni el motivo ni el archivo se mostraban por fila.
+      key: "_motivo",
+      header: "Motivo",
+      render: (_: unknown, row: UnclassifiedRecordResponse) => (
+        <span className="block max-w-[10rem] truncate text-xs text-vk-text-muted">
+          {row.context_label ?? "—"}
+        </span>
+      ),
+    },
+    {
       key: "_detail",
       header: "Detalle",
       render: (_: unknown, row: UnclassifiedRecordResponse) => {
@@ -294,6 +386,88 @@ export default function OtrosPage() {
     },
   ];
 
+  const groupColumns = [
+    {
+      key: "original_filename",
+      header: "Archivo",
+      render: (_: unknown, row: UnclassifiedGroupSummary) => (
+        <span className="block max-w-[12rem] truncate" title={row.original_filename ?? undefined}>
+          {row.original_filename ?? "Carga manual / chat"}
+        </span>
+      ),
+    },
+    {
+      key: "context_label",
+      header: "Motivo",
+      render: (_: unknown, row: UnclassifiedGroupSummary) =>
+        row.context_label ?? <span className="text-vk-text-muted">Sin motivo</span>,
+    },
+    {
+      key: "source",
+      header: "Origen",
+      render: (_: unknown, row: UnclassifiedGroupSummary) => (
+        <Badge variant="info">{SOURCE_LABELS[row.source] ?? row.source}</Badge>
+      ),
+    },
+    {
+      key: "suggested_entity",
+      header: "Destino sugerido",
+      render: (_: unknown, row: UnclassifiedGroupSummary) =>
+        row.suggested_entity ? (
+          <Badge variant="success">{ENTITY_LABELS[row.suggested_entity]}</Badge>
+        ) : (
+          <span className="text-vk-text-muted">—</span>
+        ),
+    },
+    {
+      key: "count",
+      header: "Cantidad",
+      render: (_: unknown, row: UnclassifiedGroupSummary) => (
+        <span className="font-semibold text-vk-text-primary">{row.count}</span>
+      ),
+    },
+    {
+      key: "_actions",
+      header: "Acciones",
+      render: (_: unknown, row: UnclassifiedGroupSummary) => (
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => openGroup(row)}
+            className="inline-flex items-center gap-1.5 rounded border border-vk-border-w px-2.5 py-1.5 text-sm text-vk-text-primary transition-colors hover:bg-vk-bg-light"
+          >
+            Ver filas
+          </button>
+          <button
+            type="button"
+            title="Descartar todo el grupo"
+            aria-label="Descartar todo el grupo"
+            disabled={dismissGroupMutation.isPending}
+            onClick={() => {
+              if (
+                confirm(
+                  `¿Descartar las ${row.count} fila(s) de "${row.context_label ?? "sin motivo"}"? ` +
+                    "Esta acción no se puede deshacer.",
+                )
+              )
+                dismissGroupMutation.mutate({
+                  uploaded_file_id: row.uploaded_file_id,
+                  original_filename: row.original_filename,
+                  source: row.source,
+                  context_label: row.context_label,
+                  suggested_entity: row.suggested_entity,
+                  count: row.count,
+                });
+            }}
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    },
+  ];
+
   return (
     <PageWrapper title="Otros">
       <p className="text-sm text-vk-text-muted">
@@ -302,64 +476,123 @@ export default function OtrosPage() {
         importalos — o descartalos.
       </p>
 
-      {isError ? (
-        <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
-          Error al cargar los registros. Recargá la página.
-        </p>
-      ) : isLoading ? (
-        <div className="h-40 animate-pulse rounded-lg border border-vk-border-w bg-vk-surface-w" />
-      ) : records.length === 0 ? (
-        <EmptyState
-          title="Nada pendiente de revisión"
-          description="Todo lo que Véktor no pueda clasificar automáticamente va a aparecer acá."
-        />
-      ) : (
-        <>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-xs text-vk-text-muted">
-              {pendingTotal} registro(s) pendiente(s)
-              {totalPages > 1 ? ` — página ${page + 1} de ${totalPages}` : ""}
-            </p>
-            <button
-              type="button"
-              disabled={bulkImportMutation.isPending}
-              onClick={() => {
-                if (
-                  confirm(
-                    "¿Importar TODOS los registros pendientes sugeridos como venta o gasto? " +
-                      "Cada uno se registra en su sección con la fecha, monto y categoría detectados. " +
-                      "Los que no tengan fecha o monto legibles quedan pendientes para revisión manual.",
+      {view === "groups" ? (
+        isGroupsError ? (
+          <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
+            Error al cargar los grupos. Recargá la página.
+          </p>
+        ) : isLoadingGroups ? (
+          <div className="h-40 animate-pulse rounded-lg border border-vk-border-w bg-vk-surface-w" />
+        ) : groups.length === 0 ? (
+          <EmptyState
+            title="Nada pendiente de revisión"
+            description="Todo lo que Véktor no pueda clasificar automáticamente va a aparecer acá."
+          />
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-vk-text-muted">
+                {groups.length} motivo(s) — {pendingTotal} registro(s) pendiente(s) en total
+              </p>
+              <button
+                type="button"
+                disabled={bulkImportMutation.isPending}
+                onClick={() => {
+                  if (
+                    confirm(
+                      "¿Importar TODOS los registros pendientes sugeridos como venta o gasto? " +
+                        "Cada uno se registra en su sección con la fecha, monto y categoría detectados. " +
+                        "Los que no tengan fecha o monto legibles quedan pendientes para revisión manual.",
+                    )
                   )
-                )
-                  bulkImportMutation.mutate();
-              }}
-              className="inline-flex items-center gap-1.5 rounded border border-vektor-teal/40 px-3 py-1.5 text-sm text-vektor-teal transition-colors hover:bg-vektor-teal/10 disabled:opacity-50"
-            >
-              <Zap className="h-4 w-4" />
-              {bulkImportMutation.isPending ? "Importando…" : "Importar todo lo sugerido"}
-            </button>
-          </div>
-          <Table columns={columns} data={records} />
-          {totalPages > 1 ? (
-            <div className="flex items-center justify-center gap-3 pt-2">
-              <button
-                type="button"
-                disabled={page === 0}
-                onClick={() => setPage((p) => Math.max(0, p - 1))}
-                className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+                    bulkImportMutation.mutate();
+                }}
+                className="inline-flex items-center gap-1.5 rounded border border-vektor-teal/40 px-3 py-1.5 text-sm text-vektor-teal transition-colors hover:bg-vektor-teal/10 disabled:opacity-50"
               >
-                ← Anterior
-              </button>
-              <button
-                type="button"
-                disabled={page + 1 >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
-                className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
-              >
-                Siguiente →
+                <Zap className="h-4 w-4" />
+                {bulkImportMutation.isPending ? "Importando…" : "Importar todo lo sugerido"}
               </button>
             </div>
+            <Table columns={groupColumns} data={groups} />
+          </>
+        )
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={backToGroups}
+            className="inline-flex w-fit items-center gap-1.5 rounded border border-vk-border-w px-2.5 py-1.5 text-sm text-vk-text-primary transition-colors hover:bg-vk-bg-light"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" /> Volver a grupos
+          </button>
+          {groupFilter ? (
+            <p className="flex items-center gap-1.5 text-xs text-vk-text-muted">
+              <Layers className="h-3.5 w-3.5" />
+              Filtrando: {groupFilter.original_filename ?? "Carga manual / chat"} ·{" "}
+              {groupFilter.context_label ?? "Sin motivo"}
+            </p>
           ) : null}
+
+          {isError ? (
+            <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
+              Error al cargar los registros. Recargá la página.
+            </p>
+          ) : isLoading ? (
+            <div className="h-40 animate-pulse rounded-lg border border-vk-border-w bg-vk-surface-w" />
+          ) : records.length === 0 ? (
+            <EmptyState
+              title="Nada pendiente de revisión"
+              description="Todo lo que Véktor no pueda clasificar automáticamente va a aparecer acá."
+            />
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs text-vk-text-muted">
+                  {pendingTotal} registro(s) pendiente(s)
+                  {totalPages > 1 ? ` — página ${page + 1} de ${totalPages}` : ""}
+                </p>
+                <button
+                  type="button"
+                  disabled={bulkImportMutation.isPending}
+                  onClick={() => {
+                    if (
+                      confirm(
+                        "¿Importar TODOS los registros pendientes sugeridos como venta o gasto? " +
+                          "Cada uno se registra en su sección con la fecha, monto y categoría detectados. " +
+                          "Los que no tengan fecha o monto legibles quedan pendientes para revisión manual.",
+                      )
+                    )
+                      bulkImportMutation.mutate();
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded border border-vektor-teal/40 px-3 py-1.5 text-sm text-vektor-teal transition-colors hover:bg-vektor-teal/10 disabled:opacity-50"
+                >
+                  <Zap className="h-4 w-4" />
+                  {bulkImportMutation.isPending ? "Importando…" : "Importar todo lo sugerido"}
+                </button>
+              </div>
+              <Table columns={columns} data={records} />
+              {totalPages > 1 ? (
+                <div className="flex items-center justify-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    disabled={page === 0}
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                    className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+                  >
+                    ← Anterior
+                  </button>
+                  <button
+                    type="button"
+                    disabled={page + 1 >= totalPages}
+                    onClick={() => setPage((p) => p + 1)}
+                    className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+                  >
+                    Siguiente →
+                  </button>
+                </div>
+              ) : null}
+            </>
+          )}
         </>
       )}
 
