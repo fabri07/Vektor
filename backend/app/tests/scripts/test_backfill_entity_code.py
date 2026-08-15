@@ -22,11 +22,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.customer_sentinel import resolve_or_create_local_sentinel
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
+from app.persistence.models.entity_code_sequence import EntityCodeSequence
+from app.persistence.models.entity_identifier import EntityIdentifier
 from app.persistence.models.product import Product
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
@@ -112,6 +115,52 @@ async def test_productos_sin_sku_se_numeran(
     assert conteo[mod._YA_TENIA] == 1
     assert p1.sku == "GEN-0001"
     assert p2.sku == "YA-TENGO"
+
+
+async def test_productos_dry_run_no_escribe_ni_toma_lock_de_secuencia(
+    mod, db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Regresión: el dry-run (``apply=False``) NO puede llamar a la asignación
+    real — eso muta el ORM (``product.sku``) y toma el lock de fila de
+    ``assign_next_sequence`` (vía INSERT/UPDATE en ``entity_code_sequences``),
+    sostenido hasta el cierre de la sesión. Antes del fix, el conteo salía
+    bien (por eso pasaba desapercibido) pero el ORM y la fila de secuencia
+    quedaban mutados en la MISMA transacción que el caller sigue usando."""
+    p1 = Product(
+        tenant_id=sample_tenant.tenant_id,
+        name="Producto 1",
+        sale_price_ars=Decimal("100"),
+        stock_units=1,
+        category="BEBIDAS",
+    )
+    p2 = Product(
+        tenant_id=sample_tenant.tenant_id,
+        name="Producto con sku",
+        sku="YA-TENGO",
+        sale_price_ars=Decimal("100"),
+        stock_units=1,
+    )
+    db_session.add_all([p1, p2])
+    await db_session.flush()
+
+    conteo, detalle = await mod._procesar_productos(
+        db_session, str(sample_tenant.tenant_id), apply=False
+    )
+
+    # Mismo conteo que el modo apply (misma cobertura reportada)...
+    assert conteo[mod._ASIGNADO] == 1
+    assert conteo[mod._YA_TENIA] == 1
+    # ...pero sin mutar el producto...
+    assert p1.sku is None
+    assert p2.sku == "YA-TENGO"
+    # ...ni tocar la tabla de secuencias (que es donde vive el lock de fila).
+    seq_rows = (await db_session.execute(select(EntityCodeSequence))).scalars().all()
+    assert seq_rows == []
+    id_rows = (await db_session.execute(select(EntityIdentifier))).scalars().all()
+    assert id_rows == []
+    # El detalle no inventa un código que no se asignó.
+    fila_asignada = next(f for f in detalle if f["estado"] == mod._ASIGNADO)
+    assert fila_asignada["codigo"] == ""
 
 
 async def test_productos_backfill_es_idempotente(

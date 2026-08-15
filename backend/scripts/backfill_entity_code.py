@@ -60,7 +60,11 @@ Undo en bloque (ejemplo para cliente):
 (No revierte la fila de ``entity_identifiers`` a propósito — es insert-only
 por diseño, ver el docstring de ``persistence/models/entity_identifier.py``.)
 
-NUNCA imprime la connection URL. Read-only por default. Correr desde backend/.
+NUNCA imprime la connection URL. Read-only por default: sin ``--apply``, nunca
+llama a la asignación real (que toma el lock de fila de
+``assign_next_sequence`` y lo sostiene hasta el cierre de la sesión) — sólo
+evalúa con ``needs_vektor_code`` si asignaría, sin escribir ni lockear nada.
+Correr desde backend/.
 """
 
 from __future__ import annotations
@@ -87,6 +91,7 @@ from app.application.services.entity_code_service import (  # noqa: E402
     SUPPLIER_CODE_SPEC,
     EntityCodeSpec,
     assign_vektor_code_if_missing,
+    needs_vektor_code,
 )
 from app.domain.text_norm import normalize_text  # noqa: E402
 from app.domain.verticals import Vertical, parse_vertical  # noqa: E402
@@ -161,14 +166,20 @@ async def _procesar_productos(
 
     for product in rows:
         had_code = bool(product.sku)
-        assigned = await assign_vektor_code_if_missing(
-            session,
-            product,
-            PRODUCT_CODE_SPEC,
-            product.tenant_id,
-            vertical=vertical,
-            category=product.category,
-        )
+        if apply:
+            assigned = await assign_vektor_code_if_missing(
+                session,
+                product,
+                PRODUCT_CODE_SPEC,
+                product.tenant_id,
+                vertical=vertical,
+                category=product.category,
+            )
+        else:
+            # Dry-run: NUNCA llama a la asignación real — eso toma el lock de
+            # fila de `assign_next_sequence` y lo mantiene hasta que cierra la
+            # sesión (todo el scan). Sólo evalúa si asignaría, sin escribir nada.
+            assigned = needs_vektor_code(product, PRODUCT_CODE_SPEC)
         estado = _ASIGNADO if assigned else _YA_TENIA
         conteo[estado] += 1
         detalle.append(
@@ -224,7 +235,10 @@ async def _procesar_simple(
     for entity in rows:
         if getattr(entity, "is_sentinel", False):
             continue
-        assigned = await assign_vektor_code_if_missing(session, entity, spec, entity.tenant_id)
+        if apply:
+            assigned = await assign_vektor_code_if_missing(session, entity, spec, entity.tenant_id)
+        else:
+            assigned = needs_vektor_code(entity, spec)
         estado = _ASIGNADO if assigned else _YA_TENIA
         conteo[estado] += 1
         detalle.append(
@@ -276,9 +290,12 @@ async def _procesar_proveedores(
 
     for supplier in activos:
         es_duplicado = normalize_text(supplier.name) in duplicados
-        assigned = await assign_vektor_code_if_missing(
-            session, supplier, SUPPLIER_CODE_SPEC, supplier.tenant_id
-        )
+        if apply:
+            assigned = await assign_vektor_code_if_missing(
+                session, supplier, SUPPLIER_CODE_SPEC, supplier.tenant_id
+            )
+        else:
+            assigned = needs_vektor_code(supplier, SUPPLIER_CODE_SPEC)
         if es_duplicado:
             estado = _POSIBLE_DUPLICADO
         elif assigned:

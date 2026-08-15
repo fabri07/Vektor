@@ -509,7 +509,16 @@ def _classify_row_reference(
     if anonymous_name_tokens is not None and name_norm and name_norm in anonymous_name_tokens:
         return RowReferenceResolution(outcome="anonymous")
 
-    keys = record_keys(record, doc_fields=doc_fields, code_field=code_field)
+    # ("code", "business_code"): el valor de la fila no sabe de antemano si va
+    # a matchear el vektor_code propio de una entidad o un business_code
+    # externo de otra — probar los dos tiers deja que resolve_identity marque
+    # `conflict` si cada uno matchea una entidad DISTINTA (ver record_keys).
+    keys = record_keys(
+        record,
+        doc_fields=doc_fields,
+        code_field=code_field,
+        code_key_types=("code", "business_code"),
+    )
     if not keys and not name_norm:
         return RowReferenceResolution(outcome="anonymous")
 
@@ -667,7 +676,11 @@ async def _augment_index_with_business_codes(
     for entity_id, normalized_value in rows:
         entity = by_id.get(entity_id)
         if entity is not None:
-            index.setdefault(IdentityKey("code", normalized_value), entity)
+            # Tier "business_code", DISTINTO de "code" (el vektor_code propio que
+            # `build_existing_index` ya indexó arriba) — el mismo valor normalizado
+            # nunca puede compartir slot con el vektor_code de OTRA entidad y
+            # taparlo en silencio; ver el docstring de `_KEY_PRIORITY`.
+            index.setdefault(IdentityKey("business_code", normalized_value), entity)
 
 
 async def _load_customer_identity_index(

@@ -68,6 +68,7 @@ router = APIRouter()
 def _customer_snapshot(customer: Customer) -> dict[str, object]:
     return {
         "id": str(customer.id),
+        "vektor_code": customer.vektor_code,
         "name": customer.name,
         "customer_type": customer.customer_type,
         "last_name": customer.last_name,

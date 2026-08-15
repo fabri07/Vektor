@@ -199,3 +199,61 @@ class TestCodeField:
             code_field="vektor_code",
         )
         assert index[IdentityKey("code", "cli-0001")] is entities[0]
+
+
+class TestBusinessCodeVsOwnCode:
+    """F-ID: regresión del colapso de precedencia. ``code`` (vektor_code propio,
+    single-valued) y ``business_code`` (externo, multi-valuado vía
+    ``entity_identifiers``) son tiers SEPARADOS del índice — un valor no puede
+    apuntar a una entidad por un tier y a otra DISTINTA por el otro sin que
+    ``resolve_identity`` lo vea como conflicto real."""
+
+    def test_mismo_valor_como_code_y_business_code_de_entidades_distintas_es_conflict(
+        self,
+    ) -> None:
+        # Antes del fix, la construcción del índice indexaba ambos bajo el
+        # MISMO tipo "code" — `index.setdefault` hacía que el segundo (acá
+        # business_code de B) se descartara en silencio, y una fila con ese
+        # valor resolvía siempre a A, nunca a "conflict".
+        index = {
+            IdentityKey("code", "abc-001"): _ENTITY_A,
+            IdentityKey("business_code", "abc-001"): _ENTITY_B,
+        }
+        keys = record_keys(
+            {"code": "abc-001"},
+            doc_fields=(),
+            code_field="code",
+            code_key_types=("code", "business_code"),
+        )
+        result = resolve_identity(keys, index)
+        assert result.outcome == "conflict"
+        assert set(result.conflicting_entities) == {_ENTITY_A, _ENTITY_B}
+
+    def test_mismo_valor_apuntando_a_la_misma_entidad_en_los_dos_tiers_matchea(
+        self,
+    ) -> None:
+        index = {
+            IdentityKey("code", "abc-001"): _ENTITY_A,
+            IdentityKey("business_code", "abc-001"): _ENTITY_A,
+        }
+        keys = record_keys(
+            {"code": "abc-001"},
+            doc_fields=(),
+            code_field="code",
+            code_key_types=("code", "business_code"),
+        )
+        result = resolve_identity(keys, index)
+        assert result.outcome == "matched"
+        assert result.entity is _ENTITY_A
+
+    def test_solo_business_code_matchea_sin_tier_code_en_el_indice(self) -> None:
+        index = {IdentityKey("business_code", "ext-42"): _ENTITY_B}
+        keys = record_keys(
+            {"code": "ext-42"},
+            doc_fields=(),
+            code_field="code",
+            code_key_types=("code", "business_code"),
+        )
+        result = resolve_identity(keys, index)
+        assert result.outcome == "matched"
+        assert result.entity is _ENTITY_B

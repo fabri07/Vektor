@@ -32,6 +32,7 @@ from app.domain.entity_code import (
 )
 from app.domain.text_norm import normalize_external_code
 from app.domain.verticals import Vertical
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
 from app.persistence.models.entity_code_sequence import EntityCodeSequence
 from app.persistence.models.entity_identifier import EntityIdentifier
@@ -39,6 +40,11 @@ from app.persistence.models.product import Product
 from app.persistence.models.supplier import Supplier
 
 _CodeableEntity = Product | Customer | Supplier
+
+#: Decisión auditada en CADA asignación en vivo (los 8 sitios reales de F-ID.5:
+#: HTTP, chat, imports, remitos) — distinta de "ENTITY_CODE_BACKFILL", que sólo
+#: emite `backfill_entity_code.py` sobre lo que ya existía antes de F-ID.
+_DECISION_TYPE_ASSIGNED = "ENTITY_CODE_ASSIGNED"
 
 
 class EntityIdentifierConflictError(Exception):
@@ -66,6 +72,18 @@ _SEQUENCE_CONFLICT = unique_violation_classifier(
         "entity_code_sequences.tenant_id",
         "entity_code_sequences.entity_type",
         "entity_code_sequences.prefix",
+    ),
+)
+
+_IDENTIFIER_CONFLICT = unique_violation_classifier(
+    "identifier",
+    constraint="uq_entity_identifiers_active_value",
+    columns=(
+        "entity_identifiers.tenant_id",
+        "entity_identifiers.entity_type",
+        "entity_identifiers.identifier_type",
+        "entity_identifiers.namespace",
+        "entity_identifiers.normalized_value",
     ),
 )
 
@@ -164,6 +182,22 @@ def _prefix_for(
     return CUSTOMER_PREFIX if spec.kind == "customer" else SUPPLIER_PREFIX
 
 
+def needs_vektor_code(entity: _CodeableEntity, spec: EntityCodeSpec) -> bool:
+    """``True`` si :func:`assign_vektor_code_if_missing` le asignaría un código a
+    esta entidad — sin tocar la sesión ni el lock de fila de
+    ``assign_next_sequence``. Para previews (dry-run) que necesitan reportar
+    cobertura sin pagar el costo de escritura real (ver ``backfill_entity_code.py``:
+    un dry-run que igual llama a la asignación toma locks reales durante todo
+    el scan, contradiciendo "read-only por default").
+
+    Misma regla que la primera mitad de ``assign_vektor_code_if_missing`` — se
+    extrae para que las dos no puedan divergir.
+    """
+    if getattr(entity, "is_sentinel", False):
+        return False
+    return not getattr(entity, spec.code_field)
+
+
 async def assign_vektor_code_if_missing(
     session: AsyncSession,
     entity: _CodeableEntity,
@@ -189,9 +223,7 @@ async def assign_vektor_code_if_missing(
     no-reciclo verificable después: desactivar o fusionar la entidad no la
     borra.
     """
-    if getattr(entity, "is_sentinel", False):
-        return False
-    if getattr(entity, spec.code_field):
+    if not needs_vektor_code(entity, spec):
         return False
     if entity.id is None:
         raise ValueError(
@@ -222,6 +254,20 @@ async def assign_vektor_code_if_missing(
             last_seen_at=ts,
         )
     )
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant_id,
+            decision_type=_DECISION_TYPE_ASSIGNED,
+            decision_data={
+                "entity_type": spec.kind,
+                "entity_id": str(entity.id),
+                "name": getattr(entity, "name", None),
+                "codigo": code,
+            },
+            triggered_by="entity_code_service.assign_vektor_code_if_missing",
+            created_at=ts,
+        )
+    )
     return True
 
 
@@ -247,25 +293,36 @@ async def record_identifier(
     filas por releer el mismo dato en cada import). Si la fila vigente
     pertenece a OTRA entidad, es un conflicto real — se levanta
     ``EntityIdentifierConflictError`` en vez de reasignarla en silencio.
+
+    El INSERT va DENTRO de un ``guarded_savepoint`` (mismo patrón que
+    ``assign_next_sequence``): dos llamadas concurrentes que no ven la fila del
+    otro en su SELECT insertarían ambas y la segunda chocaría contra
+    ``uq_entity_identifiers_active_value`` con un ``IntegrityError`` crudo que,
+    sin savepoint, aborta TODA la transacción externa en PostgreSQL (ver
+    ``_savepoint.py``). Con el guard, la segunda re-consulta tras perder la
+    carrera y resuelve igual que si hubiera visto la fila desde el principio.
     """
     normalized = normalize_external_code(raw_value)
     if not normalized:
         raise ValueError(f"record_identifier: valor vacío para {identifier_type!r}")
 
     ts = now or datetime.now(UTC)
-    existing = (
-        await session.execute(
-            sa.select(EntityIdentifier).where(
-                EntityIdentifier.tenant_id == tenant_id,
-                EntityIdentifier.entity_type == entity_type,
-                EntityIdentifier.identifier_type == identifier_type,
-                EntityIdentifier.namespace == namespace,
-                EntityIdentifier.normalized_value == normalized,
-                EntityIdentifier.revoked_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
 
+    async def _find_active() -> EntityIdentifier | None:
+        return (
+            await session.execute(
+                sa.select(EntityIdentifier).where(
+                    EntityIdentifier.tenant_id == tenant_id,
+                    EntityIdentifier.entity_type == entity_type,
+                    EntityIdentifier.identifier_type == identifier_type,
+                    EntityIdentifier.namespace == namespace,
+                    EntityIdentifier.normalized_value == normalized,
+                    EntityIdentifier.revoked_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+
+    existing = await _find_active()
     if existing is not None:
         if existing.entity_id != entity_id:
             raise EntityIdentifierConflictError(identifier_type, raw_value, existing.entity_id)
@@ -287,5 +344,23 @@ async def record_identifier(
         source_upload_id=source_upload_id,
         created_by_user_id=created_by_user_id,
     )
-    session.add(row)
+    try:
+        async with guarded_savepoint(session, _IDENTIFIER_CONFLICT):
+            session.add(row)
+    except SavepointConflictError:
+        existing = await _find_active()
+        if existing is None:
+            # El conflicto era real (el índice único disparó) pero la fila
+            # vigente ya no aparece — otra transacción la revocó entre medio.
+            # No hay nada seguro para devolver: quien llama tiene que reintentar.
+            raise RuntimeError(
+                "record_identifier: conflicto de unicidad sin fila vigente "
+                f"para {identifier_type}={raw_value!r} — reintentar"
+            ) from None
+        if existing.entity_id != entity_id:
+            raise EntityIdentifierConflictError(
+                identifier_type, raw_value, existing.entity_id
+            ) from None
+        existing.last_seen_at = ts
+        return existing
     return row

@@ -25,6 +25,7 @@ from app.application.services.entity_code_service import (
     record_identifier,
 )
 from app.domain.verticals import Vertical
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
 from app.persistence.models.entity_identifier import EntityIdentifier
 from app.persistence.models.product import Product
@@ -70,6 +71,74 @@ async def test_producto_sin_sku_recibe_codigo_por_categoria(
     assert row.namespace == "vektor"
     assert row.origin == "vektor"
     assert row.is_primary is True
+
+
+async def test_asignacion_en_vivo_queda_auditada(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Regresión: antes, ``assign_vektor_code_if_missing`` — el path de
+    asignación en vivo, usado en TODA alta real de producto/cliente/proveedor —
+    nunca escribía en ``decision_audit_log``, a diferencia del backfill offline
+    (``ENTITY_CODE_BACKFILL``), violando el invariante "toda decisión → audit"."""
+    product = Product(
+        tenant_id=sample_tenant.tenant_id,
+        name="Sabana king",
+        sale_price_ars=Decimal("15000"),
+        stock_units=5,
+        category="TEXTILES",
+    )
+    db_session.add(product)
+    await db_session.flush()
+
+    await assign_vektor_code_if_missing(
+        db_session,
+        product,
+        PRODUCT_CODE_SPEC,
+        sample_tenant.tenant_id,
+        vertical=Vertical.DECORACION_HOGAR,
+        category="TEXTILES",
+    )
+
+    audit = (
+        await db_session.execute(
+            select(DecisionAuditLog).where(
+                DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                DecisionAuditLog.decision_type == "ENTITY_CODE_ASSIGNED",
+            )
+        )
+    ).scalar_one()
+    assert audit.decision_data["entity_type"] == "product"
+    assert audit.decision_data["entity_id"] == str(product.id)
+    assert audit.decision_data["codigo"] == "TEX-0001"
+
+
+async def test_asignacion_ya_tenia_codigo_no_audita_de_nuevo(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    product = Product(
+        tenant_id=sample_tenant.tenant_id,
+        name="Ya con sku",
+        sku="PROPIO-1",
+        sale_price_ars=Decimal("100"),
+        stock_units=1,
+    )
+    db_session.add(product)
+    await db_session.flush()
+
+    assigned = await assign_vektor_code_if_missing(
+        db_session, product, PRODUCT_CODE_SPEC, sample_tenant.tenant_id
+    )
+
+    assert assigned is False
+    rows = (
+        await db_session.execute(
+            select(DecisionAuditLog).where(
+                DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                DecisionAuditLog.decision_type == "ENTITY_CODE_ASSIGNED",
+            )
+        )
+    ).scalars().all()
+    assert rows == []
 
 
 async def test_producto_con_sku_propio_no_se_pisa(

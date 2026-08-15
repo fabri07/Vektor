@@ -15,6 +15,10 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.persistence.models.audit import DecisionAuditLog
 
 _DNI_SEQ = itertools.count(41_000_000)
 
@@ -95,6 +99,31 @@ class TestMasterCRUD:
         assert body["is_active"] is True
         assert body["custom_fields"] == {}
         assert "id" in body and "tenant_id" in body
+
+    async def test_create_audita_el_codigo_vektor_asignado(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        m: _Master,
+    ) -> None:
+        """Regresión F-ID: el snapshot de `DATA_RECORD_CREATED` no incluía
+        `vektor_code` — el código recién asignado quedaba invisible en la
+        traza de auditoría, aunque la fila ya lo tuviera."""
+        resp = await client.post(m.base, json=m.payload, headers=auth_headers)
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["vektor_code"]  # se asignó (alta nueva, F-ID.5)
+
+        rows = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "DATA_RECORD_CREATED",
+                )
+            )
+        ).scalars().all()
+        audit = next(r for r in rows if r.decision_data["record_id"] == body["id"])
+        assert audit.decision_data["after"]["vektor_code"] == body["vektor_code"]
 
     async def test_create_requires_name(
         self, client: AsyncClient, auth_headers: dict[str, Any], m: _Master

@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from app.application.services.ingestion_import_service import ProductIdentityIndexes
+    from app.domain.entity_code import EntityKind
 
 # ── Versionado de la lógica de decisión ──────────────────────────────────────────
 # Cambiar CUALQUIER regla de identidad/stock/fingerprint OBLIGA a subir esta versión:
@@ -1232,12 +1233,22 @@ def _group_source_items(items: list[Any]) -> dict[str, dict[str, Any]]:
 
 
 async def _transfer_identifiers_to_canonical(
-    session: AsyncSession, tenant_id: uuid.UUID, canonical_id: uuid.UUID, duplicate_id: uuid.UUID
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    canonical_id: uuid.UUID,
+    duplicate_id: uuid.UUID,
+    *,
+    entity_type: EntityKind,
 ) -> None:
     """F-ID.8 — re-apunta las filas VIGENTES de ``entity_identifiers`` del
     duplicado al canónico, para que un código que ya identificaba al
     duplicado (su propio ``vektor_code``, o un ``business_code`` capturado
     por F-ID.4/F-ID.7) siga resolviendo tras la fusión.
+
+    ``entity_type`` es obligatorio y tipado (sin default): antes estaba
+    hardcodeado a ``"product"`` en la query — un futuro merge de Customer/Supplier
+    que reusara la función sin darse cuenta filtraría igual por "product" y no
+    tocaría ninguna fila, un no-op silencioso en vez de un error ruidoso.
 
     Si el canónico YA tiene una fila vigente con el MISMO
     ``(identifier_type, namespace, normalized_value)``, re-apuntar chocaría
@@ -1272,32 +1283,41 @@ async def _transfer_identifiers_to_canonical(
         await session.execute(
             select(EntityIdentifier).where(
                 EntityIdentifier.tenant_id == tenant_id,
-                EntityIdentifier.entity_type == "product",
+                EntityIdentifier.entity_type == entity_type,
                 EntityIdentifier.entity_id == duplicate_id,
                 EntityIdentifier.revoked_at.is_(None),
             )
         )
     ).scalars().all()
-    for row in rows:
-        canonical_already_has_it = (
+    if not rows:
+        return
+
+    # Set del canónico cargado UNA vez (no una query por fila del duplicado — con
+    # miles de productos duplicados/tenant esto era el N+1 que el review marcó).
+    canonical_keys = {
+        (r.identifier_type, r.namespace, r.normalized_value)
+        for r in (
             await session.execute(
-                select(EntityIdentifier.id).where(
+                select(EntityIdentifier).where(
                     EntityIdentifier.tenant_id == tenant_id,
-                    EntityIdentifier.entity_type == "product",
+                    EntityIdentifier.entity_type == entity_type,
                     EntityIdentifier.entity_id == canonical_id,
-                    EntityIdentifier.identifier_type == row.identifier_type,
-                    EntityIdentifier.namespace == row.namespace,
-                    EntityIdentifier.normalized_value == row.normalized_value,
                     EntityIdentifier.revoked_at.is_(None),
                 )
             )
-        ).first()
-        if canonical_already_has_it is not None:
+        )
+        .scalars()
+        .all()
+    }
+    for row in rows:
+        key = (row.identifier_type, row.namespace, row.normalized_value)
+        if key in canonical_keys:
             row.revoked_at = func.now()
             row.is_primary = False
         else:
             row.entity_id = canonical_id
             row.is_primary = False
+            canonical_keys.add(key)  # guarda contra dos filas del mismo duplicado
 
 
 async def _apply_one_group(
@@ -1599,7 +1619,9 @@ async def _apply_one_group(
     # validación de arriba) — ver `_transfer_identifiers_to_canonical` por
     # qué NO participa del revert de T6 (deuda declarada).
     for d in ordered_dups:
-        await _transfer_identifiers_to_canonical(session, tenant_id, canonical_id, d)
+        await _transfer_identifiers_to_canonical(
+            session, tenant_id, canonical_id, d, entity_type="product"
+        )
 
     # 5) DEACTIVATE_DUPLICATE — soft-delete con reloj de la DB. NO se pone stock en 0
     # (queda como estaba; la reversa reactiva y resta el delta del canónico).

@@ -3,9 +3,9 @@
 Cualquier sub-agente que ya resolvió un UUID de producto/cliente/proveedor
 (nunca lo inventa — lo recibe de un repo/query propio) puede pedirle a este
 helper cómo mostrarlo: ``{id, code, display_name}``, p. ej. "Juan Pérez
-(CLI-0042)". No resuelve identidad (eso es `identity_resolution.py` /
-`entity_resolution.py`) ni reemplaza el tooling interno de cada agente — es
-sólo formateo, de sólo lectura, sobre una entidad que YA se conoce.
+(CLI-0042)". No resuelve identidad (eso es `identity_resolution.py`) ni reemplaza el
+tooling interno de cada agente — es sólo formateo, de sólo lectura, sobre una
+entidad que YA se conoce.
 
 No inventa: si la entidad no existe (o no pertenece al tenant) devuelve
 ``None`` en vez de fabricar un display — no-invention rule.
