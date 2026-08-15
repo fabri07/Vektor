@@ -44,21 +44,34 @@ router = APIRouter()
 DEACTIVATION_REASON_MANUAL = "MANUAL_ADMIN_VOID"
 
 
-async def _tenant_vertical(session: AsyncSession, tenant_id: UUID) -> Vertical:
-    """Vertical del tenant, tipado. Sin fallback: sin perfil no hay catálogo.
+async def _tenant_vertical_or_none(session: AsyncSession, tenant_id: UUID) -> Vertical | None:
+    """Vertical del tenant si tiene `BusinessProfile`, si no `None`.
 
-    Un tenant logueado sin `BusinessProfile` es un estado roto real (signups
-    viejos de Google); servirle el catálogo de kiosco era peor que decírselo.
+    Usado donde el vertical es solo un insumo opcional (ej. prefijo del código
+    Véktor, que ya tiene fallback honesto a "GEN") y la ausencia de perfil no
+    debe bloquear la operación.
     """
     result = await session.execute(
         select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
     )
     code = result.scalar_one_or_none()
     if code is None:
+        return None
+    return parse_vertical(code)
+
+
+async def _tenant_vertical(session: AsyncSession, tenant_id: UUID) -> Vertical:
+    """Vertical del tenant, tipado. Sin fallback: sin perfil no hay catálogo.
+
+    Un tenant logueado sin `BusinessProfile` es un estado roto real (signups
+    viejos de Google); servirle el catálogo de kiosco era peor que decírselo.
+    """
+    vertical = await _tenant_vertical_or_none(session, tenant_id)
+    if vertical is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="business_profile_not_found"
         )
-    return parse_vertical(code)
+    return vertical
 
 
 async def _resolve_category(
@@ -367,9 +380,16 @@ async def create_product(
     # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
     # F-ID: se resuelve el vertical siempre (no sólo cuando hay categoría) para que
     # el prefijo del código Véktor pueda usar la categoría del producto — GEN si no
-    # hay vertical/categoría es un fallback honesto, no un error.
-    vertical = await _tenant_vertical(session, tenant.tenant_id)
+    # hay vertical/categoría es un fallback honesto, no un error. Por eso la
+    # resolución es tolerante (`_or_none`): un tenant sin BusinessProfile puede
+    # seguir creando productos sin categoría; el 404 solo aplica si SÍ mandó
+    # categoría (ahí sí hace falta un catálogo real contra el cual normalizarla).
+    vertical = await _tenant_vertical_or_none(session, tenant.tenant_id)
     if data.get("category"):
+        if vertical is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="business_profile_not_found"
+            )
         code, label = await _resolve_category(
             session, tenant.tenant_id, data["category"], vertical
         )

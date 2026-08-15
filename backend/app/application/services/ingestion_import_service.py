@@ -2193,7 +2193,7 @@ async def build_incomplete_product(
     )
     # NO ``session.add()`` acá: ``add_product_or_reuse`` exige el objeto TRANSIENT
     # para poder emitir el INSERT DENTRO del savepoint (ver services/_savepoint.py).
-    resolved, created = await add_product_or_reuse(session, product)
+    resolved, created = await add_product_or_reuse(session, product, vertical=vertical)
     if product_cache is not None:
         product_cache[resolved.id] = resolved
     return resolved.id, created
@@ -4848,7 +4848,7 @@ async def _insert_confirmed_data_impl(
                     # para emitir el INSERT dentro del savepoint.
                     try:
                         _resolved, _created = await add_product_or_reuse(
-                            session, new_product
+                            session, new_product, vertical=_vertical
                         )
                     except ProductIdentityConflictError as _conflict:
                         counts["productos_ambiguos"] += 1
@@ -6352,7 +6352,9 @@ async def _insert_multisheet_data(
             # F5-A: sin ``session.add`` — ``add_product_or_reuse`` necesita el objeto
             # TRANSIENT para emitir el INSERT dentro del savepoint.
             try:
-                _resolved, _created = await add_product_or_reuse(session, new_product)
+                _resolved, _created = await add_product_or_reuse(
+                    session, new_product, vertical=_vertical
+                )
             except ProductIdentityConflictError as _conflict:
                 # Ambigüedad que el motor no vio (barcode y sku de productos
                 # distintos): mismo destino que la ambigüedad detectada arriba.

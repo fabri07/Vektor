@@ -26,6 +26,7 @@ from app.api.v1.products import (
     _find_active_product_by_identity,
     _identity_conflict_from_db,
     _tenant_vertical,
+    _tenant_vertical_or_none,
 )
 from app.application.services import maintenance_lock_service, stock_service
 from app.application.services._ledger_restore import snapshot_master
@@ -551,9 +552,16 @@ async def reclassify_record(
                 )
             # Misma normalización que POST /products (catálogo del vertical). F-ID:
             # se resuelve siempre (no sólo con categoría) para el prefijo del código
-            # Véktor — GEN si no hay vertical/categoría es un fallback honesto.
-            vertical = await _tenant_vertical(session, tenant.tenant_id)
+            # Véktor — GEN si no hay vertical/categoría es un fallback honesto. Por
+            # eso es tolerante (`_or_none`): sin categoría no hace falta un perfil
+            # real; el 404 solo aplica si SÍ mandó categoría.
+            vertical = await _tenant_vertical_or_none(session, tenant.tenant_id)
             if data.get("category"):
+                if vertical is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="business_profile_not_found",
+                    )
                 code_p, label_p = normalize_product_category(data["category"], vertical)
                 data["category"] = code_p
                 if label_p:

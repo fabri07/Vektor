@@ -277,7 +277,7 @@ async def _resolve_product(
     # decide él —vincular la línea a ese producto, o corregir el SKU—.
     try:
         _resolved, _created = await add_product_or_reuse(
-            session, product, on_conflict="raise"
+            session, product, on_conflict="raise", vertical=vertical
         )
     except ProductIdentityConflictError as conflict:
         clave = "código de barras" if conflict.matched_by == "barcode" else "SKU"

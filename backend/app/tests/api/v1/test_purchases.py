@@ -71,6 +71,13 @@ class TestManualPurchase:
         )
         assert exp.json()["expense_type"] == "COGS"
         assert exp.json()["category"] == "INVENTORY"
+        # F-ID regresión: el remito pasa el vertical del tenant a
+        # `add_product_or_reuse`, así que el producto nuevo nace con el prefijo
+        # curado por categoría ("BEB-") y no el genérico ("GEN-").
+        prod = await client.get(
+            f"/api/v1/products/{data['products_created'][0]}", headers=auth_headers
+        )
+        assert prod.json()["sku"].startswith("BEB-")
 
     async def test_existing_product_restock_without_price_update(
         self, client: AsyncClient, auth_headers: dict[str, Any]
