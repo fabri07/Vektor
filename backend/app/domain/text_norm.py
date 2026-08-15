@@ -107,3 +107,17 @@ def normalize_brand(s: str | None) -> str | None:
     if not s:
         return None
     return normalize_text(s) or None
+
+
+def normalize_external_code(s: str | None) -> str | None:
+    """Código externo normalizado (``normalize_text``). None/vacío → None.
+
+    Misma implementación que ``normalize_sku`` — nombre propio porque este
+    normalizador alimenta identificadores de cliente/proveedor (F-ID), y un
+    código de cliente pasando por una función llamada "sku" confunde en
+    review. Sin normalizar, "CLI-01" y "cli-01" de dos filas del mismo
+    archivo serían dos códigos distintos.
+    """
+    if not s:
+        return None
+    return normalize_text(s) or None
