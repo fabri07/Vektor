@@ -42,6 +42,7 @@ import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
 import { MappingOriginHint } from "./MappingOriginHint";
 import { TargetSelect } from "./TargetSelect";
 import { AmbiguityHint } from "./AmbiguityHint";
+import { BulkMappingActionsToolbar } from "./BulkMappingActionsToolbar";
 import { StatusDot } from "./StatusDot";
 import {
   customFieldCollisions,
@@ -537,6 +538,14 @@ function SheetMapperSection({
     setCustomKey("");
   }
 
+  // F-B: ver el comentario equivalente del camino plano (`applyBulkUpdates`).
+  function applyBulkUpdates(updates: Record<string, string>) {
+    const cols = Object.keys(updates);
+    if (cols.length === 0) return;
+    for (const col of cols) onColumnTouched?.(context.context_id, col);
+    setMappings((p) => ({ ...p, ...updates }));
+  }
+
   const { data: suggestions = [], isLoading } = useQuery({
     queryKey: ["column-mappings", fileId, context.context_id, entity],
     queryFn: () =>
@@ -760,6 +769,11 @@ function SheetMapperSection({
           <div className="px-3 py-3 text-xs text-vk-text-muted">Analizando columnas...</div>
         ) : (
           <div className="p-2">
+            <BulkMappingActionsToolbar
+              suggestions={suggestions}
+              mappings={mappings}
+              onApply={applyBulkUpdates}
+            />
             {reqMissing && (
               <div className="mb-2 flex items-center gap-2 rounded border border-vk-danger/30 bg-vk-danger-bg px-2 py-1 text-[11px] text-vk-danger">
                 <XCircle className="h-3 w-3 shrink-0" />
@@ -1960,6 +1974,18 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     setMappings((prev) => ({ ...prev, [col]: target }));
   }
 
+  // F-B: acciones masivas — aplican N cambios de una sola vez. Misma marca de
+  // "tocada" que un cambio manual: es una decisión explícita del usuario
+  // (apretó el botón), no una sugerencia automática que se cuela como
+  // confirmada — invariante F-0 (una sugerencia nunca equivale a una
+  // confirmación) sigue valiendo, sólo que la confirmación es masiva.
+  function applyBulkUpdates(updates: Record<string, string>) {
+    const cols = Object.keys(updates);
+    if (cols.length === 0) return;
+    for (const col of cols) touchedRef.current.add(riskKey("table", col));
+    setMappings((prev) => ({ ...prev, ...updates }));
+  }
+
   // Calcula el status efectivo de una columna:
   // Si hay mapeo local → mapped/unmapped/ignore según el valor.
   // Si no hay mapeo local → usa el status del backend (captura required_missing).
@@ -2246,6 +2272,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         </div>
       ) : (
         <>
+          <BulkMappingActionsToolbar
+            suggestions={suggestions}
+            mappings={mappings}
+            onApply={applyBulkUpdates}
+          />
           {/* Tabla de mapeo — dos paneles */}
           <div className="mb-4 overflow-hidden rounded-lg border border-vk-border-w">
             {/* Headers */}

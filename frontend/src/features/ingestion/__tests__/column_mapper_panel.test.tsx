@@ -1351,6 +1351,161 @@ describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
   });
 });
 
+describe("ColumnMapperPanel — F-B: acciones masivas (camino plano)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["Fecha", "Precio de venta", "Observaciones libres", "Columna vacía"],
+      },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-15"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Precio de venta",
+        normalized_column: "precio_de_venta",
+        sample_values: ["1500"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "ambiguo",
+        options: ["amount", "unit_price"],
+        duda: "¿es el precio de cada unidad, o el total de la línea?",
+      },
+      {
+        source_column: "Observaciones libres",
+        normalized_column: "observaciones_libres",
+        sample_values: ["Cliente frecuente"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "unmapped",
+      },
+      {
+        source_column: "Columna vacía",
+        normalized_column: "columna_vacia",
+        sample_values: ["", "  ", "nan"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "unmapped",
+      },
+    ]);
+  });
+
+  // El nombre de columna aparece dos veces cuando también entra en "Revisá
+  // antes de confirmar" (F-C/F-M): se toma la fila de la TABLA principal, la
+  // única envuelta en ".grid".
+  function selectDe(columna: string): HTMLSelectElement {
+    const fila = screen
+      .getAllByText(columna)
+      .map((el) => el.closest(".grid"))
+      .find((f): f is HTMLElement => f !== null);
+    return within(fila as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+  }
+
+  test("la barra no se muestra si no hay nada para las tres acciones", async () => {
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-15"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("transaction_date");
+    });
+    expect(screen.queryByText(/Acciones masivas/)).not.toBeInTheDocument();
+  });
+
+  test("«Aceptar sugerencias ambiguas» toma el primer candidato y marca la columna tocada", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Aceptar sugerencias ambiguas \(1\)/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Aceptar sugerencias ambiguas \(1\)/));
+
+    await waitFor(() => {
+      expect(selectDe("Precio de venta").value).toBe("amount");
+    });
+    // Marcada como tocada: sobrevive un cambio de sección/propósito después
+    // (comportamiento ya cubierto por otro describe; acá sólo se confirma el valor).
+  });
+
+  test("«Guardar sin mapear como campos propios» no toca la vacía (le compite «ignorar»)", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Guardar sin mapear como campos propios \(1\)/),
+      ).toBeInTheDocument();
+    });
+    // Sólo "Observaciones libres" tiene datos reales — "Columna vacía" es
+    // candidata de "ignorar", no de "campo propio" (mutuamente excluyentes).
+    fireEvent.click(screen.getByText(/Guardar sin mapear como campos propios \(1\)/));
+
+    await waitFor(() => {
+      expect(selectDe("Observaciones libres").value).toBe(
+        "custom_field:observaciones_libres",
+      );
+    });
+    expect(selectDe("Columna vacía").value).toBe("");
+  });
+
+  test("«Ignorar columnas vacías» sólo actúa sobre la que no tiene ningún dato real", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Ignorar columnas vacías \(1\)/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Ignorar columnas vacías \(1\)/));
+
+    await waitFor(() => {
+      expect(selectDe("Columna vacía").value).toBe("ignore");
+    });
+    expect(selectDe("Observaciones libres").value).toBe("");
+  });
+
+  test("no pisa una columna que el usuario ya mapeó a mano antes de usar la acción masiva", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Ignorar columnas vacías \(1\)/)).toBeInTheDocument();
+    });
+    // El usuario decide a mano que "Columna vacía" en realidad va a notas.
+    fireEvent.change(selectDe("Columna vacía"), { target: { value: "notes" } });
+
+    await waitFor(() => {
+      // La barra se recalcula: ya no hay nada que ignorar.
+      expect(screen.queryByText(/Ignorar columnas vacías/)).not.toBeInTheDocument();
+    });
+    expect(selectDe("Columna vacía").value).toBe("notes");
+  });
+});
+
 /**
  * Un archivo de UNA SOLA TABLA no puede traer costos de compra.
  *
