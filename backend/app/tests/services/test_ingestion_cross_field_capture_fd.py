@@ -1,4 +1,4 @@
-"""F-D (sub-commit 4, 7b/7c) — captura de campos cross-sección al buffer.
+"""F-D (7b/7c/7f) — captura y escritura de campos cross-sección.
 
 7a validó el mapeo (`app/tests/api/v1/test_ingestion_cross_target_validation_fd.py`)
 y `cross_field_buffer.py` probó el desempate puro. Este módulo cablea ambos al
@@ -7,10 +7,12 @@ proveedor resuelve ``matched`` vuelca sus columnas ``customer:*``/``supplier:*``
 al buffer compartido; una que NO resuelve (anonymous/unresolved) no vuelca
 nada — nunca se escribe sobre el sentinela ni sobre una entidad ambigua.
 
-La escritura real de los campos (7f) y su ledger (7e) esperan la migración,
-así que lo único observable hoy es el conteo que llega a ``counts``
-(``cross_fields_pendientes``/``cross_fields_entidades_pendientes``) — mismo
-patrón que ya usaba ``targets_cruzados_descartados`` antes de este commit.
+``_apply_cross_field_buffer`` (7f) escribe lo acumulado ``fill_if_empty`` —
+una vez por entidad, nunca por fila, y nunca pisa un campo que la ficha ya
+tenía cargado. El ledger de campo (7e, ``DataRepairItem`` con las acciones de
+la migración `20260816_0001`) y la reversión real al borrar el archivo (7g)
+se prueban en `test_file_deletion_revert.py` — acá sólo la escritura.
+
 ``product:*`` (expense→product) sigue deliberadamente sin capturar: está
 acoplado al motor de costos de F-H6 y se declara fase propia
 (``_CROSS_CAPTURE_KINDS`` en ``ingestion_import_service.py``).
@@ -280,3 +282,104 @@ class TestCapturaMultiHojaVentaCliente:
         assert counts["ventas_cliente_identificado"] == 1
         assert counts["cross_fields_entidades_pendientes"] == 1
         assert counts["cross_fields_pendientes"] == 1
+
+
+class TestAplicacionFillIfEmpty:
+    async def test_campo_vacio_se_completa_y_el_ledger_queda_listo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        cliente = await repo.save(
+            Customer(tenant_id=sample_tenant.tenant_id, name="Cliente Uno", dni="30111222")
+        )
+        assert cliente.last_name is None
+
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _flat_sale_summary(),
+            {"ventas": True},
+            column_mappings={
+                "doc_cliente": "customer_dni",
+                "apellido_cliente": "customer:last_name",
+            },
+        )
+
+        assert counts["cross_fields_aplicados"] == 1
+        assert not counts.get("cross_fields_ya_tenian_dato")
+        [detalle] = counts["cross_field_details"]
+        assert detalle["action"] == "UPDATE_CUSTOMER_CROSS_FIELD"
+        assert detalle["before"] == {"last_name": None}
+        assert detalle["after"] == {
+            "last_name": "Pérez",
+            "id": str(cliente.id),
+            "kind": "customer",
+        }
+
+        await db_session.refresh(cliente)
+        assert cliente.last_name == "Pérez"
+
+    async def test_campo_con_dato_no_se_pisa(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        cliente = await repo.save(
+            Customer(
+                tenant_id=sample_tenant.tenant_id,
+                name="Cliente Uno",
+                dni="30111222",
+                last_name="Gómez",
+            )
+        )
+
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _flat_sale_summary(),
+            {"ventas": True},
+            column_mappings={
+                "doc_cliente": "customer_dni",
+                "apellido_cliente": "customer:last_name",
+            },
+        )
+
+        assert counts.get("cross_fields_aplicados", 0) == 0
+        assert counts["cross_fields_ya_tenian_dato"] == 1
+        assert "cross_field_details" not in counts
+
+        await db_session.refresh(cliente)
+        assert cliente.last_name == "Gómez"
+
+    async def test_proveedor_campo_vacio_se_completa(
+        self,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(get_settings(), "SUPPLIER_REFERENCE_CREATION_MODE", "link_only")
+        valid_cuil = "20-12345678-6"
+        proveedor = Supplier(
+            tenant_id=sample_tenant.tenant_id, name="Distribuidora Real SA", cuil=valid_cuil
+        )
+        db_session.add(proveedor)
+        await db_session.flush()
+        assert proveedor.payment_method is None
+
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _merch_purchase_summary("Distribuidora Real", valid_cuil),
+            {"gastos": True},
+            column_mappings={
+                "cuil_prov": "supplier_cuil",
+                "forma_pago_prov": "supplier:payment_method",
+            },
+        )
+
+        assert counts["cross_fields_aplicados"] == 1
+        await db_session.refresh(proveedor)
+        assert proveedor.payment_method == "transferencia"

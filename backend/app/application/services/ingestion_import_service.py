@@ -54,7 +54,7 @@ from app.application.services.product_identity import (
 )
 from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
-from app.domain.cross_field_buffer import CrossFieldBuffer
+from app.domain.cross_field_buffer import CrossFieldBuffer, is_cross_value_blank
 from app.domain.date_parsing import parse_business_date, parse_business_datetime
 from app.domain.entity_code import EntityKind
 from app.domain.expense_categories import (
@@ -532,10 +532,11 @@ def _capture_row_cross_fields(
 
 
 def _volcar_preview_cross_fields(counts: dict[str, Any], buffer: CrossFieldBuffer) -> None:
-    """F-D (7d, preview): dice cuántos campos cross quedaron listos para
-    aplicarse — no los aplica. La escritura real (7f) y su ledger (7e)
-    esperan la migración; hasta entonces, esto es lo único observable del
-    ruteo cross-sección, igual que ya avisaba ``targets_cruzados_descartados``.
+    """F-D (7d): cuántos campos cross identificó el buffer, por entidad y por
+    campo. Se llama ANTES de `_apply_cross_field_buffer` (7f) — describe lo
+    que el buffer JUNTÓ durante el recorrido de filas, no lo que terminó
+    escribiéndose (eso lo cuentan `cross_fields_aplicados`/
+    `cross_fields_ya_tenian_dato`, que agrega la función de abajo).
     """
     resolved = buffer.resolved()
     counts["cross_fields_entidades_pendientes"] = len(resolved)
@@ -549,6 +550,76 @@ def _volcar_preview_cross_fields(counts: dict[str, Any], buffer: CrossFieldBuffe
             _por_campo[field_name] = _por_campo.get(field_name, 0) + 1
     if _por_campo:
         counts["cross_fields_por_campo"] = _por_campo
+
+
+#: F-D (7f): a qué acción de ledger corresponde cada kind capturado. `product`
+#: no está — `_CROSS_CAPTURE_KINDS` ya lo excluye antes de llegar al buffer.
+_CROSS_APPLY_ACTION: dict[str, str] = {
+    "customer": "UPDATE_CUSTOMER_CROSS_FIELD",
+    "supplier": "UPDATE_SUPPLIER_CROSS_FIELD",
+}
+
+
+async def _apply_cross_field_buffer(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    buffer: CrossFieldBuffer,
+    counts: dict[str, Any],
+) -> None:
+    """F-D (7f): escribe ``fill_if_empty`` — una vez por entidad, nunca por
+    fila — los campos que el buffer acumuló. Si la entidad YA tenía dato en
+    ese campo, no lo pisa (se cuenta en ``cross_fields_ya_tenian_dato``, no
+    se escribe ni se audita).
+
+    No inserta el ``DataRepairItem`` acá: deja lo escrito en
+    ``counts["cross_field_details"]`` para que el caller (`api/v1/ingestion.py`,
+    mismo patrón que ``product_details``/``master_details``) lo pase a
+    ``record_import_ledger`` — así todos los items de ESTE confirm (productos,
+    maestros, campos cross) quedan bajo el MISMO ``DataRepairRun``, en la misma
+    transacción del savepoint.
+    """
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    _cross_apply_model: dict[str, type[Any]] = {"customer": Customer, "supplier": Supplier}
+
+    details: list[dict[str, Any]] = []
+    _aplicados = 0
+    _ya_tenian_dato = 0
+    for kind, entity_id_str, fields in buffer.resolved():
+        model = _cross_apply_model.get(kind)
+        if model is None:
+            continue
+        entity = await session.get(model, uuid.UUID(entity_id_str))
+        if entity is None or entity.tenant_id != tenant_id:
+            # Defensivo: no debería pasar — resolvió "matched" hace instantes,
+            # en la MISMA transacción — pero si pasara, no se escribe a ciegas.
+            continue
+        before: dict[str, Any] = {}
+        after: dict[str, Any] = {}
+        for field_name, pending in fields.items():
+            current = getattr(entity, field_name, None)
+            if not is_cross_value_blank(field_name, current):
+                _ya_tenian_dato += 1
+                continue
+            before[field_name] = current
+            after[field_name] = pending.value
+            setattr(entity, field_name, pending.value)
+        if after:
+            _aplicados += len(after)
+            details.append(
+                {
+                    "action": _CROSS_APPLY_ACTION[kind],
+                    "before": before,
+                    "after": {**after, "id": entity_id_str, "kind": kind},
+                }
+            )
+    if details:
+        counts["cross_field_details"] = details
+    if _aplicados:
+        counts["cross_fields_aplicados"] = _aplicados
+    if _ya_tenian_dato:
+        counts["cross_fields_ya_tenian_dato"] = _ya_tenian_dato
 
 
 def _classify_row_reference(
@@ -3631,6 +3702,7 @@ async def _insert_confirmed_data_impl(
                 )
             _volcar_impacto_de_inventario()
             _volcar_preview_cross_fields(counts, _cross_buffer)
+            await _apply_cross_field_buffer(session, tenant_id, _cross_buffer, counts)
             return counts
 
         # F-H3.d.6: el archivo de UNA sola tabla también tiene su hoja, y la UI
@@ -5330,6 +5402,7 @@ async def _insert_confirmed_data_impl(
 
     _volcar_impacto_de_inventario()
     _volcar_preview_cross_fields(counts, _cross_buffer)
+    await _apply_cross_field_buffer(session, tenant_id, _cross_buffer, counts)
 
     await session.flush()
     # Persistir en lote (idempotente) las huellas nuevas del camino batch.

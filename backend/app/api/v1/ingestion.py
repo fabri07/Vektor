@@ -1298,6 +1298,7 @@ async def delete_file(
         restored={
             "products": int(_revertido.get("productos_restaurados", 0)),
             "masters": int(_revertido.get("maestros_restaurados", 0)),
+            "cross_fields": int(_revertido.get("campos_cross_restaurados", 0)),
         },
         conservados=_conservados,
     )
@@ -2899,6 +2900,10 @@ async def confirm_file(
         # detalle por producto engordaría el JSONB (justo lo que ese bloque
         # existe para evitar) y lo devolvería en la respuesta del endpoint.
         _product_details = counts.pop("product_details", []) or []
+        # F-D: mismo motivo — ya viene armado (action/before/after) desde
+        # `_apply_cross_field_buffer`, engordaría el JSONB de `counts` igual
+        # que `product_details`.
+        _cross_field_details = counts.pop("cross_field_details", []) or []
 
         # Maestros creados/modificados por este import. Sin esto, borrar el
         # archivo dejaba vivos sus clientes y proveedores, sin manera de saber de
@@ -2920,6 +2925,7 @@ async def confirm_file(
             file_id=file_id,
             product_details=_product_details,
             master_details=_master_details,
+            cross_field_details=_cross_field_details,
         )
         _timings.mark("ledger_reversa")
 
@@ -3333,18 +3339,23 @@ async def confirm_file(
     # F-D: mapeos cross-sección (venta→cliente, compra→proveedor/producto) que el
     # usuario mapeó a mano. `descartados` = todavía sin implementar (hoy, solo
     # producto — acoplado al motor de costos de F-H6, ver `_CROSS_CAPTURE_KINDS`).
-    # `pendientes` = ya identificados y listos para escribirse (cliente/proveedor
-    # matched), pero la escritura real espera el ledger de campo (7e/7f).
+    # `aplicados`/`ya_tenian_dato` (7f) son hechos consumados de ESTE confirm —
+    # se escriben `fill_if_empty`, nunca pisan un dato que la ficha ya tenía.
     if counts.get("targets_cruzados_descartados"):
         warnings.append(
             f"{counts['targets_cruzados_descartados']} columna(s) mapeadas a un campo de "
             "otra sección no se importaron todavía."
         )
-    if counts.get("cross_fields_pendientes"):
+    if counts.get("cross_fields_aplicados"):
         warnings.append(
-            f"{counts['cross_fields_pendientes']} campo(s) de otra sección se identificaron "
-            f"en {counts.get('cross_fields_entidades_pendientes', 0)} ficha(s) de "
-            "cliente/proveedor, listos para completarse en una próxima versión."
+            f"{counts['cross_fields_aplicados']} campo(s) de cliente/proveedor se "
+            "completaron con datos de otra sección del archivo (venta→cliente, "
+            "compra→proveedor)."
+        )
+    if counts.get("cross_fields_ya_tenian_dato"):
+        warnings.append(
+            f"{counts['cross_fields_ya_tenian_dato']} campo(s) de otra sección no se "
+            "aplicaron porque la ficha ya tenía ese dato cargado."
         )
 
     # F-F.3: el descuento ya se aplicó en el confirm, así que los dos avisos son de
