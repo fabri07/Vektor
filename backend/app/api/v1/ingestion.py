@@ -46,6 +46,8 @@ from app.application.services import (
 from app.application.services import ingestion_import_service as _iis
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
+    CROSS_ENTITY_FORBIDDEN_FIELDS,
+    CROSS_ENTITY_TARGETS,
     MASTER_REFERENCE_TARGETS,
     REQUIRED_ALTERNATIVES,
     REQUIRED_FIELDS,
@@ -1936,6 +1938,38 @@ async def confirm_file(
             by_key[parsed.field].append(m.source_column)
         return {k: cols for k, cols in by_key.items() if len(cols) > 1}
 
+    def _invalid_cross_targets(
+        entity_type: str, mappings: list[ColumnMapping]
+    ) -> list[str]:
+        """F-D (sub-commit 2): mapeos cross-sección fuera de la allowlist
+        (``CROSS_ENTITY_TARGETS``) o hacia un campo prohibido
+        (``CROSS_ENTITY_FORBIDDEN_FIELDS``, defensa en profundidad —
+        ``stock_units`` no puede llegar acá ni aunque alguien lo agregue a la
+        allowlist por error).
+
+        ``_resolve_target_cols`` del importador ya descarta en silencio (con
+        un log) cualquier ``kind == "cross"``. Lo que este validador rechaza
+        nunca llega a esa función — se corta acá, con un 422 explícito.
+        """
+        allowed = CROSS_ENTITY_TARGETS.get(entity_type, {})
+        invalid: list[str] = []
+        for m in mappings:
+            parsed = parse_target(m.target_field)
+            if parsed.kind != "cross" or parsed.entity is None:
+                continue
+            if parsed.field in CROSS_ENTITY_FORBIDDEN_FIELDS or parsed.field not in (
+                allowed.get(parsed.entity) or frozenset()
+            ):
+                invalid.append(m.target_field)
+        return invalid
+
+    def _cross_target_detail(targets: list[str]) -> str:
+        return (
+            "Estos campos no se pueden completar desde esta sección: "
+            f"{', '.join(sorted(set(targets)))}. Sacalos del mapeo o mandalos "
+            "a «Ignorar»."
+        )
+
     def _custom_collision_detail(colisiones: dict[str, list[str]]) -> str:
         partes = [
             f"«{key}» ← {', '.join(cols)}" for key, cols in sorted(colisiones.items())
@@ -2057,6 +2091,15 @@ async def confirm_file(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=_custom_collision_detail(_cf_colisiones),
                 )
+            if _cross_invalidos := _invalid_cross_targets(_entity_type, _flat_mappings):
+                await _emit_validation_reject(
+                    "cross_target_no_permitido",
+                    {"entity_type": _entity_type, "targets": _cross_invalidos},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=_cross_target_detail(_cross_invalidos),
+                )
 
     # Validación de requeridos — por contexto (multi-hoja), solo contextos incluidos
     if _ctx_mappings:
@@ -2120,6 +2163,22 @@ async def confirm_file(
                         detail=(
                             f"En la hoja «{_hoja(_cid)}»: "
                             f"{_custom_collision_detail(_cf_colisiones)}"
+                        ),
+                    )
+                if _cross_invalidos := _invalid_cross_targets(_ent, _ms):
+                    await _emit_validation_reject(
+                        "cross_target_no_permitido",
+                        {
+                            "context_id": _cid,
+                            "entity_type": _ent,
+                            "targets": _cross_invalidos,
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"En la hoja «{_hoja(_cid)}»: "
+                            f"{_cross_target_detail(_cross_invalidos)}"
                         ),
                     )
 
@@ -3270,6 +3329,22 @@ async def confirm_file(
         warnings.append(
             f"{counts['filas_riesgo_a_otros']} fila(s) con datos faltantes o inválidos en "
             "columnas riesgosas se enviaron a «Otros» para que las completes."
+        )
+    # F-D: mapeos cross-sección (venta→cliente, compra→proveedor/producto) que el
+    # usuario mapeó a mano. `descartados` = todavía sin implementar (hoy, solo
+    # producto — acoplado al motor de costos de F-H6, ver `_CROSS_CAPTURE_KINDS`).
+    # `pendientes` = ya identificados y listos para escribirse (cliente/proveedor
+    # matched), pero la escritura real espera el ledger de campo (7e/7f).
+    if counts.get("targets_cruzados_descartados"):
+        warnings.append(
+            f"{counts['targets_cruzados_descartados']} columna(s) mapeadas a un campo de "
+            "otra sección no se importaron todavía."
+        )
+    if counts.get("cross_fields_pendientes"):
+        warnings.append(
+            f"{counts['cross_fields_pendientes']} campo(s) de otra sección se identificaron "
+            f"en {counts.get('cross_fields_entidades_pendientes', 0)} ficha(s) de "
+            "cliente/proveedor, listos para completarse en una próxima versión."
         )
 
     # F-F.3: el descuento ya se aplicó en el confirm, así que los dos avisos son de

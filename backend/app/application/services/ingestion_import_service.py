@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,6 +54,7 @@ from app.application.services.product_identity import (
 )
 from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
+from app.domain.cross_field_buffer import CrossFieldBuffer
 from app.domain.date_parsing import parse_business_date, parse_business_datetime
 from app.domain.entity_code import EntityKind
 from app.domain.expense_categories import (
@@ -488,6 +489,66 @@ class RowReferenceResolution:
     # sin perder la traza) — puramente diagnóstico, no cambia ningún outcome.
     matched_key: IdentityKey | None = None
     conflicting_entities: list[Any] = field(default_factory=list)
+
+
+#: F-D (sub-commit 4, 7b): entidades cross que este pase ya sabe capturar.
+#: `product` queda deliberadamente afuera — sus campos cross (`unit_cost_ars`
+#: entre otros) están acoplados al motor de costos de F-H6 (flete, costo
+#: facturado vs costo de referencia); mezclar un segundo camino de escritura
+#: ahí es justamente la clase de riesgo que esos incidentes ya dejaron cara.
+#: Se declara fase propia. Los mapeos `product:*` siguen validando (7a, la
+#: allowlist ya está congelada) pero no se aplican todavía — mismo criterio
+#: que tenían TODOS los cruzados antes de este commit.
+_CROSS_CAPTURE_KINDS: frozenset[str] = frozenset({"customer", "supplier"})
+
+
+def _capture_row_cross_fields(
+    buffer: CrossFieldBuffer,
+    cruzados: dict[str, str],
+    row: dict[str, Any],
+    *,
+    kind: Literal["customer", "supplier", "product"],
+    entity_id: Any,
+    source_row_ref: str | None,
+) -> None:
+    """Vuelca al buffer los campos cross de ESTA fila para la entidad YA
+    resuelta como ``matched`` (nunca se llama para anonymous/unresolved —
+    ver los call sites). Sólo acumula: la escritura real y el ledger de
+    campo (7e/7f) están pendientes de la migración, que se revisa aparte.
+    """
+    if kind not in _CROSS_CAPTURE_KINDS:
+        return
+    from app.application.services.column_mapping_service import (  # noqa: PLC0415
+        parse_target,
+    )
+
+    for src_col, target in cruzados.items():
+        parsed = parse_target(target)
+        if parsed.kind != "cross" or parsed.entity != kind or not parsed.field:
+            continue
+        buffer.add(
+            kind, str(entity_id), parsed.field, row.get(src_col), source_row_ref=source_row_ref
+        )
+
+
+def _volcar_preview_cross_fields(counts: dict[str, Any], buffer: CrossFieldBuffer) -> None:
+    """F-D (7d, preview): dice cuántos campos cross quedaron listos para
+    aplicarse — no los aplica. La escritura real (7f) y su ledger (7e)
+    esperan la migración; hasta entonces, esto es lo único observable del
+    ruteo cross-sección, igual que ya avisaba ``targets_cruzados_descartados``.
+    """
+    resolved = buffer.resolved()
+    counts["cross_fields_entidades_pendientes"] = len(resolved)
+    counts["cross_fields_pendientes"] = sum(len(fields) for _, _, fields in resolved)
+    # "Qué campos" (7d): por nombre de campo, cuántas entidades lo tendrían
+    # listo. "Sobre qué entidad" (nombre/id concreto) queda para cuando la
+    # escritura real exista — antes de eso, mostrar un id no ayuda al usuario.
+    _por_campo: dict[str, int] = {}
+    for _, _, fields in resolved:
+        for field_name in fields:
+            _por_campo[field_name] = _por_campo.get(field_name, 0) + 1
+    if _por_campo:
+        counts["cross_fields_por_campo"] = _por_campo
 
 
 def _classify_row_reference(
@@ -3507,6 +3568,10 @@ async def _insert_confirmed_data_impl(
     _proyeccion_recorder = ImportProjectionRecorder(
         session, tenant_id, _product_cache, inventory_effect
     )
+    # F-D (7b/7c): uno solo para toda la corrida — compartido por el camino
+    # multi-hoja y el de una sola tabla — para que "primera fila gana" sea
+    # del ARCHIVO entero, no de la hoja que lo procesó primero.
+    _cross_buffer = CrossFieldBuffer()
     # F-H3.d.2: el camino de una sola tabla no recorre contextos —no tiene por qué,
     # hay uno solo—, pero el archivo IGUAL tiene su hoja y el usuario igual pudo
     # declararle un efecto. Sin esto, un `.xlsx` plano quedaba clavado en el default
@@ -3558,12 +3623,14 @@ async def _insert_confirmed_data_impl(
                 shipping_decisions=shipping_decisions,
                 purchase_cost_decisions=purchase_cost_decisions,
                 proyeccion=_proyeccion_recorder,
+                cross_buffer=_cross_buffer,
             )
             if seen_fp is not None and _preloaded_fp is not None:
                 await _persist_import_fingerprints(
                     session, tenant_id, seen_fp - _preloaded_fp
                 )
             _volcar_impacto_de_inventario()
+            _volcar_preview_cross_fields(counts, _cross_buffer)
             return counts
 
         # F-H3.d.6: el archivo de UNA sola tabla también tiene su hoja, y la UI
@@ -3668,6 +3735,9 @@ async def _insert_confirmed_data_impl(
         # `target_to_col.get(...)` sin guardas — vacío si no hay mapeo explícito
         # (la referencia es opt-in, ver `_customer_reference_record`).
         target_to_col: dict[str, str] = {}
+        # F-D (7b): mismo motivo — la captura cross por fila necesita esto
+        # declarado siempre, vacío si no hay mapeo explícito.
+        _cruzados: dict[str, str] = {}
 
         if column_mappings:
             # Construir lookup: target_field → primer source_col que lo mapee
@@ -3677,11 +3747,18 @@ async def _insert_confirmed_data_impl(
             target_to_col.update(_canon)
             custom_field_cols.update(_custom)
             if _cruzados:
-                # Se descartan (F-D no está entregada) pero el usuario tiene
-                # que enterarse: mapeó una columna a mano y no se importó.
-                counts["targets_cruzados_descartados"] = counts.get(
-                    "targets_cruzados_descartados", 0
-                ) + len(_cruzados)
+                # F-D (7b): customer/supplier se CAPTURAN más abajo (al resolver
+                # la referencia de cada fila) — solo product sigue "descartado"
+                # (ver `_CROSS_CAPTURE_KINDS`), y sólo eso cuenta acá.
+                _descartados_plano = sum(
+                    1
+                    for _t in _cruzados.values()
+                    if _t.split(":", 1)[0] not in _CROSS_CAPTURE_KINDS
+                )
+                if _descartados_plano:
+                    counts["targets_cruzados_descartados"] = counts.get(
+                        "targets_cruzados_descartados", 0
+                    ) + _descartados_plano
 
             # Remapear columnas de fecha y monto usando el mapeo explícito
             fecha_col = (
@@ -4206,6 +4283,19 @@ async def _insert_confirmed_data_impl(
                         assert _cust_ref.entity is not None
                         entry.customer_id = _cust_ref.entity.id
                         cf["_customer_resolution"] = "matched"
+                        if _cruzados:
+                            _capture_row_cross_fields(
+                                _cross_buffer,
+                                _cruzados,
+                                row,
+                                kind="customer",
+                                entity_id=_cust_ref.entity.id,
+                                source_row_ref=(
+                                    _source_row_ref(_row_anchor)
+                                    if _row_anchor is not None
+                                    else None
+                                ),
+                            )
                     else:
                         entry.customer_id = await _get_local_sentinel()
                         cf["_customer_resolution"] = _cust_ref.outcome
@@ -4330,6 +4420,19 @@ async def _insert_confirmed_data_impl(
                                 expense.supplier_name = _sup_ref.entity.name
                                 cf["_supplier_resolution"] = "matched"
                                 _supplier_matched = True
+                                if _cruzados:
+                                    _capture_row_cross_fields(
+                                        _cross_buffer,
+                                        _cruzados,
+                                        row,
+                                        kind="supplier",
+                                        entity_id=_sup_ref.entity.id,
+                                        source_row_ref=(
+                                            _source_row_ref(_row_anchor)
+                                            if _row_anchor is not None
+                                            else None
+                                        ),
+                                    )
                             else:
                                 _pending_supplier_ref = _sup_ref
                     elif supplier_col:
@@ -5226,6 +5329,7 @@ async def _insert_confirmed_data_impl(
                     _add_text_expense(text_row)
 
     _volcar_impacto_de_inventario()
+    _volcar_preview_cross_fields(counts, _cross_buffer)
 
     await session.flush()
     # Persistir en lote (idempotente) las huellas nuevas del camino batch.
@@ -5302,6 +5406,9 @@ async def _insert_multisheet_data(
     # envíos sin comprobante de cada hoja. Sin entrada, no se cobran.
     shipping_decisions: dict[str, str] | None = None,
     purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
+    # F-D (7b/7c): compartido con el camino de una sola tabla — ver el
+    # comentario en `_insert_confirmed_data_impl`.
+    cross_buffer: CrossFieldBuffer | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -5317,6 +5424,7 @@ async def _insert_multisheet_data(
 
     confirmed_fields = confirmed_fields or {}
     context_mappings = context_mappings or {}
+    cross_buffer = cross_buffer if cross_buffer is not None else CrossFieldBuffer()
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
     # F-H6.c: avisos sobre el costo que la persona tiene que ver — celdas de
     # ajuste ilegibles y columnas mapeadas que no movieron ningún número. Viajan
@@ -5504,6 +5612,8 @@ async def _insert_multisheet_data(
         cf_cols: dict[str, str],
         row_ref: str | None = None,
         context_id: str | None = None,
+        *,
+        cruzados: dict[str, str] | None = None,
     ) -> bool:
         """Inserta una venta. Devuelve ``True`` si produjo output persistido."""
         amount_col = cols.get("amount")
@@ -5651,6 +5761,15 @@ async def _insert_multisheet_data(
             assert _cust_ref.entity is not None
             entry.customer_id = _cust_ref.entity.id
             cf["_customer_resolution"] = "matched"
+            if cruzados:
+                _capture_row_cross_fields(
+                    cross_buffer,
+                    cruzados,
+                    row,
+                    kind="customer",
+                    entity_id=_cust_ref.entity.id,
+                    source_row_ref=row_ref,
+                )
         else:
             entry.customer_id = await _get_local_sentinel()
             cf["_customer_resolution"] = _cust_ref.outcome
@@ -5888,6 +6007,8 @@ async def _insert_multisheet_data(
         row_ref: str | None = None,
         context_id: str | None = None,
         costo_calculado: LineCost | None = None,
+        *,
+        cruzados: dict[str, str] | None = None,
     ) -> bool:
         """Inserta un gasto. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
@@ -6010,6 +6131,15 @@ async def _insert_multisheet_data(
                     expense.supplier_name = _sup_ref.entity.name
                     cf["_supplier_resolution"] = "matched"
                     _supplier_matched = True
+                    if cruzados:
+                        _capture_row_cross_fields(
+                            cross_buffer,
+                            cruzados,
+                            row,
+                            kind="supplier",
+                            entity_id=_sup_ref.entity.id,
+                            source_row_ref=row_ref,
+                        )
                 else:
                     _pending_supplier_ref = _sup_ref
         elif _supplier_name_raw is not None:
@@ -6705,8 +6835,8 @@ async def _insert_multisheet_data(
 
         def _filas_y_mapeo(
             ctx: dict[str, Any],
-        ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
-            """Filas de esta hoja + su mapeo resuelto.
+        ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str], dict[str, str]]:
+            """Filas de esta hoja + su mapeo resuelto (+ los targets cruzados).
 
             Compartido con el gate de replay (F-H3.d.3) para que la fila que el gate
             evalúa sea exactamente la que el loop importa: si cada uno filtrara el
@@ -6728,10 +6858,18 @@ async def _insert_multisheet_data(
                 _resolve_target_cols(_mapping) if _mapping else ({}, {}, {})
             )
             if _cruzados:
-                counts["targets_cruzados_descartados"] = counts.get(
-                    "targets_cruzados_descartados", 0
-                ) + len(_cruzados)
-            return _rows, _cols, _cf_cols
+                # F-D (7b): customer/supplier se capturan al resolver la
+                # referencia de cada fila — sólo product sigue "descartado".
+                _descartados = sum(
+                    1
+                    for _t in _cruzados.values()
+                    if _t.split(":", 1)[0] not in _CROSS_CAPTURE_KINDS
+                )
+                if _descartados:
+                    counts["targets_cruzados_descartados"] = counts.get(
+                        "targets_cruzados_descartados", 0
+                    ) + _descartados
+            return _rows, _cols, _cf_cols, _cruzados
 
         def _hoja_incluida(ctx: dict[str, Any]) -> bool:
             """Inclusión: por contexto si vino ``context_confirmed``; si no, por tipo."""
@@ -6765,7 +6903,7 @@ async def _insert_multisheet_data(
                 _cid = str(_ctx.get("context_id") or "")
                 if (proyeccion.effect_for(_cid) if proyeccion else None) != HISTORICAL_REPLAY:
                     continue
-                _rows, _cols, _ = _filas_y_mapeo(_ctx)
+                _rows, _cols, _, _ = _filas_y_mapeo(_ctx)
                 for _idx, _row in enumerate(_rows):
                     _pid = _venta_producto_id(_row, _cols)
                     _fecha = _venta_fecha(_row, _cols)
@@ -6859,7 +6997,7 @@ async def _insert_multisheet_data(
             # Inclusión: por contexto si vino context_confirmed; si no, por tipo (legacy)
             if not _hoja_incluida(ctx):
                 continue
-            rows, cols, cf_cols = _filas_y_mapeo(ctx)
+            rows, cols, cf_cols, cruzados = _filas_y_mapeo(ctx)
             if not rows:
                 continue
             # F-H3.d.3: recién acá, no antes del loop — los productos que el archivo
@@ -6951,10 +7089,18 @@ async def _insert_multisheet_data(
                     counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                     _did_insert = True
                 elif entity == "sale":
-                    _did_insert = await _add_sale(row, cols, cf_cols, _row_ref, ctx_id)
+                    _did_insert = await _add_sale(
+                        row, cols, cf_cols, _row_ref, ctx_id, cruzados=cruzados
+                    )
                 elif entity == "expense":
                     _did_insert = await _add_expense(
-                        row, cols, cf_cols, _row_ref, ctx_id, _costos_por_fila.get(_i)
+                        row,
+                        cols,
+                        cf_cols,
+                        _row_ref,
+                        ctx_id,
+                        _costos_por_fila.get(_i),
+                        cruzados=cruzados,
                     )
                 else:
                     # F6-B2: la CREACIÓN de producto no fingerprintea (dedup por
