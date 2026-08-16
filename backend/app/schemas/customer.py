@@ -202,6 +202,18 @@ class CustomerImportRow(BaseModel):
     birthday: date | None = None
 
 
+class NameSplitSuggestionSchema(BaseModel):
+    """F-N: PROPUESTA de split nombre/apellido — nunca se aplica sola. El
+    frontend la muestra y el usuario decide (aceptar, corregir, o dejar el
+    nombre entero) antes de confirmar el import."""
+
+    status: str  # "proposed" | "not_applicable" | "ambiguous"
+    first_name: str | None = None
+    last_name: str | None = None
+    reason: str
+    confidence_basis: str
+
+
 class CustomerImportPreviewItem(BaseModel):
     row_index: int
     status: str  # "create" | "update" | "invalid" | "duplicate_in_file" | "needs_review"
@@ -209,6 +221,7 @@ class CustomerImportPreviewItem(BaseModel):
     existing_id: UUID | None = None
     existing_name: str | None = None
     issues: list[str] = Field(default_factory=list)
+    name_split_suggestion: NameSplitSuggestionSchema | None = None
 
 
 class CustomerImportPreviewResponse(BaseModel):

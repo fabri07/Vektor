@@ -24,6 +24,7 @@ from app.application.services.identity_resolution import (
     record_keys,
     resolve_identity,
 )
+from app.domain.name_split import NameSplitProposal, propose_supplier_name_split
 from app.persistence.models.supplier import Supplier
 from app.persistence.repositories.supplier_repository import SupplierRepository
 from app.schemas._ar_fiscal import validate_cuit
@@ -50,6 +51,8 @@ class PreviewItem:
     existing_id: UUID | None = None
     existing_name: str | None = None
     issues: list[str] = field(default_factory=list)
+    # F-N: ver el campo equivalente en customer_import_service.PreviewItem.
+    name_split_suggestion: NameSplitProposal | None = None
 
 
 @dataclass
@@ -118,6 +121,15 @@ def _validate_record(record: dict[str, Any]) -> list[str]:
 
 def _supplier_record(sup: Supplier) -> dict[str, Any]:
     return {"cuit": sup.cuit, "cuil": sup.cuil, "email": sup.email, "phone": sup.phone}
+
+
+def _maybe_name_split_suggestion(record: dict[str, Any]) -> NameSplitProposal | None:
+    """`None` si el archivo ya trajo `last_name` por su cuenta. `Supplier` no
+    tiene columna de tipo (a diferencia de `customer_type`) — ver la regla
+    más conservadora en `propose_supplier_name_split`."""
+    if not is_blank(record.get("name")) and is_blank(record.get("last_name")):
+        return propose_supplier_name_split(record["name"])
+    return None
 
 
 def _existing_index(existing: list[Supplier]) -> dict[IdentityKey, Supplier]:
@@ -195,7 +207,14 @@ def build_import_preview(
                 )
             )
         else:
-            items.append(PreviewItem(row_index=idx, status="create", fields=record))
+            items.append(
+                PreviewItem(
+                    row_index=idx,
+                    status="create",
+                    fields=record,
+                    name_split_suggestion=_maybe_name_split_suggestion(record),
+                )
+            )
 
     return ImportPreview(items=items, warnings=list(parse_warnings or []))
 

@@ -57,6 +57,7 @@ from app.schemas.customer import (
     CustomerImportPreviewResponse,
     CustomerImportRow,
     CustomerResponse,
+    NameSplitSuggestionSchema,
     UpdateCustomerRequest,
 )
 
@@ -385,6 +386,17 @@ async def import_customers_preview(
                 existing_id=item.existing_id,
                 existing_name=item.existing_name,
                 issues=item.issues,
+                name_split_suggestion=(
+                    NameSplitSuggestionSchema(
+                        status=item.name_split_suggestion.status,
+                        first_name=item.name_split_suggestion.first_name,
+                        last_name=item.name_split_suggestion.last_name,
+                        reason=item.name_split_suggestion.reason,
+                        confidence_basis=item.name_split_suggestion.confidence_basis,
+                    )
+                    if item.name_split_suggestion is not None
+                    else None
+                ),
             )
             for item in preview.items
         ],

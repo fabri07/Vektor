@@ -113,3 +113,128 @@ describe("CustomerFileModal — estado needs_review", () => {
     expect(invalidos).toHaveLength(1);
   });
 });
+
+describe("CustomerFileModal — F-N: propuesta de split nombre/apellido", () => {
+  const mockConfirm = customersService.importConfirm as jest.Mock;
+
+  const PREVIEW_CON_PROPUESTA: CustomerImportPreviewResponse = {
+    items: [
+      {
+        row_index: 0,
+        status: "create",
+        customer: { name: "Juan Perez", dni: "30111222", customer_type: "person" },
+        existing_id: null,
+        existing_name: null,
+        issues: [],
+        name_split_suggestion: {
+          status: "proposed",
+          first_name: "Juan",
+          last_name: "Perez",
+          reason: "Sin coma: se propone la primera palabra como nombre.",
+          confidence_basis: "customer_type=person",
+        },
+      },
+      {
+        row_index: 1,
+        status: "create",
+        customer: { name: "Roberto Gomez Sin Tipo", email: "roberto@x.com" },
+        existing_id: null,
+        existing_name: null,
+        issues: [],
+        name_split_suggestion: {
+          status: "ambiguous",
+          first_name: null,
+          last_name: null,
+          reason: "No hay evidencia suficiente de si es una persona o una empresa.",
+          confidence_basis: "sin customer_type ni doc_type=dni",
+        },
+      },
+      {
+        row_index: 2,
+        status: "create",
+        customer: { name: "García e Hijos S.A.", cuit: "20-12345678-6", customer_type: "company" },
+        existing_id: null,
+        existing_name: null,
+        issues: [],
+        name_split_suggestion: {
+          status: "not_applicable",
+          first_name: null,
+          last_name: null,
+          reason: "Es una razón social (empresa) — el nombre queda entero.",
+          confidence_basis: "customer_type=company",
+        },
+      },
+    ],
+    to_create: 3,
+    to_update: 0,
+    needs_review: 0,
+    invalid: 0,
+    duplicates: 0,
+    warnings: [],
+    source_upload_id: null,
+  };
+
+  beforeEach(() => {
+    mockPreview.mockReset();
+    mockConfirm.mockReset();
+    mockPreview.mockResolvedValue(PREVIEW_CON_PROPUESTA);
+    mockConfirm.mockResolvedValue({ created: 0, updated: 0, skipped: 0 });
+  });
+
+  it("muestra la propuesta con el botón Aplicar para la fila resuelta", async () => {
+    renderModal();
+    await uploadBulkFile();
+
+    expect(await screen.findByText(/Nombre:/)).toBeInTheDocument();
+    expect(screen.getByText("Juan", { selector: "strong" })).toBeInTheDocument();
+    expect(screen.getByText("Perez", { selector: "strong" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Aplicar" })).toBeInTheDocument();
+  });
+
+  it("la fila ambigua explica pero no ofrece un botón de aplicar", async () => {
+    renderModal();
+    await uploadBulkFile();
+
+    expect(
+      await screen.findByText(/No está claro — revisalo si hace falta/),
+    ).toBeInTheDocument();
+  });
+
+  it("la fila not_applicable (razón social) no muestra ningún hint", async () => {
+    renderModal();
+    await uploadBulkFile();
+
+    await screen.findByText("García e Hijos S.A.");
+    // Sólo debe existir el botón "Aplicar" de la fila proposed (1 en total).
+    expect(screen.getAllByRole("button", { name: "Aplicar" })).toHaveLength(1);
+  });
+
+  it("«Aplicar» separa el nombre en la fila y desaparece el hint", async () => {
+    renderModal();
+    await uploadBulkFile();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Aplicar" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Aplicar" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("confirmar después de aplicar manda el nombre y apellido ya separados", async () => {
+    renderModal();
+    await uploadBulkFile();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Aplicar" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Aplicar" })).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Importar 3 clientes/ }));
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalled());
+    const rows = mockConfirm.mock.calls[0]?.[0];
+    const fila0 = rows.find((r: { dni?: string }) => r.dni === "30111222");
+    expect(fila0.name).toBe("Juan");
+    expect(fila0.last_name).toBe("Perez");
+  });
+});

@@ -120,6 +120,19 @@ export type ImportItemStatus =
   | "duplicate_in_file"
   | "needs_review";
 
+/**
+ * F-N: PROPUESTA de split nombre/apellido — nunca se aplica sola. El backend
+ * la calcula sólo para filas "create" sin `last_name` propio; el usuario la
+ * acepta, la corrige, o deja el nombre entero, antes de confirmar el import.
+ */
+export interface NameSplitSuggestion {
+  status: "proposed" | "not_applicable" | "ambiguous";
+  first_name: string | null;
+  last_name: string | null;
+  reason: string;
+  confidence_basis: string;
+}
+
 export interface CustomerImportPreviewItem {
   row_index: number;
   status: ImportItemStatus;
@@ -127,6 +140,7 @@ export interface CustomerImportPreviewItem {
   existing_id: string | null;
   existing_name: string | null;
   issues: string[];
+  name_split_suggestion?: NameSplitSuggestion | null;
 }
 
 export interface CustomerImportPreviewResponse {

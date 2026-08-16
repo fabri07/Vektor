@@ -26,6 +26,7 @@ from app.application.services.identity_resolution import (
     resolve_identity,
 )
 from app.domain.date_parsing import BIRTHDAY_CENTURY_PIVOT, parse_business_date
+from app.domain.name_split import NameSplitProposal, propose_name_split
 from app.persistence.models.customer import Customer
 from app.persistence.repositories.customer_repository import CustomerRepository
 from app.schemas._ar_fiscal import validate_cuit, validate_dni
@@ -62,6 +63,13 @@ class PreviewItem:
     existing_id: UUID | None = None
     existing_name: str | None = None
     issues: list[str] = field(default_factory=list)
+    # F-N: PROPUESTA de split nombre/apellido, nunca aplicada sola — el
+    # usuario la ve en el preview y decide. Sólo se calcula para "create" (un
+    # "update" ya tiene su propio last_name en la ficha existente, y no es
+    # este servicio el que decide pisarlo) y sólo cuando el archivo trajo
+    # `name` sin `last_name` — si ya vino con las dos columnas separadas, no
+    # hay nada que proponer.
+    name_split_suggestion: NameSplitProposal | None = None
 
 
 @dataclass
@@ -145,6 +153,19 @@ def _customer_record(cust: Customer) -> dict[str, Any]:
     return {"cuit": cust.cuit, "dni": cust.dni, "email": cust.email, "phone": cust.phone}
 
 
+def _maybe_name_split_suggestion(record: dict[str, Any]) -> NameSplitProposal | None:
+    """`None` si el archivo ya trajo `last_name` por su cuenta (columna
+    separada mapeada explícitamente) — F-N sólo propone cuando hay algo que
+    proponer, nunca reemplaza un dato que ya llegó separado."""
+    if not is_blank(record.get("name")) and is_blank(record.get("last_name")):
+        return propose_name_split(
+            record["name"],
+            customer_type=record.get("customer_type"),
+            doc_type=record.get("doc_type"),
+        )
+    return None
+
+
 def build_import_preview(
     records: list[dict[str, Any]],
     existing: list[Customer],
@@ -215,7 +236,14 @@ def build_import_preview(
                 )
             )
         else:
-            items.append(PreviewItem(row_index=idx, status="create", fields=record))
+            items.append(
+                PreviewItem(
+                    row_index=idx,
+                    status="create",
+                    fields=record,
+                    name_split_suggestion=_maybe_name_split_suggestion(record),
+                )
+            )
 
     return ImportPreview(items=items, warnings=list(parse_warnings or []))
 
