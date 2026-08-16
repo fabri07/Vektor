@@ -1805,36 +1805,6 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     placeholderData: (prev) => prev,
   });
   const hojaEfecto = inventoryEffects[0];
-  /**
-   * Este camino NO puede traer costos de compra, y por eso no los ofrece.
-   *
-   * El importador plano no cobra el envío ni aplica las decisiones de costo —el
-   * cobro vive en un closure del camino multi-hoja y la decisión se busca bajo
-   * otra clave—, así que el confirm rechaza el archivo con 422 en cuanto ve una
-   * columna de envío mapeada O una decisión de costo declarada. Arreglar el
-   * camino plano de verdad es otra fase.
-   *
-   * Mientras tanto, lo que la pantalla NO puede hacer es ofrecer los tres ejes
-   * acá: cada decisión que tomara terminaría en un rechazo, y antes de ese guard
-   * terminaba en algo peor —el import aceptaba el archivo y la ignoraba en
-   * silencio, dejando el costo más bajo que el real y el margen inflado—. Se
-   * nombra el problema y se dicen las dos salidas, que son las mismas del 422.
-   *
-   * El predicado del backend (`_plano`) es más AMPLIO que este `!isMultiContext`,
-   * así que todo lo que la pantalla manda por acá cae adentro de su rechazo: no
-   * hay archivo que la UI deje pasar y el confirm frene por sorpresa.
-   */
-  const columnasDeCostoEnTablaUnica = [
-    ...new Set(
-      riskRecomputeInput.columnMappings
-        .filter(
-          (m) =>
-            m.target_field === "shipping_cost" ||
-            m.target_field === "shipping_cost_line",
-        )
-        .map((m) => m.source_column),
-    ),
-  ];
   // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
   // cantidad puede dejar a la hoja sin poder mover inventario.
 
@@ -1930,10 +1900,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         // multi-hoja, misma razón).
         undefined,
         undefined,
-        // Nunca. El importador plano no aplica las decisiones de costo, y el
-        // confirm rechaza el archivo con 422 en cuanto ve una: mandar algo acá
-        // sólo puede terminar en un rechazo. Ver el comentario de
-        // `columnasDeCostoEnTablaUnica`.
+        // F-H6.f: el envío de una tabla suelta ya se cobra sin necesitar
+        // ninguna decisión (comprobante repetido → un solo cargo, igual que
+        // el multi-hoja). Elegir CÓMO repartirlo (por subtotal / al costo)
+        // sigue sin tener UI en este camino — no hay selector que arme un
+        // `PurchaseCostDecision` acá todavía, así que se manda `undefined`
+        // por falta de UI, no porque el backend lo vaya a rechazar.
         undefined,
       ),
     onSuccess: (result) => {
@@ -2467,34 +2439,6 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         />
       )}
 
-      {/* Un archivo de una sola tabla no puede traer costos de compra: el
-          importador plano no cobra el envío y el confirm lo rechaza. Se dice
-          acá, con las dos salidas, en vez de ofrecer tres ejes cuyo único
-          desenlace posible es un 422. */}
-      {!needsPurpose && columnasDeCostoEnTablaUnica.length > 0 && (
-        <div className="mb-3 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
-          <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
-          <div>
-            <p>
-              Este archivo es una sola tabla y trae{" "}
-              {columnasDeCostoEnTablaUnica.length === 1 ? "una columna" : "columnas"}{" "}
-              de envío (
-              <span className="font-mono">
-                {columnasDeCostoEnTablaUnica.join(", ")}
-              </span>
-              ). Véktor todavía no sabe cobrar ni repartir el envío en este
-              formato: si lo importara, la compra quedaría con un costo más bajo
-              que el real y el margen inflado.
-            </p>
-            <p className="mt-1 text-vk-text-secondary">
-              Dos salidas: subilo como libro con hojas separadas (una por
-              sección), o sacá esas columnas del mapeo —marcalas «Ignorar»— y
-              cargá ese envío como un gasto aparte.
-            </p>
-          </div>
-        </div>
-      )}
-
       {/* Error de API (excluye 409/timeout: los maneja el toast, no el banner) */}
       {confirmMutation.isError &&
         !isTransientConfirmError(confirmMutation.error) && (
@@ -2513,9 +2457,6 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
             !Object.values(confirmedFields).some(Boolean) ||
             faltanRequeridos.length > 0 ||
             colisiones.length > 0 ||
-            // El confirm lo va a rechazar igual: descubrirlo con un 422 después
-            // de apretar es exactamente lo que este panel existe para evitar.
-            columnasDeCostoEnTablaUnica.length > 0 ||
             needsPurpose
           }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"

@@ -36,6 +36,8 @@ from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 
+_CTX_EQUIV = "sheet:Compras"
+
 _MAPEO = {
     "fecha": "expense_date",
     "articulo": "product_name",
@@ -259,3 +261,98 @@ class TestPlanoYMultiHojaConvergen:
         assert len(envios) == 1
         assert envios[0].custom_fields is not None
         assert envios[0].custom_fields.get("attributed_to_inventory") is True
+
+    async def test_mismo_archivo_como_tabla_suelta_o_como_solapa_da_el_mismo_costo(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Equivalencia real: MISMAS filas lógicas, un tenant las importa como
+        tabla suelta (sin `mapping_contexts`) y otro como una hoja dentro de un
+        `.xlsx` multi-sección — el envío cobrado y el costo unitario resultante
+        tienen que coincidir. Dos tenants para que las dos corridas no compartan
+        catálogo ni gastos."""
+        from app.domain.verticals import Vertical
+        from app.persistence.models.business import BusinessProfile
+
+        filas = [_linea_remito(f"Articulo {i}") for i in range(5)]
+
+        tenant_plano = Tenant(legal_name="Plano SA", display_name="Plano")
+        tenant_solapa = Tenant(legal_name="Solapa SA", display_name="Solapa")
+        db_session.add_all([tenant_plano, tenant_solapa])
+        await db_session.flush()
+        db_session.add_all(
+            [
+                BusinessProfile(
+                    tenant_id=tenant_plano.tenant_id,
+                    vertical_code=Vertical.KIOSCO_ALMACEN.value,
+                    data_mode="M0",
+                    data_confidence="LOW",
+                ),
+                BusinessProfile(
+                    tenant_id=tenant_solapa.tenant_id,
+                    vertical_code=Vertical.KIOSCO_ALMACEN.value,
+                    data_mode="M0",
+                    data_confidence="LOW",
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        counts_plano = await insert_confirmed_data(
+            db_session,
+            tenant_plano.tenant_id,
+            _flat_summary(filas),
+            {"gastos": True},
+            column_mappings=_MAPEO,
+        )
+
+        counts_solapa = await insert_confirmed_data(
+            db_session,
+            tenant_solapa.tenant_id,
+            {
+                "file_type": "spreadsheet",
+                "inferred_type": "mixed",
+                "multi_sheet": True,
+                "mapping_contexts": [
+                    {
+                        "context_id": _CTX_EQUIV,
+                        "label": "Compras",
+                        "entity_type": "expense",
+                        "source_kind": "sheet",
+                        "headers": list(_MAPEO),
+                        "fields": None,
+                        "preview_rows": [],
+                        "row_count": len(filas),
+                    }
+                ],
+                "gastos_detectados": [{**f, "__context__": _CTX_EQUIV} for f in filas],
+                "ventas_detectadas": [],
+                "stock_detectado": [],
+            },
+            {"gastos": True},
+            context_mappings={_CTX_EQUIV: _MAPEO},
+            context_confirmed={_CTX_EQUIV: True},
+        )
+        await db_session.flush()
+
+        assert counts_plano["gastos"] == counts_solapa["gastos"] == 5
+        assert counts_plano["envios"] == counts_solapa["envios"] == 1
+        assert counts_plano["envios_repetidos_colapsados"] == 1
+        assert counts_solapa["envios_repetidos_colapsados"] == 1
+
+        envios_plano = (
+            await db_session.execute(
+                select(ExpenseEntry).where(
+                    ExpenseEntry.tenant_id == tenant_plano.tenant_id,
+                    ExpenseEntry.category == "LOGISTICS",
+                )
+            )
+        ).scalar_one()
+        envios_solapa = (
+            await db_session.execute(
+                select(ExpenseEntry).where(
+                    ExpenseEntry.tenant_id == tenant_solapa.tenant_id,
+                    ExpenseEntry.category == "LOGISTICS",
+                )
+            )
+        ).scalar_one()
+        assert envios_plano.amount == envios_solapa.amount == Decimal("2000.00")

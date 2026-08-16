@@ -1674,17 +1674,6 @@ async def confirm_file(
     _flat_mappings = [m for m in body.column_mappings if m.context_id is None]
     _ctx_mappings = [m for m in body.column_mappings if m.context_id is not None]
 
-    # ¿El importador va a tomar el camino de UNA sola tabla?
-    #
-    # Es la negación EXACTA del despacho de `insert_confirmed_data`
-    # (`if inferred_type == "mixed" or summary.get("multi_sheet")` →
-    # `_insert_multisheet_data`), y por eso vale como respuesta a la pregunta que
-    # importa acá: el cobro del envío (`_cobrar_envios_de_la_hoja`) es un closure
-    # anidado dentro del camino multi-hoja, así que **cualquier otro camino no
-    # cobra envío**. Estaba calculado adentro del gate de replay; subió de scope
-    # porque ahora lo consultan dos guards y una segunda copia podría divergir.
-    _plano = _inferred_type != "mixed" and not _summary_for_ctx.get("multi_sheet")
-
     # Etiqueta legible de una hoja para los mensajes de error. `context_id` es un
     # identificador interno ("sheet:precios y stock ") — mostrárselo al usuario,
     # con su espacio final incluido, no lo ayuda a encontrar la hoja.
@@ -1699,7 +1688,18 @@ async def confirm_file(
 
     # Mapeos agrupados por hoja — los usan la validación por contexto y el
     # snapshot que se traza al confirmar.
+    #
+    # F-H6.f: los mapeos del camino plano (`_flat_mappings`, `context_id is
+    # None`) entran bajo la clave sintética `"table"` — la misma que usa el
+    # resto del archivo para nombrar la tabla única (ver `context_id or
+    # "table"` en los demás puntos de este endpoint). Sin esto, una decisión
+    # de envío o de costo contra una tabla suelta encontraba el diccionario
+    # vacío y rebotaba con "la hoja «table» no tiene ninguna columna mapeada"
+    # aunque la columna SÍ estuviera mapeada — invisible mientras el camino
+    # plano no cobraba nada (8a/8b lo arreglaron; esto lo destapó).
     _mappings_por_contexto: dict[str, list[ColumnMapping]] = defaultdict(list)
+    if _flat_mappings:
+        _mappings_por_contexto["table"] = list(_flat_mappings)
     for _m in _ctx_mappings:
         _mappings_por_contexto[_m.context_id or ""].append(_m)
 
@@ -2270,57 +2270,6 @@ async def confirm_file(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=_detalle_plano,
         )
-
-    # ── Un archivo de UNA sola tabla no puede traer costos de compra ────────────
-    # El camino plano del importador NO cobra el envío ni aplica las decisiones de
-    # costo, y no lo hace de tres maneras a la vez:
-    #   1. `_cobrar_envios_de_la_hoja` es un closure anidado dentro del camino
-    #      multi-hoja: desde el plano es estructuralmente inalcanzable;
-    #   2. el plano llama al planificador con `ctx_id=None` —que busca la decisión
-    #      bajo la clave `""`— mientras la API la manda con el `context_id` real,
-    #      así que la decisión se valida, el usuario la ve aceptada y el import la
-    #      ignora;
-    #   3. los avisos de costo nunca llegan a `counts`, así que tampoco hay rastro.
-    #
-    # Arreglar el camino plano de verdad es otra fase. Lo que NO se puede hacer
-    # mientras tanto es aceptar el archivo: importar una compra sin cobrarle el
-    # envío que el usuario mapeó deja un costo más bajo que el real, y con él un
-    # margen inflado que nadie va a salir a buscar. Se rechaza y se dice la salida.
-    #
-    # **No está gateado por tenant**: no cobrar un envío mapeado es incorrecto con
-    # el motor de costos prendido o apagado. La compuerta gobierna el reparto, no
-    # el silencio.
-    if _plano:
-        _targets_planos = {m.target_field for m in _flat_mappings} | {
-            m.target_field for m in _ctx_mappings
-        }
-        _columnas_de_costo = sorted(
-            _targets_planos & {"shipping_cost", "shipping_cost_line"}
-        )
-        if _columnas_de_costo or body.purchase_cost_decisions:
-            _que_pasa = (
-                "tiene columnas de envío mapeadas"
-                if _columnas_de_costo
-                else "trae decisiones sobre el costo de compra"
-            )
-            await _emit_validation_reject(
-                "costos_de_compra_en_archivo_plano",
-                {
-                    "columnas": _columnas_de_costo,
-                    "decisiones": bool(body.purchase_cost_decisions),
-                },
-            )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"«{record.original_filename}» es un archivo de una sola tabla "
-                    f"y {_que_pasa}. Véktor todavía no sabe repartir ni cobrar el "
-                    "envío en este formato: si lo importara, la compra quedaría con "
-                    "un costo más bajo que el real y el margen inflado. Subilo como "
-                    "libro con hojas separadas (una por sección), o sacá las columnas "
-                    "de envío del mapeo y cargá ese costo como un gasto aparte."
-                ),
-            )
 
     # ── F-H6.b: la decisión sobre envíos sin comprobante apunta a una hoja real ──
     # Mismo criterio que el efecto de inventario: una decisión que no se puede
