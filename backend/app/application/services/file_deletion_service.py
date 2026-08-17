@@ -577,11 +577,19 @@ async def _revert_cross_field_items(
     items = await _cross_field_items_by_file(session, file_id, tenant_id)
 
     # Un mismo (kind, entidad) puede tener más de un item si el archivo se
-    # reprocesó (relectura). Vale el `before` del PRIMERO; el `after` del
-    # ÚLTIMO es contra el que se compara "¿cambió después?" — mismo criterio
-    # que `_revert_master_items`.
-    primero: dict[tuple[str, uuid.UUID], DataRepairItem] = {}
-    ultimo: dict[tuple[str, uuid.UUID], DataRepairItem] = {}
+    # reprocesó (relectura), y CADA item puede traer un campo DISTINTO — a
+    # diferencia de `_revert_master_items` (un item = la entidad entera), acá
+    # "el primero" y "el último" de la entidad no alcanzan: un campo que sólo
+    # capturó un item intermedio quedaría invisible si sólo se mirara el
+    # primero. Se fusionan TODOS los items en orden cronológico (ya vienen
+    # ordenados por `created_at`): el `before` de cada campo es el del
+    # PRIMER item que lo trajo (el estado antes de que este archivo lo
+    # tocara la primera vez); el `after` de cada campo es el del ÚLTIMO item
+    # que lo trajo (cómo lo dejó el archivo) — mismo criterio de
+    # `_revert_master_items`, aplicado por campo en vez de a la entidad
+    # entera.
+    before_por_entidad: dict[tuple[str, uuid.UUID], dict[str, Any]] = {}
+    after_por_entidad: dict[tuple[str, uuid.UUID], dict[str, Any]] = {}
     for it in items:
         after = it.after_json or {}
         kind = str(after.get("kind") or "")
@@ -589,12 +597,15 @@ async def _revert_cross_field_items(
         if kind not in _modelo or not raw_id:
             continue
         clave = (kind, uuid.UUID(str(raw_id)))
-        primero.setdefault(clave, it)
-        ultimo[clave] = it
+        _before_acum = before_por_entidad.setdefault(clave, {})
+        for campo, valor in (it.before_json or {}).items():
+            if campo not in _before_acum:
+                _before_acum[campo] = valor
+        after_por_entidad.setdefault(clave, {}).update(after)
 
     restaurados = 0
     conservados: list[dict[str, Any]] = []
-    for (kind, entity_id), item in primero.items():
+    for (kind, entity_id), before_fusionado in before_por_entidad.items():
         entity = await session.get(_modelo[kind], entity_id)
         if entity is None or entity.tenant_id != tenant_id:
             continue
@@ -605,8 +616,8 @@ async def _revert_cross_field_items(
             continue
         await session.refresh(entity)
 
-        _cambiados = fields_changed_since_ledger(entity, ultimo[(kind, entity_id)].after_json)
-        _restaurable = dict(item.before_json or {})
+        _cambiados = fields_changed_since_ledger(entity, after_por_entidad[(kind, entity_id)])
+        _restaurable = dict(before_fusionado)
         for campo in _cambiados:
             _restaurable.pop(campo, None)
 

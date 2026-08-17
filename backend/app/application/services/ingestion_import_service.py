@@ -560,6 +560,67 @@ _CROSS_APPLY_ACTION: dict[str, str] = {
 }
 
 
+def _cross_field_max_length(model: type[Any], field_name: str) -> int | None:
+    """Largo declarado en la columna (`String(N)`), si lo tiene. Se lee del
+    modelo ORM en vez de copiar los números del schema Pydantic — la fuente
+    de verdad es la columna real, no una segunda lista que puede
+    desalinearse (el mismo motivo por el que este proyecto no duplica
+    `_match_key`/`normalize_text`). `Text` (ej. `address`) no tiene límite en
+    la columna y no se trunca acá.
+    """
+    try:
+        col_type = model.__table__.columns[field_name].type
+    except KeyError:
+        return None
+    return getattr(col_type, "length", None)
+
+
+def _sanitize_cross_field_value(
+    model: type[Any], field_name: str, raw_value: object
+) -> tuple[str | None, bool]:
+    """(valor saneado, es válido). Todos los campos cross de `customer`/
+    `supplier` son texto hoy (ver `_CROSS_CAPTURE_KINDS`) — nada numérico
+    que sanear todavía.
+
+    Reusa los MISMOS validators que `POST`/`PATCH /customers` y `/suppliers`
+    para `customer_type`/`iva_condition` (catálogo cerrado): una celda que
+    la API rechazaría con 422 no puede colarse sin revisión sólo porque
+    llegó por un mapeo cross-sección — antes esto escribía el valor crudo
+    con `setattr`, sin pasar por ningún validator. `es_válido=False` → ese
+    campo puntual de esa fila NO se escribe (no se inventa ni se corrige el
+    valor, se descarta).
+
+    Comparación case-insensitive a propósito, mismo criterio que F-N
+    (`name_split.py`) para `customer_type`/`doc_type`: el dato viene de una
+    celda de planilla, no de un `<select>` controlado.
+    """
+    if raw_value is None:
+        return None, True
+    text = str(raw_value).strip()
+    if not text:
+        return None, True
+    max_len = _cross_field_max_length(model, field_name)
+    if max_len is not None:
+        text = text[:max_len]
+    if field_name == "customer_type":
+        from app.schemas.customer import CUSTOMER_TYPES  # noqa: PLC0415
+
+        candidato = text.lower()
+        return (candidato, True) if candidato in CUSTOMER_TYPES else (None, False)
+    if field_name == "iva_condition":
+        from pydantic_core import PydanticCustomError  # noqa: PLC0415
+
+        from app.schemas._ar_fiscal import validate_iva_condition  # noqa: PLC0415
+
+        candidato = text.lower()
+        try:
+            validate_iva_condition(candidato)
+        except PydanticCustomError:
+            return None, False
+        return candidato, True
+    return text, True
+
+
 async def _apply_cross_field_buffer(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -586,6 +647,7 @@ async def _apply_cross_field_buffer(
     details: list[dict[str, Any]] = []
     _aplicados = 0
     _ya_tenian_dato = 0
+    _invalidos = 0
     for kind, entity_id_str, fields in buffer.resolved():
         model = _cross_apply_model.get(kind)
         if model is None:
@@ -602,9 +664,13 @@ async def _apply_cross_field_buffer(
             if not is_cross_value_blank(field_name, current):
                 _ya_tenian_dato += 1
                 continue
+            saneado, valido = _sanitize_cross_field_value(model, field_name, pending.value)
+            if not valido:
+                _invalidos += 1
+                continue
             before[field_name] = current
-            after[field_name] = pending.value
-            setattr(entity, field_name, pending.value)
+            after[field_name] = saneado
+            setattr(entity, field_name, saneado)
         if after:
             _aplicados += len(after)
             details.append(
@@ -620,6 +686,8 @@ async def _apply_cross_field_buffer(
         counts["cross_fields_aplicados"] = _aplicados
     if _ya_tenian_dato:
         counts["cross_fields_ya_tenian_dato"] = _ya_tenian_dato
+    if _invalidos:
+        counts["cross_fields_invalidos"] = _invalidos
 
 
 def _classify_row_reference(
@@ -3923,7 +3991,14 @@ async def _insert_confirmed_data_impl(
             inferred_type != "stock"
             and confirmed_fields.get("gastos")
             and (summary.get("has_gasto") or inferred_type in ("gastos", "general"))
-            and gasto_col
+            # F-H6.a: mismo motivo que `wants_ventas` — `REQUIRED_ALTERNATIVES
+            # ["expense"]` ya acepta unit_price+quantity como cubriendo "amount",
+            # así que la compuerta de abajo tenía que aceptar la misma
+            # combinación. Sin este fallback, un archivo plano que sólo mapeaba
+            # unit_price+quantity pasaba la validación de requeridos (200) y
+            # después el importador saltaba el bloque de gasto ENTERO en
+            # silencio — no sólo el envío, la fila no se importaba en absoluto.
+            and (gasto_col or (unit_price_col and qty_col))
         )
         wants_productos = bool(
             confirmed_fields.get("productos")
@@ -4402,8 +4477,15 @@ async def _insert_confirmed_data_impl(
                     counts["ventas"] += 1
 
             if wants_gastos and not _captured_to_otros:
-                assert gasto_col is not None  # wants_gastos implica gasto_col presente
-                amount = _parse_amount(row.get(gasto_col))
+                # F-H6.a: mismo criterio que ventas — el monto lo trae el archivo
+                # o sale de precio × cantidad. `gasto_col` puede ser None cuando
+                # la hoja entró por la pareja unit_price_col/qty_col mapeada.
+                _linea_gasto = resolve_line_amount(
+                    amount=_parse_amount(row.get(gasto_col)) if gasto_col else None,
+                    unit_price=_venta_precio_unitario_plano(row),
+                    quantity=_venta_cantidad_cruda_plana(row),
+                )
+                amount = _linea_gasto.amount
                 if amount:
                     desc_raw = row.get(nombre_col) if nombre_col else None
                     notes_raw = row.get(notes_col) if notes_col else None
@@ -4443,6 +4525,7 @@ async def _insert_confirmed_data_impl(
                         for k, v in custom_field_cols.items()
                         if row.get(v) is not None
                     }
+                    _registrar_monto_derivado(cf, _linea_gasto, counts)
                     if cat_label:
                         cf = {**cf, "category_label": cat_label}
 

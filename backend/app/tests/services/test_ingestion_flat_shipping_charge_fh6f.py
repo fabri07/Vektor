@@ -198,6 +198,44 @@ class TestElCaminoPlanoCobraElEnvio:
         assert counts.get("avisos"), "los avisos de costo no llegaron a counts"
         assert "descuento" in counts["avisos"][0]
 
+    async def test_sin_columna_de_monto_pero_con_precio_y_cantidad_igual_importa_y_cobra(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Hallazgo del code review de F-H6.f: `wants_gastos` exigía
+        `gasto_col` mapeado sin el fallback unit_price+quantity que sí tiene
+        `wants_ventas`, aunque `REQUIRED_ALTERNATIVES["expense"]` ya acepta esa
+        combinación como "amount" cubierto — el confirm daba 200 y el
+        importador saltaba el bloque de gasto ENTERO en silencio (no sólo el
+        envío)."""
+        filas = [
+            {
+                "fecha": "2024-03-05",
+                "articulo": "Termo acero",
+                "cantidad": "1",
+                "precio_unitario": "1000",
+                "comprobante": "A-0001",
+                "envio": "300",
+                "proveedor": "Distribuidora Sur",
+            }
+        ]
+        counts = await insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _flat_summary(filas),
+            {"gastos": True},
+            column_mappings={
+                "fecha": "expense_date",
+                "articulo": "product_name",
+                "cantidad": "quantity",
+                "precio_unitario": "unit_price",
+                "comprobante": "invoice_number",
+                "envio": "shipping_cost",
+                "proveedor": "supplier_name",
+            },
+        )
+        assert counts["gastos"] == 1
+        assert (await _logistica(db_session, sample_tenant))[0].amount == Decimal("300.00")
+
 
 class TestPlanoYMultiHojaConvergen:
     """El mismo input lógico entra como tabla plana o como una hoja dentro de

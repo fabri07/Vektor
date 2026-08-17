@@ -383,3 +383,123 @@ class TestAplicacionFillIfEmpty:
         assert counts["cross_fields_aplicados"] == 1
         await db_session.refresh(proveedor)
         assert proveedor.payment_method == "transferencia"
+
+
+def _flat_sale_summary_con_campo(field: str, value: str) -> dict[str, Any]:
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "ventas",
+        "has_venta": True,
+        "ventas_detectadas": [
+            {
+                "fecha": "2024-01-15",
+                "monto": "3000",
+                "doc_cliente": "30111222",
+                field: value,
+            }
+        ],
+    }
+
+
+class TestSanitizacionDeCamposCruzados:
+    """Hallazgo del code review de F-H6.f (#2): antes de este fix, el valor
+    crudo de la celda se escribía con ``setattr`` sin pasar por ningún
+    validator — una celda que la API rechazaría con 422 en `POST`/`PATCH
+    /customers` se colaba igual sólo por llegar por un mapeo cross-sección.
+    """
+
+    async def test_customer_type_invalido_se_descarta_no_se_escribe(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        cliente = Customer(tenant_id=sample_tenant.tenant_id, name="Cliente Uno", dni="30111222")
+        db_session.add(cliente)
+        await db_session.flush()
+
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _flat_sale_summary_con_campo("tipo_cliente", "empresa_fantasma"),
+            {"ventas": True},
+            column_mappings={
+                "doc_cliente": "customer_dni",
+                "tipo_cliente": "customer:customer_type",
+            },
+        )
+
+        assert counts["cross_fields_invalidos"] == 1
+        assert counts.get("cross_fields_aplicados", 0) == 0
+        assert "cross_field_details" not in counts
+        await db_session.refresh(cliente)
+        assert cliente.customer_type is None
+
+    async def test_customer_type_valido_case_insensitive_se_normaliza(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        cliente = Customer(tenant_id=sample_tenant.tenant_id, name="Cliente Uno", dni="30111222")
+        db_session.add(cliente)
+        await db_session.flush()
+
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _flat_sale_summary_con_campo("tipo_cliente", " Company "),
+            {"ventas": True},
+            column_mappings={
+                "doc_cliente": "customer_dni",
+                "tipo_cliente": "customer:customer_type",
+            },
+        )
+
+        assert counts["cross_fields_aplicados"] == 1
+        await db_session.refresh(cliente)
+        assert cliente.customer_type == "company"
+
+    async def test_iva_condition_invalida_se_descarta_no_se_escribe(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        cliente = Customer(tenant_id=sample_tenant.tenant_id, name="Cliente Uno", dni="30111222")
+        db_session.add(cliente)
+        await db_session.flush()
+
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _flat_sale_summary_con_campo("iva", "no_es_una_condicion_real"),
+            {"ventas": True},
+            column_mappings={
+                "doc_cliente": "customer_dni",
+                "iva": "customer:iva_condition",
+            },
+        )
+
+        assert counts["cross_fields_invalidos"] == 1
+        assert counts.get("cross_fields_aplicados", 0) == 0
+        await db_session.refresh(cliente)
+        assert cliente.iva_condition is None
+
+    async def test_texto_mas_largo_que_la_columna_se_trunca_no_se_rechaza(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """`postal_code` es `String(12)`: truncar no es lo mismo que
+        rechazar — la celda sigue siendo un dato válido, sólo más largo de
+        lo que la columna admite."""
+        cliente = Customer(tenant_id=sample_tenant.tenant_id, name="Cliente Uno", dni="30111222")
+        db_session.add(cliente)
+        await db_session.flush()
+
+        codigo_largo = "1234567890123456"  # 16 chars, > String(12)
+        counts = await importer.insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _flat_sale_summary_con_campo("cp", codigo_largo),
+            {"ventas": True},
+            column_mappings={
+                "doc_cliente": "customer_dni",
+                "cp": "customer:postal_code",
+            },
+        )
+
+        assert counts["cross_fields_aplicados"] == 1
+        assert counts.get("cross_fields_invalidos", 0) == 0
+        await db_session.refresh(cliente)
+        assert cliente.postal_code == codigo_largo[:12]

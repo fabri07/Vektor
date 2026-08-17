@@ -1211,6 +1211,25 @@ async def _reconcile(
                     confidence="HIGH",
                 )
             )
+        # F-D (7e, hallazgo del code review de F-H6.f): mismo motivo que
+        # `product_details` arriba — sin esto, un campo cross-sección
+        # (`customer:*`/`supplier:*`) que la relectura complete vía
+        # `_apply_cross_field_buffer` se escribía de verdad pero sin ledger,
+        # así que borrar el archivo después no podía revertirlo. `action`
+        # llega ya resuelto (`UPDATE_CUSTOMER_CROSS_FIELD`/
+        # `UPDATE_SUPPLIER_CROSS_FIELD`), sin traducir como `product_details`.
+        for _cfd in _reimport_detail.get("cross_field_details", []):
+            session.add(
+                DataRepairItem(
+                    run_id=run.id,
+                    tenant_id=tenant_id,
+                    source_file_id=file_id,
+                    action=_cfd["action"],
+                    before_json=_cfd["before"],
+                    after_json=_cfd["after"],
+                    confidence="HIGH",
+                )
+            )
         await session.flush()
 
     # F-F.4 — la relectura DESCUENTA, con el mismo núcleo que el confirm.

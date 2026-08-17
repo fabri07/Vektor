@@ -1368,6 +1368,70 @@ async def test_reread_audita_masters_creados_y_actualizados(
     assert create_item.after_json["name"] == "Maria Lopez"
 
 
+async def test_reread_audita_campos_cross_seccion(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo del code review de F-H6.f (#1): un campo cross-sección
+    (``customer:*``/``supplier:*``) que ``_apply_cross_field_buffer`` escribe
+    de verdad durante una relectura debe dejar su propio ``DataRepairItem`` —
+    sin esto se escribía sin ledger y borrar el archivo después no podía
+    revertirlo.
+
+    El threading de ``column_mappings`` explícitos hacia el `insert_confirmed_
+    data` de la relectura es un eje aparte (la relectura re-detecta por
+    heurística, no reaplica mapeos de columna del confirm original); acá se
+    envuelve la función real y se le inyecta ``cross_field_details`` como lo
+    haría ``_apply_cross_field_buffer`` si el mapeo llegara — aislando
+    exactamente el tramo de `_reconcile` que este fix agregó (7e)."""
+    cliente = Customer(tenant_id=tenant.tenant_id, name="Cliente Uno", dni="30111222")
+    db_session.add(cliente)
+    await db_session.flush()
+    cliente_id = cliente.id
+
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+
+    real_insert_confirmed_data = insert_confirmed_data
+
+    async def _fake_insert_confirmed_data(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = await real_insert_confirmed_data(*args, **kwargs)
+        result["cross_field_details"] = [
+            {
+                "action": "UPDATE_CUSTOMER_CROSS_FIELD",
+                "before": {"last_name": None},
+                "after": {
+                    "last_name": "Pérez",
+                    "id": str(cliente_id),
+                    "kind": "customer",
+                },
+            }
+        ]
+        return result
+
+    monkeypatch.setattr(
+        reread_service, "insert_confirmed_data", _fake_insert_confirmed_data
+    )
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    items_res = await db_session.execute(
+        select(DataRepairItem).where(
+            DataRepairItem.run_id == result.run_id,
+            DataRepairItem.action == "UPDATE_CUSTOMER_CROSS_FIELD",
+        )
+    )
+    items = items_res.scalars().all()
+    assert len(items) == 1
+    assert items[0].before_json == {"last_name": None}
+    assert items[0].after_json == {
+        "last_name": "Pérez",
+        "id": str(cliente_id),
+        "kind": "customer",
+    }
+
+
 async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:

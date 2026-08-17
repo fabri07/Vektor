@@ -3306,6 +3306,12 @@ async def confirm_file(
             f"{counts['cross_fields_ya_tenian_dato']} campo(s) de otra sección no se "
             "aplicaron porque la ficha ya tenía ese dato cargado."
         )
+    if counts.get("cross_fields_invalidos"):
+        warnings.append(
+            f"{counts['cross_fields_invalidos']} campo(s) de otra sección no se "
+            "aplicaron porque el valor de la celda no es válido para ese campo "
+            "(ej. una condición de IVA o un tipo de cliente que no existe)."
+        )
 
     # F-F.3: el descuento ya se aplicó en el confirm, así que los dos avisos son de
     # hechos consumados y no de intenciones. Los números salen del outcome
