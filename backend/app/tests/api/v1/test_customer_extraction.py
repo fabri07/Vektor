@@ -28,10 +28,24 @@ from app.application.services.customer_extraction_service import (
     parse_customer_records,
 )
 from app.application.services.customer_import_service import (
+    _customer_record,
     apply_import,
     build_import_preview,
 )
+from app.application.services.identity_resolution import IdentityKey, build_existing_index
 from app.persistence.models.customer import Customer
+
+_DOC_FIELDS = ("cuit", "dni")
+
+
+def _index(existing: list[Customer]) -> dict[IdentityKey, Customer]:
+    """Índice síncrono para tests de `build_import_preview` puro — sin DB, así
+    que sin el tier `business_code` (que exige `session` para leer
+    `entity_identifiers`; ver `build_existing_index_with_codes`)."""
+    return build_existing_index(
+        existing, to_record=_customer_record, doc_fields=_DOC_FIELDS, code_field="code"
+    )
+
 
 # CUIT con dígito verificador válido (módulo 11).
 _VALID_CUIT = "20-12345678-6"
@@ -141,6 +155,22 @@ class TestTabularExtraction:
         assert extraction.fields == {}
         assert extraction.warnings
 
+    async def test_business_code_column_detected(self) -> None:
+        content = (
+            b"nombre,dni,codigo_cliente\nJuan Perez,30111222,CLI-EXT-9\n"
+        )
+        extraction, _ = await extract_customer(content, "clientes.csv")
+        assert extraction.fields["business_code"] == "CLI-EXT-9"
+
+    async def test_business_code_no_colisiona_con_postal_code(self) -> None:
+        content = (
+            b"nombre,codigo_postal,codigo_cliente\n"
+            b"Juan Perez,1642,CLI-EXT-9\n"
+        )
+        extraction, _ = await extract_customer(content, "clientes.csv")
+        assert extraction.fields["postal_code"] == "1642"
+        assert extraction.fields["business_code"] == "CLI-EXT-9"
+
 
 # ── Servicio IA (foto / PDF) ───────────────────────────────────────────────────
 
@@ -237,7 +267,7 @@ class TestImportPreview:
             _row(name="Sin Doc"),  # needs_review (sin ninguna clave fuerte)
             _row(name="Repe", dni="30111222"),  # duplicate_in_file
         ]
-        preview = build_import_preview(records, existing)
+        preview = build_import_preview(records, _index(existing))
         assert preview.to_create == 1
         assert preview.to_update == 1
         assert preview.needs_review == 1
@@ -246,14 +276,14 @@ class TestImportPreview:
 
     def test_invalid_cuit_check_digit_flagged(self) -> None:
         records = [_row(name="Mal CUIT", cuit="20-12345678-0")]
-        preview = build_import_preview(records, [])
+        preview = build_import_preview(records, {})
         assert preview.invalid == 1
         assert preview.items[0].issues
 
     def test_missing_name_is_invalid_not_needs_review(self) -> None:
         # Sin nombre no hay ni siquiera señal débil — sigue siendo "invalid".
         records = [_row(dni="30111222")]
-        preview = build_import_preview(records, [])
+        preview = build_import_preview(records, {})
         assert preview.invalid == 1
         assert preview.needs_review == 0
 
@@ -262,7 +292,7 @@ class TestImportPreview:
             Customer(tenant_id=uuid.uuid4(), name="Con Email SA", email="ventas@norte.com")
         ]
         records = [_row(name="Con Email SA", email="Ventas@Norte.com")]
-        preview = build_import_preview(records, existing)
+        preview = build_import_preview(records, _index(existing))
         assert preview.to_update == 1
         assert preview.items[0].existing_id == existing[0].id
 
@@ -272,7 +302,7 @@ class TestImportPreview:
             Customer(tenant_id=uuid.uuid4(), name="B", email="b@b.com"),
         ]
         records = [_row(name="Ambiguo", cuit=_VALID_CUIT, email="b@b.com")]
-        preview = build_import_preview(records, existing)
+        preview = build_import_preview(records, _index(existing))
         assert preview.invalid == 1
         assert preview.needs_review == 0
         assert preview.to_create == 0
@@ -291,12 +321,16 @@ class TestApplyImport:
             _row(name="Norte SA", cuit=_VALID_CUIT, iva_condition="responsable_inscripto"),
             _row(name="Juan Pérez", dni="30123456"),
         ]
-        first = await apply_import(repo, tid, records)
+        first = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert len(first.created_ids) == 2
         assert first.skipped == 0
 
         # Reaplicar el MISMO archivo: ahora todo matchea → actualiza, no duplica.
-        second = await apply_import(repo, tid, records)
+        second = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert len(second.created_ids) == 0
         assert len(second.updated_ids) == 2
 
@@ -306,9 +340,13 @@ class TestApplyImport:
         for c in await repo.list_for_dedup(tid):
             assert c.is_sentinel is False
 
-    async def test_in_batch_duplicate_not_created_twice(
+    async def test_in_batch_duplicate_goes_to_others_not_merged(
         self, db_session: Any, sample_tenant: Any
     ) -> None:
+        """F-I(B): antes, la 2ª fila con el mismo documento matcheaba al
+        recién creado por la 1ª y lo actualizaba en silencio (merge secuencial
+        sin que el usuario lo viera venir). Ahora va a "Otros" — la entidad de
+        la 1ª fila queda intacta, con sus propios datos únicamente."""
         from app.persistence.repositories.customer_repository import CustomerRepository
 
         repo = CustomerRepository(db_session)
@@ -317,11 +355,16 @@ class TestApplyImport:
             _row(name="Dup A", cuit=_VALID_CUIT),
             _row(name="Dup B", cuit=_VALID_CUIT),  # mismo documento
         ]
-        result = await apply_import(repo, tid, records)
-        # El segundo matchea al recién creado → update, no segundo create.
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert len(result.created_ids) == 1
-        assert len(result.updated_ids) == 1
+        assert len(result.updated_ids) == 0
+        assert result.sent_to_others == 1
         assert await repo.count_active(tid) == 1
+        created = await repo.get_by_id(result.created_ids[0], tid)
+        assert created is not None
+        assert created.name == "Dup A"  # nunca lo tocó la fila 2
 
     async def test_needs_review_never_created(
         self, db_session: Any, sample_tenant: Any
@@ -331,7 +374,9 @@ class TestApplyImport:
         repo = CustomerRepository(db_session)
         tid = sample_tenant.tenant_id
         records = [_row(name="Solo Nombre")]  # sin ninguna clave fuerte
-        result = await apply_import(repo, tid, records)
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert result.created_ids == []
         assert result.updated_ids == []
         assert result.skipped == 1
@@ -350,13 +395,105 @@ class TestApplyImport:
         await db_session.commit()
 
         records = [_row(name="Ambiguo", cuit=_VALID_CUIT, email="b@b.com")]
-        result = await apply_import(repo, tid, records)
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert result.created_ids == []
         assert result.updated_ids == []
         assert result.skipped == 1
         # A y B siguen sin tocarse.
         assert (await repo.get_by_id(a.id, tid)).name == "A"  # type: ignore[union-attr]
         assert (await repo.get_by_id(b.id, tid)).name == "B"  # type: ignore[union-attr]
+
+
+class TestApplyImportBusinessCode:
+    """F-I(B): `business_code` en el import masivo — se persiste al crear/
+    actualizar, resuelve identidad en corridas futuras, y un duplicado (por
+    cualquier clave, incluido business_code) va a "Otros", nunca fusiona solo.
+    """
+
+    async def test_business_code_nuevo_se_registra_al_crear(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from sqlalchemy import select
+
+        from app.persistence.models.entity_identifier import EntityIdentifier
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+        records = [_row(name="Nuevo", dni="30111222", business_code="ERP-9")]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert len(result.created_ids) == 1
+
+        identifiers = (
+            await db_session.execute(
+                select(EntityIdentifier).where(
+                    EntityIdentifier.tenant_id == tid,
+                    EntityIdentifier.entity_type == "customer",
+                    EntityIdentifier.identifier_type == "business_code",
+                )
+            )
+        ).scalars().all()
+        assert len(identifiers) == 1
+        assert identifiers[0].entity_id == result.created_ids[0]
+        assert identifiers[0].normalized_value == "erp-9"
+
+    async def test_fila_con_solo_business_code_matchea_entidad_indexada(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        """El código quedó registrado en una importación ANTERIOR (o por
+        F-I(A), vía una venta) — una fila de un import nuevo que sólo trae el
+        código, sin documento, debe resolver contra esa misma entidad."""
+        from app.application.services.entity_code_service import record_identifier
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+        existing = Customer(tenant_id=tid, name="Cliente Viejo", dni="30111222")
+        db_session.add(existing)
+        await db_session.flush()
+        await record_identifier(
+            db_session,
+            tid,
+            "customer",
+            existing.id,
+            identifier_type="business_code",
+            namespace="business",
+            raw_value="ERP-9",
+            origin="business",
+        )
+        await db_session.commit()
+
+        records = [_row(name="Cliente Viejo", business_code="ERP-9")]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert result.created_ids == []
+        assert result.updated_ids == [existing.id]
+
+    async def test_duplicate_por_business_code_va_a_otros(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+        records = [
+            _row(name="Cliente A", dni="30111222", business_code="ERP-9"),
+            # Documento DISTINTO, mismo business_code — conflicto real de
+            # datos dentro del archivo, misma mecánica que un documento repetido.
+            _row(name="Cliente B", dni="30999888", business_code="ERP-9"),
+        ]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert len(result.created_ids) == 1
+        assert len(result.updated_ids) == 0
+        assert result.sent_to_others == 1
+        assert await repo.count_active(tid) == 1
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────

@@ -552,6 +552,7 @@ async def _reread_master_entities(
         None,
         flat_mapping,
         counts,
+        uploaded_file_id=file.id,
     )
     await session.flush()
 
@@ -585,15 +586,16 @@ async def _reread_master_entities(
                 )
             )
 
-    # Dedup: si dos filas del MISMO archivo matchean la misma identidad (ej. DNI
-    # repetido, o una fila posterior "corrige" la que ésta acaba de crear),
-    # apply_import indexa el recién creado en su dedup de batch — la segunda fila
-    # resuelve como "matched" y ese id termina en updated_ids AUNQUE ya esté en
-    # created_ids de la primera fila. Sin este filtro, esa entidad generaría DOS
-    # DataRepairItem: un REREAD_MASTER_UPDATE con before_json=None (mal etiquetado
-    # — no hubo estado previo real) y un REREAD_MASTER_CREATE redundante con el
-    # mismo after_json. El "antes" real de esa entidad relativo a TODO este run es
-    # "no existía", así que se audita UNA sola vez como CREATE.
+    # Dedup: defensivo, no la vía principal desde F-I(B). Antes, dos filas del
+    # MISMO archivo que matcheaban la misma identidad (ej. DNI repetido) creaban
+    # con la primera y actualizaban con la segunda dentro del mismo batch —
+    # este filtro evitaba que esa entidad generara DOS DataRepairItem (un
+    # REREAD_MASTER_UPDATE con before_json=None mal etiquetado + un
+    # REREAD_MASTER_CREATE redundante). F-I(B) cambió la causa raíz: una fila
+    # que repite una clave ya vista en el archivo ahora va a "Otros" ANTES de
+    # tocar create/update, así que `creados_ids`/`actualizados_ids` ya no
+    # deberían solaparse por esta razón — el filtro queda como red de
+    # seguridad ante otras fuentes de solape, no como el mecanismo principal.
     clientes_creados_ids = counts.get("clientes_creados_ids", [])
     clientes_actualizados_ids = [
         i

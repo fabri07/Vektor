@@ -9,7 +9,14 @@ from typing import Any
 
 from app.application.services.customer_extraction_service import parse_customer_records
 from app.application.services.customer_import_service import (
+    _customer_record,
+)
+from app.application.services.customer_import_service import (
     build_import_preview as build_customer_preview,
+)
+from app.application.services.identity_resolution import IdentityKey, build_existing_index
+from app.application.services.supplier_import_service import (
+    _supplier_record,
 )
 from app.application.services.supplier_import_service import (
     build_import_preview as build_supplier_preview,
@@ -24,10 +31,22 @@ def _row(**kw: Any) -> dict[str, Any]:
     return kw
 
 
+def _customer_index(existing: list[Customer]) -> dict[IdentityKey, Customer]:
+    return build_existing_index(
+        existing, to_record=_customer_record, doc_fields=("cuit", "dni"), code_field="code"
+    )
+
+
+def _supplier_index(existing: list[Supplier]) -> dict[IdentityKey, Supplier]:
+    return build_existing_index(
+        existing, to_record=_supplier_record, doc_fields=("cuit", "cuil"), code_field="code"
+    )
+
+
 class TestClientePreviewConPropuesta:
     def test_fila_a_crear_sin_apellido_trae_la_propuesta(self) -> None:
         records = [_row(name="Juan Perez", customer_type="person", dni="30111222")]
-        preview = build_customer_preview(records, [])
+        preview = build_customer_preview(records, {})
         item = preview.items[0]
         assert item.status == "create"
         assert item.name_split_suggestion is not None
@@ -39,7 +58,7 @@ class TestClientePreviewConPropuesta:
         records = [
             _row(name="Juan", last_name="Perez", customer_type="person", dni="30111222")
         ]
-        preview = build_customer_preview(records, [])
+        preview = build_customer_preview(records, {})
         item = preview.items[0]
         assert item.status == "create"
         assert item.name_split_suggestion is None
@@ -50,7 +69,7 @@ class TestClientePreviewConPropuesta:
         records = [
             _row(name="García e Hijos S.A.", customer_type="company", cuit=_VALID_CUIT)
         ]
-        preview = build_customer_preview(records, [])
+        preview = build_customer_preview(records, {})
         item = preview.items[0]
         assert item.name_split_suggestion is not None
         assert item.name_split_suggestion.status == "not_applicable"
@@ -64,14 +83,14 @@ class TestClientePreviewConPropuesta:
             )
         ]
         records = [_row(name="Juan Perez", dni="30111222", customer_type="person")]
-        preview = build_customer_preview(records, existing)
+        preview = build_customer_preview(records, _customer_index(existing))
         item = preview.items[0]
         assert item.status == "update"
         assert item.name_split_suggestion is None
 
     def test_fila_invalida_no_calcula_propuesta(self) -> None:
         records = [_row(customer_type="person")]  # sin name → invalid
-        preview = build_customer_preview(records, [])
+        preview = build_customer_preview(records, {})
         item = preview.items[0]
         assert item.status == "invalid"
         assert item.name_split_suggestion is None
@@ -80,7 +99,7 @@ class TestClientePreviewConPropuesta:
 class TestProveedorPreviewConPropuesta:
     def test_sin_coma_nunca_propone_con_heuristica(self) -> None:
         records = [_row(name="Roberto Gomez", cuil="20-12345678-6")]
-        preview = build_supplier_preview(records, [])
+        preview = build_supplier_preview(records, {})
         item = preview.items[0]
         assert item.status == "create"
         assert item.name_split_suggestion is not None
@@ -88,7 +107,7 @@ class TestProveedorPreviewConPropuesta:
 
     def test_con_coma_propone(self) -> None:
         records = [_row(name="Gomez, Roberto", cuil="20-12345678-6")]
-        preview = build_supplier_preview(records, [])
+        preview = build_supplier_preview(records, {})
         item = preview.items[0]
         assert item.name_split_suggestion is not None
         assert item.name_split_suggestion.status == "proposed"
@@ -98,7 +117,7 @@ class TestProveedorPreviewConPropuesta:
     def test_fila_a_actualizar_no_calcula_propuesta(self) -> None:
         existing = [Supplier(tenant_id=uuid.uuid4(), name="Roberto Gomez", cuil=_VALID_CUIT)]
         records = [_row(name="Roberto Gomez", cuil=_VALID_CUIT)]
-        preview = build_supplier_preview(records, existing)
+        preview = build_supplier_preview(records, _supplier_index(existing))
         item = preview.items[0]
         assert item.status == "update"
         assert item.name_split_suggestion is None
@@ -119,7 +138,7 @@ class TestExtremoAExtremoConElParserReal:
         assert records[0]["doc_type"] == "dni"  # confirma el valor real, no supuesto
         assert not records[0].get("last_name")
 
-        preview = build_customer_preview(records, [])
+        preview = build_customer_preview(records, {})
         item = preview.items[0]
         assert item.status == "create"
         assert item.name_split_suggestion is not None

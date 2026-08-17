@@ -620,7 +620,10 @@ async def _build_master_previews(
             ]
             if existing_customers is None:
                 existing_customers = await customer_repo.list_for_dedup(tenant_id)
-            preview = customer_import_service.build_import_preview(records, existing_customers)
+            customer_index = await customer_import_service.build_existing_index_with_codes(
+                session, tenant_id, existing_customers
+            )
+            preview = customer_import_service.build_import_preview(records, customer_index)
         else:
             _fields = CANONICAL_FIELDS["supplier"]
             records = [
@@ -629,7 +632,10 @@ async def _build_master_previews(
             ]
             if existing_suppliers is None:
                 existing_suppliers = await supplier_repo.list_for_dedup(tenant_id)
-            preview = supplier_import_service.build_import_preview(records, existing_suppliers)
+            supplier_index = await supplier_import_service.build_existing_index_with_codes(
+                session, tenant_id, existing_suppliers
+            )
+            preview = supplier_import_service.build_import_preview(records, supplier_index)
 
         samples = [
             MasterPreviewSample(

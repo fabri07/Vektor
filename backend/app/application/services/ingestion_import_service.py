@@ -1032,6 +1032,7 @@ async def _import_master_entities(
     column_mappings: dict[str, str] | None,
     counts: dict[str, Any],
     context_entity: dict[str, str] | None = None,
+    uploaded_file_id: uuid.UUID | None = None,
 ) -> None:
     """Paso 1/2 del orden maestro→transacción: importa clientes y proveedores
     ANTES de cualquier venta/gasto, reusando los import services de F7b
@@ -1110,7 +1111,12 @@ async def _import_master_entities(
                 for row in rows
             ]
             cust_result = await customer_import_service.apply_import(
-                CustomerRepository(session), tenant_id, customer_records
+                CustomerRepository(session),
+                tenant_id,
+                customer_records,
+                session=session,
+                uploaded_file_id=uploaded_file_id,
+                source="ingestion",
             )
             counts["clientes"] = (
                 counts.get("clientes", 0)
@@ -1129,6 +1135,10 @@ async def _import_master_entities(
             counts["clientes_invalidos"] = (
                 counts.get("clientes_invalidos", 0) + cust_result.invalid
             )
+            if cust_result.sent_to_others:
+                counts["clientes_a_otros"] = (
+                    counts.get("clientes_a_otros", 0) + cust_result.sent_to_others
+                )
             counts["clientes_creados_ids"] = counts.get("clientes_creados_ids", []) + [
                 str(i) for i in cust_result.created_ids
             ]
@@ -1145,7 +1155,12 @@ async def _import_master_entities(
                 for row in rows
             ]
             sup_result = await supplier_import_service.apply_import(
-                SupplierRepository(session), tenant_id, supplier_records
+                SupplierRepository(session),
+                tenant_id,
+                supplier_records,
+                session=session,
+                uploaded_file_id=uploaded_file_id,
+                source="ingestion",
             )
             counts["proveedores"] = (
                 counts.get("proveedores", 0)
@@ -1164,6 +1179,10 @@ async def _import_master_entities(
             counts["proveedores_invalidos"] = (
                 counts.get("proveedores_invalidos", 0) + sup_result.invalid
             )
+            if sup_result.sent_to_others:
+                counts["proveedores_a_otros"] = (
+                    counts.get("proveedores_a_otros", 0) + sup_result.sent_to_others
+                )
             counts["proveedores_creados_ids"] = counts.get(
                 "proveedores_creados_ids", []
             ) + [str(i) for i in sup_result.created_ids]
@@ -3683,6 +3702,7 @@ async def _insert_confirmed_data_impl(
         column_mappings,
         counts,
         context_entity=context_entity,
+        uploaded_file_id=uploaded_file_id,
     )
 
     # Batch anti-N+1: precargar las huellas de import del tenant una sola vez

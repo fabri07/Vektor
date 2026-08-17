@@ -83,12 +83,22 @@ export function CustomerFileModal({
       const rows = (preview?.items ?? [])
         .filter((it) => it.status === "create" || it.status === "update")
         .map((it) => it.customer);
-      return customersService.importConfirm(rows);
+      return customersService.importConfirm(rows, preview?.source_upload_id);
     },
     onSuccess: async (result) => {
+      const skippedSuffix = [
+        result.skipped ? `${result.skipped} salteados` : null,
+        // F-I(B): fila con clave repetida dentro del archivo — va a "Otros",
+        // no se fusiona sola con la fila anterior.
+        result.sent_to_others
+          ? `${result.sent_to_others} a revisar en Otros`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
       toast(
         `Import listo: ${result.created} creados, ${result.updated} actualizados` +
-          (result.skipped ? `, ${result.skipped} salteados.` : "."),
+          (skippedSuffix ? `, ${skippedSuffix}.` : "."),
         "success",
       );
       await onImported();

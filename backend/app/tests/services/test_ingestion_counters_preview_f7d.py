@@ -434,7 +434,9 @@ async def test_customer_apply_import_no_pisa_email_existente_con_celda_vacia(
     # La columna "email" está MAPEADA (la clave está presente) pero la celda de
     # esta fila vino vacía.
     records = [{"name": "Juan Perez", "dni": _VALID_DNI, "email": ""}]
-    result = await apply_import(repo, tid, records)
+    result = await apply_import(
+        repo, tid, records, session=db_session, uploaded_file_id=None
+    )
     assert result.updated_ids == [existing.id]
 
     await db_session.refresh(existing)

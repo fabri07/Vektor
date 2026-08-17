@@ -2,21 +2,31 @@
 
 Espejo de ``customer_import_service``: mismo motor de identidad
 (``identity_resolution``), misma estructura de dos pasos (preview puro / confirm con
-upsert idempotente). Matchea por CUIL → email → teléfono; el nombre es señal débil.
-Campos acotados a lo que persiste el modelo ``Supplier`` hoy (ver ``models/supplier.py``):
-no hay doc_type/address/etc. El sentinela "No identificado" y las marcas colapsadas
-(``_brand_collapsed``) nunca se crean ni se actualizan por import — quedan afuera del
-índice de dedup (``SupplierRepository.list_for_dedup``).
+upsert idempotente). Matchea por código externo → CUIL → email → teléfono; el nombre
+es señal débil. Campos acotados a lo que persiste el modelo ``Supplier`` hoy (ver
+``models/supplier.py``): no hay doc_type/address/etc. El sentinela "No identificado" y
+las marcas colapsadas (``_brand_collapsed``) nunca se crean ni se actualizan por import —
+quedan afuera del índice de dedup (``SupplierRepository.list_for_dedup``).
+
+F-I(B): una fila que repite CUALQUIER clave (CUIL/email/teléfono/``business_code``) ya
+vista en ESTE archivo va a la bandeja "Otros" para revisión humana — ver la nota
+equivalente en ``customer_import_service``.
 """
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
 from pydantic_core import PydanticCustomError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.entity_code_service import (
+    EntityIdentifierConflictError,
+    record_identifier,
+)
 from app.application.services.identity_resolution import (
     IdentityKey,
     build_existing_index,
@@ -90,11 +100,21 @@ class ImportResult:
     # el mismo campo en customer_import_service.ImportResult.
     needs_review: int = 0
     invalid: int = 0
+    # F-I(B): ver el mismo campo en customer_import_service.ImportResult.
+    sent_to_others: int = 0
 
 
 def _record_keys(record: dict[str, Any]) -> list[IdentityKey]:
-    """Claves de identidad del record — CUIL → email → teléfono."""
-    return record_keys(record, doc_fields=_DOC_FIELDS)
+    """Claves de identidad del record — business_code → CUIL → email → teléfono.
+
+    Ver la nota de ``code_key_types`` en ``customer_import_service._record_keys``.
+    """
+    return record_keys(
+        record,
+        doc_fields=_DOC_FIELDS,
+        code_field="business_code",
+        code_key_types=("code", "business_code"),
+    )
 
 
 def _validate_record(record: dict[str, Any]) -> list[str]:
@@ -120,7 +140,13 @@ def _validate_record(record: dict[str, Any]) -> list[str]:
 
 
 def _supplier_record(sup: Supplier) -> dict[str, Any]:
-    return {"cuit": sup.cuit, "cuil": sup.cuil, "email": sup.email, "phone": sup.phone}
+    return {
+        "cuit": sup.cuit,
+        "cuil": sup.cuil,
+        "email": sup.email,
+        "phone": sup.phone,
+        "code": sup.vektor_code,
+    }
 
 
 def _maybe_name_split_suggestion(record: dict[str, Any]) -> NameSplitProposal | None:
@@ -132,19 +158,40 @@ def _maybe_name_split_suggestion(record: dict[str, Any]) -> NameSplitProposal | 
     return None
 
 
-def _existing_index(existing: list[Supplier]) -> dict[IdentityKey, Supplier]:
-    """Índice ``IdentityKey → Supplier`` de los proveedores existentes (CUIL/email/tel)."""
-    return build_existing_index(existing, to_record=_supplier_record, doc_fields=_DOC_FIELDS)
+async def build_existing_index_with_codes(
+    session: AsyncSession, tenant_id: UUID, existing: list[Supplier]
+) -> dict[IdentityKey, Any]:
+    """Índice ``IdentityKey → Supplier`` de los existentes: CUIL/email/tel +
+    ``vektor_code`` propio (tier "code") + ``business_code`` externo (F-I(B),
+    tier "business_code", desde ``entity_identifiers``).
+
+    Ver la nota equivalente en ``customer_import_service.build_existing_index_with_codes``
+    (mismo motivo del import local diferido).
+    """
+    from app.application.services.ingestion_import_service import (  # noqa: PLC0415
+        _augment_index_with_business_codes,
+    )
+
+    index = build_existing_index(
+        existing, to_record=_supplier_record, doc_fields=_DOC_FIELDS, code_field="code"
+    )
+    await _augment_index_with_business_codes(
+        session, tenant_id, "supplier", index, {s.id: s for s in existing}
+    )
+    return index
 
 
 def build_import_preview(
     records: list[dict[str, Any]],
-    existing: list[Supplier],
+    existing_index: dict[IdentityKey, Any],
     *,
     parse_warnings: list[str] | None = None,
 ) -> ImportPreview:
-    """Clasifica cada fila contra los existentes. Puro, sin tocar la DB."""
-    existing_index = _existing_index(existing)
+    """Clasifica cada fila contra los existentes. Puro, sin tocar la DB.
+
+    ``existing_index`` ya viene construido por el caller — ver la nota
+    equivalente en ``customer_import_service.build_import_preview``.
+    """
     seen_in_file: dict[IdentityKey, int] = {}
     items: list[PreviewItem] = []
 
@@ -157,7 +204,8 @@ def build_import_preview(
             continue
 
         keys = _record_keys(record)
-        # Duplicado dentro del MISMO archivo (otra fila ya trajo esta clave).
+        # Duplicado dentro del MISMO archivo (otra fila ya trajo esta clave) —
+        # F-I(B): el confirm manda esta fila a "Otros", nunca la fusiona sola.
         dup_of = next((seen_in_file[k] for k in keys if k in seen_in_file), None)
         if dup_of is not None:
             items.append(
@@ -165,7 +213,10 @@ def build_import_preview(
                     row_index=idx,
                     status="duplicate_in_file",
                     fields=record,
-                    issues=[f"Documento/contacto repetido en el archivo (fila {dup_of + 1})."],
+                    issues=[
+                        f"Documento/código/contacto repetido en el archivo (fila "
+                        f"{dup_of + 1}) — va a la bandeja Otros para revisión."
+                    ],
                 )
             )
             continue
@@ -219,30 +270,91 @@ def build_import_preview(
     return ImportPreview(items=items, warnings=list(parse_warnings or []))
 
 
+async def _persist_business_code(
+    session: AsyncSession,
+    tenant_id: UUID,
+    supplier_id: UUID,
+    record: dict[str, Any],
+    uploaded_file_id: UUID | None,
+) -> None:
+    """F-I(B): ver la nota equivalente en
+    ``customer_import_service._persist_business_code``."""
+    raw_code = record.get("business_code")
+    if raw_code is None or not str(raw_code).strip():
+        return
+    with suppress(EntityIdentifierConflictError):
+        await record_identifier(
+            session,
+            tenant_id,
+            "supplier",
+            supplier_id,
+            identifier_type="business_code",
+            namespace="business",
+            raw_value=str(raw_code),
+            origin="business",
+            source_upload_id=uploaded_file_id,
+        )
+
+
 async def apply_import(
     repo: SupplierRepository,
     tenant_id: UUID,
     records: list[dict[str, Any]],
+    *,
+    session: AsyncSession,
+    uploaded_file_id: UUID | None,
+    source: str = "ingestion",
 ) -> ImportResult:
-    """Aplica el import: upsert idempotente por CUIL/email/teléfono. Crea o actualiza,
-    no duplica.
+    """Aplica el import: upsert idempotente por CUIL/email/teléfono/código. Crea
+    o actualiza, no duplica.
 
     Re-valida cada fila y re-resuelve el match contra la DB actual. Las filas
     inválidas se saltean, igual que las ``needs_review`` (sin clave fuerte) y los
     conflictos de identidad — nunca crean ni actualizan. El sentinela "No identificado"
     y las marcas colapsadas nunca se crean/pisan (quedan fuera de ``list_for_dedup``).
-    Devuelve los ids creados/actualizados y la cantidad salteada.
+
+    F-I(B): ver la nota equivalente en ``customer_import_service.apply_import``
+    — una fila cuya clave ya apareció en OTRA fila de este archivo va a "Otros",
+    nunca fusiona sola.
     """
+    from app.application.services.ingestion_import_service import (  # noqa: PLC0415
+        _capture_unclassified,
+    )
+
     existing = await repo.list_for_dedup(tenant_id)
-    index = _existing_index(existing)
+    index = await build_existing_index_with_codes(session, tenant_id, existing)
+    seen_in_file: dict[IdentityKey, int] = {}
     result = ImportResult()
 
-    for record in records:
+    for idx, record in enumerate(records):
         if _validate_record(record):
             result.skipped += 1
             result.invalid += 1
             continue
         keys = _record_keys(record)
+
+        # F-I(B): duplicado dentro del MISMO archivo — a "Otros", nunca fusiona.
+        dup_of = next((seen_in_file[k] for k in keys if k in seen_in_file), None)
+        if dup_of is not None:
+            capture = _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[record],
+                headers=None,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=(
+                    "Documento/código/contacto repetido en el archivo "
+                    f"(fila {dup_of + 1}) — requiere revisión manual antes de "
+                    "fusionar con esa ficha."
+                ),
+                suggested_entity="supplier",
+            )
+            result.sent_to_others += capture.captured
+            continue
+        for k in keys:
+            seen_in_file[k] = idx
+
         resolution = resolve_identity(keys, index)
         # F7d: mismo mapeo que build_import_preview — needs_review (sin clave
         # fuerte) es distinto de conflict (ambiguo, tratado como invalid).
@@ -267,6 +379,9 @@ async def apply_import(
                     continue
                 setattr(match, fname, record[fname])
             await repo.save(match)
+            await _persist_business_code(
+                session, tenant_id, match.id, record, uploaded_file_id
+            )
             result.updated_ids.append(match.id)
         else:
             payload: dict[str, Any] = {
@@ -274,6 +389,9 @@ async def apply_import(
             }
             supplier = Supplier(tenant_id=tenant_id, **payload)
             saved = await repo.save(supplier)
+            await _persist_business_code(
+                session, tenant_id, saved.id, record, uploaded_file_id
+            )
             result.created_ids.append(saved.id)
             # Registrar las nuevas claves para no duplicar dentro del mismo batch.
             for k in keys:

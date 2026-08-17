@@ -133,6 +133,13 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "postal_code": "Código postal",
         "birthday": "Cumpleaños",
         "notes": "Notas",
+        # F-I(B): código propio del cliente en OTRO sistema del negocio — DISTINTO
+        # de `customer_business_code` (arriba, en 'sale'), que es la referencia
+        # desde una venta a un cliente ya existente. Acá es un campo de la propia
+        # ficha, se persiste como `EntityIdentifier` (namespace "business") al
+        # crear/actualizar. Sin heurística a propósito (ver `_HEURISTICS`) — mismo
+        # criterio de F-ID.7: un "código externo" es ambiguo para adivinar solo.
+        "business_code": "Código externo",
     },
     # F7a: maestro de PROVEEDORES — ACOTADO a lo que persiste el modelo Supplier
     # HOY (models/supplier.py). No se agregan doc_type/address/locality/province/
@@ -147,6 +154,8 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "email": "Email",
         "phone": "Teléfono",
         "notes": "Notas",
+        # F-I(B): ver la nota equivalente en 'customer' arriba.
+        "business_code": "Código externo",
     },
     "product": {
         "sku": "Código (SKU)",

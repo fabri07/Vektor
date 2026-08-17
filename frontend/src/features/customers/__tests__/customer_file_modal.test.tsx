@@ -238,3 +238,51 @@ describe("CustomerFileModal — F-N: propuesta de split nombre/apellido", () => 
     expect(fila0.last_name).toBe("Perez");
   });
 });
+
+describe("CustomerFileModal — F-I(B): source_upload_id viaja del preview al confirm", () => {
+  const mockConfirm = customersService.importConfirm as jest.Mock;
+
+  const PREVIEW_CON_UPLOAD_ID: CustomerImportPreviewResponse = {
+    items: [
+      {
+        row_index: 0,
+        status: "create",
+        customer: { name: "Nuevo OK", cuit: "20-12345678-6" },
+        existing_id: null,
+        existing_name: null,
+        issues: [],
+      },
+    ],
+    to_create: 1,
+    to_update: 0,
+    needs_review: 0,
+    invalid: 0,
+    duplicates: 0,
+    warnings: [],
+    source_upload_id: "a1b2c3d4-0000-0000-0000-000000000000",
+  };
+
+  beforeEach(() => {
+    mockPreview.mockReset();
+    mockConfirm.mockReset();
+    mockPreview.mockResolvedValue(PREVIEW_CON_UPLOAD_ID);
+    mockConfirm.mockResolvedValue({
+      created: 1,
+      updated: 0,
+      skipped: 0,
+      sent_to_others: 0,
+    });
+  });
+
+  it("reenvía el source_upload_id del preview al confirmar", async () => {
+    renderModal();
+    await uploadBulkFile();
+
+    fireEvent.click(screen.getByRole("button", { name: /Importar 1 cliente/ }));
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalled());
+    expect(mockConfirm.mock.calls[0]?.[1]).toBe(
+      "a1b2c3d4-0000-0000-0000-000000000000",
+    );
+  });
+});

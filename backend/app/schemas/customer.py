@@ -239,6 +239,11 @@ class CustomerImportPreviewResponse(BaseModel):
 
 class CustomerImportConfirmRequest(BaseModel):
     rows: list[CustomerImportRow] = Field(default_factory=list)
+    # F-I(B): el preview ya devuelve este id (archivo persistido al parsear) —
+    # reenviarlo acá permite que una fila duplicada-en-archivo quede linkeada
+    # al capturarse en "Otros". Opcional/backward-compat: sin él, la captura
+    # igual funciona, sólo sin `source_upload_id` en el UnclassifiedRecord.
+    source_upload_id: UUID | None = None
 
 
 class CustomerImportConfirmResponse(BaseModel):
@@ -247,6 +252,8 @@ class CustomerImportConfirmResponse(BaseModel):
     skipped: int
     created_ids: list[UUID] = Field(default_factory=list)
     updated_ids: list[UUID] = Field(default_factory=list)
+    # F-I(B): filas con clave repetida dentro del archivo, capturadas en "Otros".
+    sent_to_others: int = 0
 
 
 class UpdateCustomerRequest(BaseModel):

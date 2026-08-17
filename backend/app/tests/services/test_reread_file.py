@@ -1435,16 +1435,15 @@ async def test_reread_audita_campos_cross_seccion(
 async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F9b (fix post-review): dos filas del MISMO archivo con el mismo DNI —
-    ninguna matchea a un cliente preexistente, así que la primera CREA y la
-    segunda, al re-resolver contra el índice de dedup del propio batch
-    (``apply_import`` registra el recién creado ahí para no duplicar dentro del
-    mismo archivo), resuelve como "matched" contra ESE cliente recién creado y
-    termina en ``updated_ids``. Sin el dedup entre ``*_creados_ids`` y
-    ``*_actualizados_ids``, esto generaba DOS ``DataRepairItem`` para la MISMA
-    entidad: un REREAD_MASTER_UPDATE con ``before_json=None`` (mal etiquetado,
-    no hubo estado previo real) y un REREAD_MASTER_CREATE redundante. Debe
-    generarse UN solo item, REREAD_MASTER_CREATE."""
+    """F9b (fix post-review) + F-I(B): dos filas del MISMO archivo con el mismo
+    DNI — ninguna matchea a un cliente preexistente. Antes de F-I(B), la
+    primera CREABA y la segunda, al re-resolver contra el índice de dedup del
+    propio batch, resolvía "matched" contra ESE cliente recién creado y lo
+    actualizaba en silencio (merge secuencial). F-I(B) cambió esa mecánica: la
+    2ª fila que repite una clave ya vista en el archivo va a "Otros" — nunca
+    toca la entidad de la 1ª. Sigue generándose UN solo DataRepairItem
+    (REREAD_MASTER_CREATE, para la 1ª fila) — la 2ª no genera ninguno, porque
+    no crea ni actualiza nada."""
     file = await _make_master_file(
         db_session,
         tenant,
@@ -1464,8 +1463,8 @@ async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
         "clientes_detectados": [
             # crea el cliente.
             {"nombre": "Juan Perez", "documento": "30111222"},
-            # mismo DNI que la fila anterior -> "actualiza" lo que la primera
-            # fila del MISMO archivo acaba de crear (no un cliente preexistente).
+            # mismo DNI que la fila anterior -> F-I(B): va a Otros, no toca
+            # la entidad que acaba de crear la fila anterior.
             {"nombre": "Juan Perez Corregido", "documento": "30111222"},
         ],
     }
@@ -1484,14 +1483,15 @@ async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
         )
     )
     items = items_res.scalars().all()
-    assert len(items) == 1  # NO dos (create + update fantasma) para la misma entidad
+    assert len(items) == 1  # sólo la 1ª fila crea; la 2ª va a Otros, sin item
     assert items[0].action == "REREAD_MASTER_CREATE"
     assert items[0].before_json is None
     assert items[0].after_json is not None
     assert items[0].after_json["id"] == str(customers[0].id)
-    # El name final refleja la ÚLTIMA fila que la tocó (la segunda, "corregida"),
-    # aunque la auditoría la trate como parte del mismo CREATE.
-    assert items[0].after_json["name"] == "Juan Perez Corregido"
+    # F-I(B): la 2ª fila NUNCA tocó la entidad — el nombre sigue siendo el de
+    # la 1ª, no el "corregido" de la fila que fue a Otros.
+    assert items[0].after_json["name"] == "Juan Perez"
+    assert customers[0].name == "Juan Perez"
 
 
 # ── F9b (Task 6): auditoría before/after de productos en la relectura ──────────

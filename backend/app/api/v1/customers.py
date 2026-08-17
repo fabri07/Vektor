@@ -29,6 +29,7 @@ from app.application.services.customer_extraction_service import (
 )
 from app.application.services.customer_import_service import (
     apply_import,
+    build_existing_index_with_codes,
     build_import_preview,
 )
 from app.application.services.file_parsing import (
@@ -365,7 +366,10 @@ async def import_customers_preview(
     records, parse_warnings = parse_customer_records(content, filename, mime)
     repo = CustomerRepository(session)
     existing = await repo.list_for_dedup(tenant.tenant_id)
-    preview = build_import_preview(records, existing, parse_warnings=parse_warnings)
+    existing_index = await build_existing_index_with_codes(
+        session, tenant.tenant_id, existing
+    )
+    preview = build_import_preview(records, existing_index, parse_warnings=parse_warnings)
 
     source_upload_id = await _persist_customer_upload(
         session,
@@ -421,11 +425,20 @@ async def import_customers_confirm(
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> CustomerImportConfirmResponse:
-    """Aplica el import: por cada fila, upsert idempotente por documento (crea o
-    actualiza, no duplica). Las filas inválidas se saltean. El sentinela nunca se crea."""
+    """Aplica el import: por cada fila, upsert idempotente por documento/código (crea
+    o actualiza, no duplica). Las filas inválidas se saltean; una fila que repite la
+    clave de otra fila de este mismo archivo va a la bandeja "Otros" (F-I(B)). El
+    sentinela nunca se crea."""
     records = [row.model_dump(exclude_none=True) for row in body.rows]
     repo = CustomerRepository(session)
-    result = await apply_import(repo, tenant.tenant_id, records)
+    result = await apply_import(
+        repo,
+        tenant.tenant_id,
+        records,
+        session=session,
+        uploaded_file_id=body.source_upload_id,
+        source="ingestion",
+    )
 
     session.add(
         DecisionAuditLog(
@@ -436,6 +449,7 @@ async def import_customers_confirm(
                 "created": len(result.created_ids),
                 "updated": len(result.updated_ids),
                 "skipped": result.skipped,
+                "sent_to_others": result.sent_to_others,
                 "created_ids": [str(i) for i in result.created_ids],
                 "updated_ids": [str(i) for i in result.updated_ids],
                 "source": "ui:import",
@@ -453,6 +467,7 @@ async def import_customers_confirm(
         skipped=result.skipped,
         created_ids=result.created_ids,
         updated_ids=result.updated_ids,
+        sent_to_others=result.sent_to_others,
     )
 
 

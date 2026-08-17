@@ -160,6 +160,9 @@ export interface CustomerImportConfirmResponse {
   skipped: number;
   created_ids: string[];
   updated_ids: string[];
+  // F-I(B): filas con clave (documento/email/teléfono/business_code) repetida
+  // dentro del mismo archivo — capturadas en la bandeja "Otros" para revisión.
+  sent_to_others: number;
 }
 
 const PAGE_SIZE = 200;
@@ -254,13 +257,18 @@ export const customersService = {
     return res.data;
   },
 
-  /** Confirma el import: upsert idempotente de las filas elegidas. */
+  /** Confirma el import: upsert idempotente de las filas elegidas.
+   *
+   * `sourceUploadId` es el que devolvió `importPreview` — F-I(B): sin él, una
+   * fila con clave repetida en el archivo igual va a "Otros" al confirmar,
+   * pero queda sin vincular al archivo de origen. */
   async importConfirm(
     rows: CustomerImportRow[],
+    sourceUploadId?: string | null,
   ): Promise<CustomerImportConfirmResponse> {
     const res = await api.post<CustomerImportConfirmResponse>(
       "/customers/import/confirm",
-      { rows },
+      { rows, source_upload_id: sourceUploadId ?? null },
     );
     return res.data;
   },
