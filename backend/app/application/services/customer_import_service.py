@@ -18,7 +18,6 @@ en silencio — un merge secuencial que el usuario nunca veía venir.
 
 from __future__ import annotations
 
-from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -27,9 +26,10 @@ from uuid import UUID
 from pydantic_core import PydanticCustomError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services.entity_code_service import (
-    EntityIdentifierConflictError,
-    record_identifier,
+from app.application.services._master_import_shared import (
+    classify_duplicate_in_file,
+    persist_business_code,
+    register_seen_keys,
 )
 from app.application.services.identity_resolution import (
     IdentityKey,
@@ -127,6 +127,11 @@ class ImportResult:
     # fusionan solas. Aparte de `skipped`: la fila queda trazada, no salteada
     # en silencio.
     sent_to_others: int = 0
+    # F-I(B), hallazgo del code review: la fila SÍ crea/actualiza la entidad
+    # con sus otros campos, pero el `business_code` que traía ya pertenece a
+    # OTRA entidad — antes se descartaba en silencio (sin log ni contador),
+    # a diferencia del mismo caso en F-I(A) (`*_referencia_conflictiva`).
+    business_code_conflictivo: int = 0
 
 
 def _record_keys(record: dict[str, Any]) -> list[IdentityKey]:
@@ -251,7 +256,7 @@ def build_import_preview(
         keys = _record_keys(record)
         # Duplicado dentro del MISMO archivo (otra fila ya trajo esta clave) —
         # F-I(B): el confirm manda esta fila a "Otros", nunca la fusiona sola.
-        dup_of = next((seen_in_file[k] for k in keys if k in seen_in_file), None)
+        dup_of = classify_duplicate_in_file(keys, seen_in_file)
         if dup_of is not None:
             items.append(
                 PreviewItem(
@@ -265,8 +270,6 @@ def build_import_preview(
                 )
             )
             continue
-        for k in keys:
-            seen_in_file[k] = idx
 
         resolution = resolve_identity(keys, existing_index)
         if resolution.outcome == "needs_review":
@@ -281,7 +284,8 @@ def build_import_preview(
                     ],
                 )
             )
-        elif resolution.outcome == "conflict":
+            continue
+        if resolution.outcome == "conflict":
             items.append(
                 PreviewItem(
                     row_index=idx,
@@ -290,7 +294,16 @@ def build_import_preview(
                     issues=["El registro matchea contra más de un cliente existente."],
                 )
             )
-        elif resolution.outcome == "matched":
+            continue
+
+        # Hallazgo del code review de F-I(B): registrar la clave ACÁ, recién
+        # cuando se sabe que la fila va a crear/actualizar algo — nunca antes.
+        # Una fila `needs_review`/`conflict` no toca ninguna entidad y no
+        # puede "contaminar" la detección de duplicados de una fila posterior
+        # que sí es válida por su cuenta.
+        register_seen_keys(keys, seen_in_file, idx)
+
+        if resolution.outcome == "matched":
             match = resolution.entity
             assert match is not None  # invariante de "matched": siempre trae entity
             items.append(
@@ -319,41 +332,6 @@ def _coerce_birthday(value: Any) -> date | None:
     # F6-C1: antes solo aceptaba ISO, así que un "12/03/1985" de una planilla se
     # perdía en silencio. Mismo parser y mismo pivote que la extracción por IA.
     return parse_business_date(value, century_pivot=BIRTHDAY_CENTURY_PIVOT)
-
-
-async def _persist_business_code(
-    session: AsyncSession,
-    tenant_id: UUID,
-    customer_id: UUID,
-    record: dict[str, Any],
-    uploaded_file_id: UUID | None,
-) -> None:
-    """F-I(B): si la fila trae ``business_code``, lo persiste como
-    ``EntityIdentifier`` — mismo patrón que ``_record_row_business_code`` de
-    F-I(A), simplificado: acá el código es dato DIRECTO de la ficha, no un
-    extra sobre un match resuelto por otra clave.
-
-    ``EntityIdentifierConflictError`` (el código ya pertenece a OTRA entidad,
-    de un import/fila anterior — no del mismo archivo, eso ya lo atajó
-    ``seen_in_file`` antes de llegar acá) no revierte la entidad: sus otros
-    campos (documento, email, nombre) siguen siendo datos válidos. Sólo el
-    registro del código se salta — no se pisa la titularidad de otra entidad.
-    """
-    raw_code = record.get("business_code")
-    if raw_code is None or not str(raw_code).strip():
-        return
-    with suppress(EntityIdentifierConflictError):
-        await record_identifier(
-            session,
-            tenant_id,
-            "customer",
-            customer_id,
-            identifier_type="business_code",
-            namespace="business",
-            raw_value=str(raw_code),
-            origin="business",
-            source_upload_id=uploaded_file_id,
-        )
 
 
 async def apply_import(
@@ -397,7 +375,7 @@ async def apply_import(
         keys = _record_keys(record)
 
         # F-I(B): duplicado dentro del MISMO archivo — a "Otros", nunca fusiona.
-        dup_of = next((seen_in_file[k] for k in keys if k in seen_in_file), None)
+        dup_of = classify_duplicate_in_file(keys, seen_in_file)
         if dup_of is not None:
             capture = _capture_unclassified(
                 session,
@@ -415,8 +393,6 @@ async def apply_import(
             )
             result.sent_to_others += capture.captured
             continue
-        for k in keys:
-            seen_in_file[k] = idx
 
         resolution = resolve_identity(keys, index)
         # F7d: mismo mapeo que build_import_preview — needs_review (sin clave
@@ -429,6 +405,11 @@ async def apply_import(
             result.skipped += 1
             result.invalid += 1
             continue
+
+        # Hallazgo del code review de F-I(B): registrar la clave ACÁ, recién
+        # cuando se sabe que la fila va a crear/actualizar algo — ver el
+        # docstring de `register_seen_keys`.
+        register_seen_keys(keys, seen_in_file, idx)
 
         if resolution.outcome == "matched":
             match = resolution.entity
@@ -447,9 +428,13 @@ async def apply_import(
                 )
                 setattr(match, fname, value)
             await repo.save(match)
-            await _persist_business_code(
-                session, tenant_id, match.id, record, uploaded_file_id
-            )
+            if (
+                await persist_business_code(
+                    session, tenant_id, "customer", match.id, record, uploaded_file_id
+                )
+                is False
+            ):
+                result.business_code_conflictivo += 1
             result.updated_ids.append(match.id)
         else:
             payload: dict[str, Any] = {}
@@ -463,9 +448,13 @@ async def apply_import(
                 )
             customer = Customer(tenant_id=tenant_id, **payload)
             saved = await repo.save(customer)
-            await _persist_business_code(
-                session, tenant_id, saved.id, record, uploaded_file_id
-            )
+            if (
+                await persist_business_code(
+                    session, tenant_id, "customer", saved.id, record, uploaded_file_id
+                )
+                is False
+            ):
+                result.business_code_conflictivo += 1
             result.created_ids.append(saved.id)
             # Registrar las nuevas claves para no duplicar dentro del mismo batch.
             for k in keys:

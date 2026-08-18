@@ -429,6 +429,20 @@ async def import_customers_confirm(
     o actualiza, no duplica). Las filas inválidas se saltean; una fila que repite la
     clave de otra fila de este mismo archivo va a la bandeja "Otros" (F-I(B)). El
     sentinela nunca se crea."""
+    # F-I(B), hallazgo del code review: `source_upload_id` lo manda el cliente —
+    # re-derivar contra el tenant de la request antes de usarlo como FK, mismo
+    # criterio que `tenant_id` (nunca del body sin validar). Un id ajeno o
+    # inexistente se trata como si no hubiera venido (fail-soft, igual que
+    # `_persist_customer_upload`): la fila igual va a "Otros", sólo sin el
+    # vínculo al archivo de origen.
+    source_upload_id = body.source_upload_id
+    if source_upload_id is not None:
+        from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+
+        owned_file = await session.get(UploadedFile, source_upload_id)
+        if owned_file is None or owned_file.tenant_id != tenant.tenant_id:
+            source_upload_id = None
+
     records = [row.model_dump(exclude_none=True) for row in body.rows]
     repo = CustomerRepository(session)
     result = await apply_import(
@@ -436,7 +450,7 @@ async def import_customers_confirm(
         tenant.tenant_id,
         records,
         session=session,
-        uploaded_file_id=body.source_upload_id,
+        uploaded_file_id=source_upload_id,
         source="ingestion",
     )
 

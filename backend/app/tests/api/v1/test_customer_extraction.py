@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import unittest.mock
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import openpyxl
@@ -495,6 +496,97 @@ class TestApplyImportBusinessCode:
         assert result.sent_to_others == 1
         assert await repo.count_active(tid) == 1
 
+    async def test_fila_conflictiva_no_contamina_seen_in_file_para_la_siguiente(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        """Hallazgo del code review de F-I(B): antes, `seen_in_file` registraba
+        las claves de una fila ANTES de saber si `resolve_identity` la iba a
+        resolver — una fila que termina en "conflict" (matchea 2 entidades
+        DISTINTAS, nunca toca ninguna) igual dejaba sus claves ahí. La fila
+        siguiente que compartiera una de esas claves se marcaba
+        "duplicate_in_file" por error, aunque la fila 1 nunca hubiera creado ni
+        actualizado nada con qué "fusionarse"."""
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+        a = Customer(tenant_id=tid, name="A", cuit=_VALID_CUIT)
+        b = Customer(tenant_id=tid, name="B", email="b@b.com")
+        db_session.add_all([a, b])
+        await db_session.commit()
+
+        records = [
+            # Conflicto real: el CUIT matchea a A, el email matchea a B —
+            # ninguna entidad se toca.
+            _row(name="Ambiguo", cuit=_VALID_CUIT, email="b@b.com"),
+            # Comparte el CUIT con la fila 1, pero por sí sola resuelve limpio
+            # contra A (no debería depender de la fila 1 en absoluto).
+            _row(name="A Actualizado", cuit=_VALID_CUIT),
+        ]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert result.skipped == 1  # la fila 1, conflict
+        assert result.sent_to_others == 0  # la fila 2 NO fue a Otros
+        assert result.updated_ids == [a.id]
+
+        await db_session.refresh(a)
+        assert a.name == "A Actualizado"
+
+
+class TestApplyImportBusinessCodeConflictCounter:
+    """Hallazgo del code review de F-I(B): antes, un conflicto de
+    `business_code` en `_persist_business_code` se descartaba en silencio
+    (`contextlib.suppress`, sin log ni contador) — a diferencia del mismo
+    caso en F-I(A) (`_record_row_business_code`), que sí lo cuenta."""
+
+    async def test_conflicto_de_business_code_se_cuenta_y_no_bloquea_el_resto(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        """El código ya pertenece a un cliente DESACTIVADO (fuera del índice
+        de dedup, así que `resolve_identity` no lo ve como conflicto — el
+        conflicto sólo aparece al intentar persistir, adentro de
+        `record_identifier`, que sí mira TODA la tabla `entity_identifiers`
+        sin importar si la entidad sigue activa)."""
+        from app.application.services.entity_code_service import record_identifier
+        from app.persistence.repositories.customer_repository import CustomerRepository
+
+        repo = CustomerRepository(db_session)
+        tid = sample_tenant.tenant_id
+
+        deactivated = Customer(tenant_id=tid, name="Viejo Desactivado", dni="30000111")
+        db_session.add(deactivated)
+        await db_session.flush()
+        await record_identifier(
+            db_session,
+            tid,
+            "customer",
+            deactivated.id,
+            identifier_type="business_code",
+            namespace="business",
+            raw_value="ERP-9",
+            origin="business",
+        )
+        deactivated.deactivated_at = datetime.now(UTC)
+
+        active = Customer(tenant_id=tid, name="Activo", email="activo@x.com")
+        db_session.add(active)
+        await db_session.commit()
+
+        # Matchea a `active` por email — el business_code no participa de la
+        # resolución (el desactivado está fuera del índice), pero al intentar
+        # persistirlo choca contra el registro vigente del desactivado.
+        records = [_row(name="Activo", email="activo@x.com", business_code="ERP-9")]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+
+        assert result.updated_ids == [active.id]
+        assert result.business_code_conflictivo == 1
+
+        await db_session.refresh(active)
+        assert active.name == "Activo"  # el resto de la fila SÍ se aplicó
+
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
@@ -641,6 +733,65 @@ class TestCustomerFileEndpoints:
         )
         other = await client.get("/api/v1/customers", headers=second_auth_headers)
         assert "Norte SA" not in {c["name"] for c in other.json()}
+
+    async def test_source_upload_id_de_otro_tenant_no_se_usa(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+        db_session: Any,
+        mock_s3_upload: unittest.mock.AsyncMock,
+    ) -> None:
+        """Hallazgo del code review de F-I(B): `source_upload_id` lo manda el
+        cliente — antes se usaba tal cual como FK sin validar que el archivo
+        fuera del tenant de la request. Acá el tenant B sube un archivo (su
+        `source_upload_id` real, VÁLIDO — no un UUID inventado) y el tenant A
+        lo manda en su propio confirm; el archivo del tenant A que produce un
+        duplicado-en-archivo debe capturarse en Otros SIN vincularse al
+        archivo ajeno."""
+        from sqlalchemy import select
+
+        from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        # Tenant B sube un archivo real — source_upload_id VÁLIDO, pero de OTRO tenant.
+        other_prev = await client.post(
+            "/api/v1/customers/import/preview",
+            files={
+                "file": (
+                    "b.xlsx",
+                    _xlsx_clientes([["Sur SA", _VALID_CUIT_2, "b@b.com", "222"]]),
+                    "application/octet-stream",
+                )
+            },
+            headers=second_auth_headers,
+        )
+        other_upload_id = other_prev.json()["source_upload_id"]
+        assert other_upload_id is not None
+
+        # Tenant A confirma un duplicado-en-archivo mandando el upload id de B.
+        rows = [
+            {"name": "Dup A", "cuit": _VALID_CUIT},
+            {"name": "Dup B", "cuit": _VALID_CUIT},  # mismo documento -> Otros
+        ]
+        conf = await client.post(
+            "/api/v1/customers/import/confirm",
+            json={"rows": rows, "source_upload_id": other_upload_id},
+            headers=auth_headers,
+        )
+        assert conf.status_code == 200, conf.text
+        assert conf.json()["sent_to_others"] == 1
+
+        pending = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.suggested_entity == "customer",
+                )
+            )
+        ).scalars().all()
+        assert len(pending) == 1
+        # Nunca linkeado al archivo del OTRO tenant, aunque el id fuera válido.
+        assert pending[0].uploaded_file_id != uuid.UUID(other_upload_id)
+        assert pending[0].uploaded_file_id is None
 
 
 def test_customer_extraction_dataclass_defaults() -> None:

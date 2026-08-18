@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import openpyxl
@@ -384,3 +385,75 @@ class TestSupplierApplyImportBusinessCode:
         assert len(result.updated_ids) == 0
         assert result.sent_to_others == 1
         assert await repo.count_active(tid) == 1
+
+    async def test_fila_conflictiva_no_contamina_seen_in_file_para_la_siguiente(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        """Ver la nota equivalente en
+        test_customer_extraction.py::TestApplyImportBusinessCode."""
+        from app.persistence.repositories.supplier_repository import SupplierRepository
+
+        repo = SupplierRepository(db_session)
+        tid = sample_tenant.tenant_id
+        a = Supplier(tenant_id=tid, name="A", cuil=_VALID_CUIL)
+        b = Supplier(tenant_id=tid, name="B", email="b@b.com")
+        db_session.add_all([a, b])
+        await db_session.commit()
+
+        records = [
+            _row(name="Ambiguo", cuil=_VALID_CUIL, email="b@b.com"),
+            _row(name="A Actualizado", cuil=_VALID_CUIL),
+        ]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert result.skipped == 1
+        assert result.sent_to_others == 0
+        assert result.updated_ids == [a.id]
+
+        await db_session.refresh(a)
+        assert a.name == "A Actualizado"
+
+
+class TestSupplierApplyImportBusinessCodeConflictCounter:
+    """Ver la nota equivalente en
+    test_customer_extraction.py::TestApplyImportBusinessCodeConflictCounter."""
+
+    async def test_conflicto_de_business_code_se_cuenta_y_no_bloquea_el_resto(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.application.services.entity_code_service import record_identifier
+        from app.persistence.repositories.supplier_repository import SupplierRepository
+
+        repo = SupplierRepository(db_session)
+        tid = sample_tenant.tenant_id
+
+        deactivated = Supplier(tenant_id=tid, name="Viejo Desactivado", cuil=_VALID_CUIL)
+        db_session.add(deactivated)
+        await db_session.flush()
+        await record_identifier(
+            db_session,
+            tid,
+            "supplier",
+            deactivated.id,
+            identifier_type="business_code",
+            namespace="business",
+            raw_value="PROV-9",
+            origin="business",
+        )
+        deactivated.deactivated_at = datetime.now(UTC)
+
+        active = Supplier(tenant_id=tid, name="Activo", email="activo@x.com")
+        db_session.add(active)
+        await db_session.commit()
+
+        records = [_row(name="Activo", email="activo@x.com", business_code="PROV-9")]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+
+        assert result.updated_ids == [active.id]
+        assert result.business_code_conflictivo == 1
+
+        await db_session.refresh(active)
+        assert active.name == "Activo"
