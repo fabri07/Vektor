@@ -32,7 +32,7 @@ from app.application.services.file_parsing import (
 # ``CANONICAL_FIELDS["supplier"]`` en column_mapping_service).
 SUPPLIER_FIELDS = (
     "name", "last_name", "cuil", "cuit", "iva_condition", "payment_method",
-    "email", "phone", "notes",
+    "email", "phone", "notes", "business_code",
 )
 
 _FIELD_MAXLEN = {
@@ -45,6 +45,7 @@ _FIELD_MAXLEN = {
     "email": 320,
     "phone": 50,
     "notes": 2000,
+    "business_code": 60,
 }
 
 
@@ -55,6 +56,27 @@ def _clean_str(raw: Any, *, maxlen: int) -> str | None:
     if text in ("", "None", "nan"):
         return None
     return text[:maxlen]
+
+
+# F-I(B): `codigo_externo` no es un concepto de `header_semantics.py`/
+# `RESOLUCION` (el motor que usa `heuristic_target`) — agregarlo ahí afectaría
+# TAMBIÉN al mapper multi-hoja general, que debe quedar manual-only para este
+# campo (mismo criterio que `customer_business_code`/`supplier_business_code`
+# de F-ID.7). Pre-chequeo propio, sólo para este parser standalone sin pantalla
+# donde desambiguar. Keywords COMPUESTOS a propósito, con y sin tilde porque
+# `_normalize_col` no saca acentos (a diferencia de `customer_extraction_
+# service._norm_header`, que sí).
+_BUSINESS_CODE_KEYWORDS = frozenset(
+    {
+        "codigo_proveedor",
+        "código_proveedor",
+        "cod_proveedor",
+        "codigo_externo",
+        "código_externo",
+        "id_externo",
+        "id_proveedor",
+    }
+)
 
 
 def _map_supplier_columns(headers: list[str]) -> dict[str, str]:
@@ -68,7 +90,12 @@ def _map_supplier_columns(headers: list[str]) -> dict[str, str]:
     for header in headers:
         if header is None:
             continue
-        field_name = heuristic_target(_normalize_col(str(header)), "supplier")
+        normalized = _normalize_col(str(header))
+        field_name: str | None = (
+            "business_code"
+            if normalized in _BUSINESS_CODE_KEYWORDS
+            else heuristic_target(normalized, "supplier")
+        )
         # No pisar un mapeo ya encontrado (el primer header gana por campo).
         if field_name is not None and field_name not in mapping.values():
             mapping[header] = field_name

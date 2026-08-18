@@ -1021,6 +1021,249 @@ class TestReversaDeMaestros:
         assert contadores["maestros_desactivados"] == 0
 
 
+class TestReversaDeCamposCruzados:
+    """F-D (7g) — un campo cross-sección (`sale→customer:last_name`, etc.) que
+    el archivo escribió sobre un cliente/proveedor YA existente.
+
+    Función HERMANA de la reversa de maestros: acá NUNCA se desactiva nada
+    (F-D nunca crea entidad), sólo se restaura el campo puntual — o se
+    conserva ESE campo, sin tocar el resto de la ficha, si alguien lo editó
+    después del import.
+    """
+
+    async def test_restaura_el_campo_que_el_archivo_completo(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        archivo = await _archivo(db_session, sample_tenant)
+        cliente = await _cliente(db_session, sample_tenant, "Cliente Uno")
+        await db_session.flush()
+        await db_session.refresh(cliente)
+        assert cliente.last_name is None
+
+        cliente.last_name = "Pérez"
+        await db_session.flush()
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            cross_field_details=[
+                {
+                    "action": "UPDATE_CUSTOMER_CROSS_FIELD",
+                    "before": {"last_name": None},
+                    "after": {
+                        "last_name": "Pérez",
+                        "id": str(cliente.id),
+                        "kind": "customer",
+                    },
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(cliente)
+        assert cliente.last_name is None
+        assert contadores["campos_cross_restaurados"] == 1
+        assert contadores["conservados"] == []
+
+    async def test_edicion_posterior_del_campo_se_conserva_sin_tocar_el_resto(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """El usuario corrigió el apellido después del import — el borrado NO
+        lo pisa, lo informa (`campo_modificado_posteriormente`, con
+        `fields=["last_name"]`), y el resto de la ficha no se ve afectado."""
+        archivo = await _archivo(db_session, sample_tenant)
+        cliente = await _cliente(db_session, sample_tenant, "Cliente Uno")
+        await db_session.flush()
+        await db_session.refresh(cliente)
+
+        cliente.last_name = "Pérez"
+        await db_session.flush()
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            cross_field_details=[
+                {
+                    "action": "UPDATE_CUSTOMER_CROSS_FIELD",
+                    "before": {"last_name": None},
+                    "after": {
+                        "last_name": "Pérez",
+                        "id": str(cliente.id),
+                        "kind": "customer",
+                    },
+                }
+            ],
+        )
+
+        # El usuario corrige el apellido A MANO, después del import.
+        cliente.last_name = "Pérez Corregido"
+        await db_session.flush()
+
+        contadores = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(cliente)
+        assert cliente.last_name == "Pérez Corregido"  # nunca se pisa
+        assert cliente.name == "Cliente Uno"  # el resto de la ficha, intacto
+        assert contadores["campos_cross_restaurados"] == 0
+        assert len(contadores["conservados"]) == 1
+        assert contadores["conservados"][0]["reasons"] == ["campo_modificado_posteriormente"]
+        assert contadores["conservados"][0]["fields"] == ["last_name"]
+
+    async def test_dos_campos_uno_editado_despues_el_otro_se_restaura(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Grano fino real: dos campos del MISMO cliente, uno editado después
+        (se conserva), el otro no (se restaura) — en la MISMA entidad."""
+        archivo = await _archivo(db_session, sample_tenant)
+        cliente = await _cliente(db_session, sample_tenant, "Cliente Uno")
+        await db_session.flush()
+        await db_session.refresh(cliente)
+
+        cliente.last_name = "Pérez"
+        cliente.address = "San Martín 123"
+        await db_session.flush()
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            cross_field_details=[
+                {
+                    "action": "UPDATE_CUSTOMER_CROSS_FIELD",
+                    "before": {"last_name": None, "address": None},
+                    "after": {
+                        "last_name": "Pérez",
+                        "address": "San Martín 123",
+                        "id": str(cliente.id),
+                        "kind": "customer",
+                    },
+                }
+            ],
+        )
+
+        cliente.last_name = "Pérez Corregido"  # el usuario corrige SOLO éste
+        await db_session.flush()
+
+        contadores = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(cliente)
+        assert cliente.last_name == "Pérez Corregido"  # se conserva
+        assert cliente.address is None  # se restaura
+        assert contadores["campos_cross_restaurados"] == 1
+        assert contadores["conservados"][0]["fields"] == ["last_name"]
+
+    async def test_dos_items_del_mismo_archivo_fusionan_campos_distintos(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Dos `DataRepairItem` del MISMO archivo sobre el MISMO cliente (una
+        relectura del archivo generó un segundo run), cada uno con un campo
+        DISTINTO — el bug que corrigió el code-review de F-D: la reversa sólo
+        miraba el `before_json` del PRIMER item y perdía el campo que sólo
+        trajo el segundo. Acá los dos deben restaurar."""
+        archivo = await _archivo(db_session, sample_tenant)
+        cliente = await _cliente(db_session, sample_tenant, "Cliente Uno")
+        await db_session.flush()
+        await db_session.refresh(cliente)
+
+        cliente.last_name = "Pérez"
+        await db_session.flush()
+
+        # Primer run (import original): sólo trae `last_name`.
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            cross_field_details=[
+                {
+                    "action": "UPDATE_CUSTOMER_CROSS_FIELD",
+                    "before": {"last_name": None},
+                    "after": {
+                        "last_name": "Pérez",
+                        "id": str(cliente.id),
+                        "kind": "customer",
+                    },
+                }
+            ],
+        )
+
+        cliente.address = "San Martín 123"
+        await db_session.flush()
+
+        # Segundo run (relectura del mismo archivo): sólo trae `address`, un
+        # campo DISTINTO del primer item, sobre la MISMA entidad.
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            cross_field_details=[
+                {
+                    "action": "UPDATE_CUSTOMER_CROSS_FIELD",
+                    "before": {"address": None},
+                    "after": {
+                        "address": "San Martín 123",
+                        "id": str(cliente.id),
+                        "kind": "customer",
+                    },
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(cliente)
+        assert cliente.last_name is None
+        assert cliente.address is None
+        assert contadores["campos_cross_restaurados"] == 1
+        assert contadores["conservados"] == []
+
+    async def test_el_centinela_nunca_se_toca(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        from app.application.services.customer_sentinel import (
+            resolve_or_create_local_sentinel,
+        )
+        from app.persistence.models.customer import Customer
+
+        archivo = await _archivo(db_session, sample_tenant)
+        centinela_id = await resolve_or_create_local_sentinel(
+            db_session, sample_tenant.tenant_id
+        )
+        centinela = await db_session.get(Customer, centinela_id)
+        assert centinela is not None
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[],
+            cross_field_details=[
+                {
+                    "action": "UPDATE_CUSTOMER_CROSS_FIELD",
+                    "before": {"last_name": None},
+                    "after": {
+                        "last_name": "No debería aplicar",
+                        "id": str(centinela_id),
+                        "kind": "customer",
+                    },
+                }
+            ],
+        )
+
+        contadores = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(centinela)
+        assert centinela.last_name is None
+        assert contadores["campos_cross_restaurados"] == 0
+
+
 class TestOtraFuenteDemostrable:
     """"Otra fuente" exige evidencia real, nunca coincidencia de nombre.
 

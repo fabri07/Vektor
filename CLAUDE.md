@@ -127,7 +127,8 @@ make dev                    # Docker Compose con hot reload
 make dev-bg / make stop / make logs / make shell
 
 # Tests
-make test                   # pytest con cobertura (mínimo 50%)
+make test                   # pytest paralelo, SIN cobertura (loop rápido, default)
+make test-cov                # mismo gate que CI: --cov-fail-under=60
 make test-fast / make test-watch
 make test-file FILE=app/tests/api/v1/test_auth.py
 pytest app/tests/api/v1/test_auth.py::test_login -v
@@ -145,6 +146,7 @@ make migrate-history
 
 # Demo
 make seed-demo / make reset-demo
+make seed-demo-local / make reset-demo-local   # idem, contra el Postgres LOCAL de Docker (nunca toca prod)
 make db-reset               # ⚠️ PELIGROSO
 make seed-vertical-fields   # Upsert definiciones de campos por vertical desde JSON (idempotente)
 ```
@@ -522,12 +524,12 @@ El historial de sprints (1–21), los proyectos mergeados post-Sprint-21 y la ca
 ## Tests
 
 - pytest + pytest-asyncio (`asyncio_mode = "auto"`). DB en memoria: SQLite + aiosqlite.
-- Cobertura: **50%** local, **60%** en CI.
+- `make test` no mide cobertura (loop rápido). Cobertura: **60%**, mismo gate en `make test-cov` local y en CI.
 - `pytest app/tests/domain/test_health_score.py -v --no-cov`
 
 ## CI
 
-- `ci-backend.yml`: ruff + mypy + pytest (cov ≥ 60%) + Docker build. Triggers `backend/**` → `main/develop`.
+- `ci-backend.yml`: ruff + mypy + pytest SQLite (cov ≥ 60%) + pytest marcado `postgres` contra un Postgres real del CI (concurrencia: advisory locks F3, lease F4, savepoints F5-A, índices F5-B) + Docker build. Triggers `backend/**` → `main/develop`.
 - `ci-frontend.yml`: tsc + ESLint + `next build`. Triggers `frontend/**` → `main/develop`.
 
 ## Deploy (Railway + Vercel — beta)

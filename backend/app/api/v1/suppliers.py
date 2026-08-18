@@ -87,6 +87,7 @@ def _reject_brand_collapsed_flag(custom_fields: dict[str, Any] | None) -> None:
 def _supplier_snapshot(supplier: Supplier) -> dict[str, object]:
     return {
         "id": str(supplier.id),
+        "vektor_code": supplier.vektor_code,
         "name": supplier.name,
         "last_name": supplier.last_name,
         "cuil": supplier.cuil,

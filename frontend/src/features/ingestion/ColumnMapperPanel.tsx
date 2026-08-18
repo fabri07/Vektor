@@ -42,6 +42,7 @@ import { ColumnRiskDecisionsPanel } from "./ColumnRiskDecisionsPanel";
 import { MappingOriginHint } from "./MappingOriginHint";
 import { TargetSelect } from "./TargetSelect";
 import { AmbiguityHint } from "./AmbiguityHint";
+import { BulkMappingActionsToolbar } from "./BulkMappingActionsToolbar";
 import { StatusDot } from "./StatusDot";
 import {
   customFieldCollisions,
@@ -537,6 +538,14 @@ function SheetMapperSection({
     setCustomKey("");
   }
 
+  // F-B: ver el comentario equivalente del camino plano (`applyBulkUpdates`).
+  function applyBulkUpdates(updates: Record<string, string>) {
+    const cols = Object.keys(updates);
+    if (cols.length === 0) return;
+    for (const col of cols) onColumnTouched?.(context.context_id, col);
+    setMappings((p) => ({ ...p, ...updates }));
+  }
+
   const { data: suggestions = [], isLoading } = useQuery({
     queryKey: ["column-mappings", fileId, context.context_id, entity],
     queryFn: () =>
@@ -760,6 +769,11 @@ function SheetMapperSection({
           <div className="px-3 py-3 text-xs text-vk-text-muted">Analizando columnas...</div>
         ) : (
           <div className="p-2">
+            <BulkMappingActionsToolbar
+              suggestions={suggestions}
+              mappings={mappings}
+              onApply={applyBulkUpdates}
+            />
             {reqMissing && (
               <div className="mb-2 flex items-center gap-2 rounded border border-vk-danger/30 bg-vk-danger-bg px-2 py-1 text-[11px] text-vk-danger">
                 <XCircle className="h-3 w-3 shrink-0" />
@@ -1791,36 +1805,6 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     placeholderData: (prev) => prev,
   });
   const hojaEfecto = inventoryEffects[0];
-  /**
-   * Este camino NO puede traer costos de compra, y por eso no los ofrece.
-   *
-   * El importador plano no cobra el envío ni aplica las decisiones de costo —el
-   * cobro vive en un closure del camino multi-hoja y la decisión se busca bajo
-   * otra clave—, así que el confirm rechaza el archivo con 422 en cuanto ve una
-   * columna de envío mapeada O una decisión de costo declarada. Arreglar el
-   * camino plano de verdad es otra fase.
-   *
-   * Mientras tanto, lo que la pantalla NO puede hacer es ofrecer los tres ejes
-   * acá: cada decisión que tomara terminaría en un rechazo, y antes de ese guard
-   * terminaba en algo peor —el import aceptaba el archivo y la ignoraba en
-   * silencio, dejando el costo más bajo que el real y el margen inflado—. Se
-   * nombra el problema y se dicen las dos salidas, que son las mismas del 422.
-   *
-   * El predicado del backend (`_plano`) es más AMPLIO que este `!isMultiContext`,
-   * así que todo lo que la pantalla manda por acá cae adentro de su rechazo: no
-   * hay archivo que la UI deje pasar y el confirm frene por sorpresa.
-   */
-  const columnasDeCostoEnTablaUnica = [
-    ...new Set(
-      riskRecomputeInput.columnMappings
-        .filter(
-          (m) =>
-            m.target_field === "shipping_cost" ||
-            m.target_field === "shipping_cost_line",
-        )
-        .map((m) => m.source_column),
-    ),
-  ];
   // Lo elegido sólo vale mientras siga ofreciéndose: sacar la columna de
   // cantidad puede dejar a la hoja sin poder mover inventario.
 
@@ -1837,12 +1821,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         [opt.field]: true,
       });
     }
-    // Re-inicializar el mapeo con el nuevo schema de entidad.
+    // F-A: re-derivar el mapeo contra el nuevo schema de entidad, pero SIN
+    // pisar `mappings`/`touchedRef` — el bloque de fusión de abajo (mismo
+    // criterio que `SheetMapperSection`) conserva lo tocado a mano cuyo
+    // target sigue existiendo en la entidad nueva. Antes acá se vaciaban los
+    // dos y una columna corregida a mano se perdía al cambiar de propósito.
     setInitialized(false);
-    setMappings({});
-    // F8c: el mapeo se re-deriva de las sugerencias del nuevo schema — ninguna
-    // columna quedó tocada a mano en el schema nuevo (evita fuga de user_selected).
-    touchedRef.current.clear();
   }
 
   // Multi-contexto: se usa el mapeo por contexto cuando hay >1 contexto (multi-hoja)
@@ -1874,13 +1858,28 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     enabled: !!fileId && !!preview && !isMultiContext && !needsPurpose,
   });
 
-  // Inicializar mappings desde sugerencias cuando cargan
-  if (suggestions.length > 0 && !initialized) {
-    const initial: Record<string, string> = {};
+  // F-A: MERGE, no reemplazo — mismo criterio que el camino multi-hoja
+  // (`targetSobreviveALaEntidad`, ver `SheetMapperSection`). Sin catálogo no
+  // se puede afirmar que un target tocado dejó de ser elegible: este bloque
+  // vuelve a correr cuando `loadingCatalog` pasa a `false`.
+  if (suggestions.length > 0 && !initialized && !loadingCatalog) {
+    const fields = catalog?.[entityType]?.fields ?? [];
+    const next: Record<string, string> = {};
     for (const s of suggestions) {
-      if (s.target_field) initial[s.source_column] = s.target_field;
+      const col = s.source_column;
+      const elegido = mappings[col] ?? "";
+      if (
+        touchedRef.current.has(riskKey("table", col)) &&
+        targetSobreviveALaEntidad(elegido, fields)
+      ) {
+        // Incluye el «Sin mapear» explícito: si la persona sacó esa columna a
+        // propósito, cambiar de propósito no es motivo para volver a meterla.
+        if (elegido) next[col] = elegido;
+        continue;
+      }
+      if (s.target_field) next[col] = s.target_field;
     }
-    setMappings(initial);
+    setMappings(next);
     setInitialized(true);
   }
 
@@ -1901,10 +1900,12 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         // multi-hoja, misma razón).
         undefined,
         undefined,
-        // Nunca. El importador plano no aplica las decisiones de costo, y el
-        // confirm rechaza el archivo con 422 en cuanto ve una: mandar algo acá
-        // sólo puede terminar en un rechazo. Ver el comentario de
-        // `columnasDeCostoEnTablaUnica`.
+        // F-H6.f: el envío de una tabla suelta ya se cobra sin necesitar
+        // ninguna decisión (comprobante repetido → un solo cargo, igual que
+        // el multi-hoja). Elegir CÓMO repartirlo (por subtotal / al costo)
+        // sigue sin tener UI en este camino — no hay selector que arme un
+        // `PurchaseCostDecision` acá todavía, así que se manda `undefined`
+        // por falta de UI, no porque el backend lo vaya a rechazar.
         undefined,
       ),
     onSuccess: (result) => {
@@ -1943,6 +1944,18 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     // Cambio MANUAL del mapeo → marcar la columna como tocada (user_selected).
     touchedRef.current.add(riskKey("table", col));
     setMappings((prev) => ({ ...prev, [col]: target }));
+  }
+
+  // F-B: acciones masivas — aplican N cambios de una sola vez. Misma marca de
+  // "tocada" que un cambio manual: es una decisión explícita del usuario
+  // (apretó el botón), no una sugerencia automática que se cuela como
+  // confirmada — invariante F-0 (una sugerencia nunca equivale a una
+  // confirmación) sigue valiendo, sólo que la confirmación es masiva.
+  function applyBulkUpdates(updates: Record<string, string>) {
+    const cols = Object.keys(updates);
+    if (cols.length === 0) return;
+    for (const col of cols) touchedRef.current.add(riskKey("table", col));
+    setMappings((prev) => ({ ...prev, ...updates }));
   }
 
   // Calcula el status efectivo de una columna:
@@ -2231,6 +2244,11 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         </div>
       ) : (
         <>
+          <BulkMappingActionsToolbar
+            suggestions={suggestions}
+            mappings={mappings}
+            onApply={applyBulkUpdates}
+          />
           {/* Tabla de mapeo — dos paneles */}
           <div className="mb-4 overflow-hidden rounded-lg border border-vk-border-w">
             {/* Headers */}
@@ -2421,34 +2439,6 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         />
       )}
 
-      {/* Un archivo de una sola tabla no puede traer costos de compra: el
-          importador plano no cobra el envío y el confirm lo rechaza. Se dice
-          acá, con las dos salidas, en vez de ofrecer tres ejes cuyo único
-          desenlace posible es un 422. */}
-      {!needsPurpose && columnasDeCostoEnTablaUnica.length > 0 && (
-        <div className="mb-3 flex gap-2 rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-3 py-2 text-xs text-vk-danger">
-          <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
-          <div>
-            <p>
-              Este archivo es una sola tabla y trae{" "}
-              {columnasDeCostoEnTablaUnica.length === 1 ? "una columna" : "columnas"}{" "}
-              de envío (
-              <span className="font-mono">
-                {columnasDeCostoEnTablaUnica.join(", ")}
-              </span>
-              ). Véktor todavía no sabe cobrar ni repartir el envío en este
-              formato: si lo importara, la compra quedaría con un costo más bajo
-              que el real y el margen inflado.
-            </p>
-            <p className="mt-1 text-vk-text-secondary">
-              Dos salidas: subilo como libro con hojas separadas (una por
-              sección), o sacá esas columnas del mapeo —marcalas «Ignorar»— y
-              cargá ese envío como un gasto aparte.
-            </p>
-          </div>
-        </div>
-      )}
-
       {/* Error de API (excluye 409/timeout: los maneja el toast, no el banner) */}
       {confirmMutation.isError &&
         !isTransientConfirmError(confirmMutation.error) && (
@@ -2467,9 +2457,6 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
             !Object.values(confirmedFields).some(Boolean) ||
             faltanRequeridos.length > 0 ||
             colisiones.length > 0 ||
-            // El confirm lo va a rechazar igual: descubrirlo con un 422 después
-            // de apretar es exactamente lo que este panel existe para evitar.
-            columnasDeCostoEnTablaUnica.length > 0 ||
             needsPurpose
           }
           className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-xs font-medium text-white hover:bg-vk-blue-hover disabled:opacity-50 transition-colors"

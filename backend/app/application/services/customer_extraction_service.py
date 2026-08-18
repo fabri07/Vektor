@@ -73,6 +73,7 @@ CUSTOMER_FIELDS = (
     "province",
     "postal_code",
     "birthday",
+    "business_code",
 )
 
 
@@ -155,6 +156,18 @@ def _match_customer_field(normalized: str) -> str | None:
     # Cumpleaños.
     if "cumple" in n or "nacimiento" in n or "birthday" in n or "fecha_nac" in n:
         return "birthday"
+    # F-I(B): código propio del cliente en OTRO sistema del negocio. Keywords
+    # COMPUESTOS a propósito (nunca "codigo" bare) — antes del catch-all
+    # genérico de abajo porque "id_cliente"/"codigo_cliente" contienen
+    # "cliente" y ese catch-all los capturaría como `name` primero.
+    if (
+        "codigo_cliente" in n
+        or "cod_cliente" in n
+        or "codigo_externo" in n
+        or "id_externo" in n
+        or "id_cliente" in n
+    ):
+        return "business_code"
     # Nombre / cliente (genérico) — último para no pisar lo de arriba.
     if "nombre" in n or "cliente" in n:
         return "name"
@@ -204,6 +217,7 @@ _FIELD_MAXLEN = {
     "locality": 120,
     "province": 120,
     "postal_code": 12,
+    "business_code": 60,
 }
 
 

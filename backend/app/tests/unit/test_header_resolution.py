@@ -702,3 +702,63 @@ class TestUnProveedorPuedeGuardarSuCUIT:
         # Y el CUIT es clave de identidad: dos filas con el mismo CUIT son el
         # mismo proveedor, igual que pasa con el CUIT de un cliente.
         assert "cuit" in _DOC_FIELDS
+
+
+class TestUnaVentaPuedeDeclararElCodigoDeSuProducto:
+    """F-S.0 mecanismo 1: `sale` no tenía sku/barcode como target — el motor de
+    resolución (`_venta_producto_id`) ya sabía leerlos, faltaba el reconocedor
+    y el catálogo. Mismas reglas que `expense`/`product` (líneas 954-956,
+    1008-1010): la entrada explícita existe porque sin ella el genérico diría
+    «esta hoja no tiene un campo para eso», que acá es falso.
+    """
+
+    def test_sku_resuelve_directo(self) -> None:
+        r = _leer("SKU", "sale")
+        assert r.outcome == "unico"
+        assert r.target == "sku"
+
+    def test_codigo_a_secas_resuelve_a_sku_en_una_venta(self) -> None:
+        """A diferencia de 'expense' (donde «codigo» puede ser el número de
+        comprobante, F-H6.b), una venta no tiene ese concepto compitiendo —
+        no hace falta la cautela de excluir el bare keyword."""
+        r = _leer("Codigo", "sale")
+        assert r.outcome == "unico"
+        assert r.target == "sku"
+
+    def test_barcode_resuelve_directo(self) -> None:
+        r = _leer("Código de barras", "sale")
+        assert r.outcome == "unico"
+        assert r.target == "barcode"
+
+    def test_codigo_no_colisiona_con_ningun_otro_campo_de_venta(self) -> None:
+        """Regresión: 'codigo' no puede terminar resolviendo a otra cosa
+        (customer_dni, notes, etc.) por un empate de longitud o un concepto
+        mal armado — el bug histórico de este reconocedor (ASTERIA) siempre
+        fue una colisión silenciosa, no una ausencia de regla."""
+        r = _leer("Codigo", "sale")
+        assert r.target not in {
+            "customer_dni",
+            "customer_cuit",
+            "notes",
+            "product_name",
+            "amount",
+        }
+
+    def test_el_catalogo_expone_los_dos_targets_para_venta(self) -> None:
+        assert "sku" in CANONICAL_FIELDS["sale"]
+        assert "barcode" in CANONICAL_FIELDS["sale"]
+        assert CANONICAL_FIELDS["sale"]["sku"] == CANONICAL_FIELDS["expense"]["sku"]
+        assert CANONICAL_FIELDS["sale"]["barcode"] == CANONICAL_FIELDS["expense"]["barcode"]
+
+    def test_no_son_obligatorios_ni_escalares(self) -> None:
+        from app.application.services.column_mapping_service import (
+            REQUIRED_FIELDS,
+            SINGLE_VALUE_FIELDS,
+        )
+
+        assert "sku" not in REQUIRED_FIELDS.get("sale", [])
+        assert "barcode" not in REQUIRED_FIELDS.get("sale", [])
+        # Mismo criterio que 'expense': dos columnas de sku no son el mismo
+        # tipo de colisión que dos columnas de monto.
+        assert "sku" not in SINGLE_VALUE_FIELDS.get("sale", frozenset())
+        assert "barcode" not in SINGLE_VALUE_FIELDS.get("sale", frozenset())

@@ -1059,3 +1059,62 @@ async def test_sale_links_to_same_file_purchased_product(
     assert len(products) == 1
     sale = (await db_session.execute(_select(SaleEntry))).scalar_one()
     assert sale.product_id == products[0].id  # la venta linkeó al producto comprado
+
+
+# ── F-ID regresión: el prefijo de código Véktor debe llegar desde el import ────
+# (`add_product_or_reuse` sin `vertical=` hacía que todo producto nacido de un
+# import cayera al prefijo genérico "GEN-" en vez del curado por categoría).
+
+
+async def test_single_sheet_import_asigna_prefijo_curado_no_generico(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Camino B (`_insert_confirmed_data_impl`, hoja única): un producto nuevo
+    con categoría "bebidas" (kiosco) nace con SKU "BEB-000N", no "GEN-000N"."""
+    summary = _stock_summary(
+        [
+            {
+                "producto": "Coca-Cola 500ml",
+                "precio": "1500",
+                "costo": "900",
+                "stock": "50",
+                "categoria": "bebidas",
+            }
+        ]
+    )
+    counts = await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"productos": True}
+    )
+    assert counts["productos"] == 1
+
+    products = await _all_products(db_session, sample_tenant.tenant_id)
+    assert len(products) == 1
+    assert products[0].sku is not None
+    assert products[0].sku.startswith("BEB-")
+
+
+async def test_multisheet_import_asigna_prefijo_curado_no_generico(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Camino A (`_insert_multisheet_data`, multi-hoja): mismo caso que arriba
+    pero por el path de archivos multi-contexto."""
+    summary = _multisheet_product_summary(
+        [
+            {
+                "producto": "Coca-Cola 500ml",
+                "precio": "1500",
+                "costo": "900",
+                "stock": "50",
+                "categoria": "bebidas",
+            }
+        ]
+    )
+    counts = await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, context_confirmed={"sheet:Productos": True}
+    )
+    assert counts["productos"] == 1
+
+    products = await _all_products(db_session, sample_tenant.tenant_id)
+    assert len(products) == 1
+    assert products[0].sku is not None
+    assert products[0].sku.startswith("BEB-")

@@ -1351,6 +1351,161 @@ describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
   });
 });
 
+describe("ColumnMapperPanel — F-B: acciones masivas (camino plano)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "ventas",
+        headers: ["Fecha", "Precio de venta", "Observaciones libres", "Columna vacía"],
+      },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-15"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+      {
+        source_column: "Precio de venta",
+        normalized_column: "precio_de_venta",
+        sample_values: ["1500"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "ambiguo",
+        options: ["amount", "unit_price"],
+        duda: "¿es el precio de cada unidad, o el total de la línea?",
+      },
+      {
+        source_column: "Observaciones libres",
+        normalized_column: "observaciones_libres",
+        sample_values: ["Cliente frecuente"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "unmapped",
+      },
+      {
+        source_column: "Columna vacía",
+        normalized_column: "columna_vacia",
+        sample_values: ["", "  ", "nan"],
+        target_field: null,
+        confidence: 0,
+        source: "none",
+        status: "unmapped",
+      },
+    ]);
+  });
+
+  // El nombre de columna aparece dos veces cuando también entra en "Revisá
+  // antes de confirmar" (F-C/F-M): se toma la fila de la TABLA principal, la
+  // única envuelta en ".grid".
+  function selectDe(columna: string): HTMLSelectElement {
+    const fila = screen
+      .getAllByText(columna)
+      .map((el) => el.closest(".grid"))
+      .find((f): f is HTMLElement => f !== null);
+    return within(fila as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+  }
+
+  test("la barra no se muestra si no hay nada para las tres acciones", async () => {
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha",
+        normalized_column: "fecha",
+        sample_values: ["2024-03-15"],
+        target_field: "transaction_date",
+        confidence: 0.9,
+        source: "heuristic",
+        status: "mapped",
+      },
+    ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("transaction_date");
+    });
+    expect(screen.queryByText(/Acciones masivas/)).not.toBeInTheDocument();
+  });
+
+  test("«Aceptar sugerencias ambiguas» toma el primer candidato y marca la columna tocada", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Aceptar sugerencias ambiguas \(1\)/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Aceptar sugerencias ambiguas \(1\)/));
+
+    await waitFor(() => {
+      expect(selectDe("Precio de venta").value).toBe("amount");
+    });
+    // Marcada como tocada: sobrevive un cambio de sección/propósito después
+    // (comportamiento ya cubierto por otro describe; acá sólo se confirma el valor).
+  });
+
+  test("«Guardar sin mapear como campos propios» no toca la vacía (le compite «ignorar»)", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Guardar sin mapear como campos propios \(1\)/),
+      ).toBeInTheDocument();
+    });
+    // Sólo "Observaciones libres" tiene datos reales — "Columna vacía" es
+    // candidata de "ignorar", no de "campo propio" (mutuamente excluyentes).
+    fireEvent.click(screen.getByText(/Guardar sin mapear como campos propios \(1\)/));
+
+    await waitFor(() => {
+      expect(selectDe("Observaciones libres").value).toBe(
+        "custom_field:observaciones_libres",
+      );
+    });
+    expect(selectDe("Columna vacía").value).toBe("");
+  });
+
+  test("«Ignorar columnas vacías» sólo actúa sobre la que no tiene ningún dato real", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Ignorar columnas vacías \(1\)/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText(/Ignorar columnas vacías \(1\)/));
+
+    await waitFor(() => {
+      expect(selectDe("Columna vacía").value).toBe("ignore");
+    });
+    expect(selectDe("Observaciones libres").value).toBe("");
+  });
+
+  test("no pisa una columna que el usuario ya mapeó a mano antes de usar la acción masiva", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Ignorar columnas vacías \(1\)/)).toBeInTheDocument();
+    });
+    // El usuario decide a mano que "Columna vacía" en realidad va a notas.
+    fireEvent.change(selectDe("Columna vacía"), { target: { value: "notes" } });
+
+    await waitFor(() => {
+      // La barra se recalcula: ya no hay nada que ignorar.
+      expect(screen.queryByText(/Ignorar columnas vacías/)).not.toBeInTheDocument();
+    });
+    expect(selectDe("Columna vacía").value).toBe("notes");
+  });
+});
+
 /**
  * Un archivo de UNA SOLA TABLA no puede traer costos de compra.
  *
@@ -1364,7 +1519,12 @@ describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
  * pantalla no puede seguir ofreciendo los tres ejes acá —cada decisión termina
  * en un rechazo— así que nombra el problema y da las dos salidas.
  */
-describe("ColumnMapperPanel — tabla única: los costos de compra no se ofrecen", () => {
+describe("ColumnMapperPanel — F-H6.f: tabla única cobra el envío como cualquier otra", () => {
+  // Hasta 8d, este mismo mapeo disparaba un banner rojo y deshabilitaba
+  // Confirmar: el importador plano no cobraba el envío y el confirm
+  // rechazaba el archivo con 422. 8a-8b lo arreglaron en el backend; acá se
+  // retira la advertencia y el bloqueo, que quedaron como una red de
+  // seguridad sobre un bug ya cerrado.
   function preview(headers: string[]) {
     return {
       file_id: "file-1",
@@ -1395,53 +1555,12 @@ describe("ColumnMapperPanel — tabla única: los costos de compra no se ofrecen
     mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
   });
 
-  test("con una columna de envío se explica el rechazo y no se deja confirmar", async () => {
+  test("una columna de envío mapeada no bloquea ni advierte, y se confirma", async () => {
     mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Envio"]));
     mockGetColumnMappings.mockResolvedValue([
       sugerencia("Fecha", "expense_date"),
       sugerencia("Monto", "amount"),
       sugerencia("Envio", "shipping_cost"),
-    ]);
-    renderPanel();
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(/todavía no sabe cobrar ni repartir el envío/i),
-      ).toBeInTheDocument();
-    });
-    // Las dos salidas que ofrece el 422, dichas ANTES de apretar.
-    expect(screen.getByText(/libro con hojas separadas/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Confirmar/i })).toBeDisabled();
-    // Y ningún eje de costo: cada decisión que tomara terminaría en un rechazo.
-    expect(screen.queryByText(/cobra una sola vez/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/viene asignado a cada línea/i)).not.toBeInTheDocument();
-  });
-
-  test("el flete por línea también lo dispara, y se nombra la columna", async () => {
-    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Flete linea"]));
-    mockGetColumnMappings.mockResolvedValue([
-      sugerencia("Fecha", "expense_date"),
-      sugerencia("Monto", "amount"),
-      sugerencia("Flete linea", "shipping_cost_line"),
-    ]);
-    renderPanel();
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Confirmar/i })).toBeDisabled();
-    });
-    // Nombrar la columna es lo que vuelve accionable la salida «sacala del
-    // mapeo»: sin eso hay que adivinar cuál de todas es.
-    expect(screen.getAllByText("Flete linea").length).toBeGreaterThan(0);
-  });
-
-  test("el mismo archivo SIN columnas de envío importa igual", async () => {
-    // El rechazo alcanza a los costos, no al formato. Si esto fuera rojo, el
-    // guard estaría bloqueando archivos que el backend acepta.
-    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Descuento"]));
-    mockGetColumnMappings.mockResolvedValue([
-      sugerencia("Fecha", "expense_date"),
-      sugerencia("Monto", "amount"),
-      sugerencia("Descuento", "discount"),
     ]);
     renderPanel();
 
@@ -1454,12 +1573,44 @@ describe("ColumnMapperPanel — tabla única: los costos de compra no se ofrecen
     fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
 
     await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
-    // Nunca una decisión de costo por este camino: el importador plano no la
-    // aplica y el confirm rechaza el archivo apenas la ve.
-    expect(mockConfirmFile.mock.calls[0]?.[9]).toBeUndefined();
   });
 
-  test("tampoco se le pide el reparto al servidor para un archivo que no puede tenerlo", async () => {
+  test("el flete por línea mapeado tampoco bloquea", async () => {
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Flete linea"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Flete linea", "shipping_cost_line"),
+    ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Confirmar/i })).toBeEnabled();
+    });
+  });
+
+  test("el mismo archivo SIN columnas de envío importa igual", async () => {
+    mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Descuento"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Descuento", "discount"),
+    ]);
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Confirmar/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+  });
+
+  test("todavía no manda una decisión de reparto: no hay UI para elegirla en este camino", async () => {
+    // Gap conocido y declarado, no un bug: el envío SIN decisión ya se cobra
+    // bien (comprobante repetido → un solo cargo). Elegir CÓMO repartirlo
+    // (por subtotal / al costo) sigue sin tener selector para una tabla
+    // suelta — cuando lo tenga, este test es el que hay que actualizar.
     mockGetPreview.mockResolvedValue(preview(["Fecha", "Monto", "Envio"]));
     mockGetColumnMappings.mockResolvedValue([
       sugerencia("Fecha", "expense_date"),
@@ -1469,11 +1620,12 @@ describe("ColumnMapperPanel — tabla única: los costos de compra no se ofrecen
     renderPanel();
 
     await waitFor(() => {
-      expect(
-        screen.getByText(/todavía no sabe cobrar ni repartir el envío/i),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Confirmar/i })).toBeEnabled();
     });
-    expect(mockPurchaseGroups).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    expect(mockConfirmFile.mock.calls[0]?.[9]).toBeUndefined();
   });
 });
 
@@ -2241,6 +2393,136 @@ describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a m
     });
 
     cambiarSeccion("expense");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("category");
+    expect(selectDe("Monto").value).toBe("amount");
+  });
+});
+
+/**
+ * F-A — mismo mecanismo que "cambiar de sección" arriba, pero del lado del
+ * camino PLANO (archivo ambiguo, un único propósito exclusivo en vez de una
+ * hoja por sección). Antes `choosePurpose` vaciaba `mappings` y limpiaba
+ * `touchedRef` a ciegas — cambiar el propósito de un archivo con 20 columnas
+ * ya corregidas a mano las perdía todas.
+ */
+describe("ColumnMapperPanel — F-A: cambiar de propósito (camino plano) conserva lo mapeado a mano", () => {
+  const PREVIEW_AMBIGUO = {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: {
+      inferred_type: "general",
+      headers: ["Fecha", "Monto", "Detalle"],
+    },
+    columns_at_risk: [],
+  };
+
+  function sugerencia(source_column: string, target_field: string | null) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["x"],
+      target_field,
+      confidence: 0.9,
+      source: target_field ? "heuristic" : "none",
+      status: target_field ? "mapped" : "unmapped",
+    };
+  }
+
+  const POR_ENTIDAD: Record<string, ReturnType<typeof sugerencia>[]> = {
+    sale: [
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "notes"),
+    ],
+    expense: [
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "category"),
+    ],
+  };
+
+  // El camino plano no pone `title` en el nombre de columna (a diferencia de
+  // `SheetMapperSection`) — el nombre vive en un `<span>` de texto plano.
+  function selectDe(columna: string): HTMLSelectElement {
+    const fila = screen.getByText(columna).closest(".grid");
+    return within(fila as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+  }
+
+  // El selector de propósito solo aparece después de que cargue el preview
+  // (isAmbiguous depende de `parsed_summary_json.inferred_type`) — a
+  // diferencia de `cambiarSeccion` (multi-hoja), acá hace falta esperarlo.
+  async function cambiarProposito(nombre: string) {
+    const boton = await screen.findByRole("button", { name: nombre });
+    fireEvent.click(boton);
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockGetPreview.mockResolvedValue(PREVIEW_AMBIGUO);
+    mockGetColumnMappings.mockImplementation((_fileId: string, entity: string) =>
+      Promise.resolve(POR_ENTIDAD[entity] ?? []),
+    );
+  });
+
+  test("lo elegido a mano sobrevive; lo no tocado se recalcula", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `payment_method` existe en Ventas y en Gastos: sigue siendo elegible.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "payment_method" } });
+
+    await cambiarProposito("Gastos");
+
+    await waitFor(() => {
+      // La columna que nadie tocó adopta la sugerencia del propósito nuevo.
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    // Y la que la persona eligió a mano queda como la dejó.
+    expect(selectDe("Detalle").value).toBe("payment_method");
+  });
+
+  test("un target que el propósito nuevo no tiene NO se conserva", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `customer_name` sólo existe en Ventas.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "customer_name" } });
+
+    await cambiarProposito("Gastos");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    // Conservarlo dejaría el select en «(campo desconocido)»: cae a la
+    // sugerencia de Gastos, sin inventar ningún reemplazo.
+    expect(selectDe("Detalle").value).not.toBe("customer_name");
+    expect(selectDe("Detalle").value).toBe("category");
+  });
+
+  test("sin tocar nada, todo se recalcula con el propósito nuevo", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("transaction_date");
+    });
+
+    await cambiarProposito("Gastos");
 
     await waitFor(() => {
       expect(selectDe("Fecha").value).toBe("expense_date");

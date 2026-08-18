@@ -12,12 +12,18 @@ from __future__ import annotations
 
 import io
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import openpyxl
 
+from app.application.services.identity_resolution import IdentityKey, build_existing_index
 from app.application.services.supplier_extraction_service import parse_supplier_records
-from app.application.services.supplier_import_service import apply_import, build_import_preview
+from app.application.services.supplier_import_service import (
+    _supplier_record,
+    apply_import,
+    build_import_preview,
+)
 from app.persistence.models.supplier import (
     BRAND_COLLAPSED_FLAG_KEY,
     SENTINEL_FLAG_KEY,
@@ -26,6 +32,15 @@ from app.persistence.models.supplier import (
 
 _VALID_CUIL = "20-12345678-6"
 _VALID_CUIL_2 = "27-23456789-1"
+_DOC_FIELDS = ("cuit", "cuil")
+
+
+def _index(existing: list[Supplier]) -> dict[IdentityKey, Supplier]:
+    """Índice síncrono para tests de `build_import_preview` puro — ver la
+    misma nota en `test_customer_extraction.py`."""
+    return build_existing_index(
+        existing, to_record=_supplier_record, doc_fields=_DOC_FIELDS, code_field="code"
+    )
 
 
 def _xlsx_suppliers(rows: list[list[Any]]) -> bytes:
@@ -78,6 +93,33 @@ class TestParseSupplierRecords:
         assert records == []
         assert warnings
 
+    def test_business_code_column_detected(self) -> None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["razon social", "codigo_proveedor"])
+        ws.append(["Distribuidora Norte", "PROV-EXT-9"])
+        buf = io.BytesIO()
+        wb.save(buf)
+        records, _ = parse_supplier_records(
+            buf.getvalue(), "prov.xlsx", "application/octet-stream"
+        )
+        assert records[0]["business_code"] == "PROV-EXT-9"
+
+    def test_business_code_no_pisa_heuristica_compartida(self) -> None:
+        """El pre-chequeo de business_code no puede pisar los conceptos que ya
+        resuelve `heuristic_target` para otras columnas de la misma hoja."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["razon social", "cuil", "codigo_proveedor"])
+        ws.append(["Distribuidora Norte", _VALID_CUIL, "PROV-EXT-9"])
+        buf = io.BytesIO()
+        wb.save(buf)
+        records, _ = parse_supplier_records(
+            buf.getvalue(), "prov.xlsx", "application/octet-stream"
+        )
+        assert records[0]["cuil"] == _VALID_CUIL
+        assert records[0]["business_code"] == "PROV-EXT-9"
+
 
 class TestSupplierImportPreview:
     def test_classifies_create_update_needs_review_duplicate(self) -> None:
@@ -88,7 +130,7 @@ class TestSupplierImportPreview:
             _row(name="Sin Dato Fuerte"),  # needs_review
             _row(name="Repe", cuil=_VALID_CUIL_2),  # duplicate_in_file
         ]
-        preview = build_import_preview(records, existing)
+        preview = build_import_preview(records, _index(existing))
         assert preview.to_create == 1
         assert preview.to_update == 1
         assert preview.needs_review == 1
@@ -97,19 +139,19 @@ class TestSupplierImportPreview:
 
     def test_invalid_cuil_check_digit_flagged(self) -> None:
         records = [_row(name="Mal CUIL", cuil="20-12345678-0")]
-        preview = build_import_preview(records, [])
+        preview = build_import_preview(records, {})
         assert preview.invalid == 1
 
     def test_missing_name_is_invalid(self) -> None:
         records = [_row(cuil=_VALID_CUIL)]
-        preview = build_import_preview(records, [])
+        preview = build_import_preview(records, {})
         assert preview.invalid == 1
         assert preview.needs_review == 0
 
     def test_email_only_matches_existing(self) -> None:
         existing = [Supplier(tenant_id=uuid.uuid4(), name="Con Email", email="ventas@norte.com")]
         records = [_row(name="Con Email", email="Ventas@Norte.com")]
-        preview = build_import_preview(records, existing)
+        preview = build_import_preview(records, _index(existing))
         assert preview.to_update == 1
         assert preview.items[0].existing_id == existing[0].id
 
@@ -119,7 +161,7 @@ class TestSupplierImportPreview:
             Supplier(tenant_id=uuid.uuid4(), name="B", email="b@b.com"),
         ]
         records = [_row(name="Ambiguo", cuil=_VALID_CUIL, email="b@b.com")]
-        preview = build_import_preview(records, existing)
+        preview = build_import_preview(records, _index(existing))
         assert preview.invalid == 1
         assert preview.to_create == 0
         assert preview.to_update == 0
@@ -135,11 +177,15 @@ class TestSupplierApplyImport:
             _row(name="Norte", cuil=_VALID_CUIL, payment_method="transferencia"),
             _row(name="Sur", email="sur@sur.com"),
         ]
-        first = await apply_import(repo, tid, records)
+        first = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert len(first.created_ids) == 2
         assert first.skipped == 0
 
-        second = await apply_import(repo, tid, records)
+        second = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert len(second.created_ids) == 0
         assert len(second.updated_ids) == 2
 
@@ -151,7 +197,9 @@ class TestSupplierApplyImport:
         repo = SupplierRepository(db_session)
         tid = sample_tenant.tenant_id
         records = [_row(name="Solo Nombre")]
-        result = await apply_import(repo, tid, records)
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert result.created_ids == []
         assert result.skipped == 1
         assert await repo.count_active(tid) == 0
@@ -169,7 +217,9 @@ class TestSupplierApplyImport:
         await db_session.commit()
 
         records = [_row(name="Ambiguo", cuil=_VALID_CUIL, email="b@b.com")]
-        result = await apply_import(repo, tid, records)
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert result.created_ids == []
         assert result.updated_ids == []
         assert result.skipped == 1
@@ -193,7 +243,9 @@ class TestSupplierApplyImport:
         # (caso límite: el sentinela típicamente no tiene CUIL, pero igual queda
         # afuera del índice de dedup por el flag, no por el CUIL).
         records = [_row(name="No identificado", cuil=_VALID_CUIL)]
-        result = await apply_import(repo, tid, records)
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         # Crea uno NUEVO (no matchea contra el sentinela, que está excluido del índice).
         assert len(result.created_ids) == 1
         assert result.created_ids[0] != sentinel.id
@@ -215,7 +267,9 @@ class TestSupplierApplyImport:
         await db_session.commit()
 
         records = [_row(name="Marca Colapsada", cuil=_VALID_CUIL)]
-        result = await apply_import(repo, tid, records)
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         # No matchea la marca colapsada (excluida del índice) → crea un proveedor nuevo.
         assert len(result.created_ids) == 1
         assert result.created_ids[0] != collapsed.id
@@ -242,8 +296,164 @@ class TestSupplierApplyImport:
         # La columna "email" está MAPEADA (la clave está presente) pero la celda
         # de esta fila vino vacía.
         records = [_row(name="Distribuidora Norte", cuil=_VALID_CUIL, email="")]
-        result = await apply_import(repo, tid, records)
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
         assert result.updated_ids == [existing.id]
 
         await db_session.refresh(existing)
         assert existing.email == "norte@viejo.com"  # preservado, no pisado con ""
+
+
+class TestSupplierApplyImportBusinessCode:
+    """F-I(B): ver la clase equivalente en test_customer_extraction.py."""
+
+    async def test_business_code_nuevo_se_registra_al_crear(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from sqlalchemy import select
+
+        from app.persistence.models.entity_identifier import EntityIdentifier
+        from app.persistence.repositories.supplier_repository import SupplierRepository
+
+        repo = SupplierRepository(db_session)
+        tid = sample_tenant.tenant_id
+        records = [_row(name="Nuevo", cuil=_VALID_CUIL, business_code="PROV-9")]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert len(result.created_ids) == 1
+
+        identifiers = (
+            await db_session.execute(
+                select(EntityIdentifier).where(
+                    EntityIdentifier.tenant_id == tid,
+                    EntityIdentifier.entity_type == "supplier",
+                    EntityIdentifier.identifier_type == "business_code",
+                )
+            )
+        ).scalars().all()
+        assert len(identifiers) == 1
+        assert identifiers[0].entity_id == result.created_ids[0]
+        assert identifiers[0].normalized_value == "prov-9"
+
+    async def test_fila_con_solo_business_code_matchea_entidad_indexada(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.application.services.entity_code_service import record_identifier
+        from app.persistence.repositories.supplier_repository import SupplierRepository
+
+        repo = SupplierRepository(db_session)
+        tid = sample_tenant.tenant_id
+        existing = Supplier(tenant_id=tid, name="Proveedor Viejo", cuil=_VALID_CUIL)
+        db_session.add(existing)
+        await db_session.flush()
+        await record_identifier(
+            db_session,
+            tid,
+            "supplier",
+            existing.id,
+            identifier_type="business_code",
+            namespace="business",
+            raw_value="PROV-9",
+            origin="business",
+        )
+        await db_session.commit()
+
+        records = [_row(name="Proveedor Viejo", business_code="PROV-9")]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert result.created_ids == []
+        assert result.updated_ids == [existing.id]
+
+    async def test_duplicate_por_business_code_va_a_otros(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.persistence.repositories.supplier_repository import SupplierRepository
+
+        repo = SupplierRepository(db_session)
+        tid = sample_tenant.tenant_id
+        records = [
+            _row(name="Proveedor A", cuil=_VALID_CUIL, business_code="PROV-9"),
+            _row(name="Proveedor B", cuil=_VALID_CUIL_2, business_code="PROV-9"),
+        ]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert len(result.created_ids) == 1
+        assert len(result.updated_ids) == 0
+        assert result.sent_to_others == 1
+        assert await repo.count_active(tid) == 1
+
+    async def test_fila_conflictiva_no_contamina_seen_in_file_para_la_siguiente(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        """Ver la nota equivalente en
+        test_customer_extraction.py::TestApplyImportBusinessCode."""
+        from app.persistence.repositories.supplier_repository import SupplierRepository
+
+        repo = SupplierRepository(db_session)
+        tid = sample_tenant.tenant_id
+        a = Supplier(tenant_id=tid, name="A", cuil=_VALID_CUIL)
+        b = Supplier(tenant_id=tid, name="B", email="b@b.com")
+        db_session.add_all([a, b])
+        await db_session.commit()
+
+        records = [
+            _row(name="Ambiguo", cuil=_VALID_CUIL, email="b@b.com"),
+            _row(name="A Actualizado", cuil=_VALID_CUIL),
+        ]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+        assert result.skipped == 1
+        assert result.sent_to_others == 0
+        assert result.updated_ids == [a.id]
+
+        await db_session.refresh(a)
+        assert a.name == "A Actualizado"
+
+
+class TestSupplierApplyImportBusinessCodeConflictCounter:
+    """Ver la nota equivalente en
+    test_customer_extraction.py::TestApplyImportBusinessCodeConflictCounter."""
+
+    async def test_conflicto_de_business_code_se_cuenta_y_no_bloquea_el_resto(
+        self, db_session: Any, sample_tenant: Any
+    ) -> None:
+        from app.application.services.entity_code_service import record_identifier
+        from app.persistence.repositories.supplier_repository import SupplierRepository
+
+        repo = SupplierRepository(db_session)
+        tid = sample_tenant.tenant_id
+
+        deactivated = Supplier(tenant_id=tid, name="Viejo Desactivado", cuil=_VALID_CUIL)
+        db_session.add(deactivated)
+        await db_session.flush()
+        await record_identifier(
+            db_session,
+            tid,
+            "supplier",
+            deactivated.id,
+            identifier_type="business_code",
+            namespace="business",
+            raw_value="PROV-9",
+            origin="business",
+        )
+        deactivated.deactivated_at = datetime.now(UTC)
+
+        active = Supplier(tenant_id=tid, name="Activo", email="activo@x.com")
+        db_session.add(active)
+        await db_session.commit()
+
+        records = [_row(name="Activo", email="activo@x.com", business_code="PROV-9")]
+        result = await apply_import(
+            repo, tid, records, session=db_session, uploaded_file_id=None
+        )
+
+        assert result.updated_ids == [active.id]
+        assert result.business_code_conflictivo == 1
+
+        await db_session.refresh(active)
+        assert active.name == "Activo"

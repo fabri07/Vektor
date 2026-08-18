@@ -1,9 +1,15 @@
 """Tests for /api/v1/products endpoints."""
 
+import uuid
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.persistence.models.tenant import Tenant
+from app.persistence.models.user import User
+from app.utils.security import create_access_token, hash_password
 
 _PRODUCT_PAYLOAD = {
     "name": "Coca-Cola 500ml",
@@ -428,3 +434,66 @@ class TestProductIdentityBarcodeExpiry:
 
         resp = await client.delete(f"/api/v1/products/{product_id}", headers=second_auth_headers)
         assert resp.status_code == 404
+
+
+class TestCreateProductSinBusinessProfile:
+    """F-ID regresión: resolver el vertical siempre (para el prefijo de código
+    Véktor) no puede volver a exigir un `BusinessProfile` para crear un producto
+    SIN categoría — ese 404 era el estado real de los signups viejos de Google
+    que el chequeo estricto solo debe aplicar cuando SÍ hay categoría."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def _headers_sin_perfil(self, db_session: AsyncSession) -> dict[str, str]:
+        tenant = Tenant(
+            tenant_id=uuid.uuid4(),
+            legal_name="Negocio Sin Perfil",
+            display_name="Negocio Sin Perfil",
+            currency="ARS",
+            pricing_reference_mode="MEP",
+            status="ACTIVE",
+        )
+        db_session.add(tenant)
+        await db_session.flush()
+        user = User(
+            user_id=uuid.uuid4(),
+            tenant_id=tenant.tenant_id,
+            email="owner@sinperfil.com",
+            full_name="Owner Sin Perfil",
+            password_hash=hash_password("Secure123"),
+            role_code="OWNER",
+            is_active=True,
+        )
+        db_session.add(user)
+        await db_session.commit()
+        token = create_access_token(
+            {
+                "sub": str(user.user_id),
+                "tenant_id": str(tenant.tenant_id),
+                "role_code": "OWNER",
+            }
+        )
+        return {"Authorization": f"Bearer {token}"}
+
+    async def test_crear_sin_categoria_no_da_404(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        headers = await self._headers_sin_perfil(db_session)
+        payload = {k: v for k, v in _PRODUCT_PAYLOAD.items() if k != "category"}
+
+        resp = await client.post("/api/v1/products", json=payload, headers=headers)
+
+        assert resp.status_code == 201
+        assert resp.json()["sku"].startswith("GEN-")  # sin vertical, fallback honesto
+
+    async def test_crear_con_categoria_sigue_dando_404(
+        self, client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        headers = await self._headers_sin_perfil(db_session)
+
+        resp = await client.post("/api/v1/products", json=_PRODUCT_PAYLOAD, headers=headers)
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "business_profile_not_found"

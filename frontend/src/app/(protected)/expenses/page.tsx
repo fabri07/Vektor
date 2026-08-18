@@ -239,6 +239,23 @@ export default function ExpensesPage() {
       (typeFilter === "all" || (e.expense_type ?? "OPEX") === typeFilter),
   );
 
+  // F-V.2: el desplegable lista las 13 categorías canónicas existan o no en los
+  // datos, y acá encima `entries` ya viene acotado al PERÍODO — así que elegir
+  // una categoría real podía devolver una tabla vacía por dos motivos distintos
+  // sin decir cuál. El conteo se calcula sobre el mismo universo que se filtra
+  // (respetando el tipo), para que el número del desplegable no prometa filas
+  // que el filtro después no muestra.
+  const conteoPorCategoria = entries
+    .filter((e) => typeFilter === "all" || (e.expense_type ?? "OPEX") === typeFilter)
+    .reduce<Record<string, number>>((acc, e) => {
+      acc[e.category] = (acc[e.category] ?? 0) + 1;
+      return acc;
+    }, {});
+  const categoriaVaciaEnPeriodo =
+    filtered.length === 0 &&
+    categoryFilter !== "all" &&
+    (conteoPorCategoria[categoryFilter] ?? 0) === 0;
+
   const sorted = [...filtered].sort(
     (a, b) =>
       new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime(),
@@ -281,7 +298,7 @@ export default function ExpensesPage() {
                 <option value="all">Todas</option>
                 {categoryOptions.map((cat) => (
                   <option key={cat} value={cat}>
-                    {CATEGORY_LABELS[cat] ?? cat}
+                    {CATEGORY_LABELS[cat] ?? cat} ({conteoPorCategoria[cat] ?? 0})
                   </option>
                 ))}
               </select>
@@ -289,6 +306,15 @@ export default function ExpensesPage() {
           )}
         </div>
       </div>
+
+      {categoriaVaciaEnPeriodo && (
+        <p className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm text-vk-text-secondary">
+          No hay gastos de{" "}
+          <strong>{CATEGORY_LABELS[categoryFilter] ?? categoryFilter}</strong> en
+          este período. El desplegable lista las 13 categorías del sistema, no
+          sólo las que usaste — probá con otro período.
+        </p>
+      )}
 
       {/* KPIs */}
       {isLoading ? (

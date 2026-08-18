@@ -33,6 +33,28 @@ def _norm_key(value: str) -> str:
     return re.sub(r"[\s\-_/]+", " ", s)
 
 
+def _fold_plural(key: str) -> str:
+    """Pliega el plural de cada palabra: ``alfombras`` y ``alfombra`` colapsan.
+
+    Existe porque la tabla de alias está escrita en plural ("alfombras",
+    "cortinas", "lamparas") y los nombres de producto reales vienen en singular
+    ("alfombra shaggy", "cortina black out"). Medido sobre los nombres reales de
+    una cuenta: sin plegar, la inferencia no reconocía casi nada — y lo poco que
+    reconocía lo hacía por la palabra equivocada ("alfombra felpuda exterior"
+    daba JARDIN porque matcheaba "exterior" y no "alfombra").
+
+    Sólo se pliega desde 4 caracteres: sin ese piso "mes" se convierte en "me" y
+    "gas" en "ga", que son alias reales de gastos.
+
+    **No se usa en ``normalize``, a propósito.** Ahí el usuario DECLARÓ una
+    categoría y la comparación exacta es parte del contrato; acá se está
+    adivinando desde texto libre, que es donde la tolerancia hace falta.
+    """
+    return " ".join(
+        re.sub(r"(?:es|s)$", "", w) if len(w) >= 4 else w for w in key.split(" ")
+    )
+
+
 class CategoryNormalizer:
     """Normaliza texto libre a un catálogo cerrado, en orden determinístico:
 
@@ -89,6 +111,33 @@ class CategoryNormalizer:
             return self._aliases[match[0]], None
 
         return self.fallback_code, cleaned[:50]
+
+    def codes_present(self, raw: str | None) -> set[str]:
+        """TODOS los códigos cuyo alias aparece como palabra completa en ``raw``.
+
+        Es el paso 2 de :meth:`normalize` sin su desempate: ahí, ante dos alias
+        posibles, gana el más largo — correcto cuando el usuario DECLARÓ una
+        categoría y hay que elegir una. Acá el caso es el opuesto: inferir desde
+        un texto que nadie declaró (el nombre de un producto), donde dos
+        categorías posibles significan que no se sabe, no que gane la más larga.
+        Devolver el conjunto deja esa decisión afuera, en quien infiere.
+
+        Sin fuzzy a propósito: un typo dentro de un nombre de producto no es
+        evidencia de nada, y el paso 3 de ``normalize`` compara el texto ENTERO
+        contra cada alias — sobre "almohadones lienzo 30 x 50" mediría cualquier
+        cosa. Tampoco cae al fallback: la ausencia de evidencia se devuelve como
+        conjunto vacío, no como ``OTHER``.
+        """
+        if raw is None:
+            return set()
+        key = _fold_plural(_norm_key(str(raw).strip()))
+        if not key:
+            return set()
+        return {
+            code
+            for alias_key, code in self._aliases.items()
+            if re.search(rf"(?:^| ){re.escape(_fold_plural(alias_key))}(?: |$)", key)
+        }
 
 
 # ── Catálogo de gastos ────────────────────────────────────────────────────────

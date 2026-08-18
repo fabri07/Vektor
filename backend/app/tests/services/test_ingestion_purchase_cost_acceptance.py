@@ -373,8 +373,11 @@ class TestElCaminoPlanoDaElMismoCosto:
             _summary_plano([_fila(descuento="2000")]),
             {"gastos": True},
             column_mappings=_MAPEO,
+            # F-H6.f (V24): la clave del camino plano es `"table"` — la misma
+            # que usa `api/v1/ingestion.py` para el `context_id` sintético de
+            # una tabla suelta, no `""`.
             purchase_cost_decisions={
-                "": PurchaseCostDecision(context_id="", base="monto_sin_ajustes")
+                "table": PurchaseCostDecision(context_id="table", base="monto_sin_ajustes")
             },
         )
         await db_session.flush()
@@ -389,8 +392,9 @@ class TestElCaminoPlanoDaElMismoCosto:
             _summary_plano([_fila(flete_linea="300")]),
             {"gastos": True},
             column_mappings=_MAPEO,
+            # F-H6.f (V24): ver el comentario del test anterior.
             purchase_cost_decisions={
-                "": PurchaseCostDecision(context_id="", line_shipping="al_costo")
+                "table": PurchaseCostDecision(context_id="table", line_shipping="al_costo")
             },
         )
         await db_session.flush()

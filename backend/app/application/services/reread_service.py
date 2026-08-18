@@ -190,6 +190,45 @@ def _row_anchor(
 
 
 @dataclass
+class RereadCorrespondence:
+    """F-R: qué le pasa a cada registro VIVO del archivo cuando la relectura corre.
+
+    Existe porque ``to_void`` y ``to_update`` cuentan las MISMAS filas —anular y
+    reimportar corregido es el mecanismo de actualizar— y presentarlos como dos
+    números sueltos hace leer una actualización como una destrucción. Lo que
+    importa no es cuántos se anulan sino **cuántos se anulan sin que el archivo
+    los reponga**, que hasta F-R no lo calculaba nadie.
+
+    ``sin_reemplazo`` es exacto y demostrable: el registro tiene ``source_row_ref``
+    (hoja + índice de fila) y ese ancla NO aparece entre las filas frescas
+    importables. ``legacy_sin_ancla`` son los importados antes de que existiera el
+    ref: no se pueden emparejar ni a favor ni en contra, y por eso se cuentan
+    aparte en vez de disfrazarse de reemplazados (o de pérdidas).
+    """
+
+    reemplazado: int = 0
+    preservado: int = 0
+    sin_reemplazo: int = 0
+    legacy_sin_ancla: int = 0
+    #: ``{"ventas": {"antes", "reemplazado", "preservado", "sin_reemplazo"}, ...}``
+    por_entidad: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: Filas frescas que NO corresponden a ningún registro vivo, por tipo. La clave
+    #: ``sin_clasificar`` es el bucket "otros": el importador decidirá qué son, así
+    #: que no se las anota como ventas ni como gastos.
+    nuevas_por_entidad: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def bloquea(self) -> bool:
+        """¿Esta relectura anula algo que el archivo no repone?
+
+        Los legacy NO bloquean: no tienen ancla, así que afirmar que se pierden
+        sería inventar tanto como afirmar que se reponen. Su señal es
+        ``legacy_fallback``, que ya existía.
+        """
+        return self.sin_reemplazo > 0
+
+
+@dataclass
 class RereadPreview:
     file_id: uuid.UUID
     to_update: int = 0
@@ -211,6 +250,8 @@ class RereadPreview:
     column_risk_outcome: str = "NO_RISK_FOUND"
     column_risk_ambiguous: list[dict[str, Any]] = field(default_factory=list)
     column_risk_forced_unverified: list[dict[str, Any]] = field(default_factory=list)
+    #: F-R — la correspondencia registro↔fila fresca. Ver ``RereadCorrespondence``.
+    correspondence: RereadCorrespondence = field(default_factory=RereadCorrespondence)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -511,6 +552,7 @@ async def _reread_master_entities(
         None,
         flat_mapping,
         counts,
+        uploaded_file_id=file.id,
     )
     await session.flush()
 
@@ -544,15 +586,16 @@ async def _reread_master_entities(
                 )
             )
 
-    # Dedup: si dos filas del MISMO archivo matchean la misma identidad (ej. DNI
-    # repetido, o una fila posterior "corrige" la que ésta acaba de crear),
-    # apply_import indexa el recién creado en su dedup de batch — la segunda fila
-    # resuelve como "matched" y ese id termina en updated_ids AUNQUE ya esté en
-    # created_ids de la primera fila. Sin este filtro, esa entidad generaría DOS
-    # DataRepairItem: un REREAD_MASTER_UPDATE con before_json=None (mal etiquetado
-    # — no hubo estado previo real) y un REREAD_MASTER_CREATE redundante con el
-    # mismo after_json. El "antes" real de esa entidad relativo a TODO este run es
-    # "no existía", así que se audita UNA sola vez como CREATE.
+    # Dedup: defensivo, no la vía principal desde F-I(B). Antes, dos filas del
+    # MISMO archivo que matcheaban la misma identidad (ej. DNI repetido) creaban
+    # con la primera y actualizaban con la segunda dentro del mismo batch —
+    # este filtro evitaba que esa entidad generara DOS DataRepairItem (un
+    # REREAD_MASTER_UPDATE con before_json=None mal etiquetado + un
+    # REREAD_MASTER_CREATE redundante). F-I(B) cambió la causa raíz: una fila
+    # que repite una clave ya vista en el archivo ahora va a "Otros" ANTES de
+    # tocar create/update, así que `creados_ids`/`actualizados_ids` ya no
+    # deberían solaparse por esta razón — el filtro queda como red de
+    # seguridad ante otras fuentes de solape, no como el mecanismo principal.
     clientes_creados_ids = counts.get("clientes_creados_ids", [])
     clientes_actualizados_ids = [
         i
@@ -606,6 +649,10 @@ class _Reconciliation:
     #: F-O.2 — los registros en sí, no sólo cuántos: después del reimport hay que
     #: preguntarle a cada uno si la fila que representa volvió a entrar.
     others_records: list[SaleEntry | ExpenseEntry] = field(default_factory=list)
+    #: F-R — los preservados en sí, por la misma razón: el desglose por entidad de
+    #: la correspondencia los necesita, y re-derivar acá el predicado de "se
+    #: preserva" lo dejaría desincronizado del que decide de verdad (V28).
+    preserved_records: list[SaleEntry | ExpenseEntry] = field(default_factory=list)
 
 
 def _split_records(
@@ -624,12 +671,14 @@ def _split_records(
     preserved = 0
     preserved_from_others = 0
     others_records: list[SaleEntry | ExpenseEntry] = []
+    preserved_records: list[SaleEntry | ExpenseEntry] = []
     legacy_fallback = False
 
     for rec in all_records:
         ref = rec.source_row_ref
         if rec.has_user_edits:
             preserved += 1
+            preserved_records.append(rec)
             if ref:
                 edited_refs.add(ref)
             else:
@@ -659,6 +708,7 @@ def _split_records(
             preserved += 1
             preserved_from_others += 1
             others_records.append(rec)
+            preserved_records.append(rec)
             continue
         if ref:
             non_edited.append(rec)
@@ -677,6 +727,7 @@ def _split_records(
         legacy_fallback=legacy_fallback,
         preserved_from_others=preserved_from_others,
         others_records=others_records,
+        preserved_records=preserved_records,
     )
 
 
@@ -1162,6 +1213,25 @@ async def _reconcile(
                     confidence="HIGH",
                 )
             )
+        # F-D (7e, hallazgo del code review de F-H6.f): mismo motivo que
+        # `product_details` arriba — sin esto, un campo cross-sección
+        # (`customer:*`/`supplier:*`) que la relectura complete vía
+        # `_apply_cross_field_buffer` se escribía de verdad pero sin ledger,
+        # así que borrar el archivo después no podía revertirlo. `action`
+        # llega ya resuelto (`UPDATE_CUSTOMER_CROSS_FIELD`/
+        # `UPDATE_SUPPLIER_CROSS_FIELD`), sin traducir como `product_details`.
+        for _cfd in _reimport_detail.get("cross_field_details", []):
+            session.add(
+                DataRepairItem(
+                    run_id=run.id,
+                    tenant_id=tenant_id,
+                    source_file_id=file_id,
+                    action=_cfd["action"],
+                    before_json=_cfd["before"],
+                    after_json=_cfd["after"],
+                    confidence="HIGH",
+                )
+            )
         await session.flush()
 
     # F-F.4 — la relectura DESCUENTA, con el mismo núcleo que el confirm.
@@ -1621,9 +1691,15 @@ def _estimate_reread(
     unchanged_count = 0
     update_samples: list[dict[str, Any]] = []
     new_samples: list[dict[str, Any]] = []
+    # F-R: todas las anclas que el archivo fresco produce, sin filtrar por bucket.
+    # Se junta ANTES de cualquier `continue` para que un registro cuya fila fresca
+    # existe pero cae en otra rama (editada, huella previa) no cuente como pérdida.
+    fresh_refs: set[str] = set()
+    nuevas_por_entidad: dict[str, int] = {}
 
     for ctx, idx, row, kind in _iter_importable_fresh_rows(fresh, confirmed_fields):
         fp = _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))
+        fresh_refs.add(fp)
         if fp in edited_refs:
             continue  # editado → insert lo saltea (preservado)
         if fp in voided_refs:
@@ -1645,6 +1721,8 @@ def _estimate_reread(
             unchanged_count += 1
         else:
             new_count += 1
+            _k = {"sale": "ventas", "expense": "gastos"}.get(kind, "sin_clasificar")
+            nuevas_por_entidad[_k] = nuevas_por_entidad.get(_k, 0) + 1
             if len(new_samples) < _SAMPLE_PER_KIND:
                 new_samples.append(
                     {"action": "new", "before": None, "after": _fresh_row_snapshot(row, kind)}
@@ -1663,8 +1741,29 @@ def _estimate_reread(
         fresh, confirmed_fields, catalog
     )
 
+    # ── F-R: la correspondencia ──────────────────────────────────────────────
+    # Un registro vivo y no editado se anula para reimportarse corregido. Eso es
+    # una ACTUALIZACIÓN mientras el archivo traiga su fila; deja de serlo cuando
+    # el ancla desapareció del archivo fresco, y ahí sí el dato se pierde. Hasta
+    # F-R nadie calculaba esa diferencia: `to_void` contaba los dos casos juntos.
+    sin_reemplazo_recs = [
+        rec
+        for rec in recon.non_edited_with_ref
+        if rec.source_row_ref and rec.source_row_ref not in fresh_refs
+    ]
+    correspondence = _build_correspondence(
+        sales=sales,
+        expenses=expenses,
+        recon=recon,
+        sin_reemplazo_recs=sin_reemplazo_recs,
+        nuevas_por_entidad=nuevas_por_entidad,
+    )
+
+    # La tarjeta "Anulado → —" queda SÓLO para lo que de verdad no vuelve. Antes
+    # se armaba con `recon.non_edited[:N]`, o sea con los reemplazados: lo primero
+    # que veía el usuario era su archivo entero presentado como una destrucción.
     void_samples: list[dict[str, Any]] = []
-    for rec in recon.non_edited[:_SAMPLE_PER_KIND]:
+    for rec in sin_reemplazo_recs[:_SAMPLE_PER_KIND]:
         snap = _snapshot_sale(rec) if isinstance(rec, SaleEntry) else _snapshot_expense(rec)
         void_samples.append({"action": "void", "before": snap, "after": None})
 
@@ -1679,7 +1778,49 @@ def _estimate_reread(
         products_new=products_new,
         products_restock=products_restock,
         legacy_fallback=recon.legacy_fallback,
+        # Las pérdidas reales van primero: son pocas y son las que hay que mirar.
         sample_changes=void_samples + update_samples + new_samples + product_samples,
+        correspondence=correspondence,
+    )
+
+
+def _entidad_de(rec: SaleEntry | ExpenseEntry) -> str:
+    return "ventas" if isinstance(rec, SaleEntry) else "gastos"
+
+
+def _build_correspondence(
+    *,
+    sales: list[SaleEntry],
+    expenses: list[ExpenseEntry],
+    recon: _Reconciliation,
+    sin_reemplazo_recs: list[SaleEntry | ExpenseEntry],
+    nuevas_por_entidad: dict[str, int],
+) -> RereadCorrespondence:
+    """Arma el desglose de F-R. Función aparte y pura: el gate del apply la
+    consume, y una condición re-derivada en dos lugares se queda con la mitad
+    (lección de V28)."""
+    def _cuantos(recs: list[SaleEntry | ExpenseEntry], entidad: str) -> int:
+        return sum(1 for r in recs if _entidad_de(r) == entidad)
+
+    por_entidad: dict[str, dict[str, int]] = {}
+    for entidad, vivos in (("ventas", sales), ("gastos", expenses)):
+        sin_reemplazo_n = _cuantos(sin_reemplazo_recs, entidad)
+        por_entidad[entidad] = {
+            "antes": len(vivos),
+            "sin_reemplazo": sin_reemplazo_n,
+            "preservado": _cuantos(recon.preserved_records, entidad),
+            "legacy_sin_ancla": _cuantos(recon.legacy_records, entidad),
+            "nuevas": nuevas_por_entidad.get(entidad, 0),
+            "reemplazado": _cuantos(recon.non_edited_with_ref, entidad) - sin_reemplazo_n,
+        }
+
+    return RereadCorrespondence(
+        reemplazado=len(recon.non_edited_with_ref) - len(sin_reemplazo_recs),
+        preservado=recon.preserved_count,
+        sin_reemplazo=len(sin_reemplazo_recs),
+        legacy_sin_ancla=len(recon.legacy_records),
+        por_entidad=por_entidad,
+        nuevas_por_entidad=dict(nuevas_por_entidad),
     )
 
 
@@ -2167,15 +2308,58 @@ async def _acquire_reread_guard_lock(session: AsyncSession, tenant_id: uuid.UUID
     )
 
 
+class RereadWouldLoseDataError(Exception):
+    """F-R: la relectura anularía registros que el archivo fresco ya no repone.
+
+    No es un error del sistema: es una pregunta. Anular sin reponer es legítimo
+    —el archivo puede haber cambiado de verdad—, pero hacerlo **en silencio** no.
+    El caller lo traduce a un 409 con el detalle, y el usuario reintenta con
+    ``accept_data_loss=True`` si eso es lo que quiere.
+    """
+
+    def __init__(self, correspondence: RereadCorrespondence) -> None:
+        self.correspondence = correspondence
+        detalle = ", ".join(
+            f"{datos['sin_reemplazo']} de {entidad}"
+            for entidad, datos in sorted(correspondence.por_entidad.items())
+            if datos.get("sin_reemplazo")
+        )
+        super().__init__(
+            f"La relectura anularía {correspondence.sin_reemplazo} registro(s) que el "
+            f"archivo ya no contiene ({detalle}). Revisá el detalle y confirmá "
+            f"explícitamente si querés aplicarla igual."
+        )
+
+
+class RereadCorrespondenceUnavailableError(Exception):
+    """No se pudo calcular la correspondencia (típicamente: el archivo no se pudo
+    descargar). Fail-closed: sin poder probar que el apply es seguro no se
+    encola. El apply necesita el mismo archivo, así que igual iba a fallar —
+    pero adentro del worker y como run FAILED, que el usuario tiene que ir a
+    buscar. Cortar acá le da el error en el momento."""
+
+
 async def start_background_apply(
     session: AsyncSession,
     file_id: uuid.UUID,
     tenant_id: uuid.UUID,
+    *,
+    accept_data_loss: bool = False,
+    s3: S3Client | None = None,
 ) -> DataRepairRun:
     """Crea el ``DataRepairRun`` (status RUNNING) para un apply en background y lo
     devuelve. Guard anti-duplicado: si ya hay una relectura RUNNING reciente del
     tenant, levanta ``ValueError`` (el caller responde 409). El caller commitea y
-    encola la task. Evita el ciclo timeout→reintento→duplicados."""
+    encola la task. Evita el ciclo timeout→reintento→duplicados.
+
+    **F-R:** antes de encolar nada se verifica la correspondencia. Si hay
+    registros a anular que el archivo fresco no repone, levanta
+    ``RereadWouldLoseDataError`` salvo que el usuario lo acepte explícitamente.
+    El chequeo va acá y no en el worker a propósito: el usuario acaba de mirar el
+    preview y merece un 409 con el detalle, no un run fallido que tiene que ir a
+    buscar. El costo es un parseo extra —sub-segundo— contra un apply que tarda
+    minutos, y reusa ``preview_reread`` en vez de re-derivar la condición.
+    """
     await _acquire_reread_guard_lock(session, tenant_id)
 
     existing = await session.execute(
@@ -2201,6 +2385,28 @@ async def start_background_apply(
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
+
+    # F-R: la compuerta. Se corre DESPUÉS de validar el archivo (para que un id
+    # inexistente siga dando 404 y no un 409 confuso) y ANTES de crear el run,
+    # para no dejar un RUNNING huérfano que bloquee al siguiente intento.
+    if not accept_data_loss:
+        try:
+            preview = await preview_reread(session, file_id, tenant_id, s3)
+        except RereadWouldLoseDataError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Fail-closed: si no se puede leer el archivo no se puede probar que
+            # el apply sea seguro, y el apply necesita ese mismo archivo — así
+            # que igual iba a fallar, pero en el worker y como run FAILED. Cortar
+            # acá da un error accionable en el momento en vez de un run muerto.
+            logger.warning(
+                "reread.correspondence_check_failed",
+                file_id=str(file_id),
+                error=str(exc),
+            )
+            raise RereadCorrespondenceUnavailableError(str(exc)) from exc
+        if preview.correspondence.bloquea:
+            raise RereadWouldLoseDataError(preview.correspondence)
 
     run = DataRepairRun(
         tenant_id=tenant_id,

@@ -68,6 +68,14 @@ const COLUMNS = [
     csvValue: (v: unknown) => String(v ?? ""),
   },
   {
+    key: "vektor_code",
+    header: "Código",
+    hideable: true,
+    defaultVisible: false,
+    render: (v: unknown) => String(v ?? "").trim() || "—",
+    csvValue: (v: unknown) => String(v ?? "").trim(),
+  },
+  {
     key: "customer_type",
     header: "Tipo",
     hideable: true,

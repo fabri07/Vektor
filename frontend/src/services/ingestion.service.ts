@@ -468,11 +468,26 @@ export interface RereadItem {
   after: Record<string, unknown> | null;
 }
 
+// F-R: `to_void` y `to_update` cuentan las MISMAS filas — anular y reimportar
+// corregido es el mecanismo de actualizar. Lo único que representa una pérdida
+// es `sin_reemplazo`: registros que se anulan y el archivo ya no repone.
+export interface RereadCorrespondence {
+  reemplazado: number;
+  preservado: number;
+  sin_reemplazo: number;
+  // Importados antes de que existiera el ancla de fila: no se pueden emparejar
+  // ni a favor ni en contra, y por eso no bloquean.
+  legacy_sin_ancla: number;
+  por_entidad: Record<string, Record<string, number>>;
+  nuevas_por_entidad: Record<string, number>;
+}
+
 export interface RereadPreviewResponse {
   file_id: string;
   counts: RereadCounts;
   legacy_fallback: boolean;
   sample_changes: RereadItem[];
+  correspondence?: RereadCorrespondence;
 }
 
 export interface RereadApplyResponse {
@@ -809,9 +824,18 @@ export const ingestionService = {
   },
 
   // Encola el apply en background y devuelve el run para hacer polling.
-  async rereadApply(fileId: string): Promise<RereadApplyStartResponse> {
+  //
+  // F-R: si la relectura anularía registros que el archivo ya no contiene, el
+  // backend responde 409 `REREAD_WOULD_LOSE_DATA` en vez de aplicar. Reintentar
+  // con `acceptDataLoss` la aplica igual — la decisión es del usuario, y el
+  // default de no mandarlo es lo que impide que se pierda algo por accidente.
+  async rereadApply(
+    fileId: string,
+    acceptDataLoss = false,
+  ): Promise<RereadApplyStartResponse> {
     const res = await api.post<RereadApplyStartResponse>(
       `/ingestion/files/${fileId}/reread/apply`,
+      { accept_data_loss: acceptDataLoss },
     );
     return res.data;
   },

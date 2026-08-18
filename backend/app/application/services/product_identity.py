@@ -35,7 +35,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.inspection import inspect as sa_inspect
 
 from app.application.services._savepoint import SavepointConflictError, guarded_savepoint
+from app.application.services.entity_code_service import (
+    PRODUCT_CODE_SPEC,
+    assign_vektor_code_if_missing,
+)
 from app.domain.text_norm import normalize_barcode, normalize_sku
+from app.domain.verticals import Vertical
 from app.observability.logger import get_logger
 from app.persistence.models.product import Product
 
@@ -253,12 +258,18 @@ async def add_product_or_reuse(
     product: Product,
     *,
     on_conflict: Literal["reuse", "raise"] = "reuse",
+    vertical: Vertical | None = None,
 ) -> tuple[Product, bool]:
     """Persiste ``product``; si su identidad fuerte ya está ocupada, resuelve.
 
     ``product`` debe llegar **transient** (sin ``session.add()`` previo): si ya está
     pendiente, el flush incondicional de ``begin_nested()`` emite el INSERT fuera del
     savepoint y la colisión aborta la transacción entera.
+
+    ``vertical`` — F-ID: sólo importa cuando el producto es GENUINAMENTE nuevo (no
+    reusado) y no trae ``sku`` propio; sirve para elegir el prefijo por categoría del
+    código Véktor. ``None`` es un fallback honesto (prefijo ``GEN``), no un error —
+    los 5 callers internos no siempre tienen el vertical a mano.
 
     Returns:
         ``(producto, creado)``. Con ``on_conflict="reuse"`` y colisión devuelve
@@ -301,6 +312,12 @@ async def add_product_or_reuse(
             existing_id=str(existing.id),
         )
         return existing, False
+
+    assigned = await assign_vektor_code_if_missing(
+        session, product, PRODUCT_CODE_SPEC, tenant_id, vertical=vertical, category=product.category
+    )
+    if assigned:
+        await session.flush()
     return product, True
 
 

@@ -294,6 +294,23 @@ export default function ProductsPage() {
     .sort(stockSort)
     .map((p) => ({ ...p, _status: null }));
 
+  // F-V.2: cuántos productos tiene REALMENTE cada categoría. El desplegable se
+  // arma con el catálogo del vertical (`GET /products/categories`), que existe
+  // aunque ningún producto lo use: en una cuenta real ofrecía Textiles,
+  // Iluminación y Muebles con 0 de 398 productos categorizados, así que elegir
+  // cualquiera devolvía una tabla vacía sin explicar por qué.
+  const conteoPorCategoria = products.reduce<Record<string, number>>((acc, p) => {
+    const cat = (p.category ?? "").trim();
+    const key = cat || "none";
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
+  const categoriaElegida = categories.find((c) => c.code === categoryFilter);
+  const categoriaVacia =
+    filtered.length === 0 &&
+    categoryFilter !== "all" &&
+    (conteoPorCategoria[categoryFilter] ?? 0) === 0;
+
   return (
     <PageWrapper title="Productos" actions={<ManualEntryLauncher />}>
       {/* Filter */}
@@ -319,12 +336,22 @@ export default function ProductsPage() {
           <option value="all">Todas</option>
           {categories.map((c) => (
             <option key={c.code} value={c.code}>
-              {c.label}
+              {c.label} ({conteoPorCategoria[c.code] ?? 0})
             </option>
           ))}
-          <option value="none">Sin categoría</option>
+          <option value="none">
+            Sin categoría ({conteoPorCategoria.none ?? 0})
+          </option>
         </select>
       </div>
+
+      {categoriaVacia && (
+        <p className="rounded-lg border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm text-vk-text-secondary">
+          Ningún producto tiene la categoría{" "}
+          <strong>{categoriaElegida?.label ?? categoryFilter}</strong> todavía. La
+          lista de categorías es la de tu rubro, no la de lo que ya cargaste.
+        </p>
+      )}
 
       {/* KPIs */}
       {isLoading ? (

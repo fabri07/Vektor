@@ -390,8 +390,18 @@ async def test_persist_import_fingerprints_is_idempotent(
 async def test_preview_returns_before_after_sample(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """El preview (estimado en memoria) devuelve un sample antes/después: voids
-    con `before`, y filas nuevas con `after` y sin `before`."""
+    """El preview devuelve un sample antes/después: pares `update` con los dos
+    lados, y filas nuevas con `after` y sin `before`.
+
+    **Cambió con F-R y el contrato viejo era el equivocado.** Este test exigía
+    que apareciera una tarjeta `void` en un escenario donde el archivo AGREGA una
+    fila y no pierde ninguna: los voids se armaban con `recon.non_edited[:N]`, o
+    sea con los registros que se anulan **para volver a entrar corregidos**. Eso
+    es una actualización, y presentarla como «Anulado → —» es lo que hacía leer
+    una relectura sana como una destrucción (el `2563 / 2563` de ASTERIA).
+    Ahora la tarjeta sin contraparte queda reservada para lo que de verdad no
+    vuelve, y acá no vuelve nada: la correspondencia lo confirma.
+    """
     _patch_s3(monkeypatch, _CSV_BASE)
     file = await _make_file(db_session, tenant, _CSV_BASE)
     await _initial_import(db_session, tenant, file, _CSV_BASE)
@@ -402,14 +412,18 @@ async def test_preview_returns_before_after_sample(
 
     assert preview.sample_changes, "el preview debe traer un sample de cambios"
     actions = {c["action"] for c in preview.sample_changes}
-    # Hay voids (no-editados) y al menos un nuevo (la fila extra).
-    assert "void" in actions
     assert "new" in actions
     new_items = [c for c in preview.sample_changes if c["action"] == "new"]
     assert new_items[0]["before"] is None
     assert new_items[0]["after"] is not None
-    void_items = [c for c in preview.sample_changes if c["action"] == "void"]
-    assert void_items[0]["before"] is not None
+
+    # Las filas que se anulan vuelven todas: no hay pérdida y no hay tarjeta.
+    assert preview.correspondence.sin_reemplazo == 0
+    assert "void" not in actions
+    update_items = [c for c in preview.sample_changes if c["action"] == "update"]
+    assert update_items, "una fila reemplazada se muestra con su par antes/después"
+    assert update_items[0]["before"] is not None
+    assert update_items[0]["after"] is not None
 
 
 async def test_batch_fingerprints_preloaded_and_idempotent(
@@ -1354,19 +1368,82 @@ async def test_reread_audita_masters_creados_y_actualizados(
     assert create_item.after_json["name"] == "Maria Lopez"
 
 
+async def test_reread_audita_campos_cross_seccion(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo del code review de F-H6.f (#1): un campo cross-sección
+    (``customer:*``/``supplier:*``) que ``_apply_cross_field_buffer`` escribe
+    de verdad durante una relectura debe dejar su propio ``DataRepairItem`` —
+    sin esto se escribía sin ledger y borrar el archivo después no podía
+    revertirlo.
+
+    El threading de ``column_mappings`` explícitos hacia el `insert_confirmed_
+    data` de la relectura es un eje aparte (la relectura re-detecta por
+    heurística, no reaplica mapeos de columna del confirm original); acá se
+    envuelve la función real y se le inyecta ``cross_field_details`` como lo
+    haría ``_apply_cross_field_buffer`` si el mapeo llegara — aislando
+    exactamente el tramo de `_reconcile` que este fix agregó (7e)."""
+    cliente = Customer(tenant_id=tenant.tenant_id, name="Cliente Uno", dni="30111222")
+    db_session.add(cliente)
+    await db_session.flush()
+    cliente_id = cliente.id
+
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+
+    real_insert_confirmed_data = insert_confirmed_data
+
+    async def _fake_insert_confirmed_data(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = await real_insert_confirmed_data(*args, **kwargs)
+        result["cross_field_details"] = [
+            {
+                "action": "UPDATE_CUSTOMER_CROSS_FIELD",
+                "before": {"last_name": None},
+                "after": {
+                    "last_name": "Pérez",
+                    "id": str(cliente_id),
+                    "kind": "customer",
+                },
+            }
+        ]
+        return result
+
+    monkeypatch.setattr(
+        reread_service, "insert_confirmed_data", _fake_insert_confirmed_data
+    )
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    items_res = await db_session.execute(
+        select(DataRepairItem).where(
+            DataRepairItem.run_id == result.run_id,
+            DataRepairItem.action == "UPDATE_CUSTOMER_CROSS_FIELD",
+        )
+    )
+    items = items_res.scalars().all()
+    assert len(items) == 1
+    assert items[0].before_json == {"last_name": None}
+    assert items[0].after_json == {
+        "last_name": "Pérez",
+        "id": str(cliente_id),
+        "kind": "customer",
+    }
+
+
 async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F9b (fix post-review): dos filas del MISMO archivo con el mismo DNI —
-    ninguna matchea a un cliente preexistente, así que la primera CREA y la
-    segunda, al re-resolver contra el índice de dedup del propio batch
-    (``apply_import`` registra el recién creado ahí para no duplicar dentro del
-    mismo archivo), resuelve como "matched" contra ESE cliente recién creado y
-    termina en ``updated_ids``. Sin el dedup entre ``*_creados_ids`` y
-    ``*_actualizados_ids``, esto generaba DOS ``DataRepairItem`` para la MISMA
-    entidad: un REREAD_MASTER_UPDATE con ``before_json=None`` (mal etiquetado,
-    no hubo estado previo real) y un REREAD_MASTER_CREATE redundante. Debe
-    generarse UN solo item, REREAD_MASTER_CREATE."""
+    """F9b (fix post-review) + F-I(B): dos filas del MISMO archivo con el mismo
+    DNI — ninguna matchea a un cliente preexistente. Antes de F-I(B), la
+    primera CREABA y la segunda, al re-resolver contra el índice de dedup del
+    propio batch, resolvía "matched" contra ESE cliente recién creado y lo
+    actualizaba en silencio (merge secuencial). F-I(B) cambió esa mecánica: la
+    2ª fila que repite una clave ya vista en el archivo va a "Otros" — nunca
+    toca la entidad de la 1ª. Sigue generándose UN solo DataRepairItem
+    (REREAD_MASTER_CREATE, para la 1ª fila) — la 2ª no genera ninguno, porque
+    no crea ni actualiza nada."""
     file = await _make_master_file(
         db_session,
         tenant,
@@ -1386,8 +1463,8 @@ async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
         "clientes_detectados": [
             # crea el cliente.
             {"nombre": "Juan Perez", "documento": "30111222"},
-            # mismo DNI que la fila anterior -> "actualiza" lo que la primera
-            # fila del MISMO archivo acaba de crear (no un cliente preexistente).
+            # mismo DNI que la fila anterior -> F-I(B): va a Otros, no toca
+            # la entidad que acaba de crear la fila anterior.
             {"nombre": "Juan Perez Corregido", "documento": "30111222"},
         ],
     }
@@ -1406,14 +1483,15 @@ async def test_reread_audita_masters_no_duplica_create_y_update_para_misma_fila(
         )
     )
     items = items_res.scalars().all()
-    assert len(items) == 1  # NO dos (create + update fantasma) para la misma entidad
+    assert len(items) == 1  # sólo la 1ª fila crea; la 2ª va a Otros, sin item
     assert items[0].action == "REREAD_MASTER_CREATE"
     assert items[0].before_json is None
     assert items[0].after_json is not None
     assert items[0].after_json["id"] == str(customers[0].id)
-    # El name final refleja la ÚLTIMA fila que la tocó (la segunda, "corregida"),
-    # aunque la auditoría la trate como parte del mismo CREATE.
-    assert items[0].after_json["name"] == "Juan Perez Corregido"
+    # F-I(B): la 2ª fila NUNCA tocó la entidad — el nombre sigue siendo el de
+    # la 1ª, no el "corregido" de la fila que fue a Otros.
+    assert items[0].after_json["name"] == "Juan Perez"
+    assert customers[0].name == "Juan Perez"
 
 
 # ── F9b (Task 6): auditoría before/after de productos en la relectura ──────────

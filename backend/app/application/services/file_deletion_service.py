@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services._ledger_restore import (
     entity_changed_since_ledger,
+    fields_changed_since_ledger,
     restore_from_before,
     snapshot_master,
 )
@@ -103,6 +104,13 @@ _MASTER_ACTIONS: dict[tuple[str, bool], str] = {
 }
 _CREATE_MASTER_ACTIONS = (ACTION_CREATE_CUSTOMER, ACTION_CREATE_SUPPLIER)
 _UPDATE_MASTER_ACTIONS = (ACTION_UPDATE_CUSTOMER, ACTION_UPDATE_SUPPLIER)
+
+# F-D (7g, mig 20260816_0001): un campo cross-sección puntual (ej. `sale→
+# customer:last_name`) — NUNCA mezclado con ACTION_UPDATE_CUSTOMER/SUPPLIER,
+# que asumen snapshot de la entidad ENTERA. Ver el docstring de la migración.
+ACTION_UPDATE_CUSTOMER_CROSS_FIELD = "UPDATE_CUSTOMER_CROSS_FIELD"
+ACTION_UPDATE_SUPPLIER_CROSS_FIELD = "UPDATE_SUPPLIER_CROSS_FIELD"
+_CROSS_FIELD_ACTIONS = (ACTION_UPDATE_CUSTOMER_CROSS_FIELD, ACTION_UPDATE_SUPPLIER_CROSS_FIELD)
 
 
 async def snapshot_masters_before_import(
@@ -212,6 +220,7 @@ async def record_import_ledger(
     file_id: uuid.UUID,
     product_details: list[dict[str, Any]],
     master_details: list[dict[str, Any]] | None = None,
+    cross_field_details: list[dict[str, Any]] | None = None,
 ) -> uuid.UUID | None:
     """Registra qué creó/actualizó un import, para poder revertirlo.
 
@@ -222,10 +231,15 @@ async def record_import_ledger(
     un run vacío). ``product_details`` es lo que ya devuelve
     ``insert_confirmed_data(..., return_details=True)``; ``master_details`` lo
     arma ``build_master_details`` desde los ids de clientes/proveedores que ese
-    mismo import devuelve.
+    mismo import devuelve. ``cross_field_details`` (F-D) sale directo de
+    ``counts["cross_field_details"]`` — ya viene con ``action``/``before``/
+    ``after`` armados por ``_apply_cross_field_buffer``, no necesita un
+    ``build_*`` propio porque no hay snapshot previo que anticipar (el "antes"
+    es el valor del campo al momento de escribirlo, ya calculado ahí).
     """
     master_details = master_details or []
-    if not product_details and not master_details:
+    cross_field_details = cross_field_details or []
+    if not product_details and not master_details and not cross_field_details:
         return None
 
     run = DataRepairRun(
@@ -266,6 +280,21 @@ async def record_import_ledger(
     # identidad de la entidad viaja en el `after_json` (`id` + `kind`), que es de
     # donde la lee la reversa.
     for detalle in master_details:
+        session.add(
+            DataRepairItem(
+                run_id=run.id,
+                tenant_id=tenant_id,
+                source_file_id=file_id,
+                action=detalle["action"],
+                before_json=detalle.get("before"),
+                after_json=detalle.get("after"),
+                confidence="HIGH",
+            )
+        )
+
+    # F-D: campos cross-sección — mismo run, misma transacción, mismo convenio
+    # `after_json["id"]`/`["kind"]` que los maestros (ver `_revert_cross_field_items`).
+    for detalle in cross_field_details:
         session.add(
             DataRepairItem(
                 run_id=run.id,
@@ -499,6 +528,116 @@ async def _revert_master_items(
             restaurados += 1
 
     return desactivados, restaurados, conservados
+
+
+async def _cross_field_items_by_file(
+    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+) -> list[DataRepairItem]:
+    """Items de campos cross-sección (F-D) que este archivo escribió."""
+    res = await session.execute(
+        select(DataRepairItem)
+        .join(DataRepairRun, DataRepairRun.id == DataRepairItem.run_id)
+        .where(
+            DataRepairRun.repair_type.in_(_LEDGER_REPAIR_TYPES),
+            DataRepairItem.tenant_id == tenant_id,
+            DataRepairItem.source_file_id == file_id,
+            DataRepairItem.action.in_(_CROSS_FIELD_ACTIONS),
+        )
+        .order_by(DataRepairItem.created_at)
+    )
+    return list(res.scalars().all())
+
+
+async def _revert_cross_field_items(
+    session: AsyncSession,
+    file_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    *,
+    dry_run: bool = False,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Revierte los campos cross-sección que este archivo escribió (F-D, 7g).
+
+    Función HERMANA de ``_revert_master_items``, no la misma función: ahí un
+    item representa la entidad ENTERA (creada → se desactiva; modificada → se
+    restaura completa). Acá cada item es UN campo puntual de una entidad que
+    YA existía antes de este archivo (F-D nunca crea cliente/proveedor), así
+    que la reversa es POR CAMPO — mezclar las dos habría hecho que un solo
+    campo cross activara el guard/la desactivación de la entidad entera.
+
+    Grano fino: si alguien tocó ESE campo después del import, ese campo se
+    conserva (``CAMPO_MODIFICADO_POSTERIORMENTE``, con ``fields`` poblado —
+    el único motivo pensado para viajar por campo, ver
+    ``domain/file_deletion_reasons.py``) pero el resto de los campos que este
+    archivo escribió sí vuelve a su valor anterior.
+    """
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    _modelo: dict[str, type[Any]] = {"customer": Customer, "supplier": Supplier}
+    items = await _cross_field_items_by_file(session, file_id, tenant_id)
+
+    # Un mismo (kind, entidad) puede tener más de un item si el archivo se
+    # reprocesó (relectura), y CADA item puede traer un campo DISTINTO — a
+    # diferencia de `_revert_master_items` (un item = la entidad entera), acá
+    # "el primero" y "el último" de la entidad no alcanzan: un campo que sólo
+    # capturó un item intermedio quedaría invisible si sólo se mirara el
+    # primero. Se fusionan TODOS los items en orden cronológico (ya vienen
+    # ordenados por `created_at`): el `before` de cada campo es el del
+    # PRIMER item que lo trajo (el estado antes de que este archivo lo
+    # tocara la primera vez); el `after` de cada campo es el del ÚLTIMO item
+    # que lo trajo (cómo lo dejó el archivo) — mismo criterio de
+    # `_revert_master_items`, aplicado por campo en vez de a la entidad
+    # entera.
+    before_por_entidad: dict[tuple[str, uuid.UUID], dict[str, Any]] = {}
+    after_por_entidad: dict[tuple[str, uuid.UUID], dict[str, Any]] = {}
+    for it in items:
+        after = it.after_json or {}
+        kind = str(after.get("kind") or "")
+        raw_id = after.get("id")
+        if kind not in _modelo or not raw_id:
+            continue
+        clave = (kind, uuid.UUID(str(raw_id)))
+        _before_acum = before_por_entidad.setdefault(clave, {})
+        for campo, valor in (it.before_json or {}).items():
+            if campo not in _before_acum:
+                _before_acum[campo] = valor
+        after_por_entidad.setdefault(clave, {}).update(after)
+
+    restaurados = 0
+    conservados: list[dict[str, Any]] = []
+    for (kind, entity_id), before_fusionado in before_por_entidad.items():
+        entity = await session.get(_modelo[kind], entity_id)
+        if entity is None or entity.tenant_id != tenant_id:
+            continue
+        if getattr(entity, "is_sentinel", False):
+            # F-D nunca captura sobre el sentinela (sólo entidades "matched"),
+            # pero el guard se mantiene por consistencia con el resto del
+            # archivo — un ledger viejo/corrupto no debería poder tocarlo.
+            continue
+        await session.refresh(entity)
+
+        _cambiados = fields_changed_since_ledger(entity, after_por_entidad[(kind, entity_id)])
+        _restaurable = dict(before_fusionado)
+        for campo in _cambiados:
+            _restaurable.pop(campo, None)
+
+        if _restaurable and (
+            (dry_run) or restore_from_before(entity, kind, _restaurable)
+        ):
+            restaurados += 1
+
+        if _cambiados:
+            conservados.append(
+                {
+                    "entity_type": kind,
+                    "id": str(entity_id),
+                    "name": getattr(entity, "name", "") or "",
+                    "reasons": [PreservationReason.CAMPO_MODIFICADO_POSTERIORMENTE.value],
+                    "fields": _cambiados,
+                }
+            )
+
+    return restaurados, conservados
 
 
 async def _productos_con_otra_fuente(
@@ -769,6 +908,13 @@ async def preview_file_deletion(
     )
     a_restaurar += _m_rest
     conservados.extend(_m_conservados)
+
+    # Campos cross-sección (F-D): misma función que la reversa, en modo
+    # lectura — igual criterio que arriba, para no divergir del DELETE real.
+    _, _conservados_cross_preview = await _revert_cross_field_items(
+        session, file_id, tenant_id, dry_run=True
+    )
+    conservados.extend(_conservados_cross_preview)
 
     con_ledger = await _has_import_ledger(session, file_id, tenant_id)
     if not con_ledger:
@@ -1045,6 +1191,14 @@ async def revert_file_data(
     contadores["maestros_desactivados"] = _mc
     contadores["maestros_restaurados"] = _mr
     conservados.extend(_conservados_maestros)
+
+    # 3-quater. Campos cross-sección (F-D) que el archivo escribió sobre
+    #    clientes/proveedores YA existentes — nunca desactiva nada, sólo
+    #    devuelve el campo puntual a su valor anterior (o lo conserva si
+    #    alguien lo tocó después, ver `_revert_cross_field_items`).
+    _cfr, _conservados_cross = await _revert_cross_field_items(session, file_id, tenant_id)
+    contadores["campos_cross_restaurados"] = _cfr
+    conservados.extend(_conservados_cross)
 
     # 4. Filas de "Otros" del archivo.
     #

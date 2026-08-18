@@ -6,8 +6,13 @@ from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.inspection import inspect as sa_inspect
 from sqlalchemy.sql import ColumnElement
 
+from app.application.services.entity_code_service import (
+    SUPPLIER_CODE_SPEC,
+    assign_vektor_code_if_missing,
+)
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY, SENTINEL_FLAG_KEY, Supplier
 from app.persistence.models.transaction import ExpenseEntry
@@ -133,8 +138,18 @@ class SupplierRepository:
         return list(result.scalars().all())
 
     async def save(self, supplier: Supplier) -> Supplier:
+        # F-ID: mismo criterio que CustomerRepository.save — `transient` se
+        # pierde en cuanto `add()` lo asocia a la sesión, hay que leerlo ANTES
+        # para no reasignar código en cada edición.
+        is_new = sa_inspect(supplier).transient
         self._session.add(supplier)
         await self._session.flush()
+        if is_new:
+            assigned = await assign_vektor_code_if_missing(
+                self._session, supplier, SUPPLIER_CODE_SPEC, supplier.tenant_id
+            )
+            if assigned:
+                await self._session.flush()
         return supplier
 
     async def soft_delete(self, supplier: Supplier) -> Supplier:

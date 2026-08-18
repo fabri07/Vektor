@@ -1,12 +1,13 @@
 """Sales entry endpoints."""
 
+import re
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
@@ -20,7 +21,11 @@ from app.application.services.customer_sentinel import (
     resolve_or_create_local_sentinel,
 )
 from app.application.services.idempotency import claim_idempotency_key
+from app.application.services.ingestion_import_service import (
+    UNLINKED_PRODUCT_NAME_FIELD,
+)
 from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.domain.product_alias import add_alias
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.product import Product
@@ -34,8 +39,13 @@ from app.schemas.transaction import (
     BulkSaleRequest,
     CreateSaleRequest,
     DateRangeResponse,
+    LinkProductQueueRequest,
+    LinkProductQueueResponse,
     ManualBatchSaleRequest,
     ManualBatchSaleResponse,
+    ProductLinkCandidate,
+    ProductLinkQueueGroup,
+    ProductLinkQueueResponse,
     SaleEntryResponse,
     SaleSummaryResponse,
     UpdateSaleRequest,
@@ -425,6 +435,234 @@ async def create_sale(
     await stock_service.decrement_for_sale(saved, session)
     trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_created")
     return saved
+
+
+# ── F-S.0: cola de ventas sin producto vinculado ────────────────────────────────
+#
+# IMPORTANTE — orden de rutas: estas dos van ANTES de `GET /{sale_id}` (abajo).
+# Starlette matchea rutas en el orden en que se registran; si `/{sale_id}`
+# fuera primero, `GET /sales/product-link-queue` matchearía ahí y
+# "product-link-queue" fallaría la validación de UUID (422), nunca 200.
+
+#: Filas ESCANEADAS por página (no filas que califican). Keyset por `id`, no
+#: OFFSET: con miles de ventas `product_id IS NULL` sin el flag (mostrador),
+#: un OFFSET creciente re-escanea desde cero en cada página.
+_QUEUE_PAGE_SIZE = 1000
+
+#: Tope de filas que SÍ califican (tienen `_unlinked_product_name_raw`) antes
+#: de cortar. No es una regla de negocio — es memoria acotada.
+_QUEUE_MAX_MATCHES = 5000
+
+#: Tope de filas ESCANEADAS en total, aunque casi ninguna califique. Sin esto,
+#: un tenant con muchas ventas `product_id IS NULL` sin el flag (mostrador)
+#: haría escanear la tabla entera para juntar unos pocos grupos reales.
+_QUEUE_MAX_SCAN = 50_000
+
+_CANDIDATE_STOPWORDS = frozenset(
+    {"de", "del", "la", "el", "los", "las", "un", "una", "para", "con", "sin", "por"}
+)
+
+
+async def _scan_unlinked_sale_entries(
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    raw_name: str | None = None,
+) -> tuple[list[SaleEntry], bool]:
+    """Escanea `SaleEntry` con `product_id IS NULL`, ordenado por `id`, en
+    páginas de `_QUEUE_PAGE_SIZE`, hasta juntar `_QUEUE_MAX_MATCHES` filas que
+    tengan `_unlinked_product_name_raw` (o agotar el tenant), sin cargar más
+    de `_QUEUE_MAX_SCAN` filas en memoria de una.
+
+    Con `raw_name`, sólo junta las de ESE grupo (para el POST de vinculación).
+    Sin él, junta TODAS las que califican (para el GET, que las agrupa después).
+
+    Devuelve `(entries, truncated)`. `truncated=True` sólo si se COMPROBÓ que
+    queda al menos una fila más que calificaba y no entró — nunca se asume por
+    llegar justo al tope: seguir escaneando (sin agregar a `matches`, ya
+    lleno) es la única forma de distinguir "el tope coincidió con el final"
+    de "el tope cortó en medio de más filas". Nunca en silencio.
+    """
+    matches: list[SaleEntry] = []
+    scanned = 0
+    last_id: UUID | None = None
+    hay_mas_alla_del_tope = False
+    while True:
+        stmt = (
+            select(SaleEntry)
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.product_id.is_(None),
+                SaleEntry.voided_at.is_(None),
+            )
+            .order_by(SaleEntry.id)
+            .limit(_QUEUE_PAGE_SIZE)
+        )
+        if last_id is not None:
+            stmt = stmt.where(SaleEntry.id > last_id)
+        page = (await session.execute(stmt)).scalars().all()
+        if not page:
+            break
+        page_llena = len(page) == _QUEUE_PAGE_SIZE
+        for entry in page:
+            scanned += 1
+            name = (entry.custom_fields or {}).get(UNLINKED_PRODUCT_NAME_FIELD)
+            if not name or (raw_name is not None and name != raw_name):
+                continue
+            if len(matches) < _QUEUE_MAX_MATCHES:
+                matches.append(entry)
+            else:
+                # Ya está lleno: esta fila califica igual, así que SÍ queda
+                # más — no es una suposición.
+                hay_mas_alla_del_tope = True
+        last_id = page[-1].id
+        if hay_mas_alla_del_tope:
+            break
+        if scanned >= _QUEUE_MAX_SCAN:
+            # No se llegó a comprobar si hay más — tope de trabajo, no de
+            # datos. Conservador: si la página vino llena, puede haber más.
+            hay_mas_alla_del_tope = page_llena
+            break
+        if not page_llena:
+            break  # se acabaron las filas `product_id IS NULL` del tenant
+    return matches, hay_mas_alla_del_tope
+
+
+async def _suggest_product_candidates(
+    session: AsyncSession, tenant_id: UUID, raw_name: str, *, limit: int = 5
+) -> list[ProductLinkCandidate]:
+    """Candidatos livianos por nombre, misma FORMA que `match_candidates` en
+    `/otros` (F2-T2b) para que un frontend futuro reuse el mismo componente —
+    pero sin reusar el motor de identidad privado del import
+    (`ingestion_import_service`), que no está pensado para invocarse fuera de
+    una corrida. Búsqueda por token, `ILIKE` (portable SQLite/Postgres vía
+    `Column.ilike`), acotada a 3 tokens y `limit` resultados. Puramente
+    orientativa: la decisión la sigue tomando la persona.
+    """
+    tokens = [
+        t
+        for t in re.split(r"\s+", raw_name.strip().lower())
+        if len(t) >= 4 and t not in _CANDIDATE_STOPWORDS
+    ]
+    if not tokens:
+        return []
+    conditions = [Product.name.ilike(f"%{t}%") for t in tokens[:3]]
+    result = await session.execute(
+        select(Product)
+        .where(
+            Product.tenant_id == tenant_id,
+            Product.is_active.is_(True),
+            or_(*conditions),
+        )
+        .limit(limit)
+    )
+    return [
+        ProductLinkCandidate(
+            id=p.id, matched_by=["name"], name=p.name, sku=p.sku, barcode=p.barcode
+        )
+        for p in result.scalars().all()
+    ]
+
+
+@router.get(
+    "/product-link-queue",
+    response_model=ProductLinkQueueResponse,
+    summary="Ventas sin producto vinculado, agrupadas por nombre",
+)
+async def get_product_link_queue(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> ProductLinkQueueResponse:
+    entries, truncated = await _scan_unlinked_sale_entries(session, tenant.tenant_id)
+
+    grouped: dict[str, list[UUID]] = {}
+    for entry in entries:
+        name = entry.custom_fields[UNLINKED_PRODUCT_NAME_FIELD]  # presente: ya filtrado arriba
+        grouped.setdefault(name, []).append(entry.id)
+
+    groups = [
+        ProductLinkQueueGroup(
+            raw_name=name,
+            count=len(ids),
+            sample_sale_ids=ids[:5],
+            candidates=await _suggest_product_candidates(session, tenant.tenant_id, name),
+        )
+        # Orden estable: cantidad descendente, nombre como desempate — para que
+        # el orden no dependa de en qué página cayó cada grupo.
+        for name, ids in sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    ]
+    return ProductLinkQueueResponse(groups=groups, truncated=truncated)
+
+
+@router.post(
+    "/product-link-queue/link",
+    response_model=LinkProductQueueResponse,
+    summary="Vincula en bloque todas las ventas con ese nombre crudo a un producto",
+)
+async def link_product_queue_group(
+    body: LinkProductQueueRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_modify_access),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+) -> LinkProductQueueResponse:
+    # Re-validación: NUNCA confiar en el id que manda el cliente (mismo
+    # criterio que `others.py::reclassify_record`, rama "vincular a existente").
+    target = await session.get(Product, body.target_product_id)
+    if target is None or target.tenant_id != tenant.tenant_id or not target.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "INVALID_TARGET_PRODUCT"},
+        )
+
+    # Muta un producto EXISTENTE (`custom_fields`) — mismo chokepoint que el
+    # resto de las mutaciones de catálogo fuera de `ProductRepository.save()`
+    # (`products.py`), para que el dedup (que toma el exclusive) no corra en
+    # simultáneo con esto.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant.tenant_id)
+
+    entries, truncated = await _scan_unlinked_sale_entries(
+        session, tenant.tenant_id, raw_name=body.raw_name
+    )
+    linked_ids: list[UUID] = []
+    for entry in entries:
+        entry.product_id = target.id
+        entry.custom_fields = {
+            k: v for k, v in (entry.custom_fields or {}).items()
+            if k != UNLINKED_PRODUCT_NAME_FIELD
+        }
+        # F-O/F-F: una relectura del archivo original no puede pisar esta
+        # decisión humana — mismo guard que el PATCH manual (línea ~530).
+        if entry.source_upload_id is not None:
+            entry.has_user_edits = True
+        linked_ids.append(entry.id)
+
+    if linked_ids:
+        target.custom_fields = add_alias(target.custom_fields, body.raw_name)
+        # Una fila de auditoría por OPERACIÓN, no por venta — miles de filas
+        # por un solo click sería ruido, no trazabilidad. `user` de
+        # `require_modify_access` es quien decidió el vínculo.
+        session.add(
+            DecisionAuditLog(
+                tenant_id=tenant.tenant_id,
+                decision_type="SALES_PRODUCT_BULK_LINKED",
+                decision_data={
+                    "raw_name": body.raw_name,
+                    "target_product_id": str(target.id),
+                    "linked_count": len(linked_ids),
+                    "sample_sale_ids": [str(i) for i in linked_ids[:20]],
+                    "alias_added": body.raw_name,
+                },
+                triggered_by="ui:data_records",
+                actor_user_id=user.user_id,
+                context={"endpoint": "sales/product-link-queue"},
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    await session.flush()
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "sales_product_bulk_linked")
+    return LinkProductQueueResponse(linked=len(linked_ids), truncated=truncated)
 
 
 @router.get("/{sale_id}", response_model=SaleEntryResponse, summary="Get sale by ID")

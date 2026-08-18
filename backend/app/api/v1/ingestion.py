@@ -11,6 +11,7 @@ import hashlib
 import time
 import uuid
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, cast
@@ -45,6 +46,8 @@ from app.application.services import (
 from app.application.services import ingestion_import_service as _iis
 from app.application.services.column_mapping_service import (
     CANONICAL_FIELDS,
+    CROSS_ENTITY_FORBIDDEN_FIELDS,
+    CROSS_ENTITY_TARGETS,
     MASTER_REFERENCE_TARGETS,
     REQUIRED_ALTERNATIVES,
     REQUIRED_FIELDS,
@@ -192,7 +195,9 @@ from app.schemas.ingestion import (
     PurchaseGroupLine,
     PurchaseGroupsRequest,
     PurchaseGroupsResponse,
+    RereadApplyRequest,
     RereadApplyStartResponse,
+    RereadCorrespondenceResponse,
     RereadCounts,
     RereadItem,
     RereadPreviewResponse,
@@ -615,7 +620,10 @@ async def _build_master_previews(
             ]
             if existing_customers is None:
                 existing_customers = await customer_repo.list_for_dedup(tenant_id)
-            preview = customer_import_service.build_import_preview(records, existing_customers)
+            customer_index = await customer_import_service.build_existing_index_with_codes(
+                session, tenant_id, existing_customers
+            )
+            preview = customer_import_service.build_import_preview(records, customer_index)
         else:
             _fields = CANONICAL_FIELDS["supplier"]
             records = [
@@ -624,7 +632,10 @@ async def _build_master_previews(
             ]
             if existing_suppliers is None:
                 existing_suppliers = await supplier_repo.list_for_dedup(tenant_id)
-            preview = supplier_import_service.build_import_preview(records, existing_suppliers)
+            supplier_index = await supplier_import_service.build_existing_index_with_codes(
+                session, tenant_id, existing_suppliers
+            )
+            preview = supplier_import_service.build_import_preview(records, supplier_index)
 
         samples = [
             MasterPreviewSample(
@@ -1293,6 +1304,7 @@ async def delete_file(
         restored={
             "products": int(_revertido.get("productos_restaurados", 0)),
             "masters": int(_revertido.get("maestros_restaurados", 0)),
+            "cross_fields": int(_revertido.get("campos_cross_restaurados", 0)),
         },
         conservados=_conservados,
     )
@@ -1668,17 +1680,6 @@ async def confirm_file(
     _flat_mappings = [m for m in body.column_mappings if m.context_id is None]
     _ctx_mappings = [m for m in body.column_mappings if m.context_id is not None]
 
-    # ¿El importador va a tomar el camino de UNA sola tabla?
-    #
-    # Es la negación EXACTA del despacho de `insert_confirmed_data`
-    # (`if inferred_type == "mixed" or summary.get("multi_sheet")` →
-    # `_insert_multisheet_data`), y por eso vale como respuesta a la pregunta que
-    # importa acá: el cobro del envío (`_cobrar_envios_de_la_hoja`) es un closure
-    # anidado dentro del camino multi-hoja, así que **cualquier otro camino no
-    # cobra envío**. Estaba calculado adentro del gate de replay; subió de scope
-    # porque ahora lo consultan dos guards y una segunda copia podría divergir.
-    _plano = _inferred_type != "mixed" and not _summary_for_ctx.get("multi_sheet")
-
     # Etiqueta legible de una hoja para los mensajes de error. `context_id` es un
     # identificador interno ("sheet:precios y stock ") — mostrárselo al usuario,
     # con su espacio final incluido, no lo ayuda a encontrar la hoja.
@@ -1693,7 +1694,18 @@ async def confirm_file(
 
     # Mapeos agrupados por hoja — los usan la validación por contexto y el
     # snapshot que se traza al confirmar.
+    #
+    # F-H6.f: los mapeos del camino plano (`_flat_mappings`, `context_id is
+    # None`) entran bajo la clave sintética `"table"` — la misma que usa el
+    # resto del archivo para nombrar la tabla única (ver `context_id or
+    # "table"` en los demás puntos de este endpoint). Sin esto, una decisión
+    # de envío o de costo contra una tabla suelta encontraba el diccionario
+    # vacío y rebotaba con "la hoja «table» no tiene ninguna columna mapeada"
+    # aunque la columna SÍ estuviera mapeada — invisible mientras el camino
+    # plano no cobraba nada (8a/8b lo arreglaron; esto lo destapó).
     _mappings_por_contexto: dict[str, list[ColumnMapping]] = defaultdict(list)
+    if _flat_mappings:
+        _mappings_por_contexto["table"] = list(_flat_mappings)
     for _m in _ctx_mappings:
         _mappings_por_contexto[_m.context_id or ""].append(_m)
 
@@ -1933,6 +1945,38 @@ async def confirm_file(
             by_key[parsed.field].append(m.source_column)
         return {k: cols for k, cols in by_key.items() if len(cols) > 1}
 
+    def _invalid_cross_targets(
+        entity_type: str, mappings: list[ColumnMapping]
+    ) -> list[str]:
+        """F-D (sub-commit 2): mapeos cross-sección fuera de la allowlist
+        (``CROSS_ENTITY_TARGETS``) o hacia un campo prohibido
+        (``CROSS_ENTITY_FORBIDDEN_FIELDS``, defensa en profundidad —
+        ``stock_units`` no puede llegar acá ni aunque alguien lo agregue a la
+        allowlist por error).
+
+        ``_resolve_target_cols`` del importador ya descarta en silencio (con
+        un log) cualquier ``kind == "cross"``. Lo que este validador rechaza
+        nunca llega a esa función — se corta acá, con un 422 explícito.
+        """
+        allowed = CROSS_ENTITY_TARGETS.get(entity_type, {})
+        invalid: list[str] = []
+        for m in mappings:
+            parsed = parse_target(m.target_field)
+            if parsed.kind != "cross" or parsed.entity is None:
+                continue
+            if parsed.field in CROSS_ENTITY_FORBIDDEN_FIELDS or parsed.field not in (
+                allowed.get(parsed.entity) or frozenset()
+            ):
+                invalid.append(m.target_field)
+        return invalid
+
+    def _cross_target_detail(targets: list[str]) -> str:
+        return (
+            "Estos campos no se pueden completar desde esta sección: "
+            f"{', '.join(sorted(set(targets)))}. Sacalos del mapeo o mandalos "
+            "a «Ignorar»."
+        )
+
     def _custom_collision_detail(colisiones: dict[str, list[str]]) -> str:
         partes = [
             f"«{key}» ← {', '.join(cols)}" for key, cols in sorted(colisiones.items())
@@ -2054,6 +2098,15 @@ async def confirm_file(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=_custom_collision_detail(_cf_colisiones),
                 )
+            if _cross_invalidos := _invalid_cross_targets(_entity_type, _flat_mappings):
+                await _emit_validation_reject(
+                    "cross_target_no_permitido",
+                    {"entity_type": _entity_type, "targets": _cross_invalidos},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=_cross_target_detail(_cross_invalidos),
+                )
 
     # Validación de requeridos — por contexto (multi-hoja), solo contextos incluidos
     if _ctx_mappings:
@@ -2117,6 +2170,22 @@ async def confirm_file(
                         detail=(
                             f"En la hoja «{_hoja(_cid)}»: "
                             f"{_custom_collision_detail(_cf_colisiones)}"
+                        ),
+                    )
+                if _cross_invalidos := _invalid_cross_targets(_ent, _ms):
+                    await _emit_validation_reject(
+                        "cross_target_no_permitido",
+                        {
+                            "context_id": _cid,
+                            "entity_type": _ent,
+                            "targets": _cross_invalidos,
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"En la hoja «{_hoja(_cid)}»: "
+                            f"{_cross_target_detail(_cross_invalidos)}"
                         ),
                     )
 
@@ -2207,57 +2276,6 @@ async def confirm_file(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=_detalle_plano,
         )
-
-    # ── Un archivo de UNA sola tabla no puede traer costos de compra ────────────
-    # El camino plano del importador NO cobra el envío ni aplica las decisiones de
-    # costo, y no lo hace de tres maneras a la vez:
-    #   1. `_cobrar_envios_de_la_hoja` es un closure anidado dentro del camino
-    #      multi-hoja: desde el plano es estructuralmente inalcanzable;
-    #   2. el plano llama al planificador con `ctx_id=None` —que busca la decisión
-    #      bajo la clave `""`— mientras la API la manda con el `context_id` real,
-    #      así que la decisión se valida, el usuario la ve aceptada y el import la
-    #      ignora;
-    #   3. los avisos de costo nunca llegan a `counts`, así que tampoco hay rastro.
-    #
-    # Arreglar el camino plano de verdad es otra fase. Lo que NO se puede hacer
-    # mientras tanto es aceptar el archivo: importar una compra sin cobrarle el
-    # envío que el usuario mapeó deja un costo más bajo que el real, y con él un
-    # margen inflado que nadie va a salir a buscar. Se rechaza y se dice la salida.
-    #
-    # **No está gateado por tenant**: no cobrar un envío mapeado es incorrecto con
-    # el motor de costos prendido o apagado. La compuerta gobierna el reparto, no
-    # el silencio.
-    if _plano:
-        _targets_planos = {m.target_field for m in _flat_mappings} | {
-            m.target_field for m in _ctx_mappings
-        }
-        _columnas_de_costo = sorted(
-            _targets_planos & {"shipping_cost", "shipping_cost_line"}
-        )
-        if _columnas_de_costo or body.purchase_cost_decisions:
-            _que_pasa = (
-                "tiene columnas de envío mapeadas"
-                if _columnas_de_costo
-                else "trae decisiones sobre el costo de compra"
-            )
-            await _emit_validation_reject(
-                "costos_de_compra_en_archivo_plano",
-                {
-                    "columnas": _columnas_de_costo,
-                    "decisiones": bool(body.purchase_cost_decisions),
-                },
-            )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"«{record.original_filename}» es un archivo de una sola tabla "
-                    f"y {_que_pasa}. Véktor todavía no sabe repartir ni cobrar el "
-                    "envío en este formato: si lo importara, la compra quedaría con "
-                    "un costo más bajo que el real y el margen inflado. Subilo como "
-                    "libro con hojas separadas (una por sección), o sacá las columnas "
-                    "de envío del mapeo y cargá ese costo como un gasto aparte."
-                ),
-            )
 
     # ── F-H6.b: la decisión sobre envíos sin comprobante apunta a una hoja real ──
     # Mismo criterio que el efecto de inventario: una decisión que no se puede
@@ -2837,6 +2855,10 @@ async def confirm_file(
         # detalle por producto engordaría el JSONB (justo lo que ese bloque
         # existe para evitar) y lo devolvería en la respuesta del endpoint.
         _product_details = counts.pop("product_details", []) or []
+        # F-D: mismo motivo — ya viene armado (action/before/after) desde
+        # `_apply_cross_field_buffer`, engordaría el JSONB de `counts` igual
+        # que `product_details`.
+        _cross_field_details = counts.pop("cross_field_details", []) or []
 
         # Maestros creados/modificados por este import. Sin esto, borrar el
         # archivo dejaba vivos sus clientes y proveedores, sin manera de saber de
@@ -2858,6 +2880,7 @@ async def confirm_file(
             file_id=file_id,
             product_details=_product_details,
             master_details=_master_details,
+            cross_field_details=_cross_field_details,
         )
         _timings.mark("ledger_reversa")
 
@@ -3150,6 +3173,16 @@ async def confirm_file(
             f"{counts['sin_producto']} compra(s) sin producto detallado crearon un producto "
             "incompleto. Completá precio de venta y datos en Productos."
         )
+    # F-S.0: no promete una pantalla que todavía no existe — el backend de la
+    # cola de vinculación (GET/POST /sales/product-link-queue) está listo,
+    # pero sin frontend propio el aviso no puede decir "resolvelas desde la
+    # cola" como si hubiera un botón esperando. Se avisa el hecho, sin la
+    # acción.
+    if counts.get("ventas_sin_producto"):
+        warnings.append(
+            f"{counts['ventas_sin_producto']} venta(s) no encontraron su producto en el "
+            "catálogo y quedaron pendientes de completar."
+        )
     # F7d: taxonomía reconciliada de resolución de referencia. "anonimo" (venta de
     # mostrador / compra sin proveedor informado) NUNCA avisa — es el caso normal.
     # Solo "no_resuelto" (trajo una referencia que no matcheó contra ningún
@@ -3257,6 +3290,33 @@ async def confirm_file(
         warnings.append(
             f"{counts['filas_riesgo_a_otros']} fila(s) con datos faltantes o inválidos en "
             "columnas riesgosas se enviaron a «Otros» para que las completes."
+        )
+    # F-D: mapeos cross-sección (venta→cliente, compra→proveedor/producto) que el
+    # usuario mapeó a mano. `descartados` = todavía sin implementar (hoy, solo
+    # producto — acoplado al motor de costos de F-H6, ver `_CROSS_CAPTURE_KINDS`).
+    # `aplicados`/`ya_tenian_dato` (7f) son hechos consumados de ESTE confirm —
+    # se escriben `fill_if_empty`, nunca pisan un dato que la ficha ya tenía.
+    if counts.get("targets_cruzados_descartados"):
+        warnings.append(
+            f"{counts['targets_cruzados_descartados']} columna(s) mapeadas a un campo de "
+            "otra sección no se importaron todavía."
+        )
+    if counts.get("cross_fields_aplicados"):
+        warnings.append(
+            f"{counts['cross_fields_aplicados']} campo(s) de cliente/proveedor se "
+            "completaron con datos de otra sección del archivo (venta→cliente, "
+            "compra→proveedor)."
+        )
+    if counts.get("cross_fields_ya_tenian_dato"):
+        warnings.append(
+            f"{counts['cross_fields_ya_tenian_dato']} campo(s) de otra sección no se "
+            "aplicaron porque la ficha ya tenía ese dato cargado."
+        )
+    if counts.get("cross_fields_invalidos"):
+        warnings.append(
+            f"{counts['cross_fields_invalidos']} campo(s) de otra sección no se "
+            "aplicaron porque el valor de la celda no es válido para ese campo "
+            "(ej. una condición de IVA o un tipo de cliente que no existe)."
         )
 
     # F-F.3: el descuento ya se aplicó en el confirm, así que los dos avisos son de
@@ -3445,6 +3505,9 @@ async def reread_preview(
         counts=RereadCounts(**preview.counts()),
         legacy_fallback=preview.legacy_fallback,
         sample_changes=preview.sample_changes,
+        correspondence=RereadCorrespondenceResponse(
+            **asdict(preview.correspondence)
+        ),
     )
 
 
@@ -3460,22 +3523,49 @@ async def reread_preview(
 )
 async def reread_apply(
     file_id: uuid.UUID,
+    payload: RereadApplyRequest | None = None,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> RereadApplyStartResponse:
     """El apply puede insertar miles de filas (minutos). Corre en background: se
     crea el run, se encola la task y se devuelve el ``run_id`` para que el frontend
     haga polling de ``GET /reread/runs/{run_id}``. Guard anti-duplicado: una sola
-    relectura RUNNING por tenant."""
+    relectura RUNNING por tenant.
+
+    **F-R:** si la relectura anularía registros que el archivo fresco ya no
+    repone, responde **409 `REREAD_WOULD_LOSE_DATA`** con el desglose por entidad
+    en vez de aplicar. Reintentar con ``accept_data_loss=true`` la aplica igual —
+    la decisión es del usuario, el silencio no."""
     from app.application.services import reread_service  # noqa: PLC0415
 
     try:
         run = await reread_service.start_background_apply(
-            session, file_id, tenant.tenant_id
+            session,
+            file_id,
+            tenant.tenant_id,
+            accept_data_loss=bool(payload and payload.accept_data_loss),
         )
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
+        ) from exc
+    except reread_service.RereadWouldLoseDataError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "REREAD_WOULD_LOSE_DATA",
+                "message": str(exc),
+                "correspondence": asdict(exc.correspondence),
+            },
+        ) from exc
+    except reread_service.RereadCorrespondenceUnavailableError as exc:
+        # Fail-closed: no se pudo leer el archivo para verificar qué se pierde.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "No se pudo leer el archivo para verificar qué cambiaría la "
+                "relectura. Reintentá en unos segundos."
+            ),
         ) from exc
     except ValueError as exc:
         raise HTTPException(

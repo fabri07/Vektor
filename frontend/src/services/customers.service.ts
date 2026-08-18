@@ -27,6 +27,8 @@ export interface CustomerResponse {
   id: string;
   tenant_id: string;
   name: string;
+  /** Código Véktor permanente (CLI-0001), asignado una sola vez por F-ID. */
+  vektor_code: string | null;
   customer_type: string | null;
   last_name: string | null;
   doc_type: string | null;
@@ -118,6 +120,19 @@ export type ImportItemStatus =
   | "duplicate_in_file"
   | "needs_review";
 
+/**
+ * F-N: PROPUESTA de split nombre/apellido — nunca se aplica sola. El backend
+ * la calcula sólo para filas "create" sin `last_name` propio; el usuario la
+ * acepta, la corrige, o deja el nombre entero, antes de confirmar el import.
+ */
+export interface NameSplitSuggestion {
+  status: "proposed" | "not_applicable" | "ambiguous";
+  first_name: string | null;
+  last_name: string | null;
+  reason: string;
+  confidence_basis: string;
+}
+
 export interface CustomerImportPreviewItem {
   row_index: number;
   status: ImportItemStatus;
@@ -125,6 +140,7 @@ export interface CustomerImportPreviewItem {
   existing_id: string | null;
   existing_name: string | null;
   issues: string[];
+  name_split_suggestion?: NameSplitSuggestion | null;
 }
 
 export interface CustomerImportPreviewResponse {
@@ -144,6 +160,9 @@ export interface CustomerImportConfirmResponse {
   skipped: number;
   created_ids: string[];
   updated_ids: string[];
+  // F-I(B): filas con clave (documento/email/teléfono/business_code) repetida
+  // dentro del mismo archivo — capturadas en la bandeja "Otros" para revisión.
+  sent_to_others: number;
 }
 
 const PAGE_SIZE = 200;
@@ -238,13 +257,18 @@ export const customersService = {
     return res.data;
   },
 
-  /** Confirma el import: upsert idempotente de las filas elegidas. */
+  /** Confirma el import: upsert idempotente de las filas elegidas.
+   *
+   * `sourceUploadId` es el que devolvió `importPreview` — F-I(B): sin él, una
+   * fila con clave repetida en el archivo igual va a "Otros" al confirmar,
+   * pero queda sin vincular al archivo de origen. */
   async importConfirm(
     rows: CustomerImportRow[],
+    sourceUploadId?: string | null,
   ): Promise<CustomerImportConfirmResponse> {
     const res = await api.post<CustomerImportConfirmResponse>(
       "/customers/import/confirm",
-      { rows },
+      { rows, source_upload_id: sourceUploadId ?? null },
     );
     return res.data;
   },

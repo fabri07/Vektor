@@ -66,6 +66,9 @@ class CustomerResponse(BaseModel):
     credit_limit: Decimal | None = None
     created_at: datetime
     deactivated_at: datetime | None = None
+    # F-ID: código Véktor permanente, sólo lectura (asignado por
+    # entity_code_service, nunca editable desde acá).
+    vektor_code: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -199,6 +202,18 @@ class CustomerImportRow(BaseModel):
     birthday: date | None = None
 
 
+class NameSplitSuggestionSchema(BaseModel):
+    """F-N: PROPUESTA de split nombre/apellido — nunca se aplica sola. El
+    frontend la muestra y el usuario decide (aceptar, corregir, o dejar el
+    nombre entero) antes de confirmar el import."""
+
+    status: str  # "proposed" | "not_applicable" | "ambiguous"
+    first_name: str | None = None
+    last_name: str | None = None
+    reason: str
+    confidence_basis: str
+
+
 class CustomerImportPreviewItem(BaseModel):
     row_index: int
     status: str  # "create" | "update" | "invalid" | "duplicate_in_file" | "needs_review"
@@ -206,6 +221,7 @@ class CustomerImportPreviewItem(BaseModel):
     existing_id: UUID | None = None
     existing_name: str | None = None
     issues: list[str] = Field(default_factory=list)
+    name_split_suggestion: NameSplitSuggestionSchema | None = None
 
 
 class CustomerImportPreviewResponse(BaseModel):
@@ -223,6 +239,11 @@ class CustomerImportPreviewResponse(BaseModel):
 
 class CustomerImportConfirmRequest(BaseModel):
     rows: list[CustomerImportRow] = Field(default_factory=list)
+    # F-I(B): el preview ya devuelve este id (archivo persistido al parsear) —
+    # reenviarlo acá permite que una fila duplicada-en-archivo quede linkeada
+    # al capturarse en "Otros". Opcional/backward-compat: sin él, la captura
+    # igual funciona, sólo sin `source_upload_id` en el UnclassifiedRecord.
+    source_upload_id: UUID | None = None
 
 
 class CustomerImportConfirmResponse(BaseModel):
@@ -231,6 +252,8 @@ class CustomerImportConfirmResponse(BaseModel):
     skipped: int
     created_ids: list[UUID] = Field(default_factory=list)
     updated_ids: list[UUID] = Field(default_factory=list)
+    # F-I(B): filas con clave repetida dentro del archivo, capturadas en "Otros".
+    sent_to_others: int = 0
 
 
 class UpdateCustomerRequest(BaseModel):

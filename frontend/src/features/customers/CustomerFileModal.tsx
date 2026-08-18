@@ -10,6 +10,7 @@ import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 import {
   customersService,
   type CustomerExtractionResponse,
+  type CustomerImportPreviewItem,
   type CustomerImportPreviewResponse,
 } from "@/services/customers.service";
 import { useToastStore } from "@/stores/toastStore";
@@ -82,12 +83,22 @@ export function CustomerFileModal({
       const rows = (preview?.items ?? [])
         .filter((it) => it.status === "create" || it.status === "update")
         .map((it) => it.customer);
-      return customersService.importConfirm(rows);
+      return customersService.importConfirm(rows, preview?.source_upload_id);
     },
     onSuccess: async (result) => {
+      const skippedSuffix = [
+        result.skipped ? `${result.skipped} salteados` : null,
+        // F-I(B): fila con clave repetida dentro del archivo — va a "Otros",
+        // no se fusiona sola con la fila anterior.
+        result.sent_to_others
+          ? `${result.sent_to_others} a revisar en Otros`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
       toast(
         `Import listo: ${result.created} creados, ${result.updated} actualizados` +
-          (result.skipped ? `, ${result.skipped} salteados.` : "."),
+          (skippedSuffix ? `, ${skippedSuffix}.` : "."),
         "success",
       );
       await onImported();
@@ -95,6 +106,27 @@ export function CustomerFileModal({
     },
     onError: () => toast("No se pudo confirmar el import.", "error"),
   });
+
+  // F-N: acepta la propuesta de split para ESA fila — nunca se aplica sola.
+  // Actualiza el `customer` local (lo que viaja a confirm), y limpia la
+  // propuesta para que la fila deje de mostrar el hint una vez aceptada.
+  function applyNameSplitSuggestion(rowIndex: number) {
+    setPreview((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        items: prev.items.map((it) => {
+          if (it.row_index !== rowIndex || !it.name_split_suggestion) return it;
+          const { first_name, last_name } = it.name_split_suggestion;
+          return {
+            ...it,
+            customer: { ...it.customer, name: first_name, last_name },
+            name_split_suggestion: null,
+          };
+        }),
+      };
+    });
+  }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -236,6 +268,7 @@ export function CustomerFileModal({
                       </td>
                       <td className="px-3 py-1.5 text-vk-text-primary">
                         {it.customer.name ?? "—"}
+                        <NameSplitHint item={it} onApply={applyNameSplitSuggestion} />
                       </td>
                       <td className="px-3 py-1.5 text-vk-text-secondary">
                         {it.customer.cuit ?? it.customer.dni ?? "—"}
@@ -302,6 +335,45 @@ function SummaryCard({
       <p className="text-lg font-semibold">{value}</p>
       <p className="text-[11px] uppercase tracking-wide">{label}</p>
     </div>
+  );
+}
+
+/**
+ * F-N: propuesta de split nombre/apellido — nunca se aplica sola. Sólo
+ * aparece para filas "create" sin `last_name` propio (el backend no la
+ * calcula para el resto). `not_applicable` (razón social / una sola
+ * palabra) no muestra nada — no hay nada que ofrecer.
+ */
+function NameSplitHint({
+  item,
+  onApply,
+}: {
+  item: CustomerImportPreviewItem;
+  onApply: (rowIndex: number) => void;
+}) {
+  const s = item.name_split_suggestion;
+  if (!s || s.status === "not_applicable") return null;
+  if (s.status === "ambiguous") {
+    return (
+      <p className="mt-0.5 text-[11px] text-vk-text-muted" title={s.reason}>
+        ¿Nombre y apellido? No está claro — revisalo si hace falta.
+      </p>
+    );
+  }
+  return (
+    <p className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-vk-text-muted">
+      <span>
+        ¿Nombre: <strong>{s.first_name}</strong> / Apellido:{" "}
+        <strong>{s.last_name}</strong>?
+      </span>
+      <button
+        type="button"
+        onClick={() => onApply(item.row_index)}
+        className="rounded border border-vk-blue/40 px-1.5 py-0.5 text-vk-blue hover:bg-vk-blue/10"
+      >
+        Aplicar
+      </button>
+    </p>
   );
 }
 
