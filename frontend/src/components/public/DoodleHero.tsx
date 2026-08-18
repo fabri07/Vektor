@@ -19,28 +19,28 @@ export function DoodleHero() {
         {/* Título — izquierda */}
         <div className="max-w-xl">
           <p className="mb-4 text-xs font-semibold uppercase tracking-[0.22em] text-vektor-teal">
-            Salud financiera para negocios argentinos
+            Tomá las mejores decisiones para tu negocio
           </p>
           <h1 className="font-display text-[46px] font-bold uppercase leading-[0.95] tracking-tight text-vektor-white sm:text-[64px] lg:text-[72px]">
-            Tomá las mejores decisiones.
+            Sabé qué hacer antes de que sea demasiado tarde.
           </h1>
           <p className="mt-6 text-lg leading-8 text-vektor-body">
-            Véktor entiende tu kiosco, tu local de limpieza o tu tienda de
-            decoración y te dice cómo viene la caja, qué riesgo está creciendo y
-            cuál es la próxima acción concreta.
+            Véktor conecta tus ventas, gastos, stock, proveedores y clientes
+            para mostrarte qué está pasando, qué puede complicarse y dónde
+            conviene actuar primero.
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             <Link
               href="/solicitar-acceso?src=hero_primary"
               className="inline-flex items-center justify-center rounded-full bg-white px-8 py-3.5 text-sm font-semibold text-vektor-night transition hover:-translate-y-0.5 hover:bg-white/90"
             >
-              Pedir acceso
+              Quiero probar Véktor
             </Link>
             <Link
               href="/login?src=hero_secondary"
               className="inline-flex items-center justify-center rounded-full border border-white/25 px-8 py-3.5 text-sm font-semibold text-vektor-white backdrop-blur-sm transition hover:border-white/50"
             >
-              Ya tengo cuenta
+              Entrar a mi cuenta
             </Link>
           </div>
         </div>

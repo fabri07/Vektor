@@ -26,7 +26,7 @@ export default function ForgotPasswordPage() {
         <div className="flex-1">
           <VektorLogo variant="full" size="lg" theme="dark" />
           <p className="mt-3 text-base text-vk-text-muted">
-            Recuperá el acceso a tu negocio.
+            Volvé a tus números, sin vueltas.
           </p>
         </div>
       </div>
@@ -38,10 +38,11 @@ export default function ForgotPasswordPage() {
           </div>
 
           <h1 className="mb-2 text-2xl font-semibold text-vk-navy">
-            Recuperar contraseña
+            Recuperá tu acceso
           </h1>
           <p className="mb-8 text-sm text-vk-text-secondary">
-            Ingresá tu email y te enviaremos instrucciones para restablecerla.
+            Escribí el email de tu cuenta. Te enviaremos un enlace para crear
+            una nueva contraseña.
           </p>
 
           <form onSubmit={handleSubmit} className="space-y-5">
@@ -50,7 +51,7 @@ export default function ForgotPasswordPage() {
                 htmlFor="forgot-email"
                 className="mb-1.5 block text-sm font-medium text-vk-text-secondary"
               >
-                Email
+                Email de tu cuenta
               </label>
               <input
                 id="forgot-email"
@@ -58,7 +59,7 @@ export default function ForgotPasswordPage() {
                 autoComplete="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                placeholder="tu@email.com"
+                placeholder="nombre@empresa.com"
                 className="w-full rounded-lg border border-vk-border-w bg-vk-surface-w px-4 py-3 text-[15px] text-vk-text-primary transition-colors placeholder:text-vk-text-placeholder focus:border-vk-blue/40 focus:outline-none focus:ring-[3px] focus:ring-vk-blue/15"
               />
             </div>
@@ -74,12 +75,12 @@ export default function ForgotPasswordPage() {
               disabled={status === "sending" || !email}
               className="flex w-full items-center justify-center rounded-lg bg-vk-blue px-4 py-3 text-[15px] font-semibold text-white transition-colors hover:bg-vk-blue-hover focus:outline-none focus:ring-2 focus:ring-vk-blue/40 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {status === "sending" ? "Enviando..." : "Enviar link"}
+              {status === "sending" ? "Enviando..." : "Enviar enlace de recuperación"}
             </button>
 
             <p className="text-center text-sm text-vk-text-secondary">
               <Link href="/login" className="font-medium text-vk-blue hover:text-vk-blue-hover">
-                Volver a iniciar sesión
+                Volver al ingreso
               </Link>
             </p>
           </form>

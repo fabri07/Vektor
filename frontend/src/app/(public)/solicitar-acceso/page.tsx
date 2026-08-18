@@ -30,13 +30,13 @@ export default function SolicitarAccesoPage() {
       <PublicNav />
       <main className="pt-16">
         <PageHeader
-          eyebrow="Acceso por solicitud"
-          title="Pedí acceso a Véktor"
+          eyebrow="Primer paso"
+          title="Contanos cómo se mueve tu negocio"
           subtitle={
             <>
-              Revisamos cada solicitud a mano: queremos entender tu negocio antes de
-              darte una cuenta, para asegurarnos de que podemos ayudarte. Son{" "}
-              {REQUIRED_FIELD_COUNT} preguntas y te lleva unos tres minutos.
+              Revisamos cada solicitud para confirmar que Véktor pueda darte
+              una lectura útil desde el inicio. Son {REQUIRED_FIELD_COUNT}{" "}
+              respuestas breves y suele llevar menos de tres minutos.
             </>
           }
         />

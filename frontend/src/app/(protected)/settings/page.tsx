@@ -417,7 +417,9 @@ function GeneralTab() {
         </h2>
         <div className="space-y-3">
           <a
-            href="#"
+            href="/terminos"
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex items-center justify-between rounded-lg px-3 py-2.5 text-sm text-vk-text-primary hover:bg-vk-bg-light transition-colors"
           >
             <span>Terminos de servicio</span>
@@ -433,7 +435,9 @@ function GeneralTab() {
             </svg>
           </a>
           <a
-            href="#"
+            href="/privacidad"
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex items-center justify-between rounded-lg px-3 py-2.5 text-sm text-vk-text-primary hover:bg-vk-bg-light transition-colors"
           >
             <span>Politica de privacidad</span>

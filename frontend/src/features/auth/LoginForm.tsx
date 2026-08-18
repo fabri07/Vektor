@@ -248,12 +248,12 @@ export function LoginForm() {
         {login.isPending && (
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
         )}
-        {login.isPending ? "Ingresando..." : "Iniciar sesión"}
+        {login.isPending ? "Ingresando..." : "Entrar a Véktor"}
       </button>
 
       <p className="text-center text-sm">
         <a href="/forgot-password" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
-          ¿Olvidaste tu contraseña?
+          Necesito recuperar mi contraseña
         </a>
       </p>
 
@@ -263,7 +263,9 @@ export function LoginForm() {
           <div className="w-full border-t border-vk-border-w" />
         </div>
         <div className="relative flex justify-center text-xs uppercase">
-          <span className="bg-vk-surface-w px-2 text-vk-text-muted">o</span>
+          <span className="bg-vk-surface-w px-2 text-vk-text-muted">
+            también podés ingresar con
+          </span>
         </div>
       </div>
 
@@ -279,7 +281,7 @@ export function LoginForm() {
         ) : (
           <GoogleIcon />
         )}
-        {googleLoading ? "Redirigiendo..." : "Continuar con Google"}
+        {googleLoading ? "Redirigiendo..." : "Google"}
       </button>
 
       {/*
@@ -290,8 +292,8 @@ export function LoginForm() {
         es cerrado y el alta la aprueba el dueño a mano.
       */}
       <p className="text-center text-xs text-vk-text-muted">
-        Si ese email todavía no tiene cuenta, te llevamos a pedir acceso: el alta
-        la aprobamos a mano.
+        Si tu email todavía no está habilitado, vas a poder completar la
+        solicitud de acceso. Revisamos cada alta antes de activar la cuenta.
       </p>
 
       {/*
@@ -301,9 +303,9 @@ export function LoginForm() {
         /register) para no gastar un salto de más.
       */}
       <p className="text-center text-sm text-vk-text-secondary">
-        ¿Todavía no tenés cuenta?{" "}
+        ¿Querés probar Véktor?{" "}
         <a href="/solicitar-acceso?src=login" className="font-medium text-vk-blue hover:text-vk-blue-hover focus:outline-none focus:underline">
-          Pedí acceso
+          Solicitá tu acceso
         </a>
       </p>
     </form>

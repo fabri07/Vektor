@@ -29,9 +29,9 @@ const RUBROS = VERTICAL_OPTIONS.map(({ name, anchor }) => ({
 }));
 
 const NAV_LINKS = [
-  { label: "Quiénes somos", href: "/quienes-somos" },
-  { label: "Precios", href: "/precios" },
-  { label: "Contactanos", href: "/contacto" },
+  { label: "Por qué Véktor", href: "/quienes-somos" },
+  { label: "Planes", href: "/precios" },
+  { label: "Hablemos", href: "/contacto" },
 ];
 
 export function PublicNav() {
@@ -122,7 +122,7 @@ export function PublicNav() {
               aria-expanded={rubrosOpen}
               className="flex items-center gap-1 rounded-full px-4 py-2 text-sm font-medium text-vektor-body hover:text-vektor-white"
             >
-              Rubros
+              Soluciones por rubro
               <ChevronDown
                 className={`h-4 w-4 transition-transform ${rubrosOpen ? "rotate-180" : ""}`}
               />
@@ -170,7 +170,7 @@ export function PublicNav() {
             href="/solicitar-acceso?src=nav_desktop"
             className="inline-flex rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-5 py-2.5 text-sm font-semibold text-white hover:brightness-95"
           >
-            Pedir acceso
+            Quiero probar Véktor
           </Link>
         </div>
 
@@ -190,7 +190,7 @@ export function PublicNav() {
       {mobileOpen && (
         <div className="border-t border-white/10 bg-vektor-night px-6 py-4 lg:hidden">
           <p className="px-1 pb-1 text-xs font-semibold uppercase tracking-widest text-vektor-muted">
-            Rubros
+            Soluciones por rubro
           </p>
           {RUBROS.map((r) => (
             <Link
@@ -226,7 +226,7 @@ export function PublicNav() {
               onClick={() => setMobileOpen(false)}
               className="inline-flex justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-5 py-2.5 text-sm font-semibold text-white"
             >
-              Pedir acceso
+              Quiero probar Véktor
             </Link>
           </div>
         </div>

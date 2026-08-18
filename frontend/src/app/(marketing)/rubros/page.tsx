@@ -38,12 +38,12 @@ export default function RubrosPage() {
     <div className="mx-auto max-w-5xl px-6">
       <section className="pt-20 sm:pt-28">
         <h1 className="text-balance font-display text-4xl font-bold uppercase leading-[1.05] tracking-tight text-vektor-white sm:text-6xl">
-          Cada rubro pierde la plata en un lugar distinto
+          El punto débil cambia según el rubro. Véktor también.
         </h1>
         <p className="mt-6 max-w-[58ch] text-lg leading-8 text-vektor-body">
-          Véktor no es un sistema genérico con el nombre de tu negocio arriba. Los
-          umbrales, las alertas y los campos que usa cambian según a qué te dedicás.
-          Estos son los seis rubros que entiende hoy, y lo que mira en cada uno.
+          Un kiosco no inmoviliza plata igual que una tienda de ropa. Por eso
+          Véktor adapta indicadores, alertas y datos a la lógica real de cada
+          actividad. Hoy entiende estos seis rubros desde adentro.
         </p>
       </section>
 
@@ -120,14 +120,14 @@ export default function RubrosPage() {
 
       <section className="border-t border-vektor-border/70 py-20">
         <p className="max-w-[52ch] text-lg leading-8 text-vektor-body">
-          ¿Tu negocio es de otro rubro? Contanos de qué es. Sumamos rubros cuando
-          entendemos cómo se les mueve la plata, no antes.
+          ¿Tu rubro todavía no está? Contanos cómo se mueve tu negocio. Si
+          Véktor puede leerlo con precisión, queremos demostrártelo.
         </p>
         <Link
           href="/solicitar-acceso?src=rubros"
           className="mt-8 inline-flex items-center justify-center rounded-full bg-white px-7 py-3 text-sm font-semibold text-vektor-night transition hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vektor-teal focus-visible:ring-offset-4 focus-visible:ring-offset-vektor-night"
         >
-          Pedir acceso
+          Quiero contarles sobre mi negocio
         </Link>
       </section>
     </div>

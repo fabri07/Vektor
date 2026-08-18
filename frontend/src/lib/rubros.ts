@@ -62,63 +62,63 @@ const DOODLES: Record<Vertical, ComponentType<{ drawDelay?: number }>> = {
 
 const CONTENIDO: Record<Vertical, RubroContenido> = {
   kiosco_almacen: {
-    tension: "Todo pasa por la caja y por la mercadería, y las dos se mueven todo el día.",
+    tension: "Que el movimiento diario no te tape el margen.",
     respuesta:
-      "Véktor te ordena las ventas del día, te avisa cuándo se te está por acabar un producto y te muestra qué margen real te deja cada cosa que vendés. Cargás una compra al proveedor y el stock se actualiza solo; vendés y el inventario baja.",
+      "Véktor conecta cada compra y cada venta para que sepas qué falta y qué te deja plata de verdad. El stock se actualiza con el movimiento del negocio, sin rehacer cuentas a mano.",
     capacidades: [
-      "Cierre de caja diario con arqueo de efectivo",
-      "Alertas de quiebre antes de quedarte sin el producto",
-      "Margen por producto para saber qué te conviene reponer",
+      "Cerrá la caja con diferencias a la vista",
+      "Reponé antes de perder la venta",
+      "Priorizá productos por margen y rotación",
     ],
   },
   limpieza: {
-    tension: "Vendés a cuenta, y el fiado no se ve en la caja hasta que ya es tarde.",
+    tension: "Vendiste. Ahora necesitás saber cuándo esa venta se vuelve plata.",
     respuesta:
-      "Véktor separa lo que es costo de mercadería de lo que es gasto fijo, y te muestra qué clientes te deben y cuánto. Así sabés si estás ganando plata de verdad o si la cuenta corriente te está comiendo el efectivo.",
+      "Véktor separa mercadería, gastos y cuentas por cobrar para mostrarte el resultado real y el efectivo disponible. Así podés cobrar a tiempo, cuidar la caja y defender el margen.",
     capacidades: [
-      "Cuenta corriente por cliente y antigüedad de la deuda",
-      "Costo de insumos separado de los gastos fijos",
-      "Margen por línea de producto",
+      "Deudas ordenadas por cliente y antigüedad",
+      "Costos de mercadería separados de la estructura",
+      "Rentabilidad visible por línea de producto",
     ],
   },
   decoracion_hogar: {
-    tension: "Muchos productos distintos, y los que no se venden no avisan.",
+    tension: "Lo que no rota también ocupa caja.",
     respuesta:
-      "Véktor te muestra qué se vende bien, qué tenés parado ocupando plata y cómo vienen tus proveedores. Con eso decidís qué reponer, qué liquidar y a quién comprarle mejor.",
+      "Véktor identifica qué productos sostienen las ventas y cuáles inmovilizan capital. Con costos y proveedores comparados, decidís qué reponer, liquidar o dejar de comprar.",
     capacidades: [
-      "Detección de sobrestock y baja rotación",
-      "Comparación de proveedores y precios de compra",
-      "Margen por producto para ajustar precios",
+      "Capital inmovilizado, detectado a tiempo",
+      "Proveedores y costos comparables",
+      "Precios respaldados por el margen real",
     ],
   },
   libreria_papeleria: {
-    tension: "Facturás fuerte dos veces al año, y el resto del tiempo sostenés.",
+    tension: "La temporada dura semanas. Sus decisiones impactan todo el año.",
     respuesta:
-      "Véktor separa lo de zafra escolar de lo que se vende todo el año, así ves cuánta de tu plata está parada esperando a marzo. Con la lista de cada colegio cargada en la venta, el año que viene comprás sabiendo qué te pidieron de verdad.",
+      "Véktor distingue la zafra del movimiento permanente y registra la demanda por lista y colegio. Comprás la próxima temporada con evidencia, no con memoria.",
     capacidades: [
-      "Stock por temporada: zafra, permanente o fecha especial",
-      "Ventas por lista escolar y por colegio",
-      "Margen por línea: útiles, mochilas, libros, regalería",
+      "Stock separado por temporada y fecha clave",
+      "Demanda histórica por lista y colegio",
+      "Margen por útiles, mochilas, libros y regalería",
     ],
   },
   indumentaria: {
-    tension: "El problema no es vender: es lo que te queda sin vender.",
+    tension: "Cada talle que queda tiene un costo.",
     respuesta:
-      "Véktor te muestra qué se movió de la temporada y qué talles y colores quedaron colgados en la percha. Y distingue la venta de liquidación de la venta a precio lleno, para que el margen que ves sea el que de verdad te quedó.",
+      "Véktor traza temporada, talle, color, canal y tipo de venta para mostrarte qué rota y qué pierde valor. El margen separa precio pleno de liquidación para que el resultado no se disfrace.",
     capacidades: [
-      "Rotación por temporada, talle y color",
-      "Margen real separando liquidación de precio lleno",
-      "Ventas por canal: local, online o retiro en local",
+      "Rotación visible por temporada, talle y color",
+      "Margen neto de liquidaciones",
+      "Rendimiento comparado por canal",
     ],
   },
   verduleria_fruteria: {
-    tension: "Lo que traés del mercado se vende esta semana o no se vende.",
+    tension: "En productos frescos, decidir tarde cuesta mercadería.",
     respuesta:
-      "Véktor ordena lo que comprás —por kilo, por atado o por cajón— contra lo que sale por caja, y le suma el flete al costo, que es donde se te escapa el margen cuando el cajón viene de lejos.",
+      "Véktor compara lo que entra del mercado con lo que sale por caja, y suma el flete al costo real. Vas rápido sabiendo dónde ajustar precio, compra o rotación antes de que el producto pierda margen.",
     capacidades: [
-      "Costo real por kilo, atado o cajón, con el flete adentro",
-      "Precio del mercado contra tu precio de venta",
-      "Margen por producto y por calidad comercial",
+      "Costo completo por unidad de compra",
+      "Precio de mercado frente a precio de venta",
+      "Margen por producto y calidad comercial",
     ],
   },
 };

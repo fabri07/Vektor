@@ -93,7 +93,7 @@ function enfocarCampo(campo: string) {
   enfocarYMostrar(control);
 }
 
-const HINT_TELEFONO = "Si nos lo dejás, te escribimos por acá.";
+const HINT_TELEFONO = "Si completás, podemos responderte por ese medio.";
 const HINT_EMAIL_GOOGLE = "Lo verificó Google. Es el email con el que vas a entrar.";
 
 /**
@@ -410,7 +410,7 @@ export function AccessRequestForm() {
         {/* ── Contacto ─────────────────────────────────────────────────────── */}
         <section className="space-y-5">
           <h2 className="font-display text-xl font-bold uppercase tracking-tight text-vektor-white">
-            Contacto
+            Datos de contacto
           </h2>
 
           <Field
@@ -431,7 +431,7 @@ export function AccessRequestForm() {
 
           <Field
             campo="email"
-            label="Email"
+            label="Email de trabajo"
             required
             hint={hintEmail}
             error={errores.email}
@@ -455,7 +455,7 @@ export function AccessRequestForm() {
 
           <Field
             campo="phone"
-            label="Teléfono / WhatsApp (opcional)"
+            label="WhatsApp (opcional)"
             hint={HINT_TELEFONO}
             error={errores.phone}
           >
@@ -490,7 +490,7 @@ export function AccessRequestForm() {
         {/* ── Rubro ────────────────────────────────────────────────────────── */}
         <section className="space-y-5">
           <h2 className="font-display text-xl font-bold uppercase tracking-tight text-vektor-white">
-            Rubro
+            Tu actividad
           </h2>
 
           {/*
@@ -515,7 +515,8 @@ export function AccessRequestForm() {
               id="rubro-legend"
               className="mb-3 block text-sm font-medium text-vektor-body"
             >
-              ¿De qué es tu negocio? <span className="text-vektor-red">*</span>
+              ¿Cuál es el rubro principal de tu negocio?{" "}
+              <span className="text-vektor-red">*</span>
             </legend>
             <div className="grid gap-3 sm:grid-cols-2">
               {REQUESTED_VERTICAL_OPTIONS.map((opcion, indice) => {
@@ -606,12 +607,12 @@ export function AccessRequestForm() {
         {/* ── Cómo querés usar Véktor ──────────────────────────────────────── */}
         <section className="space-y-5">
           <h2 className="font-display text-xl font-bold uppercase tracking-tight text-vektor-white">
-            Cómo querés usar Véktor
+            Tu primera experiencia
           </h2>
 
           <RadioGroup
             name="requested_plan"
-            legend="¿Con qué cuenta te gustaría comenzar?"
+            legend="¿Cómo te gustaría empezar?"
             options={REQUESTED_PLAN_OPTIONS}
             value={draft.requested_plan}
             onChange={(v) => elegir("requested_plan", v)}
@@ -631,11 +632,12 @@ export function AccessRequestForm() {
               onChange={(e) => elegir("consent", e.target.checked)}
             />
             <span>
-              Acepto la{" "}
+              Leí la{" "}
               <Link href="/privacidad" className="text-vektor-blue hover:underline">
-                política de privacidad
+                Política de privacidad
               </Link>{" "}
-              y el tratamiento de mis datos para que revisen mi solicitud.
+              y autorizo el tratamiento de mis datos para evaluar esta
+              solicitud.
             </span>
           </label>
 
@@ -715,7 +717,7 @@ export function AccessRequestForm() {
             escrito a mano.
           */}
           <p className="text-center text-xs text-vektor-muted">
-            {respondidas} de {REQUIRED_FIELD_COUNT} respuestas
+            {respondidas} de {REQUIRED_FIELD_COUNT} respuestas completadas
           </p>
 
           {/*
@@ -735,11 +737,11 @@ export function AccessRequestForm() {
             disabled={enviando}
             className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-6 py-3.5 text-sm font-semibold text-white transition hover:brightness-95 disabled:cursor-wait"
           >
-            {enviando ? "Enviando..." : "Pedir acceso"}
+            {enviando ? "Enviando..." : "Enviar mi solicitud"}
           </button>
 
           <p className="text-center text-xs text-vektor-muted">
-            ¿Ya tenés cuenta?{" "}
+            ¿Ya usás Véktor?{" "}
             <Link href="/login" className="text-vektor-blue hover:underline">
               Iniciá sesión
             </Link>

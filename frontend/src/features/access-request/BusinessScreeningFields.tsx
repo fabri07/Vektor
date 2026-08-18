@@ -271,12 +271,12 @@ export function BusinessScreeningFields({
     <>
       <section className="space-y-5">
         <h2 className="font-display text-xl font-bold uppercase tracking-tight text-vektor-white">
-          Tu negocio
+          Sobre tu negocio
         </h2>
 
         <RadioGroup
           name="years_operating"
-          legend="¿Hace cuánto opera?"
+          legend="¿Hace cuánto está en actividad?"
           options={YEARS_OPERATING_OPTIONS}
           value={draft.years_operating}
           onChange={(v) => update("years_operating", v)}
@@ -285,7 +285,7 @@ export function BusinessScreeningFields({
 
         <RadioGroup
           name="staff_size"
-          legend="¿Cuánta gente trabaja?"
+          legend="¿Cuántas personas trabajan hoy?"
           options={STAFF_SIZE_OPTIONS}
           value={draft.staff_size}
           onChange={(v) => update("staff_size", v)}
@@ -294,7 +294,7 @@ export function BusinessScreeningFields({
 
         <RadioGroup
           name="main_concern"
-          legend="¿Qué te preocupa más?"
+          legend="¿Qué necesitás entender primero?"
           options={MAIN_CONCERN_OPTIONS}
           value={draft.main_concern}
           onChange={(v) => update("main_concern", v)}
@@ -306,7 +306,7 @@ export function BusinessScreeningFields({
 
         <RadioGroup
           name="monthly_revenue_band"
-          legend="Facturación mensual aproximada"
+          legend="¿Cuál es la facturación mensual aproximada?"
           options={REVENUE_BAND_OPTIONS}
           value={draft.monthly_revenue_band}
           onChange={(v) => update("monthly_revenue_band", v)}
@@ -316,12 +316,12 @@ export function BusinessScreeningFields({
 
       <section className="space-y-5">
         <h2 className="font-display text-xl font-bold uppercase tracking-tight text-vektor-white">
-          Tu info
+          Tus registros
         </h2>
 
         <RadioGroup
           name="records_format"
-          legend="¿Guardás registro de ventas y gastos?"
+          legend="¿Dónde registrás hoy ventas y gastos?"
           options={RECORDS_FORMAT_OPTIONS}
           value={draft.records_format}
           onChange={(v) => update("records_format", v)}
@@ -330,7 +330,7 @@ export function BusinessScreeningFields({
 
         <RadioGroup
           name="history_depth"
-          legend="¿Desde cuándo tenés esos registros?"
+          legend="¿Cuánto historial conservás?"
           options={HISTORY_DEPTH_OPTIONS}
           value={draft.history_depth}
           onChange={(v) => update("history_depth", v)}
@@ -339,7 +339,7 @@ export function BusinessScreeningFields({
 
         <RadioGroup
           name="can_share_files"
-          legend="¿Esos archivos los podrías subir para arrancar?"
+          legend="¿Podrías compartir esos registros para comenzar?"
           options={CAN_SHARE_FILES_OPTIONS}
           value={draft.can_share_files}
           onChange={(v) => update("can_share_files", v)}
@@ -347,7 +347,7 @@ export function BusinessScreeningFields({
           columns={3}
         />
 
-        <Field campo="records_notes" label="Contanos cómo lo llevás (opcional)">
+        <Field campo="records_notes" label="¿Cómo es tu forma de trabajo actual? (opcional)">
           <textarea
             {...fieldAria("records_notes")}
             className={`${inputClass} min-h-[110px] resize-y`}
@@ -358,7 +358,7 @@ export function BusinessScreeningFields({
           />
         </Field>
 
-        <Field campo="applicant_notes" label="Algo más que quieras contarnos (opcional)">
+        <Field campo="applicant_notes" label="¿Hay algo más que deberíamos saber? (opcional)">
           <textarea
             {...fieldAria("applicant_notes")}
             className={`${inputClass} min-h-[90px] resize-y`}
