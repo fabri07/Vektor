@@ -9,27 +9,27 @@ export const metadata = {
 };
 
 const gratuitoFeatures = [
-  "Acceso al chat con IA, con límite de mensajes y tokens",
-  "Dashboard de salud financiera básico",
-  "1 usuario",
+  "Consultas al asistente con límites de uso",
+  "Vista esencial de salud financiera",
+  "Acceso para una persona",
 ];
 
 const premiumFeatures = [
-  "Mensajes y tokens ampliados",
-  "Todos los módulos habilitados",
-  "Multiusuario para tu equipo",
-  "Soporte prioritario",
+  "Mayor capacidad de consultas",
+  "Acceso a módulos avanzados",
+  "Trabajo con más de un usuario",
+  "Atención prioritaria",
 ];
 
 export default function PreciosPage() {
   return (
     <>
       <PageHeader
-        title="Precios simples"
+        title="Empezá sin costo"
         subtitle={
           <>
-            Arrancá con el plan Gratuito y pasate a Premium cuando tu negocio lo pida. Sin
-            letra chica.
+            Probá Véktor con tu negocio real. Cuando necesites más alcance,
+            vas a poder avanzar a Premium.
           </>
         }
       />
@@ -42,11 +42,11 @@ export default function PreciosPage() {
               Gratuito
             </h2>
             <p className="mt-2 text-vektor-muted">
-              Ideal para empezar a ordenar tu negocio.
+              Para transformar tus primeros datos en una lectura útil.
             </p>
             <p className="mt-6">
               <span className="font-display text-5xl font-bold text-vektor-white">
-                Gratis
+                $0
               </span>
             </p>
             <ul className="mt-6 flex-1 space-y-3">
@@ -61,7 +61,7 @@ export default function PreciosPage() {
               href="/solicitar-acceso?plan=free&src=precios_free"
               className="mt-8 inline-flex items-center justify-center rounded-full bg-white px-7 py-3 text-sm font-semibold text-vektor-night transition hover:bg-white/90"
             >
-              Pedir acceso gratuito
+              Quiero empezar gratis
             </Link>
           </div>
 
@@ -72,11 +72,11 @@ export default function PreciosPage() {
                 Premium
               </h2>
               <span className="rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white">
-                Pronto
+                En preparación
               </span>
             </div>
             <p className="mt-2 text-vektor-muted">
-              Todo sin límites, para cuando quieras exprimir Véktor al máximo.
+              Más capacidad para negocios que necesitan profundizar el control.
             </p>
             <p className="mt-6">
               <span className="font-display text-5xl font-bold text-vektor-white">
@@ -92,21 +92,23 @@ export default function PreciosPage() {
               ))}
             </ul>
             <p className="mt-4 text-xs text-vektor-muted">
-              Beneficios y límites sujetos a definición.
+              Las funciones y los límites finales se confirmarán antes del
+              lanzamiento.
             </p>
             <Link
               href="/solicitar-acceso?plan=premium&src=precios_premium"
               className="mt-8 inline-flex items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-7 py-3 text-sm font-semibold text-white transition hover:brightness-95"
             >
-              Solicitar Premium
+              Quiero recibir novedades de Premium
             </Link>
           </div>
         </div>
 
         <p className="mx-auto mt-8 max-w-2xl text-center text-sm text-vektor-muted">
-          Las condiciones, precios y beneficios definitivos se anunciarán
-          pronto. El acceso es por solicitud: revisamos cada pedido a mano antes
-          de habilitar la cuenta.
+          Premium todavía no está disponible. Mientras terminamos de
+          definirlo, podés pedir acceso gratuito. Revisamos cada solicitud
+          para confirmar que Véktor pueda aportar valor a tu negocio desde el
+          inicio.
         </p>
       </section>
     </>

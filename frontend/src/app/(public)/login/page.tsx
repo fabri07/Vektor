@@ -11,9 +11,9 @@ export const metadata: Metadata = {
 };
 
 const CHECK_ITEMS = [
-  "Salud financiera en tiempo real",
-  "Diseño personalizado para tu negocio",
-  "Automatiza todas esas tareas aburridas, simple y claro",
+  "Leé la salud financiera de tu negocio",
+  "Trabajá con indicadores adaptados a tu rubro",
+  "Convertí tareas repetitivas en información lista para usar",
 ];
 
 /**
@@ -50,10 +50,10 @@ function PanelDeLogin() {
 
       <div className="border-t border-vk-border-dark pt-6">
         <p className="text-xs font-medium text-vk-text-light">
-          Tus datos permanecen bajo tu control
+          Tu información permanece bajo tu control
         </p>
         <p className="mt-1 text-xs text-vk-text-muted">
-          Sin contabilidad obligatoria. Para negocios en Argentina
+          Pensado para gestionar, sin reemplazar tu contabilidad
         </p>
       </div>
     </>
@@ -63,12 +63,14 @@ function PanelDeLogin() {
 export default function LoginPage() {
   return (
     <FunnelSplitShell
-      aside="Trabaja menos y toma las mejores decisiones."
+      aside="Menos tiempo ordenando datos. Más claridad para decidir."
       asideExtra={<PanelDeLogin />}
     >
-      <h1 className="mb-2 text-2xl font-semibold text-vk-navy">Iniciá sesión</h1>
+      <h1 className="mb-2 text-2xl font-semibold text-vk-navy">
+        Volvé a ver tu negocio con claridad.
+      </h1>
       <p className="mb-8 text-sm text-vk-text-secondary">
-        Bienvenido de vuelta a tu salud financiera.
+        Ingresá para retomar tus números donde los dejaste.
       </p>
 
       <Suspense>

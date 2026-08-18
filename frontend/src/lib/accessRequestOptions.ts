@@ -32,9 +32,9 @@ export const YEARS_OPERATING_OPTIONS: readonly Choice<YearsOperating>[] = [
 export type StaffSize = "solo" | "2_5" | "6_15" | "gt_15";
 
 export const STAFF_SIZE_OPTIONS: readonly Choice<StaffSize>[] = [
-  { value: "solo", label: "Solo yo" },
-  { value: "2_5", label: "Entre 2 y 5" },
-  { value: "6_15", label: "Entre 6 y 15" },
+  { value: "solo", label: "Trabajo por mi cuenta" },
+  { value: "2_5", label: "2 a 5" },
+  { value: "6_15", label: "6 a 15" },
   { value: "gt_15", label: "Más de 15" },
 ] as const;
 
@@ -43,18 +43,18 @@ export type MainConcern = "MARGIN" | "STOCK" | "CASH";
 export const MAIN_CONCERN_OPTIONS: readonly Choice<MainConcern>[] = [
   {
     value: "MARGIN",
-    label: "El margen",
-    detail: "No sabés cuánto te queda de lo que vendés.",
+    label: "Margen",
+    detail: "Cuánto deja realmente cada venta o producto.",
   },
   {
     value: "STOCK",
-    label: "El stock",
-    detail: "Se te acaba lo que vende y te sobra lo que no.",
+    label: "Stock",
+    detail: "Qué reponer, qué sobra y cuánto capital está inmovilizado.",
   },
   {
     value: "CASH",
-    label: "La caja",
-    detail: "No sabés con cuánta plata contás la semana que viene.",
+    label: "Caja",
+    detail: "Con cuánto efectivo podés contar en los próximos días.",
   },
 ] as const;
 
@@ -93,9 +93,9 @@ export const HISTORY_DEPTH_OPTIONS: readonly Choice<HistoryDepth>[] = [
 export type CanShareFiles = "si_ordenados" | "si_desprolijos" | "no";
 
 export const CAN_SHARE_FILES_OPTIONS: readonly Choice<CanShareFiles>[] = [
-  { value: "si_ordenados", label: "Sí, y están ordenados" },
-  { value: "si_desprolijos", label: "Sí, pero están desprolijos" },
-  { value: "no", label: "No los tengo en archivo" },
+  { value: "si_ordenados", label: "Sí, están ordenados" },
+  { value: "si_desprolijos", label: "Sí, aunque necesitan orden" },
+  { value: "no", label: "No los tengo en formato digital" },
 ] as const;
 
 // ── Cómo querés usar Véktor ───────────────────────────────────────────────────
@@ -105,14 +105,14 @@ export type RequestedPlan = "free" | "premium";
 export const REQUESTED_PLAN_OPTIONS: readonly Choice<RequestedPlan>[] = [
   {
     value: "free",
-    label: "Cuenta gratuita",
-    detail: "Quiero comenzar con las funciones gratuitas.",
+    label: "Plan Gratuito",
+    detail: "Quiero probar las funciones disponibles sin costo.",
   },
   {
     value: "premium",
-    label: "Cuenta Premium",
+    label: "Premium",
     detail:
-      "Quiero acceder a las funciones Premium y recibir información sobre su habilitación.",
+      "Quiero recibir novedades y evaluar las funciones avanzadas cuando estén disponibles.",
   },
 ] as const;
 
@@ -135,19 +135,19 @@ export function isRequestedPlan(value: string | null | undefined): value is Requ
  */
 export const ACCESS_REQUEST_FIELD_LABELS: readonly (readonly [string, string])[] = [
   ["full_name", "Nombre y apellido"],
-  ["email", "Email"],
-  ["phone", "Teléfono / WhatsApp"],
+  ["email", "Email de trabajo"],
+  ["phone", "WhatsApp"],
   ["business_name", "Nombre del negocio"],
   ["requested_vertical", "Rubro"],
   ["vertical_other_text", "De qué es tu negocio"],
-  ["years_operating", "¿Hace cuánto opera?"],
-  ["staff_size", "¿Cuánta gente trabaja?"],
-  ["main_concern", "¿Qué te preocupa más?"],
+  ["years_operating", "¿Hace cuánto está en actividad?"],
+  ["staff_size", "¿Cuántas personas trabajan hoy?"],
+  ["main_concern", "¿Qué necesitás entender primero?"],
   ["monthly_revenue_band", "Facturación mensual aproximada"],
-  ["records_format", "¿Guardás registro de ventas y gastos?"],
-  ["history_depth", "¿Desde cuándo tenés esos registros?"],
-  ["can_share_files", "¿Podrías subir esos archivos?"],
-  ["requested_plan", "¿Con qué cuenta querés comenzar?"],
+  ["records_format", "¿Dónde registrás hoy ventas y gastos?"],
+  ["history_depth", "¿Cuánto historial conservás?"],
+  ["can_share_files", "¿Podrías compartir esos registros?"],
+  ["requested_plan", "¿Cómo te gustaría empezar?"],
   ["consent", "Consentimiento"],
 ] as const;
 

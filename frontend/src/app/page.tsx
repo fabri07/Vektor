@@ -31,21 +31,21 @@ const SOCIAL_PROOF_CARDS = [
 const FEATURE_HIGHLIGHTS = [
   {
     icon: Activity,
-    title: "Salud financiera en tiempo real",
+    title: "Tu negocio, leído al momento",
     description:
-      "Entendé cómo viene tu caja, qué riesgos están creciendo y cuál es la próxima acción concreta para proteger el negocio.",
+      "Detectá cambios en caja, margen y ventas antes de que se conviertan en un problema difícil de corregir.",
   },
   {
     icon: Boxes,
-    title: "Control de inventario inteligente",
+    title: "Stock que trabaja, no que se acumula",
     description:
-      "Detectá quiebres, exceso de mercadería y oportunidades de rotación antes de que se conviertan en plata inmovilizada.",
+      "Anticipá faltantes, encontrá mercadería inmovilizada y priorizá la reposición que sostiene tus ventas.",
   },
   {
     icon: Truck,
-    title: "Gestión de proveedores centralizada",
+    title: "Compras con mejor información",
     description:
-      "Concentrá compras, condiciones de pago y dependencia por proveedor para negociar mejor y evitar cuellos de botella.",
+      "Comparé costos, plazos y concentración por proveedor para negociar con respaldo y reducir dependencias.",
   },
 ];
 
@@ -83,10 +83,10 @@ function FeatureHighlights() {
       <div className="mx-auto max-w-7xl px-6">
         <div className="mb-12 max-w-3xl">
           <p className="text-xs font-semibold uppercase tracking-[0.22em] text-vektor-teal">
-            Qué resuelve Véktor
+            Menos incertidumbre. Más control.
           </p>
           <h2 className="mt-4 font-display text-4xl font-bold uppercase leading-tight tracking-tight text-vektor-white">
-            Un tablero pensado para dueños de negocio, no para técnicos.
+            No te muestra más datos. Te muestra dónde actuar.
           </h2>
         </div>
 
@@ -116,27 +116,27 @@ function FeatureHighlights() {
 const SCREENSHOTS = [
   {
     src: "/screenshots/dashboard-kiosco.png",
-    caption: "Salud del negocio: score, caja, margen y stock de un vistazo.",
+    caption: "Tu salud financiera, resumida sin esconder lo importante.",
   },
   {
     src: "/screenshots/dashboard-limpieza.png",
-    caption: "El riesgo principal y la próxima acción concreta, siempre a la vista.",
+    caption: "El riesgo que más pesa y la acción que puede reducirlo.",
   },
   {
     src: "/screenshots/productos-kiosco.png",
-    caption: "Inventario con estado de stock y valor a precio de costo.",
+    caption: "Stock disponible, alertas y capital inmovilizado.",
   },
   {
     src: "/screenshots/productos-deco.png",
-    caption: "Catálogo por categoría, adaptado a tu rubro.",
+    caption: "Un catálogo organizado como se mueve tu rubro.",
   },
   {
     src: "/screenshots/gastos-kiosco.png",
-    caption: "Gastos categorizados y clasificados entre operativos y mercadería.",
+    caption: "Gastos separados para entender adónde se va la plata.",
   },
   {
     src: "/screenshots/ventas-kiosco.png",
-    caption: "Ventas del período con ticket promedio y comparativo mensual.",
+    caption: "Ventas, ticket promedio y evolución para leer el ritmo del negocio.",
   },
 ];
 
@@ -267,14 +267,14 @@ function WorkflowPreview() {
           <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.22em] text-vektor-blue">
-                Vista previa
+                Así se ve la claridad
               </p>
               <h2 className="mt-3 font-display text-4xl font-bold uppercase tracking-tight text-vektor-white">
-                Todo lo importante en una sola pantalla.
+                Tu negocio, entendido en segundos.
               </h2>
             </div>
             <p className="max-w-xl text-sm leading-7 text-vektor-muted">
-              Caja, margen, stock, proveedores y salud general del negocio en una experiencia oscura, clara y accionable.
+              Caja, margen, stock y proveedores conectados en una vista que ordena prioridades y te lleva del dato a la acción.
             </p>
           </div>
 

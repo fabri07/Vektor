@@ -1,7 +1,7 @@
 import { PageHeader } from "@/components/public/PageHeader";
 
 export const metadata = {
-  title: "Quiénes somos | Véktor",
+  title: "Por qué Véktor | Véktor",
   description:
     "Véktor es un asistente de salud financiera con IA para PYMEs argentinas. Determinístico en la plata, no inventa números, hecho en Argentina.",
 };
@@ -10,11 +10,11 @@ export default function QuienesSomosPage() {
   return (
     <>
       <PageHeader
-        title="Quiénes somos"
+        title="Por qué Véktor"
         subtitle={
           <>
-            Ayudamos a que un dueño de PYME decida con datos, sin vivir
-            atrapado en planillas.
+            Creamos Véktor para que gestionar un negocio no dependa de
+            recordar todo ni de adivinar a fin de mes.
           </>
         }
       />
@@ -25,12 +25,11 @@ export default function QuienesSomosPage() {
             Nuestra misión
           </h2>
           <p className="mt-4 text-vektor-body">
-            La mayoría de los dueños de kioscos, negocios de limpieza y
-            decoración llevan las cuentas de memoria o en una planilla que solo
-            ellos entienden. Al final del mes no saben con certeza si ganaron
-            plata. Véktor existe para cambiar eso: queremos que cualquier PYME
-            pueda ver la salud real de su negocio y tomar decisiones con datos,
-            sin necesidad de ser contador ni pasar horas cargando números.
+            Quienes sostienen una PYME toman decisiones todos los días, muchas
+            veces con información dispersa entre la memoria, el cuaderno y una
+            planilla. Nuestra misión es convertir ese movimiento cotidiano en
+            respuestas claras: cuánto queda, qué está en riesgo y qué decisión
+            conviene tomar ahora.
           </p>
         </div>
 
@@ -39,15 +38,15 @@ export default function QuienesSomosPage() {
             Qué es Véktor
           </h2>
           <p className="mt-4 text-vektor-body">
-            Véktor es un asistente de salud financiera con inteligencia
-            artificial que entiende cómo funciona tu negocio. Cargás tus ventas,
-            gastos y compras —escribiéndole al chat o subiendo un archivo— y
-            Véktor te devuelve un panorama claro: cuánta plata tenés, qué margen
-            te deja cada producto, cómo viene el stock y dónde estás perdiendo.
+            Véktor es un asistente de gestión financiera que se adapta a tu
+            rubro. Le enviás ventas, gastos y compras por chat o archivo;
+            Véktor los ordena y te devuelve una lectura accionable de caja,
+            margen, stock y proveedores.
           </p>
           <p className="mt-4 text-vektor-body">
-            No es un ERP ni un sistema contable: es un compañero que traduce tus
-            números a decisiones concretas, en tu idioma.
+            No reemplaza tu sistema contable ni pretende convertirse en otro
+            ERP. Ocupa el espacio que suele quedar vacío: traducir los números
+            del negocio en decisiones comprensibles y oportunas.
           </p>
         </div>
 
@@ -58,34 +57,32 @@ export default function QuienesSomosPage() {
           <ul className="mt-4 space-y-4 text-vektor-body">
             <li>
               <span className="font-semibold text-vektor-white">
-                Determinísticos con la plata.
+                Los cálculos no se improvisan.
               </span>{" "}
-              Los números los calcula un motor determinístico, no la IA. La
-              inteligencia artificial explica y aconseja, pero nunca inventa una
-              cifra.
+              Un motor determinístico obtiene cada cifra. La inteligencia
+              artificial la interpreta y la explica, pero no la inventa.
             </li>
             <li>
               <span className="font-semibold text-vektor-white">
-                No inventamos datos.
+                La incertidumbre también se informa.
               </span>{" "}
-              Si faltan datos para una conclusión, te lo decimos y te pedimos lo
-              que falta. Preferimos ser honestos antes que mostrar un número que
-              suene lindo pero sea falso.
+              Si faltan datos, Véktor lo señala y pide lo necesario antes de
+              concluir. Una respuesta incompleta es mejor que una certeza
+              falsa.
             </li>
             <li>
               <span className="font-semibold text-vektor-white">
-                Cuidamos tu información.
+                Tu información sigue siendo tuya.
               </span>{" "}
-              Tus datos son tuyos. Los tratamos con foco en la privacidad y el
-              cumplimiento de la normativa argentina de protección de datos.
+              La tratamos con criterios de privacidad y conforme a la
+              normativa argentina de protección de datos.
             </li>
             <li>
               <span className="font-semibold text-vektor-white">
-                Hecho en Argentina.
+                Hecho para el negocio argentino.
               </span>{" "}
-              Pensado para la realidad de las PYMEs de acá: el fiado, la caja en
-              efectivo, la inflación y la forma de laburar del comerciante
-              argentino.
+              Véktor contempla la caja en efectivo, el fiado, la inflación y
+              la operación real de una PYME local.
             </li>
           </ul>
         </div>

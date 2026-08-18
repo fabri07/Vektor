@@ -13,10 +13,10 @@ import Link from "next/link";
 import { VektorLogo } from "@/components/ui/VektorLogo";
 
 const FOOTER_LINKS = [
-  { label: "Tutoriales", href: "/tutoriales" },
+  { label: "Aprender", href: "/tutoriales" },
   { label: "Términos", href: "/terminos" },
-  { label: "Contacto", href: "/contacto" },
-  { label: "Política de privacidad", href: "/privacidad" }, // siempre al final
+  { label: "Hablemos", href: "/contacto" },
+  { label: "Privacidad", href: "/privacidad" }, // siempre al final
 ];
 
 // href: null ⇒ ícono deshabilitado hasta tener la URL real de la red.
@@ -58,7 +58,7 @@ export function PublicFooter() {
         <div className="flex flex-col items-center gap-3">
           <VektorLogo variant="full" size="md" theme="dark" />
           <p className="max-w-md text-center text-sm text-vektor-muted">
-            Véktor te ayuda a decidir mejor sin vivir en planillas.
+            Tus números, convertidos en decisiones.
           </p>
         </div>
 
@@ -108,7 +108,7 @@ export function PublicFooter() {
         </div>
 
         <p className="text-xs text-vektor-muted">
-          © {new Date().getFullYear()} Véktor. Hecho en Argentina.
+          © {new Date().getFullYear()} Véktor. Pensado y desarrollado en Argentina.
         </p>
       </div>
     </footer>

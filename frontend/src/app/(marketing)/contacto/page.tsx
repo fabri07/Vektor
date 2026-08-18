@@ -46,9 +46,9 @@ const USUARIOS = [
 ];
 
 const STEPS = [
-  "Completá tus datos",
-  "Te contactamos para entender tus necesidades",
-  "Coordinamos una demo del sistema adaptado a tu negocio",
+  "Contanos lo esencial",
+  "Entendemos tu forma de trabajar",
+  "Preparamos una demo enfocada en tu negocio",
 ];
 
 const inputClass =
@@ -142,8 +142,8 @@ export default function ContactoPage() {
   return (
     <div className="pb-24">
       <PageHeader
-        title="Dejá tus datos y te contactaremos para conversar"
-        subtitle="Contanos de tu negocio y coordinamos una demo sin compromiso."
+        title="Contanos cómo gestionás hoy"
+        subtitle="Conocemos tu operación y te mostramos dónde Véktor puede darte más claridad. La conversación no tiene costo ni compromiso."
       />
 
       {/* Pasos */}
@@ -171,7 +171,7 @@ export default function ContactoPage() {
             className="hidden"
           />
 
-          <Field label="Tu nombre" required>
+          <Field label="Nombre y apellido" required>
             <input
               className={inputClass}
               required
@@ -181,7 +181,7 @@ export default function ContactoPage() {
             />
           </Field>
 
-          <Field label="Tu celular" required>
+          <Field label="WhatsApp" required>
             <input
               className={inputClass}
               required
@@ -191,7 +191,7 @@ export default function ContactoPage() {
             />
           </Field>
 
-          <Field label="Correo corporativo" required>
+          <Field label="Email de trabajo" required>
             <input
               type="email"
               className={inputClass}
@@ -202,7 +202,7 @@ export default function ContactoPage() {
             />
           </Field>
 
-          <Field label="Empresa" required>
+          <Field label="Nombre del negocio" required>
             <input
               className={inputClass}
               required
@@ -212,7 +212,7 @@ export default function ContactoPage() {
             />
           </Field>
 
-          <Field label="Rubro" required>
+          <Field label="¿A qué se dedica?" required>
             <select
               className={inputClass}
               required
@@ -220,7 +220,7 @@ export default function ContactoPage() {
               onChange={(e) => update("rubro", e.target.value)}
             >
               <option value="" disabled>
-                Elegí tu rubro
+                Elegí el rubro más cercano
               </option>
               {RUBROS.map((r) => (
                 <option key={r.value} value={r.value}>
@@ -232,7 +232,7 @@ export default function ContactoPage() {
 
           <fieldset>
             <legend className="mb-2 block text-sm font-medium text-vektor-body">
-              Usuarios (personas que van a usar el sistema){" "}
+              ¿Cuántas personas usarían Véktor?{" "}
               <span className="text-vektor-red">*</span>
             </legend>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -260,7 +260,7 @@ export default function ContactoPage() {
             </div>
           </fieldset>
 
-          <Field label="¿Cómo gestionan la empresa actualmente?">
+          <Field label="¿Cómo registran hoy ventas, gastos y stock?">
             <textarea
               className={`${inputClass} min-h-[110px] resize-y`}
               maxLength={2000}
@@ -281,9 +281,9 @@ export default function ContactoPage() {
             <span>
               Acepto la{" "}
               <Link href="/privacidad" className="text-vektor-blue hover:underline">
-                política de privacidad
+                Política de privacidad
               </Link>{" "}
-              y el tratamiento de mis datos para ser contactado.
+              y autorizo a Véktor a contactarme por esta consulta.
             </span>
           </label>
 
@@ -298,7 +298,7 @@ export default function ContactoPage() {
             disabled={status === "sending"}
             className="inline-flex w-full items-center justify-center rounded-full bg-gradient-to-r from-vektor-blue-strong to-vektor-teal-deep px-6 py-3.5 text-sm font-semibold text-white transition hover:brightness-95 disabled:cursor-wait"
           >
-            {status === "sending" ? "Enviando..." : "Enviar"}
+            {status === "sending" ? "Enviando..." : "Quiero coordinar una demo"}
           </button>
         </div>
       </form>
