@@ -2296,3 +2296,41 @@ async def test_start_background_apply_reuses_existing_run_and_fresh_summary(
     assert started.status == "RUNNING"
     assert (started.details_json or {}).get("fresh_summary") is not None
     assert (started.details_json or {}).get("phase") == "queued"
+
+
+async def test_start_background_apply_rejects_stale_in_memory_run_copy(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si la sesión se canceló (u otro request ya la aplicó) DESPUÉS de que
+    ``validate_ready_to_apply`` devolvió una copia en memoria todavía
+    READY_TO_APPLY, ``start_background_apply`` no puede confiar en esa copia
+    ciegamente — el guard tenant-wide (RUNNING-scan) no cubre este caso
+    porque el estado real nunca pasó por RUNNING. Sin el UPDATE condicionado
+    por status, esto revivía una sesión cancelada."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    run, fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await reread_service.preview_reread(
+        db_session, file.id, tenant.tenant_id, fresh_override=fresh
+    )
+    reread_service.mark_session_ready_to_apply(run)
+    await db_session.commit()
+
+    # Copia en memoria "stale": válida en el momento en que se leyó.
+    stale_copy = await reread_service.validate_ready_to_apply(
+        db_session, run.id, tenant.tenant_id, file.id, draft_version=0
+    )
+
+    # Mientras tanto, alguien cancela la sesión (otra pestaña, u otro request).
+    await reread_service.cancel_preview_session(db_session, run.id, tenant.tenant_id, file.id)
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="ya no está lista"):
+        await reread_service.start_background_apply(
+            db_session, file.id, tenant.tenant_id, existing_run=stale_copy
+        )
+
+    await db_session.refresh(run)
+    assert run.status == "FAILED"  # sigue cancelada, NO revivida a RUNNING

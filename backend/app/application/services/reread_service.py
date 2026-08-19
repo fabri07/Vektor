@@ -68,9 +68,10 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTasks
 
@@ -2065,6 +2066,22 @@ async def start_or_resume_preview_session(
         # Sesión sin summary cacheado (dato legado/corrupto) — se recrea abajo
         # en vez de fallar; no debería ocurrir por este camino.
 
+    # A punto de CREAR: lock por (tenant, archivo) — sin esto, dos "Volver a
+    # leer" casi simultáneos del MISMO archivo (doble click, dos pestañas)
+    # pasan el chequeo de arriba en paralelo (ninguno ve la sesión del otro
+    # todavía) y crean dos runs PREVIEWING, cada uno pagando su propia
+    # descarga+parseo. Namespace PROPIO — a propósito por archivo, no por
+    # tenant como el guard de apply (dos archivos no deben bloquearse entre
+    # sí acá).
+    await _acquire_preview_session_lock(session, tenant_id, file_id)
+    # Re-chequear YA con el lock tomado: si el otro request ganó la carrera
+    # mientras este esperaba, reusar lo que creó en vez de duplicar.
+    existing = await _active_preview_session(session, file_id, tenant_id)
+    if existing is not None:
+        cached = (existing.details_json or {}).get("fresh_summary")
+        if cached is not None:
+            return existing, deepcopy(cached)
+
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
@@ -2399,6 +2416,31 @@ async def _acquire_reread_guard_lock(session: AsyncSession, tenant_id: uuid.UUID
     )
 
 
+# Namespace PROPIO, distinto de `_REREAD_GUARD_LOCK_NAMESPACE` (que es a
+# propósito tenant-wide, para el apply). Este es por (tenant, archivo) — dos
+# archivos del mismo tenant no deben bloquearse entre sí al crear su sesión
+# de preview.
+_PREVIEW_SESSION_LOCK_NAMESPACE = 0x52524453  # "RRDS" (reread draft session)
+
+
+async def _acquire_preview_session_lock(
+    session: AsyncSession, tenant_id: uuid.UUID, file_id: uuid.UUID
+) -> None:
+    """Advisory lock por (tenant, archivo) que serializa la CREACIÓN de una
+    sesión de preview — evita que dos "Volver a leer" casi simultáneos del
+    mismo archivo creen dos ``DataRepairRun`` PREVIEWING en paralelo, cada
+    uno pagando su propia descarga+parseo. No-op en SQLite."""
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    key1 = int.from_bytes(tenant_id.bytes[:4], "big", signed=True)
+    key2 = int.from_bytes(file_id.bytes[:4], "big", signed=True)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :key)"),
+        {"ns": _PREVIEW_SESSION_LOCK_NAMESPACE, "key": key1 ^ key2},
+    )
+
+
 async def start_background_apply(
     session: AsyncSession,
     file_id: uuid.UUID,
@@ -2465,12 +2507,30 @@ async def start_background_apply(
         raise FileNotFoundError(file_id)
 
     if existing_run is not None:
-        existing_run.status = "RUNNING"
-        existing_run.dry_run = False
+        # UPDATE atómico condicionado por status, no una mutación ORM directa:
+        # dos requests de apply concurrentes con el MISMO run_id (doble click,
+        # o dos pestañas) pasan `validate_ready_to_apply` cada uno con su
+        # propia copia en memoria del run, ya leída ANTES de este punto — sin
+        # el WHERE de acá, ambos pisarían `existing_run.status = "RUNNING"`
+        # sin chequear el estado real en DB, reabriendo exactamente el
+        # doble-apply que este guard existe para evitar. El advisory lock de
+        # arriba serializa el SCAN de otros runs, no esta transición puntual.
         details = dict(existing_run.details_json or {})
         details["phase"] = "queued"
-        existing_run.details_json = details
-        await session.flush()
+        result = await session.execute(
+            update(DataRepairRun)
+            .where(
+                DataRepairRun.id == existing_run.id,
+                DataRepairRun.status == "READY_TO_APPLY",
+            )
+            .values(status="RUNNING", dry_run=False, details_json=details)
+        )
+        if cast("CursorResult[Any]", result).rowcount == 0:
+            raise ValueError(
+                "Esta sesión de relectura ya no está lista para aplicarse — "
+                "alguien más ya la aplicó o canceló. Generá un preview nuevo."
+            )
+        await session.refresh(existing_run)
         return existing_run
 
     run = DataRepairRun(
