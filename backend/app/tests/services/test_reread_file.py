@@ -104,7 +104,11 @@ def _patch_s3(monkeypatch: pytest.MonkeyPatch, content: bytes) -> None:
     async def _fake_download(self: S3Client, key: str) -> bytes:  # noqa: ARG001
         return content
 
+    async def _fake_head(self: S3Client, key: str) -> dict[str, Any]:  # noqa: ARG001
+        return {"etag": '"fake"', "size": len(content), "last_modified": "2026-01-01T00:00:00Z"}
+
     monkeypatch.setattr(S3Client, "download", _fake_download)
+    monkeypatch.setattr(S3Client, "head", _fake_head)
 
 
 async def _make_file(
@@ -2084,3 +2088,211 @@ async def test_undo_reread_producto_creado_y_actualizado_en_mismo_run_se_desacti
     assert producto.deactivation_reason == "REREAD_UNDO"
     assert producto.is_active is False
     assert undo["not_reverted_entities"] == []  # no estaba "tocado" -> no aparece ahí
+
+
+# ── F-RR: sesión de relectura (preview persistido + control de versión) ──────
+
+
+async def test_start_or_resume_preview_session_reuses_active_session(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dos llamadas seguidas (ej. el usuario reabre el modal) reusan la MISMA
+    sesión — no crean un `DataRepairRun` nuevo por cada una."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+
+    calls = {"download": 0}
+    original_download = S3Client.download
+
+    async def _counting_download(self: S3Client, key: str) -> bytes:
+        calls["download"] += 1
+        return await original_download(self, key)
+
+    monkeypatch.setattr(S3Client, "download", _counting_download)
+
+    run1, fresh1 = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+    run2, fresh2 = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+
+    assert run1.id == run2.id
+    assert calls["download"] == 1  # NO volvió a descargar en la 2ª llamada
+    assert fresh1 == fresh2
+    # Cada llamada devuelve una copia propia — mutar una no afecta la otra ni
+    # lo cacheado en el run.
+    fresh1["mutated"] = True
+    assert "mutated" not in fresh2
+    assert "mutated" not in (run2.details_json or {}).get("fresh_summary", {})
+
+
+async def test_start_or_resume_preview_session_different_files_independent(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El guard de sesión abierta es POR ARCHIVO: dos archivos distintos del
+    mismo tenant no se bloquean entre sí."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file_a = await _make_file(db_session, tenant, _CSV_BASE)
+    file_b = await _make_file(db_session, tenant, _CSV_WITH_NEW_ROW)
+
+    run_a, _ = await reread_service.start_or_resume_preview_session(
+        db_session, file_a.id, tenant.tenant_id
+    )
+    run_b, _ = await reread_service.start_or_resume_preview_session(
+        db_session, file_b.id, tenant.tenant_id
+    )
+    await db_session.commit()
+
+    assert run_a.id != run_b.id
+    assert run_a.status == "PREVIEWING"
+    assert run_b.status == "PREVIEWING"
+
+
+async def test_validate_ready_to_apply_rejects_stale_draft_version(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    run, fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await reread_service.preview_reread(
+        db_session, file.id, tenant.tenant_id, fresh_override=fresh
+    )
+    reread_service.mark_session_ready_to_apply(run)
+    await db_session.commit()
+
+    with pytest.raises(reread_service.StaleDraftVersionError):
+        await reread_service.validate_ready_to_apply(
+            db_session, run.id, tenant.tenant_id, file.id, draft_version=99
+        )
+
+    # La versión correcta (0, sin correcciones en esta fase) sí pasa.
+    validated = await reread_service.validate_ready_to_apply(
+        db_session, run.id, tenant.tenant_id, file.id, draft_version=0
+    )
+    assert validated.id == run.id
+
+
+async def test_validate_ready_to_apply_rejects_file_changed_since_preview(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si el archivo en S3 cambió (etag/size distintos) desde que se generó el
+    preview, aplicar ahora aplicaría una interpretación distinta a la que el
+    usuario vio — se rechaza y hay que generar un preview nuevo."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    run, fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await reread_service.preview_reread(
+        db_session, file.id, tenant.tenant_id, fresh_override=fresh
+    )
+    reread_service.mark_session_ready_to_apply(run)
+    await db_session.commit()
+
+    async def _changed_head(self: S3Client, key: str) -> dict[str, Any]:  # noqa: ARG001
+        return {"etag": '"otro-hash"', "size": 999999, "last_modified": "2026-02-01T00:00:00Z"}
+
+    monkeypatch.setattr(S3Client, "head", _changed_head)
+
+    with pytest.raises(reread_service.FileChangedSincePreviewError):
+        await reread_service.validate_ready_to_apply(
+            db_session, run.id, tenant.tenant_id, file.id, draft_version=0
+        )
+
+
+async def test_validate_ready_to_apply_rejects_not_ready_status(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un run que todavía no terminó de previsualizarse (o ya se aplicó/
+    canceló) no puede aplicarse."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    run, _ = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+
+    assert run.status == "PREVIEWING"  # nunca se llamó mark_session_ready_to_apply
+    with pytest.raises(ValueError, match="no está lista"):
+        await reread_service.validate_ready_to_apply(
+            db_session, run.id, tenant.tenant_id, file.id, draft_version=0
+        )
+
+
+async def test_cancel_preview_session_releases_file_for_new_session(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    run, _ = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+
+    cancelled = await reread_service.cancel_preview_session(
+        db_session, run.id, tenant.tenant_id, file.id
+    )
+    await db_session.commit()
+    assert cancelled.status == "FAILED"
+    assert (cancelled.details_json or {}).get("reason") == "cancelled_by_user"
+
+    # Una nueva "Volver a leer" del mismo archivo crea una sesión NUEVA — la
+    # cancelada no cuenta como abierta.
+    run2, _ = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    assert run2.id != run.id
+
+
+async def test_cancel_preview_session_rejects_wrong_file_id(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file_a = await _make_file(db_session, tenant, _CSV_BASE)
+    file_b = await _make_file(db_session, tenant, _CSV_WITH_NEW_ROW)
+    run, _ = await reread_service.start_or_resume_preview_session(
+        db_session, file_a.id, tenant.tenant_id
+    )
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="No hay ninguna sesión"):
+        await reread_service.cancel_preview_session(
+            db_session, run.id, tenant.tenant_id, file_b.id
+        )
+
+
+async def test_start_background_apply_reuses_existing_run_and_fresh_summary(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-RR: cuando el apply viene de una sesión de preview validada, reusa el
+    MISMO run_id (no crea uno nuevo) y conserva el `fresh_summary` cacheado —
+    el worker no debería tener que volver a descargar/parsear."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    run, fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await reread_service.preview_reread(
+        db_session, file.id, tenant.tenant_id, fresh_override=fresh
+    )
+    reread_service.mark_session_ready_to_apply(run)
+    await db_session.commit()
+    session_run_id = run.id
+
+    validated = await reread_service.validate_ready_to_apply(
+        db_session, run.id, tenant.tenant_id, file.id, draft_version=0
+    )
+    started = await reread_service.start_background_apply(
+        db_session, file.id, tenant.tenant_id, existing_run=validated
+    )
+    await db_session.commit()
+
+    assert started.id == session_run_id
+    assert started.status == "RUNNING"
+    assert (started.details_json or {}).get("fresh_summary") is not None
+    assert (started.details_json or {}).get("phase") == "queued"

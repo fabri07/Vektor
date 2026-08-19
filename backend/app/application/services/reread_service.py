@@ -65,6 +65,7 @@ import hashlib
 import json
 import re
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -1961,22 +1962,248 @@ async def _reconcile_column_risk(
 # ── API pública ────────────────────────────────────────────────────────────────
 
 
-async def preview_reread(
+# ── Sesión de relectura (F-RR): preview persistido + control de versión ──────
+#
+# Antes, cada llamada a `preview_reread`/`apply_reread` re-descargaba y
+# re-parseaba el archivo de forma independiente, y el `apply` no tenía forma
+# de saber si estaba aplicando la MISMA interpretación que el usuario vio en
+# el preview. Esto materializa una "sesión" como un `DataRepairRun` que nace
+# en PREVIEWING (descarga+parseo UNA sola vez, cacheados en `details_json`),
+# pasa a READY_TO_APPLY cuando el preview terminó, y a RUNNING cuando el
+# usuario confirma — el `run_id` (+ `draft_version`) es la referencia que ata
+# el apply al preview exacto que se mostró.
+#
+# Alcance del guard de sesión ABIERTA (PREVIEWING/NEEDS_REVIEW/READY_TO_APPLY):
+# POR ARCHIVO — dos usuarios revisando archivos distintos no se bloquean entre
+# sí. Esto es DISTINTO del guard de `start_background_apply` de más abajo
+# (POR TENANT, preexistente): revisar el mapeo de un archivo no debería
+# competir con la revisión de otro, pero solo puede haber un apply corriendo
+# de verdad por tenant a la vez (ese alcance no se tocó).
+
+_SESSION_STATUSES_OPEN = ("PREVIEWING", "NEEDS_REVIEW", "READY_TO_APPLY")
+# Una sesión de revisión legítima puede quedar abierta mucho más que el
+# umbral de "colgado" del apply (15 min) mientras el usuario corrige mapeos a
+# mano — por eso el umbral acá es mucho más generoso.
+_PREVIEW_SESSION_STALE_AFTER_SECONDS = 60 * 60
+
+
+def _age_seconds(moment: datetime | None, now: datetime) -> float:
+    if moment is None:
+        return 0.0
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return (now - moment).total_seconds()
+
+
+async def _expire_stale_preview_sessions(
+    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+) -> None:
+    """Cierra (FAILED) sesiones de revisión de ESTE archivo abandonadas hace
+    más de `_PREVIEW_SESSION_STALE_AFTER_SECONDS` sin avanzar. Usa
+    `updated_at` (no `created_at`): una revisión activa que el usuario sigue
+    corrigiendo no es huérfana aunque sea vieja."""
+    result = await session.execute(
+        select(DataRepairRun).where(
+            DataRepairRun.tenant_id == tenant_id,
+            DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            DataRepairRun.status.in_(_SESSION_STATUSES_OPEN),
+        )
+    )
+    now = datetime.now(UTC)
+    for r in result.scalars().all():
+        if (r.details_json or {}).get("file_id") != str(file_id):
+            continue
+        if _age_seconds(r.updated_at, now) < _PREVIEW_SESSION_STALE_AFTER_SECONDS:
+            continue
+        logger.error(
+            "reread.session.expire_stale",
+            run_id=str(r.id),
+            tenant_id=str(tenant_id),
+            status=r.status,
+        )
+        r.status = "FAILED"
+        r.completed_at = now
+        details = dict(r.details_json or {})
+        details["reason"] = "stale_review_session"
+        r.details_json = details
+
+
+async def _active_preview_session(
+    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+) -> DataRepairRun | None:
+    await _expire_stale_preview_sessions(session, file_id, tenant_id)
+    result = await session.execute(
+        select(DataRepairRun).where(
+            DataRepairRun.tenant_id == tenant_id,
+            DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            DataRepairRun.status.in_(_SESSION_STATUSES_OPEN),
+        )
+    )
+    for r in result.scalars().all():
+        if (r.details_json or {}).get("file_id") == str(file_id):
+            return r
+    return None
+
+
+async def start_or_resume_preview_session(
     session: AsyncSession,
     file_id: uuid.UUID,
     tenant_id: uuid.UUID,
     s3: S3Client | None = None,
-) -> RereadPreview:
-    """Preview RÁPIDO de la relectura: re-descarga + re-parsea el archivo y estima
-    los cambios en memoria, **sin escribir en la DB** (sub-segundo incluso en
-    archivos grandes). ``to_void``/``preserved`` exactos; ``new``/``to_update``
-    estimados — el apply (``apply_reread``) es la fuente de verdad exacta. Devuelve
-    un sample antes/después real para ver qué va a cambiar antes de aplicar."""
+) -> tuple[DataRepairRun, dict[str, Any]]:
+    """Punto de entrada de "Volver a leer": reusa la sesión de revisión ya
+    abierta para este archivo si hay una viva (sin volver a tocar S3), o crea
+    una nueva descargando + parseando + tomando metadata de S3 UNA sola vez.
+
+    Devuelve ``(run, fresh)`` — ``fresh`` es SIEMPRE una copia propia del
+    summary cacheado, segura de mutar sin afectar lo guardado en el run."""
+    existing = await _active_preview_session(session, file_id, tenant_id)
+    if existing is not None:
+        cached = (existing.details_json or {}).get("fresh_summary")
+        if cached is not None:
+            return existing, deepcopy(cached)
+        # Sesión sin summary cacheado (dato legado/corrupto) — se recrea abajo
+        # en vez de fallar; no debería ocurrir por este camino.
+
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
     s3 = s3 or S3Client()
     fresh = await _fresh_summary(file, s3)
+    snapshot = await s3.head(file.s3_key)
+
+    run = DataRepairRun(
+        tenant_id=tenant_id,
+        repair_type=REPAIR_TYPE_REREAD,
+        status="PREVIEWING",
+        dry_run=True,
+        details_json={
+            "file_id": str(file_id),
+            "fresh_summary": fresh,
+            "s3_snapshot": snapshot,
+            "draft_version": 0,
+        },
+    )
+    session.add(run)
+    await session.flush()
+    return run, deepcopy(fresh)
+
+
+def mark_session_ready_to_apply(run: DataRepairRun) -> None:
+    """Transición PREVIEWING → READY_TO_APPLY tras un preview exitoso. No pisa
+    NEEDS_REVIEW (reservado para cuando el borrador tenga bloqueos — F-RR
+    Fase 6/8): en esta fase, sin edición de mapeo todavía, todo preview
+    exitoso queda listo para aplicar."""
+    if run.status == "PREVIEWING":
+        run.status = "READY_TO_APPLY"
+
+
+class StaleDraftVersionError(ValueError):
+    """El ``draft_version`` que mandó el cliente no coincide con el actual del
+    run — hay correcciones más recientes sin ver (ej. otra pestaña, o el
+    usuario refrescó y el estado del cliente quedó desactualizado)."""
+
+
+class FileChangedSincePreviewError(ValueError):
+    """El archivo en S3 cambió (etag/size/last_modified) desde que se generó
+    el preview — aplicar ahora sería aplicar una interpretación distinta a la
+    que el usuario vio."""
+
+
+async def validate_ready_to_apply(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    draft_version: int,
+    s3: S3Client | None = None,
+) -> DataRepairRun:
+    """Valida que ``run_id`` sea una sesión READY_TO_APPLY de ``file_id``, con
+    el ``draft_version`` esperado y el archivo sin cambios en S3 desde el
+    preview. Lanza ``ValueError``/subclases — el caller HTTP las traduce a 404
+    (no encontrado) o 409 (conflicto). No muta nada; el caller decide qué
+    hacer con el run validado."""
+    run = await session.get(DataRepairRun, run_id)
+    if (
+        run is None
+        or run.tenant_id != tenant_id
+        or run.repair_type != REPAIR_TYPE_REREAD
+        or (run.details_json or {}).get("file_id") != str(file_id)
+    ):
+        raise FileNotFoundError(run_id)
+    if run.status != "READY_TO_APPLY":
+        raise ValueError(
+            f"La sesión de relectura no está lista para aplicarse (estado actual: "
+            f"{run.status})."
+        )
+    current_version = (run.details_json or {}).get("draft_version", 0)
+    if current_version != draft_version:
+        raise StaleDraftVersionError(
+            "Hay cambios más recientes sin aplicar en esta revisión — "
+            "actualizala antes de continuar."
+        )
+
+    file = await _load_file(session, file_id, tenant_id)
+    if file is None:
+        raise FileNotFoundError(file_id)
+    s3 = s3 or S3Client()
+    fresh_snapshot = await s3.head(file.s3_key)
+    saved_snapshot = (run.details_json or {}).get("s3_snapshot") or {}
+    if any(fresh_snapshot.get(k) != saved_snapshot.get(k) for k in ("etag", "size")):
+        raise FileChangedSincePreviewError(
+            "El archivo cambió desde que se generó esta revisión — generá un "
+            "preview nuevo."
+        )
+    return run
+
+
+async def cancel_preview_session(
+    session: AsyncSession, run_id: uuid.UUID, tenant_id: uuid.UUID, file_id: uuid.UUID
+) -> DataRepairRun:
+    """Abandona una sesión de revisión abierta (PREVIEWING/NEEDS_REVIEW/
+    READY_TO_APPLY) sin esperar el timeout de `stale` — libera el archivo para
+    una relectura nueva de inmediato."""
+    run = await session.get(DataRepairRun, run_id)
+    if (
+        run is None
+        or run.tenant_id != tenant_id
+        or run.repair_type != REPAIR_TYPE_REREAD
+        or (run.details_json or {}).get("file_id") != str(file_id)
+        or run.status not in _SESSION_STATUSES_OPEN
+    ):
+        raise ValueError("No hay ninguna sesión de revisión abierta con ese id.")
+    run.status = "FAILED"
+    run.completed_at = datetime.now(UTC)
+    details = dict(run.details_json or {})
+    details["reason"] = "cancelled_by_user"
+    run.details_json = details
+    return run
+
+
+async def preview_reread(
+    session: AsyncSession,
+    file_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    s3: S3Client | None = None,
+    fresh_override: dict[str, Any] | None = None,
+) -> RereadPreview:
+    """Preview RÁPIDO de la relectura: re-descarga + re-parsea el archivo y estima
+    los cambios en memoria, **sin escribir en la DB** (sub-segundo incluso en
+    archivos grandes). ``to_void``/``preserved`` exactos; ``new``/``to_update``
+    estimados — el apply (``apply_reread``) es la fuente de verdad exacta. Devuelve
+    un sample antes/después real para ver qué va a cambiar antes de aplicar.
+
+    ``fresh_override``: si viene, se usa TAL CUAL en vez de re-descargar/parsear
+    (F-RR: sesión de relectura — el summary fresco ya se descargó una vez al
+    crear la sesión y quedó cacheado en ``DataRepairRun.details_json``; sin esto
+    cada corrección del usuario durante la revisión pagaría S3+parseo de nuevo).
+    El caller es responsable de pasar una copia si el mismo dict cacheado se va
+    a reusar en llamadas posteriores — esta función no lo muta en el lugar."""
+    file = await _load_file(session, file_id, tenant_id)
+    if file is None:
+        raise FileNotFoundError(file_id)
+    s3 = s3 or S3Client()
+    fresh = fresh_override if fresh_override is not None else await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
     # F9a: resuelve el riesgo de columnas con outcome explícito — REAPPLIED (mapeo
     # real, F8b+) es el ÚNICO que muta ``fresh`` para que el estimado refleje el
@@ -2009,6 +2236,7 @@ async def apply_reread(
     s3: S3Client | None = None,
     run: DataRepairRun | None = None,
     origin: Literal["interactive", "batch_auto", "batch_manual"] = "interactive",
+    fresh_override: dict[str, Any] | None = None,
 ) -> RereadApplyResult:
     """Aplica la relectura: void no-editados + reimport corregido, auditado y
     reversible. El commit lo hace el caller (get_db_session o el worker).
@@ -2020,7 +2248,11 @@ async def apply_reread(
     por sí solo: ``"interactive"`` (default, humano vía UI/endpoint HTTP),
     ``"batch_auto"`` (batch sin supervisión, Task 4) o ``"batch_manual"`` (batch
     con revisión humana previa). Solo afecta el ``reread_status`` cuando el
-    outcome de riesgo es ``REAPPLIED`` (ver stamping más abajo)."""
+    outcome de riesgo es ``REAPPLIED`` (ver stamping más abajo).
+
+    ``fresh_override``: ver docstring de ``preview_reread`` — evita volver a
+    descargar/parsear S3 cuando el ``run`` ya trae el summary de su sesión de
+    preview cacheado."""
     # F3-T3: la relectura crea/void productos+stock. Shared lock ANTES de mutar.
     # No-op en SQLite.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
@@ -2029,7 +2261,7 @@ async def apply_reread(
     if file is None:
         raise FileNotFoundError(file_id)
     s3 = s3 or S3Client()
-    fresh = await _fresh_summary(file, s3)
+    fresh = fresh_override if fresh_override is not None else await _fresh_summary(file, s3)
     confirmed_fields = _confirmed_fields_for(file, fresh)
 
     # F9a: resuelve el riesgo de columnas con outcome explícito. Solo REAPPLIED
@@ -2171,11 +2403,21 @@ async def start_background_apply(
     session: AsyncSession,
     file_id: uuid.UUID,
     tenant_id: uuid.UUID,
+    *,
+    existing_run: DataRepairRun | None = None,
 ) -> DataRepairRun:
-    """Crea el ``DataRepairRun`` (status RUNNING) para un apply en background y lo
-    devuelve. Guard anti-duplicado: si ya hay una relectura RUNNING reciente del
-    tenant, levanta ``ValueError`` (el caller responde 409). El caller commitea y
-    encola la task. Evita el ciclo timeout→reintento→duplicados."""
+    """Deja un ``DataRepairRun`` en status RUNNING para un apply en background y
+    lo devuelve. Guard anti-duplicado: si ya hay una relectura RUNNING reciente
+    del tenant (alcance POR TENANT, preexistente — no confundir con el guard de
+    sesión de preview, que es por archivo), levanta ``ValueError`` (el caller
+    responde 409). El caller commitea y encola la task. Evita el ciclo
+    timeout→reintento→duplicados.
+
+    ``existing_run``: si viene (F-RR — la sesión READY_TO_APPLY que
+    ``validate_ready_to_apply`` ya validó), se REUSA ese mismo run — conserva
+    su ``run_id`` y su ``fresh_summary`` cacheado (así el worker no vuelve a
+    descargar/parsear) — en vez de crear uno nuevo desde cero (camino legado,
+    sin sesión de preview previa)."""
     await _acquire_reread_guard_lock(session, tenant_id)
 
     existing = await session.execute(
@@ -2221,6 +2463,15 @@ async def start_background_apply(
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
+
+    if existing_run is not None:
+        existing_run.status = "RUNNING"
+        existing_run.dry_run = False
+        details = dict(existing_run.details_json or {})
+        details["phase"] = "queued"
+        existing_run.details_json = details
+        await session.flush()
+        return existing_run
 
     run = DataRepairRun(
         tenant_id=tenant_id,
@@ -2605,13 +2856,19 @@ __all__ = [
     "ACTION_VOID",
     "REPAIR_TYPE_REREAD",
     "VOID_REASON_REREAD",
+    "FileChangedSincePreviewError",
     "ResolvedRisk",
     "RereadApplyResult",
     "RereadPreview",
+    "StaleDraftVersionError",
     "apply_reread",
     "build_reread_summary",
+    "cancel_preview_session",
     "file_has_user_edits",
     "latest_applied_run_for_file",
+    "mark_session_ready_to_apply",
     "preview_reread",
+    "start_or_resume_preview_session",
     "undo_reread",
+    "validate_ready_to_apply",
 ]

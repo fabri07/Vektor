@@ -65,11 +65,17 @@ def reread_apply(run_id: str, file_id: str, tenant_id: str) -> None:
                 run.details_json = details
                 await session.commit()
                 try:
+                    # F-RR: si el run viene de una sesión de preview, ya trae el
+                    # summary re-descargado/re-parseado cacheado — evita pagar
+                    # S3+parseo de nuevo acá (el worker corre en background, pero
+                    # sigue siendo trabajo evitable).
+                    fresh_override = (run.details_json or {}).get("fresh_summary")
                     result = await reread_service.apply_reread(
                         session,
                         _uuid.UUID(file_id),
                         _uuid.UUID(tenant_id),
                         run=run,
+                        fresh_override=fresh_override,
                     )
                     await session.commit()
                     logger.info(

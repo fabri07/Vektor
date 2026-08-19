@@ -740,9 +740,28 @@ class RereadCounts(BaseModel):
 
 class RereadPreviewResponse(BaseModel):
     file_id: UUID
+    # F-RR: sesión de relectura — referencia + versión del borrador que ata el
+    # apply al preview exacto que el usuario vio (evita aplicar una
+    # interpretación distinta a la mostrada).
+    run_id: UUID
+    draft_version: int
+    status: str  # "PREVIEWING" | "READY_TO_APPLY"
     counts: RereadCounts
     legacy_fallback: bool = False
     sample_changes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RereadApplyRequest(BaseModel):
+    """F-RR: el apply ya no dispara una relectura ciega — ata la ejecución a
+    la sesión de preview exacta que el usuario confirmó."""
+
+    run_id: UUID
+    draft_version: int
+
+
+class RereadCancelResponse(BaseModel):
+    run_id: UUID
+    status: str  # "FAILED"
 
 
 class RereadItem(BaseModel):

@@ -3188,6 +3188,56 @@ class TestOthersHidesRiskRef:
         assert RISK_REF_KEY not in raw
 
 
+_REREAD_TEST_CONTENT = (
+    b"fecha,producto,monto,proveedor\n"
+    b"2026-01-05,Coca Cola,1500,Distribuidora Sur\n"
+)
+
+
+def _patch_s3_for_reread() -> Any:
+    """F-RR: contexto que mockea S3 (`download` + `head`) para toda la vida de
+    una sesión de relectura — la crea `_start_ready_reread_session` pero
+    `validate_ready_to_apply` vuelve a llamar `head()` al momento del apply
+    para chequear que el archivo no cambió, así que el POST al endpoint
+    también necesita el mock activo, no solo la creación de la sesión."""
+    from app.integrations.s3 import S3Client
+
+    async def _fake_download(_self: S3Client, _key: str) -> bytes:
+        return _REREAD_TEST_CONTENT
+
+    async def _fake_head(_self: S3Client, _key: str) -> dict[str, Any]:
+        return {
+            "etag": '"fake"',
+            "size": len(_REREAD_TEST_CONTENT),
+            "last_modified": "2026-01-01T00:00:00Z",
+        }
+
+    return unittest.mock.patch.multiple(
+        S3Client, download=_fake_download, head=_fake_head
+    )
+
+
+async def _start_ready_reread_session(
+    db_session: AsyncSession, tenant: Tenant, file: UploadedFile
+) -> tuple[uuid.UUID, int]:
+    """F-RR: el endpoint de apply ahora exige {run_id, draft_version} de una
+    sesión de preview READY_TO_APPLY — arma una directo contra el servicio
+    (sin HTTP) para no acoplar estos tests, que verifican el enqueue, al mock
+    completo de S3 vía cliente HTTP."""
+    from app.application.services import reread_service
+
+    with _patch_s3_for_reread():
+        run, fresh = await reread_service.start_or_resume_preview_session(
+            db_session, file.id, tenant.tenant_id
+        )
+        await reread_service.preview_reread(
+            db_session, file.id, tenant.tenant_id, fresh_override=fresh
+        )
+    reread_service.mark_session_ready_to_apply(run)
+    await db_session.commit()
+    return run.id, (run.details_json or {}).get("draft_version", 0)
+
+
 class TestRereadApplyEnqueueEndpoint:
     async def test_reread_apply_enqueue_fallido_marca_run_failed(
         self,
@@ -3217,6 +3267,9 @@ class TestRereadApplyEnqueueEndpoint:
         )
         db_session.add(record)
         await db_session.commit()
+        run_id, draft_version = await _start_ready_reread_session(
+            db_session, sample_tenant, record
+        )
 
         # El chequeo de salud del worker (pre-encolado, nuevo) es ortogonal a
         # esto: acá se testea el .delay() que falla DESPUÉS de crear el run.
@@ -3225,6 +3278,7 @@ class TestRereadApplyEnqueueEndpoint:
         # el chequeo nuevo cortaría ANTES de crear el run y esta aserción
         # fallaría por una razón distinta a la que el test verifica.
         with (
+            _patch_s3_for_reread(),
             unittest.mock.patch(
                 "app.application.services.reread_diagnostics_service."
                 "check_ingestion_workers_available",
@@ -3237,6 +3291,7 @@ class TestRereadApplyEnqueueEndpoint:
             response = await client.post(
                 f"/api/v1/ingestion/files/{record.id}/reread/apply",
                 headers=auth_headers,
+                json={"run_id": str(run_id), "draft_version": draft_version},
             )
         assert response.status_code == 503
 
@@ -3252,8 +3307,14 @@ class TestRereadApplyEnqueueEndpoint:
         assert (run.details_json or {}).get("phase") == "enqueue_failed"
 
         # Un segundo intento no debe estar bloqueado por el guard
-        # anti-duplicado: el run FAILED no cuenta como RUNNING.
+        # anti-duplicado: el run FAILED no cuenta como RUNNING. Necesita una
+        # sesión de preview nueva (la anterior quedó FAILED, ya no es
+        # READY_TO_APPLY).
+        run_id2, draft_version2 = await _start_ready_reread_session(
+            db_session, sample_tenant, record
+        )
         with (
+            _patch_s3_for_reread(),
             unittest.mock.patch(
                 "app.application.services.reread_diagnostics_service."
                 "check_ingestion_workers_available",
@@ -3264,6 +3325,7 @@ class TestRereadApplyEnqueueEndpoint:
             response2 = await client.post(
                 f"/api/v1/ingestion/files/{record.id}/reread/apply",
                 headers=auth_headers,
+                json={"run_id": str(run_id2), "draft_version": draft_version2},
             )
         assert response2.status_code == 202
         mock_delay.assert_called_once()
@@ -3294,22 +3356,128 @@ class TestRereadApplyEnqueueEndpoint:
         )
         db_session.add(record)
         await db_session.commit()
+        run_id, draft_version = await _start_ready_reread_session(
+            db_session, sample_tenant, record
+        )
 
-        with unittest.mock.patch(
-            "app.application.services.reread_diagnostics_service."
-            "check_ingestion_workers_available",
-            return_value=False,
+        with (
+            _patch_s3_for_reread(),
+            unittest.mock.patch(
+                "app.application.services.reread_diagnostics_service."
+                "check_ingestion_workers_available",
+                return_value=False,
+            ),
         ):
             response = await client.post(
                 f"/api/v1/ingestion/files/{record.id}/reread/apply",
                 headers=auth_headers,
+                json={"run_id": str(run_id), "draft_version": draft_version},
             )
 
         assert response.status_code == 503
+        # La sesión validada no se toca si el worker-check corta antes de
+        # encolar: sigue READY_TO_APPLY, nunca pasó a RUNNING.
         result = await db_session.execute(
             select(DataRepairRun).where(DataRepairRun.tenant_id == sample_tenant.tenant_id)
         )
-        assert result.scalars().first() is None
+        run = result.scalars().one()
+        assert run.status == "READY_TO_APPLY"
+
+
+class TestRereadPreviewSessionEndpoint:
+    """F-RR: POST /reread/preview crea/reusa una sesión, y su run_id se puede
+    cancelar explícitamente vía POST /reread/{run_id}/cancel."""
+
+    async def test_preview_returns_session_and_reuses_it(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid3/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            resp1 = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            assert resp1.status_code == 200
+            data1 = resp1.json()
+            assert data1["draft_version"] == 0
+            assert data1["status"] == "READY_TO_APPLY"
+            assert data1["run_id"]
+
+            resp2 = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            assert resp2.status_code == 200
+            data2 = resp2.json()
+
+        # Misma sesión reusada, no una nueva por cada click en "Volver a leer".
+        assert data2["run_id"] == data1["run_id"]
+
+    async def test_cancel_session_then_apply_rejects_stale_session(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid4/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            preview = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+        run_id = preview.json()["run_id"]
+
+        cancel = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/reread/{run_id}/cancel",
+            headers=auth_headers,
+        )
+        assert cancel.status_code == 200
+        assert cancel.json()["status"] == "FAILED"
+
+        with unittest.mock.patch(
+            "app.application.services.reread_diagnostics_service."
+            "check_ingestion_workers_available",
+            return_value=None,
+        ):
+            apply_resp = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/apply",
+                headers=auth_headers,
+                json={"run_id": run_id, "draft_version": 0},
+            )
+        # La sesión existe (se encontró por id) pero ya no está lista para
+        # aplicarse (quedó FAILED al cancelarla) — 409, no 404.
+        assert apply_resp.status_code == 409
 
 
 class TestEfectoDeInventarioPorHoja:

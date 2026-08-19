@@ -1,7 +1,9 @@
 """S3-compatible storage client (AWS S3 / MinIO / Cloudflare R2)."""
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import boto3
 from botocore.config import Config
@@ -117,6 +119,32 @@ class S3Client:
             return data
         except (BotoCoreError, ClientError) as exc:
             logger.error("s3.download_failed", key=key, error=str(exc))
+            raise
+
+    async def head(self, key: str) -> dict[str, Any]:
+        """Metadata liviana del objeto (``etag``/``size``/``last_modified``),
+        sin descargar el contenido. Usado por la relectura para detectar si el
+        archivo cambió entre el preview y el apply sin pagar el costo de
+        volver a descargarlo entero solo para chequearlo."""
+        if self._is_local_key(key):
+            local_path = self._local_path(key)
+            stat = local_path.stat()
+            return {
+                "etag": None,
+                "size": stat.st_size,
+                "last_modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+            }
+
+        try:
+            response = self._client.head_object(Bucket=self._bucket, Key=key)
+            last_modified = response.get("LastModified")
+            return {
+                "etag": response.get("ETag"),
+                "size": response.get("ContentLength"),
+                "last_modified": last_modified.isoformat() if last_modified else None,
+            }
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("s3.head_failed", key=key, error=str(exc))
             raise
 
     async def generate_presigned_url(self, key: str, expires_in: int = 3600) -> str:

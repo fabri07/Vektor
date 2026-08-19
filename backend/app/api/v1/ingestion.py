@@ -192,7 +192,9 @@ from app.schemas.ingestion import (
     PurchaseGroupLine,
     PurchaseGroupsRequest,
     PurchaseGroupsResponse,
+    RereadApplyRequest,
     RereadApplyStartResponse,
+    RereadCancelResponse,
     RereadCounts,
     RereadItem,
     RereadPreviewResponse,
@@ -3431,21 +3433,64 @@ async def reread_preview(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> RereadPreviewResponse:
+    """F-RR: reusa (o crea) una sesión de relectura para este archivo — descarga
+    y parsea UNA sola vez, cacheada en el run. El ``run_id`` + ``draft_version``
+    devueltos son la referencia que ``POST .../reread/apply`` exige para
+    garantizar que aplica EXACTAMENTE lo que se previsualizó acá."""
     from app.application.services import reread_service  # noqa: PLC0415
 
     try:
-        preview = await reread_service.preview_reread(session, file_id, tenant.tenant_id)
+        run, fresh = await reread_service.start_or_resume_preview_session(
+            session, file_id, tenant.tenant_id
+        )
+        preview = await reread_service.preview_reread(
+            session, file_id, tenant.tenant_id, fresh_override=fresh
+        )
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         ) from exc
 
+    reread_service.mark_session_ready_to_apply(run)
+    await session.commit()
+
     return RereadPreviewResponse(
         file_id=file_id,
+        run_id=run.id,
+        draft_version=(run.details_json or {}).get("draft_version", 0),
+        status=run.status,
         counts=RereadCounts(**preview.counts()),
         legacy_fallback=preview.legacy_fallback,
         sample_changes=preview.sample_changes,
     )
+
+
+@router.post(
+    "/files/{file_id}/reread/{run_id}/cancel",
+    response_model=RereadCancelResponse,
+    summary="Abandona una sesión de revisión de relectura abierta",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+)
+async def reread_cancel_session(
+    file_id: uuid.UUID,
+    run_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> RereadCancelResponse:
+    """Libera el archivo para una relectura nueva de inmediato, sin esperar el
+    timeout de sesión abandonada."""
+    from app.application.services import reread_service  # noqa: PLC0415
+
+    try:
+        run = await reread_service.cancel_preview_session(
+            session, run_id, tenant.tenant_id, file_id
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    await session.commit()
+    return RereadCancelResponse(run_id=run.id, status=run.status)
 
 
 @router.post(
@@ -3460,17 +3505,45 @@ async def reread_preview(
 )
 async def reread_apply(
     file_id: uuid.UUID,
+    body: RereadApplyRequest,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> RereadApplyStartResponse:
     """El apply puede insertar miles de filas (minutos). Corre en background: se
-    crea el run, se encola la task y se devuelve el ``run_id`` para que el frontend
-    haga polling de ``GET /reread/runs/{run_id}``. Guard anti-duplicado: una sola
-    relectura RUNNING por tenant."""
+    reusa el run de la sesión de preview (``body.run_id``), se encola la task y
+    se devuelve el ``run_id`` para que el frontend haga polling de
+    ``GET /reread/runs/{run_id}``. Guard anti-duplicado: una sola relectura
+    RUNNING por tenant.
+
+    F-RR: ``body.run_id`` + ``body.draft_version`` atan el apply a la sesión de
+    preview EXACTA que el usuario vio — si alguien más la modificó
+    (``draft_version`` desactualizado) o el archivo cambió en S3 desde
+    entonces, se rechaza con 409 y hay que generar un preview nuevo."""
     from app.application.services import reread_service  # noqa: PLC0415
     from app.application.services.reread_diagnostics_service import (  # noqa: PLC0415
         check_ingestion_workers_available,
     )
+
+    try:
+        validated_run = await reread_service.validate_ready_to_apply(
+            session, body.run_id, tenant.tenant_id, file_id, body.draft_version
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sesión de relectura no encontrada.",
+        ) from exc
+    except (
+        reread_service.StaleDraftVersionError,
+        reread_service.FileChangedSincePreviewError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
 
     # Best-effort: `.delay()` más abajo publica al broker y SIEMPRE devuelve
     # éxito, incluso sin ningún worker escuchando la cola `ingestion` — ahí es
@@ -3490,7 +3563,7 @@ async def reread_apply(
 
     try:
         run = await reread_service.start_background_apply(
-            session, file_id, tenant.tenant_id
+            session, file_id, tenant.tenant_id, existing_run=validated_run
         )
     except FileNotFoundError as exc:
         raise HTTPException(
