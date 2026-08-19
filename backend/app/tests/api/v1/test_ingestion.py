@@ -3419,6 +3419,21 @@ class TestRereadPreviewSessionEndpoint:
             assert data1["draft_version"] == 0
             assert data1["status"] == "READY_TO_APPLY"
             assert data1["run_id"]
+            # F-RR Fase 4: el endpoint expone el impacto proyectado de
+            # vínculo producto — presente y con las 5 categorías, no solo
+            # los contadores agregados de siempre.
+            assert set(data1["impact"]) == {
+                "ventas_con_producto",
+                "ventas_sin_producto",
+                "ventas_sin_producto_samples",
+                "compras_vinculadas",
+                "compras_producto_nuevo",
+                "compras_sin_producto",
+                "compras_sin_producto_samples",
+                "compras_gate_bloqueado",
+                "compras_gate_bloqueado_samples",
+                "movimientos_sin_producto_esperado",
+            }
 
             resp2 = await client.post(
                 f"/api/v1/ingestion/files/{record.id}/reread/preview",

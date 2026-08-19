@@ -102,6 +102,7 @@ from app.application.services.stock_service import (
     unvoid_movement,
     void_movement,
 )
+from app.domain.expense_categories import classify_expense_with_vertical
 from app.domain.ingestion_version import INGESTION_VERSION
 from app.domain.inventory_effect import (
     SheetInventoryProfile,
@@ -152,6 +153,17 @@ _row_val = _iis._row_val
 _resolve_product = _iis._resolve_product
 _load_import_fingerprints = _iis._load_import_fingerprints
 _load_product_index = _iis._load_product_index
+# F-RR (Fase 4, reconciliación): MISMAS primitivas que resuelven identidad de
+# producto y categoría en el import real — el estimador del impacto proyectado
+# no puede tener su propia copia de este criterio, o diverge del apply (ver
+# incidente ASTERIA: el preview decía "sin_producto: 0" contra 1.403/427
+# reales porque nada de esto se contaba).
+_CATEGORIA_COLS = _iis._CATEGORIA_COLS
+_row_val_categoria = _iis._row_val_categoria
+_load_tenant_vertical = _iis._load_tenant_vertical
+_load_product_identity_indexes = _iis._load_product_identity_indexes
+_resolve_link = _iis._resolve_link
+_clean_str = _iis._clean_str
 # F8b (Task 5): primitivas de captura/correlación de riesgo compartidas con el
 # confirm (reuso deliberado, no se reimplementa la captura).
 _capture_column_risk_rows = _iis._capture_column_risk_rows
@@ -192,6 +204,34 @@ def _row_anchor(
 
 
 @dataclass
+class UnlinkedProductsEstimate:
+    """F-RR (Fase 4): impacto proyectado en el vínculo venta/compra↔producto,
+    ANTES de aplicar — 5 categorías mutuamente excluyentes (ver docstring de
+    ``estimate_unlinked_products``). Nace de un incidente real: el resumen de
+    reread de la cuenta ASTERIA reportaba ``sin_producto: 0`` mientras la base
+    tenía 1.403 ventas y 427 gastos/compras sin producto — nada en el código
+    anterior contaba lo que se filtraba en silencio."""
+
+    ventas_con_producto: int = 0
+    ventas_sin_producto: int = 0
+    ventas_sin_producto_samples: list[dict[str, Any]] = field(default_factory=list)
+    compras_vinculadas: int = 0
+    #: Producto nuevo que SE CREARÁ y quedará vinculado en el apply real —
+    #: distinto de `compras_sin_producto` (ambiguo, NO se crea nada).
+    compras_producto_nuevo: int = 0
+    compras_sin_producto: int = 0
+    compras_sin_producto_samples: list[dict[str, Any]] = field(default_factory=list)
+    #: El bug real de ASTERIA: la fila ni siquiera INTENTA resolver producto
+    #: porque falta la cantidad (o el nombre) — típicamente la hoja no tiene
+    #: esa columna mapeada. Releer con el MISMO mapeo nunca lo arregla solo.
+    compras_gate_bloqueado: int = 0
+    compras_gate_bloqueado_samples: list[dict[str, Any]] = field(default_factory=list)
+    #: Servicios/alquiler/etc: legítimamente no requieren producto — sin esta
+    #: categoría se mezclarían con las filas realmente rotas.
+    movimientos_sin_producto_esperado: int = 0
+
+
+@dataclass
 class RereadPreview:
     file_id: uuid.UUID
     to_update: int = 0
@@ -213,6 +253,11 @@ class RereadPreview:
     column_risk_outcome: str = "NO_RISK_FOUND"
     column_risk_ambiguous: list[dict[str, Any]] = field(default_factory=list)
     column_risk_forced_unverified: list[dict[str, Any]] = field(default_factory=list)
+    # F-RR (Fase 4): impacto proyectado en el vínculo venta/compra↔producto —
+    # ver invariante de reconciliación en ``estimate_unlinked_products``.
+    unlinked_products: UnlinkedProductsEstimate = field(
+        default_factory=UnlinkedProductsEstimate
+    )
 
     def counts(self) -> dict[str, int]:
         return {
@@ -1596,6 +1641,121 @@ def _estimate_products(
     return new, restock, samples
 
 
+async def estimate_unlinked_products(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    fresh: dict[str, Any],
+    confirmed_fields: dict[str, bool],
+    catalog: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+) -> UnlinkedProductsEstimate:
+    """Proyecta, SIN escribir nada, si cada venta/compra quedaría vinculada a
+    un producto — usando la MISMA decisión determinística que el apply real
+    (``ingestion_import_service``), no una copia que pueda divergir:
+
+      - Ventas: ``_resolve_product`` (idéntico matcher usado en
+        ``_venta_producto_id``/``_venta_producto_id_plana``).
+      - Compras de mercadería: el MISMO gate (`nombre + cantidad>0` o
+        categoría INVENTORY) que ``ingestion_import_service`` evalúa antes de
+        siquiera intentar vincular — una fila que lo pierde no se cuenta como
+        "sin producto" genérico, se distingue como ``compras_gate_bloqueado``
+        (releer con el mismo mapeo NUNCA la arregla sola) de
+        ``movimientos_sin_producto_esperado`` (un service/alquiler real).
+      - Gate pasado: ``_resolve_link`` sobre ``ProductIdentityIndexes`` recién
+        cargados (SELECT puro, sin mutar) — resuelto/ambiguo/a-crear.
+
+    Deliberadamente NO reusa ``_resolve_purchase_identity``: esa función
+    CREA productos incompletos en el caso "create" (vía
+    ``build_incomplete_product``) — inaceptable en un preview, que nunca debe
+    escribir datos de negocio. ``_resolve_link`` es su mitad pura.
+
+    Aproximación conocida: no simula el orden fila-por-fila del import real
+    (un producto que la fila 5 crearía y la fila 20 del MISMO archivo
+    vincularía después aparece acá como dos "compras_producto_nuevo"
+    separadas, no como alta+reposición) — replicar eso exactamente exigiría
+    simular la corrida completa, lo que iría en contra del propio objetivo
+    de "estimar sin escribir". Tampoco resuelve por barcode/marca (esas
+    columnas no llegan resueltas a esta capa) — sku/nombre cubre el caso
+    típico de un libro de compras.
+    """
+    by_sku, by_name, by_token = catalog
+    result = UnlinkedProductsEstimate()
+
+    for _ctx, _idx, row, kind in _iter_importable_fresh_rows(fresh, confirmed_fields):
+        if kind != "sale":
+            continue
+        name = _row_val(row, _NOMBRE_COLS)
+        sku = _row_val(row, _SKU_COLS)
+        pid = _resolve_product(by_sku, by_name, name, sku, by_token)
+        if pid is not None:
+            result.ventas_con_producto += 1
+        else:
+            result.ventas_sin_producto += 1
+            if len(result.ventas_sin_producto_samples) < _SAMPLE_PER_KIND:
+                result.ventas_sin_producto_samples.append(
+                    {"name": _clean_str(name, 120), "sku": _clean_str(sku, 60)}
+                )
+
+    is_stock = fresh.get("inferred_type") == "stock"
+    if is_stock or not (confirmed_fields.get("gastos") or confirmed_fields.get("ventas")):
+        return result
+
+    vertical = await _load_tenant_vertical(session, tenant_id)
+    indexes = await _load_product_identity_indexes(session, tenant_id)
+    empty_cache: dict[str, Product] = {}
+
+    purchase_rows: list[dict[str, Any]] = []
+    for bucket_key in ("gastos_detectados", "otros_detectados"):
+        purchase_rows += [r for r in (fresh.get(bucket_key) or []) if isinstance(r, dict)]
+
+    for row in purchase_rows:
+        clean_name = _clean_str(_row_val(row, _NOMBRE_COLS), 299)
+        sku = _row_val(row, _SKU_COLS)
+        has_qty = _parse_qty(_row_val(row, _CANTIDAD_COLS)) > 0
+        # MISMO gate que ingestion_import_service._is_merch_purchase / el
+        # `if expense.product_id is None and (...)` que lo envuelve.
+        is_merch_purchase = bool(clean_name) and has_qty
+
+        cat_code, _label, _ = classify_expense_with_vertical(
+            _clean_str(_row_val_categoria(row)), vertical
+        )
+
+        if not (is_merch_purchase or (cat_code == "INVENTORY" and has_qty)):
+            sample = {"name": clean_name, "categoria": cat_code}
+            # `_NOMBRE_COLS` (heurística, sin la columna MAPEADA explícita que
+            # sí tiene el import real) también matchea la descripción genérica
+            # de un gasto real ("detalle"/"concepto") — "Alquiler local" parece
+            # nombre de producto igual que "Yerba Mate 1kg". La categoría
+            # clasificada desempata: si ya resolvió a un OPEX reconocido
+            # (RENT, SERVICES, etc. — no "OTHER" ni "INVENTORY"), la fila SÍ
+            # se identificó como lo que es y no necesita producto. Solo cuando
+            # la categoría queda "OTHER" (no reconocida) Y hay nombre sin
+            # cantidad es plausible que sea mercadería con la columna de
+            # cantidad perdida — el bug real de ASTERIA.
+            if clean_name and not has_qty and cat_code in ("OTHER", "INVENTORY"):
+                result.compras_gate_bloqueado += 1
+                if len(result.compras_gate_bloqueado_samples) < _SAMPLE_PER_KIND:
+                    result.compras_gate_bloqueado_samples.append(sample)
+            else:
+                result.movimientos_sin_producto_esperado += 1
+            continue
+
+        resolution = _resolve_link(
+            clean_name, sku, None, None, indexes=indexes, cache=empty_cache
+        )
+        if resolution.status == "resolved":
+            result.compras_vinculadas += 1
+        elif resolution.status in ("ambiguous", "conflict"):
+            result.compras_sin_producto += 1
+            if len(result.compras_sin_producto_samples) < _SAMPLE_PER_KIND:
+                result.compras_sin_producto_samples.append(
+                    {"name": clean_name, "sku": _clean_str(sku, 60)}
+                )
+        else:  # "create"
+            result.compras_producto_nuevo += 1
+
+    return result
+
+
 def _estimate_reread(
     file: UploadedFile,
     tenant_id: uuid.UUID,
@@ -2243,6 +2403,9 @@ async def preview_reread(
     preview.column_risk_outcome = resolved.outcome
     preview.column_risk_ambiguous = resolved.ambiguous_rows
     preview.column_risk_forced_unverified = resolved.forced_rows
+    preview.unlinked_products = await estimate_unlinked_products(
+        session, tenant_id, fresh, confirmed_fields, catalog
+    )
     return preview
 
 

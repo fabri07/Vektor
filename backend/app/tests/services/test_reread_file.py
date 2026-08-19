@@ -2334,3 +2334,215 @@ async def test_start_background_apply_rejects_stale_in_memory_run_copy(
 
     await db_session.refresh(run)
     assert run.status == "FAILED"  # sigue cancelada, NO revivida a RUNNING
+
+
+# ── F-RR (Fase 4): estimate_unlinked_products — reconciliación preview↔apply ──
+#
+# Caso real que motiva estos tests: el resumen de reread de ASTERIA reportaba
+# "sin_producto: 0" mientras la base tenía 1.403 ventas y 427 gastos/compras
+# sin producto — nada en el código anterior contaba lo que se filtraba en
+# silencio. Cada test corresponde a UNA de las 5 categorías mutuamente
+# excluyentes.
+
+
+async def test_estimate_unlinked_products_ventas_con_y_sin_producto(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    existing = Product(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        name="Coca 500ml",
+        sku="COC500",
+        sale_price_ars=Decimal("500"),
+        stock_units=10,
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "ventas_detectadas": [
+            {"producto": "Coca 500ml", "sku": "COC500", "monto": "500"},
+            {"producto": "Producto Desconocido XYZ", "monto": "300"},
+        ],
+    }
+    catalog = await reread_service._load_product_index(db_session, tenant.tenant_id)
+
+    result = await reread_service.estimate_unlinked_products(
+        db_session, tenant.tenant_id, fresh, {"ventas": True, "gastos": False}, catalog
+    )
+
+    assert result.ventas_con_producto == 1
+    assert result.ventas_sin_producto == 1
+    assert result.ventas_sin_producto_samples[0]["name"] == "Producto Desconocido XYZ"
+
+
+async def test_estimate_unlinked_products_compra_gate_bloqueado_sin_cantidad(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """EL bug real de ASTERIA: una fila de compra con nombre de producto pero
+    sin columna de cantidad mapeada (o cantidad no parseable) nunca intenta
+    resolver producto — antes esto era invisible en el preview."""
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "gastos_detectados": [
+            {"producto": "Yerba Mate 1kg", "monto": "2200"},  # sin columna cantidad
+        ],
+    }
+    catalog = await reread_service._load_product_index(db_session, tenant.tenant_id)
+
+    result = await reread_service.estimate_unlinked_products(
+        db_session, tenant.tenant_id, fresh, {"gastos": True, "ventas": False}, catalog
+    )
+
+    assert result.compras_gate_bloqueado == 1
+    assert result.compras_gate_bloqueado_samples[0]["name"] == "Yerba Mate 1kg"
+    assert result.compras_vinculadas == 0
+    assert result.compras_producto_nuevo == 0
+    assert result.movimientos_sin_producto_esperado == 0
+
+
+async def test_estimate_unlinked_products_compra_vinculada_a_existente(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    existing = Product(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        name="Yerba Mate 1kg",
+        sale_price_ars=Decimal("3000"),
+        stock_units=5,
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "gastos_detectados": [
+            {"producto": "Yerba Mate 1kg", "cantidad": "10", "monto": "22000"},
+        ],
+    }
+    catalog = await reread_service._load_product_index(db_session, tenant.tenant_id)
+
+    result = await reread_service.estimate_unlinked_products(
+        db_session, tenant.tenant_id, fresh, {"gastos": True, "ventas": False}, catalog
+    )
+
+    assert result.compras_vinculadas == 1
+    assert result.compras_gate_bloqueado == 0
+    assert result.compras_producto_nuevo == 0
+
+
+async def test_estimate_unlinked_products_compra_producto_nuevo(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "gastos_detectados": [
+            {"producto": "Alfajor Triple XYZ", "cantidad": "24", "monto": "9600"},
+        ],
+    }
+    catalog = await reread_service._load_product_index(db_session, tenant.tenant_id)
+
+    result = await reread_service.estimate_unlinked_products(
+        db_session, tenant.tenant_id, fresh, {"gastos": True, "ventas": False}, catalog
+    )
+
+    # No matchea catálogo (vacío) pero tiene nombre+cantidad: SE crearía y
+    # quedaría vinculado — no es lo mismo que "sin producto".
+    assert result.compras_producto_nuevo == 1
+    assert result.compras_gate_bloqueado == 0
+    assert result.compras_sin_producto == 0
+
+
+async def test_estimate_unlinked_products_compra_ambigua(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """Dos productos activos comparten el mismo nombre normalizado: el motor
+    de identidad no puede resolver a ciegas — ambiguo, no "nuevo"."""
+    db_session.add_all(
+        [
+            Product(
+                id=uuid.uuid4(),
+                tenant_id=tenant.tenant_id,
+                name="Detergente 750ml",
+                sku="DET-A",
+                sale_price_ars=Decimal("100"),
+                stock_units=1,
+            ),
+            Product(
+                id=uuid.uuid4(),
+                tenant_id=tenant.tenant_id,
+                name="Detergente 750ml",
+                sku="DET-B",
+                sale_price_ars=Decimal("120"),
+                stock_units=1,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "gastos_detectados": [
+            {"producto": "Detergente 750ml", "cantidad": "5", "monto": "500"},
+        ],
+    }
+    catalog = await reread_service._load_product_index(db_session, tenant.tenant_id)
+
+    result = await reread_service.estimate_unlinked_products(
+        db_session, tenant.tenant_id, fresh, {"gastos": True, "ventas": False}, catalog
+    )
+
+    assert result.compras_sin_producto == 1
+    assert result.compras_vinculadas == 0
+    assert result.compras_producto_nuevo == 0
+
+
+async def test_estimate_unlinked_products_movimiento_sin_producto_esperado(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """Un gasto real de servicio (sin nombre de producto, sin cantidad,
+    categoría no-mercadería) legítimamente no requiere producto — no debe
+    mezclarse con las filas realmente rotas (`compras_gate_bloqueado`)."""
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "gastos_detectados": [
+            {"detalle": "Alquiler local", "categoria": "Alquiler", "monto": "150000"},
+        ],
+    }
+    catalog = await reread_service._load_product_index(db_session, tenant.tenant_id)
+
+    result = await reread_service.estimate_unlinked_products(
+        db_session, tenant.tenant_id, fresh, {"gastos": True, "ventas": False}, catalog
+    )
+
+    assert result.movimientos_sin_producto_esperado == 1
+    assert result.compras_gate_bloqueado == 0
+
+
+async def test_estimate_unlinked_products_stock_file_skips_purchase_gate(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """Un catálogo de stock (no libro de compras) no pasa por el gate de
+    compra — evita falsos "gate_bloqueado" sobre filas de catálogo."""
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "stock_detectado": [{"producto": "Cualquiera", "stock": "10"}],
+    }
+    catalog = await reread_service._load_product_index(db_session, tenant.tenant_id)
+
+    result = await reread_service.estimate_unlinked_products(
+        db_session, tenant.tenant_id, fresh, {"gastos": False, "ventas": False}, catalog
+    )
+
+    assert result.compras_gate_bloqueado == 0
+    assert result.movimientos_sin_producto_esperado == 0
+    assert result.compras_vinculadas == 0

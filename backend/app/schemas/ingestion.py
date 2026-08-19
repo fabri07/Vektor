@@ -738,6 +738,25 @@ class RereadCounts(BaseModel):
     products_restock: int = 0
 
 
+class RereadImpactProjection(BaseModel):
+    """F-RR (Fase 4): impacto proyectado en el vínculo venta/compra↔producto,
+    ANTES de aplicar. 5 categorías mutuamente excluyentes — ver
+    ``reread_service.estimate_unlinked_products``. Nace de un incidente real:
+    el resumen de reread de ASTERIA reportaba "sin_producto: 0" mientras la
+    base tenía 1.403 ventas y 427 gastos/compras sin producto."""
+
+    ventas_con_producto: int = 0
+    ventas_sin_producto: int = 0
+    ventas_sin_producto_samples: list[dict[str, Any]] = Field(default_factory=list)
+    compras_vinculadas: int = 0
+    compras_producto_nuevo: int = 0
+    compras_sin_producto: int = 0
+    compras_sin_producto_samples: list[dict[str, Any]] = Field(default_factory=list)
+    compras_gate_bloqueado: int = 0
+    compras_gate_bloqueado_samples: list[dict[str, Any]] = Field(default_factory=list)
+    movimientos_sin_producto_esperado: int = 0
+
+
 class RereadPreviewResponse(BaseModel):
     file_id: UUID
     # F-RR: sesión de relectura — referencia + versión del borrador que ata el
@@ -747,6 +766,7 @@ class RereadPreviewResponse(BaseModel):
     draft_version: int
     status: str  # "PREVIEWING" | "READY_TO_APPLY"
     counts: RereadCounts
+    impact: RereadImpactProjection = Field(default_factory=RereadImpactProjection)
     legacy_fallback: bool = False
     sample_changes: list[dict[str, Any]] = Field(default_factory=list)
 

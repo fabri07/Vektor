@@ -11,6 +11,7 @@ import hashlib
 import time
 import uuid
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, cast
@@ -196,6 +197,7 @@ from app.schemas.ingestion import (
     RereadApplyStartResponse,
     RereadCancelResponse,
     RereadCounts,
+    RereadImpactProjection,
     RereadItem,
     RereadPreviewResponse,
     RereadRunStatusResponse,
@@ -3460,6 +3462,7 @@ async def reread_preview(
         draft_version=(run.details_json or {}).get("draft_version", 0),
         status=run.status,
         counts=RereadCounts(**preview.counts()),
+        impact=RereadImpactProjection(**asdict(preview.unlinked_products)),
         legacy_fallback=preview.legacy_fallback,
         sample_changes=preview.sample_changes,
     )
