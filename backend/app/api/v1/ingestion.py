@@ -3468,6 +3468,25 @@ async def reread_apply(
     haga polling de ``GET /reread/runs/{run_id}``. Guard anti-duplicado: una sola
     relectura RUNNING por tenant."""
     from app.application.services import reread_service  # noqa: PLC0415
+    from app.application.services.reread_diagnostics_service import (  # noqa: PLC0415
+        check_ingestion_workers_available,
+    )
+
+    # Best-effort: `.delay()` más abajo publica al broker y SIEMPRE devuelve
+    # éxito, incluso sin ningún worker escuchando la cola `ingestion` — ahí es
+    # donde quedaron trabadas las dos relecturas de ASTERIA (RUNNING para
+    # siempre, sin que nadie las tomara). Solo bloquea con 503 cuando el
+    # chequeo pudo confirmar que NO hay workers; si el chequeo mismo falla
+    # (`None`), se sigue encolando igual — fail-open, nunca fail-closed por un
+    # chequeo de salud que puede fallar por su cuenta.
+    if await check_ingestion_workers_available() is False:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "No se pudo encolar: no hay ningún proceso disponible para "
+                "aplicar la relectura ahora. Reintentá en unos minutos."
+            ),
+        )
 
     try:
         run = await reread_service.start_background_apply(

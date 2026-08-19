@@ -3218,8 +3218,21 @@ class TestRereadApplyEnqueueEndpoint:
         db_session.add(record)
         await db_session.commit()
 
-        with unittest.mock.patch.object(
-            reread_apply_task, "delay", side_effect=RuntimeError("broker caído")
+        # El chequeo de salud del worker (pre-encolado, nuevo) es ortogonal a
+        # esto: acá se testea el .delay() que falla DESPUÉS de crear el run.
+        # Se fuerza `None` (fail-open / inconcluso) para no interferir — sin
+        # esto, si el entorno de test no tiene ningún worker Celery escuchando,
+        # el chequeo nuevo cortaría ANTES de crear el run y esta aserción
+        # fallaría por una razón distinta a la que el test verifica.
+        with (
+            unittest.mock.patch(
+                "app.application.services.reread_diagnostics_service."
+                "check_ingestion_workers_available",
+                return_value=None,
+            ),
+            unittest.mock.patch.object(
+                reread_apply_task, "delay", side_effect=RuntimeError("broker caído")
+            ),
         ):
             response = await client.post(
                 f"/api/v1/ingestion/files/{record.id}/reread/apply",
@@ -3240,13 +3253,63 @@ class TestRereadApplyEnqueueEndpoint:
 
         # Un segundo intento no debe estar bloqueado por el guard
         # anti-duplicado: el run FAILED no cuenta como RUNNING.
-        with unittest.mock.patch.object(reread_apply_task, "delay") as mock_delay:
+        with (
+            unittest.mock.patch(
+                "app.application.services.reread_diagnostics_service."
+                "check_ingestion_workers_available",
+                return_value=None,
+            ),
+            unittest.mock.patch.object(reread_apply_task, "delay") as mock_delay,
+        ):
             response2 = await client.post(
                 f"/api/v1/ingestion/files/{record.id}/reread/apply",
                 headers=auth_headers,
             )
         assert response2.status_code == 202
         mock_delay.assert_called_once()
+
+    async def test_reread_apply_sin_workers_disponibles_no_encola(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Si el chequeo pre-apply determina con certeza que ningún worker
+        escucha la cola `ingestion`, corta con 503 ANTES de encolar (y antes de
+        crear el run) en vez de dejar una relectura fantasma en cola para
+        siempre — el síntoma real detectado en ASTERIA."""
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid2/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with unittest.mock.patch(
+            "app.application.services.reread_diagnostics_service."
+            "check_ingestion_workers_available",
+            return_value=False,
+        ):
+            response = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/apply",
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 503
+        result = await db_session.execute(
+            select(DataRepairRun).where(DataRepairRun.tenant_id == sample_tenant.tenant_id)
+        )
+        assert result.scalars().first() is None
 
 
 class TestEfectoDeInventarioPorHoja:

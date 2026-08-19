@@ -1,0 +1,186 @@
+"""Diagnóstico read-only de la salud operativa de la cola de relectura.
+
+El apply de una relectura corre en background (Celery, cola ``ingestion``).
+Encolar una tarea con ``.delay()`` siempre devuelve éxito aunque no haya ningún
+worker escuchando esa cola — el broker simplemente la deja esperando. Sin este
+chequeo, un ``DataRepairRun`` queda en ``RUNNING`` con
+``details_json["phase"] == "queued"`` para siempre, indistinguible de "se está
+por tomar en cualquier momento" (incidente real: cuenta ASTERIA, 2026-08, dos
+runs exactamente en ese estado, sin que ningún worker los tomara nunca).
+
+Este módulo nunca bloquea ni escribe nada — solo reporta lo que puede
+verificar desde el backend, siguiendo el mismo patrón que
+``mcp_diagnostics_service.py`` (cada chequeo captura su propio error y se
+reporta como check fallido, nunca propaga la excepción).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.observability.logger import get_logger
+from app.persistence.models.repair import DataRepairRun
+
+logger = get_logger(__name__)
+
+_INGESTION_QUEUE = "ingestion"
+_REPAIR_TYPE_REREAD = "REREAD_FILE"
+# Umbral de diagnóstico, DELIBERADAMENTE más corto que el umbral de 15 min que
+# usa el guard anti-duplicado de `reread_service._STALE_RUNNING_AFTER_SECONDS`:
+# ese umbral decide cuándo dejar de BLOQUEAR una relectura nueva; este decide
+# cuándo vale la pena AVISAR que nadie está consumiendo la cola — mucho antes.
+_QUEUED_TOO_LONG_SECONDS = 2 * 60
+
+
+def _check(name: str, ok: bool, severity: str, detail: str) -> dict[str, Any]:
+    return {"check": name, "ok": ok, "severity": severity, "detail": detail}
+
+
+def _inspect_celery(timeout: float) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """Bloqueante (publica al broker y espera respuestas hasta ``timeout``) —
+    llamar vía ``asyncio.to_thread`` para no trabar el event loop. Si NADIE
+    responde, ``ping()``/``active_queues()`` esperan el ``timeout`` completo
+    antes de devolver vacío — no hay forma de saberlo antes (es el costo
+    inherente de un RPC por pub/sub). ``timeout`` se ajusta según el caller:
+    corto en el chequeo pre-apply (hot path), más paciente en el diagnóstico
+    manual de `/admin`."""
+    try:
+        from app.jobs.celery_app import celery_app  # noqa: PLC0415
+
+        insp = celery_app.control.inspect(timeout=timeout)
+        pong = insp.ping() or {}
+        active_queues = insp.active_queues() or {}
+        return pong, active_queues, None
+    except Exception as exc:  # noqa: BLE001 — diagnóstico nunca rompe
+        return {}, {}, str(exc)
+
+
+def _evaluate_ingestion_queue(active_queues: dict[str, Any]) -> tuple[bool, str]:
+    for worker_name, queues in active_queues.items():
+        names = {q.get("name") for q in (queues or [])}
+        if _INGESTION_QUEUE in names:
+            return True, f"'{worker_name}' escucha la cola '{_INGESTION_QUEUE}'."
+    return (
+        False,
+        f"Ningún worker respondiendo tiene la cola '{_INGESTION_QUEUE}' entre sus "
+        "colas activas — revisar la variable CELERY_QUEUES del proceso worker "
+        "(scripts/start_worker.sh) o si el proceso worker está corriendo.",
+    )
+
+
+async def _count_stuck_in_queue(session: AsyncSession) -> int:
+    result = await session.execute(
+        select(DataRepairRun).where(
+            DataRepairRun.repair_type == _REPAIR_TYPE_REREAD,
+            DataRepairRun.status == "RUNNING",
+        )
+    )
+    now = datetime.now(UTC)
+    stuck = 0
+    for r in result.scalars().all():
+        # Solo cuenta los que nunca salieron de "queued" — un run en RUNNING
+        # con `phase="applying"` está siendo procesado, no está huérfano.
+        if (r.details_json or {}).get("phase") != "queued":
+            continue
+        created = r.created_at
+        if created is not None and created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        age = (now - created).total_seconds() if created is not None else 0.0
+        if age >= _QUEUED_TOO_LONG_SECONDS:
+            stuck += 1
+    return stuck
+
+
+# Corto a propósito: en el camino feliz un worker real responde en
+# milisegundos; este valor acota cuánto se espera cuando NADIE responde
+# (broker sin consumidores), que es el caso que puede agregar latencia visible
+# a un endpoint sincrónico — un timeout largo acá sería peor que el chequeo.
+_PRE_APPLY_CHECK_TIMEOUT_SECONDS = 0.3
+
+
+async def check_ingestion_workers_available() -> bool | None:
+    """Chequeo liviano, best-effort, para usar ANTES de encolar un apply.
+
+    Devuelve ``True``/``False`` solo cuando pudo determinarlo con certeza;
+    ``None`` si el chequeo mismo falló (broker inalcanzable, timeout, error
+    inesperado) — en ese caso el caller debe encolar igual (fail-open): un
+    chequeo de salud que bloquea el flujo entero por su propia falla sería
+    peor que no tenerlo.
+    """
+    try:
+        pong, active_queues, inspect_error = await asyncio.to_thread(
+            _inspect_celery, _PRE_APPLY_CHECK_TIMEOUT_SECONDS
+        )
+    except Exception:  # noqa: BLE001 — fail-open ante cualquier fallo del chequeo
+        return None
+    if inspect_error is not None or not pong:
+        return None if inspect_error is not None else False
+    ok, _detail = _evaluate_ingestion_queue(active_queues)
+    return ok
+
+
+async def run_reread_diagnostics(session: AsyncSession) -> dict[str, Any]:
+    """Corre los chequeos de salud del worker/cola de relectura.
+
+    Devuelve ``{overall_ok, checks[]}``. ``overall_ok`` es False si algún check
+    de severidad ``error`` falla. Nunca lanza.
+    """
+    checks: list[dict[str, Any]] = []
+
+    pong, active_queues, inspect_error = await asyncio.to_thread(_inspect_celery, 2.0)
+
+    if inspect_error is not None:
+        checks.append(
+            _check(
+                "workers_responding",
+                False,
+                "error",
+                f"No se pudo consultar el broker/workers de Celery: {inspect_error}.",
+            )
+        )
+    else:
+        ping_ok = bool(pong)
+        checks.append(
+            _check(
+                "workers_responding",
+                ping_ok,
+                "error",
+                f"{len(pong)} worker(s) respondieron: {', '.join(pong)}."
+                if ping_ok
+                else "Ningún worker de Celery respondió al ping — el proceso "
+                "vektor-worker puede estar caído o inalcanzable.",
+            )
+        )
+        if ping_ok:
+            queue_ok, queue_detail = _evaluate_ingestion_queue(active_queues)
+            checks.append(_check("ingestion_queue_consumed", queue_ok, "error", queue_detail))
+
+    stuck = await _count_stuck_in_queue(session)
+    stuck_ok = stuck == 0
+    checks.append(
+        _check(
+            "no_stale_queued_runs",
+            stuck_ok,
+            "warning",
+            "Sin relecturas encoladas hace más de "
+            f"{_QUEUED_TOO_LONG_SECONDS // 60} min sin tomar."
+            if stuck_ok
+            else f"{stuck} relectura(s) llevan más de "
+            f"{_QUEUED_TOO_LONG_SECONDS // 60} min encoladas sin que ningún worker "
+            "las tomara — señal de que la cola 'ingestion' no se está consumiendo "
+            "(mismo síntoma detectado en la cuenta ASTERIA).",
+        )
+    )
+
+    overall_ok = all(c["ok"] for c in checks if c["severity"] == "error")
+    if not overall_ok:
+        logger.error(
+            "reread_diagnostics.unhealthy",
+            checks=[c for c in checks if c["severity"] == "error" and not c["ok"]],
+        )
+    return {"overall_ok": overall_ok, "checks": checks}

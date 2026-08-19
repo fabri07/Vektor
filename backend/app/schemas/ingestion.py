@@ -802,3 +802,18 @@ class RereadUndoResponse(BaseModel):
     # undo NO restauró porque alguien los editó después de la relectura (política
     # touched-since — nunca pisar una edición manual en silencio).
     not_reverted_entities: list[dict[str, str]] = Field(default_factory=list)
+
+
+# ── Salud operativa de la cola de relectura (SUPERADMIN) ───────────────────────
+
+
+class RereadDiagnosticCheck(BaseModel):
+    check: str
+    ok: bool
+    severity: str  # "error" | "warning" | "info"
+    detail: str
+
+
+class RereadHealthResponse(BaseModel):
+    overall_ok: bool
+    checks: list[RereadDiagnosticCheck]

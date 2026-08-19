@@ -32,6 +32,7 @@ from app.schemas.admin import (
     VerticalBenchmarkItem,
 )
 from app.schemas.admin_usage import UsageDashboardResponse
+from app.schemas.ingestion import RereadHealthResponse
 
 router = APIRouter()
 
@@ -395,6 +396,28 @@ async def get_pipeline_trace_by_file(
         "processing_status": record.processing_status,
         "events": events,
     }
+
+
+@router.get(
+    "/ingestion/reread-health",
+    response_model=RereadHealthResponse,
+    dependencies=[Depends(require_role("SUPERADMIN"))],
+    summary="Salud del worker/cola de relectura (SUPERADMIN)",
+)
+async def get_reread_health(
+    db: AsyncSession = Depends(get_db_session),
+) -> RereadHealthResponse:
+    """Chequea si hay workers de Celery escuchando la cola ``ingestion`` y si
+    hay relecturas encoladas hace más de lo esperable sin que ninguno las
+    tomara — el mismo síntoma que dejó dos relecturas de ASTERIA trabadas
+    permanentemente en cola. Nunca escribe nada, nunca bloquea.
+    """
+    from app.application.services.reread_diagnostics_service import (  # noqa: PLC0415
+        run_reread_diagnostics,
+    )
+
+    data = await run_reread_diagnostics(db)
+    return RereadHealthResponse(**data)
 
 
 @router.get(

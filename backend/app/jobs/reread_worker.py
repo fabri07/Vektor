@@ -55,6 +55,15 @@ def reread_apply(run_id: str, file_id: str, tenant_id: str) -> None:
                         "reread.apply.skip_not_running", run_id=run_id, status=run.status
                     )
                     return {"status": run.status}
+                # Marca que el worker efectivamente tomó la tarea, ANTES de correr
+                # la reconciliación (puede tardar minutos). Sin esto, `phase` queda
+                # en "queued" (seteado al encolar) para siempre si el proceso muere
+                # a mitad de camino — indistinguible de "nunca lo tomó ningún
+                # worker" (caso real: ASTERIA). Commit propio, no atado al de abajo.
+                details = dict(run.details_json or {})
+                details["phase"] = "applying"
+                run.details_json = details
+                await session.commit()
                 try:
                     result = await reread_service.apply_reread(
                         session,

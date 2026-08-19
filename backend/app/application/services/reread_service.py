@@ -2196,6 +2196,26 @@ async def start_background_apply(
                 "Ya hay una relectura en curso. Esperá a que termine antes de "
                 "aplicar otra."
             )
+        # Huérfano: nunca se movió de RUNNING en el tiempo esperado. Antes esto
+        # solo lo IGNORABA para no bloquear una relectura nueva — el run zombie
+        # quedaba en RUNNING para siempre en la auditoría (caso real: ASTERIA,
+        # dos runs con `details_json["phase"]=="queued"` desde su creación, señal
+        # de que ningún worker llegó a tomarlos). Ahora además se cierra.
+        phase = (r.details_json or {}).get("phase")
+        reason = "stale_never_picked_up" if phase == "queued" else "stale_timeout"
+        logger.error(
+            "reread.guard.expire_stale_run",
+            run_id=str(r.id),
+            tenant_id=str(tenant_id),
+            age_seconds=age,
+            phase=phase,
+            reason=reason,
+        )
+        r.status = "FAILED"
+        r.completed_at = now
+        details = dict(r.details_json or {})
+        details["reason"] = reason
+        r.details_json = details
 
     # Validar que el archivo exista/pertenezca antes de encolar.
     file = await _load_file(session, file_id, tenant_id)
