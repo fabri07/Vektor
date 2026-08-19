@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import reread_service
@@ -44,7 +44,7 @@ from app.persistence.models.file import (
 )
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.product import Product
-from app.persistence.models.repair import DataRepairItem
+from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -452,7 +452,7 @@ async def test_batch_fingerprints_preloaded_and_idempotent(
 async def test_background_apply_run_status_and_guard(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """El apply en background: ``start_background_apply`` crea el run RUNNING, el
+    """El apply en background: ``start_background_apply`` deja el run QUEUED, el
     worker lo ejecuta con ``apply_reread(run=...)`` dejándolo APPLIED, y
     ``get_reread_run`` lo devuelve. El guard bloquea una 2ª relectura concurrente."""
     _patch_s3(monkeypatch, _CSV_BASE)
@@ -462,10 +462,10 @@ async def test_background_apply_run_status_and_guard(
     run = await reread_service.start_background_apply(
         db_session, file.id, tenant.tenant_id
     )
-    assert run.status == "RUNNING"
+    assert run.status == "QUEUED"
     await db_session.commit()
 
-    # Guard: una 2ª relectura mientras hay una RUNNING reciente → ValueError.
+    # Guard: una 2ª relectura mientras hay una QUEUED reciente → ValueError.
     with pytest.raises(ValueError, match="en curso"):
         await reread_service.start_background_apply(
             db_session, file.id, tenant.tenant_id
@@ -495,10 +495,10 @@ async def test_background_apply_run_status_and_guard(
 async def test_stale_running_run_gets_marked_failed_not_left_forever(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Caso real (ASTERIA): un run que nunca salió de RUNNING (el worker nunca
-    lo tomó, ``phase`` sigue en "queued") antes solo se IGNORABA al decidir si
-    bloquear una relectura nueva — quedaba en RUNNING para siempre en la
-    auditoría. Ahora ``start_background_apply`` lo cierra como FAILED."""
+    """Caso real (ASTERIA): un run que nunca salió de QUEUED (el worker nunca
+    lo tomó) antes solo se IGNORABA al decidir si bloquear una relectura
+    nueva — quedaba en ese estado para siempre en la auditoría. Ahora
+    ``start_background_apply`` lo cierra como FAILED."""
     _patch_s3(monkeypatch, _CSV_BASE)
     file = await _make_file(db_session, tenant, _CSV_BASE)
     await _initial_import(db_session, tenant, file, _CSV_BASE)
@@ -506,8 +506,7 @@ async def test_stale_running_run_gets_marked_failed_not_left_forever(
     stale = await reread_service.start_background_apply(
         db_session, file.id, tenant.tenant_id
     )
-    assert stale.details_json is not None
-    assert stale.details_json["phase"] == "queued"
+    assert stale.status == "QUEUED"
     # Envejecerlo más allá del umbral de "colgado" sin tocar nada más.
     stale.created_at = datetime.now(UTC) - timedelta(
         seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1
@@ -2293,9 +2292,8 @@ async def test_start_background_apply_reuses_existing_run_and_fresh_summary(
     await db_session.commit()
 
     assert started.id == session_run_id
-    assert started.status == "RUNNING"
+    assert started.status == "QUEUED"
     assert (started.details_json or {}).get("fresh_summary") is not None
-    assert (started.details_json or {}).get("phase") == "queued"
 
 
 async def test_start_background_apply_rejects_stale_in_memory_run_copy(
@@ -2551,17 +2549,61 @@ async def test_estimate_unlinked_products_stock_file_skips_purchase_gate(
 # ── F-RR (Fase 4): verificación post-apply ────────────────────────────────────
 
 
+async def _run_through_preview_session(
+    db_session: AsyncSession, tenant: Tenant, file: UploadedFile
+) -> DataRepairRun:
+    """Recorre el camino REAL completo (preview con sesión → READY_TO_APPLY →
+    QUEUED → reclamo atómico del worker → APPLYING) para que
+    ``run.details_json["projected_impact"]`` quede poblado con lo que
+    ``preview_reread`` calculó — exactamente lo que la reconciliación post-
+    apply necesita comparar contra la realidad persistida."""
+    run, fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await reread_service.preview_reread(
+        db_session, file.id, tenant.tenant_id, fresh_override=fresh, run=run
+    )
+    reread_service.mark_session_ready_to_apply(run)
+    await db_session.commit()
+
+    validated = await reread_service.validate_ready_to_apply(
+        db_session, run.id, tenant.tenant_id, file.id, draft_version=0
+    )
+    started = await reread_service.start_background_apply(
+        db_session, file.id, tenant.tenant_id, existing_run=validated
+    )
+    assert started.status == "QUEUED"
+    await db_session.commit()
+
+    # Simula el reclamo atómico del worker (QUEUED -> APPLYING) — mismo
+    # UPDATE condicionado que reread_worker.py, no una asignación directa.
+    await db_session.execute(
+        update(DataRepairRun)
+        .where(DataRepairRun.id == started.id, DataRepairRun.status == "QUEUED")
+        .values(status="APPLYING")
+    )
+    await db_session.commit()
+    await db_session.refresh(started)
+    assert started.status == "APPLYING"
+    return started
+
+
 async def test_apply_reread_reconciliation_matches_for_normal_import(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Camino feliz: lo que el preview proyecta y lo que efectivamente queda
-    persistido deben coincidir SIEMPRE que no haya un bug — sin desvío, el
-    apply no debe reportar ninguna advertencia."""
+    """Camino feliz, atravesando la sesión de preview real: lo que
+    ``preview_reread`` proyectó y guardó, y lo que efectivamente queda
+    persistido, deben coincidir SIEMPRE que no haya un bug."""
     _patch_s3(monkeypatch, _CSV_BASE)
     file = await _make_file(db_session, tenant, _CSV_BASE)
     await _initial_import(db_session, tenant, file, _CSV_BASE)
 
-    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    run = await _run_through_preview_session(db_session, tenant, file)
+    fresh_override = (run.details_json or {}).get("fresh_summary")
+
+    result = await reread_service.apply_reread(
+        db_session, file.id, tenant.tenant_id, run=run, fresh_override=fresh_override
+    )
     await db_session.commit()
 
     assert result.reconciliation_warning is None
@@ -2570,10 +2612,11 @@ async def test_apply_reread_reconciliation_matches_for_normal_import(
 async def test_apply_reread_reconciliation_detects_injected_mismatch(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Prueba de mutación: si el estimador (llamado DENTRO de apply_reread
-    para la verificación) devolviera una proyección que no coincide con lo
-    persistido, la reconciliación debe detectarlo — no confiar a ciegas en
-    que "el número que se calculó" es "el número que se aplicó"."""
+    """Prueba de mutación (hallazgo de code review: debe mentir durante el
+    PREVIEW, no dentro de un recompute post-apply): si lo que quedó GUARDADO
+    como "lo que el usuario vio" en la sesión de preview no coincide con lo
+    que el apply real (sin mentiras) termina persistiendo, la reconciliación
+    debe detectarlo."""
     _patch_s3(monkeypatch, _CSV_BASE)
     file = await _make_file(db_session, tenant, _CSV_BASE)
     await _initial_import(db_session, tenant, file, _CSV_BASE)
@@ -2582,14 +2625,20 @@ async def test_apply_reread_reconciliation_detects_injected_mismatch(
 
     async def _lying_estimate(*args: Any, **kwargs: Any) -> Any:
         real = await real_estimate(*args, **kwargs)
-        # Miente sobre cuántas ventas quedaron sin producto — simula un bug
-        # donde el estimador y el import real divergen.
         real.ventas_sin_producto += 999
         return real
 
+    # La mentira SOLO cubre la sesión de preview (lo que se guarda como
+    # "lo que el usuario vio") — se restaura antes del apply real, que corre
+    # con la lógica correcta y sin saber que el preview mintió.
     monkeypatch.setattr(reread_service, "estimate_unlinked_products", _lying_estimate)
+    run = await _run_through_preview_session(db_session, tenant, file)
+    monkeypatch.setattr(reread_service, "estimate_unlinked_products", real_estimate)
 
-    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    fresh_override = (run.details_json or {}).get("fresh_summary")
+    result = await reread_service.apply_reread(
+        db_session, file.id, tenant.tenant_id, run=run, fresh_override=fresh_override
+    )
     await db_session.commit()
 
     assert result.reconciliation_warning is not None
@@ -2597,3 +2646,151 @@ async def test_apply_reread_reconciliation_detects_injected_mismatch(
     assert result.reconciliation_warning["ventas_sin_producto"]["esperado"] != (
         result.reconciliation_warning["ventas_sin_producto"]["real"]
     )
+
+
+# ── F-RR (Fase 5): sweep global + lineage vía source_run_id ──────────────────
+
+
+async def test_sweep_stale_reread_runs_closes_stuck_apply_globally(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """El sweep global cierra un apply colgado SIN que nadie reintente sobre
+    ese archivo/tenant — a diferencia del guard reactivo de
+    `start_background_apply`, que solo actúa si alguien vuelve a tocarlo."""
+    stale = DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="QUEUED",
+        dry_run=False,
+        details_json={"file_id": str(uuid.uuid4())},
+    )
+    db_session.add(stale)
+    await db_session.commit()
+    stale.created_at = datetime.now(UTC) - timedelta(
+        seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1
+    )
+    await db_session.commit()
+
+    closed = await reread_service.sweep_stale_reread_runs(db_session)
+    await db_session.commit()
+
+    assert closed["apply_stuck"] == 1
+    await db_session.refresh(stale)
+    assert stale.status == "FAILED"
+    assert (stale.details_json or {})["reason"] == "stale_never_picked_up"
+
+
+async def test_sweep_stale_reread_runs_closes_abandoned_preview_session_globally(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    stale = DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="PREVIEWING",
+        dry_run=True,
+        details_json={"file_id": str(uuid.uuid4()), "draft_version": 0},
+    )
+    db_session.add(stale)
+    await db_session.commit()
+    old_enough = datetime.now(UTC) - timedelta(
+        seconds=reread_service._PREVIEW_SESSION_STALE_AFTER_SECONDS + 1
+    )
+    await db_session.execute(
+        update(DataRepairRun).where(DataRepairRun.id == stale.id).values(updated_at=old_enough)
+    )
+    await db_session.commit()
+
+    closed = await reread_service.sweep_stale_reread_runs(db_session)
+    await db_session.commit()
+
+    assert closed["preview_session_abandoned"] == 1
+    await db_session.refresh(stale)
+    assert stale.status == "FAILED"
+    assert (stale.details_json or {})["reason"] == "stale_review_session"
+
+
+async def test_sweep_stale_reread_runs_leaves_fresh_runs_alone(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    fresh_apply = DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="APPLYING",
+        dry_run=False,
+        details_json={"file_id": str(uuid.uuid4())},
+    )
+    fresh_preview = DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="PREVIEWING",
+        dry_run=True,
+        details_json={"file_id": str(uuid.uuid4())},
+    )
+    db_session.add_all([fresh_apply, fresh_preview])
+    await db_session.commit()
+
+    closed = await reread_service.sweep_stale_reread_runs(db_session)
+    await db_session.commit()
+
+    assert closed == {"apply_stuck": 0, "preview_session_abandoned": 0}
+    await db_session.refresh(fresh_apply)
+    await db_session.refresh(fresh_preview)
+    assert fresh_apply.status == "APPLYING"
+    assert fresh_preview.status == "PREVIEWING"
+
+
+async def test_start_background_apply_sets_source_run_id_on_retry_after_stale(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reintentar tras un run colgado no es un evento sin historia: el run
+    nuevo queda trazable de cuál reemplazó."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+
+    stale = await reread_service.start_background_apply(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+    stale.created_at = datetime.now(UTC) - timedelta(
+        seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1
+    )
+    await db_session.commit()
+    stale_id = stale.id
+
+    fresh = await reread_service.start_background_apply(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+
+    assert fresh.id != stale_id
+    assert fresh.source_run_id == stale_id
+
+
+async def test_start_or_resume_preview_session_sets_source_run_id_after_expiry(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+
+    stale, _ = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+    stale_id = stale.id
+    await db_session.execute(
+        update(DataRepairRun)
+        .where(DataRepairRun.id == stale_id)
+        .values(
+            updated_at=datetime.now(UTC)
+            - timedelta(seconds=reread_service._PREVIEW_SESSION_STALE_AFTER_SECONDS + 1)
+        )
+    )
+    await db_session.commit()
+
+    fresh, _ = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+
+    assert fresh.id != stale_id
+    assert fresh.source_run_id == stale_id

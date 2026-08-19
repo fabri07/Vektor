@@ -96,9 +96,9 @@ async def test_stuck_queued_run_is_counted(
     run = DataRepairRun(
         tenant_id=sample_tenant.tenant_id,
         repair_type="REREAD_FILE",
-        status="RUNNING",
+        status="QUEUED",
         dry_run=False,
-        details_json={"file_id": str(uuid.uuid4()), "phase": "queued"},
+        details_json={"file_id": str(uuid.uuid4())},
         created_at=old_enough,
     )
     db_session.add(run)
@@ -114,7 +114,7 @@ async def test_stuck_queued_run_is_counted(
 async def test_run_in_applying_phase_is_not_counted_as_stuck(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Un run que el worker SÍ tomó (`phase="applying"`) no es un huérfano de
+    """Un run que el worker SÍ tomó (status APPLYING) no es un huérfano de
     cola — está siendo procesado, no hay que alertar sobre él acá."""
     monkeypatch.setattr(
         diag, "_inspect_celery", _mock_inspect({"worker1@host": [{"name": "ingestion"}]})
@@ -125,9 +125,9 @@ async def test_run_in_applying_phase_is_not_counted_as_stuck(
     run = DataRepairRun(
         tenant_id=sample_tenant.tenant_id,
         repair_type="REREAD_FILE",
-        status="RUNNING",
+        status="APPLYING",
         dry_run=False,
-        details_json={"file_id": str(uuid.uuid4()), "phase": "applying"},
+        details_json={"file_id": str(uuid.uuid4())},
         created_at=old_enough,
     )
     db_session.add(run)

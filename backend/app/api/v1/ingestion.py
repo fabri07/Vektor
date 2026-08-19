@@ -3446,7 +3446,7 @@ async def reread_preview(
             session, file_id, tenant.tenant_id
         )
         preview = await reread_service.preview_reread(
-            session, file_id, tenant.tenant_id, fresh_override=fresh
+            session, file_id, tenant.tenant_id, fresh_override=fresh, run=run
         )
     except FileNotFoundError as exc:
         raise HTTPException(
@@ -3585,10 +3585,17 @@ async def reread_apply(
     try:
         reread_apply_task.delay(str(run.id), str(file_id), str(tenant.tenant_id))
     except Exception as exc:  # noqa: BLE001
+        from app.application.services.reread_service import (  # noqa: PLC0415
+            _strip_bulky_fields,
+        )
+
         logger.error("ingestion.reread.enqueue_failed", run_id=str(run.id), error=str(exc))
         run.status = "FAILED"
         run.completed_at = datetime.now(UTC)
-        run.details_json = {**(run.details_json or {}), "phase": "enqueue_failed"}
+        run.details_json = {
+            **_strip_bulky_fields(run.details_json or {}),
+            "reason": "enqueue_failed",
+        }
         await session.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -3596,7 +3603,7 @@ async def reread_apply(
         ) from exc
 
     logger.info("ingestion.reread.enqueued", file_id=str(file_id), run_id=str(run.id))
-    return RereadApplyStartResponse(file_id=file_id, run_id=run.id, status="RUNNING")
+    return RereadApplyStartResponse(file_id=file_id, run_id=run.id, status=run.status)
 
 
 @router.get(

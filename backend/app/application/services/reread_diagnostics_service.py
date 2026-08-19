@@ -3,10 +3,10 @@
 El apply de una relectura corre en background (Celery, cola ``ingestion``).
 Encolar una tarea con ``.delay()`` siempre devuelve éxito aunque no haya ningún
 worker escuchando esa cola — el broker simplemente la deja esperando. Sin este
-chequeo, un ``DataRepairRun`` queda en ``RUNNING`` con
-``details_json["phase"] == "queued"`` para siempre, indistinguible de "se está
-por tomar en cualquier momento" (incidente real: cuenta ASTERIA, 2026-08, dos
-runs exactamente en ese estado, sin que ningún worker los tomara nunca).
+chequeo, un ``DataRepairRun`` queda en ``QUEUED`` para siempre, indistinguible
+de "se está por tomar en cualquier momento" (incidente real: cuenta ASTERIA,
+2026-08, dos runs exactamente en ese estado, sin que ningún worker los tomara
+nunca).
 
 Este módulo nunca bloquea ni escribe nada — solo reporta lo que puede
 verificar desde el backend, siguiendo el mismo patrón que
@@ -86,19 +86,17 @@ def _evaluate_ingestion_queue(active_queues: dict[str, Any]) -> tuple[bool, str]
 
 
 async def _count_stuck_in_queue(session: AsyncSession) -> int:
+    # Solo QUEUED — un run en APPLYING ya fue tomado por un worker y está
+    # siendo procesado, no es huérfano de cola.
     result = await session.execute(
         select(DataRepairRun).where(
             DataRepairRun.repair_type == _REPAIR_TYPE_REREAD,
-            DataRepairRun.status == "RUNNING",
+            DataRepairRun.status == "QUEUED",
         )
     )
     now = datetime.now(UTC)
     stuck = 0
     for r in result.scalars().all():
-        # Solo cuenta los que nunca salieron de "queued" — un run en RUNNING
-        # con `phase="applying"` está siendo procesado, no está huérfano.
-        if (r.details_json or {}).get("phase") != "queued":
-            continue
         created = r.created_at
         if created is not None and created.tzinfo is None:
             created = created.replace(tzinfo=UTC)

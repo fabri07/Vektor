@@ -3,13 +3,26 @@
 El apply de un libro de compras grande inserta miles de filas (gastos + productos
 + movimientos + auditoría) y puede tardar minutos — demasiado para un request HTTP
 (timeout → el usuario reintenta → duplicados). Esta task lo corre fuera del request:
-el endpoint crea el ``DataRepairRun`` (status RUNNING) y encola; la task ejecuta
-``apply_reread`` reusando ese run y deja status APPLIED/FAILED. El frontend hace
-polling del estado.
+el endpoint deja el ``DataRepairRun`` en QUEUED y encola; la task lo RECLAMA
+(QUEUED → APPLYING) y ejecuta ``apply_reread`` reusando ese run, dejando status
+APPLIED/FAILED. El frontend hace polling del estado.
 
-Idempotente ante re-entrega (``task_acks_late``): si el run ya no está RUNNING, no
-hace nada. Un crash a mitad deja la transacción sin commitear (rollback) → el
-re-run arranca limpio, sin duplicar.
+Idempotente ante re-entrega (``task_acks_late``) vía un ``UPDATE`` atómico
+condicionado por status, no una lectura+comparación en dos pasos — hallazgo de
+code review: antes se leía ``run.status == "RUNNING"`` y LUEGO se escribía
+``details_json["phase"]="applying"`` como dos operaciones separadas; dos
+entregas del mismo mensaje (no solo un crash — también reentrega por red bajo
+``task_acks_late``) podían leer "RUNNING" ANTES de que la otra commiteara su
+propio cambio, y ambas seguían de largo aplicando la relectura dos veces. El
+``UPDATE ... WHERE status='QUEUED'`` hace que solo UNA entrega gane la carrera
+(``rowcount == 1``); cualquier otra encuentra el run ya en APPLYING/APPLIED/
+FAILED y termina sin tocar datos.
+
+Un crash a mitad dentro del ``try`` deja la transacción del apply sin
+commitear (rollback) → el re-run (si Celery reintenta) arranca desde QUEUED de
+nuevo — pero como este run YA quedó en APPLYING, no lo reclama otra entrega:
+solo un reintento vía ``start_background_apply`` (usuario, o el sweep si
+queda huérfano) genera un run NUEVO.
 """
 
 from __future__ import annotations
@@ -17,7 +30,10 @@ from __future__ import annotations
 import asyncio
 import uuid as _uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
+
+from sqlalchemy import update
+from sqlalchemy.engine import CursorResult
 
 from app.jobs.celery_app import celery_app
 from app.jobs.ingestion_worker import _build_async_session
@@ -34,10 +50,13 @@ logger = get_logger(__name__)
     time_limit=300,
 )
 def reread_apply(run_id: str, file_id: str, tenant_id: str) -> None:
-    """Ejecuta ``reread_service.apply_reread`` sobre un run ya creado."""
+    """Ejecuta ``reread_service.apply_reread`` sobre un run ya encolado."""
 
     async def _run() -> dict[str, Any]:
         from app.application.services import reread_service  # noqa: PLC0415
+        from app.application.services.reread_service import (  # noqa: PLC0415
+            _strip_bulky_fields,
+        )
         from app.config.settings import get_settings  # noqa: PLC0415
         from app.persistence.models.repair import DataRepairRun  # noqa: PLC0415
 
@@ -45,25 +64,27 @@ def reread_apply(run_id: str, file_id: str, tenant_id: str) -> None:
         engine, factory = _build_async_session(get_settings().DATABASE_URL)
         try:
             async with factory() as session:
+                # Reclamo atómico: solo la entrega que gane el UPDATE (rowcount==1)
+                # sigue de largo. Cualquier otra (reentrega, doble delivery) ve 0
+                # filas afectadas y termina acá sin tocar datos de negocio.
+                claim = await session.execute(
+                    update(DataRepairRun)
+                    .where(DataRepairRun.id == _uuid.UUID(run_id), DataRepairRun.status == "QUEUED")
+                    .values(status="APPLYING")
+                )
+                await session.commit()
+                if cast("CursorResult[Any]", claim).rowcount == 0:
+                    run_check = await session.get(DataRepairRun, _uuid.UUID(run_id))
+                    status_found = run_check.status if run_check is not None else "MISSING"
+                    logger.info(
+                        "reread.apply.skip_not_queued", run_id=run_id, status=status_found
+                    )
+                    return {"status": status_found}
+
                 run = await session.get(DataRepairRun, _uuid.UUID(run_id))
                 if run is None:
                     logger.warning("reread.apply.run_missing", run_id=run_id)
                     return {"status": "MISSING"}
-                # Idempotencia ante re-entrega: si ya no está RUNNING, no re-aplicar.
-                if run.status != "RUNNING":
-                    logger.info(
-                        "reread.apply.skip_not_running", run_id=run_id, status=run.status
-                    )
-                    return {"status": run.status}
-                # Marca que el worker efectivamente tomó la tarea, ANTES de correr
-                # la reconciliación (puede tardar minutos). Sin esto, `phase` queda
-                # en "queued" (seteado al encolar) para siempre si el proceso muere
-                # a mitad de camino — indistinguible de "nunca lo tomó ningún
-                # worker" (caso real: ASTERIA). Commit propio, no atado al de abajo.
-                details = dict(run.details_json or {})
-                details["phase"] = "applying"
-                run.details_json = details
-                await session.commit()
                 try:
                     # F-RR: si el run viene de una sesión de preview, ya trae el
                     # summary re-descargado/re-parseado cacheado — evita pagar
@@ -94,10 +115,10 @@ def reread_apply(run_id: str, file_id: str, tenant_id: str) -> None:
                     # Marcar FAILED en una transacción nueva (la anterior se revirtió).
                     async with factory() as s2:
                         r = await s2.get(DataRepairRun, _uuid.UUID(run_id))
-                        if r is not None and r.status == "RUNNING":
+                        if r is not None and r.status == "APPLYING":
                             r.status = "FAILED"
                             r.completed_at = datetime.now(UTC)
-                            details = dict(r.details_json or {})
+                            details = _strip_bulky_fields(r.details_json or {})
                             details["error"] = str(exc)[:500]
                             r.details_json = details
                             await s2.commit()

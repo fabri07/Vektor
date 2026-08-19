@@ -22,11 +22,12 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import Table, delete, select
+from sqlalchemy import Table, delete, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -154,11 +155,14 @@ async def test_dos_start_background_apply_concurrentes_solo_uno_gana(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
 ) -> None:
     """Dos ``start_background_apply`` concurrentes (conexiones separadas) del
-    MISMO archivo: exactamente uno crea el ``DataRepairRun`` RUNNING, el otro
+    MISMO archivo: exactamente uno crea el ``DataRepairRun`` QUEUED, el otro
     pierde con ``ValueError`` (409 en el endpoint). Sin el advisory lock del
-    guard, ambas transacciones podrían leer "no hay RUNNING" antes de que la
-    otra commitee su INSERT → dos runs RUNNING duplicados (el bug que este test
-    existe para cazar — ver Task 1 de F9b)."""
+    guard, ambas transacciones podrían leer "no hay QUEUED/APPLYING" antes de
+    que la otra commitee su INSERT → dos runs duplicados (el bug que este test
+    existe para cazar — ver Task 1 de F9b). El status es QUEUED, no RUNNING
+    (F-RR Fase 1/5 renombró los estados — ver docstring de
+    ``start_background_apply``: deja el run en QUEUED, no en RUNNING, para que
+    el worker lo reclame con un UPDATE atómico — ver el siguiente test)."""
     file_id = await _seed_file(sessionmaker, tenant_id)
 
     results: list[tuple[str, uuid.UUID | None]] = []
@@ -173,15 +177,69 @@ async def test_dos_start_background_apply_concurrentes_solo_uno_gana(
     assert len(blocked) == 1, f"esperaba exactamente 1 'blocked', obtuve: {results}"
 
     # Confirmación directa en la DB (no solo por el resultado en memoria): a lo
-    # sumo un DataRepairRun RUNNING para este tenant/archivo.
+    # sumo un DataRepairRun QUEUED para este tenant/archivo.
     async with sessionmaker() as s:
         rows = (
             await s.execute(
                 select(DataRepairRun).where(
                     DataRepairRun.tenant_id == tenant_id,
-                    DataRepairRun.status == "RUNNING",
+                    DataRepairRun.status == "QUEUED",
                 )
             )
         ).scalars().all()
     assert len(rows) == 1
     assert rows[0].id == oks[0][1]
+
+
+async def _claim(
+    sm: async_sessionmaker[AsyncSession],
+    run_id: uuid.UUID,
+    results: list[str],
+) -> None:
+    """Un intento de reclamo atómico QUEUED→APPLYING, EXACTAMENTE el mismo
+    UPDATE condicionado que ``jobs.reread_worker.reread_apply`` ejecuta al
+    recibir la tarea — en su PROPIA sesión/conexión, para que el
+    row-level-lock de Postgres se ejercite entre conexiones físicas
+    distintas, no dentro de una única sesión secuencial (lo único que SQLite
+    puede probar)."""
+    async with sm() as session:
+        claim = await session.execute(
+            update(DataRepairRun)
+            .where(DataRepairRun.id == run_id, DataRepairRun.status == "QUEUED")
+            .values(status="APPLYING")
+        )
+        await session.commit()
+        results.append("claimed" if cast("CursorResult[Any]", claim).rowcount == 1 else "lost")
+
+
+async def test_dos_workers_reclamando_el_mismo_run_solo_uno_gana(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> None:
+    """Hallazgo de code review (Finding 1, F-RR Fase 5): una reentrega
+    duplicada del mensaje de Celery para el MISMO ``run_id`` no debe aplicar
+    la relectura dos veces. La garantía la da el UPDATE atómico
+    ``WHERE status='QUEUED'`` que reclama el run antes de ejecutar nada — acá
+    se simulan DOS "workers" (conexiones separadas) reclamando el mismo run
+    QUEUED en simultáneo: exactamente uno debe obtener ``rowcount==1``
+    (reclamó) y el otro ``rowcount==0`` (llegó tarde, el run ya no está en
+    QUEUED). Sin este atomicidad, ambas conexiones podrían leer QUEUED antes
+    de que la otra commitee su UPDATE → dos ejecuciones del mismo apply."""
+    file_id = await _seed_file(sessionmaker, tenant_id)
+    async with sessionmaker() as s:
+        run = await reread_service.start_background_apply(s, file_id, tenant_id)
+        await s.commit()
+        run_id = run.id
+        assert run.status == "QUEUED"
+
+    results: list[str] = []
+    await asyncio.gather(
+        _claim(sessionmaker, run_id, results),
+        _claim(sessionmaker, run_id, results),
+    )
+
+    assert sorted(results) == ["claimed", "lost"], f"esperaba 1 claim + 1 lost, obtuve: {results}"
+
+    async with sessionmaker() as s:
+        persisted = await s.get(DataRepairRun, run_id)
+    assert persisted is not None
+    assert persisted.status == "APPLYING"

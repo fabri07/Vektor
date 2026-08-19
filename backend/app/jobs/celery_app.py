@@ -32,6 +32,7 @@ celery_app = Celery(
         "app.jobs.report_worker",
         "app.jobs.ingestion_worker",
         "app.jobs.reread_worker",
+        "app.jobs.reread_sweep_worker",
         "app.jobs.update_momentum",
         "app.jobs.send_weekly_email",
         "app.application.services.score_trigger_service",
@@ -78,6 +79,7 @@ celery_app.conf.update(
         "jobs.process_text_document": {"queue": "ingestion"},
         "jobs.process_image_ocr": {"queue": "ingestion"},
         "jobs.reread_apply": {"queue": "ingestion"},
+        "jobs.sweep_stale_reread_runs": {"queue": "ingestion"},
         "jobs.inventory_integrity_check": {"queue": "scores"},
         "jobs.inventory_integrity_check_all_tenants": {"queue": "scores"},
     },
@@ -113,5 +115,13 @@ celery_app.conf.beat_schedule = {
         # accionable el mismo día, no necesita cadencia diaria.
         "schedule": _crontab(hour=6, minute=0, day_of_week=3),
         "options": {"queue": "scores"},
+    },
+    "sweep-stale-reread-runs": {
+        "task": "jobs.sweep_stale_reread_runs",
+        # F-RR Fase 5: housekeeping de sesiones/jobs de relectura colgados que
+        # nadie reintentó — cada 10 min, independiente del guard reactivo
+        # (que solo limpia cuando alguien vuelve a tocar ESE archivo/tenant).
+        "schedule": 10 * 60,
+        "options": {"queue": "ingestion"},
     },
 }

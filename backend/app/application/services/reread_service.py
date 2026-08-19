@@ -66,7 +66,7 @@ import json
 import re
 import uuid
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
@@ -1795,8 +1795,15 @@ async def _verify_unlinked_products_reconciliation(
     fresca hubiera calculado — eso es la edición ganando, no una divergencia.
 
     Nunca lanza: un fallo en la verificación misma no debe abortar un apply
-    que ya escribió correctamente — se loguea y se trata como "sin desvío
-    detectable" (``None``), no como una advertencia positiva.
+    que ya escribió correctamente. Devuelve tres formas distinguibles —
+    hallazgo de code review: antes un fallo del chequeo (timeout, error SQL)
+    devolvía ``None``, lo mismo que "reconcilió sin desvío" — ocultando que
+    la verificación ni siquiera corrió:
+
+      - ``None``: se verificó y coincide, nada que avisar.
+      - ``{"con_producto": {...}, ...}``: se verificó y DIVERGE.
+      - ``{"check_failed": {"reason": ...}}``: la verificación misma falló —
+        no se sabe si coincide o no, y eso se dice explícitamente.
     """
     try:
         sales_linked = (
@@ -1870,7 +1877,7 @@ async def _verify_unlinked_products_reconciliation(
         logger.error(
             "reread.reconciliation_check_failed", file_id=str(file_id), error=str(exc)
         )
-        return None
+        return {"check_failed": {"reason": "No se pudo verificar el resultado."}}
 
 
 def _estimate_reread(
@@ -2273,13 +2280,30 @@ def _age_seconds(moment: datetime | None, now: datetime) -> float:
     return (now - moment).total_seconds()
 
 
+# Hallazgo de code review (F-RR): un run que termina FAILED/cancelado NO
+# necesita conservar `fresh_summary` (el contenido crudo re-parseado del
+# archivo — potencialmente miles de filas de datos de negocio). Sin esto,
+# cada sesión abandonada/vencida/cancelada infla `data_repair_runs` para
+# siempre con una copia completa del archivo que nunca se va a aplicar.
+# `projected_impact` (agregados livianos, no filas) SÍ se conserva — lo
+# necesita la reconciliación aunque el run haya fallado en el camino.
+def _strip_bulky_fields(details: dict[str, Any]) -> dict[str, Any]:
+    stripped = dict(details)
+    stripped.pop("fresh_summary", None)
+    return stripped
+
+
 async def _expire_stale_preview_sessions(
     session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
-) -> None:
+) -> uuid.UUID | None:
     """Cierra (FAILED) sesiones de revisión de ESTE archivo abandonadas hace
     más de `_PREVIEW_SESSION_STALE_AFTER_SECONDS` sin avanzar. Usa
     `updated_at` (no `created_at`): una revisión activa que el usuario sigue
-    corrigiendo no es huérfana aunque sea vieja."""
+    corrigiendo no es huérfana aunque sea vieja.
+
+    Devuelve el ``id`` de la última sesión cerrada (para lineage vía
+    ``source_run_id`` en la sesión que la reemplace), o ``None`` si no cerró
+    ninguna."""
     result = await session.execute(
         select(DataRepairRun).where(
             DataRepairRun.tenant_id == tenant_id,
@@ -2288,6 +2312,7 @@ async def _expire_stale_preview_sessions(
         )
     )
     now = datetime.now(UTC)
+    last_expired: uuid.UUID | None = None
     for r in result.scalars().all():
         if (r.details_json or {}).get("file_id") != str(file_id):
             continue
@@ -2301,15 +2326,20 @@ async def _expire_stale_preview_sessions(
         )
         r.status = "FAILED"
         r.completed_at = now
-        details = dict(r.details_json or {})
+        details = _strip_bulky_fields(r.details_json or {})
         details["reason"] = "stale_review_session"
         r.details_json = details
+        last_expired = r.id
+    return last_expired
 
 
 async def _active_preview_session(
     session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
-) -> DataRepairRun | None:
-    await _expire_stale_preview_sessions(session, file_id, tenant_id)
+) -> tuple[DataRepairRun | None, uuid.UUID | None]:
+    """Devuelve ``(sesión activa o None, id de la última expirada o None)`` —
+    el segundo valor es lineage para la sesión NUEVA que se cree si no hay
+    una activa."""
+    expired = await _expire_stale_preview_sessions(session, file_id, tenant_id)
     result = await session.execute(
         select(DataRepairRun).where(
             DataRepairRun.tenant_id == tenant_id,
@@ -2319,8 +2349,8 @@ async def _active_preview_session(
     )
     for r in result.scalars().all():
         if (r.details_json or {}).get("file_id") == str(file_id):
-            return r
-    return None
+            return r, expired
+    return None, expired
 
 
 async def start_or_resume_preview_session(
@@ -2335,7 +2365,7 @@ async def start_or_resume_preview_session(
 
     Devuelve ``(run, fresh)`` — ``fresh`` es SIEMPRE una copia propia del
     summary cacheado, segura de mutar sin afectar lo guardado en el run."""
-    existing = await _active_preview_session(session, file_id, tenant_id)
+    existing, expired = await _active_preview_session(session, file_id, tenant_id)
     if existing is not None:
         cached = (existing.details_json or {}).get("fresh_summary")
         if cached is not None:
@@ -2353,7 +2383,8 @@ async def start_or_resume_preview_session(
     await _acquire_preview_session_lock(session, tenant_id, file_id)
     # Re-chequear YA con el lock tomado: si el otro request ganó la carrera
     # mientras este esperaba, reusar lo que creó en vez de duplicar.
-    existing = await _active_preview_session(session, file_id, tenant_id)
+    existing, expired_after_lock = await _active_preview_session(session, file_id, tenant_id)
+    expired = expired_after_lock or expired
     if existing is not None:
         cached = (existing.details_json or {}).get("fresh_summary")
         if cached is not None:
@@ -2371,6 +2402,10 @@ async def start_or_resume_preview_session(
         repair_type=REPAIR_TYPE_REREAD,
         status="PREVIEWING",
         dry_run=True,
+        # Lineage (F-RR Fase 5): si esta sesión reemplaza una abandonada por
+        # `_expire_stale_preview_sessions`, queda trazable de cuál viene —
+        # "un reintento no es un evento sin historia".
+        source_run_id=expired,
         details_json={
             "file_id": str(file_id),
             "fresh_summary": fresh,
@@ -2468,7 +2503,7 @@ async def cancel_preview_session(
         raise ValueError("No hay ninguna sesión de revisión abierta con ese id.")
     run.status = "FAILED"
     run.completed_at = datetime.now(UTC)
-    details = dict(run.details_json or {})
+    details = _strip_bulky_fields(run.details_json or {})
     details["reason"] = "cancelled_by_user"
     run.details_json = details
     return run
@@ -2480,6 +2515,7 @@ async def preview_reread(
     tenant_id: uuid.UUID,
     s3: S3Client | None = None,
     fresh_override: dict[str, Any] | None = None,
+    run: DataRepairRun | None = None,
 ) -> RereadPreview:
     """Preview RÁPIDO de la relectura: re-descarga + re-parsea el archivo y estima
     los cambios en memoria, **sin escribir en la DB** (sub-segundo incluso en
@@ -2492,7 +2528,15 @@ async def preview_reread(
     crear la sesión y quedó cacheado en ``DataRepairRun.details_json``; sin esto
     cada corrección del usuario durante la revisión pagaría S3+parseo de nuevo).
     El caller es responsable de pasar una copia si el mismo dict cacheado se va
-    a reusar en llamadas posteriores — esta función no lo muta en el lugar."""
+    a reusar en llamadas posteriores — esta función no lo muta en el lugar.
+
+    ``run``: si viene, persiste ``preview.unlinked_products`` en
+    ``run.details_json["projected_impact"]`` — hallazgo de code review: la
+    reconciliación post-apply debe comparar contra lo que el usuario REALMENTE
+    VIO en este preview, no contra un recálculo hecho después de escribir (que
+    ya vería el catálogo modificado por el propio apply y podría esconder una
+    divergencia real). Sin ``run``, el preview sigue siendo puramente de
+    lectura, como siempre."""
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
@@ -2523,6 +2567,10 @@ async def preview_reread(
     preview.unlinked_products = await estimate_unlinked_products(
         session, tenant_id, fresh, confirmed_fields, catalog
     )
+    if run is not None:
+        details = dict(run.details_json or {})
+        details["projected_impact"] = asdict(preview.unlinked_products)
+        run.details_json = details
     return preview
 
 
@@ -2574,10 +2622,15 @@ async def apply_reread(
     )
 
     if run is None:
+        # Camino directo/legado (sin pasar por start_background_apply — ej.
+        # scripts, tests): arranca en APPLYING directamente, ya que acá se
+        # está ejecutando de verdad. Mismo vocabulario de estados que el
+        # camino en background (QUEUED→APPLYING→APPLIED/FAILED), aunque este
+        # camino nunca pasa por QUEUED.
         run = DataRepairRun(
             tenant_id=tenant_id,
             repair_type=REPAIR_TYPE_REREAD,
-            status="RUNNING",
+            status="APPLYING",
             dry_run=False,
             details_json={"file_id": str(file_id)},
         )
@@ -2609,20 +2662,49 @@ async def apply_reread(
         await _reconcile_column_risk(session, file, tenant_id, resolved.applied)
 
     # F-RR (Fase 4): reconciliación post-apply — compara lo que el preview
-    # proyectó sobre este MISMO summary contra lo que efectivamente quedó
-    # persistido. `session.flush()` explícito ANTES: la sesión de producción
-    # corre con `autoflush=False` (ver `app/persistence/db/session.py` — ya
-    # mordió antes, ver el bug histórico de `session.get()` no viendo
-    # productos recién creados) y las queries de conteo de la verificación no
-    # verían las filas que `_reconcile` recién escribió sin este flush.
+    # proyectó (guardado en `run.details_json["projected_impact"]` cuando el
+    # usuario lo VIO, en `preview_reread`) contra lo que efectivamente quedó
+    # persistido. Hallazgo de code review: recomputar la proyección ACÁ, con
+    # el catálogo YA modificado por este mismo apply, compara "un recálculo
+    # contra sí mismo" y puede esconder una divergencia real (ej. un producto
+    # duplicado creado por un bug de resolución ya aparece como match válido
+    # al recalcular después). Por eso se lee la copia INMUTABLE que quedó
+    # guardada al momento del preview, nunca se recalcula acá.
+    #
+    # `session.flush()` explícito ANTES de la verificación: la sesión de
+    # producción corre con `autoflush=False` (ver `app/persistence/db/session.py`
+    # — ya mordió antes, ver el bug histórico de `session.get()` no viendo
+    # productos recién creados) y las queries de conteo no verían las filas
+    # que `_reconcile` recién escribió sin este flush.
     await session.flush()
-    catalog_for_check = await _load_product_index(session, tenant_id)
-    projected_links = await estimate_unlinked_products(
-        session, tenant_id, summary_for_import, confirmed_fields, catalog_for_check
-    )
-    result.reconciliation_warning = await _verify_unlinked_products_reconciliation(
-        session, tenant_id, file_id, projected_links
-    )
+    saved_projection = (run.details_json or {}).get("projected_impact")
+    if saved_projection is None:
+        # Camino directo/legado (sin sesión de preview previa — ej. scripts,
+        # tests que llaman apply_reread a mano): no hay "lo que el usuario
+        # vio" para comparar. No se inventa un recompute post-apply acá —
+        # sería exactamente el problema que este diseño evita.
+        result.reconciliation_warning = {
+            "check_skipped": {
+                "reason": "sin proyección de preview guardada en este run "
+                "(no pasó por una sesión de preview)."
+            }
+        }
+    else:
+        try:
+            projected = UnlinkedProductsEstimate(**saved_projection)
+        except TypeError as exc:
+            logger.error(
+                "reread.reconciliation_check_failed",
+                file_id=str(file_id),
+                error=f"projected_impact con forma inesperada: {exc}",
+            )
+            result.reconciliation_warning = {
+                "check_failed": {"reason": "No se pudo verificar el resultado."}
+            }
+        else:
+            result.reconciliation_warning = await _verify_unlinked_products_reconciliation(
+                session, tenant_id, file_id, projected
+            )
 
     # F9a: stamping de versionado/estado de la relectura sobre el archivo.
     # REAPPLIED es el ÚNICO outcome que bumpea ``ingestion_version`` — es el único
@@ -2747,28 +2829,36 @@ async def start_background_apply(
     *,
     existing_run: DataRepairRun | None = None,
 ) -> DataRepairRun:
-    """Deja un ``DataRepairRun`` en status RUNNING para un apply en background y
-    lo devuelve. Guard anti-duplicado: si ya hay una relectura RUNNING reciente
-    del tenant (alcance POR TENANT, preexistente — no confundir con el guard de
-    sesión de preview, que es por archivo), levanta ``ValueError`` (el caller
-    responde 409). El caller commitea y encola la task. Evita el ciclo
-    timeout→reintento→duplicados.
+    """Deja un ``DataRepairRun`` en status QUEUED (esperando que un worker lo
+    reclame) para un apply en background y lo devuelve. Guard anti-duplicado:
+    si ya hay una relectura QUEUED/APPLYING reciente del tenant (alcance POR
+    TENANT, preexistente — no confundir con el guard de sesión de preview,
+    que es por archivo), levanta ``ValueError`` (el caller responde 409). El
+    caller commitea y encola la task. Evita el ciclo timeout→reintento→duplicados.
 
     ``existing_run``: si viene (F-RR — la sesión READY_TO_APPLY que
     ``validate_ready_to_apply`` ya validó), se REUSA ese mismo run — conserva
     su ``run_id`` y su ``fresh_summary`` cacheado (así el worker no vuelve a
     descargar/parsear) — en vez de crear uno nuevo desde cero (camino legado,
-    sin sesión de preview previa)."""
+    sin sesión de preview previa).
+
+    Nota de diseño (code review): dejar este método en QUEUED, NO en RUNNING,
+    es lo que le permite al worker (``reread_worker.py``) RECLAMAR el run con
+    un ``UPDATE ... WHERE status='QUEUED'`` atómico antes de ejecutar nada —
+    sin esa transición real de estado, dos entregas del mismo mensaje de
+    Celery (reentrega por red, no solo por crash) podían leer el mismo run
+    "en curso" y aplicar la relectura dos veces."""
     await _acquire_reread_guard_lock(session, tenant_id)
 
     existing = await session.execute(
         select(DataRepairRun).where(
             DataRepairRun.tenant_id == tenant_id,
             DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
-            DataRepairRun.status == "RUNNING",
+            DataRepairRun.status.in_(("QUEUED", "APPLYING")),
         )
     )
     now = datetime.now(UTC)
+    last_expired_run_id: uuid.UUID | None = None
     for r in existing.scalars().all():
         created = r.created_at
         if created is not None and created.tzinfo is None:
@@ -2779,26 +2869,25 @@ async def start_background_apply(
                 "Ya hay una relectura en curso. Esperá a que termine antes de "
                 "aplicar otra."
             )
-        # Huérfano: nunca se movió de RUNNING en el tiempo esperado. Antes esto
-        # solo lo IGNORABA para no bloquear una relectura nueva — el run zombie
-        # quedaba en RUNNING para siempre en la auditoría (caso real: ASTERIA,
-        # dos runs con `details_json["phase"]=="queued"` desde su creación, señal
-        # de que ningún worker llegó a tomarlos). Ahora además se cierra.
-        phase = (r.details_json or {}).get("phase")
-        reason = "stale_never_picked_up" if phase == "queued" else "stale_timeout"
+        # Huérfano: nunca avanzó de QUEUED/APPLYING en el tiempo esperado.
+        # Antes esto solo lo IGNORABA para no bloquear una relectura nueva —
+        # el run zombie quedaba así para siempre en la auditoría (caso real:
+        # ASTERIA, dos runs sin que ningún worker los tomara). Ahora se cierra.
+        reason = "stale_never_picked_up" if r.status == "QUEUED" else "stale_timeout"
         logger.error(
             "reread.guard.expire_stale_run",
             run_id=str(r.id),
             tenant_id=str(tenant_id),
             age_seconds=age,
-            phase=phase,
+            status=r.status,
             reason=reason,
         )
         r.status = "FAILED"
         r.completed_at = now
-        details = dict(r.details_json or {})
+        details = _strip_bulky_fields(r.details_json or {})
         details["reason"] = reason
         r.details_json = details
+        last_expired_run_id = r.id
 
     # Validar que el archivo exista/pertenezca antes de encolar.
     file = await _load_file(session, file_id, tenant_id)
@@ -2810,19 +2899,17 @@ async def start_background_apply(
         # dos requests de apply concurrentes con el MISMO run_id (doble click,
         # o dos pestañas) pasan `validate_ready_to_apply` cada uno con su
         # propia copia en memoria del run, ya leída ANTES de este punto — sin
-        # el WHERE de acá, ambos pisarían `existing_run.status = "RUNNING"`
+        # el WHERE de acá, ambos pisarían `existing_run.status = "QUEUED"`
         # sin chequear el estado real en DB, reabriendo exactamente el
         # doble-apply que este guard existe para evitar. El advisory lock de
         # arriba serializa el SCAN de otros runs, no esta transición puntual.
-        details = dict(existing_run.details_json or {})
-        details["phase"] = "queued"
         result = await session.execute(
             update(DataRepairRun)
             .where(
                 DataRepairRun.id == existing_run.id,
                 DataRepairRun.status == "READY_TO_APPLY",
             )
-            .values(status="RUNNING", dry_run=False, details_json=details)
+            .values(status="QUEUED", dry_run=False)
         )
         if cast("CursorResult[Any]", result).rowcount == 0:
             raise ValueError(
@@ -2835,13 +2922,83 @@ async def start_background_apply(
     run = DataRepairRun(
         tenant_id=tenant_id,
         repair_type=REPAIR_TYPE_REREAD,
-        status="RUNNING",
+        status="QUEUED",
         dry_run=False,
-        details_json={"file_id": str(file_id), "phase": "queued"},
+        # Lineage (F-RR Fase 5): si este run reemplaza uno huérfano que el
+        # scan de arriba acaba de cerrar, queda trazable de cuál viene.
+        source_run_id=last_expired_run_id,
+        details_json={"file_id": str(file_id)},
     )
     session.add(run)
     await session.flush()
     return run
+
+
+async def sweep_stale_reread_runs(session: AsyncSession) -> dict[str, int]:
+    """F-RR (Fase 5): housekeeping GLOBAL, independiente de que alguien
+    reintente. Los guards reactivos de arriba (``start_background_apply``,
+    ``_expire_stale_preview_sessions``) solo cierran un run colgado cuando
+    alguien vuelve a tocar ESE archivo/tenant — si nadie reintenta nunca, un
+    run zombie queda RUNNING/PREVIEWING para siempre en la auditoría sin que
+    nada lo note. Pensado para correr desde un Celery beat periódico (ver
+    ``jobs/reread_sweep_worker.py``), sobre TODOS los tenants.
+
+    MISMOS umbrales que los guards reactivos (``_STALE_RUNNING_AFTER_SECONDS``,
+    ``_PREVIEW_SESSION_STALE_AFTER_SECONDS``) — es la misma noción de "colgado",
+    solo que evaluada proactivamente en vez de al vuelo de un request. El
+    caller (el worker) hace el commit.
+
+    Devuelve cuántos runs cerró por categoría, para logueo/métricas."""
+    now = datetime.now(UTC)
+    closed = {"apply_stuck": 0, "preview_session_abandoned": 0}
+
+    running = await session.execute(
+        select(DataRepairRun).where(
+            DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            DataRepairRun.status.in_(("QUEUED", "APPLYING")),
+        )
+    )
+    for r in running.scalars().all():
+        if _age_seconds(r.created_at, now) < _STALE_RUNNING_AFTER_SECONDS:
+            continue
+        reason = "stale_never_picked_up" if r.status == "QUEUED" else "stale_timeout"
+        logger.error(
+            "reread.sweep.expire_apply",
+            run_id=str(r.id),
+            tenant_id=str(r.tenant_id),
+            status=r.status,
+            reason=reason,
+        )
+        r.status = "FAILED"
+        r.completed_at = now
+        details = _strip_bulky_fields(r.details_json or {})
+        details["reason"] = reason
+        r.details_json = details
+        closed["apply_stuck"] += 1
+
+    sessions_result = await session.execute(
+        select(DataRepairRun).where(
+            DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            DataRepairRun.status.in_(_SESSION_STATUSES_OPEN),
+        )
+    )
+    for r in sessions_result.scalars().all():
+        if _age_seconds(r.updated_at, now) < _PREVIEW_SESSION_STALE_AFTER_SECONDS:
+            continue
+        logger.error(
+            "reread.sweep.expire_preview_session",
+            run_id=str(r.id),
+            tenant_id=str(r.tenant_id),
+            status=r.status,
+        )
+        r.status = "FAILED"
+        r.completed_at = now
+        details = _strip_bulky_fields(r.details_json or {})
+        details["reason"] = "stale_review_session"
+        r.details_json = details
+        closed["preview_session_abandoned"] += 1
+
+    return closed
 
 
 async def get_reread_run(
@@ -3228,6 +3385,7 @@ __all__ = [
     "mark_session_ready_to_apply",
     "preview_reread",
     "start_or_resume_preview_session",
+    "sweep_stale_reread_runs",
     "undo_reread",
     "validate_ready_to_apply",
 ]

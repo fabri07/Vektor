@@ -813,11 +813,11 @@ class RereadApplyStartResponse(BaseModel):
 
     file_id: UUID
     run_id: UUID
-    status: str  # "RUNNING"
+    status: str  # "QUEUED" (o "FAILED" si el enqueue mismo falló)
 
 
 class RereadRunStatusResponse(BaseModel):
-    """Estado del apply en background (polling). ``status``: RUNNING|APPLIED|FAILED."""
+    """Estado del apply en background (polling). ``status``: QUEUED|APPLYING|APPLIED|FAILED."""
 
     run_id: UUID
     file_id: UUID

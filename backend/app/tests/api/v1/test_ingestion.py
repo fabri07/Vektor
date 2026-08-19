@@ -3304,7 +3304,7 @@ class TestRereadApplyEnqueueEndpoint:
         run = result.scalars().one()
         assert run.status == "FAILED"
         assert run.completed_at is not None
-        assert (run.details_json or {}).get("phase") == "enqueue_failed"
+        assert (run.details_json or {}).get("reason") == "enqueue_failed"
 
         # Un segundo intento no debe estar bloqueado por el guard
         # anti-duplicado: el run FAILED no cuenta como RUNNING. Necesita una
