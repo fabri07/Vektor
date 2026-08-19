@@ -38,12 +38,29 @@ class DataRepairRun(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+    # F-RR (revisión de relectura): usada por el sweep de sesiones/jobs
+    # huérfanos para saber cuánto hace que un run no avanzó — `created_at` no
+    # alcanza porque una sesión de revisión (PREVIEWING/NEEDS_REVIEW/
+    # READY_TO_APPLY) puede estar activa (el usuario corrigiendo mapeos) mucho
+    # más que el umbral de "colgado" sin ser huérfana.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
             "status IN ('PENDING','RUNNING','COMPLETED','FAILED','APPROVED','APPLIED',"
-            "'REVERTED','PARTIALLY_APPLIED','COMPLETED_WITH_ERRORS')",
+            "'REVERTED','PARTIALLY_APPLIED','COMPLETED_WITH_ERRORS',"
+            # F-RR: estados de la sesión de revisión de relectura (ver
+            # reread_service.py) — PREVIEWING/NEEDS_REVIEW/READY_TO_APPLY
+            # cubren la revisión de mapeo antes de aplicar; QUEUED/APPLYING
+            # reemplazan la granularidad plana que antes vivía toda en
+            # RUNNING. APPLIED/FAILED ya existían y se reusan tal cual.
+            "'PREVIEWING','NEEDS_REVIEW','READY_TO_APPLY','QUEUED','APPLYING')",
             name="ck_repair_runs_status",
         ),
     )
