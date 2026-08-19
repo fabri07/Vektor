@@ -2546,3 +2546,54 @@ async def test_estimate_unlinked_products_stock_file_skips_purchase_gate(
     assert result.compras_gate_bloqueado == 0
     assert result.movimientos_sin_producto_esperado == 0
     assert result.compras_vinculadas == 0
+
+
+# ── F-RR (Fase 4): verificación post-apply ────────────────────────────────────
+
+
+async def test_apply_reread_reconciliation_matches_for_normal_import(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Camino feliz: lo que el preview proyecta y lo que efectivamente queda
+    persistido deben coincidir SIEMPRE que no haya un bug — sin desvío, el
+    apply no debe reportar ninguna advertencia."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.reconciliation_warning is None
+
+
+async def test_apply_reread_reconciliation_detects_injected_mismatch(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prueba de mutación: si el estimador (llamado DENTRO de apply_reread
+    para la verificación) devolviera una proyección que no coincide con lo
+    persistido, la reconciliación debe detectarlo — no confiar a ciegas en
+    que "el número que se calculó" es "el número que se aplicó"."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+
+    real_estimate = reread_service.estimate_unlinked_products
+
+    async def _lying_estimate(*args: Any, **kwargs: Any) -> Any:
+        real = await real_estimate(*args, **kwargs)
+        # Miente sobre cuántas ventas quedaron sin producto — simula un bug
+        # donde el estimador y el import real divergen.
+        real.ventas_sin_producto += 999
+        return real
+
+    monkeypatch.setattr(reread_service, "estimate_unlinked_products", _lying_estimate)
+
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert result.reconciliation_warning is not None
+    assert "ventas_sin_producto" in result.reconciliation_warning
+    assert result.reconciliation_warning["ventas_sin_producto"]["esperado"] != (
+        result.reconciliation_warning["ventas_sin_producto"]["real"]
+    )

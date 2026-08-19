@@ -70,7 +70,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTasks
@@ -298,6 +298,10 @@ class RereadApplyResult:
     column_risk_outcome: str = "NO_RISK_FOUND"
     column_risk_ambiguous: list[dict[str, Any]] = field(default_factory=list)
     column_risk_forced_unverified: list[dict[str, Any]] = field(default_factory=list)
+    # F-RR (Fase 4): None si lo proyectado en el preview coincide con lo
+    # efectivamente persistido; si no, el detalle del desvío — ver
+    # ``_verify_unlinked_products_reconciliation``.
+    reconciliation_warning: dict[str, Any] | None = None
 
 
 # ── snapshots para auditoría ───────────────────────────────────────────────────
@@ -1756,6 +1760,119 @@ async def estimate_unlinked_products(
     return result
 
 
+async def _verify_unlinked_products_reconciliation(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    projected: UnlinkedProductsEstimate,
+) -> dict[str, Any] | None:
+    """Post-apply (F-RR Fase 4): compara lo que ``estimate_unlinked_products``
+    proyectó ANTES de aplicar contra lo que efectivamente quedó persistido —
+    la invariante de reconciliación central de este módulo (ver docstring de
+    ``UnlinkedProductsEstimate``: el resumen de ASTERIA decía "sin_producto: 0"
+    mientras la base tenía cientos sin vincular).
+
+    Alcance HONESTO — no las 5 categorías completas, las 2 que tienen un
+    equivalente exacto y estable en lo persistido:
+
+      - ``con_producto``: ``ventas_con_producto + compras_vinculadas +
+        compras_producto_nuevo`` (proyectado) vs. filas vivas con
+        ``product_id IS NOT NULL`` (real). Da igual si una fila proyectada
+        como "nueva" terminó matcheando el catálogo recién creado por OTRA
+        fila del mismo archivo — se suman antes de comparar, el total no
+        depende de esa distinción interna.
+      - ``ventas_sin_producto``: exacto en ambos lados.
+
+    NO reconciliable 1:1 desde lo persistido: ``compras_gate_bloqueado`` vs
+    ``movimientos_sin_producto_esperado`` colapsan al mismo estado final
+    (OPEX, ``product_id`` NULL) — la distinción solo existe en el momento de
+    la estimación, sobre la fila cruda. Y ``compras_sin_producto``
+    (ambiguo/conflicto) no persiste como ``ExpenseEntry`` en absoluto — cae a
+    "Otros"/``unclassified_records``, sin equivalente directo acá.
+
+    Excluye filas con ``has_user_edits=True``: una edición manual puede (a
+    propósito) tener un vínculo de producto distinto al que la estimación
+    fresca hubiera calculado — eso es la edición ganando, no una divergencia.
+
+    Nunca lanza: un fallo en la verificación misma no debe abortar un apply
+    que ya escribió correctamente — se loguea y se trata como "sin desvío
+    detectable" (``None``), no como una advertencia positiva.
+    """
+    try:
+        sales_linked = (
+            await session.scalar(
+                select(func.count())
+                .select_from(SaleEntry)
+                .where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.source_upload_id == file_id,
+                    SaleEntry.voided_at.is_(None),
+                    SaleEntry.has_user_edits.is_(False),
+                    SaleEntry.product_id.is_not(None),
+                )
+            )
+        ) or 0
+        sales_unlinked = (
+            await session.scalar(
+                select(func.count())
+                .select_from(SaleEntry)
+                .where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.source_upload_id == file_id,
+                    SaleEntry.voided_at.is_(None),
+                    SaleEntry.has_user_edits.is_(False),
+                    SaleEntry.product_id.is_(None),
+                )
+            )
+        ) or 0
+        expenses_linked = (
+            await session.scalar(
+                select(func.count())
+                .select_from(ExpenseEntry)
+                .where(
+                    ExpenseEntry.tenant_id == tenant_id,
+                    ExpenseEntry.source_upload_id == file_id,
+                    ExpenseEntry.voided_at.is_(None),
+                    ExpenseEntry.has_user_edits.is_(False),
+                    ExpenseEntry.product_id.is_not(None),
+                )
+            )
+        ) or 0
+
+        expected_con_producto = (
+            projected.ventas_con_producto
+            + projected.compras_vinculadas
+            + projected.compras_producto_nuevo
+        )
+        actual_con_producto = sales_linked + expenses_linked
+
+        mismatches: dict[str, Any] = {}
+        if expected_con_producto != actual_con_producto:
+            mismatches["con_producto"] = {
+                "esperado": expected_con_producto,
+                "real": actual_con_producto,
+            }
+        if projected.ventas_sin_producto != sales_unlinked:
+            mismatches["ventas_sin_producto"] = {
+                "esperado": projected.ventas_sin_producto,
+                "real": sales_unlinked,
+            }
+        if not mismatches:
+            return None
+        logger.error(
+            "reread.reconciliation_mismatch",
+            tenant_id=str(tenant_id),
+            file_id=str(file_id),
+            mismatches=mismatches,
+        )
+        return mismatches
+    except Exception as exc:  # noqa: BLE001 — nunca aborta un apply ya escrito
+        logger.error(
+            "reread.reconciliation_check_failed", file_id=str(file_id), error=str(exc)
+        )
+        return None
+
+
 def _estimate_reread(
     file: UploadedFile,
     tenant_id: uuid.UUID,
@@ -2491,6 +2608,22 @@ async def apply_reread(
     if resolved.applied is not None:
         await _reconcile_column_risk(session, file, tenant_id, resolved.applied)
 
+    # F-RR (Fase 4): reconciliación post-apply — compara lo que el preview
+    # proyectó sobre este MISMO summary contra lo que efectivamente quedó
+    # persistido. `session.flush()` explícito ANTES: la sesión de producción
+    # corre con `autoflush=False` (ver `app/persistence/db/session.py` — ya
+    # mordió antes, ver el bug histórico de `session.get()` no viendo
+    # productos recién creados) y las queries de conteo de la verificación no
+    # verían las filas que `_reconcile` recién escribió sin este flush.
+    await session.flush()
+    catalog_for_check = await _load_product_index(session, tenant_id)
+    projected_links = await estimate_unlinked_products(
+        session, tenant_id, summary_for_import, confirmed_fields, catalog_for_check
+    )
+    result.reconciliation_warning = await _verify_unlinked_products_reconciliation(
+        session, tenant_id, file_id, projected_links
+    )
+
     # F9a: stamping de versionado/estado de la relectura sobre el archivo.
     # REAPPLIED es el ÚNICO outcome que bumpea ``ingestion_version`` — es el único
     # caso donde el mapeo reaplicado es el REAL (F8b+), no un guess re-derivado.
@@ -2536,6 +2669,9 @@ async def apply_reread(
         "clientes": result.clientes,
         "proveedores": result.proveedores,
         "column_risk_outcome": result.column_risk_outcome,
+        # F-RR Fase 4: None si reconcilia; si no, el detalle del desvío —
+        # nunca se descarta en silencio (ver invariante del módulo).
+        "reconciliation_warning": result.reconciliation_warning,
         # Sample para el diff antes/después en el frontend (limitado para no inflar).
         "sample_changes": list(result.items)[:24],
         "products_limitation": (

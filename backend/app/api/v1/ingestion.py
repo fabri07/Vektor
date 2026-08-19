@@ -3635,6 +3635,7 @@ async def reread_run_status(
         error=d.get("error"),
         clientes=int(d.get("clientes", 0) or 0),
         proveedores=int(d.get("proveedores", 0) or 0),
+        reconciliation_warning=d.get("reconciliation_warning"),
     )
 
 

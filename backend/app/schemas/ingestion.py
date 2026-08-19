@@ -803,6 +803,9 @@ class RereadApplyResponse(BaseModel):
     # F7d: maestros (clientes/proveedores) reaplicados — creados + actualizados.
     clientes: int = 0
     proveedores: int = 0
+    # F-RR Fase 4: None si lo proyectado en el preview coincidió con lo
+    # persistido; si no, el detalle del desvío — nunca se oculta en un log.
+    reconciliation_warning: dict[str, Any] | None = None
 
 
 class RereadApplyStartResponse(BaseModel):
@@ -830,6 +833,9 @@ class RereadRunStatusResponse(BaseModel):
     # F7d: maestros (clientes/proveedores) reaplicados — creados + actualizados.
     clientes: int = 0
     proveedores: int = 0
+    # F-RR Fase 4: None si lo proyectado en el preview coincidió con lo
+    # persistido; si no, el detalle del desvío — nunca se oculta en un log.
+    reconciliation_warning: dict[str, Any] | None = None
 
 
 class RereadUndoResponse(BaseModel):
