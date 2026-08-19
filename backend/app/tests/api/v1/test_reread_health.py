@@ -53,7 +53,7 @@ async def test_reports_unhealthy_when_no_workers(
     sample_tenant: Tenant,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(diag, "_inspect_celery", lambda _timeout: ({}, {}, None))
+    monkeypatch.setattr(diag, "_inspect_celery", lambda _timeout: ({}, None))
     headers = await _superadmin_headers(db_session, sample_tenant)
 
     resp = await client.get(_HEALTH, headers=headers)
@@ -74,11 +74,7 @@ async def test_reports_healthy_when_worker_listens_ingestion(
     monkeypatch.setattr(
         diag,
         "_inspect_celery",
-        lambda _timeout: (
-            {"worker1@host": "pong"},
-            {"worker1@host": [{"name": "ingestion"}]},
-            None,
-        ),
+        lambda _timeout: ({"worker1@host": [{"name": "ingestion"}]}, None),
     )
     headers = await _superadmin_headers(db_session, sample_tenant)
 

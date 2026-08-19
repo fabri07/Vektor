@@ -41,26 +41,38 @@ def _check(name: str, ok: bool, severity: str, detail: str) -> dict[str, Any]:
     return {"check": name, "ok": ok, "severity": severity, "detail": detail}
 
 
-def _inspect_celery(timeout: float) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+def _inspect_celery(timeout: float) -> tuple[dict[str, Any], str | None]:
     """Bloqueante (publica al broker y espera respuestas hasta ``timeout``) —
-    llamar vía ``asyncio.to_thread`` para no trabar el event loop. Si NADIE
-    responde, ``ping()``/``active_queues()`` esperan el ``timeout`` completo
-    antes de devolver vacío — no hay forma de saberlo antes (es el costo
-    inherente de un RPC por pub/sub). ``timeout`` se ajusta según el caller:
-    corto en el chequeo pre-apply (hot path), más paciente en el diagnóstico
-    manual de `/admin`."""
+    llamar vía ``asyncio.to_thread`` para no trabar el event loop.
+
+    UNA sola consulta (``active_queues()``), a propósito: antes se hacían dos
+    broadcasts independientes (``ping()`` + ``active_queues()``), cada uno
+    sujeto al mismo ``timeout`` por separado. Bajo latencia normal del broker
+    era posible que ``ping()`` respondiera a tiempo pero ``active_queues()``
+    (una consulta más pesada — el worker tiene que introspeccionar sus
+    bindings) no llegara a responder dentro de la ventana corta del chequeo
+    pre-apply, dando `{}` — eso se interpretaba como "no hay workers" y
+    bloqueaba un apply sobre un worker sano. ``active_queues()`` sola ya
+    prueba vida (si un worker responde, aparece como key del dict) y qué
+    colas escucha, en un solo round-trip — no hace falta el ping aparte.
+    Devuelve ``({}, None)`` si nadie respondió dentro del timeout: eso es
+    INDETERMINADO (broker lento/nadie escuchando), nunca una prueba de que no
+    hay workers — el caller decide qué hacer con esa ambigüedad."""
     try:
         from app.jobs.celery_app import celery_app  # noqa: PLC0415
 
         insp = celery_app.control.inspect(timeout=timeout)
-        pong = insp.ping() or {}
         active_queues = insp.active_queues() or {}
-        return pong, active_queues, None
+        return active_queues, None
     except Exception as exc:  # noqa: BLE001 — diagnóstico nunca rompe
-        return {}, {}, str(exc)
+        return {}, str(exc)
 
 
 def _evaluate_ingestion_queue(active_queues: dict[str, Any]) -> tuple[bool, str]:
+    """Solo se llama con ``active_queues`` NO vacío (al menos un worker
+    respondió) — decide si alguno de los que respondieron escucha
+    `ingestion`. Un dict vacío es responsabilidad del caller (indeterminado,
+    no "ninguno la escucha")."""
     for worker_name, queues in active_queues.items():
         names = {q.get("name") for q in (queues or [])}
         if _INGESTION_QUEUE in names:
@@ -106,20 +118,22 @@ _PRE_APPLY_CHECK_TIMEOUT_SECONDS = 0.3
 async def check_ingestion_workers_available() -> bool | None:
     """Chequeo liviano, best-effort, para usar ANTES de encolar un apply.
 
-    Devuelve ``True``/``False`` solo cuando pudo determinarlo con certeza;
-    ``None`` si el chequeo mismo falló (broker inalcanzable, timeout, error
-    inesperado) — en ese caso el caller debe encolar igual (fail-open): un
-    chequeo de salud que bloquea el flujo entero por su propia falla sería
-    peor que no tenerlo.
+    Devuelve ``True``/``False`` SOLO cuando al menos un worker respondió y se
+    pudo determinar con certeza si escucha `ingestion`; ``None`` en cualquier
+    caso indeterminado — el chequeo falló, o nadie respondió dentro del
+    timeout corto (broker lento, no necesariamente "no hay workers"). El
+    caller debe encolar igual ante `None` (fail-open): un chequeo de salud
+    que bloquea el flujo entero por su propia ambigüedad sería peor que no
+    tenerlo.
     """
     try:
-        pong, active_queues, inspect_error = await asyncio.to_thread(
+        active_queues, inspect_error = await asyncio.to_thread(
             _inspect_celery, _PRE_APPLY_CHECK_TIMEOUT_SECONDS
         )
     except Exception:  # noqa: BLE001 — fail-open ante cualquier fallo del chequeo
         return None
-    if inspect_error is not None or not pong:
-        return None if inspect_error is not None else False
+    if inspect_error is not None or not active_queues:
+        return None
     ok, _detail = _evaluate_ingestion_queue(active_queues)
     return ok
 
@@ -132,7 +146,7 @@ async def run_reread_diagnostics(session: AsyncSession) -> dict[str, Any]:
     """
     checks: list[dict[str, Any]] = []
 
-    pong, active_queues, inspect_error = await asyncio.to_thread(_inspect_celery, 2.0)
+    active_queues, inspect_error = await asyncio.to_thread(_inspect_celery, 2.0)
 
     if inspect_error is not None:
         checks.append(
@@ -144,19 +158,20 @@ async def run_reread_diagnostics(session: AsyncSession) -> dict[str, Any]:
             )
         )
     else:
-        ping_ok = bool(pong)
+        responding_ok = bool(active_queues)
         checks.append(
             _check(
                 "workers_responding",
-                ping_ok,
+                responding_ok,
                 "error",
-                f"{len(pong)} worker(s) respondieron: {', '.join(pong)}."
-                if ping_ok
-                else "Ningún worker de Celery respondió al ping — el proceso "
+                f"{len(active_queues)} worker(s) respondieron: "
+                f"{', '.join(active_queues)}."
+                if responding_ok
+                else "Ningún worker de Celery respondió — el proceso "
                 "vektor-worker puede estar caído o inalcanzable.",
             )
         )
-        if ping_ok:
+        if responding_ok:
             queue_ok, queue_detail = _evaluate_ingestion_queue(active_queues)
             checks.append(_check("ingestion_queue_consumed", queue_ok, "error", queue_detail))
 

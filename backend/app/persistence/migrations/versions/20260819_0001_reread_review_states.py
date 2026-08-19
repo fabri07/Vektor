@@ -66,7 +66,29 @@ def upgrade() -> None:
     )
 
 
+_NEW_STATUSES = ("PREVIEWING", "NEEDS_REVIEW", "READY_TO_APPLY", "QUEUED", "APPLYING")
+
+
 def downgrade() -> None:
+    # Si ya corrió el código nuevo, puede haber runs en un estado que el CHECK
+    # viejo no admite — recrearlo directo fallaría contra esas filas (o, con
+    # NOT VALID, las dejaría inválidas en silencio para siempre). Se
+    # transicionan a FAILED primero, preservando el estado real en
+    # details_json — mismo criterio que usa el código de la app para cerrar
+    # runs huérfanos, nunca borra evidencia de qué pasó.
+    conn = op.get_bind()
+    conn.execute(
+        sa.text(
+            "UPDATE data_repair_runs SET "
+            "details_json = jsonb_set("
+            "  COALESCE(details_json, '{}'::jsonb), '{downgraded_from_status}', to_jsonb(status)"
+            "), "
+            "status = 'FAILED', "
+            "completed_at = COALESCE(completed_at, now()) "
+            "WHERE status = ANY(:new_statuses)"
+        ),
+        {"new_statuses": list(_NEW_STATUSES)},
+    )
     op.drop_constraint("ck_repair_runs_status", "data_repair_runs", type_="check")
     op.create_check_constraint(
         "ck_repair_runs_status", "data_repair_runs", f"status IN ({_STATUS_OLD})"

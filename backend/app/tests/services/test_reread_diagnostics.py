@@ -3,8 +3,10 @@
 Caso real que motivó este módulo (cuenta ASTERIA, 2026-08): dos
 ``DataRepairRun`` de relectura quedaron en ``RUNNING`` con
 ``details_json["phase"] == "queued"`` para siempre — nadie los tomó, y nada lo
-detectaba. Estos tests cubren: (1) el chequeo de workers/cola, (2) el conteo
-de runs encolados hace demasiado sin que ningún worker los tomara.
+detectaba. Estos tests cubren: (1) el chequeo de workers/cola (una sola
+consulta ``active_queues()``, sin ``ping()`` separado — ver docstring de
+``_inspect_celery``), (2) el conteo de runs encolados hace demasiado sin que
+ningún worker los tomara.
 """
 
 from __future__ import annotations
@@ -20,9 +22,9 @@ from app.persistence.models.repair import DataRepairRun
 from app.persistence.models.tenant import Tenant
 
 
-def _mock_inspect(pong: dict, active_queues: dict, error: str | None = None):
-    def _fake(_timeout: float) -> tuple[dict, dict, str | None]:
-        return pong, active_queues, error
+def _mock_inspect(active_queues: dict, error: str | None = None):
+    def _fake(_timeout: float) -> tuple[dict, str | None]:
+        return active_queues, error
 
     return _fake
 
@@ -31,10 +33,7 @@ async def test_all_healthy(db_session: AsyncSession, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         diag,
         "_inspect_celery",
-        _mock_inspect(
-            {"worker1@host": "pong"},
-            {"worker1@host": [{"name": "ingestion"}, {"name": "default"}]},
-        ),
+        _mock_inspect({"worker1@host": [{"name": "ingestion"}, {"name": "default"}]}),
     )
     result = await diag.run_reread_diagnostics(db_session)
     assert result["overall_ok"] is True
@@ -47,7 +46,7 @@ async def test_all_healthy(db_session: AsyncSession, monkeypatch: pytest.MonkeyP
 async def test_no_workers_responding(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(diag, "_inspect_celery", _mock_inspect({}, {}))
+    monkeypatch.setattr(diag, "_inspect_celery", _mock_inspect({}))
     result = await diag.run_reread_diagnostics(db_session)
     assert result["overall_ok"] is False
     by_name = {c["check"]: c for c in result["checks"]}
@@ -65,10 +64,7 @@ async def test_worker_responds_but_not_listening_ingestion_queue(
     monkeypatch.setattr(
         diag,
         "_inspect_celery",
-        _mock_inspect(
-            {"worker1@host": "pong"},
-            {"worker1@host": [{"name": "scores"}, {"name": "default"}]},
-        ),
+        _mock_inspect({"worker1@host": [{"name": "scores"}, {"name": "default"}]}),
     )
     result = await diag.run_reread_diagnostics(db_session)
     assert result["overall_ok"] is False
@@ -80,7 +76,7 @@ async def test_inspect_error_is_reported_not_raised(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        diag, "_inspect_celery", _mock_inspect({}, {}, error="Connection refused")
+        diag, "_inspect_celery", _mock_inspect({}, error="Connection refused")
     )
     result = await diag.run_reread_diagnostics(db_session)
     assert result["overall_ok"] is False
@@ -92,11 +88,7 @@ async def test_stuck_queued_run_is_counted(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        diag,
-        "_inspect_celery",
-        _mock_inspect(
-            {"worker1@host": "pong"}, {"worker1@host": [{"name": "ingestion"}]}
-        ),
+        diag, "_inspect_celery", _mock_inspect({"worker1@host": [{"name": "ingestion"}]})
     )
     old_enough = datetime.now(UTC) - timedelta(
         seconds=diag._QUEUED_TOO_LONG_SECONDS + 5
@@ -125,11 +117,7 @@ async def test_run_in_applying_phase_is_not_counted_as_stuck(
     """Un run que el worker SÍ tomó (`phase="applying"`) no es un huérfano de
     cola — está siendo procesado, no hay que alertar sobre él acá."""
     monkeypatch.setattr(
-        diag,
-        "_inspect_celery",
-        _mock_inspect(
-            {"worker1@host": "pong"}, {"worker1@host": [{"name": "ingestion"}]}
-        ),
+        diag, "_inspect_celery", _mock_inspect({"worker1@host": [{"name": "ingestion"}]})
     )
     old_enough = datetime.now(UTC) - timedelta(
         seconds=diag._QUEUED_TOO_LONG_SECONDS + 5
@@ -154,22 +142,35 @@ async def test_check_ingestion_workers_available_true(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        diag,
-        "_inspect_celery",
-        _mock_inspect(
-            {"worker1@host": "pong"}, {"worker1@host": [{"name": "ingestion"}]}
-        ),
+        diag, "_inspect_celery", _mock_inspect({"worker1@host": [{"name": "ingestion"}]})
     )
     assert await diag.check_ingestion_workers_available() is True
 
 
-async def test_check_ingestion_workers_available_false(
+async def test_check_ingestion_workers_available_false_when_worker_responds_without_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """`False` (bloquea) SOLO cuando al menos un worker respondió a
+    `active_queues()` y ninguno de los que respondieron escucha `ingestion`
+    — nunca por la sola ausencia de respuesta."""
     monkeypatch.setattr(
-        diag, "_inspect_celery", _mock_inspect({"worker1@host": "pong"}, {})
+        diag, "_inspect_celery", _mock_inspect({"worker1@host": [{"name": "scores"}]})
     )
     assert await diag.check_ingestion_workers_available() is False
+
+
+async def test_check_ingestion_workers_available_indeterminate_when_nobody_responds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hallazgo de code review: antes se hacían DOS broadcasts (`ping()` +
+    `active_queues()`) con el mismo timeout corto — si `ping()` respondía a
+    tiempo pero `active_queues()` no llegaba a responder (más pesado, bajo
+    latencia normal del broker), el resultado combinado daba `False` y
+    bloqueaba un apply sobre un worker sano. Ahora es una sola consulta:
+    `active_queues()` vacío (nadie respondió dentro del timeout) es
+    INDETERMINADO (`None`, fail-open), nunca `False`."""
+    monkeypatch.setattr(diag, "_inspect_celery", _mock_inspect({}))
+    assert await diag.check_ingestion_workers_available() is None
 
 
 async def test_check_ingestion_workers_available_fail_open_on_error(
@@ -178,7 +179,5 @@ async def test_check_ingestion_workers_available_fail_open_on_error(
     """Fail-open: si el chequeo mismo falla, NO bloquea (`None`, no `False`) —
     un chequeo de salud que corta el flujo por su propia falla sería peor que
     no tenerlo."""
-    monkeypatch.setattr(
-        diag, "_inspect_celery", _mock_inspect({}, {}, error="timeout")
-    )
+    monkeypatch.setattr(diag, "_inspect_celery", _mock_inspect({}, error="timeout"))
     assert await diag.check_ingestion_workers_available() is None
