@@ -173,6 +173,32 @@ async def list_sales(
     )
 
 
+@router.get(
+    "/count",
+    summary="Total de ventas del tenant (para paginación) — DEBE ir antes de /{sale_id}",
+)
+async def count_sales(
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    customer_id: UUID | None = Query(default=None),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, int]:
+    """Corrección C4 ampliada (2026-08-19): `GET /sales` pagina de a 50 (max
+    200) pero no había forma de saber cuántas páginas hay en total. Mismos
+    filtros que `list_sales`, sin el default de `from_date=hoy-30d` — un total
+    de "toda la historia" es el más útil para paginar el listado completo; el
+    caller pasa `from_date`/`to_date` si quiere el total de un rango puntual."""
+    repo = SaleRepository(session)
+    total = await repo.count_by_tenant(
+        tenant.tenant_id,
+        from_date=from_date,
+        to_date=to_date,
+        customer_id=customer_id,
+    )
+    return {"total": total}
+
+
 @router.post(
     "/bulk",
     response_model=list[SaleEntryResponse],

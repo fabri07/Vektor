@@ -116,6 +116,59 @@ class TestExpensesCRUD:
         assert len(resp.json()) >= 1
 
 
+# ── Count endpoint (corrección C4, revisión externa 2026-08-19) ────────────────
+# `GET /expenses` pagina de a 50 (max 200) pero el frontend no tenía forma de
+# saber cuántas páginas hay en total.
+
+
+class TestExpensesCountEndpoint:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_count_matches_total_created(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        for _ in range(3):
+            await client.post("/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers)
+
+        resp = await client.get("/api/v1/expenses/count", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == {"total": 3}
+
+    async def test_count_respects_category_filter(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        await client.post("/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers)
+        await client.post(
+            "/api/v1/expenses",
+            json={**_EXPENSE_PAYLOAD, "category": "UTILITIES"},
+            headers=auth_headers,
+        )
+
+        resp = await client.get(
+            "/api/v1/expenses/count",
+            headers=auth_headers,
+            params={"category": "UTILITIES"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"total": 1}
+
+    async def test_count_tenant_isolation(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+    ) -> None:
+        await client.post("/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers)
+
+        resp_a = await client.get("/api/v1/expenses/count", headers=auth_headers)
+        assert resp_a.json() == {"total": 1}
+
+        resp_b = await client.get("/api/v1/expenses/count", headers=second_auth_headers)
+        assert resp_b.json() == {"total": 0}
+
+
 class TestExpensesSummary:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

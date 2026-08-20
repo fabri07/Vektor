@@ -185,6 +185,22 @@ async def create_supplier(
     return saved
 
 
+@router.get(
+    "/count",
+    summary="Total de proveedores del tenant (para paginación) — DEBE ir antes de /{supplier_id}",
+)
+async def count_suppliers(
+    include_inactive: bool = Query(default=False),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, int]:
+    """Corrección C4 (revisión externa, paginación real): `GET /suppliers`
+    pagina de a 50 (max 200) sin forma de saber cuántas páginas hay en total."""
+    repo = SupplierRepository(session)
+    total = await repo.count_by_tenant(tenant.tenant_id, include_inactive=include_inactive)
+    return {"total": total}
+
+
 @router.get("/{supplier_id}", response_model=SupplierResponse, summary="Get supplier by ID")
 async def get_supplier(
     supplier_id: UUID,

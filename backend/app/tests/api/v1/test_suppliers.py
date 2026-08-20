@@ -580,3 +580,97 @@ class TestSupplierProducts:
         assert len(groups) == 1
         names = {r["name"] for r in groups[0]["products"]}
         assert names == {"Yerba Playadito", "Azúcar Ledesma"}
+
+
+# ── Corrección C4 (revisión externa, paginación real): GET /suppliers/count ────
+
+
+class TestSuppliersCountEndpoint:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_count_matches_active_total(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        for name in ("Prov A", "Prov B", "Prov C"):
+            resp = await client.post(
+                "/api/v1/suppliers", json={"name": name}, headers=auth_headers
+            )
+            assert resp.status_code == 201
+        resp = await client.get("/api/v1/suppliers/count", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == {"total": 3}
+
+    async def test_count_excludes_inactive_by_default_and_includes_with_flag(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        activo = await client.post(
+            "/api/v1/suppliers", json={"name": "Prov Activo"}, headers=auth_headers
+        )
+        baja = await client.post(
+            "/api/v1/suppliers", json={"name": "Prov De Baja"}, headers=auth_headers
+        )
+        assert activo.status_code == 201 and baja.status_code == 201
+        deleted = await client.delete(
+            f"/api/v1/suppliers/{baja.json()['id']}", headers=auth_headers
+        )
+        assert deleted.status_code == 200
+
+        default = await client.get("/api/v1/suppliers/count", headers=auth_headers)
+        assert default.json() == {"total": 1}
+
+        con_inactivos = await client.get(
+            "/api/v1/suppliers/count?include_inactive=true", headers=auth_headers
+        )
+        assert con_inactivos.json() == {"total": 2}
+
+    async def test_count_excludes_brand_collapsed_even_with_include_inactive(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: Any
+    ) -> None:
+        """Espejo de `TestBrandCollapsedSuppliers.test_collapsed_hidden_even_with_
+        include_inactive` — el count tiene que respetar la MISMA exclusión que
+        `list_by_tenant`, no solo `deactivated_at`."""
+        from sqlalchemy import update  # noqa: PLC0415
+
+        from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+        activo = await client.post(
+            "/api/v1/suppliers", json={"name": "Prov Sano"}, headers=auth_headers
+        )
+        assert activo.status_code == 201
+
+        colapsada = await client.post(
+            "/api/v1/suppliers", json={"name": "Marca Fantasma"}, headers=auth_headers
+        )
+        sid = colapsada.json()["id"]
+        deleted = await client.delete(f"/api/v1/suppliers/{sid}", headers=auth_headers)
+        assert deleted.status_code == 200
+        await db_session.execute(
+            update(Supplier)
+            .where(Supplier.id == uuid.UUID(sid))
+            .values(custom_fields={"_brand_collapsed": "true"})
+        )
+        await db_session.commit()
+
+        con_inactivos = await client.get(
+            "/api/v1/suppliers/count?include_inactive=true", headers=auth_headers
+        )
+        assert con_inactivos.json() == {"total": 1}
+
+    async def test_count_tenant_isolation(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+    ) -> None:
+        created = await client.post(
+            "/api/v1/suppliers", json={"name": "Prov Tenant A"}, headers=auth_headers
+        )
+        assert created.status_code == 201
+
+        resp_a = await client.get("/api/v1/suppliers/count", headers=auth_headers)
+        assert resp_a.json() == {"total": 1}
+
+        resp_b = await client.get("/api/v1/suppliers/count", headers=second_auth_headers)
+        assert resp_b.json() == {"total": 0}

@@ -59,6 +59,10 @@ export interface ProductCategoryOption {
 
 const PAGE_SIZE = 200;
 const MAX_PAGES = 25;
+// Corrección C4 (revisión externa 2026-08-19): `getAllProducts` acumula hasta
+// esta cantidad y corta en silencio — el caller necesita saber el techo para
+// poder avisar si lo alcanzó de verdad (ver `countProducts`).
+export const PRODUCTS_MAX_ACCUMULATED = PAGE_SIZE * MAX_PAGES;
 
 export const productsService = {
   async createProduct(
@@ -117,5 +121,15 @@ export const productsService = {
     }
 
     return items;
+  },
+
+  // Corrección C4: total real del catálogo (mismos filtros que `getProducts`/
+  // `getAllProducts`, sin `limit`/`offset`) — permite avisar si `getAllProducts`
+  // cortó en `PRODUCTS_MAX_ACCUMULATED` sin haber traído todo.
+  async countProducts(
+    params?: Omit<ProductsListParams, "limit" | "offset">,
+  ): Promise<number> {
+    const res = await api.get<{ total: number }>("/products/count", { params });
+    return res.data.total;
   },
 };

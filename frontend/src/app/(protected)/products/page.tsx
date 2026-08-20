@@ -13,6 +13,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import {
   productsService,
+  PRODUCTS_MAX_ACCUMULATED,
   type ProductCategoryOption,
   type ProductResponse,
 } from "@/services/products.service";
@@ -200,6 +201,19 @@ export default function ProductsPage() {
     staleTime: 2 * 60 * 1000,
   });
 
+  // Corrección C4 (revisión externa 2026-08-19): `getAllProducts` acumula
+  // hasta `PRODUCTS_MAX_ACCUMULATED` productos y corta en silencio — sin este
+  // chequeo, un catálogo más grande que el techo se mostraba incompleto sin
+  // ningún aviso (no-invention: nunca mostrar una lista parcial como si fuera
+  // el catálogo entero). Solo se pide el total real cuando hace falta.
+  const possiblyTruncated = products.length >= PRODUCTS_MAX_ACCUMULATED;
+  const { data: totalActiveCount } = useQuery({
+    queryKey: ["products-count", "active"],
+    queryFn: () => productsService.countProducts({ is_active: true }),
+    enabled: possiblyTruncated,
+    staleTime: 2 * 60 * 1000,
+  });
+
   // FASE E: catálogo de categorías del vertical del tenant.
   const { data: categories = [] } = useQuery({
     queryKey: ["product-categories"],
@@ -296,6 +310,23 @@ export default function ProductsPage() {
 
   return (
     <PageWrapper title="Productos" actions={<ManualEntryLauncher />}>
+      {/* Corrección C4 (revisión externa 2026-08-19): sin este aviso, un
+          catálogo más grande que PRODUCTS_MAX_ACCUMULATED se mostraba
+          incompleto sin decirlo — no-invention: nunca una lista parcial
+          disfrazada de catálogo completo. */}
+      {possiblyTruncated && (
+        <div
+          role="status"
+          className="rounded-lg border border-vk-warning/40 bg-vk-warning-bg px-4 py-3 text-sm text-vk-warning"
+        >
+          {totalActiveCount !== undefined
+            ? `Este catálogo tiene ${totalActiveCount} productos activos`
+            : "Este catálogo tiene más de " + PRODUCTS_MAX_ACCUMULATED + " productos activos"}{" "}
+          — mostramos los primeros {PRODUCTS_MAX_ACCUMULATED}. Si necesitás ver el resto,
+          contactanos.
+        </div>
+      )}
+
       {/* Filter */}
       <div className="flex items-center gap-3">
         <label className="text-sm text-vk-text-muted">Estado:</label>

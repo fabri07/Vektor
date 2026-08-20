@@ -71,6 +71,9 @@ function formatType(filename: string): string {
   return ext ?? "—";
 }
 
+// Mismo tamaño que el default del backend (`GET /ingestion/files`, max 200).
+const FILES_PAGE_SIZE = 50;
+
 function hasActiveFiles(files: UploadedFileItem[]): boolean {
   return files.some((f) =>
     f.processing_status === "PENDING" ||
@@ -145,6 +148,11 @@ export function FileListSection() {
     entities: RereadNotRevertedEntity[];
   } | null>(null);
 
+  // Corrección C4 (revisión externa 2026-08-19): antes se pedía siempre la
+  // misma primera página (sin `offset`) y no había forma de avanzar más allá
+  // de los primeros 50 archivos.
+  const [page, setPage] = useState(0);
+
   // `isError` NO es opcional acá: sin él, el `= []` del default convierte
   // cualquier fallo (500, timeout de 15s del cliente contra Neon frío, red
   // caída) en "no hay archivos cargados todavía". El usuario lee que su
@@ -156,13 +164,20 @@ export function FileListSection() {
     refetch,
     isRefetching,
   } = useQuery<UploadedFileItem[]>({
-    queryKey: ["ingestion-files"],
-    queryFn: ingestionService.listFiles,
+    queryKey: ["ingestion-files", page],
+    queryFn: () => ingestionService.listFiles(page * FILES_PAGE_SIZE, FILES_PAGE_SIZE),
     refetchInterval: (query) => {
       const data = query.state.data as UploadedFileItem[] | undefined;
       return data && hasActiveFiles(data) ? 3_000 : 30_000;
     },
   });
+
+  const { data: totalFiles = 0 } = useQuery({
+    queryKey: ["ingestion-files-count"],
+    queryFn: () => ingestionService.countFiles(),
+    staleTime: 30_000,
+  });
+  const totalFilesPages = Math.max(1, Math.ceil(totalFiles / FILES_PAGE_SIZE));
 
   /*
    * El panel de mapeo sólo se monta con NEEDS_CONFIRMATION, pero el archivo se
@@ -287,6 +302,7 @@ export function FileListSection() {
     onSuccess: (resultado) => {
       setFileToDelete(null);
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
+      void queryClient.invalidateQueries({ queryKey: ["ingestion-files-count"] });
       // El borrado revierte datos de negocio: hay que refrescar todo lo que los
       // muestra, no solo la lista de archivos.
       invalidateDataQueries();
@@ -768,6 +784,33 @@ export function FileListSection() {
           </table>
         </div>
         ))}
+
+      {/* Corrección C4 (revisión externa 2026-08-19): antes no había forma de
+          avanzar más allá de los primeros 50 archivos — mismo patrón que
+          `/otros` (referencia de paginación real del proyecto). */}
+      {!isLoading && totalFilesPages > 1 && (
+        <div className="flex items-center justify-center gap-3 pt-2">
+          <p className="text-xs text-vk-text-muted">
+            Página {page + 1} de {totalFilesPages} ({totalFiles} archivo(s))
+          </p>
+          <button
+            type="button"
+            disabled={page === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+          >
+            ← Anterior
+          </button>
+          <button
+            type="button"
+            disabled={page + 1 >= totalFilesPages}
+            onClick={() => setPage((p) => p + 1)}
+            className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+          >
+            Siguiente →
+          </button>
+        </div>
+      )}
 
       {/* Borrar un archivo revierte lo que importó: la advertencia muestra los
           conteos reales antes de que el usuario acepte. */}

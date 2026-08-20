@@ -113,6 +113,29 @@ class CustomerRepository:
         result = await self._session.execute(q)
         return list(result.scalars().all())
 
+    async def count_by_tenant(
+        self,
+        tenant_id: UUID,
+        include_sentinel: bool = False,
+        include_inactive: bool = False,
+    ) -> int:
+        """Total que ve `list_by_tenant` — mismos filtros, sin `limit`/`offset`.
+
+        Corrección C4 (revisión externa 2026-08-19): sin esto el frontend no
+        podía saber cuántas páginas hay en total. Método NUEVO, separado de
+        `count_active` (semántica fija: siempre activos y sin centinela, lo
+        usan las métricas de negocio de AgentClient) — acá los filtros deben
+        espejar EXACTAMENTE los que el usuario eligió en el listado.
+        """
+        conditions: list[Any] = [Customer.tenant_id == tenant_id]
+        if not include_inactive:
+            conditions.append(Customer.deactivated_at.is_(None))
+        if not include_sentinel:
+            conditions.append(_not_sentinel())
+        q = select(func.count(Customer.id)).where(*conditions)
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)
+
     async def get_inactive_customers(
         self,
         tenant_id: UUID,

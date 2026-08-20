@@ -610,9 +610,19 @@ export const ingestionService = {
     return res.data;
   },
 
-  async listFiles(): Promise<UploadedFileItem[]> {
-    const res = await api.get<UploadedFileItem[]>("/ingestion/files");
+  // Corrección C4 (revisión externa 2026-08-19): antes se llamaba siempre sin
+  // `limit`/`offset` y se esperaba un array plano — nunca se podía avanzar
+  // más allá de la primera página (el backend siempre pagina de a 50).
+  async listFiles(offset = 0, limit = 50): Promise<UploadedFileItem[]> {
+    const res = await api.get<UploadedFileItem[]>("/ingestion/files", {
+      params: { offset, limit },
+    });
     return res.data;
+  },
+
+  async countFiles(): Promise<number> {
+    const res = await api.get<{ total: number }>("/ingestion/files/count");
+    return res.data.total;
   },
 
   /**

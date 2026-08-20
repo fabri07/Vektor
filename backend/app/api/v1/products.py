@@ -279,6 +279,23 @@ async def list_products(
 
 
 @router.get(
+    "/count",
+    summary="Total de productos del tenant (para paginación) — DEBE ir antes de /{product_id}",
+)
+async def count_products(
+    is_active: bool | None = Query(default=None),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, int]:
+    """Corrección C4 (revisión externa 2026-08-19): `getAllProducts` (frontend)
+    acumula hasta 5000 productos (25 páginas de 200) sin forma de saber si ese
+    límite se alcanzó de verdad o si eso era todo el catálogo."""
+    repo = ProductRepository(session)
+    total = await repo.count_by_tenant(tenant.tenant_id, is_active=is_active)
+    return {"total": total}
+
+
+@router.get(
     "/categories",
     summary="Catálogo de categorías de producto (vertical + custom del tenant)",
 )

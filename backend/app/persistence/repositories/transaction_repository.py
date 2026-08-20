@@ -106,6 +106,29 @@ class SaleRepository:
         result = await self._session.execute(q)
         return list(result.scalars().all())
 
+    async def count_by_tenant(
+        self,
+        tenant_id: UUID,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        customer_id: UUID | None = None,
+    ) -> int:
+        """Total que ve `list_by_tenant` — mismos filtros, sin `limit`/`offset`.
+        Corrección C4 ampliada (2026-08-19): sin esto el frontend no puede saber
+        cuántas páginas hay en total."""
+        q = select(func.count(SaleEntry.id)).where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+        )
+        if from_date:
+            q = q.where(func.date(SaleEntry.transaction_date) >= from_date)
+        if to_date:
+            q = q.where(func.date(SaleEntry.transaction_date) <= to_date)
+        if customer_id:
+            q = q.where(SaleEntry.customer_id == customer_id)
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)
+
     async def total_revenue(
         self,
         tenant_id: UUID,
@@ -523,6 +546,36 @@ class ExpenseRepository:
         q = q.order_by(ExpenseEntry.transaction_date.desc()).limit(limit).offset(offset)
         result = await self._session.execute(q)
         return list(result.scalars().all())
+
+    async def count_by_tenant(
+        self,
+        tenant_id: UUID,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        category: str | None = None,
+        expense_type: str | None = None,
+        supplier_id: UUID | None = None,
+    ) -> int:
+        """Total que ve `list_by_tenant` — mismos filtros, sin `limit`/`offset`.
+
+        Corrección C4 (revisión externa 2026-08-19): el frontend no tenía
+        forma de saber cuántas páginas hay en total."""
+        q = select(func.count(ExpenseEntry.id)).where(
+            ExpenseEntry.tenant_id == tenant_id,
+            ExpenseEntry.voided_at.is_(None),
+        )
+        if from_date:
+            q = q.where(func.date(ExpenseEntry.transaction_date) >= from_date)
+        if to_date:
+            q = q.where(func.date(ExpenseEntry.transaction_date) <= to_date)
+        if category:
+            q = q.where(ExpenseEntry.category == category)
+        if expense_type:
+            q = q.where(ExpenseEntry.expense_type == expense_type)
+        if supplier_id:
+            q = q.where(ExpenseEntry.supplier_id == supplier_id)
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)
 
     async def total_expenses(
         self,

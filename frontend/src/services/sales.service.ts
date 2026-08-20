@@ -133,4 +133,15 @@ export const salesService = {
 
     return items;
   },
+
+  /**
+   * Total real (sin `limit`/`offset`) — corrección C4 ampliada (2026-08-19).
+   * `getAllEntries` corta en `MAX_PAGES * PAGE_SIZE` (5000): con esto la
+   * pantalla puede avisar cuando ese tope truncó el resultado en silencio,
+   * en vez de mostrar "todo" sin decir que no lo es.
+   */
+  async countEntries(params?: Omit<SalesListParams, "limit" | "offset">): Promise<number> {
+    const res = await api.get<{ total: number }>("/sales/count", { params });
+    return res.data.total;
+  },
 };

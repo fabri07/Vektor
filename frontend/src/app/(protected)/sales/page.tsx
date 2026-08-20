@@ -172,6 +172,16 @@ export default function SalesPage() {
     staleTime: 60 * 1000,
   });
 
+  // Corrección C4 ampliada (2026-08-19): `getAllEntries` corta en 5000 filas
+  // (MAX_PAGES × PAGE_SIZE) — sin esto, un período con más ventas que ese
+  // tope se mostraba "completo" sin avisar que faltaban filas.
+  const { data: totalEntries = 0 } = useQuery({
+    queryKey: ["sales-entries-count", from, to],
+    queryFn: () => salesService.countEntries({ from_date: from, to_date: to }),
+    staleTime: 60 * 1000,
+  });
+  const entriesTruncated = !isLoading && totalEntries > entries.length;
+
   const { data: products = [] } = useQuery({
     queryKey: ["products-list"],
     queryFn: () => productsService.getAllProducts({ is_active: true }),
@@ -328,39 +338,47 @@ export default function SalesPage() {
           action={{ label: "Ir al chat", href: "/chat" }}
         />
       ) : (
-        <SmartTable
-          columns={columns}
-          data={sorted}
-          exportFilename="vektor-ventas"
-          toolbarActions={<AddColumnButton entityType="sale" entityLabel="Ventas" />}
-          renderActions={(row) => (
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                title="Editar"
-                aria-label="Editar venta"
-                onClick={() => setEditing(row)}
-                className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
-              >
-                <Pencil className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                title="Anular"
-                aria-label="Anular venta"
-                disabled={deleteMutation.isPending}
-                onClick={() => {
-                  if (confirm("¿Anular esta venta?")) {
-                    deleteMutation.mutate(row.id);
-                  }
-                }}
-                className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </div>
+        <>
+          {entriesTruncated && (
+            <p className="mb-3 rounded-lg border border-vk-warning/30 bg-vk-warning-bg px-3 py-2 text-xs text-vk-warning">
+              Mostrando {entries.length} de {totalEntries} ventas de este período —
+              acotá el rango de fechas para verlas todas.
+            </p>
           )}
-        />
+          <SmartTable
+            columns={columns}
+            data={sorted}
+            exportFilename="vektor-ventas"
+            toolbarActions={<AddColumnButton entityType="sale" entityLabel="Ventas" />}
+            renderActions={(row) => (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  title="Editar"
+                  aria-label="Editar venta"
+                  onClick={() => setEditing(row)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  title="Anular"
+                  aria-label="Anular venta"
+                  disabled={deleteMutation.isPending}
+                  onClick={() => {
+                    if (confirm("¿Anular esta venta?")) {
+                      deleteMutation.mutate(row.id);
+                    }
+                  }}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+          />
+        </>
       )}
       <SaleEditModal
         sale={editing}

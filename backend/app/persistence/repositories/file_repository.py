@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.persistence.models.file import UploadedFile
 from app.persistence.repositories.base import BaseRepository
@@ -107,3 +107,20 @@ class FileRepository(BaseRepository[UploadedFile]):
         q = q.order_by(UploadedFile.created_at.desc()).limit(limit).offset(offset)
         result = await self._session.execute(q)
         return list(result.scalars().all())
+
+    async def count_by_tenant_filtered(
+        self,
+        tenant_id: UUID,
+        processing_status: str | None = None,
+    ) -> int:
+        """Total de archivos que ve `list_by_tenant_filtered` — mismos filtros,
+        sin `limit`/`offset`. Corrección C4 (revisión externa 2026-08-19): el
+        frontend no tenía forma de saber cuántas páginas hay en total."""
+        q = select(func.count(UploadedFile.id)).where(
+            UploadedFile.tenant_id == tenant_id,
+            UploadedFile.deleted_at.is_(None),
+        )
+        if processing_status is not None:
+            q = q.where(UploadedFile.processing_status == processing_status)
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)

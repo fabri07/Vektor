@@ -34,6 +34,9 @@ jest.mock("@/stores/toastStore", () => ({
 jest.mock("@/services/ingestion.service", () => ({
   ingestionService: {
     listFiles: jest.fn(),
+    // Default 0 — la mayoría de los tests no le importa el total; los que sí
+    // (describe "paginación") lo pisan con `mockResolvedValue`.
+    countFiles: jest.fn().mockResolvedValue(0),
     getFile: jest.fn(),
     deleteFile: jest.fn(),
     reprocessFile: jest.fn(),
@@ -53,6 +56,7 @@ jest.mock("@/services/ingestion.service", () => ({
 }));
 
 const mockListFiles = ingestionService.listFiles as jest.Mock;
+const mockCountFiles = ingestionService.countFiles as jest.Mock;
 const mockGetFile = ingestionService.getFile as jest.Mock;
 const mockRereadPreview = ingestionService.rereadPreview as jest.Mock;
 const mockRereadApply = ingestionService.rereadApply as jest.Mock;
@@ -115,6 +119,40 @@ describe("FileListSection — estado IMPORTING", () => {
     });
     expect(screen.getByTitle("Eliminar archivo")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+});
+
+// ── Corrección C4 (revisión externa 2026-08-19): paginación real ───────────
+
+describe("FileListSection — paginación", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("con más de una página, muestra controles y avanza pidiendo el offset correcto", async () => {
+    mockListFiles.mockResolvedValue([fileWith("DONE")]);
+    mockCountFiles.mockResolvedValue(75);
+
+    renderList();
+
+    const nextButton = await screen.findByRole("button", { name: /siguiente/i });
+    expect(nextButton).toBeEnabled();
+    expect(screen.getByRole("button", { name: /anterior/i })).toBeDisabled();
+
+    const user = userEvent.setup();
+    await user.click(nextButton);
+
+    await waitFor(() => expect(mockListFiles).toHaveBeenCalledWith(50, 50));
+  });
+
+  test("con una sola página, no muestra controles de paginación", async () => {
+    mockListFiles.mockResolvedValue([fileWith("DONE")]);
+    mockCountFiles.mockResolvedValue(1);
+
+    renderList();
+
+    await waitFor(() => expect(screen.getByText("Importado")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /siguiente/i })).not.toBeInTheDocument();
   });
 });
 

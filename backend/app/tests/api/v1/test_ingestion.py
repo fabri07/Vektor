@@ -510,6 +510,65 @@ class TestListFilesEndpoint:
         assert data[0]["processing_status"] == PROCESSING_STATUS_NEEDS_CONFIRMATION
 
 
+# ── Count files tests (corrección C4, revisión externa 2026-08-19) ─────────────
+# El listado pagina de a 50 (max 200) pero el frontend no tenía forma de saber
+# cuántas páginas hay en total — sin un endpoint de count, no se pueden dibujar
+# los controles de paginación.
+
+
+class TestFilesCountEndpoint:
+    async def test_files_count_matches_total_beyond_first_page(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        for i in range(3):
+            db_session.add(_archivo(sample_tenant.tenant_id, f"archivo_{i}.xlsx"))
+        await db_session.commit()
+
+        response = await client.get("/api/v1/ingestion/files/count", headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json() == {"total": 3}
+
+    async def test_files_count_respects_status_filter(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        confirmed_file: UploadedFile,
+    ) -> None:
+        db_session.add(_archivo(sample_tenant.tenant_id, "otro.xlsx", status="DONE"))
+        await db_session.commit()
+
+        response = await client.get(
+            "/api/v1/ingestion/files/count",
+            headers=auth_headers,
+            params={"processing_status": PROCESSING_STATUS_NEEDS_CONFIRMATION},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"total": 1}
+
+    async def test_files_count_tenant_isolation(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        db_session.add(_archivo(sample_tenant.tenant_id, "tenantA.xlsx"))
+        await db_session.commit()
+
+        resp_a = await client.get("/api/v1/ingestion/files/count", headers=auth_headers)
+        assert resp_a.json() == {"total": 1}
+
+        resp_b = await client.get("/api/v1/ingestion/files/count", headers=second_auth_headers)
+        assert resp_b.json() == {"total": 0}
+
+
 # ── Get single file tests ─────────────────────────────────────────────────────
 
 

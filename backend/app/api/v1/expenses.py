@@ -286,6 +286,37 @@ async def list_custom_expense_categories(
     return await tenant_categories_service.list_expense_categories(session, tenant.tenant_id)
 
 
+@router.get(
+    "/count",
+    summary="Total de gastos del tenant (para paginación) — DEBE ir antes de /{expense_id}",
+)
+async def count_expenses(
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    category: str | None = Query(default=None),
+    expense_type: str | None = Query(default=None, pattern=r"^(OPEX|COGS)$"),
+    supplier_id: UUID | None = Query(default=None),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, int]:
+    """Corrección C4 (revisión externa 2026-08-19): `GET /expenses` pagina de
+    a 50 (max 200) pero no había forma de saber cuántas páginas hay en total.
+    Mismo default de `from_date` que el list (últimos 30 días) para que el
+    total coincida con lo que se ve sin filtros explícitos."""
+    if from_date is None:
+        from_date = date.today() - timedelta(days=30)
+    repo = ExpenseRepository(session)
+    total = await repo.count_by_tenant(
+        tenant.tenant_id,
+        from_date=from_date,
+        to_date=to_date,
+        category=category,
+        expense_type=expense_type,
+        supplier_id=supplier_id,
+    )
+    return {"total": total}
+
+
 @router.get("/{expense_id}", response_model=ExpenseEntryResponse, summary="Get expense by ID")
 async def get_expense(
     expense_id: UUID,

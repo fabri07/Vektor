@@ -524,6 +524,26 @@ async def list_files(
 
 
 @router.get(
+    "/files/count",
+    summary="Total de archivos del tenant (para paginación) — DEBE ir antes de /files/{file_id}",
+)
+async def count_files(
+    processing_status: str | None = Query(default=None),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, int]:
+    """Corrección C4 (revisión externa 2026-08-19): `GET /files` pagina de a
+    50 (max 200) pero no había forma de saber cuántas páginas hay en total —
+    el frontend mostraba siempre la primera página sin controles."""
+    repo = FileRepository(session)
+    total = await repo.count_by_tenant_filtered(
+        tenant_id=tenant.tenant_id,
+        processing_status=processing_status,
+    )
+    return {"total": total}
+
+
+@router.get(
     "/files/{file_id}",
     response_model=FileStatusItem,
     summary="Get a single ingested file by id",

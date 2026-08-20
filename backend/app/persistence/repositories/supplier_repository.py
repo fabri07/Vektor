@@ -96,6 +96,27 @@ class SupplierRepository:
         result = await self._session.execute(q)
         return int(result.scalar_one() or 0)
 
+    async def count_by_tenant(
+        self,
+        tenant_id: UUID,
+        include_inactive: bool = False,
+    ) -> int:
+        """Total que ve `list_by_tenant` — mismos filtros, sin `limit`/`offset`.
+        Corrección C4 (revisión externa, paginación real): el frontend no tenía
+        forma de saber cuántas páginas hay en total. Espeja EXACTAMENTE la
+        condición de `list_by_tenant`, incluida la exclusión de marcas
+        colapsadas (`_not_brand_collapsed_or_active`) aun con
+        `include_inactive=True` — `count_active` de arriba no la aplica y por
+        eso no alcanza para este caso."""
+        conditions: list[Any] = [Supplier.tenant_id == tenant_id]
+        if not include_inactive:
+            conditions.append(Supplier.deactivated_at.is_(None))
+        else:
+            conditions.append(_not_brand_collapsed_or_active())
+        q = select(func.count(Supplier.id)).where(*conditions)
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)
+
     async def count_history(self, supplier_id: UUID, tenant_id: UUID) -> int:
         """Cantidad de operaciones del proveedor: gastos no anulados + movimientos
         de inventario (compras). >0 ⇒ tiene historial."""

@@ -340,6 +340,82 @@ class TestLocalSentinel:
         assert resp.status_code == 400
 
 
+# Corrección C4 (revisión externa 2026-08-19, paginación): `GET /customers`
+# pagina de a 50 (max 200) pero no había forma de saber el total.
+
+
+class TestCountCustomersEndpoint:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_count_matches_total_and_excludes_sentinel(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        for name in ("Cliente Uno", "Cliente Dos"):
+            created = await client.post(
+                "/api/v1/customers", json=_person(name), headers=auth_headers
+            )
+            assert created.status_code == 201
+
+        # Venta huérfana crea el centinela "Local" — el count NO debe sumarlo.
+        sale = await client.post(
+            "/api/v1/sales",
+            json={
+                "amount": "100.00",
+                "quantity": 1,
+                "transaction_date": _TODAY,
+                "payment_method": "cash",
+            },
+            headers=auth_headers,
+        )
+        assert sale.status_code == 201
+
+        resp = await client.get("/api/v1/customers/count", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == {"total": 2}
+
+    async def test_count_respects_include_inactive(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        active = await client.post(
+            "/api/v1/customers", json=_person("Activo"), headers=auth_headers
+        )
+        inactive = await client.post(
+            "/api/v1/customers", json=_person("Inactivo"), headers=auth_headers
+        )
+        del_resp = await client.delete(
+            f"/api/v1/customers/{inactive.json()['id']}", headers=auth_headers
+        )
+        assert del_resp.status_code == 200
+        assert active.status_code == 201
+
+        default = await client.get("/api/v1/customers/count", headers=auth_headers)
+        assert default.json() == {"total": 1}
+
+        with_inactive = await client.get(
+            "/api/v1/customers/count?include_inactive=true", headers=auth_headers
+        )
+        assert with_inactive.json() == {"total": 2}
+
+    async def test_count_tenant_isolation(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+    ) -> None:
+        created = await client.post(
+            "/api/v1/customers", json=_person("Solo tenant A"), headers=auth_headers
+        )
+        assert created.status_code == 201
+
+        resp_a = await client.get("/api/v1/customers/count", headers=auth_headers)
+        assert resp_a.json() == {"total": 1}
+
+        resp_b = await client.get("/api/v1/customers/count", headers=second_auth_headers)
+        assert resp_b.json() == {"total": 0}
+
+
 class TestFiadoRequiresRealCustomer:
     """Fiado (``payment_method='account'``) exige cliente real, nunca "Local"."""
 

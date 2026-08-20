@@ -3,7 +3,7 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # F3-T3 review (MINOR, no bloqueante): import de Application desde Persistence,
@@ -45,6 +45,21 @@ class ProductRepository:
         q = q.limit(limit).offset(offset)
         result = await self._session.execute(q)
         return list(result.scalars().all())
+
+    async def count_by_tenant(
+        self,
+        tenant_id: UUID,
+        is_active: bool | None = None,
+    ) -> int:
+        """Total de productos que ve `list_by_tenant` — mismos filtros, sin
+        `limit`/`offset`. Corrección C4 (revisión externa 2026-08-19): el
+        frontend acumula hasta 5000 productos (`getAllProducts`) sin forma de
+        saber si ese límite se alcanzó de verdad."""
+        q = select(func.count(Product.id)).where(Product.tenant_id == tenant_id)
+        if is_active is not None:
+            q = q.where(Product.is_active == is_active)
+        result = await self._session.execute(q)
+        return int(result.scalar_one() or 0)
 
     async def get_products_with_margin(self, tenant_id: UUID) -> list[dict[str, Any]]:
         """Catálogo activo con margen bruto calculado por producto (Sprint 17).

@@ -134,6 +134,60 @@ class TestSalesDateRange:
         assert resp.status_code == 200
 
 
+class TestSalesCount:
+    """Paginación real de /sales (corrección C4 ampliada, 2026-08-19): sin un
+    endpoint de count, el frontend no puede saber cuántas páginas hay."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_count_matches_total_beyond_first_page(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        for _ in range(3):
+            resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+            assert resp.status_code == 201
+
+        resp = await client.get("/api/v1/sales/count", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == {"total": 3}
+
+    async def test_count_respects_date_range_filter(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        old = {**_SINGLE_PAYLOAD, "transaction_date": "2020-01-01"}
+        await client.post("/api/v1/sales", json=old, headers=auth_headers)
+
+        resp = await client.get(
+            f"/api/v1/sales/count?from_date={_TODAY}&to_date={_TODAY}",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"total": 1}
+
+    async def test_count_not_confused_with_sale_id_route(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        # /count no debe matchear la ruta dinámica /{sale_id} (mismo gotcha que
+        # /date-range, ver test_date_range_not_confused_with_sale_id).
+        resp = await client.get("/api/v1/sales/count", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == {"total": 0}
+
+    async def test_count_tenant_isolation(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+    ) -> None:
+        await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+
+        resp_b = await client.get("/api/v1/sales/count", headers=second_auth_headers)
+        assert resp_b.json() == {"total": 0}
+
+
 class TestSalesTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

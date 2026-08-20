@@ -443,6 +443,27 @@ async def import_customers_confirm(
     )
 
 
+@router.get(
+    "/count",
+    summary="Total de clientes del tenant (para paginación) — DEBE ir antes de /{customer_id}",
+)
+async def count_customers(
+    include_sentinel: bool = Query(default=False),
+    include_inactive: bool = Query(default=False),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, int]:
+    """Corrección C4 (revisión externa 2026-08-19): `GET /customers` pagina de
+    a 50 (max 200) pero no había forma de saber cuántas páginas hay en total."""
+    repo = CustomerRepository(session)
+    total = await repo.count_by_tenant(
+        tenant.tenant_id,
+        include_sentinel=include_sentinel,
+        include_inactive=include_inactive,
+    )
+    return {"total": total}
+
+
 @router.get("/{customer_id}", response_model=CustomerResponse, summary="Get customer by ID")
 async def get_customer(
     customer_id: UUID,

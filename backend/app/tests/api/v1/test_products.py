@@ -223,6 +223,60 @@ class TestProductsCRUD:
         assert resp.json()["margin_pct"] is None
 
 
+class TestProductsCount:
+    """Corrección C4 (revisión externa 2026-08-19): `GET /products/count` — el
+    frontend acumula hasta 5000 productos en `getAllProducts` sin forma de
+    saber si el límite se alcanzó de verdad o si eso era todo."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_products_count_matches_total(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        await client.post("/api/v1/products", json=_PRODUCT_PAYLOAD, headers=auth_headers)
+        await client.post(
+            "/api/v1/products",
+            json={**_PRODUCT_PAYLOAD, "name": "Sprite 500ml"},
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/v1/products/count", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == {"total": 2}
+
+    async def test_products_count_respects_is_active_filter(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        create_resp = await client.post(
+            "/api/v1/products", json=_PRODUCT_PAYLOAD, headers=auth_headers
+        )
+        product_id = create_resp.json()["id"]
+        await client.delete(f"/api/v1/products/{product_id}", headers=auth_headers)
+
+        active = await client.get(
+            "/api/v1/products/count", params={"is_active": "true"}, headers=auth_headers
+        )
+        inactive = await client.get(
+            "/api/v1/products/count", params={"is_active": "false"}, headers=auth_headers
+        )
+        assert active.json() == {"total": 0}
+        assert inactive.json() == {"total": 1}
+
+    async def test_products_count_tenant_isolation(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+    ) -> None:
+        await client.post("/api/v1/products", json=_PRODUCT_PAYLOAD, headers=auth_headers)
+
+        resp_a = await client.get("/api/v1/products/count", headers=auth_headers)
+        resp_b = await client.get("/api/v1/products/count", headers=second_auth_headers)
+        assert resp_a.json() == {"total": 1}
+        assert resp_b.json() == {"total": 0}
+
+
 class TestProductsTenantIsolation:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):

@@ -162,6 +162,8 @@ export function FileUploadSection() {
       if (result.warning) setWarning(result.warning);
       setPhase("polling");
       startPolling(result.file_id);
+      // Corrección C4: un archivo nuevo cambia el total para la paginación.
+      void queryClient.invalidateQueries({ queryKey: ["ingestion-files-count"] });
     } catch (err) {
       const axiosErr = err as AxiosError<{ detail?: string }>;
       // C: 409 = el contenido EXACTO ya fue importado. Mostramos el detalle del
