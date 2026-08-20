@@ -3630,6 +3630,7 @@ async def reread_preview(
         ],
         legacy_fallback=preview.legacy_fallback,
         sample_changes=preview.sample_changes,
+        total_rows=(run.details_json or {}).get("total_rows"),
     )
 
 
@@ -3793,6 +3794,7 @@ async def reread_run_status(
     d = run.details_json or {}
     # status del run → status del apply: RUNNING / APPLIED / FAILED.
     items = [RereadItem(**it) for it in d.get("sample_changes", []) if isinstance(it, dict)]
+    _total_rows = d.get("total_rows")
     return RereadRunStatusResponse(
         run_id=run.id,
         file_id=file_id,
@@ -3808,6 +3810,11 @@ async def reread_run_status(
         clientes=int(d.get("clientes", 0) or 0),
         proveedores=int(d.get("proveedores", 0) or 0),
         reconciliation_warning=d.get("reconciliation_warning"),
+        total_rows=int(_total_rows) if _total_rows is not None else None,
+        # Fase 10: solo tiene sentido mostrar "empezado hace..." mientras el
+        # run está en curso — en un estado terminal confundiría en vez de
+        # informar.
+        applying_since=run.updated_at if run.status in ("QUEUED", "APPLYING") else None,
     )
 
 

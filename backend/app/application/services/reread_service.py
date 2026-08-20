@@ -2542,6 +2542,19 @@ async def _active_preview_session(
     return None, expired
 
 
+def _total_rows_in_summary(fresh: dict[str, Any]) -> int:
+    """Total de filas del archivo, sumado por hoja/contexto.
+
+    Fase 10 (progreso con contexto, revisión externa 2026-08-20): no toca el
+    motor de import — solo le da al indicador de "Aplicando…" un total
+    conocido de antemano (en vez de una barra indeterminada sin ningún dato),
+    calculado UNA vez al crear la sesión, igual que el resto del summary."""
+    return sum(
+        int(ctx.get("row_count") or len(ctx.get("preview_rows") or []))
+        for ctx in resolve_contexts(fresh)
+    )
+
+
 async def start_or_resume_preview_session(
     session: AsyncSession,
     file_id: uuid.UUID,
@@ -2600,6 +2613,7 @@ async def start_or_resume_preview_session(
             "fresh_summary": fresh,
             "s3_snapshot": snapshot,
             "draft_version": 0,
+            "total_rows": _total_rows_in_summary(fresh),
         },
     )
     session.add(run)
@@ -3257,7 +3271,13 @@ async def start_background_apply(
                 DataRepairRun.id == existing_run.id,
                 DataRepairRun.status == "READY_TO_APPLY",
             )
-            .values(status="QUEUED", dry_run=False)
+            # Fase 10 (progreso con contexto): `updated_at` explícito, mismo
+            # motivo que el reclamo QUEUED→APPLYING del worker — este es
+            # también un statement Core, que no dispara el `onupdate`
+            # Python-side. Sin esto, "empezado hace..." arrancaría contando
+            # desde el último toque de la sesión de PREVIEW, no desde que
+            # entró en cola.
+            .values(status="QUEUED", dry_run=False, updated_at=datetime.now(UTC))
         )
         if cast("CursorResult[Any]", result).rowcount == 0:
             raise ValueError(

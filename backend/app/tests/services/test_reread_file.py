@@ -2389,6 +2389,24 @@ async def test_undo_reread_producto_creado_y_actualizado_en_mismo_run_se_desacti
 # ── F-RR: sesión de relectura (preview persistido + control de versión) ──────
 
 
+async def test_start_or_resume_preview_session_persists_total_rows(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fase 10 (progreso con contexto, revisión 2026-08-20): el total de filas
+    se conoce desde el momento en que se crea la sesión — no hace falta
+    releer nada durante el apply para poder mostrarlo."""
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+
+    run, _fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    await db_session.commit()
+
+    # `_CSV_BASE` tiene 2 filas de datos.
+    assert (run.details_json or {}).get("total_rows") == 2
+
+
 async def test_start_or_resume_preview_session_reuses_active_session(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:

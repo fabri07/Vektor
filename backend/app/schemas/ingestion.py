@@ -821,6 +821,10 @@ class RereadPreviewResponse(BaseModel):
     contextual_column_risk: list[ContextualColumnRisk] = Field(default_factory=list)
     legacy_fallback: bool = False
     sample_changes: list[dict[str, Any]] = Field(default_factory=list)
+    # Fase 10 (progreso con contexto, revisión 2026-08-20): total de filas del
+    # archivo, conocido desde acá — evita que el indicador de "Aplicando…" sea
+    # una barra indeterminada sin ningún dato. `None` si no se pudo calcular.
+    total_rows: int | None = None
 
 
 class RereadApplyRequest(BaseModel):
@@ -888,6 +892,15 @@ class RereadRunStatusResponse(BaseModel):
     # F-RR Fase 4: None si lo proyectado en el preview coincidió con lo
     # persistido; si no, el detalle del desvío — nunca se oculta en un log.
     reconciliation_warning: dict[str, Any] | None = None
+    # Fase 10 (progreso con contexto, revisión 2026-08-20): mismo total que ya
+    # se sabía en el preview — sobrevive al apply (no lo toca `_strip_bulky_
+    # fields`, que solo descarta `fresh_summary`).
+    total_rows: int | None = None
+    # Desde cuándo el run está EN CURSO (QUEUED/APPLYING) — `None` en un
+    # estado terminal (APPLIED/FAILED), donde un cronómetro confundiría en vez
+    # de informar. Es `updated_at`, no `created_at`: el reclamo atómico
+    # QUEUED→APPLYING lo pisa explícitamente al tomar el run.
+    applying_since: datetime | None = None
 
 
 class RereadUndoResponse(BaseModel):

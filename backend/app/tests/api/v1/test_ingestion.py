@@ -3443,6 +3443,94 @@ class TestRereadApplyEnqueueEndpoint:
         assert run.status == "READY_TO_APPLY"
 
 
+class TestRereadRunStatusEndpoint:
+    async def test_reread_run_status_expone_total_rows_y_applying_since(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Fase 10 (progreso con contexto, revisión 2026-08-20): sin tocar el
+        motor de import, el polling de estado expone el total de filas
+        (conocido desde el preview) y desde cuándo el run está en curso —
+        alcanza para que el frontend muestre "~N filas · empezado hace Ns" en
+        vez de una barra indeterminada sin ningún contexto."""
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid3/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+        run_id, _draft_version = await _start_ready_reread_session(
+            db_session, sample_tenant, record
+        )
+
+        run = await db_session.get(DataRepairRun, run_id)
+        assert run is not None
+        run.status = "APPLYING"
+        await db_session.commit()
+
+        response = await client.get(
+            f"/api/v1/ingestion/files/{record.id}/reread/runs/{run_id}",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        # `_REREAD_TEST_CONTENT` tiene 1 fila de datos.
+        assert payload["total_rows"] == 1
+        assert payload["applying_since"] is not None
+
+    async def test_reread_run_status_applying_since_ausente_si_no_esta_en_curso(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Un run ya terminado (APPLIED/FAILED) no está "en curso" — mostrar un
+        cronómetro ahí confundiría, no informaría."""
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid4/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+        run_id, _draft_version = await _start_ready_reread_session(
+            db_session, sample_tenant, record
+        )
+
+        run = await db_session.get(DataRepairRun, run_id)
+        assert run is not None
+        run.status = "APPLIED"
+        await db_session.commit()
+
+        response = await client.get(
+            f"/api/v1/ingestion/files/{record.id}/reread/runs/{run_id}",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["applying_since"] is None
+
+
 class TestRereadPreviewSessionEndpoint:
     """F-RR: POST /reread/preview crea/reusa una sesión, y su run_id se puede
     cancelar explícitamente vía POST /reread/{run_id}/cancel."""

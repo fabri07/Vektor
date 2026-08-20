@@ -70,7 +70,13 @@ def reread_apply(run_id: str, file_id: str, tenant_id: str) -> None:
                 claim = await session.execute(
                     update(DataRepairRun)
                     .where(DataRepairRun.id == _uuid.UUID(run_id), DataRepairRun.status == "QUEUED")
-                    .values(status="APPLYING")
+                    # Fase 10 (progreso con contexto): `updated_at` explícito —
+                    # este UPDATE es un statement Core (`sqlalchemy.update`), que
+                    # NO dispara el `onupdate` Python-side del modelo. Sin esto,
+                    # `applying_since` (servido al frontend) reflejaría el último
+                    # cambio de la sesión de PREVIEW, no el momento real en que
+                    # este run entró en APPLYING.
+                    .values(status="APPLYING", updated_at=datetime.now(UTC))
                 )
                 await session.commit()
                 if cast("CursorResult[Any]", claim).rowcount == 0:

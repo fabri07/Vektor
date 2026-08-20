@@ -889,7 +889,11 @@ export function FileListSection() {
             {/* Fase aplicando: escribiendo los cambios */}
             {reread.phase === "applying" && (
               <>
-                <RereadProgress label="Aplicando cambios…" />
+                <RereadProgress
+                  label="Aplicando cambios…"
+                  totalRows={reread.preview?.total_rows}
+                  startedAt={rereadStatusQuery.data?.applying_since}
+                />
                 <p className="text-xs text-vektor-muted">
                   Se está aplicando en segundo plano. En archivos grandes puede
                   tardar unos minutos; podés esperar acá o cerrar y volver — se

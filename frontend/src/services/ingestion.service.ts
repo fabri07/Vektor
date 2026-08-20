@@ -521,6 +521,10 @@ export interface RereadPreviewResponse {
   contextual_column_risk: ContextualColumnRisk[];
   legacy_fallback: boolean;
   sample_changes: RereadItem[];
+  // Fase 10 (progreso con contexto, 2026-08-20): total de filas del archivo,
+  // conocido desde acá — le da contexto al indicador de "Aplicando…" sin
+  // tocar el motor de import. `null` si no se pudo calcular.
+  total_rows: number | null;
 }
 
 export interface RereadApplyResponse {
@@ -554,6 +558,12 @@ export interface RereadRunStatusResponse {
   legacy_fallback: boolean;
   items: RereadItem[];
   error: string | null;
+  // Fase 10 (progreso con contexto, 2026-08-20): mismo total que ya se sabía
+  // en el preview — sobrevive al apply.
+  total_rows: number | null;
+  // Desde cuándo el run está EN CURSO (QUEUED/APPLYING), ISO string —
+  // `null` en un estado terminal (APPLIED/FAILED).
+  applying_since: string | null;
 }
 
 // F9b (Task 7 backend / Task 8 frontend): clientes/proveedores/productos que
