@@ -508,7 +508,9 @@ async def test_stale_running_run_gets_marked_failed_not_left_forever(
     )
     assert stale.status == "QUEUED"
     # Envejecerlo más allá del umbral de "colgado" sin tocar nada más.
-    stale.created_at = datetime.now(UTC) - timedelta(
+    # `updated_at` (no `created_at`): el guard mide desde la última transición
+    # real de estado, no desde que se creó la sesión de revisión.
+    stale.updated_at = datetime.now(UTC) - timedelta(
         seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1
     )
     await db_session.commit()
@@ -524,7 +526,7 @@ async def test_stale_running_run_gets_marked_failed_not_left_forever(
     await db_session.refresh(stale)
     assert stale.status == "FAILED"
     assert stale.completed_at is not None
-    assert stale.details_json["reason"] == "stale_never_picked_up"
+    assert (stale.details_json or {})["reason"] == "stale_never_picked_up"
 
 
 async def test_get_reread_run_rechaza_file_id_incompatible(
@@ -883,6 +885,42 @@ async def test_reread_conserva_decision_y_no_duplica_otros(
     assert len(await _risk_records(db_session, tenant, file, UNCLASSIFIED_STATUS_PENDING)) == 1
 
 
+async def test_build_reread_sheets_flags_required_risk_as_requiere_revision(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """F-RR Fase 8 (backend): una hoja con un requerido (``amount``) que tiene
+    una fila afectada (monto vacío) queda ``requiere_revision`` — no
+    ``completa`` (hay riesgo real sin resolver) ni ``ambigua`` (una sola
+    acción legal posible, el requerido no tiene columna de reemplazo)."""
+    fresh = parse_uploaded_content(_CSV_RISK_BAD, "text/csv", "gastos.csv")
+    draft = {
+        "column_mappings": [
+            {"source_column": "fecha", "target_field": "expense_date"},
+            {"source_column": "producto", "target_field": "ignore"},
+            {"source_column": "monto", "target_field": "amount"},
+            {"source_column": "proveedor", "target_field": "supplier_name"},
+        ],
+        "context_entities": {"table": "expense"},
+        "confirmed_fields": {"gastos": True},
+        "context_confirmed": {},
+    }
+
+    sheets, risk = await reread_service.build_reread_sheets(
+        db_session, tenant.tenant_id, fresh, draft, {"gastos": True}
+    )
+
+    assert len(sheets) == 1
+    sheet = sheets[0]
+    assert sheet["context_id"] == "table"
+    assert sheet["entity_type"] == "expense"
+    assert sheet["row_count"] == 2
+    # Las 4 columnas ya tienen mapeo explícito en el borrador (una "ignore").
+    assert sheet["columns_mapped"] == 3  # expense_date, amount, supplier_name
+    assert sheet["columns_pending"] == 0
+    assert sheet["status"] == "requiere_revision"
+    assert any(r["source_column"] == "monto" for r in risk)
+
+
 async def test_reread_reapplied_outcome_bumps_version_and_status(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -902,6 +940,196 @@ async def test_reread_reapplied_outcome_bumps_version_and_status(
     assert file.reread_summary is not None
     assert file.reread_summary["outcome"] == "REAPPLIED"
     assert file.reread_summary["algorithm_version"] == INGESTION_VERSION
+
+
+async def test_reread_user_reviewed_outcome_wins_over_stored_decisions(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-RR Fase 6: un borrador de sesión con ``column_risk_decisions`` propias
+    resuelve a ``USER_REVIEWED`` — más autoritativo que ``REAPPLIED`` (que
+    reaplicaría lo guardado en el confirm ORIGINAL, potencialmente el mapeo
+    mal resuelto que motivó la relectura). Mismo efecto que REAPPLIED sobre
+    versionado/estado: bumpea ``ingestion_version`` y deja ``APPLIED``."""
+    _patch_s3(monkeypatch, _CSV_RISK_BAD)
+    summary = parse_uploaded_content(_CSV_RISK_BAD, "text/csv", "gastos.csv")
+    confirmed = default_confirmed_fields(summary)
+    file = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="gastos.csv",
+        s3_key=f"tenants/{tenant.tenant_id}/gastos.csv",
+        content_type="text/csv",
+        size_bytes=len(_CSV_RISK_BAD),
+        purpose="gastos",
+        processing_status=PROCESSING_STATUS_DONE,
+        # Nunca pasó por F8b: sin `column_risk_decisions` guardadas — sin
+        # borrador, esto resolvería a NO_RISK_FOUND/AMBIGUOUS, nunca REAPPLIED.
+        parsed_summary_json={
+            "inferred_type": summary.get("inferred_type"),
+            "confirmed_fields": confirmed,
+        },
+    )
+    db_session.add(file)
+    await db_session.commit()
+
+    run = DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="READY_TO_APPLY",
+        dry_run=True,
+        details_json={
+            "file_id": str(file.id),
+            "draft_version": 1,
+            "draft": {
+                "column_mappings": [
+                    {"source_column": "monto", "target_field": "amount"},
+                ],
+                "context_entities": {"table": "expense"},
+                "confirmed_fields": confirmed,
+                "context_confirmed": {},
+                "column_risk_decisions": [_RISK_DECISION],
+                "stock_treatment": None,
+                "master_column_mappings": None,
+            },
+        },
+    )
+    db_session.add(run)
+    await db_session.commit()
+
+    _patch_s3(monkeypatch, _CSV_RISK_FIXED)
+    result = await reread_service.apply_reread(db_session, file.id, tenant.tenant_id, run=run)
+    await db_session.commit()
+
+    assert result.column_risk_outcome == "USER_REVIEWED"
+    assert file.ingestion_version == INGESTION_VERSION
+    assert file.reread_status == REREAD_STATUS_APPLIED
+    assert file.reread_summary["outcome"] == "USER_REVIEWED"
+    # Ambas filas de `_CSV_RISK_FIXED` tienen `monto` — ninguna afectada por la
+    # decisión del borrador (rutear a Otros solo lo que siga faltando `monto`),
+    # así que las dos se importan como gasto.
+    assert len(await _active_expenses(db_session, tenant, file)) == 2
+
+
+_CSV_CUSTOM_AMOUNT_COLUMN = (
+    b"fecha,proveedor,valor_facturado\n2026-01-05,Distribuidora Sur,1500\n"
+)
+
+
+async def test_apply_reread_uses_draft_column_mapping_to_import_correctly(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Correccion C1 (revision externa 2026-08-19): un borrador con mapeo
+    explicito de columnas (``draft.column_mappings``) tiene que llegar hasta
+    el import real — antes, ``apply_reread`` solo usaba las decisiones de
+    riesgo del borrador; el reimport seguia detectando columnas 100% por
+    heuristica sobre el contenido re-leido, asi que corregir el mapeo en
+    pantalla no cambiaba nada de lo efectivamente importado."""
+    _patch_s3(monkeypatch, _CSV_CUSTOM_AMOUNT_COLUMN)
+    file_sin_draft = await _make_file(db_session, tenant, _CSV_CUSTOM_AMOUNT_COLUMN)
+
+    # Sin borrador: "valor_facturado" no matchea ningun keyword de monto —
+    # documenta el bug de base (la fila no se importa como gasto).
+    await reread_service.apply_reread(db_session, file_sin_draft.id, tenant.tenant_id)
+    await db_session.commit()
+    assert len(await _active_expenses(db_session, tenant, file_sin_draft)) == 0
+
+    file_con_draft = await _make_file(db_session, tenant, _CSV_CUSTOM_AMOUNT_COLUMN)
+    run, fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file_con_draft.id, tenant.tenant_id
+    )
+    draft = {
+        "column_mappings": [
+            {"source_column": "fecha", "target_field": "expense_date"},
+            {"source_column": "proveedor", "target_field": "supplier_name"},
+            {"source_column": "valor_facturado", "target_field": "amount"},
+        ],
+        "context_entities": {"table": "expense"},
+        "confirmed_fields": {"gastos": True},
+        "context_confirmed": {},
+        "column_risk_decisions": [],
+        "stock_treatment": None,
+        "master_column_mappings": None,
+    }
+    details = dict(run.details_json or {})
+    details["draft"] = draft
+    details["draft_version"] = 1
+    run.details_json = details
+    run.status = "READY_TO_APPLY"
+    await db_session.flush()
+
+    await reread_service.apply_reread(
+        db_session, file_con_draft.id, tenant.tenant_id, run=run, fresh_override=fresh
+    )
+    await db_session.commit()
+
+    activos = await _active_expenses(db_session, tenant, file_con_draft)
+    assert len(activos) == 1
+    assert activos[0].amount == Decimal("1500")
+
+
+_CSV_RISK_AMBIGUOUS_TWO_COLS = (
+    b"fecha,producto,monto,monto2,proveedor\n"
+    b"2026-01-05,Coca Cola,1500,,Distribuidora Sur\n"
+    b"2026-01-06,Pan Lactal,,800,Panaderia Norte\n"
+)
+
+
+async def test_preview_reread_downgrades_user_reviewed_when_other_column_still_ambiguous(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Correccion C2 (revision externa 2026-08-19): un borrador que trae
+    ``column_mappings`` no alcanza para READY_TO_APPLY si mapear esas columnas
+    deja OTRA columna con riesgo ambiguo (2+ acciones legales) sin una decision
+    explicita en ``column_risk_decisions`` — antes, alcanzaba con que
+    ``column_mappings`` no estuviera vacio para resolver a USER_REVIEWED sin
+    mirar el resto de las columnas riesgosas."""
+    _patch_s3(monkeypatch, _CSV_RISK_AMBIGUOUS_TWO_COLS)
+    file = await _make_file(db_session, tenant, _CSV_RISK_AMBIGUOUS_TWO_COLS)
+
+    run, fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file.id, tenant.tenant_id
+    )
+    draft = {
+        "column_mappings": [
+            {"source_column": "fecha", "target_field": "expense_date"},
+            {"source_column": "producto", "target_field": "ignore"},
+            {"source_column": "monto", "target_field": "amount"},
+            {"source_column": "monto2", "target_field": "amount"},
+            {"source_column": "proveedor", "target_field": "supplier_name"},
+        ],
+        "context_entities": {"table": "expense"},
+        "confirmed_fields": {"gastos": True},
+        "context_confirmed": {},
+        # Solo cubre "monto" — "monto2" queda con riesgo ambiguo sin decision.
+        "column_risk_decisions": [
+            {
+                "context_id": "table",
+                "source_column": "monto",
+                "target_field": "amount",
+                "action": "route_affected_rows_to_others",
+            }
+        ],
+        "stock_treatment": None,
+        "master_column_mappings": None,
+    }
+    details = dict(run.details_json or {})
+    details["draft"] = draft
+    details["draft_version"] = 1
+    run.details_json = details
+    await db_session.flush()
+
+    preview = await reread_service.preview_reread(
+        db_session, file.id, tenant.tenant_id, fresh_override=fresh, run=run
+    )
+    reread_service.mark_session_ready_to_apply(
+        run, column_risk_outcome=preview.column_risk_outcome
+    )
+    await db_session.commit()
+
+    assert preview.column_risk_outcome == "AMBIGUOUS"
+    assert any(r["source_column"] == "monto2" for r in preview.column_risk_ambiguous)
+    assert run.status == "NEEDS_REVIEW"
 
 
 async def test_undo_reread_reverts_ingestion_version_and_status(
@@ -2666,8 +2894,14 @@ async def test_sweep_stale_reread_runs_closes_stuck_apply_globally(
     )
     db_session.add(stale)
     await db_session.commit()
-    stale.created_at = datetime.now(UTC) - timedelta(
-        seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1
+    # `updated_at` (no `created_at`) — mismo criterio que el guard reactivo.
+    await db_session.execute(
+        update(DataRepairRun)
+        .where(DataRepairRun.id == stale.id)
+        .values(
+            updated_at=datetime.now(UTC)
+            - timedelta(seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1)
+        )
     )
     await db_session.commit()
 
@@ -2751,11 +2985,17 @@ async def test_start_background_apply_sets_source_run_id_on_retry_after_stale(
         db_session, file.id, tenant.tenant_id
     )
     await db_session.commit()
-    stale.created_at = datetime.now(UTC) - timedelta(
-        seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1
+    stale_id = stale.id
+    # `updated_at` (no `created_at`) — mismo criterio que el guard reactivo.
+    await db_session.execute(
+        update(DataRepairRun)
+        .where(DataRepairRun.id == stale_id)
+        .values(
+            updated_at=datetime.now(UTC)
+            - timedelta(seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1)
+        )
     )
     await db_session.commit()
-    stale_id = stale.id
 
     fresh = await reread_service.start_background_apply(
         db_session, file.id, tenant.tenant_id

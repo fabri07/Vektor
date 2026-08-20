@@ -41,6 +41,14 @@ jest.mock("@/services/ingestion.service", () => ({
     rereadApply: jest.fn(),
     rereadRunStatus: jest.fn(),
     rereadUndo: jest.fn(),
+    // F-RR Fase 8: `FileInterpretationReview` (montado dentro de la fase
+    // "preview") los llama incondicionalmente (el catálogo) o cuando hay una
+    // hoja activa — acá `PREVIEW_RESPONSE.sheets` está vacío, así que nunca
+    // se activan de verdad, pero deben existir para no tirar
+    // "is not a function" al primer render.
+    getFieldCatalog: jest.fn().mockResolvedValue({}),
+    getColumnMappings: jest.fn().mockResolvedValue([]),
+    recomputeColumnRisk: jest.fn().mockResolvedValue([]),
   },
 }));
 
@@ -114,6 +122,9 @@ describe("FileListSection — estado IMPORTING", () => {
 
 const PREVIEW_RESPONSE = {
   file_id: "file-1",
+  run_id: "preview-run-1",
+  draft_version: 0,
+  status: "READY_TO_APPLY",
   counts: {
     to_update: 1,
     preserved: 2,
@@ -123,11 +134,26 @@ const PREVIEW_RESPONSE = {
     products_new: 0,
     products_restock: 0,
   },
+  impact: {
+    ventas_con_producto: 0,
+    ventas_sin_producto: 0,
+    ventas_sin_producto_samples: [],
+    compras_vinculadas: 0,
+    compras_producto_nuevo: 0,
+    compras_sin_producto: 0,
+    compras_sin_producto_samples: [],
+    compras_gate_bloqueado: 0,
+    compras_gate_bloqueado_samples: [],
+    movimientos_sin_producto_esperado: 0,
+  },
+  sheets: [],
+  mapping_contexts: [],
+  contextual_column_risk: [],
   legacy_fallback: false,
   sample_changes: [],
 };
 
-const APPLY_START_RESPONSE = { file_id: "file-1", run_id: "run-1", status: "RUNNING" };
+const APPLY_START_RESPONSE = { file_id: "file-1", run_id: "run-1", status: "QUEUED" };
 
 function appliedRunStatus(): RereadApplyResponse & {
   run_id: string;
@@ -180,6 +206,16 @@ async function rereadFlowToResultPhase(user: ReturnType<typeof userEvent.setup>)
     expect(screen.getByRole("button", { name: /aplicar relectura/i })).toBeInTheDocument(),
   );
   await user.click(screen.getByRole("button", { name: /aplicar relectura/i }));
+
+  // F-RR: el apply debe atarse a la sesión de preview exacta que se vio
+  // (run_id + draft_version), no mandarse "a ciegas" sin body.
+  await waitFor(() =>
+    expect(mockRereadApply).toHaveBeenCalledWith(
+      "file-1",
+      PREVIEW_RESPONSE.run_id,
+      PREVIEW_RESPONSE.draft_version,
+    ),
+  );
 
   await waitFor(() =>
     expect(

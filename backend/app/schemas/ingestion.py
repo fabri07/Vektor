@@ -388,6 +388,12 @@ class ColumnRiskRequest(BaseModel):
     )
     confirmed_fields: dict[str, bool] = Field(default_factory=dict)
     context_confirmed: dict[str, bool] = Field(default_factory=dict)
+    # F-RR Fase 6: si viene, el mapeo/riesgo se calcula contra el summary FRESCO
+    # de esa sesión de relectura (``run.details_json["fresh_summary"]``) en vez
+    # de ``record.parsed_summary_json`` (el confirm original — potencialmente
+    # el mapeo mal resuelto que motivó la relectura). `None` = comportamiento
+    # de siempre (carga inicial, sin cambios).
+    reread_run_id: UUID | None = None
 
 
 class PurchaseGroupsRequest(ColumnRiskRequest):
@@ -757,6 +763,46 @@ class RereadImpactProjection(BaseModel):
     movimientos_sin_producto_esperado: int = 0
 
 
+class RereadSheetStatus(BaseModel):
+    """F-RR Fase 8: estado de revisión de UNA hoja/contexto — para que el
+    usuario vea, de un vistazo, cuáles todavía necesitan su atención antes de
+    aplicar. Ver ``reread_service.build_reread_sheets``."""
+
+    context_id: str
+    label: str
+    entity_type: str  # sale|expense|product|customer|supplier|otros
+    row_count: int
+    status: Literal["completa", "requiere_revision", "ignorada", "ambigua"]
+    columns_mapped: int
+    columns_pending: int
+    is_summary_or_derived: bool = False
+
+
+class RereadPreviewRequest(ColumnRiskRequest):
+    """F-RR Fase 6: correcciones opcionales del borrador de revisión de una
+    sesión de relectura ya abierta (``POST .../reread/preview`` sin body la
+    reusa/crea; CON este body, además persiste la corrección — incrementa
+    ``draft_version`` y recalcula el preview contra ella).
+
+    Mismo shape que ``ConfirmIngestionRequest``, acotado a lo que el usuario
+    corrige durante una relectura (hereda ``column_mappings``/
+    ``context_entity``/``confirmed_fields``/``context_confirmed`` de
+    ``ColumnRiskRequest`` — no un schema gemelo que pueda divergir).
+    ``reread_run_id`` (heredado) no se usa acá: la sesión ya se resuelve por
+    archivo (``start_or_resume_preview_session``), no hace falta repetirlo."""
+
+    column_risk_decisions: list[ColumnRiskDecision] = Field(default_factory=list)
+    stock_treatment: (
+        Literal["opening_balance", "purchase"]
+        | dict[str, Literal["opening_balance", "purchase"]]
+        | None
+    ) = None
+    # Mismo shape que ``file.parsed_summary_json["master_column_mappings"]``:
+    # ``{"context": {...}, "flat": {...}}``. `None` = usar lo del confirm
+    # original (comportamiento de siempre).
+    master_column_mappings: dict[str, Any] | None = None
+
+
 class RereadPreviewResponse(BaseModel):
     file_id: UUID
     # F-RR: sesión de relectura — referencia + versión del borrador que ata el
@@ -764,9 +810,15 @@ class RereadPreviewResponse(BaseModel):
     # interpretación distinta a la mostrada).
     run_id: UUID
     draft_version: int
-    status: str  # "PREVIEWING" | "READY_TO_APPLY"
+    status: str  # "PREVIEWING" | "NEEDS_REVIEW" | "READY_TO_APPLY"
     counts: RereadCounts
     impact: RereadImpactProjection = Field(default_factory=RereadImpactProjection)
+    # F-RR Fase 8: revisión completa de interpretación — hojas/sección
+    # efectiva, mapeos, riesgo. Best-effort (ver ``build_reread_sheets``):
+    # vacío si el cálculo falla, nunca tumba el resto del preview.
+    sheets: list[RereadSheetStatus] = Field(default_factory=list)
+    mapping_contexts: list[dict[str, Any]] = Field(default_factory=list)
+    contextual_column_risk: list[ContextualColumnRisk] = Field(default_factory=list)
     legacy_fallback: bool = False
     sample_changes: list[dict[str, Any]] = Field(default_factory=list)
 

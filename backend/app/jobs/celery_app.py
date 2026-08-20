@@ -79,7 +79,13 @@ celery_app.conf.update(
         "jobs.process_text_document": {"queue": "ingestion"},
         "jobs.process_image_ocr": {"queue": "ingestion"},
         "jobs.reread_apply": {"queue": "ingestion"},
-        "jobs.sweep_stale_reread_runs": {"queue": "ingestion"},
+        # F-RR (hallazgo de code review): el sweep es un AUDITOR de la cola
+        # `ingestion` — si nadie la consume (el incidente real de ASTERIA), un
+        # sweep que vive en esa misma cola tampoco corre, y el housekeeping que
+        # debería recuperar los runs huérfanos queda igual de trabado que ellos.
+        # Mismo criterio que `inventory_integrity_check` (también un auditor
+        # periódico, no la carga primaria que audita): vive en `scores`.
+        "jobs.sweep_stale_reread_runs": {"queue": "scores"},
         "jobs.inventory_integrity_check": {"queue": "scores"},
         "jobs.inventory_integrity_check_all_tenants": {"queue": "scores"},
     },
@@ -121,7 +127,9 @@ celery_app.conf.beat_schedule = {
         # F-RR Fase 5: housekeeping de sesiones/jobs de relectura colgados que
         # nadie reintentó — cada 10 min, independiente del guard reactivo
         # (que solo limpia cuando alguien vuelve a tocar ESE archivo/tenant).
+        # Cola `scores` a propósito, no `ingestion` — ver el comentario en
+        # `task_routes` de más arriba.
         "schedule": 10 * 60,
-        "options": {"queue": "ingestion"},
+        "options": {"queue": "scores"},
     },
 }

@@ -17,6 +17,7 @@ import { TableSearch } from "@/components/ui/TableSearch";
 import { matchesRow } from "@/lib/search";
 import { ColumnMapperPanel } from "./ColumnMapperPanel";
 import { DeleteFileModal } from "./DeleteFileModal";
+import { FileInterpretationReview } from "./FileInterpretationReview";
 import { RereadDiff } from "./RereadDiff";
 import { RereadProgress } from "./RereadProgress";
 import { IndeterminateBar } from "./IndeterminateBar";
@@ -344,9 +345,21 @@ export function FileListSection() {
 
   // El apply corre en BACKGROUND: el POST encola y devuelve run_id; pasamos a fase
   // "applying" y hacemos polling del estado (ver rereadStatusQuery + su useEffect).
+  //
+  // F-RR: el backend exige {run_id, draft_version} de la sesión de preview
+  // exacta que el usuario vio (evita aplicar una interpretación distinta a la
+  // mostrada) — vienen de `reread.preview`, no solo el `fileId`.
   const rereadApplyMutation = useMutation({
-    mutationFn: (fileId: string) => ingestionService.rereadApply(fileId),
-    onMutate: (fileId) => {
+    mutationFn: ({
+      fileId,
+      runId,
+      draftVersion,
+    }: {
+      fileId: string;
+      runId: string;
+      draftVersion: number;
+    }) => ingestionService.rereadApply(fileId, runId, draftVersion),
+    onMutate: ({ fileId }) => {
       setReread((prev) =>
         prev && prev.fileId === fileId ? { ...prev, phase: "applying" } : prev,
       );
@@ -358,7 +371,7 @@ export function FileListSection() {
           : prev,
       );
     },
-    onError: (_err, fileId) => {
+    onError: (_err, { fileId }) => {
       // Volver a la fase preview para que el usuario pueda reintentar.
       setReread((prev) =>
         prev && prev.fileId === fileId ? { ...prev, phase: "preview" } : prev,
@@ -414,6 +427,29 @@ export function FileListSection() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rereadStatusQuery.data]);
+
+  // Corrección C5 (revisión externa 2026-08-19): antes de esto, "Cancelar" y
+  // cerrar el modal solo limpiaban el estado local — la sesión de revisión
+  // quedaba abierta en el backend hasta que la venciera el sweep (Fase 5).
+  const rereadCancelMutation = useMutation({
+    mutationFn: ({ fileId, runId }: { fileId: string; runId: string }) =>
+      ingestionService.rereadCancel(fileId, runId),
+  });
+
+  // Solo tiene sentido cancelar si hay una sesión de revisión ABIERTA (fase
+  // "preview", con `run_id`) — en "applying"/"result" ya salió del ciclo de
+  // revisión y el backend rechazaría el cancel igual. Best-effort: si el
+  // cancel falla (red, sesión ya vencida), el sweep la limpia igual — no
+  // bloquea el cierre del modal.
+  const closeRereadModal = () => {
+    if (reread?.phase === "preview" && reread.preview?.run_id) {
+      rereadCancelMutation.mutate({
+        fileId: reread.fileId,
+        runId: reread.preview.run_id,
+      });
+    }
+    setReread(null);
+  };
 
   const rereadUndoMutation = useMutation({
     mutationFn: (fileId: string) => ingestionService.rereadUndo(fileId),
@@ -790,7 +826,7 @@ export function FileListSection() {
 
       <Modal
         isOpen={reread !== null && !undoConfirmOpen}
-        onClose={() => setReread(null)}
+        onClose={closeRereadModal}
         title="Relectura de archivo"
         size="2xl"
       >
@@ -896,23 +932,70 @@ export function FileListSection() {
                   </div>
                 )}
 
+                {/* F-RR Fase 8: revisión completa de interpretación — hojas,
+                    columnas/mapeo, riesgo, filas de ejemplo, impacto en
+                    productos, con posibilidad de corregir antes de aplicar. */}
+                <div>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-vektor-muted">
+                    Revisión de la interpretación
+                  </h3>
+                  <FileInterpretationReview
+                    fileId={reread.fileId}
+                    runId={reread.preview.run_id}
+                    sheets={reread.preview.sheets}
+                    mappingContexts={reread.preview.mapping_contexts}
+                    contextualColumnRisk={reread.preview.contextual_column_risk}
+                    impact={reread.preview.impact}
+                    onPreviewUpdated={(preview) =>
+                      setReread((prev) =>
+                        prev && prev.fileId === reread.fileId
+                          ? { ...prev, preview }
+                          : prev,
+                      )
+                    }
+                    onError={(message) => addToast(message, "error")}
+                  />
+                </div>
+
                 <p className="text-xs text-vektor-muted">
                   Volvemos a leer el archivo ya subido y aplicamos las correcciones
                   sin que tengas que volver a subirlo. Podés deshacerlo después.
                 </p>
 
+                {/* Corrección C6 (revisión externa 2026-08-19): antes el botón solo
+                    chequeaba que hubiera un preview, no su `status` — el backend
+                    rechazaba con un error genérico en vez de indicar qué falta
+                    revisar. */}
+                {reread.preview.status === "NEEDS_REVIEW" && (
+                  <p className="text-xs text-vk-warning">
+                    Todavía hay columnas con riesgo sin resolver — revisalas arriba
+                    antes de aplicar.
+                  </p>
+                )}
+
                 <div className="flex items-center justify-end gap-2">
                   <button
                     type="button"
-                    onClick={() => setReread(null)}
+                    onClick={closeRereadModal}
                     className="rounded-lg px-3 py-1.5 text-sm font-medium text-vektor-body hover:bg-vektor-surface transition-colors"
                   >
                     Cancelar
                   </button>
                   <button
                     type="button"
-                    onClick={() => rereadApplyMutation.mutate(reread.fileId)}
-                    disabled={rereadApplyMutation.isPending}
+                    onClick={() =>
+                      reread.preview &&
+                      rereadApplyMutation.mutate({
+                        fileId: reread.fileId,
+                        runId: reread.preview.run_id,
+                        draftVersion: reread.preview.draft_version,
+                      })
+                    }
+                    disabled={
+                      rereadApplyMutation.isPending ||
+                      !reread.preview ||
+                      reread.preview.status !== "READY_TO_APPLY"
+                    }
                     className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-sm font-medium text-white hover:brightness-110 transition-colors disabled:opacity-50"
                   >
                     Aplicar relectura

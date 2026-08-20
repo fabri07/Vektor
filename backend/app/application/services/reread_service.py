@@ -65,6 +65,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -83,12 +84,17 @@ from app.application.services._ledger_restore import (
     restore_from_before,
     snapshot_master,
 )
-from app.application.services.column_mapping_service import parse_target
+from app.application.services.column_mapping_service import (
+    missing_required_fields,
+    parse_target,
+)
 from app.application.services.column_risk import (
     AppliedColumnRisk,
     apply_column_risk_decisions,
     build_contextual_column_risk,
+    context_is_included,
     derive_context_mapping_entries,
+    resolve_contexts,
     split_derivable_decisions,
 )
 from app.application.services.file_parsing import parse_uploaded_content
@@ -129,13 +135,22 @@ from app.persistence.models.unclassified_record import (
     UnclassifiedRecord,
     is_unclassified_row_ref,
 )
-from app.schemas.ingestion import ColumnRiskDecision
+from app.schemas.ingestion import ColumnMapping, ColumnRiskDecision
 
 # F9a: outcome explícito de la resolución de riesgo de columnas en la relectura.
 # Reemplaza el booleano implícito de ``_apply_risk_decisions`` (None/no-None) por
 # un resultado que distingue "reaplicado tal cual" (mapeo REAL, F8b+) de un mapeo
 # RE-DERIVADO (guess) para archivos pre-F8 — ver ``ResolvedRisk``.
-RiskOutcome = Literal["REAPPLIED", "NO_RISK_FOUND", "FORCED_UNVERIFIED", "AMBIGUOUS"]
+#
+# F-RR Fase 6: ``USER_REVIEWED`` es un quinto outcome, MÁS autoritativo que
+# ``REAPPLIED`` — el usuario corrigió el mapeo/decisiones EN VIVO durante esta
+# sesión de relectura (borrador persistido en ``run.details_json["draft"]``),
+# no el mapeo guardado en el confirm original (posiblemente el mal resuelto que
+# causó la relectura, ver el bug de ASTERIA). Igual que ``REAPPLIED``, siempre
+# trae ``applied`` no-``None``.
+RiskOutcome = Literal[
+    "USER_REVIEWED", "REAPPLIED", "NO_RISK_FOUND", "FORCED_UNVERIFIED", "AMBIGUOUS"
+]
 
 # Helpers/constantes de parseo compartidos con el import — reusados en el estimado
 # del preview para clasificar/anclar las filas IGUAL que ``insert_confirmed_data``.
@@ -258,6 +273,12 @@ class RereadPreview:
     unlinked_products: UnlinkedProductsEstimate = field(
         default_factory=UnlinkedProductsEstimate
     )
+    # F-RR Fase 8 (backend): revisión completa de interpretación — hoja/sección
+    # efectiva, mapeo, riesgo. Best-effort (ver ``build_reread_sheets``): un
+    # fallo acá nunca debe tumbar el preview completo.
+    sheets: list[dict[str, Any]] = field(default_factory=list)
+    mapping_contexts: list[dict[str, Any]] = field(default_factory=list)
+    contextual_column_risk: list[dict[str, Any]] = field(default_factory=list)
 
     def counts(self) -> dict[str, int]:
         return {
@@ -468,21 +489,53 @@ async def _fresh_summary(file: UploadedFile, s3: S3Client) -> dict[str, Any]:
     return parse_uploaded_content(content, file.content_type, file.original_filename)
 
 
-def _confirmed_fields_for(file: UploadedFile, fresh: dict[str, Any]) -> dict[str, bool]:
+def _confirmed_fields_for(
+    file: UploadedFile, fresh: dict[str, Any], draft: dict[str, Any] | None = None
+) -> dict[str, bool]:
     """Campos a importar en la relectura.
 
-    UNIÓN de lo confirmado antes con lo que el re-parseo ACTUAL detecta: la
-    relectura re-interpreta el archivo, así que un tipo que ahora se detecta
-    (ej. productos, cuando una hoja de catálogo dejó de rutearse como gasto) debe
-    confirmarse aunque la confirmación vieja no lo incluyera. Nunca importa menos
-    que antes (no se pierde lo ya confirmado) y suma lo nuevo.
+    F-RR Fase 6: si el borrador de la sesión trae ``confirmed_fields``
+    explícito (el usuario revisó y corrigió qué importar durante ESTA
+    relectura), se usa TAL CUAL — a diferencia de la unión de abajo, una
+    corrección real puede querer DESMARCAR algo que estaba confirmado antes.
+
+    Sin borrador (camino de siempre): UNIÓN de lo confirmado antes con lo que
+    el re-parseo ACTUAL detecta: la relectura re-interpreta el archivo, así que
+    un tipo que ahora se detecta (ej. productos, cuando una hoja de catálogo
+    dejó de rutearse como gasto) debe confirmarse aunque la confirmación vieja
+    no lo incluyera. Nunca importa menos que antes (no se pierde lo ya
+    confirmado) y suma lo nuevo.
     """
+    if draft is not None:
+        draft_confirmed = draft.get("confirmed_fields")
+        if isinstance(draft_confirmed, dict) and draft_confirmed:
+            return {k: bool(v) for k, v in draft_confirmed.items()}
     fresh_defaults = default_confirmed_fields(fresh)
     stored = (file.parsed_summary_json or {}).get("confirmed_fields")
     if isinstance(stored, dict) and stored:
         keys = set(stored) | set(fresh_defaults)
         return {k: bool(stored.get(k)) or bool(fresh_defaults.get(k)) for k in keys}
     return fresh_defaults
+
+
+async def load_reread_run_summary(
+    session: AsyncSession, tenant_id: uuid.UUID, file_id: uuid.UUID, run_id: uuid.UUID
+) -> dict[str, Any]:
+    """F-RR Fase 6: summary FRESCO cacheado de una sesión de relectura abierta —
+    para que los endpoints de borrador (``column-mappings``/``column-risk``/
+    ``inventory-effects``/``purchase-groups``) calculen sugerencias/riesgo
+    contra lo que la relectura REALMENTE releyó, no contra
+    ``record.parsed_summary_json`` (el confirm original — potencialmente el
+    mapeo mal resuelto que motivó la relectura, caso ASTERIA)."""
+    run = await session.get(DataRepairRun, run_id)
+    if (
+        run is None
+        or run.tenant_id != tenant_id
+        or run.repair_type != REPAIR_TYPE_REREAD
+        or (run.details_json or {}).get("file_id") != str(file_id)
+    ):
+        raise FileNotFoundError(run_id)
+    return (run.details_json or {}).get("fresh_summary") or {}
 
 
 async def _reread_master_entities(
@@ -492,6 +545,7 @@ async def _reread_master_entities(
     fresh: dict[str, Any],
     confirmed_fields: dict[str, bool],
     run_id: uuid.UUID,
+    draft: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
     """F7d + F9b — reread de hojas de maestro (clientes/proveedores), ahora con
     auditoría before/after para poder revertirlos en ``undo_reread``.
@@ -527,7 +581,12 @@ async def _reread_master_entities(
     from app.persistence.models.customer import Customer  # noqa: PLC0415
     from app.persistence.models.supplier import Supplier  # noqa: PLC0415
 
-    stored = (file.parsed_summary_json or {}).get("master_column_mappings") or {}
+    # F-RR Fase 6: el borrador de la sesión gana si trae su propio mapeo de
+    # maestros explícito — misma prioridad que el resto de las correcciones
+    # (draft > lo guardado en el confirm original).
+    draft_master = (draft or {}).get("master_column_mappings")
+    original_master = (file.parsed_summary_json or {}).get("master_column_mappings")
+    stored = (draft_master if draft_master else original_master) or {}
     context_mappings = stored.get("context") or None
     flat_mapping = stored.get("flat") or None
     if not context_mappings and not flat_mapping:
@@ -992,6 +1051,7 @@ async def _reconcile(
     confirmed_fields: dict[str, bool],
     run: DataRepairRun,
     dry_run: bool = False,
+    draft: dict[str, Any] | None = None,
 ) -> RereadApplyResult:
     """Núcleo de la relectura. Asume estar dentro de una transacción que el
     caller commitea (apply) o rollbackea (preview).
@@ -1158,7 +1218,14 @@ async def _reconcile(
     await session.flush()
     # Preservar la elección de tratamiento del stock (apertura vs compra) que el usuario
     # hizo en el confirm original: vive en el summary guardado, no en el crudo re-parseado.
-    _stored_treatment = (file.parsed_summary_json or {}).get("stock_treatment")
+    # F-RR Fase 6: el borrador de la sesión gana si el usuario lo cambió EN VIVO
+    # durante esta relectura (misma prioridad que el resto de las correcciones).
+    _draft_treatment = (draft or {}).get("stock_treatment")
+    _stored_treatment = (
+        _draft_treatment
+        if _draft_treatment is not None
+        else (file.parsed_summary_json or {}).get("stock_treatment")
+    )
     # F-F.4: el efecto de inventario se DEDUCE de lo que esta relectura acaba de
     # leer, no del que resolvió el confirm original.
     #
@@ -1173,6 +1240,7 @@ async def _reconcile(
     # Consecuencia declarada y elegida por el usuario: un archivo importado ANTES
     # de F-F.4 —cuyas ventas nunca descontaron— queda al día en cuanto se relee.
     _stored_effect = await _deduce_inventory_effect(session, tenant_id, fresh)
+    _draft_context_mappings, _draft_context_entity = _draft_effective_mappings(draft)
     _reimport_detail = await insert_confirmed_data(
         session,
         tenant_id,
@@ -1182,6 +1250,15 @@ async def _reconcile(
         uploaded_file_id=file_id,
         stock_treatment=_stored_treatment,
         inventory_effect=_stored_effect,
+        # Corrección C1 (revisión externa 2026-08-19): el mapeo que el usuario
+        # corrigió EN VIVO en esta sesión tiene que llegar hasta el import
+        # real — antes solo se usaba para las decisiones de riesgo y el
+        # reimport seguía detectando columnas 100% por heurística. Prioridad
+        # por (contexto, columna): draft explícito > heurística — cualquier
+        # columna que el borrador NO toque sigue cayendo a la detección de
+        # siempre (ver ``_val``/``_row_val`` en ``ingestion_import_service``).
+        context_mappings=_draft_context_mappings,
+        context_entity=_draft_context_entity,
         # Revisión final F9b (Hallazgo 2): en preview (dry_run=True) el detalle
         # nunca se consume (ver el bloque `if not dry_run` de abajo) — pedirlo
         # igual dispara N `session.get`/`refresh` en
@@ -2098,15 +2175,122 @@ class ResolvedRisk:
     forced_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _draft_effective_mappings(
+    draft: dict[str, Any] | None,
+) -> tuple[dict[str, dict[str, str]] | None, dict[str, str] | None]:
+    """Corrección C1 (revisión externa 2026-08-19): traduce ``draft[
+    "column_mappings"]``/``draft["context_entities"]`` — el mapeo que el
+    usuario corrigió EN VIVO en la sesión de relectura, ver
+    ``ingestion.py::reread_preview`` — al par ``(context_mappings,
+    context_entity)`` que ``insert_confirmed_data`` acepta (mismo shape que
+    usa el confirm inicial, ver ``api/v1/ingestion.py::confirm_ingestion``).
+
+    Antes, este mapeo solo se usaba para resolver las decisiones de riesgo
+    (``_apply_draft_risk_decisions``) — el reimport en sí seguía detectando
+    columnas 100% por heurística sobre el contenido re-leído, así que
+    corregir "Producto" o "Cantidad" en pantalla no cambiaba nada de lo
+    efectivamente importado. Es seguro pasar un mapeo PARCIAL (solo las
+    columnas que el usuario tocó): ``insert_confirmed_data`` resuelve
+    columna-por-columna, con fallback a la heurística de siempre para
+    cualquier campo que el borrador no mencione (ver ``_val``/``_row_val`` en
+    ``ingestion_import_service``) — no hace falta que el borrador cubra el
+    mapeo completo de todas las hojas para que esto sea correcto.
+
+    Una columna DROPEADA por una decisión de riesgo (``drop_column``) no se
+    incluye — ``apply_column_risk_decisions`` ya la sacó del summary que se
+    va a reimportar, mapearla apuntaría a una columna que ya no está.
+
+    Columnas sin ``context_id`` explícito caen al contexto ``"table"`` —
+    misma convención que ``_dropped_pairs``/``reread_preview`` usan para el
+    archivo de una sola hoja.
+
+    ``(None, None)`` si el borrador no trae mapeo — el caller cae al criterio
+    heurístico de siempre, sin cambios."""
+    mappings = (draft or {}).get("column_mappings") or []
+    if not mappings:
+        return None, None
+    dropped = {
+        (d.get("context_id") or "table", d.get("source_column"))
+        for d in (draft or {}).get("column_risk_decisions") or []
+        if d.get("action") == "drop_column"
+    }
+    by_context: dict[str, dict[str, str]] = defaultdict(dict)
+    for m in mappings:
+        target = m.get("target_field")
+        if not target or parse_target(target).kind in ("ignore", "none"):
+            continue
+        context_id = m.get("context_id") or "table"
+        if (context_id, m.get("source_column")) in dropped:
+            continue
+        by_context[context_id][m["source_column"]] = target
+    context_entity = dict((draft or {}).get("context_entities") or {}) or None
+    return (dict(by_context) or None), context_entity
+
+
+def _apply_draft_risk_decisions(
+    draft: dict[str, Any], fresh: dict[str, Any]
+) -> AppliedColumnRisk | None:
+    """F-RR Fase 6: aplica el mapeo + decisiones de riesgo que el usuario armó EN
+    VIVO durante esta sesión de relectura (persistidos en
+    ``run.details_json["draft"]`` por el endpoint de preview al recibir
+    correcciones — ver ``ingestion.py::reread_preview``).
+
+    Mismo patrón que el confirm (``POST /confirm``): el mapeo efectivo por
+    contexto sale DIRECTO de ``draft["column_mappings"]`` (lo que el usuario ya
+    eligió, no un guess de ``derive_context_mapping_entries``, que es solo para
+    SUGERIR), con ``context_entities`` ya resuelto (misma prioridad que
+    ``_entity_for`` del confirm — se resolvió una vez al persistir el borrador,
+    ver el endpoint). Las decisiones de riesgo ya se validaron
+    (``validate_column_risk_decisions``) antes de persistirse — acá solo se
+    aplican. ``None`` si el borrador no trae mapeo (nada que aplicar)."""
+    if not draft.get("column_mappings"):
+        return None
+    raw_decisions = draft.get("column_risk_decisions") or []
+    decisions = [ColumnRiskDecision(**d) for d in raw_decisions]
+    context_entities = dict(draft.get("context_entities") or {})
+    return apply_column_risk_decisions(fresh, decisions, context_entities)
+
+
+def _uncovered_ambiguous_risk(
+    risk_rows: list[dict[str, Any]], draft: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Corrección C2 (revisión externa 2026-08-19): de los ``risk_rows`` YA
+    calculados sobre el mapeo efectivo del borrador (``build_reread_sheets``),
+    separa las filas verdaderamente AMBIGUAS (2+ acciones legales,
+    ``split_derivable_decisions``) y devuelve solo las que ``draft`` NO cubre
+    con una ``column_risk_decisions`` explícita — clave ``(context_id,
+    source_column, target_field)``, igual que valida ``validate_column_risk_
+    decisions`` al persistir. Vacía si no hay ambigüedad sin cubrir."""
+    _, ambiguous = split_derivable_decisions(risk_rows)
+    if not ambiguous:
+        return []
+    decided = {
+        (d.get("context_id"), d.get("source_column"), d.get("target_field"))
+        for d in (draft or {}).get("column_risk_decisions") or []
+    }
+    return [
+        row
+        for row in ambiguous
+        if (row["context_id"], row["source_column"], row["target_field"]) not in decided
+    ]
+
+
 async def _resolve_risk_decisions(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     file: UploadedFile,
     fresh: dict[str, Any],
     confirmed_fields: dict[str, bool],
+    draft: dict[str, Any] | None = None,
 ) -> ResolvedRisk:
     """Resuelve el riesgo de columnas para la relectura, con outcome explícito.
 
+    0. F-RR Fase 6: si la sesión tiene un borrador con mapeo explícito del
+       usuario (revisión completa EN VIVO, no un guess), se aplica DIRECTO →
+       ``USER_REVIEWED``. Prioridad más alta que todo lo demás: es la
+       corrección MÁS RECIENTE que el usuario hizo, más autoritativa que lo
+       guardado en el confirm original (que puede ser justamente el mapeo mal
+       resuelto que motivó la relectura).
     1. Si el confirm original guardó ``column_risk_decisions`` (F8b+): se
        REAPLICAN tal cual (``_apply_risk_decisions``, comportamiento idéntico al
        histórico) → ``REAPPLIED``. Es el mapeo REAL que el usuario eligió.
@@ -2126,6 +2310,11 @@ async def _resolve_risk_decisions(
        mapeo es un guess no verificado (ver docstring de ``ResolvedRisk``); este
        outcome existe para el reporte, no para aplicar.
     """
+    if draft is not None:
+        draft_applied = _apply_draft_risk_decisions(draft, fresh)
+        if draft_applied is not None:
+            return ResolvedRisk(outcome="USER_REVIEWED", applied=draft_applied)
+
     applied = _apply_risk_decisions(file, fresh)
     if applied is not None:
         return ResolvedRisk(outcome="REAPPLIED", applied=applied)
@@ -2418,13 +2607,25 @@ async def start_or_resume_preview_session(
     return run, deepcopy(fresh)
 
 
-def mark_session_ready_to_apply(run: DataRepairRun) -> None:
-    """Transición PREVIEWING → READY_TO_APPLY tras un preview exitoso. No pisa
-    NEEDS_REVIEW (reservado para cuando el borrador tenga bloqueos — F-RR
-    Fase 6/8): en esta fase, sin edición de mapeo todavía, todo preview
-    exitoso queda listo para aplicar."""
-    if run.status == "PREVIEWING":
-        run.status = "READY_TO_APPLY"
+def mark_session_ready_to_apply(
+    run: DataRepairRun, *, column_risk_outcome: str | None = None
+) -> None:
+    """Re-evalúa el estado de la sesión tras un preview (inicial o recomputado
+    con un borrador nuevo).
+
+    F-RR Fase 6: ``AMBIGUOUS`` (riesgo de columnas sin resolver — el usuario
+    tiene decisiones pendientes) deja la sesión en ``NEEDS_REVIEW`` en vez de
+    ``READY_TO_APPLY``: ``apply`` exige ``READY_TO_APPLY`` (ver
+    ``validate_ready_to_apply``), así que un borrador ambiguo queda bloqueado
+    hasta que el usuario lo resuelva. Se re-evalúa SIEMPRE (no solo al crear la
+    sesión): un borrador que resuelve la ambigüedad debe poder pasar a
+    READY_TO_APPLY, y uno que la introduce debe poder volver a NEEDS_REVIEW,
+    aunque la sesión ya hubiera estado READY_TO_APPLY con un borrador anterior.
+    No toca sesiones que ya salieron del ciclo de revisión (QUEUED en
+    adelante)."""
+    if run.status not in _SESSION_STATUSES_OPEN:
+        return
+    run.status = "NEEDS_REVIEW" if column_risk_outcome == "AMBIGUOUS" else "READY_TO_APPLY"
 
 
 class StaleDraftVersionError(ValueError):
@@ -2509,6 +2710,123 @@ async def cancel_preview_session(
     return run
 
 
+# Las 5 entidades del protocolo de riesgo/mapeo contextual (F8a) — mismo set
+# que ``derive_context_mapping_entries`` filtra internamente (no exportado).
+_SHEET_RISK_ENTITIES = frozenset({"sale", "expense", "product", "customer", "supplier"})
+
+
+async def build_reread_sheets(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    fresh: dict[str, Any],
+    draft: dict[str, Any] | None,
+    confirmed_fields: dict[str, bool],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """F-RR Fase 8 (backend): estado por hoja/contexto para la revisión completa
+    del preview de relectura — mismo patrón que ``GET /files/{id}/preview``
+    (F8a): ``derive_context_mapping_entries`` + ``build_contextual_column_risk``.
+    Best-effort: un fallo acá nunca debe tumbar el preview completo (igual
+    criterio que ese endpoint).
+
+    Si el borrador de la sesión trae ``column_mappings``/``context_entities``
+    explícitos (el usuario ya está corrigiendo), se usan como override — la
+    pantalla debe reflejar SU corrección, no solo la sugerencia automática.
+
+    Devuelve ``(sheets, contextual_risk)`` — ambos listos para serializar en
+    ``RereadPreviewResponse`` (``RereadSheetStatus``/``ContextualColumnRisk``)."""
+    draft = draft or {}
+    raw_mappings = draft.get("column_mappings") or []
+    user_mappings = [ColumnMapping(**m) for m in raw_mappings] if raw_mappings else None
+    context_entity_override = cast("dict[str, str] | None", draft.get("context_entities") or None)
+    context_confirmed = cast("dict[str, bool]", draft.get("context_confirmed") or {})
+
+    try:
+        entries, entities = await derive_context_mapping_entries(
+            session,
+            tenant_id,
+            fresh,
+            user_mappings=user_mappings,
+            context_entity=context_entity_override,
+        )
+        risk_rows = build_contextual_column_risk(
+            fresh,
+            entries,
+            context_entities=entities,
+            confirmed_fields=confirmed_fields,
+            context_confirmed=context_confirmed,
+        )
+    except Exception:  # noqa: BLE001 — best-effort, ver docstring.
+        logger.warning("reread.preview.sheets_failed", tenant_id=str(tenant_id))
+        return [], []
+
+    risk_by_context: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in risk_rows:
+        risk_by_context[row["context_id"]].append(row)
+
+    sheets: list[dict[str, Any]] = []
+    for ctx in resolve_contexts(fresh):
+        context_id = ctx.get("context_id")
+        if not context_id:
+            continue
+        label = str(ctx.get("label") or context_id).strip()
+        headers = ctx.get("headers") or []
+        entity = entities.get(context_id) or ctx.get("entity_type")
+        row_count = int(ctx.get("row_count") or len(ctx.get("preview_rows") or []))
+
+        # Sin headers (texto/imagen) o entidad fuera del protocolo de riesgo
+        # (F8a no tiene nada que decir de estos): no hay columnas que revisar.
+        if not headers or entity not in _SHEET_RISK_ENTITIES:
+            sheets.append(
+                {
+                    "context_id": context_id,
+                    "label": label,
+                    "entity_type": entity or "otros",
+                    "row_count": row_count,
+                    "status": "completa",
+                    "columns_mapped": 0,
+                    "columns_pending": 0,
+                    "is_summary_or_derived": False,
+                }
+            )
+            continue
+
+        context_entries = entries.get(context_id, [])
+        mapped_targets = {
+            e.target_field
+            for e in context_entries
+            if parse_target(e.target_field).kind == "canonical"
+        }
+        columns_pending = max(len(headers) - len(context_entries), 0)
+
+        if not context_is_included(context_id, entity, confirmed_fields, context_confirmed):
+            status_value = "ignorada"
+        else:
+            context_risk = risk_by_context.get(context_id, [])
+            missing = missing_required_fields(entity, mapped_targets)
+            ambiguous = any(len(r.get("allowed_actions") or []) >= 2 for r in context_risk)
+            if ambiguous:
+                status_value = "ambigua"
+            elif missing or context_risk:
+                status_value = "requiere_revision"
+            else:
+                status_value = "completa"
+
+        sheets.append(
+            {
+                "context_id": context_id,
+                "label": label,
+                "entity_type": entity,
+                "row_count": row_count,
+                "status": status_value,
+                "columns_mapped": len(mapped_targets),
+                "columns_pending": columns_pending,
+                "is_summary_or_derived": False,
+            }
+        )
+
+    return sheets, risk_rows
+
+
 async def preview_reread(
     session: AsyncSession,
     file_id: uuid.UUID,
@@ -2542,14 +2860,17 @@ async def preview_reread(
         raise FileNotFoundError(file_id)
     s3 = s3 or S3Client()
     fresh = fresh_override if fresh_override is not None else await _fresh_summary(file, s3)
-    confirmed_fields = _confirmed_fields_for(file, fresh)
-    # F9a: resuelve el riesgo de columnas con outcome explícito — REAPPLIED (mapeo
-    # real, F8b+) es el ÚNICO que muta ``fresh`` para que el estimado refleje el
-    # drop/route (filas ruteadas salen de los buckets → no se cuentan como nuevas).
-    # Los demás outcomes (mapeo derivado/guess sobre archivos pre-F8) NO tocan el
-    # summary — ver invariante en ``ResolvedRisk``.
+    # F-RR Fase 6: borrador de correcciones EN VIVO de esta sesión, si el
+    # usuario ya mandó alguna (ver ``ingestion.py::reread_preview``).
+    draft = (run.details_json or {}).get("draft") if run is not None else None
+    confirmed_fields = _confirmed_fields_for(file, fresh, draft)
+    # F9a: resuelve el riesgo de columnas con outcome explícito — REAPPLIED/
+    # USER_REVIEWED son los ÚNICOS que mutan ``fresh`` para que el estimado
+    # refleje el drop/route (filas ruteadas salen de los buckets → no se
+    # cuentan como nuevas). Los demás outcomes (mapeo derivado/guess sobre
+    # archivos pre-F8) NO tocan el summary — ver invariante en ``ResolvedRisk``.
     resolved = await _resolve_risk_decisions(
-        session, tenant_id, file, fresh, confirmed_fields
+        session, tenant_id, file, fresh, confirmed_fields, draft
     )
     if resolved.applied is not None:
         fresh = resolved.applied.summary
@@ -2567,6 +2888,25 @@ async def preview_reread(
     preview.unlinked_products = await estimate_unlinked_products(
         session, tenant_id, fresh, confirmed_fields, catalog
     )
+    # F-RR Fase 8 (backend): revisión completa — hojas/mapeo/riesgo, sobre el
+    # MISMO `fresh` que ya refleja drop/route (si `resolved.applied` mutó el
+    # summary arriba) — la pantalla no puede mostrar columnas que el propio
+    # preview ya descartó.
+    preview.sheets, preview.contextual_column_risk = await build_reread_sheets(
+        session, tenant_id, fresh, draft, confirmed_fields
+    )
+    # Corrección C2 (revisión externa 2026-08-19): ``USER_REVIEWED`` arriba solo
+    # verificó que EL BORRADOR trajera mapeo — no que el mapeo resultante deje
+    # SIN riesgo ambiguo sin resolver en otras columnas/hojas. Recalculamos acá
+    # con el mapeo efectivo completo (lo que ``build_reread_sheets`` acaba de
+    # derivar) y downgradeamos a ``AMBIGUOUS`` si queda algo sin decisión — el
+    # mismo criterio "todo-o-nada" que ya rige el camino sin borrador.
+    if preview.column_risk_outcome == "USER_REVIEWED":
+        uncovered = _uncovered_ambiguous_risk(preview.contextual_column_risk, draft)
+        if uncovered:
+            preview.column_risk_outcome = "AMBIGUOUS"
+            preview.column_risk_ambiguous = _sanitize_risk_rows(uncovered)
+    preview.mapping_contexts = list(fresh.get("mapping_contexts") or [])
     if run is not None:
         details = dict(run.details_json or {})
         details["projected_impact"] = asdict(preview.unlinked_products)
@@ -2593,7 +2933,8 @@ async def apply_reread(
     por sí solo: ``"interactive"`` (default, humano vía UI/endpoint HTTP),
     ``"batch_auto"`` (batch sin supervisión, Task 4) o ``"batch_manual"`` (batch
     con revisión humana previa). Solo afecta el ``reread_status`` cuando el
-    outcome de riesgo es ``REAPPLIED`` (ver stamping más abajo).
+    outcome de riesgo es ``REAPPLIED`` o ``USER_REVIEWED`` (ver stamping más
+    abajo).
 
     ``fresh_override``: ver docstring de ``preview_reread`` — evita volver a
     descargar/parsear S3 cuando el ``run`` ya trae el summary de su sesión de
@@ -2607,15 +2948,19 @@ async def apply_reread(
         raise FileNotFoundError(file_id)
     s3 = s3 or S3Client()
     fresh = fresh_override if fresh_override is not None else await _fresh_summary(file, s3)
-    confirmed_fields = _confirmed_fields_for(file, fresh)
+    # F-RR Fase 6: borrador de correcciones EN VIVO de la sesión de preview que
+    # originó este apply — capturado ANTES de que ``run`` se reasigne más abajo
+    # (camino directo/legado sin sesión previa, donde no hay borrador posible).
+    draft = (run.details_json or {}).get("draft") if run is not None else None
+    confirmed_fields = _confirmed_fields_for(file, fresh, draft)
 
-    # F9a: resuelve el riesgo de columnas con outcome explícito. Solo REAPPLIED
-    # (mapeo real, F8b+) muta el summary usado para reimportar — honra drop/route:
+    # F9a: resuelve el riesgo de columnas con outcome explícito. Solo REAPPLIED/
+    # USER_REVIEWED mutan el summary usado para reimportar — honra drop/route:
     # una fila corregida vuelve al bucket y se importa, una que sigue mal queda
     # fuera. Los demás outcomes (mapeo derivado/guess sobre un archivo pre-F8) NO
     # tocan el summary — invariante de seguridad, ver ``ResolvedRisk``.
     resolved = await _resolve_risk_decisions(
-        session, tenant_id, file, fresh, confirmed_fields
+        session, tenant_id, file, fresh, confirmed_fields, draft
     )
     summary_for_import = (
         resolved.applied.summary if resolved.applied is not None else fresh
@@ -2642,11 +2987,11 @@ async def apply_reread(
     # venta/gasto de este archivo puede referenciar un cliente/proveedor recién
     # actualizado. No-op si el confirm original no guardó mapeo de columnas.
     clientes_count, proveedores_count = await _reread_master_entities(
-        session, tenant_id, file, summary_for_import, confirmed_fields, run.id
+        session, tenant_id, file, summary_for_import, confirmed_fields, run.id, draft
     )
 
     result = await _reconcile(
-        session, file, tenant_id, summary_for_import, confirmed_fields, run
+        session, file, tenant_id, summary_for_import, confirmed_fields, run, draft=draft
     )
     result.clientes = clientes_count
     result.proveedores = proveedores_count
@@ -2707,8 +3052,10 @@ async def apply_reread(
             )
 
     # F9a: stamping de versionado/estado de la relectura sobre el archivo.
-    # REAPPLIED es el ÚNICO outcome que bumpea ``ingestion_version`` — es el único
-    # caso donde el mapeo reaplicado es el REAL (F8b+), no un guess re-derivado.
+    # REAPPLIED/USER_REVIEWED son los ÚNICOS outcomes que bumpean
+    # ``ingestion_version`` — los únicos casos donde el mapeo aplicado es el REAL
+    # (F8b+ reaplicado, o la corrección explícita del usuario en esta sesión —
+    # F-RR Fase 6, todavía más autoritativa), no un guess re-derivado.
     #
     # Fix round post-review (hallazgo Important #2): guardamos el valor PREVIO
     # de ``ingestion_version`` en ``run.details_json`` ANTES de pisarlo — sin
@@ -2717,7 +3064,7 @@ async def apply_reread(
     # ``select_candidate_files`` (filtra por ``ingestion_version < to_version``)
     # aunque sus datos hubieran vuelto al estado pre-reread.
     previous_ingestion_version = file.ingestion_version
-    if resolved.outcome == "REAPPLIED":
+    if resolved.outcome in ("REAPPLIED", "USER_REVIEWED"):
         file.ingestion_version = INGESTION_VERSION
         file.reread_status = (
             REREAD_STATUS_AUTO_APPLIED if origin == "batch_auto" else REREAD_STATUS_APPLIED
@@ -2860,10 +3207,11 @@ async def start_background_apply(
     now = datetime.now(UTC)
     last_expired_run_id: uuid.UUID | None = None
     for r in existing.scalars().all():
-        created = r.created_at
-        if created is not None and created.tzinfo is None:
-            created = created.replace(tzinfo=UTC)
-        age = (now - created).total_seconds() if created is not None else 0.0
+        # `updated_at`, no `created_at` — mismo fix que `sweep_stale_reread_runs`
+        # (code review): `created_at` cuenta el tiempo de revisión previo a
+        # encolarse, así que un run recién puesto en QUEUED podía nacer ya
+        # "vencido" si el usuario tardó revisando el borrador.
+        age = _age_seconds(r.updated_at, now)
         if age < _STALE_RUNNING_AFTER_SECONDS:
             raise ValueError(
                 "Ya hay una relectura en curso. Esperá a que termine antes de "
@@ -2959,7 +3307,12 @@ async def sweep_stale_reread_runs(session: AsyncSession) -> dict[str, int]:
         )
     )
     for r in running.scalars().all():
-        if _age_seconds(r.created_at, now) < _STALE_RUNNING_AFTER_SECONDS:
+        # `updated_at`, no `created_at`: `created_at` es el momento en que se
+        # creó la sesión de PREVIEWING, que puede llevar minutos de revisión
+        # del usuario ANTES de encolarse — usarlo acá vencía un apply recién
+        # encolado que todavía no tuvo tiempo de correr (hallazgo de code
+        # review). `updated_at` se toca en la transición real a QUEUED/APPLYING.
+        if _age_seconds(r.updated_at, now) < _STALE_RUNNING_AFTER_SECONDS:
             continue
         reason = "stale_never_picked_up" if r.status == "QUEUED" else "stale_timeout"
         logger.error(
@@ -3378,10 +3731,12 @@ __all__ = [
     "RereadPreview",
     "StaleDraftVersionError",
     "apply_reread",
+    "build_reread_sheets",
     "build_reread_summary",
     "cancel_preview_session",
     "file_has_user_edits",
     "latest_applied_run_for_file",
+    "load_reread_run_summary",
     "mark_session_ready_to_apply",
     "preview_reread",
     "start_or_resume_preview_session",

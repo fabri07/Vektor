@@ -3445,6 +3445,100 @@ class TestRereadPreviewSessionEndpoint:
         # Misma sesión reusada, no una nueva por cada click en "Volver a leer".
         assert data2["run_id"] == data1["run_id"]
 
+    async def test_preview_with_draft_body_persists_and_increments_version(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """F-RR Fase 6: un ``POST /reread/preview`` CON body persiste la
+        corrección en el borrador de la sesión (``draft_version`` +1) — y
+        ``reread_run_id`` en los endpoints de borrador (``column-mappings``
+        acá) resuelve contra el summary FRESCO de esa sesión, no contra
+        ``record.parsed_summary_json`` (vacío en este archivo recién subido)."""
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid5/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            first = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            assert first.status_code == 200
+            run_id = first.json()["run_id"]
+            assert first.json()["draft_version"] == 0
+
+            # `reread_run_id` resuelve contra el summary FRESCO de la sesión
+            # (el archivo no tiene `parsed_summary_json` propio — recién
+            # subido, sin confirm previo — así que sin esto sería 200 con
+            # sugerencias vacías, no un fallo, pero acá confirmamos que
+            # efectivamente ve las columnas del CSV mockeado).
+            suggestions = await client.get(
+                f"/api/v1/ingestion/files/{record.id}/column-mappings",
+                headers=auth_headers,
+                params={"reread_run_id": run_id},
+            )
+            assert suggestions.status_code == 200
+            suggested_columns = {s["source_column"] for s in suggestions.json()}
+            assert suggested_columns == {"fecha", "producto", "monto", "proveedor"}
+
+            second = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={
+                    "column_mappings": [
+                        {"source_column": "fecha", "target_field": "transaction_date"},
+                        {"source_column": "producto", "target_field": "product_name"},
+                        {"source_column": "monto", "target_field": "amount"},
+                        {"source_column": "proveedor", "target_field": "customer_name"},
+                    ],
+                    "confirmed_fields": {"ventas": True},
+                    "context_confirmed": {},
+                    "column_risk_decisions": [],
+                },
+            )
+            assert second.status_code == 200
+            data2 = second.json()
+            assert data2["run_id"] == run_id
+            assert data2["draft_version"] == 1
+            assert data2["status"] == "READY_TO_APPLY"
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["column_risk_decisions"] == []
+        assert len(draft["column_mappings"]) == 4
+        # La entidad efectiva por contexto quedó resuelta (mismo criterio que
+        # el confirm) — el valor concreto depende de cómo el parser infiere el
+        # tipo de este CSV; lo que importa acá es que el contexto "table" (flat)
+        # quedó cubierto.
+        assert set(draft["context_entities"]) == {"table"}
+
+        # Un segundo POST sin body sigue leyendo/recalculando (no pisa el
+        # borrador que ya se persistió).
+        with _patch_s3_for_reread():
+            third = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+        assert third.status_code == 200
+        assert third.json()["draft_version"] == 1
+
     async def test_cancel_session_then_apply_rejects_stale_session(
         self,
         client: AsyncClient,

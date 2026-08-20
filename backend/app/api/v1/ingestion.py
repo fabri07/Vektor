@@ -199,8 +199,10 @@ from app.schemas.ingestion import (
     RereadCounts,
     RereadImpactProjection,
     RereadItem,
+    RereadPreviewRequest,
     RereadPreviewResponse,
     RereadRunStatusResponse,
+    RereadSheetStatus,
     RereadUndoResponse,
     SheetInventoryEffect,
     SheetPurchaseGroups,
@@ -737,7 +739,20 @@ async def compute_column_risk(
             detail=f"El archivo aún se está procesando (estado: {record.processing_status}).",
         )
 
-    summary = record.parsed_summary_json or {}
+    if body.reread_run_id is not None:
+        from app.application.services import reread_service  # noqa: PLC0415
+
+        try:
+            summary = await reread_service.load_reread_run_summary(
+                session, tenant.tenant_id, file_id, body.reread_run_id
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Sesión de relectura no encontrada.",
+            ) from exc
+    else:
+        summary = record.parsed_summary_json or {}
     entries, entities = await derive_context_mapping_entries(
         session,
         tenant.tenant_id,
@@ -791,7 +806,20 @@ async def compute_inventory_effects(
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
 
-    summary = record.parsed_summary_json or {}
+    if body.reread_run_id is not None:
+        from app.application.services import reread_service  # noqa: PLC0415
+
+        try:
+            summary = await reread_service.load_reread_run_summary(
+                session, tenant.tenant_id, file_id, body.reread_run_id
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Sesión de relectura no encontrada.",
+            ) from exc
+    else:
+        summary = record.parsed_summary_json or {}
     entries, entities = await derive_context_mapping_entries(
         session,
         tenant.tenant_id,
@@ -950,7 +978,20 @@ async def compute_purchase_groups(
             detail=f"El archivo aún se está procesando (estado: {record.processing_status}).",
         )
 
-    summary = record.parsed_summary_json or {}
+    if body.reread_run_id is not None:
+        from app.application.services import reread_service  # noqa: PLC0415
+
+        try:
+            summary = await reread_service.load_reread_run_summary(
+                session, tenant.tenant_id, file_id, body.reread_run_id
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Sesión de relectura no encontrada.",
+            ) from exc
+    else:
+        summary = record.parsed_summary_json or {}
     contextos = [c for c in (summary.get("mapping_contexts") or []) if c.get("context_id")]
 
     # Entidad EFECTIVA por hoja, con la MISMA prioridad que el confirm y que el
@@ -1443,6 +1484,11 @@ async def get_column_mappings(
         description="Contexto (hoja/tabla) en archivos multi-contexto. Si se da, "
         "se usan sus headers/preview y, salvo override, su entity_type.",
     ),
+    reread_run_id: uuid.UUID | None = Query(
+        default=None,
+        description="F-RR Fase 6: si viene, las sugerencias se calculan contra el "
+        "summary FRESCO de esa sesión de relectura, no contra el confirm original.",
+    ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ColumnMappingSuggestion]:
@@ -1486,7 +1532,20 @@ async def get_column_mappings(
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
 
-    summary = record.parsed_summary_json or {}
+    from app.application.services import reread_service  # noqa: PLC0415
+
+    if reread_run_id is not None:
+        try:
+            summary = await reread_service.load_reread_run_summary(
+                session, tenant.tenant_id, file_id, reread_run_id
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Sesión de relectura no encontrada.",
+            ) from exc
+    else:
+        summary = record.parsed_summary_json or {}
 
     # Resolver headers/sample_rows/entity_type por contexto si se pidió uno.
     resolved_entity = entity_type or "sale"
@@ -3432,19 +3491,98 @@ async def confirm_file(
 )
 async def reread_preview(
     file_id: uuid.UUID,
+    body: RereadPreviewRequest | None = None,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> RereadPreviewResponse:
     """F-RR: reusa (o crea) una sesión de relectura para este archivo — descarga
     y parsea UNA sola vez, cacheada en el run. El ``run_id`` + ``draft_version``
     devueltos son la referencia que ``POST .../reread/apply`` exige para
-    garantizar que aplica EXACTAMENTE lo que se previsualizó acá."""
+    garantizar que aplica EXACTAMENTE lo que se previsualizó acá.
+
+    F-RR Fase 6: con ``body`` (mapeo/decisiones que el usuario corrigió en la
+    pantalla de revisión), además PERSISTE la corrección en el borrador de la
+    sesión (incrementa ``draft_version``) antes de recalcular — así una
+    corrección sobrevive a un refresh y ata el próximo ``apply`` a la versión
+    exacta que el usuario vio. Sin ``body`` (o vacío), comportamiento idéntico
+    al de siempre: solo lee/recalcula, no persiste nada."""
     from app.application.services import reread_service  # noqa: PLC0415
 
     try:
         run, fresh = await reread_service.start_or_resume_preview_session(
             session, file_id, tenant.tenant_id
         )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
+        ) from exc
+
+    if body is not None and body.column_mappings:
+        # Mismo criterio que el confirm (F8b Task 2): validar ANTES de
+        # persistir — una decisión inválida se rechaza upfront, nunca a mitad
+        # de una corrección ya guardada.
+        risk_context_mappings: dict[str, list[MappingEntry]] = defaultdict(list)
+        risk_context_entities: dict[str, str] = {}
+        summary_context_entity = {
+            ctx["context_id"]: ctx["entity_type"]
+            for ctx in fresh.get("mapping_contexts", [])
+            if ctx.get("context_id") and ctx.get("entity_type")
+        }
+        override = body.context_entity or {}
+        for mapping in body.column_mappings:
+            if parse_target(mapping.target_field).kind in ("ignore", "none"):
+                continue
+            cid = mapping.context_id or "table"
+            # Misma prioridad que ``_entity_for`` del confirm: override del
+            # usuario → entidad original del summary → la del propio mapping →
+            # "sale" como último fallback.
+            entity = (
+                override.get(cid)
+                or summary_context_entity.get(cid)
+                or mapping.entity_type
+                or "sale"
+            )
+            risk_context_entities[cid] = entity
+            risk_context_mappings[cid].append(
+                MappingEntry(
+                    source_column=mapping.source_column,
+                    target_field=mapping.target_field,
+                    mapping_source="none",
+                    user_selected=mapping.user_selected,
+                )
+            )
+        if body.column_risk_decisions:
+            violations = validate_column_risk_decisions(
+                body.column_risk_decisions,
+                risk_context_mappings,
+                risk_context_entities,
+                confirmed_fields=body.confirmed_fields,
+                context_confirmed=body.context_confirmed,
+            )
+            if violations:
+                detail = " ".join(v.reason for v in violations)
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Decisión de columna riesgosa inválida: {detail}",
+                )
+
+        details = dict(run.details_json or {})
+        details["draft"] = {
+            "column_mappings": [m.model_dump(mode="json") for m in body.column_mappings],
+            "context_entities": risk_context_entities,
+            "confirmed_fields": dict(body.confirmed_fields),
+            "context_confirmed": dict(body.context_confirmed),
+            "column_risk_decisions": [
+                d.model_dump(mode="json") for d in body.column_risk_decisions
+            ],
+            "stock_treatment": body.stock_treatment,
+            "master_column_mappings": body.master_column_mappings,
+        }
+        details["draft_version"] = int(details.get("draft_version", 0)) + 1
+        run.details_json = details
+        await session.flush()
+
+    try:
         preview = await reread_service.preview_reread(
             session, file_id, tenant.tenant_id, fresh_override=fresh, run=run
         )
@@ -3453,7 +3591,9 @@ async def reread_preview(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         ) from exc
 
-    reread_service.mark_session_ready_to_apply(run)
+    reread_service.mark_session_ready_to_apply(
+        run, column_risk_outcome=preview.column_risk_outcome
+    )
     await session.commit()
 
     return RereadPreviewResponse(
@@ -3463,6 +3603,11 @@ async def reread_preview(
         status=run.status,
         counts=RereadCounts(**preview.counts()),
         impact=RereadImpactProjection(**asdict(preview.unlinked_products)),
+        sheets=[RereadSheetStatus(**s) for s in preview.sheets],
+        mapping_contexts=preview.mapping_contexts,
+        contextual_column_risk=[
+            ContextualColumnRisk(**row) for row in preview.contextual_column_risk
+        ],
         legacy_fallback=preview.legacy_fallback,
         sample_changes=preview.sample_changes,
     )

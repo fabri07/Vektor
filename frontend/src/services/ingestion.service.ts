@@ -468,9 +468,57 @@ export interface RereadItem {
   after: Record<string, unknown> | null;
 }
 
+// F-RR Fase 4: impacto proyectado en el vínculo venta/compra↔producto, ANTES
+// de aplicar. 5 categorías mutuamente excluyentes.
+export interface RereadImpactProjection {
+  ventas_con_producto: number;
+  ventas_sin_producto: number;
+  ventas_sin_producto_samples: Record<string, unknown>[];
+  compras_vinculadas: number;
+  compras_producto_nuevo: number;
+  compras_sin_producto: number;
+  compras_sin_producto_samples: Record<string, unknown>[];
+  compras_gate_bloqueado: number;
+  compras_gate_bloqueado_samples: Record<string, unknown>[];
+  movimientos_sin_producto_esperado: number;
+}
+
+// F-RR Fase 6/8: corrección que el usuario arma en vivo durante la revisión
+// de una relectura — espejo de `RereadPreviewRequest` (backend).
+export interface RereadDraft {
+  columnMappings: ColumnMapping[];
+  contextEntity: Record<string, string>;
+  confirmedFields: Record<string, boolean>;
+  contextConfirmed: Record<string, boolean>;
+  columnRiskDecisions: ColumnRiskDecision[];
+  stockTreatment?: StockTreatment | Record<string, StockTreatment> | null;
+}
+
+// F-RR Fase 8: estado de revisión de UNA hoja/contexto.
+export interface RereadSheetStatus {
+  context_id: string;
+  label: string;
+  entity_type: string;
+  row_count: number;
+  status: "completa" | "requiere_revision" | "ignorada" | "ambigua";
+  columns_mapped: number;
+  columns_pending: number;
+  is_summary_or_derived: boolean;
+}
+
 export interface RereadPreviewResponse {
   file_id: string;
+  // F-RR: sesión de relectura — referencia + versión del borrador que ata el
+  // apply al preview exacto que el usuario vio.
+  run_id: string;
+  draft_version: number;
+  status: string; // "PREVIEWING" | "NEEDS_REVIEW" | "READY_TO_APPLY"
   counts: RereadCounts;
+  impact: RereadImpactProjection;
+  // F-RR Fase 8: revisión completa de interpretación.
+  sheets: RereadSheetStatus[];
+  mapping_contexts: MappingContext[];
+  contextual_column_risk: ContextualColumnRisk[];
   legacy_fallback: boolean;
   sample_changes: RereadItem[];
 }
@@ -491,7 +539,7 @@ export interface RereadApplyResponse {
 export interface RereadApplyStartResponse {
   file_id: string;
   run_id: string;
-  status: string; // "RUNNING"
+  status: string; // "QUEUED" (o "FAILED" si el enqueue mismo falló)
 }
 
 export interface RereadRunStatusResponse {
@@ -526,6 +574,11 @@ export interface RereadUndoResponse {
   removed: number;
   status: string;
   not_reverted_entities: RereadNotRevertedEntity[];
+}
+
+export interface RereadCancelResponse {
+  run_id: string;
+  status: string; // "FAILED"
 }
 
 export const ingestionService = {
@@ -611,9 +664,13 @@ export const ingestionService = {
     fileId: string,
     entityType: string = "sale",
     contextId?: string,
+    // F-RR Fase 6/8: si viene, las sugerencias se calculan contra el summary
+    // FRESCO de esa sesión de relectura, no contra el confirm original.
+    rereadRunId?: string,
   ): Promise<ColumnMappingSuggestion[]> {
     const params = new URLSearchParams({ entity_type: entityType });
     if (contextId) params.set("context_id", contextId);
+    if (rereadRunId) params.set("reread_run_id", rereadRunId);
     const res = await api.get<ColumnMappingSuggestion[]>(
       `/ingestion/files/${fileId}/column-mappings?${params.toString()}`,
     );
@@ -745,6 +802,8 @@ export const ingestionService = {
       contextEntity: Record<string, string>;
       confirmedFields: Record<string, boolean>;
       contextConfirmed: Record<string, boolean>;
+      // F-RR Fase 6/8: idem `getColumnMappings`.
+      rereadRunId?: string;
     },
     signal?: AbortSignal,
   ): Promise<ContextualColumnRisk[]> {
@@ -755,6 +814,7 @@ export const ingestionService = {
         context_entity: body.contextEntity,
         confirmed_fields: body.confirmedFields,
         context_confirmed: body.contextConfirmed,
+        reread_run_id: body.rereadRunId ?? null,
       },
       { signal },
     );
@@ -797,10 +857,25 @@ export const ingestionService = {
   },
 
   // ── Relectura de archivos (REREAD_FILE) ──────────────────────────────────
-  async rereadPreview(fileId: string): Promise<RereadPreviewResponse> {
+  // F-RR Fase 6/8: con `draft`, además de recalcular PERSISTE la corrección
+  // en el borrador de la sesión (incrementa `draft_version`) — sin `draft`,
+  // comportamiento idéntico a antes (solo lee/recalcula).
+  async rereadPreview(
+    fileId: string,
+    draft?: RereadDraft,
+  ): Promise<RereadPreviewResponse> {
     const res = await api.post<RereadPreviewResponse>(
       `/ingestion/files/${fileId}/reread/preview`,
-      undefined,
+      draft
+        ? {
+            column_mappings: draft.columnMappings,
+            context_entity: draft.contextEntity,
+            confirmed_fields: draft.confirmedFields,
+            context_confirmed: draft.contextConfirmed,
+            column_risk_decisions: draft.columnRiskDecisions,
+            stock_treatment: draft.stockTreatment ?? null,
+          }
+        : undefined,
       // Relectura sobre archivos grandes (miles de filas) puede tardar más que
       // el default de 15s del cliente; el edge de Railway corta a ~300s.
       { timeout: REREAD_TIMEOUT_MS },
@@ -809,9 +884,19 @@ export const ingestionService = {
   },
 
   // Encola el apply en background y devuelve el run para hacer polling.
-  async rereadApply(fileId: string): Promise<RereadApplyStartResponse> {
+  //
+  // F-RR: ata la ejecución a la sesión de preview EXACTA que el usuario vio —
+  // `runId`/`draftVersion` vienen de `RereadPreviewResponse`. Si alguien más
+  // corrigió el borrador después (`draft_version` desactualizado) o el
+  // archivo cambió en S3, el backend rechaza con 409.
+  async rereadApply(
+    fileId: string,
+    runId: string,
+    draftVersion: number,
+  ): Promise<RereadApplyStartResponse> {
     const res = await api.post<RereadApplyStartResponse>(
       `/ingestion/files/${fileId}/reread/apply`,
+      { run_id: runId, draft_version: draftVersion },
     );
     return res.data;
   },
@@ -853,6 +938,16 @@ export const ingestionService = {
       `/ingestion/files/${fileId}/reread/undo`,
       undefined,
       { timeout: REREAD_TIMEOUT_MS },
+    );
+    return res.data;
+  },
+
+  // Corrección C5 (revisión externa 2026-08-19): abandona una sesión de
+  // revisión de relectura abierta — sin esto, "Cancelar" solo limpiaba el
+  // estado local y la sesión quedaba abierta hasta que el sweep la venciera.
+  async rereadCancel(fileId: string, runId: string): Promise<RereadCancelResponse> {
+    const res = await api.post<RereadCancelResponse>(
+      `/ingestion/files/${fileId}/reread/${runId}/cancel`,
     );
     return res.data;
   },
