@@ -41,6 +41,12 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "unit_price": "Precio unitario vendido",
         "payment_method": "Método de pago",
         "product_name": "Nombre del producto",
+        # Identifican el producto de la línea, igual que en `expense` — sin
+        # esto, cuando la detección automática de SKU falla (columna genérica
+        # "ID", sin ninguno de los alias de `_SKU_COLS`), el usuario no tiene
+        # forma de corregir el mapeo a mano en una hoja de ventas.
+        "sku": "Código (SKU)",
+        "barcode": "Código de barras (EAN/UPC)",
         "notes": "Notas",
         # F7a: campos de referencia al cliente (aditivo — el mapeo/vinculación real
         # a un Customer existente queda para 7c; acá solo se abre el contrato).

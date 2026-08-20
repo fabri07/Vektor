@@ -1068,6 +1068,75 @@ async def test_apply_reread_uses_draft_column_mapping_to_import_correctly(
     assert activos[0].amount == Decimal("1500")
 
 
+_CSV_VENTA_ID_GENERICO = b"fecha,id,monto\n2026-01-05,COC500,1500\n"
+
+
+async def test_apply_reread_mapea_columna_generica_a_sku_y_vincula_producto_en_venta(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap detectado en revisión externa (2026-08-20): antes de esto, "Código
+    (SKU)" no estaba en el catálogo canónico de ``sale`` — un usuario no podía
+    corregir a mano una columna generica ("id", que ningún alias de
+    ``_SKU_COLS`` matchea) para vincular la venta a un producto por SKU. El
+    motor de resolución ya soportaba SKU en ventas (`_venta_producto_id`); lo
+    que faltaba era la posibilidad de MAPEARLO desde la revisión de
+    relectura. Prueba de punta a punta: preview → mapear "id" a "sku" → apply
+    → `SaleEntry.product_id` correcto."""
+    existing = Product(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        name="Coca 500ml",
+        sku="COC500",
+        sale_price_ars=Decimal("500"),
+        unit_cost_ars=Decimal("300"),
+        stock_units=5,
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    _patch_s3(monkeypatch, _CSV_VENTA_ID_GENERICO)
+    file_con_draft = await _make_file(db_session, tenant, _CSV_VENTA_ID_GENERICO)
+    run, fresh = await reread_service.start_or_resume_preview_session(
+        db_session, file_con_draft.id, tenant.tenant_id
+    )
+    draft = {
+        "column_mappings": [
+            {"source_column": "fecha", "target_field": "transaction_date"},
+            {"source_column": "id", "target_field": "sku"},
+            {"source_column": "monto", "target_field": "amount"},
+        ],
+        "context_entities": {"table": "sale"},
+        "confirmed_fields": {"ventas": True},
+        "context_confirmed": {},
+        "column_risk_decisions": [],
+        "stock_treatment": None,
+        "master_column_mappings": None,
+    }
+    details = dict(run.details_json or {})
+    details["draft"] = draft
+    details["draft_version"] = 1
+    run.details_json = details
+    run.status = "READY_TO_APPLY"
+    await db_session.flush()
+
+    await reread_service.apply_reread(
+        db_session, file_con_draft.id, tenant.tenant_id, run=run, fresh_override=fresh
+    )
+    await db_session.commit()
+
+    ventas_con_draft = (
+        await db_session.execute(
+            select(SaleEntry).where(
+                SaleEntry.tenant_id == tenant.tenant_id,
+                SaleEntry.source_upload_id == file_con_draft.id,
+                SaleEntry.voided_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    assert len(ventas_con_draft) == 1
+    assert ventas_con_draft[0].product_id == existing.id
+
+
 _CSV_RISK_AMBIGUOUS_TWO_COLS = (
     b"fecha,producto,monto,monto2,proveedor\n"
     b"2026-01-05,Coca Cola,1500,,Distribuidora Sur\n"

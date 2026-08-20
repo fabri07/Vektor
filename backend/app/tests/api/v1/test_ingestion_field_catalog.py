@@ -48,6 +48,19 @@ class TestFieldCatalog:
         assert "payment_method" in valores
         assert "is_recurring" in valores
 
+    async def test_sale_incluye_sku_y_barcode_para_vincular_producto(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Sin esto, una hoja de ventas donde la detección automática de SKU
+        falla (columna genérica "ID", sin ninguno de los alias de `_SKU_COLS`)
+        no tiene forma de que el usuario corrija el mapeo a mano — "Código
+        (SKU)" ni "Código de barras" aparecían como opción en el `<select>`
+        de una hoja de ventas, solo en compras/catálogo."""
+        response = await client.get("/api/v1/ingestion/field-catalog", headers=auth_headers)
+        valores = {f["value"] for f in response.json()["sale"]["fields"]}
+        assert "sku" in valores
+        assert "barcode" in valores
+
     async def test_los_tres_precios_de_producto_estan_disponibles(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
