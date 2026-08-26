@@ -955,11 +955,20 @@ async def test_run_scan_survives_without_expire_on_commit_false(
                 status="ACTIVE",
             )
         )
+        # El perfil va SIEMPRE junto al tenant: desde que el preview proyecta
+        # el vínculo venta/compra↔producto, `preview_reread` resuelve el
+        # vertical con `_load_tenant_vertical`, que no tiene fallback a
+        # propósito (importar con el catálogo de otro rubro clasifica mal cada
+        # fila). Un `Tenant` suelto es un estado imposible en producción, y sin
+        # perfil `run_scan` aísla el `UnknownVerticalError` y reporta bucket
+        # `error` en vez del outcome real — el test dejaba de vigilar lo suyo.
+        # Recibe el UUID plano, no el objeto ORM: nada que expirar post-commit.
+        await add_business_profile(session, tenant_id_value)
         file_a = _build_file(file_a_id)
         file_b = _build_file(file_b_id)
         session.add(file_a)
         session.add(file_b)
-        # UN solo commit para tenant + ambos archivos: con el default
+        # UN solo commit para tenant + perfil + ambos archivos: con el default
         # ``expire_on_commit=True`` de esta sesión, esto ya deja file_a/file_b
         # expirados ANTES de que ``run_scan`` arranque — el escenario más
         # exigente posible para el re-fetch defensivo.
