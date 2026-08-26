@@ -13,13 +13,13 @@ import PreciosPage from "../page";
 describe("/precios — CTAs de solicitud", () => {
   test("el card Gratuito lleva al formulario con plan=free", () => {
     render(<PreciosPage />);
-    const cta = screen.getByRole("link", { name: /Pedir acceso gratuito/i });
+    const cta = screen.getByRole("link", { name: /Quiero pedir mi acceso gratuito/i });
     expect(cta).toHaveAttribute("href", "/solicitar-acceso?plan=free&src=precios_free");
   });
 
   test("el card Premium lleva al formulario con plan=premium", () => {
     render(<PreciosPage />);
-    const cta = screen.getByRole("link", { name: /Solicitar Premium/i });
+    const cta = screen.getByRole("link", { name: /Quiero recibir novedades de Premium/i });
     expect(cta).toHaveAttribute(
       "href",
       "/solicitar-acceso?plan=premium&src=precios_premium",

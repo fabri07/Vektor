@@ -61,7 +61,15 @@ export default function PreciosPage() {
               href="/solicitar-acceso?plan=free&src=precios_free"
               className="mt-8 inline-flex items-center justify-center rounded-full bg-white px-7 py-3 text-sm font-semibold text-vektor-night transition hover:bg-white/90"
             >
-              Quiero empezar gratis
+              {/*
+                "Empezar gratis" sobrepromete: el registro es cerrado y el alta
+                la aprueba el dueño a mano, así que acá no se empieza nada — se
+                postula. El copy pass de 2026-08-18 lo puso como "Quiero empezar
+                gratis" y `precios_cta.test.tsx` lo detectó; mantener el verbo
+                "pedir" es lo que hace que el CTA describa lo que realmente pasa
+                al hacer click.
+              */}
+              Quiero pedir mi acceso gratuito
             </Link>
           </div>
 
