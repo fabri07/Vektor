@@ -3277,7 +3277,15 @@ async def start_background_apply(
             # Python-side. Sin esto, "empezado hace..." arrancaría contando
             # desde el último toque de la sesión de PREVIEW, no desde que
             # entró en cola.
-            .values(status="QUEUED", dry_run=False, updated_at=datetime.now(UTC))
+            # `queued_at` es el ancla del cronómetro del frontend (una sola
+            # escritura, nunca se pisa); `updated_at` sigue moviéndose porque
+            # el sweep de huérfanos mide por último toque real.
+            .values(
+                status="QUEUED",
+                dry_run=False,
+                updated_at=datetime.now(UTC),
+                queued_at=datetime.now(UTC),
+            )
         )
         if cast("CursorResult[Any]", result).rowcount == 0:
             raise ValueError(
@@ -3292,6 +3300,9 @@ async def start_background_apply(
         repair_type=REPAIR_TYPE_REREAD,
         status="QUEUED",
         dry_run=False,
+        # Nace ya en cola: mismo ancla de cronómetro que la transición de
+        # arriba (camino legado, sin sesión de preview previa).
+        queued_at=datetime.now(UTC),
         # Lineage (F-RR Fase 5): si este run reemplaza uno huérfano que el
         # scan de arriba acaba de cerrar, queda trazable de cuál viene.
         source_run_id=last_expired_run_id,

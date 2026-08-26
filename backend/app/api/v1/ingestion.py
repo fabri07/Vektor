@@ -3814,7 +3814,16 @@ async def reread_run_status(
         # Fase 10: solo tiene sentido mostrar "empezado hace..." mientras el
         # run está en curso — en un estado terminal confundiría en vez de
         # informar.
-        applying_since=run.updated_at if run.status in ("QUEUED", "APPLYING") else None,
+        # `queued_at` (una sola escritura) en vez de `updated_at` (que el
+        # reclamo del worker pisa, haciendo retroceder el cronómetro). Fallback
+        # a `updated_at` SOLO para los runs que ya estaban en vuelo cuando se
+        # deployó la columna: sin él mostrarían el contexto vacío, que es peor
+        # que un ancla imprecisa. `if ... is None`, no `or`.
+        applying_since=(
+            (run.queued_at if run.queued_at is not None else run.updated_at)
+            if run.status in ("QUEUED", "APPLYING")
+            else None
+        ),
     )
 
 

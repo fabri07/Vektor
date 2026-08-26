@@ -3530,6 +3530,86 @@ class TestRereadRunStatusEndpoint:
         assert response.status_code == 200
         assert response.json()["applying_since"] is None
 
+    async def test_applying_since_no_retrocede_cuando_el_worker_reclama(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """El cronómetro cuenta desde que el run entró EN COLA, y no se reinicia
+        cuando el worker lo reclama (2026-08-26).
+
+        `applying_since` se servía desde `updated_at`, que se pisa con un
+        `now()` explícito dos veces: al entrar a QUEUED y otra vez en el reclamo
+        QUEUED->APPLYING. Un run que esperó 30s en cola mostraba "empezado hace
+        30s" y saltaba a "hace 0s" — el reloj iba para atrás justo cuando algo
+        finalmente empezaba a pasar. Ahora lee `queued_at`, que se escribe una
+        sola vez; `updated_at` sigue moviéndose con cada escritura porque el
+        sweep de runs huérfanos depende de eso.
+
+        El bump de `updated_at` de acá NO copia el UPDATE del worker: simula
+        CUALQUIER escritura posterior al run, que es la condición real que
+        `applying_since` tiene que sobrevivir."""
+        from app.application.services.reread_service import start_background_apply
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid5/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+        run_id, _draft_version = await _start_ready_reread_session(
+            db_session, sample_tenant, record
+        )
+
+        existing = await db_session.get(DataRepairRun, run_id)
+        assert existing is not None
+        await start_background_apply(
+            db_session,
+            record.id,
+            sample_tenant.tenant_id,
+            existing_run=existing,
+        )
+        await db_session.commit()
+
+        en_cola = await client.get(
+            f"/api/v1/ingestion/files/{record.id}/reread/runs/{run_id}",
+            headers=auth_headers,
+        )
+        assert en_cola.status_code == 200
+        assert en_cola.json()["status"] == "QUEUED"
+        desde_la_cola = en_cola.json()["applying_since"]
+        assert desde_la_cola is not None
+
+        run = await db_session.get(DataRepairRun, run_id)
+        assert run is not None
+        updated_at_en_cola = run.updated_at
+        run.status = "APPLYING"
+        run.updated_at = datetime.now(UTC)
+        await db_session.commit()
+
+        en_curso = await client.get(
+            f"/api/v1/ingestion/files/{record.id}/reread/runs/{run_id}",
+            headers=auth_headers,
+        )
+        assert en_curso.status_code == 200
+        assert en_curso.json()["status"] == "APPLYING"
+        assert en_curso.json()["applying_since"] == desde_la_cola
+
+        # Que el bump haya sido real: sin esto el test pasaría aunque
+        # `updated_at` no se hubiera movido, sin probar nada.
+        await db_session.refresh(run)
+        assert run.updated_at > updated_at_en_cola
+
 
 class TestRereadPreviewSessionEndpoint:
     """F-RR: POST /reread/preview crea/reusa una sesión, y su run_id se puede

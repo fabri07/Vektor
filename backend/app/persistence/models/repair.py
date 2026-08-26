@@ -49,6 +49,16 @@ class DataRepairRun(UUIDPrimaryKeyMixin, Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+    # F-RR (2026-08-26): momento en que el run entró EN COLA para aplicarse.
+    # SEPARADO de `updated_at` a propósito, mismo motivo que
+    # `uploaded_files.import_started_at` (mig 20260801_0001): `updated_at` se
+    # mueve con CUALQUIER escritura — y el reclamo QUEUED->APPLYING del worker
+    # lo pisa — así que servir el cronómetro "empezado hace..." desde ahí lo
+    # hacía retroceder justo cuando el worker tomaba el run. Se escribe una
+    # sola vez, al entrar a QUEUED, y nunca más. Nullable sin backfill: los
+    # runs que ya estaban en vuelo al deployar no lo tienen (ver el fallback
+    # explícito en `api/v1/ingestion.py`).
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
