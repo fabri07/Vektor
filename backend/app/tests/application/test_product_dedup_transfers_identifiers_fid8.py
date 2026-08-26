@@ -179,6 +179,10 @@ async def test_revertir_el_merge_no_falla_aunque_el_identificador_quede_en_el_ca
 
     plan = await svc.plan_dedup(db_session, tid)
     real_canonical_id = next(g.canonical_id for g in plan.groups if g.is_mergeable)
+    # `canonical_id` es `UUID | None` en el plan (un grupo no fusionable no tiene
+    # canónico); acá ya filtramos por `is_mergeable`, así que nunca es None —
+    # pero mypy no puede saberlo y `_active_identifiers` exige `UUID`.
+    assert real_canonical_id is not None
     source_run_id = await svc.persist_dedup_plan(db_session, tid, plan)
     applied = await svc.apply_dedup_plan(db_session, tid, source_run_id, lease_id=None)
     assert applied.status == "APPLIED"
