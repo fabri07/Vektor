@@ -30,3 +30,23 @@ describe("RereadProgress — contexto (Fase 10, revisión 2026-08-20)", () => {
     expect(screen.getByText(/~50 fila\(s\) · empezado hace \d+s/)).toBeInTheDocument();
   });
 });
+
+describe("RereadProgress — honestidad del avance (2026-08-26)", () => {
+  it("no muestra ningún porcentaje: no hay medición real de filas procesadas", () => {
+    render(<RereadProgress label="Aplicando cambios…" totalRows={1200} />);
+    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+  });
+
+  it("usa una barra indeterminada anunciada con la etapa en curso", () => {
+    render(<RereadProgress label="Aplicando cambios…" />);
+    const bar = screen.getByRole("progressbar");
+    expect(bar).toHaveAttribute("aria-busy", "true");
+    expect(bar).toHaveAccessibleName("Aplicando cambios…");
+  });
+
+  it("sin label anuncia la etapa que está ciclando, no un rótulo de import", () => {
+    render(<RereadProgress />);
+    expect(screen.getByRole("progressbar")).toHaveAccessibleName(/…/);
+    expect(screen.getByRole("progressbar")).not.toHaveAccessibleName("Importando");
+  });
+});

@@ -2,12 +2,20 @@
 
 import { useEffect, useState } from "react";
 
+import { IndeterminateBar } from "./IndeterminateBar";
+
 /**
- * Barra de progreso con etapas para la relectura. Como el preview/apply es una
- * sola llamada HTTP (sin streaming), la barra es animada: avanza suavemente
- * hacia ~92% mientras la operación está en curso y cicla las etiquetas de etapa.
- * Al terminar, el padre desmonta el componente (la barra no "miente" llegando a
- * 100% sola).
+ * Indicador de "en curso" para la relectura. NO reporta avance: ni el preview ni
+ * el apply informan filas procesadas, así que no hay nada que medir. Hasta
+ * 2026-08-26 esta barra animaba un porcentaje propio de 8% a 92% con un
+ * `setInterval` — un número inventado que sugería una medición inexistente.
+ * Ahora usa la misma `IndeterminateBar` honesta que el import
+ * (`FileListSection`, estado IMPORTING), que dice "algo está en curso" sin
+ * afirmar cuánto falta.
+ *
+ * Lo que sí es real y se conserva: el total de filas del archivo (conocido desde
+ * el preview) y el tiempo transcurrido. Las etapas ciclan solo como pista de qué
+ * hace el backend; al terminar, el padre desmonta el componente.
  */
 const STAGES = [
   "Descargando archivo…",
@@ -38,25 +46,16 @@ export function RereadProgress({
    * cronómetro "empezado hace...". */
   startedAt?: string | null;
 }) {
-  const [pct, setPct] = useState(8);
   const [stageIdx, setStageIdx] = useState(0);
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    // Avance asintótico hacia 92%: rápido al principio, lento al final.
-    const tick = setInterval(() => {
-      setPct((p) => Math.min(92, p + Math.max(1, (92 - p) * 0.12)));
-    }, 220);
     // El ciclado de etapas solo aplica si NO hay un label fijo (fase 'applying').
-    const stages = label
-      ? null
-      : setInterval(() => {
-          setStageIdx((i) => (i + 1) % STAGES.length);
-        }, 1300);
-    return () => {
-      clearInterval(tick);
-      if (stages) clearInterval(stages);
-    };
+    if (label) return;
+    const stages = setInterval(() => {
+      setStageIdx((i) => (i + 1) % STAGES.length);
+    }, 1300);
+    return () => clearInterval(stages);
   }, [label]);
 
   useEffect(() => {
@@ -71,6 +70,8 @@ export function RereadProgress({
     return () => clearInterval(tick);
   }, [startedAt]);
 
+  const stage = label ?? STAGES[stageIdx];
+
   const context = [
     totalRows != null ? `~${totalRows.toLocaleString("es-AR")} fila(s)` : null,
     startedAt ? `empezado hace ${formatElapsed(elapsed)}` : null,
@@ -80,16 +81,8 @@ export function RereadProgress({
 
   return (
     <div className="flex flex-col gap-2 py-2">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-vektor-body">{label ?? STAGES[stageIdx]}</span>
-        <span className="tabular-nums text-vektor-muted">{Math.round(pct)}%</span>
-      </div>
-      <div className="h-2 w-full overflow-hidden rounded-full bg-vektor-border">
-        <div
-          className="h-full rounded-full bg-vk-blue transition-[width] duration-200 ease-out"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
+      <p className="text-xs text-vektor-body">{stage}</p>
+      <IndeterminateBar label={stage} />
       {context && <p className="text-[11px] text-vektor-muted">{context}</p>}
     </div>
   );
