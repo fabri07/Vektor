@@ -3,10 +3,10 @@
 /**
  * PublicNav — barra de navegación pública (marketing), estilo adhoc en tema dark.
  *
- * Items: Rubros ▾ (dropdown de verticales) · Quiénes somos · Precios · Contactanos
+ * Items: Soluciones por rubro ▾ (dropdown de verticales) · Por qué Véktor · Planes · Hablemos
  * Botones: Iniciar sesión (outline → /login) · Contactanos (filled → /contacto)
  *
- * Accesibilidad: "Rubros" es un disclosure de navegación (NO un role="menu",
+ * Accesibilidad: el dropdown de rubros es un disclosure de navegación (NO un role="menu",
  * para no prometer semántica de menú que no implementamos). Operable por teclado:
  * ArrowDown abre y enfoca el primer item, ArrowUp/ArrowDown mueven el foco entre
  * items, Escape cierra y devuelve el foco al botón. Cierra con click afuera.

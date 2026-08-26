@@ -69,8 +69,8 @@ interface FormErrors {
  * Un solo catálogo para las dos pantallas que preguntan lo mismo.
  *
  * Antes había dos listas escritas a mano —"Mis márgenes / Mi stock / Mi caja"
- * acá, "El margen / El stock / La caja" en la solicitud— sobre los mismos tres
- * valores. Dos textos para la misma pregunta se desincronizan solos, y el
+ * acá y otra distinta en la solicitud— sobre los mismos tres valores. Dos
+ * textos para la misma pregunta se desincronizan solos, y el
  * visitante que ya la contestó en el formulario público no reconoce la
  * segunda como la misma.
  */

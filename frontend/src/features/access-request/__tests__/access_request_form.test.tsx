@@ -7,6 +7,18 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AccessRequestForm } from "../AccessRequestForm";
 import { api } from "@/lib/api";
 import { REQUIRED_FIELD_COUNT } from "@/validation/accessRequest";
+import {
+  CAN_SHARE_FILES_OPTIONS,
+  HISTORY_DEPTH_OPTIONS,
+  MAIN_CONCERN_OPTIONS,
+  RECORDS_FORMAT_OPTIONS,
+  REQUESTED_PLAN_OPTIONS,
+  REVENUE_BAND_OPTIONS,
+  accessRequestFieldLabel,
+  STAFF_SIZE_OPTIONS,
+  YEARS_OPERATING_OPTIONS,
+  labelOf,
+} from "@/lib/accessRequestOptions";
 
 jest.mock("@/lib/api", () => ({ api: { post: jest.fn() } }));
 
@@ -40,23 +52,45 @@ async function fillContacto(user: User) {
   await user.type(screen.getByLabelText(/Nombre del negocio/i), "Kiosco Ana");
 }
 
-/** Los 8 grupos de opción cerrada, con una etiqueta unívoca de cada uno. */
-const GRUPOS: ReadonlyArray<readonly [string, RegExp]> = [
-  ["years_operating", /Más de 5 años/i],
-  ["staff_size", /Solo yo/i],
-  ["main_concern", /El margen/i],
-  ["monthly_revenue_band", /Prefiero no decirlo/i],
-  ["records_format", /Excel o Google Sheets/i],
-  ["history_depth", /Entre 1 y 3 años/i],
-  ["can_share_files", /Sí, y están ordenados/i],
-  ["requested_plan", /Cuenta gratuita/i],
+/**
+ * Los 8 grupos de opción cerrada, con una opción unívoca de cada uno.
+ *
+ * El rótulo sale del catálogo compartido en vez de estar escrito acá: estos
+ * textos son LOCALIZADORES para llegar al control y seguir verificando el
+ * payload, no contenido que este archivo venga a validar. El copy pass de
+ * 2026-08-18 los cambió y rompió toda la suite sin que nada del comportamiento
+ * se hubiera movido. Los rótulos visibles los fija el test de contrato en
+ * `lib/__tests__/access_request_options.test.ts`.
+ */
+const GRUPOS: ReadonlyArray<readonly [string, string]> = [
+  ["years_operating", labelOf(YEARS_OPERATING_OPTIONS, "gt_5y")],
+  ["staff_size", labelOf(STAFF_SIZE_OPTIONS, "solo")],
+  ["main_concern", labelOf(MAIN_CONCERN_OPTIONS, "MARGIN")],
+  ["monthly_revenue_band", labelOf(REVENUE_BAND_OPTIONS, "no_contesta")],
+  ["records_format", labelOf(RECORDS_FORMAT_OPTIONS, "planilla")],
+  ["history_depth", labelOf(HISTORY_DEPTH_OPTIONS, "1y_3y")],
+  ["can_share_files", labelOf(CAN_SHARE_FILES_OPTIONS, "si_ordenados")],
+  ["requested_plan", labelOf(REQUESTED_PLAN_OPTIONS, "free")],
 ];
+
+/**
+ * Matcher del contador de progreso. Lo que este test vigila es que el TOTAL
+ * salga de `REQUIRED_FIELD_COUNT` y no de un número escrito a mano — no la
+ * frase que lo envuelve. Un regex sobre "N de TOTAL" sobrevive a que el copy
+ * agregue o saque palabras alrededor, y sigue rompiendo si el total miente.
+ */
+function contador(respondidas: number): RegExp {
+  return new RegExp(`\\b${respondidas} de ${REQUIRED_FIELD_COUNT}\\b`);
+}
 
 /** Completa el screening (tu negocio + tu info) y el plan. */
 async function fillScreening(user: User, omitir: readonly string[] = []) {
   for (const [campo, etiqueta] of GRUPOS) {
     if (omitir.includes(campo)) continue;
-    await user.click(screen.getByLabelText(etiqueta));
+    // `exact: false`: varias opciones rinden el rótulo seguido de su `detail`
+    // dentro del mismo <label>, así que el texto accesible es más largo que la
+    // etiqueta sola.
+    await user.click(screen.getByLabelText(etiqueta, { exact: false }));
   }
 }
 
@@ -86,12 +120,12 @@ const CLAVES_DEL_PAYLOAD = [
 ];
 
 function submitButton() {
-  return screen.getByRole("button", { name: /Pedir acceso/i });
+  return screen.getByRole("button", { name: /Enviar mi solicitud/i });
 }
 
 /** El grupo de tarjetas de rubro. */
 function grupoDeRubro() {
-  return screen.getByRole("radiogroup", { name: /De qué es tu negocio/i });
+  return screen.getByRole("radiogroup", { name: /Cuál es el rubro principal de tu negocio/i });
 }
 
 /**
@@ -135,11 +169,13 @@ describe("AccessRequestForm", () => {
 
   test("renderiza las secciones del formulario y el aviso de confidencialidad", () => {
     renderForm();
-    expect(screen.getByText("Contacto")).toBeInTheDocument();
-    expect(screen.getByText("Rubro")).toBeInTheDocument();
-    expect(screen.getByText("Tu negocio")).toBeInTheDocument();
-    expect(screen.getByText("Tu info")).toBeInTheDocument();
-    expect(screen.getByText("Cómo querés usar Véktor")).toBeInTheDocument();
+    // Literales a propósito: los encabezados SON lo que este test verifica.
+    // Si un copy pass los cambia, esto tiene que romperse.
+    expect(screen.getByText("Datos de contacto")).toBeInTheDocument();
+    expect(screen.getByText("Tu actividad")).toBeInTheDocument();
+    expect(screen.getByText("Sobre tu negocio")).toBeInTheDocument();
+    expect(screen.getByText("Tus registros")).toBeInTheDocument();
+    expect(screen.getByText("Tu primera experiencia")).toBeInTheDocument();
     expect(screen.getByText(/Esta información es confidencial/)).toBeInTheDocument();
     expect(
       screen.getByText(/no reporta a ARCA ni comparte tu información/),
@@ -253,7 +289,7 @@ describe("AccessRequestForm", () => {
       // Y el resumen nombra exactamente el campo que falta.
       const resumen = screen.getByRole("alert");
       expect(resumen).toHaveTextContent("Te falta responder una cosa:");
-      expect(resumen).toHaveTextContent("¿Cuánta gente trabaja?");
+      expect(resumen).toHaveTextContent("¿Cuántas personas trabajan hoy?");
       expect(mockPost).not.toHaveBeenCalled();
     }, TIMEOUT_FORMULARIO_COMPLETO);
 
@@ -264,7 +300,7 @@ describe("AccessRequestForm", () => {
       await user.click(submitButton());
       await screen.findByRole("alert");
 
-      await user.click(screen.getByRole("button", { name: "¿Cuánta gente trabaja?" }));
+      await user.click(screen.getByRole("button", { name: "¿Cuántas personas trabajan hoy?" }));
 
       expect(document.activeElement).toBe(
         document.getElementById("campo-staff_size"),
@@ -357,7 +393,7 @@ describe("AccessRequestForm", () => {
       const user = userEvent.setup({ delay: null });
       renderForm();
 
-      const grupo = screen.getByRole("group", { name: /Cuánta gente trabaja/i });
+      const grupo = screen.getByRole("group", { name: /Cuántas personas trabajan hoy/i });
       expect(grupo).not.toHaveAttribute("aria-invalid");
 
       await user.click(submitButton());
@@ -436,9 +472,11 @@ describe("AccessRequestForm", () => {
     test("el hint describe el campo sin meterse en su nombre", () => {
       renderForm();
       const telefono = screen.getByRole("textbox", {
-        name: "Teléfono / WhatsApp (opcional)",
+        name: "WhatsApp (opcional)",
       });
-      expect(telefono).toHaveAccessibleDescription("Si nos lo dejás, te escribimos por acá.");
+      expect(telefono).toHaveAccessibleDescription(
+        "Si completás, podemos responderte por ese medio.",
+      );
     });
   });
 
@@ -448,10 +486,10 @@ describe("AccessRequestForm", () => {
       renderForm();
 
       expect(REQUIRED_FIELD_COUNT).toBe(13);
-      expect(screen.getByText(`0 de ${REQUIRED_FIELD_COUNT} respuestas`)).toBeInTheDocument();
+      expect(screen.getByText(contador(0))).toBeInTheDocument();
 
       await user.type(screen.getByLabelText(/Nombre y apellido/i), "Ana Pérez");
-      expect(screen.getByText(`1 de ${REQUIRED_FIELD_COUNT} respuestas`)).toBeInTheDocument();
+      expect(screen.getByText(contador(1))).toBeInTheDocument();
     });
 
     /**
@@ -502,7 +540,7 @@ describe("AccessRequestForm", () => {
       // La solicitud ya está en el backend: no tiene por qué quedar una copia
       // de los datos personales esperando en el navegador.
       expect(screen.getByLabelText(/Nombre y apellido/i)).toHaveValue("");
-      expect(screen.getByText(`0 de ${REQUIRED_FIELD_COUNT} respuestas`)).toBeInTheDocument();
+      expect(screen.getByText(contador(0))).toBeInTheDocument();
     }, TIMEOUT_FORMULARIO_COMPLETO);
 
     test("un borrador corrupto se descarta sin romper el formulario", () => {
@@ -548,7 +586,12 @@ describe("AccessRequestForm", () => {
     // dice cuál es el campo — no un botón gris sin explicación.
     await user.click(submitButton());
     expect(mockPost).not.toHaveBeenCalled();
-    expect(screen.getByRole("alert")).toHaveTextContent("De qué es tu negocio");
+    // El alerta nombra el CAMPO que falta, y ese rótulo sale de
+    // ACCESS_REQUEST_FIELD_LABELS — no de la legend del grupo de rubro, que sí
+    // cambió con el copy pass. Atarlo a la fuente evita confundir los dos.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      accessRequestFieldLabel("vertical_other_text"),
+    );
 
     // Espacios en blanco tampoco alcanzan: se recortan antes de medir.
     await user.type(textarea, "   ");
@@ -664,12 +707,12 @@ describe("AccessRequestForm", () => {
     renderForm();
 
     await waitFor(() =>
-      expect(screen.getByLabelText(/Cuenta Premium/i)).toBeChecked(),
+      expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "premium"), { exact: false })).toBeChecked(),
     );
 
-    await user.click(screen.getByLabelText(/Cuenta gratuita/i));
-    expect(screen.getByLabelText(/Cuenta gratuita/i)).toBeChecked();
-    expect(screen.getByLabelText(/Cuenta Premium/i)).not.toBeChecked();
+    await user.click(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "free"), { exact: false }));
+    expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "free"), { exact: false })).toBeChecked();
+    expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "premium"), { exact: false })).not.toBeChecked();
   });
 
   test("un error del backend muestra el mensaje y no navega", async () => {

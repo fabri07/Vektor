@@ -31,7 +31,7 @@ function renderLogin() {
 describe("LoginForm — CTA de alta", () => {
   test("manda a pedir acceso, no a crear una cuenta gratis", () => {
     renderLogin();
-    const cta = screen.getByRole("link", { name: /Pedí acceso/i });
+    const cta = screen.getByRole("link", { name: /Solicitá tu acceso/i });
     expect(cta).toHaveAttribute("href", "/solicitar-acceso?src=login");
   });
 

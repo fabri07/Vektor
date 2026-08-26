@@ -58,7 +58,7 @@ describe("PublicNav — el menú Rubros se deriva de la misma fuente", () => {
   test("cada vertical aparece en el menú apuntando a su sección", async () => {
     const user = userEvent.setup();
     render(<PublicNav />);
-    await user.click(screen.getByRole("button", { name: /Rubros/i }));
+    await user.click(screen.getByRole("button", { name: /Soluciones por rubro/i }));
 
     for (const { name, anchor } of VERTICAL_OPTIONS) {
       expect(screen.getByRole("link", { name })).toHaveAttribute("href", `/rubros#${anchor}`);

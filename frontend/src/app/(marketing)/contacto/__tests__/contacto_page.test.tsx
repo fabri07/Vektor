@@ -22,12 +22,12 @@ function dataLayer(): Array<Record<string, unknown>> {
 
 /** Completa todos los campos requeridos del formulario. */
 async function fillRequired(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(screen.getByLabelText(/Tu nombre/i), "Ana Pérez");
-  await user.clear(screen.getByLabelText(/Tu celular/i));
-  await user.type(screen.getByLabelText(/Tu celular/i), "+54 11 5555 5555");
-  await user.type(screen.getByLabelText(/Correo corporativo/i), "ana@negocio.com");
-  await user.type(screen.getByLabelText(/^Empresa/i), "Kiosco Ana");
-  await user.selectOptions(screen.getByLabelText(/Rubro/i), "kiosco_almacen");
+  await user.type(screen.getByLabelText(/Nombre y apellido/i), "Ana Pérez");
+  await user.clear(screen.getByLabelText(/WhatsApp/i));
+  await user.type(screen.getByLabelText(/WhatsApp/i), "+54 11 5555 5555");
+  await user.type(screen.getByLabelText(/Email de trabajo/i), "ana@negocio.com");
+  await user.type(screen.getByLabelText(/Nombre del negocio/i), "Kiosco Ana");
+  await user.selectOptions(screen.getByLabelText(/A qué se dedica/i), "kiosco_almacen");
   await user.click(screen.getByLabelText("1 a 5"));
 }
 
@@ -37,17 +37,18 @@ describe("ContactoPage", () => {
     (window as DataLayerWindow).dataLayer = [];
   });
 
-  test("muestra el título literal solicitado y registra form_view", () => {
+  // El título se asierta LITERAL a propósito: es contenido público, no un
+  // localizador. Si un copy pass lo cambia, esto tiene que romperse para que el
+  // cambio sea deliberado (actualizado el 2026-08-26 tras el copy pass de #49).
+  test("muestra el título de la página y registra form_view", () => {
     render(<ContactoPage />);
-    expect(
-      screen.getByText("Dejá tus datos y te contactaremos para conversar")
-    ).toBeInTheDocument();
+    expect(screen.getByText("Contanos cómo gestionás hoy")).toBeInTheDocument();
     expect(dataLayer().some((e) => e.event === "contact_form_view")).toBe(true);
   });
 
   test("el select de rubro usa el vocabulario de /contact/leads, no el de solicitudes", () => {
     render(<ContactoPage />);
-    const select = screen.getByLabelText(/Rubro/i) as HTMLSelectElement;
+    const select = screen.getByLabelText(/A qué se dedica/i) as HTMLSelectElement;
     const valores = Array.from(select.options)
       .map((o) => o.value)
       .filter(Boolean);
@@ -90,7 +91,7 @@ describe("ContactoPage", () => {
     render(<ContactoPage />);
     await fillRequired(user);
     await user.click(screen.getByRole("checkbox"));
-    await user.click(screen.getByRole("button", { name: /Enviar/i }));
+    await user.click(screen.getByRole("button", { name: /Quiero coordinar una demo/i }));
 
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     const [url, payload] = mockPost.mock.calls[0]!;
@@ -114,7 +115,7 @@ describe("ContactoPage", () => {
     render(<ContactoPage />);
     await fillRequired(user);
     await user.click(screen.getByRole("checkbox"));
-    await user.click(screen.getByRole("button", { name: /Enviar/i }));
+    await user.click(screen.getByRole("button", { name: /Quiero coordinar una demo/i }));
 
     expect(
       await screen.findByText(/Revisá los datos.*teléfono/i)
@@ -128,7 +129,7 @@ describe("ContactoPage", () => {
     render(<ContactoPage />);
     await fillRequired(user);
     await user.click(screen.getByRole("checkbox"));
-    await user.click(screen.getByRole("button", { name: /Enviar/i }));
+    await user.click(screen.getByRole("button", { name: /Quiero coordinar una demo/i }));
 
     expect(
       await screen.findByText(/No pudimos enviar el formulario/i)
@@ -142,7 +143,7 @@ describe("ContactoPage", () => {
     render(<ContactoPage />);
     await fillRequired(user);
     await user.click(screen.getByRole("checkbox"));
-    const submit = screen.getByRole("button", { name: /Enviar/i });
+    const submit = screen.getByRole("button", { name: /Quiero coordinar una demo/i });
     await user.click(submit);
     await user.click(submit);
     expect(mockPost).toHaveBeenCalledTimes(1);

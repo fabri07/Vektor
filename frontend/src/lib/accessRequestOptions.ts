@@ -121,6 +121,26 @@ export function valuesOf<T extends string>(options: readonly Choice<T>[]): [T, .
   return options.map((o) => o.value) as [T, ...T[]];
 }
 
+/**
+ * Etiqueta visible de una opción, buscada por su `value`.
+ *
+ * Existe para que los tests que sólo necesitan LLEGAR a un control (tildar una
+ * opción y seguir verificando el payload) no hardcodeen el texto: un copy pass
+ * como el de 2026-08-18 rompió 46 tests que buscaban por rótulo. Lo que sí es
+ * contenido a verificar —un CTA, un encabezado— sigue asertándose literal.
+ *
+ * Tira si el `value` no existe en vez de devolver `undefined`: un test que
+ * busca un rótulo inexistente tiene que romperse ahí, no arrastrar un
+ * `undefined` hasta un selector que falla por otra razón.
+ */
+export function labelOf<T extends string>(options: readonly Choice<T>[], value: T): string {
+  const found = options.find((o) => o.value === value);
+  if (!found) {
+    throw new Error(`labelOf: no existe la opción ${JSON.stringify(value)} en el catálogo.`);
+  }
+  return found.label;
+}
+
 /** `true` si el string es un plan válido — para leer `?plan=` sin inventar. */
 export function isRequestedPlan(value: string | null | undefined): value is RequestedPlan {
   return REQUESTED_PLAN_OPTIONS.some((o) => o.value === value);
