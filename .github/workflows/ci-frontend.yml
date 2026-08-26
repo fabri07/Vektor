@@ -14,7 +14,7 @@ on:
 
 jobs:
   ci:
-    name: Type-check · Lint · Build
+    name: Type-check · Lint · Test · Build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -43,15 +43,31 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # ── 4. TypeScript type check ──────────────────────────────────────────────
+      # ── 4. Jest (suite completa, compuerta obligatoria) ───────────────────────
+      # Va ANTES de tsc/lint/build para fallar rápido: los tests son lo más
+      # barato de correr y lo que más se rompe.
+      #
+      # Este paso no existía hasta 2026-08-26, y su ausencia costó 8 días de 9
+      # suites en rojo sin que nadie se enterara: el copy pass de #49 cambió
+      # rótulos en 19 archivos y rompió 46 tests que el CI nunca ejecutó.
+      #
+      # `--runInBand`: con workers, jest da fallas FALSAS en este repo, y los
+      # runners de GitHub tienen 2 vCPU. `--ci`: un snapshot nuevo falla en vez
+      # de escribirse solo. SIN `--passWithNoTests` a propósito — el default de
+      # jest ya falla si no encuentra tests, y queremos que una suite que
+      # desaparece por accidente también se vea.
+      - name: Jest — unit tests
+        run: npm test -- --ci --runInBand
+
+      # ── 5. TypeScript type check ──────────────────────────────────────────────
       - name: tsc — type check
         run: npm run type-check
 
-      # ── 5. ESLint ─────────────────────────────────────────────────────────────
+      # ── 6. ESLint ─────────────────────────────────────────────────────────────
       - name: ESLint — lint
         run: npm run lint
 
-      # ── 6. Next.js production build ───────────────────────────────────────────
+      # ── 7. Next.js production build ───────────────────────────────────────────
       - name: Next.js — build
         env:
           NEXT_PUBLIC_API_URL: "http://localhost:8000"
