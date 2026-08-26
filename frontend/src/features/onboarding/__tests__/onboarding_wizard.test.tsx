@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { OnboardingWizard } from "../OnboardingWizard";
 import { onboardingService } from "@/services/onboarding.service";
 import { ingestionService } from "@/services/ingestion.service";
+import { MAIN_CONCERN_OPTIONS, labelOf } from "@/lib/accessRequestOptions";
 
 // `Step4Loading` (paso 3) usa `useRouter` para saltar al dashboard.
 jest.mock("next/navigation", () => ({
@@ -50,7 +51,7 @@ async function completarDatos(user: ReturnType<typeof userEvent.setup>) {
   );
   await user.type(screen.getByLabelText(/productos distintos/i), "20");
   await user.type(screen.getByLabelText(/proveedores/i), "3");
-  await user.click(screen.getByRole("button", { name: "La caja" }));
+  await user.click(screen.getByRole("button", { name: labelOf(MAIN_CONCERN_OPTIONS, "CASH") }));
   await user.click(screen.getByRole("button", { name: "Siguiente" }));
 }
 
@@ -173,7 +174,7 @@ describe("OnboardingWizard", () => {
     await user.type(screen.getByLabelText(/gastás en mercadería/i), "0");
     await user.type(screen.getByLabelText(/productos distintos/i), "20");
     await user.type(screen.getByLabelText(/proveedores/i), "3");
-    await user.click(screen.getByRole("button", { name: "La caja" }));
+    await user.click(screen.getByRole("button", { name: labelOf(MAIN_CONCERN_OPTIONS, "CASH") }));
     await user.click(screen.getByRole("button", { name: "Siguiente" }));
     await user.click(screen.getByRole("button", { name: "Continuar" }));
 
@@ -241,12 +242,20 @@ describe("OnboardingWizard", () => {
       statusSinConcern();
       renderWizard();
       // Antes había dos catálogos escritos a mano sobre los mismos tres
-      // valores: "Mis márgenes / Mi stock / Mi caja" acá, "El margen / El
-      // stock / La caja" en la solicitud. El visitante que ya contestó no
-      // reconocía la segunda como la misma pregunta.
-      expect(await screen.findByRole("button", { name: "La caja" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "El margen" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "El stock" })).toBeInTheDocument();
+      // valores: "Mis márgenes / Mi stock / Mi caja" acá y otro distinto en la
+      // solicitud. El visitante que ya contestó no reconocía la segunda como la
+      // misma pregunta.
+      //
+      // Se compara contra MAIN_CONCERN_OPTIONS, no contra literales: la
+      // invariante es "ambas pantallas rinden el MISMO catálogo", no "el
+      // catálogo dice tal cosa". Con literales, cada copy pass volvería a
+      // romper este test sin que la invariante se haya movido — que es
+      // exactamente lo que pasó en 2026-08-18. Los rótulos visibles los fija el
+      // test de contrato en lib/__tests__/access_request_options.test.ts.
+      await screen.findByRole("button", { name: labelOf(MAIN_CONCERN_OPTIONS, "CASH") });
+      for (const { label } of MAIN_CONCERN_OPTIONS) {
+        expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+      }
     });
   });
 

@@ -6,6 +6,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { AccessRequestForm } from "../AccessRequestForm";
 import { api } from "@/lib/api";
+import {
+  CAN_SHARE_FILES_OPTIONS,
+  HISTORY_DEPTH_OPTIONS,
+  MAIN_CONCERN_OPTIONS,
+  RECORDS_FORMAT_OPTIONS,
+  REQUESTED_PLAN_OPTIONS,
+  REVENUE_BAND_OPTIONS,
+  STAFF_SIZE_OPTIONS,
+  YEARS_OPERATING_OPTIONS,
+  labelOf,
+} from "@/lib/accessRequestOptions";
 
 /**
  * Alta por "Continuar con Google": el visitante vuelve de Google con
@@ -50,16 +61,21 @@ function renderForm() {
 
 type User = ReturnType<typeof userEvent.setup>;
 
-/** Los 8 grupos de opción cerrada, con una etiqueta unívoca de cada uno. */
-const GRUPOS: ReadonlyArray<RegExp> = [
-  /Más de 5 años/i,
-  /Solo yo/i,
-  /El margen/i,
-  /Prefiero no decirlo/i,
-  /Excel o Google Sheets/i,
-  /Entre 1 y 3 años/i,
-  /Sí, y están ordenados/i,
-  /Cuenta gratuita/i,
+/**
+ * Los 8 grupos de opción cerrada, con una opción unívoca de cada uno. Los
+ * rótulos salen del catálogo compartido: acá son LOCALIZADORES para completar
+ * el formulario y llegar al envío, no contenido que este archivo verifique
+ * (mismo criterio que `access_request_form.test.tsx`).
+ */
+const GRUPOS: ReadonlyArray<string> = [
+  labelOf(YEARS_OPERATING_OPTIONS, "gt_5y"),
+  labelOf(STAFF_SIZE_OPTIONS, "solo"),
+  labelOf(MAIN_CONCERN_OPTIONS, "MARGIN"),
+  labelOf(REVENUE_BAND_OPTIONS, "no_contesta"),
+  labelOf(RECORDS_FORMAT_OPTIONS, "planilla"),
+  labelOf(HISTORY_DEPTH_OPTIONS, "1y_3y"),
+  labelOf(CAN_SHARE_FILES_OPTIONS, "si_ordenados"),
+  labelOf(REQUESTED_PLAN_OPTIONS, "free"),
 ];
 
 /** Completa todo lo que el prefill NO trae, y manda. */
@@ -70,10 +86,10 @@ async function completarYEnviar(user: User, { conNombre = false } = {}) {
   await user.type(screen.getByLabelText(/Nombre del negocio/i), "Kiosco Ana");
   await user.click(screen.getByRole("radio", { name: /Kiosco/i }));
   for (const etiqueta of GRUPOS) {
-    await user.click(screen.getByLabelText(etiqueta));
+    await user.click(screen.getByLabelText(etiqueta, { exact: false }));
   }
   await user.click(screen.getByRole("checkbox"));
-  await user.click(screen.getByRole("button", { name: /Pedir acceso/i }));
+  await user.click(screen.getByRole("button", { name: /Enviar mi solicitud/i }));
 }
 
 function emailInput() {
@@ -145,7 +161,7 @@ describe("AccessRequestForm — prefill de Google", () => {
 
     await waitFor(() => expect(emailInput()).toHaveValue(EMAIL));
     // El merge es parcial: toca email y nombre, y nada más.
-    expect(screen.getByLabelText(/Cuenta Premium/i)).toBeChecked();
+    expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "premium"), { exact: false })).toBeChecked();
   });
 
   test("el token viaja en el POST para que la solicitud quede ligada a Google", async () => {
@@ -221,7 +237,7 @@ describe("AccessRequestForm — prefill de Google", () => {
       await screen.findByText(/ese vínculo ya no vale/i);
 
       // El visitante leyó el aviso y aprieta de nuevo: las 16 respuestas siguen ahí.
-      await user.click(screen.getByRole("button", { name: /Pedir acceso/i }));
+      await user.click(screen.getByRole("button", { name: /Enviar mi solicitud/i }));
 
       await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
       const cuerpo = mockPost.mock.calls[0]![1] as Record<string, unknown>;

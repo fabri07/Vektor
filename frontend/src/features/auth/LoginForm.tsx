@@ -285,8 +285,8 @@ export function LoginForm() {
       </button>
 
       {/*
-        La bifurcación se avisa ANTES del redirect, no después. "Continuar con
-        Google" se lee como un login de un click; si ese email todavía no tiene
+        La bifurcación se avisa ANTES del redirect, no después. Un botón de
+        Google se lee como un login de un click; si ese email todavía no tiene
         cuenta, el visitante vuelve de Google a un formulario largo sin haber
         aceptado nunca ese trato. Véktor no crea cuentas por Google: el registro
         es cerrado y el alta la aprueba el dueño a mano.
