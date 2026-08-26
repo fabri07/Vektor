@@ -132,8 +132,16 @@ async def test_new_statuses_insert_and_downgrade_is_safe(pg_engine: AsyncEngine)
             )
 
     # ── 3: downgrade con las 5 filas nuevas presentes ──
+    # Target ABSOLUTO, no `-1`: bajar "un paso desde head" sólo ejercita la
+    # migración de este test mientras ESTA sea el head, y cualquier migración
+    # nueva que alguien agregue después la corre de lugar en silencio — el
+    # downgrade pasa a deshacer la otra, las filas conservan sus estados nuevos
+    # y las aserciones de abajo fallan por una razón que no tiene nada que ver
+    # con lo que el test dice probar (pasó con `20260826_0001`). `20260813_0001`
+    # es el `down_revision` de `20260819_0001`, así que bajar hasta ahí corre el
+    # `downgrade()` bajo prueba sin importar cuántas migraciones haya encima.
     try:
-        _run_alembic("downgrade", "-1")
+        _run_alembic("downgrade", "20260813_0001")
     except Exception:
         async with pg_engine.begin() as cleanup_conn:
             await cleanup_conn.execute(
