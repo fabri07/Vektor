@@ -10,6 +10,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
+import sentry_sdk
 from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -29,9 +30,11 @@ from app.application.services.stock_service import (
 from app.bootstrap import shutdown, startup
 from app.config.settings import get_settings
 from app.observability.logger import get_logger
+from app.observability.sentry import init_sentry
 
 logger = get_logger(__name__)
 settings = get_settings()
+init_sentry("web")
 
 # ── Rate limiter (shared instance, imported by routers) ───────────────────────
 
@@ -83,7 +86,15 @@ def create_app() -> FastAPI:
         allow_origin_regex=settings.CORS_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID", "X-Trace-Id"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "X-Request-ID",
+            "X-Trace-Id",
+            "sentry-trace",
+            "baggage",
+        ],
         expose_headers=["X-Request-ID", "X-Trace-Id"],
     )
 
@@ -128,6 +139,9 @@ def create_app() -> FastAPI:
         )
         # Disponible para el código de app (audit/external_operation logs) en este request.
         set_trace_id(trace_id)
+        # Correlación con Sentry: mismo id que structlog y que el header que
+        # recibe el frontend.
+        sentry_sdk.set_tag("vektor_trace_id", trace_id)
 
         t0 = time.monotonic()
         response = await call_next(request)
@@ -231,6 +245,11 @@ def create_app() -> FastAPI:
             exc_type=type(exc).__name__,
             exc_msg=str(exc),
         )
+        # Este handler INTERCEPTA la excepción (nunca se repropaga), así que el
+        # middleware automático de FastApiIntegration nunca la ve — sin esta
+        # línea, Sentry queda con la integración activa pero cero eventos
+        # reales de error.
+        sentry_sdk.capture_exception(exc)
         detail = (
             f"[DEBUG] {type(exc).__name__}: {exc}"
             if settings.is_development or settings.DEBUG

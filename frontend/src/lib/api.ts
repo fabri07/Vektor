@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/nextjs";
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { useAuthStore } from "@/stores/authStore";
 import { usePinGateStore } from "@/stores/pinGateStore";
@@ -24,6 +25,12 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   if (!config.headers["X-Trace-Id"]) {
     config.headers["X-Trace-Id"] = crypto.randomUUID();
   }
+  Sentry.addBreadcrumb({
+    category: "http",
+    message: `${config.method?.toUpperCase()} ${config.url}`,
+    data: { trace_id: config.headers["X-Trace-Id"] },
+    level: "info",
+  });
   return config;
 });
 
@@ -33,6 +40,30 @@ api.interceptors.response.use(
     const originalRequest = error.config as
       | (InternalAxiosRequestConfig & { _retry?: boolean; _pinRetry?: boolean })
       | undefined;
+
+    if (!error.response) {
+      // Error de red, timeout, DNS o CORS bloqueado: el backend nunca llegó a
+      // procesar la request, así que nunca la reportó a su propio Sentry —
+      // sin este evento, quedaría invisible en los dos proyectos. `beforeSend`
+      // (scrubSentryEvent) se encarga de sanear `error.config` (headers/body).
+      Sentry.captureException(error, {
+        tags: { vektor_trace_id: originalRequest?.headers?.["X-Trace-Id"] as string | undefined },
+      });
+      return Promise.reject(error);
+    }
+
+    if (error.response.status >= 500) {
+      // El backend ya generó su propio evento en `unhandled_exception_handler`
+      // y la traza distribuida (CORS + sentry-trace/baggage) ya vincula esta
+      // transacción con la del backend — no fabricar un segundo error acá,
+      // solo dejar la referencia para poder cruzarlos.
+      Sentry.addBreadcrumb({
+        category: "http",
+        message: `5xx: ${originalRequest?.method?.toUpperCase()} ${originalRequest?.url}`,
+        data: { vektor_trace_id: error.response.headers?.["x-trace-id"] },
+        level: "error",
+      });
+    }
 
     // Step-up PIN: el backend devuelve 428 con detail "PIN_REQUIRED" cuando la
     // ventana de PIN venció. Abrimos el modal (single-flight) y reintentamos UNA vez.

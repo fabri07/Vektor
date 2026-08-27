@@ -10,6 +10,7 @@ JWT payload expected keys: sub (user_id), tenant_id, role_code.
 from collections.abc import Callable
 from uuid import UUID
 
+import sentry_sdk
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
@@ -65,6 +66,11 @@ async def get_current_user(
 
     # Bind tenant_id and user_id into structlog context for this request
     bind_request_context(tenant_id=user.tenant_id, user_id=user.user_id)
+    # Sentry: tag por negocio, sin email (privacidad de datos de PyMEs
+    # argentinas) — alcanza con el id para medir cuántos usuarios/tenants
+    # distintos pisan un mismo error.
+    sentry_sdk.set_tag("tenant_id", str(user.tenant_id))
+    sentry_sdk.set_user({"id": str(user.user_id)})
 
     return user
 

@@ -44,6 +44,7 @@ async def shutdown() -> None:
     """Gracefully release all application resources."""
     await _close_database()
     await _close_redis()
+    _flush_sentry()
     logger.info("bootstrap.shutdown.complete")
 
 
@@ -99,6 +100,22 @@ async def _close_redis() -> None:
 
     await close_redis_pool()
     logger.info("bootstrap.redis.disconnected")
+
+
+# ── Sentry ────────────────────────────────────────────────────────────────────
+
+
+def _flush_sentry() -> None:
+    """
+    Fuerza el envío de eventos pendientes antes de que el proceso termine.
+    Sin esto, un evento generado justo antes de un deploy/restart puede
+    perderse porque el transporte async del SDK no llega a mandarlo. No-op si
+    Sentry nunca se inicializó (DSN vacío).
+    """
+    import sentry_sdk  # noqa: PLC0415
+
+    if sentry_sdk.is_initialized():
+        sentry_sdk.flush(timeout=2)
 
 
 # ── Celery ────────────────────────────────────────────────────────────────────
