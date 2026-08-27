@@ -308,6 +308,12 @@ class Settings(BaseSettings):
     MCP_HTTP_TIMEOUT: float = 15.0
     MCP_SERVER_SHARED_SECRET: str = ""
 
+    # ── Sentry ────────────────────────────────────────────────────────────────
+    # DSN vacío (default) = SDK deshabilitado (no-op), mismo criterio que
+    # MCP_SERVER_URL="". Sin flag ENABLE_* nuevo a propósito.
+    SENTRY_DSN: str = ""
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.1
+
     # ── Google OAuth ──────────────────────────────────────────────────────────
     GOOGLE_OAUTH_CLIENT_ID: str = ""
     GOOGLE_OAUTH_CLIENT_SECRET: str = ""

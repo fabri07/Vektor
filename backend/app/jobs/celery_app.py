@@ -9,10 +9,13 @@ Queues:
   - ingestion    : file parsing jobs (spreadsheet, text, OCR)
 """
 
+import inspect
 import ssl
+from typing import Any
 
 from celery import Celery
 from celery.schedules import crontab as _crontab
+from celery.signals import beat_init, celeryd_init, task_postrun, task_prerun
 
 from app.config.settings import get_settings
 
@@ -133,3 +136,81 @@ celery_app.conf.beat_schedule = {
         "options": {"queue": "scores"},
     },
 }
+
+
+# ── Sentry ────────────────────────────────────────────────────────────────────
+# Init por señal, NUNCA a nivel de módulo: este archivo también se importa
+# desde el proceso web (para encolar tasks vía `.delay()`) — un init a nivel
+# de módulo pisaría el Sentry del proceso web (tag service="web") en cada
+# import. `celeryd_init`/`beat_init` solo disparan cuando el proceso arranca
+# de verdad como `celery worker`/`celery beat`.
+
+
+@celeryd_init.connect  # type: ignore[misc]
+def _init_sentry_worker(**kwargs: object) -> None:
+    from app.observability.sentry import init_sentry  # noqa: PLC0415
+
+    init_sentry("worker")
+
+
+@beat_init.connect  # type: ignore[misc]
+def _init_sentry_beat(**kwargs: object) -> None:
+    from app.observability.sentry import init_sentry  # noqa: PLC0415
+
+    init_sentry("beat")
+
+
+def _extract_tenant_id(task: object, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any | None:
+    """
+    Busca `tenant_id` por NOMBRE de parámetro, nunca por posición fija: tasks
+    como `notify_access_request_account_exists(self, email)` no tienen
+    `tenant_id`, y una regla "primer argumento posicional" les taggearía el
+    error con el email de un usuario (PII, y encima mal etiquetado como
+    tenant_id). `task.run` es un bound method (celery ya excluye `self` de la
+    firma) que refleja exactamente los args/kwargs que recibió `.delay(...)`.
+    """
+    if "tenant_id" in kwargs:
+        return kwargs["tenant_id"]
+
+    run = getattr(task, "run", None)
+    if run is None:
+        return None
+    try:
+        params = list(inspect.signature(run).parameters)
+    except (TypeError, ValueError):
+        return None
+    if "tenant_id" not in params:
+        return None
+    index = params.index("tenant_id")
+    return args[index] if index < len(args) else None
+
+
+@task_prerun.connect  # type: ignore[misc]
+def _sentry_tag_task(
+    task_id: str,
+    task: object,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    **_: object,
+) -> None:
+    """
+    Tag de negocio por task — el SDK aísla el scope de tracing/spans por task
+    solo, pero no puede inferir `tenant_id`. `worker_prefetch_multiplier=1`
+    hace que un mismo proceso corra tasks de tenants distintos en secuencia:
+    sin limpiar el tag en `task_postrun`, la task N podría heredar el
+    `tenant_id` de la task N-1.
+    """
+    import sentry_sdk  # noqa: PLC0415
+
+    task_name = getattr(task, "name", "unknown")
+    sentry_sdk.set_context("celery_task", {"name": task_name, "task_id": task_id})
+    tenant_id = _extract_tenant_id(task, args, kwargs)
+    if tenant_id is not None:
+        sentry_sdk.set_tag("tenant_id", str(tenant_id))
+
+
+@task_postrun.connect  # type: ignore[misc]
+def _sentry_clear_task_tag(**kwargs: object) -> None:
+    import sentry_sdk  # noqa: PLC0415
+
+    sentry_sdk.set_tag("tenant_id", None)
