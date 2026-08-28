@@ -5,9 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth.routes import router as auth_router
 from app.config import get_settings
+from app.observability.sentry import init_sentry
 from app.tools.routes import router as tools_router
 
 settings = get_settings()
+
+# Antes de instanciar FastAPI: si el arranque explota más abajo (config,
+# routers), el evento igual llega a Sentry.
+init_sentry()
 
 app = FastAPI(
     title="Véktor Google MCP",
