@@ -127,7 +127,8 @@ make dev                    # Docker Compose con hot reload
 make dev-bg / make stop / make logs / make shell
 
 # Tests
-make test                   # pytest con cobertura (mínimo 50%)
+make test                   # pytest en paralelo, SIN cobertura (loop rápido de default)
+make test-cov                # misma compuerta que CI (--cov-fail-under=60)
 make test-fast / make test-watch
 make test-file FILE=app/tests/api/v1/test_auth.py
 pytest app/tests/api/v1/test_auth.py::test_login -v
@@ -522,7 +523,7 @@ El historial de sprints (1–21), los proyectos mergeados post-Sprint-21 y la ca
 ## Tests
 
 - pytest + pytest-asyncio (`asyncio_mode = "auto"`). DB en memoria: SQLite + aiosqlite.
-- Cobertura: **50%** local, **60%** en CI.
+- Cobertura: `make test` no la mide (default rápido); `make test-cov` exige **60%**, igual que CI.
 - `pytest app/tests/domain/test_health_score.py -v --no-cov`
 
 ## CI
