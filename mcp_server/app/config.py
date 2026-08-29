@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     # Lista vacía = ningún origen de browser permitido (correcto para llamadas server-to-server).
     CORS_ALLOWED_ORIGINS: list[str] = []
 
+    # ── Sentry ────────────────────────────────────────────────────────────
+    # DSN vacío (default) = SDK deshabilitado (no-op), mismo criterio que el
+    # backend. Apunta al MISMO proyecto Sentry (`python-fastapi`); este
+    # servicio se distingue por el tag `service=mcp`.
+    SENTRY_DSN: str = ""
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.1
+
     @field_validator("DEBUG", mode="before")
     @classmethod
     def parse_bool_flags(cls, value: bool | str, info: ValidationInfo) -> bool | str:

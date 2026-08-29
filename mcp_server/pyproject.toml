@@ -1,0 +1,33 @@
+# Config propia del MCP server. `mcp_server/` se despliega por separado del
+# backend (Dockerfile, requirements y paquete `app` propios) y hasta ahora no lo
+# cubría ningún workflow de CI: sin este archivo, `ruff`/`mypy` corridos desde
+# acá no encuentran configuración y aplican defaults distintos a los del equipo.
+#
+# Los valores son los MISMOS que `backend/pyproject.toml` a propósito: este es
+# el servicio que custodia los tokens de Google OAuth de los clientes, así que
+# es el último lugar del repo donde conviene bajar la vara.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = [".venv", ".venv312", ".python312", "htmlcov"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM", "ANN"]
+ignore = [
+    "ANN401",  # Dynamically typed expressions (typing.Any) — accepted in places
+    "B008",    # Do not perform function call in argument defaults — FastAPI Depends() pattern
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "S101", "N806"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
