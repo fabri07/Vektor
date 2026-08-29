@@ -1,0 +1,98 @@
+name: CI — MCP Server
+
+# `mcp_server/` no estaba cubierto por ningún workflow: `ci-backend.yml` filtra
+# por `backend/**` y `ci-frontend.yml` por `frontend/**`. El servicio que
+# custodia los tokens de Google OAuth de los clientes, y que está expuesto a
+# internet, no tenía ni lint, ni tipos, ni tests corriendo en ningún push —
+# `tests/test_security_guards.py` existía pero no lo ejecutaba nadie.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "mcp_server/**"
+      - ".github/workflows/ci-mcp.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "mcp_server/**"
+      - ".github/workflows/ci-mcp.yml"
+
+jobs:
+  ci:
+    name: Lint · Type-check · Test · Docker build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp_server
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Python 3.12 ───────────────────────────────────────────────────────
+      # Misma versión que el Dockerfile del servicio (python:3.12-slim).
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── 3. Install dependencies (cached) ─────────────────────────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-mcp-${{ hashFiles('mcp_server/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-mcp-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      # ── 4. Ruff (linting) ────────────────────────────────────────────────────
+      - name: Ruff — lint
+        run: ruff check .
+
+      # ── 5. mypy (type checking, strict) ──────────────────────────────────────
+      - name: mypy — type check
+        run: mypy app
+
+      # ── 6. pytest ────────────────────────────────────────────────────────────
+      # El umbral de cobertura es 15%, un piso ANTI-REGRESIÓN, no una meta: hoy
+      # el servicio está en ~18% y la mayoría de `auth/service.py`, `tools/*` y
+      # `tools/routes.py` no tiene tests. Poner el 60% del backend dejaría el CI
+      # en rojo desde el primer push y a la semana nadie lo mira. Subirlo a
+      # medida que se escriban tests.
+      - name: pytest — unit
+        env:
+          # El servicio valida su config al importar (`Settings.validate_required`),
+          # así que sin estas variables el conftest ni siquiera carga.
+          DATABASE_URL: "postgresql://vektor:vektor@localhost:5432/vektor"
+          SECRET_KEY: "ci-test-secret-key-not-for-production"
+          ENVIRONMENT: "test"
+          GOOGLE_MCP_OAUTH_CLIENT_ID: "ci-client-id"
+          GOOGLE_MCP_OAUTH_CLIENT_SECRET: "ci-client-secret"
+          GOOGLE_MCP_OAUTH_REDIRECT_URI: "http://localhost:8080/auth/callback"
+          MCP_SERVER_SHARED_SECRET: "ci-shared-secret"
+          # Vacío a propósito: `init_sentry()` es no-op sin DSN y el CI no debe
+          # mandar eventos al proyecto de producción.
+          SENTRY_DSN: ""
+        run: |
+          pytest \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-fail-under=15 \
+            -v
+
+      # ── 7. Docker build (verify only, no push) ───────────────────────────────
+      - name: Docker — verify build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./mcp_server
+          file: ./mcp_server/Dockerfile
+          push: false
+          tags: vektor-mcp:ci
