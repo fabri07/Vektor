@@ -69,6 +69,12 @@ jobs:
       # medida que se escriban tests.
       - name: pytest — unit
         env:
+          # `pytest` (a diferencia de `python -m pytest`) no agrega el cwd a
+          # sys.path: sin esto, `from app... import ...` en tests/ (que no es
+          # subpaquete de `app`, a diferencia de `backend/app/tests/`) falla
+          # con ModuleNotFoundError. Mismo criterio que `PYTHONPATH=/app` del
+          # Dockerfile en runtime.
+          PYTHONPATH: "."
           # El servicio valida su config al importar (`Settings.validate_required`),
           # así que sin estas variables el conftest ni siquiera carga.
           DATABASE_URL: "postgresql://vektor:vektor@localhost:5432/vektor"
