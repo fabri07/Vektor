@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -30,7 +31,7 @@ async def auth_start(
     body: AuthStartRequest,
     ctx: RequestContext = Depends(require_internal_context),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     auth_start_limiter.check(tenant_id=ctx.tenant_id, user_id=ctx.user_id)
     return await start_auth(session, ctx, body.scopes)
 
@@ -84,7 +85,7 @@ async def auth_callback(
 async def auth_status(
     ctx: RequestContext = Depends(require_internal_context),
     session: AsyncSession = Depends(get_db_session),
-) -> dict:
+) -> dict[str, Any]:
     return await get_status(session, ctx)
 
 

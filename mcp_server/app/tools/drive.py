@@ -10,6 +10,7 @@ from typing import Any
 import filetype
 import httpx
 from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import get_valid_access_token
 from app.security import RequestContext
@@ -67,7 +68,7 @@ def build_drive_search_query(query: str | None, folder_id: str | None) -> str:
 def detect_mime(content: bytes, filename: str) -> str:
     kind = filetype.guess(content[:2048])
     if kind and kind.mime:
-        return kind.mime
+        return str(kind.mime)
     return SAFE_EXTENSION_TO_MIME.get(Path(filename).suffix.lower(), "application/octet-stream")
 
 
@@ -82,12 +83,14 @@ def extract_text(content: bytes, mime: str, filename: str) -> str:
 
         reader = PdfReader(io.BytesIO(content))
         return "\n".join(page.extract_text() or "" for page in reader.pages)
-    if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or ext == ".docx":
+    docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    if mime == docx_mime or ext == ".docx":
         import docx  # noqa: PLC0415
 
         document = docx.Document(io.BytesIO(content))
         return "\n".join(paragraph.text for paragraph in document.paragraphs)
-    if mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" or ext == ".pptx":
+    pptx_mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    if mime == pptx_mime or ext == ".pptx":
         from pptx import Presentation  # noqa: PLC0415
 
         presentation = Presentation(io.BytesIO(content))
@@ -97,7 +100,8 @@ def extract_text(content: bytes, mime: str, filename: str) -> str:
                 if getattr(shape, "has_text_frame", False):
                     texts.append(shape.text)
         return "\n".join(texts)
-    if mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" or ext == ".xlsx":
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if mime == xlsx_mime or ext == ".xlsx":
         import openpyxl  # noqa: PLC0415
 
         workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
@@ -122,20 +126,20 @@ def summarize_content(text: str) -> dict[str, Any]:
     return {
         "line_count": len(lines),
         "content_preview": "\n".join(lines[:12])[:1800],
-        "keywords": [token for token in re.findall(r"\b[\w.-]{4,}\b", text.lower())[:20]],
+        "keywords": list(re.findall(r"\b[\w.-]{4,}\b", text.lower())[:20]),
     }
 
 
 async def list_files(
     *,
-    session,
+    session: AsyncSession,
     ctx: RequestContext,
     folder_id: str | None,
     query: str | None,
     max_results: int,
 ) -> dict[str, Any]:
     access_token, _ = await get_valid_access_token(session, ctx)
-    params = {
+    params: dict[str, str | int] = {
         "pageSize": max_results,
         "q": build_drive_search_query(query, folder_id),
         "fields": "files(id,name,mimeType,modifiedTime,webViewLink,size,parents),nextPageToken",
@@ -183,12 +187,13 @@ async def _get_file_metadata(*, access_token: str, file_id: str) -> dict[str, An
         raise HTTPException(status_code=404, detail="file_not_found")
     if resp.status_code >= 400:
         raise HTTPException(status_code=400, detail="drive_metadata_failed")
-    return resp.json()
+    metadata: dict[str, Any] = resp.json()
+    return metadata
 
 
 async def read_file(
     *,
-    session,
+    session: AsyncSession,
     ctx: RequestContext,
     file_id: str,
 ) -> dict[str, Any]:
@@ -241,7 +246,7 @@ async def read_file(
 
 async def upload_file(
     *,
-    session,
+    session: AsyncSession,
     ctx: RequestContext,
     name: str,
     content_base64: str,

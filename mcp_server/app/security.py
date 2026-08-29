@@ -33,7 +33,8 @@ def require_internal_context(
     x_mcp_server_secret: str | None = Header(default=None),
 ) -> RequestContext:
     settings = get_settings()
-    if not settings.MCP_SERVER_SHARED_SECRET or x_mcp_server_secret != settings.MCP_SERVER_SHARED_SECRET:
+    expected = settings.MCP_SERVER_SHARED_SECRET
+    if not expected or x_mcp_server_secret != expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
 
     try:
@@ -42,4 +43,6 @@ def require_internal_context(
             user_id=uuid.UUID(x_user_id),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_headers") from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_headers"
+        ) from exc
