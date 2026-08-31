@@ -235,6 +235,24 @@ regresiones. Código en producción desde antes de este plan — este fix SÍ
 afecta comportamiento ya en uso (a diferencia de los Bloques 1–5/7, todos
 detrás de flags apagados).
 
+## Push a `main` + hallazgo de CI (2026-08-31)
+
+Push directo a `origin/main` (sin PR, autorizado explícitamente) de los 4
+commits (`f159e979`, `e0fb8761`, `908b66c2` + el `168891a1` que ya estaba
+sin pushear). CI-Backend salió ROJO en la primera corrida — no por nada de
+este plan: `test_reread_review_states_migration_pg.py` corre un downgrade/
+upgrade de migración REAL (dropea y re-agrega `data_repair_runs.updated_at`)
+contra el Postgres COMPARTIDO del servicio de CI, y `pytest -m postgres`
+corría con `-n auto` (default de `pyproject.toml`) — todos los workers de
+xdist comparten esa misma base, sin aislamiento por worker (a diferencia de
+la suite SQLite). Otro test podía consultar la columna justo en la ventana
+en la que el downgrade la había sacado → `UndefinedColumnError` espurio, no
+determinístico. Reproducido y confirmado localmente (falla intermitente con
+`-n auto`, estable en 81/81 con `-n 0`); preexistente, sin relación con los
+Bloques 1–7. Fix de una línea en `ci-backend.yml` (correr esa suite
+secuencial) — commit `c271fdbd`, pusheado, **CI-Backend + CI-Frontend en
+verde**.
+
 ## Abierto / pendiente
 
 - Los 3 flags de rollout siguen en `[]` en producción (nadie habilitado) —
