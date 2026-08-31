@@ -7,6 +7,7 @@ captura de hojas no clasificables en multi-hoja.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from sqlalchemy import select
@@ -114,6 +115,63 @@ async def test_multisheet_hoja_no_clasificada_va_a_otros(
     record = (await db_session.execute(select(UnclassifiedRecord))).scalar_one()
     assert record.context_label == "Rara"
     assert record.source == "chat"
+
+
+async def test_multisheet_hoja_no_clasificada_reimportada_no_duplica_otros(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Idempotencia real (bug destapado por el dry-run del Bloque 7 contra el
+    Excel real de Asteria): releer el MISMO archivo (mismo ``uploaded_file_id``)
+    con una hoja no clasificada y no reasignada NO debe duplicar sus filas en
+    "Otros" — antes, ``_capture_unclassified`` no chequeaba ninguna huella y
+    cada aplicación volvía a insertar todas las filas de la hoja."""
+    summary: dict[str, Any] = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Rara",
+                "label": "Rara",
+                "entity_type": None,
+                "unclassified": True,
+                "headers": ["x", "y"],
+            },
+        ],
+        "ventas_detectadas": [],
+        "gastos_detectados": [],
+        "stock_detectado": [],
+        "otros_detectados": [
+            {"x": "a", "y": "b", "__context__": "sheet:Rara"},
+            {"x": "c", "y": "d", "__context__": "sheet:Rara"},
+        ],
+    }
+    uploaded_file_id = uuid.uuid4()
+
+    counts_1 = await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"ventas": False},
+        source="reread",
+        uploaded_file_id=uploaded_file_id,
+    )
+    await db_session.commit()
+    assert counts_1["otros"] == 2
+
+    counts_2 = await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"ventas": False},
+        source="reread",
+        uploaded_file_id=uploaded_file_id,
+    )
+    await db_session.commit()
+    assert counts_2["otros"] == 0
+
+    records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert len(records) == 2
 
 
 async def test_multisheet_hoja_reasignada_se_importa(

@@ -178,17 +178,23 @@ class TestAllowlistCruzada:
         for identidad in ("name", "sku", "barcode"):
             assert identidad not in desde_venta
 
-    def test_un_catalogo_de_productos_no_crea_proveedores(self) -> None:
-        """La Reforma de Proveedores: marca ≠ proveedor.
+    def test_un_catalogo_de_productos_puede_declarar_proveedor_solo_si_el_usuario_lo_confirma(
+        self,
+    ) -> None:
+        """Bloque 2 (Tienda → proveedor): la ruta existe, pero nunca es automática.
 
-        En un catálogo, la columna "Tienda"/"Proveedor" es la MARCA y va a
-        ``Product.custom_fields["marca"]``. Habilitar una ruta
-        ``product → supplier`` recrearía las filas marca-como-proveedor que hubo
-        que limpiar con ``deactivate_brand_suppliers.py`` y marcar con
-        ``_brand_collapsed``. Si alguna vez se habilita, primero hay que definir
-        que sólo VINCULE a un proveedor existente y nunca cree.
+        En un catálogo, la columna "Tienda"/"Proveedor" sigue siendo MARCA por
+        DEFECTO (`Product.custom_fields["marca"]`) — habilitar la ruta
+        ``product → supplier:name`` en el allowlist no cambia ese default: solo
+        permite que el USUARIO mapee esa columna a ``supplier:name`` a propósito.
+        Aun mapeada, `ingestion_import_service._add_product` la aplica solo si
+        el tenant está en `PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS` (compuerta
+        de rollout, ver `test_product_supplier_links_bloque2.py`), y el vínculo
+        se guarda en `product_supplier_links` — NUNCA pisa `custom_fields["marca"]`
+        ni recrea las filas marca-como-proveedor que hubo que limpiar con
+        `deactivate_brand_suppliers.py`.
         """
-        assert CROSS_ENTITY_TARGETS.get("product", {}).get("supplier") is None
+        assert CROSS_ENTITY_TARGETS.get("product", {}).get("supplier") == frozenset({"name"})
 
     def test_custom_field_no_puede_ser_una_entidad(self) -> None:
         """Si alguien agregara una entidad llamada ``custom_field``, que falle acá.

@@ -81,6 +81,23 @@ export interface MasterPreviewSummary {
   samples: MasterPreviewSample[];
 }
 
+/**
+ * Bloque 5 (consumo) — decisiones EXPLÍCITAS que un tenant confirmó en una
+ * carga anterior con la MISMA huella de esquema (tenant + tipo de archivo +
+ * columnas normalizadas, sin importar orden ni archivo). Sirve para
+ * PRELLENAR el próximo preview — nunca se aplica sola: el usuario la ve y
+ * puede corregirla antes de actualizar el preview o confirmar/aplicar.
+ * `null`/ausente = sin match exacto (huella distinta) o flag apagado para
+ * este tenant, comportamiento idéntico al de hoy.
+ */
+export interface RememberedContextDecisions {
+  column_mapping?: { mapping: Record<string, string> };
+  context_entity?: { entity: string };
+  context_included?: { included: boolean };
+  stock_treatment?: { treatment: StockTreatment };
+  shipping_decision?: { decision: string };
+}
+
 export interface FilePreview {
   file_id: string;
   processing_status: string;
@@ -91,6 +108,9 @@ export interface FilePreview {
   contextual_column_risk?: ContextualColumnRisk[];
   // F7e: vacío si el archivo no tiene hojas de maestro o no se pudo estimar el mapeo.
   master_previews: MasterPreviewSummary[];
+  // Bloque 5 (consumo): por `context_id`. Opcional — archivos viejos del
+  // backend anterior a este campo no lo traen.
+  remembered_decisions?: Record<string, RememberedContextDecisions>;
 }
 
 /**
@@ -394,6 +414,10 @@ export interface MappingContext {
   fields: string[] | null;
   preview_rows: Record<string, unknown>[];
   row_count: number;
+  /** Hoja derivada (Ganancias/resumen/balance): Véktor la calcula sola desde
+   * los movimientos del archivo. Excluida por defecto, nunca en Otros — el
+   * usuario puede igual incluirla y asignarle una sección. */
+  is_summary_or_derived?: boolean;
 }
 
 /** Qué se lleva puesto el borrado de un archivo (espejo de FileDeletionPreviewResponse). */
@@ -504,6 +528,8 @@ export interface RereadSheetStatus {
   columns_mapped: number;
   columns_pending: number;
   is_summary_or_derived: boolean;
+  // Bloque 5 (consumo): ver `RememberedContextDecisions`.
+  remembered_decisions?: RememberedContextDecisions | null;
 }
 
 export interface RereadPreviewResponse {

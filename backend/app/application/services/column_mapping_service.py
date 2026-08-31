@@ -150,6 +150,12 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "sale_price_ars": "Precio de venta",
         "list_price_ars": "Precio de lista (sugerido)",
         "unit_cost_ars": "Costo unitario",
+        # Bloque 3A: auxiliares del costo — NO son el costo final que usa el
+        # margen (ese es `unit_cost_ars`), se guardan en `custom_fields` para
+        # no perder el dato de origen cuando el archivo trae compra+envío ya
+        # calculado (F-H6 no corre sobre catálogo; ver ingestion_import_service).
+        "purchase_base_cost": "Precio de compra (costo base, sin envío)",
+        "shipping_percentage": "% de envío sobre el costo base",
         "stock_units": "Stock (unidades)",
         "category": "Categoría",
         "description": "Descripción",
@@ -1397,7 +1403,15 @@ CROSS_ENTITY_TARGETS: dict[str, dict[str, frozenset[str]]] = {
         # gasto y los consume `_supplier_reference_record`.
         "supplier": frozenset({"last_name", "payment_method"}),
     },
-    "product": {},
+    # Bloque 2: "Tienda" de un catálogo YA NO es SIEMPRE marca — el usuario
+    # puede mapearla a `supplier:name` para declarar un proveedor real (F10
+    # invariante de "Tienda"/CROSS_ENTITY_TARGETS histórico). Gateado por
+    # `PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS`; con el flag apagado, el
+    # target queda inerte (ingestion_import_service lo descarta como cualquier
+    # cruzado no aplicado, comportamiento idéntico al de hoy).
+    "product": {
+        "supplier": frozenset({"name"}),
+    },
     "customer": {},
     "supplier": {},
 }

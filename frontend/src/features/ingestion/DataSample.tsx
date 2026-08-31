@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
+import { humanizeColumnLabel } from "@/lib/columnLabels";
+
 const PAGE_SIZE = 5;
 
 /**
@@ -39,13 +41,15 @@ export function DataSample({
 
   return (
     <div className={className}>
-      <div className="overflow-x-auto rounded-lg border border-vk-border-w">
+      {/* F10-fix contraste: tarjeta clara SÓLIDA — `bg-vk-surface-w/40` dejaba
+          traslucir el canvas oscuro del panel de relectura. */}
+      <div className="overflow-x-auto rounded-lg border border-vk-border-w bg-vk-surface-w">
         <table className="w-full min-w-[480px] text-left text-[11px]">
           <thead>
-            <tr className="border-b border-vk-border-w bg-vk-surface-w/40 text-vk-text-muted">
+            <tr className="border-b border-vk-border-w bg-vk-bg-light text-vk-text-muted">
               {cols.map((c) => (
                 <th key={c} className="whitespace-nowrap px-2 py-1.5 font-medium">
-                  {c}
+                  {humanizeColumnLabel(c)}
                 </th>
               ))}
             </tr>
@@ -78,7 +82,7 @@ export function DataSample({
               type="button"
               onClick={() => setPage((p) => Math.max(p - 1, 0))}
               disabled={clampedPage === 0}
-              className="flex items-center rounded p-1 hover:bg-vk-surface-w/60 disabled:opacity-40"
+              className="flex items-center rounded p-1 hover:bg-vk-bg-light disabled:opacity-40"
               aria-label="Página anterior"
             >
               <ChevronLeft className="h-3.5 w-3.5" />
@@ -87,7 +91,7 @@ export function DataSample({
               type="button"
               onClick={() => setPage((p) => Math.min(p + 1, totalPages - 1))}
               disabled={clampedPage >= totalPages - 1}
-              className="flex items-center rounded p-1 hover:bg-vk-surface-w/60 disabled:opacity-40"
+              className="flex items-center rounded p-1 hover:bg-vk-bg-light disabled:opacity-40"
               aria-label="Página siguiente"
             >
               <ChevronRight className="h-3.5 w-3.5" />

@@ -144,6 +144,7 @@ export function scalarCollisions(
  */
 export type MappingOrigin =
   | "user"
+  | "remembered"
   | "tenant_history"
   | "heuristic"
   | "fuzzy"
@@ -163,13 +164,23 @@ export type MappingOrigin =
  *
  * Una columna sin destino, o mandada a «Ignorar», no tiene procedencia que
  * contar: el importador no va a guardar nada desde ahí.
+ *
+ * `rememberedTarget` (Bloque 5) se chequea ANTES que la sugerencia heurística:
+ * es una afirmación más específica ("vos ya elegiste esto para un archivo con
+ * esta misma forma") y, cuando la memoria corrigió lo que la heurística
+ * hubiera sugerido, decir "Sugerido por el nombre de la columna" sería
+ * ocultar de dónde salió en realidad.
  */
 export function mappingOrigin(
   suggestion: Pick<ColumnMappingSuggestion, "source" | "target_field">,
   currentTarget: string,
+  rememberedTarget?: string | null,
 ): MappingOrigin {
   const actual = normalizarTarget(currentTarget);
   if (!actual || actual === "ignore") return null;
+  if (rememberedTarget != null && actual === normalizarTarget(rememberedTarget)) {
+    return "remembered";
+  }
   // `target_field` viaja como `null` cuando el backend no propuso nada; ahí
   // cualquier destino actual es del usuario.
   //

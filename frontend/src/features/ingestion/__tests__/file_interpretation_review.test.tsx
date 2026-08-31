@@ -397,4 +397,171 @@ describe("FileInterpretationReview", () => {
     const [, draft] = mockRereadPreview.mock.calls[0];
     expect(draft.stockTreatment).toEqual({ catalogo: "purchase" });
   });
+
+  it("navega entre hojas con Anterior/Siguiente y muestra 'Hoja X de N'", async () => {
+    const user = userEvent.setup();
+    renderReview();
+
+    expect(screen.getByText("Hoja 1 de 2")).toBeInTheDocument();
+    const next = screen.getByRole("button", { name: /siguiente/i });
+    const prev = screen.getByRole("button", { name: /anterior/i });
+    expect(prev).toBeDisabled();
+
+    await user.click(next);
+    expect(screen.getByText("Hoja 2 de 2")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Ventas/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(next).toBeDisabled();
+
+    await user.click(prev);
+    expect(screen.getByText("Hoja 1 de 2")).toBeInTheDocument();
+  });
+
+  it("muestra una hoja derivada como excluida por defecto con su explicación", async () => {
+    const sheetsConDerivada: RereadSheetStatus[] = [
+      ...SHEETS,
+      {
+        context_id: "ganancias",
+        label: "Ganancias",
+        entity_type: "otros",
+        row_count: 4,
+        status: "ignorada",
+        columns_mapped: 0,
+        columns_pending: 0,
+        is_summary_or_derived: true,
+      },
+    ];
+    renderReview({ sheets: sheetsConDerivada });
+
+    const tab = screen.getByRole("tab", { name: /Ganancias/i });
+    expect(tab).toBeInTheDocument();
+    expect(screen.getByText("Derivada")).toBeInTheDocument();
+
+    await userEvent.setup().click(tab);
+    expect(
+      screen.getByText(/Véktor calcula solo desde tus movimientos/i),
+    ).toBeInTheDocument();
+    const includeCheckbox = screen.getByRole("checkbox", {
+      name: /Incluir esta hoja en la relectura/i,
+    });
+    expect(includeCheckbox).not.toBeChecked();
+  });
+
+  it("muestra un nombre legible para una columna sin encabezado (col_N)", async () => {
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "col_3",
+        normalized_column: "col_3",
+        sample_values: ["1500"],
+        target_field: "amount",
+        confidence: 0.5,
+        source: "heuristic",
+        status: "mapped",
+        context_id: "compras",
+      },
+    ]);
+
+    renderReview();
+
+    expect(await screen.findByText("Columna sin encabezado 3")).toBeInTheDocument();
+    expect(screen.queryByText("col_3")).not.toBeInTheDocument();
+  });
+
+  describe("Bloque 5 (consumo) — decisiones recordadas", () => {
+    const sheetsConRecordado: RereadSheetStatus[] = [
+      {
+        ...SHEETS[0]!,
+        remembered_decisions: {
+          column_mapping: { mapping: { proveedor: "supplier_name" } },
+          context_included: { included: true },
+        },
+      },
+      SHEETS[1]!,
+    ];
+
+    it("precarga el mapeo recordado, lo muestra como tal, y sigue siendo editable", async () => {
+      const user = userEvent.setup();
+      renderReview({ sheets: sheetsConRecordado });
+
+      // Precargado: "proveedor" (unmapped en la sugerencia) ya aparece con
+      // el destino recordado, sin que el usuario haya tocado nada.
+      const selects = await screen.findAllByRole("combobox", { name: "" });
+      expect(selects[1]).toHaveValue("supplier_name");
+
+      // Mostrado claramente como recordado, no como "elegido ahora".
+      expect(
+        screen.getByText(/Recordado de una carga anterior con este mismo formato/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Precargamos el mapeo y la sección de una carga anterior/i),
+      ).toBeInTheDocument();
+
+      // Editable: el usuario lo cambia y el cambio se respeta.
+      await user.selectOptions(selects[1]!, "amount");
+      expect(selects[1]).toHaveValue("amount");
+      expect(
+        screen.queryByText(/Recordado de una carga anterior con este mismo formato/i),
+      ).not.toBeInTheDocument();
+    });
+
+    it("no se aplica silenciosamente: recién actualiza el preview cuando el usuario confirma", async () => {
+      const user = userEvent.setup();
+      mockRereadPreview.mockResolvedValue({
+        file_id: "file-1",
+        run_id: "run-1",
+        draft_version: 2,
+        status: "READY_TO_APPLY",
+        counts: {
+          to_update: 0,
+          preserved: 0,
+          new: 0,
+          to_void: 0,
+          unchanged: 0,
+          products_new: 0,
+          products_restock: 0,
+        },
+        impact: {
+          ventas_con_producto: 0,
+          ventas_sin_producto: 0,
+          ventas_sin_producto_samples: [],
+          compras_vinculadas: 0,
+          compras_producto_nuevo: 0,
+          compras_sin_producto: 0,
+          compras_sin_producto_samples: [],
+          compras_gate_bloqueado: 0,
+          compras_gate_bloqueado_samples: [],
+          movimientos_sin_producto_esperado: 0,
+        },
+        sheets: sheetsConRecordado,
+        mapping_contexts: [],
+        contextual_column_risk: [],
+        legacy_fallback: false,
+        sample_changes: [],
+      });
+
+      renderReview({ sheets: sheetsConRecordado });
+
+      // Lo recordado ya está visible en pantalla, pero todavía no se mandó nada.
+      await screen.findAllByRole("combobox", { name: "" });
+      expect(mockRereadPreview).not.toHaveBeenCalled();
+
+      const updateButton = await screen.findByRole("button", {
+        name: /actualizar vista previa/i,
+      });
+      await user.click(updateButton);
+
+      // Recién ACÁ se manda lo recordado — como una corrección más del borrador.
+      await waitFor(() => expect(mockRereadPreview).toHaveBeenCalledTimes(1));
+      const [, draft] = mockRereadPreview.mock.calls[0];
+      expect(draft.columnMappings).toContainEqual(
+        expect.objectContaining({
+          source_column: "proveedor",
+          target_field: "supplier_name",
+          context_id: "compras",
+        }),
+      );
+    });
+  });
 });

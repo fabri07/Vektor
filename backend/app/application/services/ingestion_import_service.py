@@ -34,6 +34,9 @@ from app.application.services.identity_resolution import (
     record_keys,
     resolve_identity,
 )
+from app.application.services.ingestion_schema_decision_service import (
+    record_context_decisions,
+)
 from app.application.services.inventory_movement_origin import (
     SOURCE_CATALOG_INITIAL_STOCK,
     SOURCE_PURCHASE_IMPORT,
@@ -46,12 +49,25 @@ from app.application.services.product_identity import (
     ProductIdentityConflictError,
     add_product_or_reuse,
 )
+from app.application.services.product_supplier_link_service import (
+    link_product_to_declared_supplier,
+    reconcile_catalog_declared_links_for_upload,
+)
+from app.config.catalog_final_cost_rollout import catalog_final_cost_enabled_for
+from app.config.ingestion_schema_decisions_rollout import (
+    ingestion_schema_decisions_enabled_for,
+)
+from app.config.product_supplier_links_rollout import product_supplier_links_enabled_for
 from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
 from app.domain.date_parsing import parse_business_date, parse_business_datetime
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
+)
+from app.domain.ingestion_schema_fingerprint import (
+    compute_context_signature,
+    compute_schema_fingerprint,
 )
 from app.domain.inventory_effect import (
     HISTORICAL_REPLAY,
@@ -71,6 +87,7 @@ from app.domain.line_amount import (
     resolve_line_amount,
 )
 from app.domain.product_categories import normalize_product_category
+from app.domain.product_category_inference import CategorySuggestion, infer_category
 from app.domain.purchase_cost import (
     ATRIBUIDO_A_INVENTARIO_FIELD,
     COMPARTIDO_SUBTOTAL,
@@ -556,6 +573,19 @@ ENTITY_BUCKET = {
 }
 
 
+def _bucket_key_for_context(ctx: dict[str, Any]) -> str:
+    """Bucket donde el parser dejó las filas de esta hoja, por tipo ORIGINAL.
+
+    Excepción: una hoja derivada (Ganancias/resumen/balance, `is_summary_or_derived`
+    en `file_parsing.py`) nunca vive en `otros_detectados` — el parser la preserva
+    aparte en `derived_detected` para no contaminar Otros mientras esté excluida.
+    Si el usuario la reasigna a una entidad real, sus filas se buscan igual acá.
+    """
+    if ctx.get("is_summary_or_derived"):
+        return "derived_detected"
+    return ENTITY_BUCKET.get(ctx.get("entity_type") or "", "otros_detectados")
+
+
 def _rows_for_context(bucket: list[dict[str, Any]], ctx_id: str) -> list[dict[str, Any]]:
     """Filtra un bucket de filas por ``__context__`` (multi-hoja). Si las filas no
     llevan el marcador (archivo de un solo contexto, ej. un CSV de clientes
@@ -693,7 +723,7 @@ async def _import_master_entities(
         else:
             continue
         # Las filas están donde las dejó el parser, no donde el usuario las mandó.
-        bucket_key = ENTITY_BUCKET.get(base_entity or "", "otros_detectados")
+        bucket_key = _bucket_key_for_context(ctx)
 
         # Inclusión: por contexto si vino context_confirmed; si no, por tipo
         # (legacy) — mismo criterio que el dispatch de ventas/gastos/productos.
@@ -2450,6 +2480,32 @@ _COSTO_UNITARIO_COLS: set[str] = {
 # en el path de gastos para no confundir el total de un libro de compras con el
 # costo unitario.
 _COSTO_UNITARIO_PRODUCT_COLS: set[str] = _COSTO_UNITARIO_COLS | {"compra"}
+
+# Bloque 3A: "compra+envío" (o variantes) YA es el costo final calculado por el
+# archivo — gana sobre "Precio de compra" (costo BASE) cuando ambas columnas
+# existen. Es TUPLA (no set): el orden es prioridad para `_row_col`/`_find_col`
+# — se evalúa contra TODAS las columnas antes que el "compra" genérico de
+# `_COSTO_UNITARIO_PRODUCT_COLS` tenga chance de agarrar "Precio de compra"
+# primero solo por el orden de las columnas del archivo (el mismo bug de
+# heurística por orden que ya causó el incidente ASTERIA en `_match_key`).
+_COMPRA_MAS_ENVIO_COLS: tuple[str, ...] = (
+    "compra+envio", "compra+envío",
+    "compra_+_envio", "compra_+_envío",
+    "compra_envio", "compra_envío",
+    "compraenvio", "compraenvío",
+    "costo_final", "precio_final",
+)
+# Precio de compra BASE (sin envío) — se preserva como custom field aparte,
+# nunca se pisa aunque "compra+envío" gane como costo final.
+_PRECIO_COMPRA_BASE_COLS: tuple[str, ...] = (
+    "precio_de_compra", "precio_compra", "p_compra", "costo_compra",
+)
+# "% Envío" — porcentaje original, se preserva como custom field aparte. No se
+# usa para RECALCULAR nada (el archivo ya trae el costo final en compra+envío).
+_PORCENTAJE_ENVIO_COLS: tuple[str, ...] = (
+    "%_envio", "%_envío", "porcentaje_envio", "porcentaje_envío",
+    "envio_%", "envío_%", "%envio", "%envío",
+)
 _STOCK_COLS: set[str] = {
     "stock", "cantidad", "inventario", "units", "qty", "existencia", "stock_actual",
 }
@@ -2460,6 +2516,14 @@ _SKU_COLS: set[str] = {"sku", "codigo", "código", "code", "ref", "id_producto"}
 # matchea ambos) se resuelve dando prioridad a barcode sobre sku en la detección.
 _BARCODE_COLS: set[str] = {
     "barcode", "ean", "upc", "gtin", "barras", "cod_barra", "codigo_barra",
+}
+# Bloque 3B: texto de especificaciones para desambiguar la categoría cuando el
+# NOMBRE solo no alcanza ("Set de 3 piezas" no dice nada; "vela de soja
+# aromática" en especificaciones, sí). Distinto de "description" (canónico,
+# mapeo explícito) — esto es detección por keyword, mismo criterio que el
+# resto de las columnas auxiliares de esta función.
+_ESPECIFICACIONES_COLS: set[str] = {
+    "especificaciones", "especificacion", "caracteristicas", "detalle", "detalles",
 }
 _PROVEEDOR_COLS: set[str] = {
     "proveedor",
@@ -2994,6 +3058,45 @@ async def insert_confirmed_data(
     )
     await session.flush()
     await assign_orphan_sales_to_local(session, tenant_id)
+    # Bloque 5: persistir las decisiones EXPLÍCITAS de esta corrida por huella
+    # de esquema — nunca sugerencias. `context_mappings`/`context_entity`/
+    # `context_confirmed`/`shipping_decisions` (y `stock_treatment` en su forma
+    # por hoja) son, por convención ya establecida en todo el pipeline, SOLO lo
+    # que el usuario tocó — una hoja derivada excluida por default nunca
+    # aparece en `context_confirmed`, así que nunca se registra acá. Acá (no en
+    # `_insert_multisheet_data`) porque este wrapper es el chokepoint único
+    # para todos los callers (ingestión/chat/reread/data-repair) y es donde
+    # todavía se tiene el `stock_treatment` CRUDO — `_insert_multisheet_data`
+    # solo recibe el callable ya resuelto (`stock_is_purchase_for`), que no
+    # distingue "el usuario eligió apertura" de "nadie eligió nada".
+    _mapping_contexts_for_fp = summary.get("mapping_contexts") or []
+    if _mapping_contexts_for_fp and ingestion_schema_decisions_enabled_for(tenant_id):
+        _schema_fp = compute_schema_fingerprint(
+            str(summary.get("file_type") or ""), _mapping_contexts_for_fp
+        )
+        for _ctx in _mapping_contexts_for_fp:
+            _cid = str(_ctx.get("context_id") or "")
+            if not _cid:
+                continue
+            _ctx_signature = compute_context_signature(_ctx)
+            _stock_treatment_for_ctx = (
+                stock_treatment.get(_cid) if isinstance(stock_treatment, dict) else None
+            )
+            await record_context_decisions(
+                session,
+                tenant_id,
+                _schema_fp,
+                _ctx_signature,
+                column_mapping=(context_mappings or {}).get(_cid) or None,
+                context_entity=(context_entity or {}).get(_cid),
+                context_included=(
+                    (context_confirmed or {}).get(_cid)
+                    if context_confirmed and _cid in context_confirmed
+                    else None
+                ),
+                stock_treatment=_stock_treatment_for_ctx,
+                shipping_decision=(shipping_decisions or {}).get(_cid),
+            )
     return counts
 
 
@@ -4981,6 +5084,11 @@ async def _insert_multisheet_data(
     _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
     # Índice de proveedores para find-or-create en compras (una carga).
     _supplier_index = await _load_supplier_index(session, tenant_id)
+    # Bloque 2: pares (product_id, supplier_id) declarados por ESTA corrida vía
+    # "Tienda" → proveedor. Una relectura posterior compara contra esto para
+    # anular SOLO lo que ella misma dejó de declarar (nunca lo que no le
+    # pertenece ni la evidencia de compra real).
+    _declared_supplier_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
     # FASE E: vertical del tenant para normalizar categorías de producto.
     _vertical = await _load_tenant_vertical(session, tenant_id)
     # Batch: balances en una query (evita un SELECT por fila en movimientos).
@@ -5812,6 +5920,7 @@ async def _insert_multisheet_data(
         cf_cols: dict[str, str],
         row_ref: str | None = None,
         context_id: str | None = None,
+        cruzados: dict[str, str] | None = None,
     ) -> bool:
         """Devuelve ``True`` si la fila se CAPTURÓ a /otros (identidad ambigua o fecha
         de producto ilegible en columna mapeada a mano) — el caller registra la huella
@@ -5825,14 +5934,49 @@ async def _insert_multisheet_data(
         name = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 299)
         if not name:
             return False
-        # La columna "Tienda"/"proveedor" de un CATÁLOGO es marca/origen del
-        # artículo, NO un proveedor: se guarda como atributo del producto en
-        # ``custom_fields["marca"]``. NO se crea Supplier desde un catálogo.
+        # Bloque 2: "Tienda"/"proveedor" de un catálogo es marca/origen del
+        # artículo POR DEFECTO — salvo que el usuario haya mapeado esa MISMA
+        # columna a `supplier:name` explícitamente (gateado por rollout). En
+        # ese caso NO participa como marca: un mismo producto comprado en dos
+        # tiendas no debe duplicarse por identidad de marca (F2-T2 usa
+        # `normalize_brand(store_name)` en la clave de identidad).
+        _store_col = cols.get("supplier_name") or _row_col(row, _PROVEEDOR_COLS)
         store_name: str | None = _clean_str(
-            _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS), 300
+            row.get(_store_col) if _store_col else None, 300
         )
-        if store_name:
+        _store_mapped_as_supplier = bool(
+            store_name
+            and _store_col
+            and (cruzados or {}).get(_store_col) == "supplier:name"
+            and product_supplier_links_enabled_for(tenant_id)
+        )
+        if store_name and not _store_mapped_as_supplier:
             _skipped_brands.add(store_name)
+
+        async def _declarar_link_proveedor(target_product_id: uuid.UUID) -> None:
+            """Bloque 2: crea/revive el vínculo Producto↔Proveedor declarado.
+
+            `purchase_evidence` cuando la fila del catálogo se trata como
+            COMPRA (`stock_is_purchase`, ya cobra COGS+baja de caja); si no,
+            `catalog_declared` — es una referencia sin evidencia transaccional.
+            """
+            if not (_store_mapped_as_supplier and store_name):
+                return
+            _supplier_id, _ = await _resolve_or_create_supplier(
+                session, tenant_id, store_name, _supplier_index
+            )
+            if _supplier_id is None:
+                return
+            await link_product_to_declared_supplier(
+                session,
+                tenant_id,
+                target_product_id,
+                _supplier_id,
+                source="purchase_evidence" if stock_is_purchase else "catalog_declared",
+                source_upload_id=uploaded_file_id,
+                source_context_id=context_id,
+            )
+            _declared_supplier_pairs.add((target_product_id, _supplier_id))
         # Mejora C: costo unitario narrow-first. Se resuelve ANTES que el precio
         # para poder excluirlo (desambiguar "precio de compra" vs "precio de
         # venta"). Mapeo explícito gana; si no, una columna inequívoca de costo
@@ -5844,7 +5988,18 @@ async def _insert_multisheet_data(
             cost = _parse_amount(row.get(_uc_mapped))
             _uc_col = _uc_mapped
         else:
-            _uc_col = _row_col(row, _COSTO_UNITARIO_PRODUCT_COLS)
+            # Bloque 3A: "compra+envío" ya es el costo final calculado por el
+            # archivo — gana sobre el "compra" genérico (que agarraría "Precio
+            # de compra", solo el costo BASE) cuando ambas existen. Gateado:
+            # con el flag apagado, el orden de columnas del archivo sigue
+            # decidiendo como hasta ahora (comportamiento histórico).
+            _uc_col = (
+                _row_col(row, _COMPRA_MAS_ENVIO_COLS)
+                if catalog_final_cost_enabled_for(tenant_id)
+                else None
+            )
+            if not _uc_col:
+                _uc_col = _row_col(row, _COSTO_UNITARIO_PRODUCT_COLS)
             if not _uc_col:
                 _broad = _row_col(row, _COSTO_COLS)
                 if _broad and not _is_total_cost_col(_broad):
@@ -5854,6 +6009,16 @@ async def _insert_multisheet_data(
                 if _uc_col and not _is_total_cost_col(_uc_col)
                 else None
             )
+        # Bloque 3A: costo base y % de envío ORIGINALES — se preservan como
+        # custom fields aparte, nunca se usan para recalcular ni sumar el
+        # envío una segunda vez (el motor de distribución F-H6 no corre sobre
+        # catálogo; ver `_planificar_costos_de_la_hoja`, solo `entity=="expense"`).
+        _base_cost_mapped = cols.get("purchase_base_cost")
+        _base_cost_col = _base_cost_mapped or _row_col(row, _PRECIO_COMPRA_BASE_COLS)
+        _purchase_base_cost_raw = row.get(_base_cost_col) if _base_cost_col else None
+        _shipping_pct_mapped = cols.get("shipping_percentage")
+        _shipping_pct_col = _shipping_pct_mapped or _row_col(row, _PORCENTAJE_ENVIO_COLS)
+        _shipping_percentage_raw = row.get(_shipping_pct_col) if _shipping_pct_col else None
         # Precio de venta desambiguado del de compra/costo: mapeo explícito gana;
         # si no, "venta" > "lista" > "precio_venta"/"p_venta" > genérico "precio"
         # EXCLUYENDO la columna de costo ya resuelta y cualquier header de
@@ -5888,8 +6053,19 @@ async def _insert_multisheet_data(
         )
         cat: str | None = None
         cat_label: str | None = None
+        _cat_suggestion: CategorySuggestion | None = None
         if cat_raw:
             cat, cat_label = normalize_product_category(cat_raw, _vertical)
+        else:
+            # Bloque 3B: sin columna de categoría, inferir desde nombre +
+            # especificaciones — nunca reemplaza una categoría que el archivo
+            # SÍ declara (por eso vive en el `else`, no antes).
+            _desc_col = cols.get("description")
+            _specs_raw = row.get(_desc_col) if _desc_col else _row_val(row, _ESPECIFICACIONES_COLS)
+            _specs = _clean_str(_specs_raw, 500)
+            _cat_suggestion = infer_category(_vertical, name, _specs)
+            if _cat_suggestion.confidence == "high":
+                cat = _cat_suggestion.code
         # F6-B2: fechas de producto (columna mapeada o keyword; la genérica "fecha"
         # NO cuenta). Sin columna/celda vacía/heurística ilegible → None (un producto
         # es válido sin fecha, no se inventa). PERO si un campo MAPEADO A MANO trae un
@@ -5927,7 +6103,14 @@ async def _insert_multisheet_data(
         # comparten identidad (mismo patrón que F1).
         _sku_n = normalize_sku(sku)
         _name_n = normalize_product_name(name)
-        _brand_n = normalize_brand(store_name)
+        # Bloque 2: si "Tienda" se confirmó como proveedor, NO entra a la
+        # identidad como marca — un mismo producto comprado en dos tiendas
+        # distintas seguiría duplicándose por identidad si la marca cambiara
+        # con cada fuente. Mismo valor para la caché intra-corrida (`_brand_n`)
+        # Y para la resolución contra el índice de la DB más abajo — dos
+        # lecturas de la misma guarda no pueden divergir.
+        _store_brand_for_identity = None if _store_mapped_as_supplier else store_name
+        _brand_n = normalize_brand(_store_brand_for_identity)
         _bc_n = normalize_barcode(barcode)
         async def _merge_into_existing(existing: Product) -> None:
             """Aplica la fila del catálogo a un producto que YA existe.
@@ -6089,7 +6272,7 @@ async def _insert_multisheet_data(
         )
         if existing is None:
             _resolution = _resolve_product_identity(
-                name, sku, store_name, indexes=_identity_indexes, barcode=barcode
+                name, sku, _store_brand_for_identity, indexes=_identity_indexes, barcode=barcode
             )
             if _resolution.status in ("ambiguous", "conflict"):
                 logger.warning(
@@ -6115,12 +6298,50 @@ async def _insert_multisheet_data(
                 existing = await session.get(Product, _resolution.product_id)
         if existing:
             await _merge_into_existing(existing)
+            await _declarar_link_proveedor(existing.id)
         else:
             cf = _custom_fields(row, cf_cols)
             if cat_label:
                 cf = {**cf, "category_label": cat_label}
+            # Bloque 3B: evidencia de la sugerencia de categoría — texto que
+            # matcheó, regla y confianza. Se guarda tanto si se aplicó (alta)
+            # como si quedó pendiente de confirmar (media), para que la
+            # revisión (Bloque 5) tenga de dónde salió sin volver a inferir.
+            if _cat_suggestion is not None and _cat_suggestion.code is not None:
+                cf = {
+                    **cf,
+                    "category_suggestion_code": _cat_suggestion.code,
+                    "category_suggestion_confidence": _cat_suggestion.confidence,
+                    "category_suggestion_evidence": _cat_suggestion.matched_text or "",
+                    "category_suggestion_rule": _cat_suggestion.rule or "",
+                }
+            # Bloque 3A: costo base y % de envío ORIGINALES, preservados tal
+            # cual el archivo los trae — nunca se recalculan ni se usan para
+            # sumar el envío una segunda vez (eso ya lo decidió `unit_cost_ars`
+            # arriba, sea "compra+envío" o "Precio de compra").
+            _base_cost_amount = (
+                _parse_amount(_purchase_base_cost_raw)
+                if _purchase_base_cost_raw is not None
+                else None
+            )
+            if _base_cost_amount is not None:
+                cf = {**cf, "purchase_base_cost": str(_base_cost_amount)}
+            _shipping_pct_amount = (
+                _parse_amount(str(_shipping_percentage_raw).replace("%", "").strip())
+                if _shipping_percentage_raw is not None
+                else None
+            )
+            if _shipping_pct_amount is not None:
+                cf = {**cf, "shipping_percentage": str(_shipping_pct_amount)}
             if store_name:
-                cf = {**cf, "marca": store_name}
+                # Bloque 2: si el usuario confirmó "Tienda" como proveedor, NO
+                # se guarda como "marca" (semántica incorrecta) — se conserva
+                # el valor original en un campo propio distinto, sin que nada
+                # (identidad, colapso de marcas) lo confunda con una marca real.
+                cf = {
+                    **cf,
+                    ("tienda_original" if _store_mapped_as_supplier else "marca"): store_name,
+                }
             _new_id = uuid.uuid4()
             new_product = Product(
                 id=_new_id,
@@ -6171,6 +6392,7 @@ async def _insert_multisheet_data(
                 # El índice único resolvió una carrera: es exactamente el camino de
                 # "producto existente" —incluido el delta de stock relativo—.
                 await _merge_into_existing(_resolved)
+                await _declarar_link_proveedor(_resolved.id)
                 counts["productos"] += 1
                 return False
             _register_product_identity_cache(
@@ -6212,6 +6434,7 @@ async def _insert_multisheet_data(
                 balance_index=_balance_index,
                 is_purchase=stock_is_purchase,
             )
+            await _declarar_link_proveedor(_new_id)
             if return_details:
                 product_details.append(
                     {
@@ -6300,7 +6523,7 @@ async def _insert_multisheet_data(
 
         def _filas_y_mapeo(
             ctx: dict[str, Any],
-        ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
+        ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str], dict[str, str]]:
             """Filas de esta hoja + su mapeo resuelto.
 
             Compartido con el gate de replay (F-H3.d.3) para que la fila que el gate
@@ -6315,18 +6538,22 @@ async def _insert_multisheet_data(
             # una hoja que el parser mandó a Clientes y el usuario reasignó a
             # Ventas tiene sus filas en `clientes_detectados`, y con el mapa
             # recortado caía a `otros_detectados` y no se importaba nada.
-            _bucket_key = ENTITY_BUCKET.get(ctx.get("entity_type") or "", "otros_detectados")
+            _bucket_key = _bucket_key_for_context(ctx)
             _bucket = summary.get(_bucket_key, [])
             _rows = [r for r in _bucket if r.get("__context__") == _cid]
             _mapping = context_mappings.get(_cid or "", {})
             _cols, _cf_cols, _cruzados = (
                 _resolve_target_cols(_mapping) if _mapping else ({}, {}, {})
             )
-            if _cruzados:
+            # Bloque 2: "supplier:name" en un contexto de producto no se descarta
+            # — `_add_product` lo aplica (gateado por rollout). El resto de los
+            # cruzados sigue contando como descartado, F-D no está entregada.
+            _no_aplicados = {k: v for k, v in _cruzados.items() if v != "supplier:name"}
+            if _no_aplicados:
                 counts["targets_cruzados_descartados"] = counts.get(
                     "targets_cruzados_descartados", 0
-                ) + len(_cruzados)
-            return _rows, _cols, _cf_cols
+                ) + len(_no_aplicados)
+            return _rows, _cols, _cf_cols, _cruzados
 
         def _hoja_incluida(ctx: dict[str, Any]) -> bool:
             """Inclusión: por contexto si vino ``context_confirmed``; si no, por tipo."""
@@ -6360,7 +6587,7 @@ async def _insert_multisheet_data(
                 _cid = str(_ctx.get("context_id") or "")
                 if (proyeccion.effect_for(_cid) if proyeccion else None) != HISTORICAL_REPLAY:
                     continue
-                _rows, _cols, _ = _filas_y_mapeo(_ctx)
+                _rows, _cols, _, _ = _filas_y_mapeo(_ctx)
                 for _idx, _row in enumerate(_rows):
                     _pid = _venta_producto_id(_row, _cols)
                     _fecha = _venta_fecha(_row, _cols)
@@ -6434,27 +6661,49 @@ async def _insert_multisheet_data(
                 # este dispatch (orden maestro→transacción) — nada más que hacer.
                 continue
             if entity not in entity_bucket:
-                # Hoja no clasificada y no reasignada → bandeja "Otros".
+                # Hoja no clasificada y no reasignada → bandeja "Otros". Idempotente
+                # por (archivo, contexto, índice) — mismo ancla/huella que el resto
+                # del import, namespace propio "otros_hoja:{ctx}" para no colisionar
+                # con la de venta/gasto/producto. Sin esto, releer el MISMO archivo
+                # (relectura o doble confirm) duplicaba estas filas en Otros en cada
+                # corrida — bug real destapado por el dry-run del Bloque 7 contra el
+                # Excel real de Asteria.
                 otros_rows = [
                     r
                     for r in summary.get("otros_detectados", [])
                     if r.get("__context__") == ctx_id
                 ]
-                if otros_rows:
-                    counts["otros"] += _capture_unclassified(
+                for _oi, _orow in enumerate(otros_rows):
+                    _otros_anchor = (
+                        _import_row_anchor(
+                            tenant_id, uploaded_file_id, f"otros_hoja:{ctx_id}", _oi
+                        )
+                        if uploaded_file_id is not None
+                        else None
+                    )
+                    if _otros_anchor is not None and await _import_row_seen(
+                        session, tenant_id, _otros_anchor, seen_fp
+                    ):
+                        continue
+                    _otros_captured = _capture_unclassified(
                         session,
                         tenant_id,
-                        otros_rows,
+                        [_orow],
                         ctx.get("headers"),
                         source,
                         uploaded_file_id,
                         context_label=str(ctx.get("label") or ctx_id or ""),
                     )
+                    counts["otros"] += _otros_captured
+                    if _otros_captured and _otros_anchor is not None:
+                        await _register_import_row_fingerprint(
+                            session, tenant_id, _otros_anchor, seen_fp
+                        )
                 continue
             # Inclusión: por contexto si vino context_confirmed; si no, por tipo (legacy)
             if not _hoja_incluida(ctx):
                 continue
-            rows, cols, cf_cols = _filas_y_mapeo(ctx)
+            rows, cols, cf_cols, cruzados = _filas_y_mapeo(ctx)
             if not rows:
                 continue
             # F-H3.d.3: recién acá, no antes del loop — los productos que el archivo
@@ -6568,7 +6817,7 @@ async def _insert_multisheet_data(
                     ):
                         continue
                     _prod_captured = await _add_product(
-                        row, cols, cf_cols, _row_ref, context_id=ctx_id
+                        row, cols, cf_cols, _row_ref, context_id=ctx_id, cruzados=cruzados
                     )
                     if _prod_captured and _prod_cap_anchor is not None:
                         await _register_import_row_fingerprint(
@@ -6707,6 +6956,14 @@ async def _insert_multisheet_data(
         if stamp_product_updated_at:
             await _stamp_updated_at_on_product_details(session, product_details)
         counts["product_details"] = product_details
+    # Bloque 2: reconciliar vínculos catalog_declared de ESTE archivo — solo si
+    # el flag está prendido para el tenant. Con el flag apagado no se toca nada
+    # (ni siquiera vínculos de una corrida anterior con el flag prendido): es
+    # una compuerta de LECTURA/aplicación, no un botón de borrado.
+    if uploaded_file_id is not None and product_supplier_links_enabled_for(tenant_id):
+        await reconcile_catalog_declared_links_for_upload(
+            session, tenant_id, uploaded_file_id, _declared_supplier_pairs
+        )
     return counts
 
 

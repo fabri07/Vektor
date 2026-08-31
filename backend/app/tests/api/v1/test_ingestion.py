@@ -670,6 +670,104 @@ class TestPreviewEndpoint:
         assert data["processing_status"] == PROCESSING_STATUS_NEEDS_CONFIRMATION
         assert data["parsed_summary_json"]["confidence"] == "HIGH"
 
+    async def test_preview_refleja_decision_recordada_de_una_carga_anterior(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bloque 5 (consumo): un archivo nuevo con la MISMA huella de esquema
+        que uno confirmado antes trae, en `GET .../preview`, lo que el usuario
+        ya había decidido — acá "Tienda" mapeada a `supplier:name` (Bloque 2),
+        no como marca (comportamiento por default sin memoria)."""
+        import app.application.services.ingestion_import_service as importer
+        from app.config.settings import get_settings
+
+        tid = sample_tenant.tenant_id
+        monkeypatch.setattr(
+            get_settings(), "INGESTION_SCHEMA_DECISIONS_ROLLOUT_TENANT_IDS", [str(tid)]
+        )
+        headers = ["nombre", "tienda", "precio_venta"]
+        mapping = {"nombre": "name", "tienda": "supplier:name", "precio_venta": "sale_price_ars"}
+        ctx = {
+            "context_id": "sheet:Catalogo",
+            "label": "Catalogo",
+            "entity_type": "product",
+            "headers": headers,
+            "row_count": 1,
+        }
+        base_summary = {
+            "file_type": "spreadsheet",
+            "inferred_type": "mixed",
+            "multi_sheet": True,
+            "has_stock": True,
+            "mapping_contexts": [ctx],
+            "stock_detectado": [
+                {
+                    "nombre": "Silla de living",
+                    "tienda": "El pasillo",
+                    "precio_venta": "5000",
+                    "__context__": "sheet:Catalogo",
+                }
+            ],
+        }
+
+        # Sesión 1: un archivo previo (mes anterior), el usuario confirma con
+        # "Tienda" mapeada a proveedor.
+        await importer.insert_confirmed_data(
+            db_session,
+            tid,
+            base_summary,
+            {"productos": True},
+            context_mappings={"sheet:Catalogo": mapping},
+            context_entity={"sheet:Catalogo": "product"},
+            context_confirmed={"sheet:Catalogo": True},
+            source="reread",
+        )
+        await db_session.commit()
+
+        # Sesión 2: archivo NUEVO (mes siguiente), misma forma de columnas.
+        segundo_archivo = UploadedFile(
+            tenant_id=tid,
+            uploaded_by=None,
+            original_filename="asteria_septiembre.xlsx",
+            s3_key="uploads/test/uuid/asteria_septiembre.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=1024,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={"confidence": "HIGH", **base_summary},
+        )
+        db_session.add(segundo_archivo)
+        await db_session.commit()
+
+        response = await client.get(
+            f"/api/v1/ingestion/files/{segundo_archivo.id}/preview",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        remembered = data["remembered_decisions"]["sheet:Catalogo"]
+        assert remembered["column_mapping"]["mapping"]["tienda"] == "supplier:name"
+        assert remembered["context_entity"]["entity"] == "product"
+        assert remembered["context_included"]["included"] is True
+
+    async def test_preview_flag_apagado_no_trae_decisiones_recordadas(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        confirmed_file: UploadedFile,
+    ) -> None:
+        response = await client.get(
+            f"/api/v1/ingestion/files/{confirmed_file.id}/preview",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["remembered_decisions"] == {}
+
     async def test_preview_pending_file_returns_409(
         self,
         client: AsyncClient,
@@ -1527,6 +1625,146 @@ async def test_fila_con_fecha_ilegible_va_a_otros_no_inventa_hoy(
             {"raw": "fecha rara", "row_index": 0},
         )
     ]
+
+
+async def test_hoja_derivada_no_reasignada_no_contamina_otros(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Bug real (Asteria): una hoja derivada (Ganancias) excluida por defecto
+    NO debe generar `UnclassifiedRecord`. `derived_detected` es un bucket
+    separado de `otros_detectados` — sus filas ni siquiera se buscan ahí salvo
+    que el usuario la reasigne (ver `test_hoja_derivada_reasignada_se_materializa`).
+    """
+    import app.application.services.ingestion_import_service as importer
+    from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+    summary: dict[str, Any] = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_gasto": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Ganancias",
+                "label": "Ganancias",
+                "entity_type": None,
+                "is_summary_or_derived": True,
+                "headers": ["fecha", "monto", "categoria"],
+                "row_count": 2,
+            },
+            {
+                "context_id": "sheet:Gastos",
+                "label": "Gastos",
+                "entity_type": "expense",
+                "headers": ["fecha", "monto", "categoria"],
+                "row_count": 1,
+            },
+        ],
+        "derived_detected": [
+            {
+                "fecha": "2026-03-02",
+                "monto": "1000",
+                "categoria": "resumen",
+                "__context__": "sheet:Ganancias",
+            },
+            {
+                "fecha": "2026-03-03",
+                "monto": "2000",
+                "categoria": "resumen",
+                "__context__": "sheet:Ganancias",
+            },
+        ],
+        "gastos_detectados": [
+            {
+                "fecha": "2026-03-02",
+                "monto": "5000",
+                "categoria": "alquiler",
+                "__context__": "sheet:Gastos",
+            },
+        ],
+    }
+    context_mappings = {
+        "sheet:Gastos": {"fecha": "expense_date", "monto": "amount", "categoria": "category"},
+    }
+
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"gastos": True},
+        context_mappings=context_mappings,
+        context_confirmed={"sheet:Gastos": True},
+    )
+
+    assert counts["gastos"] == 1
+    expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
+    assert len(expenses) == 1
+    assert expenses[0].amount == Decimal("5000")
+
+    # El punto central del fix: 0 registros en Otros por la hoja derivada.
+    records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert records == []
+
+
+async def test_hoja_derivada_reasignada_se_materializa(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Si el usuario incluye deliberadamente la hoja derivada y le asigna una
+    entidad, sus filas SÍ se importan — `_bucket_key_for_context` debe buscarlas
+    en `derived_detected`, no asumir que están vacías por no estar en
+    `otros_detectados`.
+    """
+    import app.application.services.ingestion_import_service as importer
+
+    summary: dict[str, Any] = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_gasto": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Ganancias",
+                "label": "Ganancias",
+                "entity_type": None,
+                "is_summary_or_derived": True,
+                "headers": ["fecha", "monto", "categoria"],
+                "row_count": 2,
+            },
+        ],
+        "derived_detected": [
+            {
+                "fecha": "2026-03-02",
+                "monto": "1000",
+                "categoria": "resumen",
+                "__context__": "sheet:Ganancias",
+            },
+            {
+                "fecha": "2026-03-03",
+                "monto": "2000",
+                "categoria": "resumen",
+                "__context__": "sheet:Ganancias",
+            },
+        ],
+    }
+    context_mappings = {
+        "sheet:Ganancias": {"fecha": "expense_date", "monto": "amount", "categoria": "category"},
+    }
+
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"gastos": True},
+        context_mappings=context_mappings,
+        context_confirmed={"sheet:Ganancias": True},
+        context_entity={"sheet:Ganancias": "expense"},
+    )
+
+    assert counts["gastos"] == 2
+    expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
+    assert sorted(e.amount for e in expenses) == [Decimal("1000"), Decimal("2000")]
 
 
 async def test_multisheet_heterogeneous_schemas_no_silent_drop(

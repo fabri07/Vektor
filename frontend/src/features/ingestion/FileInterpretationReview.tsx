@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
 
@@ -99,6 +99,51 @@ export function FileInterpretationReview({
   const [updating, setUpdating] = useState(false);
 
   const activeSheet = sheets.find((s) => s.context_id === activeContextId) ?? null;
+
+  // Bloque 5 (consumo): al abrir una hoja por primera vez, precargar el
+  // borrador con lo que Véktor recuerda de una carga anterior con esta misma
+  // huella — así queda VISIBLE (con su etiqueta de origen, ver
+  // `MappingOriginHint`) y forma parte de lo que se manda al pedir "Actualizar
+  // vista previa", pero como una corrección más del borrador: el usuario
+  // sigue pudiendo editar cualquier campo antes de eso, y nada se aplica
+  // hasta que confirme/aplique la relectura. Se precarga UNA vez por hoja
+  // (guardado en `seededContexts`) para no pisar una corrección que el
+  // usuario ya hizo si `sheets` se refresca por otro motivo.
+  const seededContexts = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!activeContextId || !activeSheet) return;
+    if (seededContexts.current.has(activeContextId)) return;
+    seededContexts.current.add(activeContextId);
+    const remembered = activeSheet.remembered_decisions;
+    if (!remembered) return;
+
+    if (remembered.column_mapping?.mapping) {
+      const rememberedMapping = remembered.column_mapping.mapping;
+      setOverrides((prev) => ({
+        ...prev,
+        [activeContextId]: { ...rememberedMapping, ...(prev[activeContextId] ?? {}) },
+      }));
+    }
+    if (remembered.context_entity?.entity) {
+      const entity = remembered.context_entity.entity;
+      setEntityOverrides((prev) =>
+        activeContextId in prev ? prev : { ...prev, [activeContextId]: entity },
+      );
+    }
+    if (remembered.context_included?.included !== undefined) {
+      const included = remembered.context_included.included;
+      setContextConfirmedOverrides((prev) =>
+        activeContextId in prev ? prev : { ...prev, [activeContextId]: included },
+      );
+    }
+    if (remembered.stock_treatment?.treatment) {
+      const treatment = remembered.stock_treatment.treatment;
+      setStockTreatmentOverrides((prev) =>
+        activeContextId in prev ? prev : { ...prev, [activeContextId]: treatment },
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeContextId, activeSheet]);
   // Entidad EFECTIVA de la hoja activa: la reasignación del usuario le gana a
   // la que trae el preview — mismo criterio de prioridad que el resto del
   // borrador (draft explícito > lo detectado).
@@ -215,11 +260,40 @@ export function FileInterpretationReview({
 
       {activeSheet && (
         <div
+          // F10-fix contraste: tarjeta clara SÓLIDA (antes `bg-vk-surface-w/30`
+          // dejaba traslucir el canvas oscuro del panel de relectura y el
+          // texto —pensado para tarjeta clara, mismos tokens que todo el kit
+          // de UI— quedaba ilegible). Mismo patrón que Modal/Input/Select.
           className={[
-            "rounded-lg border border-vk-border-w bg-vk-surface-w/30 p-3",
+            "rounded-lg border border-vk-border-w bg-vk-surface-w p-3",
             contextConfirmed[activeContextId ?? ""] ? "" : "opacity-60",
           ].join(" ")}
         >
+          {activeSheet.is_summary_or_derived && (
+            <p className="mb-2 rounded bg-vk-info-bg px-2 py-1 text-xs text-vk-info">
+              Esta hoja es un resumen que Véktor calcula solo desde tus
+              movimientos (Ganancias, balance por medio de pago, etc.).
+              Importarla sumaría esos totales una segunda vez, así que queda
+              excluida por defecto. Si de verdad la necesitás, incluila y
+              asignale una sección abajo.
+            </p>
+          )}
+          {activeSheet.remembered_decisions && (
+            <p className="mb-2 rounded bg-vk-info-bg px-2 py-1 text-xs text-vk-info">
+              Precargamos el mapeo y la sección de una carga anterior con este
+              mismo formato de columnas. Podés modificar cualquier campo antes
+              de actualizar la vista previa.
+              {activeSheet.remembered_decisions.shipping_decision && (
+                <>
+                  {" "}
+                  También recordamos una decisión de envío («
+                  {activeSheet.remembered_decisions.shipping_decision.decision}
+                  »), pero esta pantalla no permite editarla — revisala en el
+                  paso de costos de compra antes de confirmar.
+                </>
+              )}
+            </p>
+          )}
           {/* Corrección C3: reasignar la entidad de la hoja + incluirla o
               excluirla de la relectura — antes solo se podía corregir
               columna↔campo. Mismo patrón visual que el header de hoja del
@@ -265,6 +339,7 @@ export function FileInterpretationReview({
             suggestions={suggestionsQuery.data ?? []}
             fields={fields}
             mapping={overrides[activeContextId ?? ""] ?? {}}
+            rememberedMapping={activeSheet.remembered_decisions?.column_mapping?.mapping}
             onMappingChange={handleMappingChange}
             loading={suggestionsQuery.isLoading || catalogQuery.isLoading}
           />
@@ -298,7 +373,10 @@ export function FileInterpretationReview({
 
       {impact && (
         <div>
-          <p className="mb-1 text-xs font-semibold text-vk-text-primary">
+          {/* F10-fix contraste: este label vive DIRECTO sobre el canvas oscuro
+              del panel (no dentro de la tarjeta clara de arriba) — mismo
+              token que ya usan los headers hermanos en `FileListSection.tsx`. */}
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-vektor-muted">
             Impacto proyectado en productos
           </p>
           <ImportImpactSummary impact={impact} />
@@ -307,7 +385,7 @@ export function FileInterpretationReview({
 
       {activeSheet && (
         <div>
-          <p className="mb-1 text-xs font-semibold text-vk-text-primary">
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-vektor-muted">
             Filas de ejemplo — {activeSheet.label}
           </p>
           <DataSample

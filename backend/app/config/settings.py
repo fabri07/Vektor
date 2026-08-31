@@ -296,6 +296,34 @@ class Settings(BaseSettings):
     def parse_purchase_cost_rollout_tenant_ids(cls, v: object) -> list[str]:
         return parse_rollout_tenant_ids(v)
 
+    # Bloque 2 (Tienda → proveedor) — mismo criterio de rollout por tenant que
+    # el motor de costos de compra: lista vacía = nadie habilitado, comportamiento
+    # idéntico al de hoy (Tienda sigue guardándose como custom_fields["marca"]).
+    PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS: list[str] = Field(default_factory=list)
+
+    @field_validator("PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS", mode="before")
+    @classmethod
+    def parse_product_supplier_links_rollout_tenant_ids(cls, v: object) -> list[str]:
+        return parse_rollout_tenant_ids(v)
+
+    # Bloque 3A — "compra+envío" gana como unit_cost_ars sobre "Precio de
+    # compra" cuando ambas existen. Cambia un número (costo/margen) sin mapeo
+    # manual explícito, mismo criterio de rollout por tenant que el resto.
+    CATALOG_FINAL_COST_ROLLOUT_TENANT_IDS: list[str] = Field(default_factory=list)
+
+    @field_validator("CATALOG_FINAL_COST_ROLLOUT_TENANT_IDS", mode="before")
+    @classmethod
+    def parse_catalog_final_cost_rollout_tenant_ids(cls, v: object) -> list[str]:
+        return parse_rollout_tenant_ids(v)
+
+    # Bloque 5 — persistencia de decisiones de mapeo por huella de esquema.
+    INGESTION_SCHEMA_DECISIONS_ROLLOUT_TENANT_IDS: list[str] = Field(default_factory=list)
+
+    @field_validator("INGESTION_SCHEMA_DECISIONS_ROLLOUT_TENANT_IDS", mode="before")
+    @classmethod
+    def parse_ingestion_schema_decisions_rollout_tenant_ids(cls, v: object) -> list[str]:
+        return parse_rollout_tenant_ids(v)
+
     # Auth social
     ENABLE_GOOGLE_LOGIN: bool = False
     ENABLE_FACEBOOK_LOGIN: bool = False  # Diferido — solo abstracción en fase 1

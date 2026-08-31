@@ -102,6 +102,9 @@ from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
     insert_confirmed_data,
 )
+from app.application.services.ingestion_schema_decision_service import (
+    lookup_remembered_decisions_for_contexts,
+)
 from app.application.services.inventory_replay_service import run_inventory_replay
 from app.application.services.stock_service import (
     sale_source_event_id,
@@ -2777,8 +2780,23 @@ async def build_reread_sheets(
     for row in risk_rows:
         risk_by_context[row["context_id"]].append(row)
 
+    resolved_contexts = resolve_contexts(fresh)
+    # Bloque 5 (consumo): decisiones recordadas de una carga anterior con la
+    # MISMA huella de esquema — vacío si el tenant no está en el rollout, si
+    # el archivo no tiene contextos, o si ninguna hoja matchea exacto (huella
+    # distinta = incompatible, ver `lookup_remembered_decisions_for_contexts`).
+    # Best-effort: nunca debe tumbar el resto del preview (mismo criterio que
+    # el try/except de arriba).
+    try:
+        remembered_by_context = await lookup_remembered_decisions_for_contexts(
+            session, tenant_id, str(fresh.get("file_type") or ""), resolved_contexts
+        )
+    except Exception:  # noqa: BLE001 — best-effort, ver docstring.
+        logger.warning("reread.preview.remembered_decisions_failed", tenant_id=str(tenant_id))
+        remembered_by_context = {}
+
     sheets: list[dict[str, Any]] = []
-    for ctx in resolve_contexts(fresh):
+    for ctx in resolved_contexts:
         context_id = ctx.get("context_id")
         if not context_id:
             continue
@@ -2789,6 +2807,7 @@ async def build_reread_sheets(
 
         # Sin headers (texto/imagen) o entidad fuera del protocolo de riesgo
         # (F8a no tiene nada que decir de estos): no hay columnas que revisar.
+        is_derived = bool(ctx.get("is_summary_or_derived"))
         if not headers or entity not in _SHEET_RISK_ENTITIES:
             sheets.append(
                 {
@@ -2796,10 +2815,14 @@ async def build_reread_sheets(
                     "label": label,
                     "entity_type": entity or "otros",
                     "row_count": row_count,
-                    "status": "completa",
+                    # Derivada y no reasignada: "ignorada" (excluida por defecto),
+                    # no "completa" — mismo vocabulario que ya usa el frontend
+                    # (`STATUS_LABEL["ignorada"] = "Ignorada (no se importa)"`).
+                    "status": "ignorada" if is_derived else "completa",
                     "columns_mapped": 0,
                     "columns_pending": 0,
-                    "is_summary_or_derived": False,
+                    "is_summary_or_derived": is_derived,
+                    "remembered_decisions": remembered_by_context.get(context_id) or None,
                 }
             )
             continue
@@ -2834,7 +2857,8 @@ async def build_reread_sheets(
                 "status": status_value,
                 "columns_mapped": len(mapped_targets),
                 "columns_pending": columns_pending,
-                "is_summary_or_derived": False,
+                "is_summary_or_derived": is_derived,
+                "remembered_decisions": remembered_by_context.get(context_id) or None,
             }
         )
 

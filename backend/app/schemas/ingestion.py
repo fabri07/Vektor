@@ -170,6 +170,10 @@ class FilePreviewResponse(BaseModel):
     # F7d: preview universal de maestros (clientes/proveedores) — vacío si el
     # archivo no tiene hojas de maestro o si no se pudo estimar el mapeo.
     master_previews: list[MasterPreviewSummary] = Field(default_factory=list)
+    # Bloque 5 (consumo): decisiones recordadas por contexto — mismo shape que
+    # `RereadSheetStatus.remembered_decisions`, ver ese campo. `{}` con el flag
+    # apagado o sin match exacto de huella (comportamiento de hoy).
+    remembered_decisions: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 # ── Column mapping schemas ────────────────────────────────────────────────────
@@ -776,6 +780,14 @@ class RereadSheetStatus(BaseModel):
     columns_mapped: int
     columns_pending: int
     is_summary_or_derived: bool = False
+    # Bloque 5 (consumo): decisiones EXPLÍCITAS de una carga anterior con la
+    # MISMA huella de esquema (tenant + schema_fingerprint + context_signature),
+    # para prellenar el borrador — `{decision_type: payload}`, ver
+    # `IngestionSchemaDecision`. `None` con el flag apagado, sin match exacto,
+    # o sin nada grabado todavía: el frontend no debe inventar un "recordado"
+    # sin esto. Nunca se aplica solo: el usuario sigue viendo y pudiendo
+    # editar cada campo antes de actualizar el preview o aplicar.
+    remembered_decisions: dict[str, Any] | None = None
 
 
 class RereadPreviewRequest(ColumnRiskRequest):

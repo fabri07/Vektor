@@ -63,6 +63,7 @@ from app.application.services.column_risk import (
     build_contextual_column_risk,
     context_is_included,
     derive_context_mapping_entries,
+    resolve_contexts,
     validate_column_risk_decisions,
 )
 from app.application.services.file_deletion_service import (
@@ -98,6 +99,9 @@ from app.application.services.ingestion_lease_service import (
     acquire_import_lease,
     finalize_import_lease,
     release_import_lease,
+)
+from app.application.services.ingestion_schema_decision_service import (
+    lookup_remembered_decisions_for_contexts,
 )
 from app.application.services.inventory_replay_service import (
     ReplayOutcome,
@@ -725,6 +729,20 @@ async def get_file_preview(
     except Exception:
         logger.warning("ingestion.preview.contextual_risk_failed", file_id=str(file_id))
 
+    # Bloque 5 (consumo): decisiones recordadas de una carga anterior con la
+    # MISMA huella de esquema — best-effort, igual criterio que los dos
+    # diagnósticos de arriba (nunca debe tumbar el preview principal).
+    remembered_decisions: dict[str, dict[str, Any]] = {}
+    try:
+        remembered_decisions = await lookup_remembered_decisions_for_contexts(
+            session,
+            tenant.tenant_id,
+            str(summary.get("file_type") or ""),
+            resolve_contexts(summary),
+        )
+    except Exception:
+        logger.warning("ingestion.preview.remembered_decisions_failed", file_id=str(file_id))
+
     return FilePreviewResponse(
         file_id=record.id,
         processing_status=record.processing_status,
@@ -732,6 +750,7 @@ async def get_file_preview(
         columns_at_risk=columns_at_risk,
         contextual_column_risk=contextual_risk,
         master_previews=master_previews,
+        remembered_decisions=remembered_decisions,
     )
 
 

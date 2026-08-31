@@ -30,6 +30,7 @@ import {
   type SheetPurchaseGroups,
 } from "@/services/ingestion.service";
 import { Button } from "@/components/ui/Button";
+import { humanizeColumnLabel } from "@/lib/columnLabels";
 import { InventoryImpactPanel } from "./InventoryImpactPanel";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { InventoryEffectChoice } from "./InventoryEffectChoice";
@@ -224,7 +225,7 @@ function UnmappedModal({
           <div>
             <p className="text-xs text-vk-text-muted">Columna sin mapear</p>
             <p className="mt-0.5 font-mono text-sm font-semibold text-vk-text-primary">
-              {column}
+              {humanizeColumnLabel(column)}
             </p>
           </div>
           <AlertCircle className="h-5 w-5 shrink-0 text-vk-warning" />
@@ -782,7 +783,7 @@ function SheetMapperSection({
                   </span>
                 </p>
                 <p className="mt-1 truncate pl-4.5 font-mono text-[10px] opacity-80">
-                  {unassigned.join(", ")}
+                  {unassigned.map(humanizeColumnLabel).join(", ")}
                 </p>
               </div>
             )}
@@ -839,7 +840,7 @@ function SheetMapperSection({
                       className="truncate font-mono text-xs text-vk-text-primary"
                       title={s.source_column}
                     >
-                      {s.source_column}
+                      {humanizeColumnLabel(s.source_column)}
                     </span>
                   </div>
                   <div className="flex flex-col gap-1">
@@ -2196,7 +2197,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                         className="w-32 shrink-0 truncate font-mono text-[11px] text-vk-text-primary"
                         title={s.source_column}
                       >
-                        {s.source_column}
+                        {humanizeColumnLabel(s.source_column)}
                       </span>
                       <TargetSelect
                         target={target}
@@ -2264,7 +2265,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                     <div className="flex items-center gap-2">
                       <StatusDot status={effectiveStatus} />
                       <span className="font-mono text-xs font-medium text-vk-text-primary">
-                        {s.source_column}
+                        {humanizeColumnLabel(s.source_column)}
                       </span>
                     </div>
                     {s.sample_values.length > 0 && (
@@ -2434,7 +2435,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
               {columnasDeCostoEnTablaUnica.length === 1 ? "una columna" : "columnas"}{" "}
               de envío (
               <span className="font-mono">
-                {columnasDeCostoEnTablaUnica.join(", ")}
+                {columnasDeCostoEnTablaUnica.map(humanizeColumnLabel).join(", ")}
               </span>
               ). Véktor todavía no sabe cobrar ni repartir el envío en este
               formato: si lo importara, la compra quedaría con un costo más bajo

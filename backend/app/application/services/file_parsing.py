@@ -1402,9 +1402,16 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
                             "preview_rows": _dicts[:10],
                             "row_count": len(_dicts),
                             "unclassified": True,
+                            "is_summary_or_derived": True,
                         }
                     )
-                    summary.setdefault("otros_detectados", []).extend(
+                    # Excluida por defecto: NO va a `otros_detectados` (no genera
+                    # UnclassifiedRecord). Se preserva COMPLETA en `derived_detected`,
+                    # exclusivamente para preview/revisión — si el usuario la incluye
+                    # y le asigna una entidad, `ingestion_import_service` la materializa
+                    # ahí (ver `_bucket_key_for_context`), nunca duplicada con
+                    # `otros_detectados`.
+                    summary.setdefault("derived_detected", []).extend(
                         {**d, "__context__": context_id} for d in _dicts
                     )
                     summary["warnings"].append(

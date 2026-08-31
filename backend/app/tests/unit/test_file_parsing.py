@@ -1155,11 +1155,22 @@ def test_hoja_resumen_no_se_importa_como_ventas_sin_libro_diario() -> None:
 
     assert by_label["Resumen_Medios_Pago"]["entity_type"] is None
     assert by_label["Resumen_Medios_Pago"]["unclassified"] is True
+    assert by_label["Resumen_Medios_Pago"]["is_summary_or_derived"] is True
     # Ninguna fila del resumen llegó al bucket de ventas.
     assert all(
         r.get("__context__") != "sheet:Resumen_Medios_Pago"
         for r in summary["ventas_detectadas"]
     )
+    # Bug real corregido: el warning decía "no se importa" pero las filas SÍ
+    # llegaban a `otros_detectados` (→ 4 UnclassifiedRecord fantasma en "Otros").
+    # Ahora quedan aparte, en `derived_detected`, exclusivamente para preview.
+    assert not summary.get("otros_detectados")
+    derived_rows = [
+        r
+        for r in summary["derived_detected"]
+        if r.get("__context__") == "sheet:Resumen_Medios_Pago"
+    ]
+    assert len(derived_rows) == 3  # Débito, Efectivo, TOTAL
     # El motivo viaja con el nombre de la hoja (así lo rutea splitWarningsByContext).
     assert any(
         "Resumen_Medios_Pago" in w and "sumaría esos totales otra vez" in w

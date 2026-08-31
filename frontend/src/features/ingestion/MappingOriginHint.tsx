@@ -17,6 +17,10 @@ import { mappingOrigin, type MappingOrigin } from "./mappingRules";
  */
 const ORIGIN_LABELS: Record<Exclude<MappingOrigin, null>, string> = {
   user: "Lo elegiste vos",
+  // Bloque 5: distinto de `tenant_history` (alias aprendido, difuso) — esto
+  // es la MISMA decisión exacta que confirmaste en un archivo con esta misma
+  // forma de columnas.
+  remembered: "Recordado de una carga anterior con este mismo formato",
   tenant_history: "Usado antes por tu negocio",
   heuristic: "Sugerido por el nombre de la columna",
   fuzzy: "Sugerido por un nombre parecido",
@@ -50,6 +54,7 @@ export function MappingOriginHint({
   suggestion,
   mapped,
   currentTarget,
+  rememberedTarget,
   className = "",
 }: {
   suggestion: ColumnMappingSuggestion;
@@ -57,10 +62,12 @@ export function MappingOriginHint({
   mapped: boolean;
   /** Destino que la columna tiene AHORA, para saber si lo eligió el usuario. */
   currentTarget: string;
+  /** Bloque 5: destino recordado de una carga anterior con esta misma columna, si hay. */
+  rememberedTarget?: string | null;
   /** Clases de posicionamiento del lugar donde se inserta; van adelante. */
   className?: string;
 }) {
-  const origin = mappingOrigin(suggestion, currentTarget);
+  const origin = mappingOrigin(suggestion, currentTarget, rememberedTarget);
   if (!mapped || origin === null) return null;
   return (
     <p

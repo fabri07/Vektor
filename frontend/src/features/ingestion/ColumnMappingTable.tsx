@@ -1,5 +1,6 @@
 "use client";
 
+import { humanizeColumnLabel } from "@/lib/columnLabels";
 import type { ColumnMappingSuggestion, FieldCatalogEntry } from "@/services/ingestion.service";
 
 import { AmbiguityHint } from "./AmbiguityHint";
@@ -24,6 +25,7 @@ export function ColumnMappingTable({
   suggestions,
   fields,
   mapping,
+  rememberedMapping,
   onMappingChange,
   loading = false,
   className = "",
@@ -32,6 +34,8 @@ export function ColumnMappingTable({
   fields: FieldCatalogEntry[];
   /** Target EFECTIVO actual por columna (borrador del usuario, ya mergeado con la sugerencia). */
   mapping: Record<string, string>;
+  /** Bloque 5: mapeo recordado de una carga anterior con esta misma huella, por columna. */
+  rememberedMapping?: Record<string, string>;
   onMappingChange: (sourceColumn: string, target: string) => void;
   loading?: boolean;
   className?: string;
@@ -70,7 +74,9 @@ export function ColumnMappingTable({
                 <td className="py-2 pr-2 align-top">
                   <div className="flex items-center gap-1.5">
                     <StatusDot status={s.status} />
-                    <span className="font-mono text-vk-text-secondary">{s.source_column}</span>
+                    <span className="font-mono text-vk-text-secondary">
+                      {humanizeColumnLabel(s.source_column)}
+                    </span>
                   </div>
                   {s.sample_values.length > 0 && (
                     <p className="mt-0.5 truncate text-[10px] text-vk-text-muted">
@@ -95,6 +101,7 @@ export function ColumnMappingTable({
                     suggestion={s}
                     mapped={mapped}
                     currentTarget={currentTarget}
+                    rememberedTarget={rememberedMapping?.[s.source_column]}
                     className="mt-0.5 block"
                   />
                 </td>
