@@ -12,6 +12,7 @@ de fixture. Cubren:
 
 from __future__ import annotations
 
+import io
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
@@ -3121,3 +3122,118 @@ async def test_start_or_resume_preview_session_sets_source_run_id_after_expiry(
 
     assert fresh.id != stale_id
     assert fresh.source_run_id == stale_id
+
+
+async def test_reread_excluye_hoja_elimina_sus_filas_previas(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bloque 6 (validación, dry-run real Bloque 7): una hoja incluida en la
+    importación inicial que en una relectura posterior el usuario EXCLUYE
+    (``context_confirmed[cid] = False``) debe dejar sus filas voideadas — no
+    huérfanas, y sin recrearse. `_reconcile` no distingue por contexto al
+    voidear (voidea TODO lo no-editado del archivo, sin importar hoja) y deja
+    que `insert_confirmed_data` reimporte solo lo que sigue incluido — la
+    exclusión de hoja es una consecuencia de esa composición, nunca probada
+    end-to-end con un archivo multi-hoja real antes de este test."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    assert ws1 is not None
+    ws1.title = "Sucursal Centro"
+    ws1.append(["fecha", "producto", "monto", "proveedor"])
+    ws1.append(["2026-01-05", "Coca Cola", "1500", "Distribuidora Sur"])
+    ws1.append(["2026-01-06", "Pan Lactal", "800", "Panaderia Norte"])
+    ws2 = wb.create_sheet("Sucursal Norte")
+    ws2.append(["fecha", "producto", "monto", "proveedor"])
+    ws2.append(["2026-01-05", "Yerba", "2200", "Almacen Central"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    xlsx_name = "gastos_dos_sucursales.xlsx"
+
+    _patch_s3(monkeypatch, xlsx_bytes)
+    summary = parse_uploaded_content(xlsx_bytes, xlsx_mime, xlsx_name)
+    confirmed = default_confirmed_fields(summary)
+    file = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        uploaded_by=None,
+        original_filename=xlsx_name,
+        s3_key=f"tenants/{tenant.tenant_id}/{xlsx_name}",
+        content_type=xlsx_mime,
+        size_bytes=len(xlsx_bytes),
+        purpose="gastos",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={
+            "inferred_type": summary.get("inferred_type"),
+            "confirmed_fields": confirmed,
+        },
+    )
+    db_session.add(file)
+    await db_session.commit()
+
+    await insert_confirmed_data(
+        db_session,
+        tenant.tenant_id,
+        summary,
+        confirmed,
+        source="ingestion",
+        uploaded_file_id=file.id,
+    )
+    await db_session.commit()
+
+    before = await _active_expenses(db_session, tenant, file)
+    assert len(before) == 3
+    assert {e.amount for e in before} == {Decimal("1500"), Decimal("800"), Decimal("2200")}
+
+    # Relectura: el usuario excluye "Sucursal Norte" explícitamente.
+    run = DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="READY_TO_APPLY",
+        dry_run=True,
+        details_json={
+            "file_id": str(file.id),
+            "draft_version": 1,
+            "draft": {
+                "column_mappings": [],
+                "context_entities": {},
+                "confirmed_fields": confirmed,
+                "context_confirmed": {
+                    "sheet:Sucursal Centro": True,
+                    "sheet:Sucursal Norte": False,
+                },
+                "column_risk_decisions": [],
+                "stock_treatment": None,
+                "master_column_mappings": None,
+            },
+        },
+    )
+    db_session.add(run)
+    await db_session.commit()
+
+    result = await reread_service.apply_reread(
+        db_session, file.id, tenant.tenant_id, run=run
+    )
+    await db_session.commit()
+
+    # Las 3 filas viejas se voidean (el void no distingue por hoja); solo las
+    # 2 de la hoja TODAVÍA incluida se reimportan.
+    assert result.voided == 3
+    assert result.new == 0
+
+    after = await _active_expenses(db_session, tenant, file)
+    assert len(after) == 2
+    assert {e.amount for e in after} == {Decimal("1500"), Decimal("800")}
+    # La fila de la hoja excluida no está huérfana ni duplicada: no existe activa.
+    assert not any(e.amount == Decimal("2200") for e in after)
+
+    total_incluyendo_voided = await db_session.scalar(
+        select(func.count())
+        .select_from(ExpenseEntry)
+        .where(ExpenseEntry.source_upload_id == file.id)
+    )
+    # 3 originales voideadas + 2 reimportadas = 5, nunca 3+3 (sin duplicar).
+    assert total_incluyendo_voided == 5

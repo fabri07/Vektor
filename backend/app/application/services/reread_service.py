@@ -1244,6 +1244,16 @@ async def _reconcile(
     # de F-F.4 —cuyas ventas nunca descontaron— queda al día en cuanto se relee.
     _stored_effect = await _deduce_inventory_effect(session, tenant_id, fresh)
     _draft_context_mappings, _draft_context_entity = _draft_effective_mappings(draft)
+    # Bloque 6 (validación, hallazgo real del dry-run Bloque 7): `context_confirmed`
+    # del borrador NUNCA llegaba hasta acá — solo lo usaba `build_reread_sheets`
+    # para el status que se MUESTRA en el preview. Una hoja que el usuario
+    # excluía ("Incluir esta hoja en la relectura" sin marcar) se voideaba
+    # igual que cualquier no-editado (el void no distingue por hoja) pero se
+    # REIMPORTABA sin más, porque nada le decía al reimport que esa hoja
+    # había quedado afuera. `dict(... or {}) or None` = `None` sin borrador
+    # (el reimport cae al criterio de siempre, sin cambios), nunca `{}` (que
+    # `context_is_included` podría leer distinto de "no hay decisión").
+    _draft_context_confirmed = dict((draft or {}).get("context_confirmed") or {}) or None
     _reimport_detail = await insert_confirmed_data(
         session,
         tenant_id,
@@ -1262,6 +1272,7 @@ async def _reconcile(
         # siempre (ver ``_val``/``_row_val`` en ``ingestion_import_service``).
         context_mappings=_draft_context_mappings,
         context_entity=_draft_context_entity,
+        context_confirmed=_draft_context_confirmed,
         # Revisión final F9b (Hallazgo 2): en preview (dry_run=True) el detalle
         # nunca se consume (ver el bloque `if not dry_run` de abajo) — pedirlo
         # igual dispara N `session.get`/`refresh` en

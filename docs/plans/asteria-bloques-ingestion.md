@@ -187,10 +187,56 @@ coincide exacto con `compra+envío` en los 8 productos muestreados, y sigue
 correcto después de la Sesión B (no se revierte en una relectura). Suite de
 ingestión completa (1005 tests) sin regresiones.
 
+## Bloque 4 y Bloque 6 (aclarados por el usuario, 2026-08-31)
+
+**Bloque 4** — contraste, navegación completa y humanización de `col_8` —
+sí existía en el plan original. Ya está en `main` (`f159e979`): es el trabajo
+marcado como "F10-fix contraste" en el diff de `DataSample.tsx`/
+`FileInterpretationReview.tsx`/`SheetNavigator.tsx` + `SheetNavigator`
+Anterior/Siguiente + `frontend/src/lib/columnLabels.ts` (`humanizeColumnLabel`,
+"Columna sin encabezado N" en vez de `col_8` crudo).
+
+**Bloque 6** — idempotencia y reemplazo seguro de la lectura anterior. No era
+una implementación nueva: la mayor parte ya vivía en `main` (motor de
+void/preserve/reimport de `reread_service.py`, mucho antes de este plan).
+Se pidió validar 6 casos puntuales contra tests existentes:
+
+| # | Caso | Estado |
+|---|---|---|
+| 1 | Preservación de `has_user_edits` | ✅ cubierto — `test_reread_file.py::test_reread_preserves_edited_and_reimports_others` |
+| 2 | Rollback íntegro si falla el apply | ✅ cubierto en el confirm (`test_ingestion.py::test_rollback_integral_si_confirm_falla` + `test_failure_after_f5_savepoints_still_compensates_lease`); `apply_reread` comparte el mismo savepoint pero sin test dedicado propio — gap menor, riesgo bajo (código ya ejercido) |
+| 3 | Eliminar resultados de una hoja ahora excluida | ❌ **no era solo un gap de test — bug real**, ver abajo |
+| 4 | Reversión acotada de `product_supplier_links` | ✅ cubierto — `test_product_supplier_links_bloque2.py::test_exclusion_posterior_revierte_solo_el_vinculo_atribuible` |
+| 5 | Conservación de vínculos `purchase_evidence` | ✅ cubierto — `test_purchase_evidence_no_se_elimina_al_retirar_declaracion_de_catalogo` |
+| 6 | Sin referencias activas duplicadas por archivo | ✅ cubierto — `test_relectura_identica_es_idempotente` |
+
+### Bug real encontrado y arreglado — caso 3
+
+`apply_reread` (`reread_service.py::_reconcile`) llamaba a
+`insert_confirmed_data` sin pasarle `context_confirmed` del borrador —
+**solo** `build_reread_sheets` (el cálculo del PREVIEW) lo usaba, para el
+status que se muestra en pantalla. Consecuencia real: un usuario que
+desmarca "Incluir esta hoja en la relectura", ve la exclusión reflejada
+correctamente en el preview, y al aplicar — esa hoja se **reimporta
+igual**. `git blame` confirma que es preexistente (junio–agosto 2026, ajeno
+a este plan). Verificado con un test que reproduce el caso end-to-end antes
+del fix: `voided=3, new=0`, pero terminaban 3 filas activas (la de la hoja
+"excluida" incluida).
+
+**Fix:** extraer `context_confirmed` del `draft` en `_reconcile` (mismo
+patrón que `_draft_effective_mappings` ya hace con `column_mappings`/
+`context_entities`) y pasarlo a `insert_confirmed_data`. `None` sin borrador
+(cae al criterio de siempre, sin cambios de comportamiento cuando nadie usó
+el checkbox de inclusión). Test nuevo:
+`test_reread_file.py::test_reread_excluye_hoja_elimina_sus_filas_previas`
+(XLSX real de 2 hojas, exclusión explícita de una vía `draft.context_confirmed`).
+Suite completa de reread (68 tests) + suite de ingestión (1006 tests) sin
+regresiones. Código en producción desde antes de este plan — este fix SÍ
+afecta comportamiento ya en uso (a diferencia de los Bloques 1–5/7, todos
+detrás de flags apagados).
+
 ## Abierto / pendiente
 
-- Confirmar con el usuario si existían Bloques 4 y 6 en el plan original (no
-  se encontró rastro en código ni memoria).
 - Los 3 flags de rollout siguen en `[]` en producción (nadie habilitado) —
   el dry-run del Bloque 7 los validó localmente, falta la habilitación
   controlada real (fuera de alcance de este plan; decisión operativa aparte).
@@ -198,3 +244,5 @@ ingestión completa (1005 tests) sin regresiones.
   filas con fecha no parseable, correctamente NO inventada como "hoy" por F6)
   — no se investigó a fondo, podría valer la pena revisarlo con el negocio
   real antes de una habilitación productiva.
+- Caso 2 de Bloque 6 (rollback dedicado de `apply_reread`) sin test propio —
+  gap menor, no se agregó test (fuera de lo que el usuario pidió cerrar).
