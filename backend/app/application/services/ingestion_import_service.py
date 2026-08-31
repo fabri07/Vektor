@@ -2506,6 +2506,28 @@ _PORCENTAJE_ENVIO_COLS: tuple[str, ...] = (
     "%_envio", "%_envío", "porcentaje_envio", "porcentaje_envío",
     "envio_%", "envío_%", "%envio", "%envío",
 )
+
+
+def _es_costo_base_ambiguo(col: str) -> bool:
+    """Bloque 3A (hallazgo del dry-run real, Bloque 7): ¿el mapeo a
+    `unit_cost_ars` cayó en la MISMA columna ambigua ("Precio de compra" y
+    variantes) que Bloque 3A ya sabe re-evaluar?
+
+    `cols.get("unit_cost_ars")` no distingue una elección deliberada del
+    usuario de la sugerencia DEFAULT que el frontend precarga para toda
+    columna no tocada (`ColumnMapperPanel.tsx` — "Inicializar mapeos desde
+    sugerencias"): en un alta real, "Precio de compra" mapea a `unit_cost_ars`
+    por heurística SIN que nadie la haya revisado, y antes de este chequeo eso
+    bloqueaba a Bloque 3A para SIEMPRE (verificado contra el Excel real de
+    Asteria: "compra+envío" nunca ganaba). Si la columna mapeada es la de
+    costo BASE, se trata como la MISMA ambigüedad — no como una elección de
+    una columna distinta (ej. "costo_real", que sigue ganando sin más)."""
+    norm = col.lower().strip().replace(" ", "_")
+    if any(k in norm for k in _COMPRA_MAS_ENVIO_COLS):
+        return False  # ya ES la columna final — nada que re-resolver.
+    return "compra" in norm or any(k in norm for k in _COSTO_UNITARIO_COLS)
+
+
 _STOCK_COLS: set[str] = {
     "stock", "cantidad", "inventario", "units", "qty", "existencia", "stock_actual",
 }
@@ -5984,7 +6006,19 @@ async def _insert_multisheet_data(
         # precio ni una de "costo total".
         _uc_mapped = cols.get("unit_cost_ars")
         _uc_col: str | None = None
-        if _uc_mapped:
+        # Bloque 3A (hallazgo real, Bloque 7 dry-run contra Asteria): un
+        # mapeo a `unit_cost_ars` que cayó en la MISMA columna de costo BASE
+        # ambigua ("Precio de compra") no cuenta como elección deliberada —
+        # el frontend precarga esa sugerencia para TODA columna no tocada
+        # (`ColumnMapperPanel.tsx`), así que sin este chequeo "compra+envío"
+        # nunca ganaba en un alta real. Una columna DISTINTA (ej.
+        # "costo_real") sigue ganando sin más — ver `_es_costo_base_ambiguo`.
+        _uc_mapped_ambiguo = (
+            _uc_mapped is not None
+            and catalog_final_cost_enabled_for(tenant_id)
+            and _es_costo_base_ambiguo(_uc_mapped)
+        )
+        if _uc_mapped and not _uc_mapped_ambiguo:
             cost = _parse_amount(row.get(_uc_mapped))
             _uc_col = _uc_mapped
         else:

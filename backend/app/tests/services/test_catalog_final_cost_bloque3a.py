@@ -183,6 +183,79 @@ async def test_mapeo_manual_gana(
     assert product.unit_cost_ars == Decimal("777")
 
 
+async def test_sugerencia_default_de_precio_de_compra_no_bloquea_compra_mas_envio(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo del dry-run real (Bloque 7, Excel de Asteria): el frontend
+    precarga el mapeo con la sugerencia heurística de CADA columna, tocada o
+    no (`ColumnMapperPanel.tsx` — "Inicializar mapeos desde sugerencias"), y
+    esa sugerencia mapea "Precio de compra" a `unit_cost_ars` porque "compra"
+    es un keyword de costo. Antes de este fix, `context_mappings` traía esa
+    entrada SIN que nadie la haya tocado, y bloqueaba a Bloque 3A para
+    SIEMPRE — verificado contra productos reales del archivo (unit_cost_ars
+    quedaba en el costo base, nunca en compra+envío). El mapeo default de la
+    columna AMBIGUA no debe ganarle a "compra+envío"; una columna DISTINTA sí
+    (ver `test_mapeo_manual_gana`, "costo_real")."""
+    tid = sample_tenant.tenant_id
+    _enable(monkeypatch, tid)
+
+    row = {
+        "nombre": "Almohadones lienzo",
+        "precio_de_compra": "6975",
+        "compra+envio": "7685.64",
+        "precio_venta": "15000",
+        "__context__": "sheet:Catalogo",
+    }
+    summary = _summary(
+        [row], ["nombre", "precio_de_compra", "compra+envio", "precio_venta"]
+    )
+    await insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"productos": True},
+        # Mismo shape que manda el frontend: TODA columna reconocida trae un
+        # target, no solo las que el usuario tocó a mano.
+        context_mappings={"sheet:Catalogo": {"precio_de_compra": "unit_cost_ars"}},
+        context_confirmed={"sheet:Catalogo": True},
+    )
+
+    product = await _one_product(db_session, tid, "Almohadones lienzo")
+    assert product.unit_cost_ars == Decimal("7685.64")
+    assert product.custom_fields.get("purchase_base_cost") == "6975"
+
+
+async def test_sugerencia_default_sin_flag_mantiene_comportamiento_previo(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Mismo escenario que arriba, sin el flag: el mapeo default sigue
+    ganando — comportamiento histórico intacto para tenants fuera del rollout."""
+    tid = sample_tenant.tenant_id
+    assert get_settings().CATALOG_FINAL_COST_ROLLOUT_TENANT_IDS == []
+
+    row = {
+        "nombre": "Almohadones lienzo",
+        "precio_de_compra": "6975",
+        "compra+envio": "7685.64",
+        "precio_venta": "15000",
+        "__context__": "sheet:Catalogo",
+    }
+    summary = _summary(
+        [row], ["nombre", "precio_de_compra", "compra+envio", "precio_venta"]
+    )
+    await insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"productos": True},
+        context_mappings={"sheet:Catalogo": {"precio_de_compra": "unit_cost_ars"}},
+        context_confirmed={"sheet:Catalogo": True},
+    )
+
+    product = await _one_product(db_session, tid, "Almohadones lienzo")
+    assert product.unit_cost_ars == Decimal("6975")
+
+
 async def test_sin_compra_mas_envio_hay_fallback_compatible(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:

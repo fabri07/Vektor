@@ -126,32 +126,75 @@ escribe ni lee, comportamiento de hoy).
   editable, y "no se aplica silenciosamente" — el POST a `reread/preview`
   solo sale cuando el usuario hace click).
 
-## Bloque 7 — dry-run contra datos reales (SIGUIENTE)
+## Bloque 7 — dry-run contra datos reales (COMPLETO, 2026-08-31)
 
-Cierre integral, en DOS sesiones de proceso distintas (no alcanza correr dos
-veces dentro del mismo proceso — no prueba que las decisiones persistidas se
-recuperen en un preview futuro, solo que la memoria in-process seguía viva):
+Script: `backend/scripts/asteria_dryrun_bloque7.py`. Tenant + `uploaded_file_id`
+determinísticos (UUID fijo), las 3 flags de rollout se habilitan SOLO para ese
+tenant DENTRO del propio script (antes de importar `Settings`) — nunca toca
+Railway/producción; guarda de seguridad (`_abort_if_prod_like`) que aborta si
+`DATABASE_URL` contiene un host administrado (Neon/Railway/RDS/Supabase).
 
-1. Conseguir/crear una base Postgres local o temporal vía `DATABASE_URL_LOCAL`.
-2. Descargar el Excel real de Asteria desde R2 en modo lectura.
-3. Habilitar los 3 flags de rollout SOLO para el tenant local que representa a
-   Asteria (nunca Railway/producción):
-   - `PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS`
-   - `CATALOG_FINAL_COST_ROLLOUT_TENANT_IDS`
-   - `INGESTION_SCHEMA_DECISIONS_ROLLOUT_TENANT_IDS`
-4. Sesión de proceso A: preview + apply sobre la base local.
-5. Sesión de proceso B (proceso nuevo, no el mismo intérprete): repetir
-   exactamente la misma relectura y confirmar que el Bloque 5 recuerda lo que
-   la sesión A confirmó.
-6. Verificar que no cambien conteos ni aparezcan duplicados entre corridas.
-7. Reportar resultados por hoja.
-8. Dejar los runs históricos y producción sin modificar — nada de esto toca
-   Railway ni Celery Beat (pendiente operativo aparte).
+Infra: Postgres descartable en Docker (`vektor-asteria-dryrun`, puerto 55432,
+ya destruido al cerrar) + credenciales R2 read-only en un archivo temporal del
+scratchpad de la sesión (ya borrado). `alembic upgrade head` corrió limpio de
+punta a punta contra una base nueva — valida también la cadena completa de
+migraciones en Postgres real, lo mismo que el paso de CI.
+
+**Sesión A** (proceso 1): descargó `ASTERIA_home_deco.xlsx` real desde R2
+(277.741 bytes, 9 hojas), armó el mapeo vía el motor de sugerencias real de
+la app (`ColumnMappingService.suggest_mappings`, sin LLM — mismo camino que
+usa el preview) + la corrección real de Bloque 2 ("Tienda"→`supplier:name`),
+y confirmó contra la base local. `remembered_decisions` dio `(vacío)` antes de
+confirmar, como corresponde a una primera sesión.
+
+**Hallazgo real (antes del fix de abajo):** Bloque 3A no se disparaba nunca
+en un alta real — ver sección siguiente.
+
+**Sesión B** (proceso 2, intérprete nuevo, mismo Postgres): repitió la MISMA
+relectura. Antes de confirmar nada, `lookup_remembered_decisions_for_contexts`
+recuperó las 5 hojas que la Sesión A había confirmado — incluido
+`Tienda → {'Tienda': 'supplier:name'}` — probando que Bloque 5 persiste
+across procesos, no solo dentro de la misma sesión in-process. Tras
+re-confirmar, conteos IDÉNTICOS a la Sesión A en las 6 tablas verificadas
+(`sales_entries` 1939, `expense_entries` 624, `products` 397,
+`product_supplier_links` 238, `ingestion_schema_decisions` 10,
+`unclassified_records` 9) — cero duplicados.
+
+### Fix aplicado — Bloque 3A no se disparaba en un alta real
+
+**Causa:** `_uc_mapped = cols.get("unit_cost_ars")` en `_add_product`
+(`ingestion_import_service.py`) ganaba INCONDICIONALMENTE sobre la detección
+de "compra+envío". El frontend (`ColumnMapperPanel.tsx`, tanto el camino
+multi-hoja como el plano) precarga el mapeo con TODAS las sugerencias,
+tocadas o no — y la sugerencia heurística de "Precio de compra" es
+`unit_cost_ars` (keyword "compra"). Verificado contra productos reales del
+Excel: `unit_cost_ars` quedaba en el costo base, nunca en compra+envío, con
+el flag prendido.
+
+**Fix:** `_es_costo_base_ambiguo()` — si la columna mapeada a `unit_cost_ars`
+es la MISMA columna ambigua de costo base ("Precio de compra" y variantes,
+detectada por el mismo criterio que ya usa Bloque 3A) y no es ya la propia
+columna final, no cuenta como elección deliberada: se deja pasar a la
+detección de "compra+envío". Una columna DISTINTA (ej. "costo_real",
+`test_mapeo_manual_gana`) sigue ganando sin más — sin cambios de
+comportamiento ahí, y ninguno con el flag apagado.
+
+Tests nuevos: `test_sugerencia_default_de_precio_de_compra_no_bloquea_compra_mas_envio`
++ `test_sugerencia_default_sin_flag_mantiene_comportamiento_previo`
+(`test_catalog_final_cost_bloque3a.py`, 9/9 en verde). Verificado además
+contra los productos reales de Asteria tras una base limpia: `unit_cost_ars`
+coincide exacto con `compra+envío` en los 8 productos muestreados, y sigue
+correcto después de la Sesión B (no se revierte en una relectura). Suite de
+ingestión completa (1005 tests) sin regresiones.
 
 ## Abierto / pendiente
 
 - Confirmar con el usuario si existían Bloques 4 y 6 en el plan original (no
   se encontró rastro en código ni memoria).
-- Bloque 7 sin ejecutar.
-- Los 3 flags de rollout siguen en `[]` (nadie habilitado) hasta que el
-  dry-run del Bloque 7 los valide.
+- Los 3 flags de rollout siguen en `[]` en producción (nadie habilitado) —
+  el dry-run del Bloque 7 los validó localmente, falta la habilitación
+  controlada real (fuera de alcance de este plan; decisión operativa aparte).
+- `historial_sin_fecha: 538` en la Sesión A (más de la mitad de algo, sobre
+  filas con fecha no parseable, correctamente NO inventada como "hoy" por F6)
+  — no se investigó a fondo, podría valer la pena revisarlo con el negocio
+  real antes de una habilitación productiva.
