@@ -158,7 +158,18 @@ jobs:
         # Acotado a app/tests/integration: los 10 archivos con el mark viven todos
         # ahí; sin el path, pytest colectaba la suite entera (~3900 tests) para
         # correr ~120.
-        run: pytest app/tests/integration -m postgres --no-cov -v
+        #
+        # -n 0 (secuencial, override del "-n auto" de pyproject.toml): a
+        # diferencia de la suite SQLite, acá TODOS los workers de xdist
+        # comparten el MISMO Postgres — no hay aislamiento por worker. Uno de
+        # estos tests (test_reread_review_states_migration_pg.py) corre un
+        # downgrade/upgrade de migración REAL sobre ese Postgres compartido
+        # (dropea y re-agrega data_repair_runs.updated_at); en paralelo, otro
+        # worker puede consultar esa columna justo en la ventana en la que no
+        # existe → UndefinedColumnError espurio, reproducido y confirmado
+        # localmente (hallazgo real, no de este cambio — la corrida secuencial
+        # es 100% estable, la paralela falla de forma no determinística).
+        run: pytest app/tests/integration -m postgres --no-cov -v -n 0
 
       # ── 7. Docker build (verify only, no push) ───────────────────────────────
       - name: Docker — verify build
