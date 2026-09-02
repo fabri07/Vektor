@@ -3290,3 +3290,77 @@ async def test_apply_reread_toma_el_lock_antes_de_tocar_nada(
         "apply_reread no toma el shared lock antes de leer el archivo: el "
         "`lock_held=True` del bucle de void queda sin respaldo"
     )
+
+
+async def test_sweep_cierra_un_running_legacy_del_motor_viejo(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """`RUNNING` es el estado del apply PRE-F-RR, de antes del corte
+    QUEUED → APPLYING. Ningún camino vivo lo escribe para una relectura, así que un
+    `REREAD_FILE` en RUNNING solo puede ser un zombie viejo — y era justo el que el
+    sweep dejaba afuera: los dos de Asteria (14/8 y 18/8) seguían en RUNNING tres
+    semanas después, mientras el del 1/9 (APPLYING) sí entraba.
+
+    El motivo queda distinguido en la auditoría (`stale_legacy_running`) en vez de
+    mentir un `stale_timeout` que nunca ocurrió en este motor.
+    """
+    zombie = DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="RUNNING",
+        dry_run=False,
+        details_json={"file_id": str(uuid.uuid4()), "phase": "queued"},
+    )
+    db_session.add(zombie)
+    await db_session.commit()
+    await db_session.execute(
+        update(DataRepairRun)
+        .where(DataRepairRun.id == zombie.id)
+        .values(
+            updated_at=datetime.now(UTC)
+            - timedelta(seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1)
+        )
+    )
+    await db_session.commit()
+
+    closed = await reread_service.sweep_stale_reread_runs(db_session)
+    await db_session.commit()
+
+    assert closed["apply_stuck"] == 1
+    await db_session.refresh(zombie)
+    assert zombie.status == "FAILED"
+    assert (zombie.details_json or {})["reason"] == "stale_legacy_running"
+
+
+async def test_sweep_no_toca_un_running_de_otro_repair_type(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """`RUNNING` sí es un estado VIVO para otros tipos de reparación
+    (`product_dedup_service`, `data_repair_service` lo escriben). El sweep filtra por
+    `repair_type`, y esta es la prueba de que ese filtro es lo que hace seguro haber
+    sumado RUNNING: si alguien lo saca, acá se rompe y no en producción."""
+    ajeno = DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type="INGESTION_IMPORT",
+        status="RUNNING",
+        dry_run=False,
+        details_json={},
+    )
+    db_session.add(ajeno)
+    await db_session.commit()
+    await db_session.execute(
+        update(DataRepairRun)
+        .where(DataRepairRun.id == ajeno.id)
+        .values(
+            updated_at=datetime.now(UTC)
+            - timedelta(seconds=reread_service._STALE_RUNNING_AFTER_SECONDS + 1)
+        )
+    )
+    await db_session.commit()
+
+    closed = await reread_service.sweep_stale_reread_runs(db_session)
+    await db_session.commit()
+
+    assert closed["apply_stuck"] == 0
+    await db_session.refresh(ajeno)
+    assert ajeno.status == "RUNNING"

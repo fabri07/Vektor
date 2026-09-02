@@ -2476,6 +2476,28 @@ async def _reconcile_column_risk(
 # de verdad por tenant a la vez (ese alcance no se tocó).
 
 _SESSION_STATUSES_OPEN = ("PREVIEWING", "NEEDS_REVIEW", "READY_TO_APPLY")
+
+#: Estados desde los que un APPLY puede quedar colgado, y por qué.
+#:
+#: ``RUNNING`` es el estado del motor PRE-F-RR, de antes de que el apply se
+#: partiera en QUEUED (encolado) → APPLYING (reclamado por un worker). **Ningún
+#: camino vivo lo escribe para ``REPAIR_TYPE_REREAD``** — los únicos writers de
+#: "RUNNING" que quedan son ``product_dedup_service`` y ``data_repair_service``, que
+#: tienen otro ``repair_type`` y este query ya filtra por el suyo. O sea: una
+#: relectura en RUNNING es, por construcción, un zombie viejo.
+#:
+#: Sin él, el sweep dejaba afuera exactamente a los zombies más viejos, que son los
+#: que nadie va a cerrar de otra forma: los dos de Asteria del 14/8 y el 18/8
+#: seguían en RUNNING tres semanas después, mientras el del 1/9 (APPLYING) sí
+#: entraba. El motivo se distingue en la auditoría en vez de mentir un "timeout"
+#: que nunca ocurrió en este motor.
+_APPLY_STATUSES_STUCK = ("QUEUED", "APPLYING", "RUNNING")
+
+_STUCK_REASON_BY_STATUS = {
+    "QUEUED": "stale_never_picked_up",
+    "APPLYING": "stale_timeout",
+    "RUNNING": "stale_legacy_running",
+}
 # Una sesión de revisión legítima puede quedar abierta mucho más que el
 # umbral de "colgado" del apply (15 min) mientras el usuario corrige mapeos a
 # mano — por eso el umbral acá es mucho más generoso.
@@ -3263,6 +3285,12 @@ async def start_background_apply(
         select(DataRepairRun).where(
             DataRepairRun.tenant_id == tenant_id,
             DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            # A propósito NO incluye "RUNNING" (a diferencia de
+            # `_APPLY_STATUSES_STUCK`, que usa el sweep): acá el criterio es "¿hay
+            # un apply VIVO que deba bloquear a este?", y un RUNNING solo puede ser
+            # un zombie del motor viejo — bloquear una relectura nueva por él sería
+            # el bug que este guard existe para evitar. Cerrarlo es tarea del sweep,
+            # que ahora corre inline justo antes de este guard.
             DataRepairRun.status.in_(("QUEUED", "APPLYING")),
         )
     )
@@ -3283,7 +3311,7 @@ async def start_background_apply(
         # Antes esto solo lo IGNORABA para no bloquear una relectura nueva —
         # el run zombie quedaba así para siempre en la auditoría (caso real:
         # ASTERIA, dos runs sin que ningún worker los tomara). Ahora se cierra.
-        reason = "stale_never_picked_up" if r.status == "QUEUED" else "stale_timeout"
+        reason = _STUCK_REASON_BY_STATUS[r.status]
         logger.error(
             "reread.guard.expire_stale_run",
             run_id=str(r.id),
@@ -3382,7 +3410,7 @@ async def sweep_stale_reread_runs(session: AsyncSession) -> dict[str, int]:
     running = await session.execute(
         select(DataRepairRun).where(
             DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
-            DataRepairRun.status.in_(("QUEUED", "APPLYING")),
+            DataRepairRun.status.in_(_APPLY_STATUSES_STUCK),
         )
     )
     for r in running.scalars().all():
@@ -3393,7 +3421,7 @@ async def sweep_stale_reread_runs(session: AsyncSession) -> dict[str, int]:
         # review). `updated_at` se toca en la transición real a QUEUED/APPLYING.
         if _age_seconds(r.updated_at, now) < _STALE_RUNNING_AFTER_SECONDS:
             continue
-        reason = "stale_never_picked_up" if r.status == "QUEUED" else "stale_timeout"
+        reason = _STUCK_REASON_BY_STATUS[r.status]
         logger.error(
             "reread.sweep.expire_apply",
             run_id=str(r.id),
