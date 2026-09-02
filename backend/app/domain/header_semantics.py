@@ -83,6 +83,15 @@ CONCEPTOS: dict[str, str] = {
     "nombre": "nombre",
     "apellido": "apellido",
     "descripcion": "descripcion",
+    # Así nombra a la descripción media planilla de productos del rubro deco
+    # ("40 × 60", "estampados", "polar 2 plazas"). Sin esto el encabezado no
+    # tiene núcleo, la columna no mapea a ningún campo y el producto queda con
+    # `description` vacía: 398 de 398 en el archivo real que lo destapó. El texto
+    # igual llegaba a la inferencia de categoría por heurística
+    # (`_ESPECIFICACIONES_COLS`), pero no se PERSISTÍA — no se veía en ninguna
+    # pantalla ni servía para revisar la sugerencia.
+    "especificaciones": "descripcion",
+    "especificacion": "descripcion",
     "observaciones": "nota",
     "notas": "nota",
     "nota": "nota",

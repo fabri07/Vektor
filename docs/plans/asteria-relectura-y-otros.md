@@ -473,3 +473,67 @@ Lo medido hasta acá: los 405 movimientos son `catalog_initial_stock | adjustmen
 todos fechados `2026-09-02`, contra ventas de `2025-02-15` a `2026-12-30`; y las
 324 compras de mercadería son montos globales ("compra mercadería $1.053.240") sin
 producto ni unidades.
+
+## Fase C — categorización de productos (implementada)
+
+**Medido antes y después sobre los 398 productos reales**, con la función pura
+sobre los nombres de la base:
+
+|  | antes | después |
+|---|---|---|
+| `high` (se aplica) | 114 (28%) | **180 (45%)** |
+| `medium` (se sugiere, no se aplica) | 0 | 0 |
+| `low` (sin categoría) | 284 (71%) | 218 (54%) |
+| de los `low`: sin ningún keyword | 280 | 213 |
+| de los `low`: ambiguos (≥2 categorías) | 4 | 5 |
+
+**Corrección al diagnóstico del plan original.** Decía que el `medium` daba 0
+"porque la `description` está vacía". Es falso por dos motivos, los dos
+verificados en el código:
+
+1. El texto de especificaciones YA llegaba a `infer_category`: sin columna
+   `description` mapeada, `_specs_raw` cae a la heurística
+   `_ESPECIFICACIONES_COLS`, que sí contiene "especificaciones".
+2. El `medium` **no se aplica por diseño**: `insert_confirmed_data` sólo asigna
+   la categoría con confianza `high`; la `medium` se guarda en `custom_fields`
+   como sugerencia para revisión humana (Bloque 5). Es la regla de no-invención
+   funcionando, no un bug.
+
+La palanca real era la **cobertura del vocabulario**: 280 de 284 no matcheaban
+ningún keyword. Nada que ver con el `medium`.
+
+**Segunda corrección — el keyword iba en el motor equivocado.** El plan apuntaba
+a `column_mapping_service.py:722`, pero ese set alimenta `_heuristic_match`, que
+**sólo lo llaman los tests**: es el motor VIEJO, conservado como foto de
+caracterización para el rediseño F-M. El motor vivo es `read_header` →
+`analyze_header`, cuyo vocabulario de conceptos está en
+`app/domain/header_semantics.py`. Editar el set viejo no habría cambiado nada en
+la aplicación.
+
+Cambios:
+
+1. `especificaciones`/`especificacion` → concepto `descripcion` en
+   `header_semantics.py`. `RESOLUCION["product"]["descripcion"]` ya llevaba a
+   `description`, así que la columna ahora se persiste (antes: 0 de 398).
+2. Vocabulario `decoracion_hogar`, elegido palabra por palabra contra los
+   nombres reales: TEXTILES `alfombra`, `frazada`, `repasador`; BAZAR `bandeja`,
+   `frasco`, `huevera`, `aceitero`, `especiero`, `salero`, `batidor`,
+   `espatula`, `utensilio`, `hermetico`, `molde`, `medidora`, `cafetera`,
+   `tabla`. Los 67 productos que se categorizan por estas palabras se revisaron
+   uno por uno.
+3. La batería de caracterización de encabezados suma la fila
+   `("product", "Especificaciones")` con el veredicto del motor viejo (`FALTA`) y
+   su lectura declarada en `LECTURA_NUEVA` — el diff entre motores sigue siendo
+   explícito, fila por fila.
+
+**Lo que queda afuera a propósito** (y no es un olvido): `canasto` (19), `cesto`
+(11) y la familia `porta*` (27) son artículos de ORGANIZACIÓN, y el catálogo de
+`decoracion_hogar` no tiene esa categoría. Meterlos en DECO o BAZAR sería elegir
+por el negocio. Es un hueco del CATÁLOGO del rubro, no del vocabulario, y se
+decide aparte. Fijado por `test_articulos_de_organizacion_siguen_sin_categoria`.
+
+**Precisión, dicha entera:** de los 67 nuevos, 65 son inequívocos. Dos son
+discutibles — "porta repasadores doble" y "cuelga repasador p/puerta" son
+soportes, no textiles, y entran por `repasador`. Se dejan: dentro de este
+catálogo no hay una categoría mejor para un colgador de repasadores, y el error
+es de vecindad, no de concepto.

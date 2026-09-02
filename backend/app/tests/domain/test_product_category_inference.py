@@ -80,3 +80,50 @@ def test_nunca_inventa_un_codigo_fuera_del_catalogo() -> None:
         suggestion = infer_category(Vertical.DECORACION_HOGAR, name)
         if suggestion.code is not None:
             assert suggestion.code in catalogo
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_code"),
+    [
+        # Nombres REALES de un catálogo del rubro que no matcheaban nada. La
+        # ampliación del vocabulario se midió sobre esos 398 productos: la
+        # cobertura con confianza alta pasó de 114 (28%) a 180 (45%).
+        ("alfombra felpuda semi circular", "TEXTILES"),
+        ("frazada polar 2pl", "TEXTILES"),
+        ("set x 2 repasadores", "TEXTILES"),
+        ("bandeja rose calada", "BAZAR"),
+        ("frasco vidrio 850 ml", "BAZAR"),
+        ("huevera x 6 hoyos", "BAZAR"),
+        ("especiero apilable granito", "BAZAR"),
+        ("set salero pimentero", "BAZAR"),
+        ("tabla de picar pino", "BAZAR"),
+        ("hermetico sao red. 1750 ml", "BAZAR"),
+        ("set x 6 utensilios hudson", "BAZAR"),
+        ("cucharas medidoras", "BAZAR"),
+        ("cafetera  francesa hudson", "BAZAR"),
+    ],
+)
+def test_vocabulario_medido_contra_nombres_reales(name: str, expected_code: str) -> None:
+    suggestion = infer_category(Vertical.DECORACION_HOGAR, name)
+    assert suggestion.code == expected_code
+    assert suggestion.confidence == "high"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["canasto yute grande", "Cesto organizador", "porta bolsas mascota", "porta llaves"],
+)
+def test_articulos_de_organizacion_siguen_sin_categoria(name: str) -> None:
+    """No es un olvido: el catálogo del rubro no tiene categoría de organización,
+    y meterlos en DECO o BAZAR sería elegir por el negocio. Prefiere "sin
+    categoría" antes que una categoría inventada (regla de no-invención). Si
+    mañana se agrega la categoría, este test es el que hay que cambiar."""
+    assert infer_category(Vertical.DECORACION_HOGAR, name).code is None
+
+
+def test_una_palabra_nueva_no_le_roba_un_producto_a_otra_categoria() -> None:
+    """`tabla` (BAZAR) y `mantel` (TEXTILES) en el mismo nombre dan ambigüedad, y
+    ambiguo es "sin sugerencia" — nunca la primera del dict. Es la propiedad que
+    hace seguro ampliar el vocabulario: sumar palabras puede dejar de resolver un
+    caso, pero no puede resolverlo MAL."""
+    assert infer_category(Vertical.DECORACION_HOGAR, "set tabla + mantel").code is None

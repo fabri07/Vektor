@@ -2,7 +2,7 @@
 
 `test_header_recognition_battery` fija lo que responde el motor VIEJO
 (`_heuristic_match`). Este archivo corre el motor NUEVO sobre la misma batería y
-declara, explícitamente, cuáles de esas 90 lecturas cambian y en qué se
+declara, explícitamente, cuáles de esas 91 lecturas cambian y en qué se
 convierten.
 
 Sin esto el rediseño es un efecto lateral: un reconocedor nuevo que mueve
@@ -14,7 +14,7 @@ La lectura de esta compuerta, medida:
 
 - **72 filas resuelven igual que hoy** — y son, una por una, las 72 que la
   batería marcó ``OK``. Cero regresiones.
-- **18 cambian** — las 7 ``MAL``, las 3 ``AMBIGUO``, las 3 ``FALTA`` y las 5
+- **19 cambian** — las 7 ``MAL``, las 3 ``AMBIGUO``, las 4 ``FALTA`` y las 5
   ``SIN_CAMPO``. Ninguna fila que ya andaba bien se movió.
 """
 
@@ -34,6 +34,9 @@ LECTURA_NUEVA: dict[tuple[str, str], tuple[str, object]] = {
     ("sale", "Fecha de venta"): ("unico", "transaction_date"),
     ("expense", "Fecha del gasto"): ("unico", "expense_date"),
     ("product", "Descripción"): ("unico", "description"),
+    # El motor viejo no tiene "especificaciones" en ningún set y devuelve None;
+    # el nuevo lo lee como el concepto `descripcion` y lo lleva a `description`.
+    ("product", "Especificaciones"): ("unico", "description"),
     # ── El modificador ya no se lleva el campo ───────────────────────────────
     # F-M.7: los dos reconocían el concepto y no tenían dónde ponerlo. Ahora
     # `discount` existe, así que el calificador de entidad sigue sin llevarse el

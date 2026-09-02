@@ -38,11 +38,26 @@ Confidence = Literal["high", "medium", "low"]
 #: ya cubre el plural regular ("silla" ⊂ "sillas"), pero uno plural no cubre el
 #: singular. Reusar el alias de categoría habría perdido la mayoría de los
 #: nombres reales.
+#: Vocabulario por vertical. Se amplía SOLO contra nombres reales medidos, y una
+#: palabra entra únicamente si dentro de este catálogo no admite dos lecturas:
+#: una categoría equivocada es peor que ninguna (regla de no-invención), porque
+#: el usuario no tiene cómo saber que la que ve está mal.
+#:
+#: Deliberadamente AFUERA, aunque son 32 productos reales sin categoría:
+#: `canasto`, `cesto`, `organizador` y la familia `porta*` (porta bolsas, porta
+#: cepillo, porta utensilios). Son artículos de ORGANIZACIÓN y este catálogo no
+#: tiene esa categoría: meterlos en DECO o en BAZAR sería elegir por el negocio.
+#: Es un hueco del catálogo del rubro, no del vocabulario, y se decide aparte.
 CATEGORY_KEYWORDS: dict[Vertical, dict[str, tuple[str, ...]]] = {
     Vertical.DECORACION_HOGAR: {
         "TEXTILES": (
             "textil", "tela", "cortina", "almohadon", "manta", "sabana",
             "acolchado", "funda", "mantel", "cubrecama",
+            # Medidos contra los 398 productos reales de un cliente del rubro:
+            # ninguno de estos matcheaba nada. "alfombras" ya era TEXTILES en el
+            # mapa de alias de `product_categories`, así que la inferencia estaba
+            # diciendo algo distinto de lo que el mismo dominio ya afirmaba.
+            "alfombra", "frazada", "repasador",
         ),
         "ILUMINACION": (
             "lampara", "luz", "velador", "candelabro", "aplique",
@@ -59,6 +74,14 @@ CATEGORY_KEYWORDS: dict[Vertical, dict[str, tuple[str, ...]]] = {
         "BAZAR": (
             "vajilla", "taza", "plato", "cocina", "cubierto", "fuente",
             "bowl", "copa", "vaso",
+            # Utensilios y recipientes de cocina/mesa, todos verificados uno por
+            # uno contra los nombres reales antes de agregarlos ("huevera x 6
+            # hoyos", "especiero apilable granito", "tabla de picar pino"): son
+            # los que no matcheaban ningún keyword y no admiten otra lectura
+            # dentro de este catálogo.
+            "bandeja", "frasco", "huevera", "aceitero", "especiero", "salero",
+            "batidor", "espatula", "utensilio", "hermetico", "molde",
+            "medidora", "cafetera", "tabla",
         ),
         "JARDIN": (
             "maceta", "jardin", "exterior", "regadera", "planta", "reja",

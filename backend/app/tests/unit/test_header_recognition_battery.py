@@ -171,6 +171,15 @@ BATERIA: list[tuple[str, str, str | None, str, str]] = [
         "`descripción`(11) figura en el set de `name` Y en el de `description`: "
         "empate, gana el orden del dict",
     ),
+    (
+        "product",
+        "Especificaciones",
+        None,
+        FALTA,
+        "así nombra a la descripción media planilla del rubro deco; el motor "
+        "viejo no la reconoce y los 398 productos del archivo real quedaban con "
+        "`description` vacía. El motor nuevo sí la lee (ver LECTURA_NUEVA)",
+    ),
     ("product", "Vencimiento", "expiry_date", OK, ""),
     ("product", "Precio sugerido", "list_price_ars", OK, ""),
     ("product", "Marca", None, SIN_CAMPO, "no hay campo de marca en el catálogo"),
@@ -226,11 +235,11 @@ def test_el_tamano_del_problema_esta_medido() -> None:
     # barras", donde la tilde impedía la coincidencia exacta y el header caía al
     # empate `código`(6) vs `barras`(6) resuelto por orden de declaración.
     assert conteo[MAL] == 7
-    assert conteo[FALTA] == 3
+    assert conteo[FALTA] == 4  # +1: "Especificaciones" (ver LECTURA_NUEVA)
     assert conteo[AMBIGUO] == 3
     assert conteo[SIN_CAMPO] == 5
     assert conteo[OK] == 72
-    assert len(BATERIA) == 90
+    assert len(BATERIA) == 91
 
 
 def test_todo_veredicto_no_ok_explica_por_que() -> None:
