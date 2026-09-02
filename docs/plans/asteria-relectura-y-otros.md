@@ -537,3 +537,72 @@ discutibles — "porta repasadores doble" y "cuelga repasador p/puerta" son
 soportes, no textiles, y entran por `repasador`. Se dejan: dentro de este
 catálogo no hay una categoría mejor para un colgador de repasadores, y el error
 es de vecindad, no de concepto.
+
+## Fase B — las tres confirmaciones, y una hipótesis mía que se cayó
+
+### 1. Qué fecha representa el stock del archivo
+
+La hoja `precios y stock ` tiene los encabezados `Tienda | Productos |
+Especificaciones | Stock | Precio de compra | % Envio | compra+envio | Precio de
+lista | col_8 | Precio de venta final`: **no hay ninguna columna de fecha**. O
+sea que el archivo no fecha su stock, y los 405 movimientos
+`catalog_initial_stock` quedaron con la fecha de la CORRIDA (`2026-09-02`), no
+con una del negocio. El usuario confirmó que ese número es el stock de HOY.
+
+### 2. Las 7 ventas posteriores al 2026-09-02
+
+Son **7 de 1.939 (0,36%)**, todas entre el 26 y el 30 de diciembre de 2026:
+
+    2026-12   7      <- las futuras
+    2026-08  13
+    2026-07  67
+    2026-06 136 ... serie continua hacia atrás ...
+    2025-12  55
+    2025-03   1
+    2025-02   1
+
+El patrón: diciembre de 2026 no tiene ninguna otra venta, diciembre de 2025
+tiene 55, y los extremos (2025-02 y 2025-03) tienen 1 venta cada uno. Es
+consistente con un año mal leído sobre una fecha parcial, no con ventas
+genuinamente futuras — pero **no está probado**: confirmarlo exige mirar esas 7
+filas en el Excel. Los gastos, en cambio, terminan el `2026-07-11`, sin cola
+futura.
+
+### 3. De dónde sale el mensaje — MI HIPÓTESIS ERA FALSA
+
+Sostuve que el ancla fechada hoy hacía que el replay diera negativo para todos
+los productos. **Medido contra prod, es falso.** Corriendo
+`check_products_temporal_divergence` read-only sobre los 161 productos con
+ventas vinculadas:
+
+    checked            158
+    skipped_no_anchor    3
+    divergences          9      <- 5,7%, no 158
+
+`replay_timeline` arranca del stock ACTUAL y va restando: solo da negativo en
+los productos cuyas ventas superan el stock de hoy. No es una alarma universal.
+
+Los tres avisos son superficies DISTINTAS y ninguno viene de las 560 compras
+bloqueadas:
+
+| Mensaje | Origen | Número real |
+|---|---|---|
+| "…quedan con stock negativo en algún momento" | `impacto_inventario` del confirm | **66 de 161** (10/8) |
+| "…registra ventas por fecha que superan el stock reconstruible" | `check_products_temporal_divergence` | **9 de 158** (hoy) |
+| "Compras bloqueadas (falta columna de cantidad): 560" | `estimate_unlinked_products`, panel del PREVIEW | 560 |
+
+Los 161 productos del `impacto_inventario` traen `compradas: 0` **todos**, y 66
+terminan en negativo. Ese es el aviso ruidoso que vio el usuario.
+
+### Qué queda por hacer, entonces
+
+No lo que estaba planeado. `_candidate_products` y la fecha del ancla **no se
+tocan**: el chequeo no está gritando: reporta 9 de 158, que es información
+razonable. Lo que falla es el ENCUADRE — decir "faltan compras anteriores,
+revisá las fechas de compra" cuando la situación real es que el archivo no trae
+cantidades compradas de ningún producto y el inventario no se puede reconstruir
+desde él. Es un cambio de mensaje (la opción que eligió el usuario: informar sin
+alarmar), no de cálculo.
+
+**Sin implementar. Requiere la decisión del usuario con estos números a la
+vista.**
