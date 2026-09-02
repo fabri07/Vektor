@@ -3364,3 +3364,241 @@ async def test_sweep_no_toca_un_running_de_otro_repair_type(
     assert closed["apply_stuck"] == 0
     await db_session.refresh(ajeno)
     assert ajeno.status == "RUNNING"
+
+
+def _xlsx_dos_hojas() -> bytes:
+    """Gastos en dos sucursales — la de "Norte" es la que los tests excluyen."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    assert ws1 is not None
+    ws1.title = "Sucursal Centro"
+    ws1.append(["fecha", "producto", "monto", "proveedor"])
+    ws1.append(["2026-01-05", "Coca Cola", "1500", "Distribuidora Sur"])
+    ws1.append(["2026-01-06", "Pan Lactal", "800", "Panaderia Norte"])
+    ws2 = wb.create_sheet("Sucursal Norte")
+    ws2.append(["fecha", "producto", "monto", "proveedor"])
+    ws2.append(["2026-01-05", "Yerba", "2200", "Almacen Central"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+async def _archivo_dos_hojas(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> tuple[UploadedFile, dict[str, Any]]:
+    xlsx = _xlsx_dos_hojas()
+    _patch_s3(monkeypatch, xlsx)
+    summary = parse_uploaded_content(xlsx, _XLSX_MIME, "dos_sucursales.xlsx")
+    confirmed = default_confirmed_fields(summary)
+    file = UploadedFile(
+        id=uuid.uuid4(),
+        tenant_id=tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="dos_sucursales.xlsx",
+        s3_key=f"tenants/{tenant.tenant_id}/dos_sucursales.xlsx",
+        content_type=_XLSX_MIME,
+        size_bytes=len(xlsx),
+        purpose="gastos",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={
+            "inferred_type": summary.get("inferred_type"),
+            "confirmed_fields": confirmed,
+        },
+    )
+    db_session.add(file)
+    await db_session.commit()
+    await insert_confirmed_data(
+        db_session,
+        tenant.tenant_id,
+        summary,
+        confirmed,
+        source="ingestion",
+        uploaded_file_id=file.id,
+    )
+    await db_session.commit()
+    return file, confirmed
+
+
+def _run_excluyendo_norte(
+    tenant: Tenant, file: UploadedFile, confirmed: dict[str, Any]
+) -> DataRepairRun:
+    return DataRepairRun(
+        tenant_id=tenant.tenant_id,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="READY_TO_APPLY",
+        dry_run=True,
+        details_json={
+            "file_id": str(file.id),
+            "draft_version": 1,
+            "draft": {
+                "column_mappings": [],
+                "context_entities": {},
+                "confirmed_fields": confirmed,
+                "context_confirmed": {
+                    "sheet:Sucursal Centro": True,
+                    "sheet:Sucursal Norte": False,
+                },
+                "column_risk_decisions": [],
+                "stock_treatment": None,
+                "master_column_mappings": None,
+            },
+        },
+    )
+
+
+async def _pendientes(
+    session: AsyncSession, tenant: Tenant
+) -> dict[str, str]:
+    """``context_label`` → status, para leer la bandeja de un vistazo."""
+    res = await session.execute(
+        select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tenant.tenant_id)
+    )
+    return {str(r.context_label): r.status for r in res.scalars().all()}
+
+
+async def test_reread_descarta_pendientes_de_hoja_no_seleccionada(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El invariante del usuario: una hoja que no se selecciona no deja rastro.
+
+    Cubre las dos mitades del join. La fila con ``context_id`` matchea exacto; la
+    fila LEGACY (escrita antes de la migración `20260902_0001`, sin la columna)
+    matchea por label acotado a (tenant, archivo). Y la de la hoja que SÍ sigue
+    incluida no se toca: el descarte es por contexto excluido, no una limpieza
+    general de la bandeja.
+    """
+    file, confirmed = await _archivo_dos_hojas(db_session, tenant, monkeypatch)
+
+    # Pendientes que dejó un import ANTERIOR (lo que hoy tiene ASTERIA).
+    db_session.add_all(
+        [
+            UnclassifiedRecord(  # legacy: sin context_id, matchea por label
+                tenant_id=tenant.tenant_id,
+                uploaded_file_id=file.id,
+                source="ingestion",
+                context_label="Sucursal Norte",
+                row_data={"col_1": "resumen viejo"},
+                status=UNCLASSIFIED_STATUS_PENDING,
+            ),
+            UnclassifiedRecord(  # nuevo: matchea exacto por context_id
+                tenant_id=tenant.tenant_id,
+                uploaded_file_id=file.id,
+                source="ingestion",
+                context_label="Sucursal Norte",
+                context_id="sheet:Sucursal Norte",
+                row_data={"col_1": "otro resumen"},
+                status=UNCLASSIFIED_STATUS_PENDING,
+            ),
+            UnclassifiedRecord(  # hoja INCLUIDA: intocable
+                tenant_id=tenant.tenant_id,
+                uploaded_file_id=file.id,
+                source="ingestion",
+                context_label="Sucursal Centro",
+                context_id="sheet:Sucursal Centro",
+                row_data={"col_1": "fila ambigua real"},
+                status=UNCLASSIFIED_STATUS_PENDING,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    run = _run_excluyendo_norte(tenant, file, confirmed)
+    db_session.add(run)
+    await db_session.commit()
+
+    result = await reread_service.apply_reread(
+        db_session, file.id, tenant.tenant_id, run=run
+    )
+    await db_session.commit()
+
+    estados = await _pendientes(db_session, tenant)
+    assert estados["Sucursal Norte"] == UNCLASSIFIED_STATUS_DISMISSED
+    assert estados["Sucursal Centro"] == UNCLASSIFIED_STATUS_PENDING
+
+    # Se informa por hoja y motivo, no se limpia en silencio.
+    assert result.otros_descartados == [
+        {
+            "hoja": "Sucursal Norte",
+            "motivo": reread_service.DISMISS_REASON_NOT_SELECTED,
+            "descartados": 2,
+        }
+    ]
+
+    # Y la hoja excluida tampoco dejó gastos.
+    activos = await _active_expenses(db_session, tenant, file)
+    assert {e.amount for e in activos} == {Decimal("1500"), Decimal("800")}
+
+
+async def test_segunda_relectura_no_revive_los_pendientes_descartados(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Descartar una vez tiene que alcanzar: la segunda relectura idéntica no
+    vuelve a capturar la hoja excluida ni reabre lo ya descartado. Sin esto el
+    invariante duraría hasta la próxima corrida."""
+    file, confirmed = await _archivo_dos_hojas(db_session, tenant, monkeypatch)
+    db_session.add(
+        UnclassifiedRecord(
+            tenant_id=tenant.tenant_id,
+            uploaded_file_id=file.id,
+            source="ingestion",
+            context_label="Sucursal Norte",
+            context_id="sheet:Sucursal Norte",
+            row_data={"col_1": "resumen viejo"},
+            status=UNCLASSIFIED_STATUS_PENDING,
+        )
+    )
+    await db_session.commit()
+
+    for _vuelta in (1, 2):
+        run = _run_excluyendo_norte(tenant, file, confirmed)
+        db_session.add(run)
+        await db_session.commit()
+        await reread_service.apply_reread(db_session, file.id, tenant.tenant_id, run=run)
+        await db_session.commit()
+
+    total = await db_session.scalar(
+        select(func.count())
+        .select_from(UnclassifiedRecord)
+        .where(UnclassifiedRecord.tenant_id == tenant.tenant_id)
+    )
+    assert total == 1, "la segunda relectura no puede crear un pendiente nuevo"
+    estados = await _pendientes(db_session, tenant)
+    assert estados["Sucursal Norte"] == UNCLASSIFIED_STATUS_DISMISSED
+
+
+async def test_label_ambiguo_no_descarta_nada(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un nombre de hoja no es una identidad. Si el label del pendiente legacy no
+    coincide con NINGUNA hoja del archivo, no se descarta: el fallback resuelve
+    por nombre exacto y único, nunca por parecido."""
+    file, confirmed = await _archivo_dos_hojas(db_session, tenant, monkeypatch)
+    db_session.add(
+        UnclassifiedRecord(
+            tenant_id=tenant.tenant_id,
+            uploaded_file_id=file.id,
+            source="ingestion",
+            # Un MOTIVO, no una hoja — es lo que guardan las capturas por fila.
+            context_label="Fila sin monto: no se pudo registrar",
+            row_data={"col_1": "algo"},
+            status=UNCLASSIFIED_STATUS_PENDING,
+        )
+    )
+    await db_session.commit()
+
+    run = _run_excluyendo_norte(tenant, file, confirmed)
+    db_session.add(run)
+    await db_session.commit()
+    result = await reread_service.apply_reread(
+        db_session, file.id, tenant.tenant_id, run=run
+    )
+    await db_session.commit()
+
+    estados = await _pendientes(db_session, tenant)
+    assert estados["Fila sin monto: no se pudo registrar"] == UNCLASSIFIED_STATUS_PENDING
+    assert result.otros_descartados == []

@@ -349,3 +349,292 @@ Fase 1 → **verificar en prod que una relectura completa** → Fase 2 → Fase 
 No arrancar una fase sin cerrar la anterior con su verificación (memoria
 `feedback_subagent_phase_gates`). Las Fases 2-5 no se pueden validar en Asteria hasta que la
 Fase 1 permita que una relectura termine.
+
+---
+
+# Estado — 2026-09-02 (tarde)
+
+## Fase 1: CERRADA y verificada en producción
+
+La relectura que el usuario disparó el 2026-09-02 **terminó**:
+
+```
+89071abe  APPLIED  16:49:23 → 17:11:04   (21m 41s)
+          sales_detected=2563  sales_voided=2563
+```
+
+Reemplazo limpio contra la base real: 1.939 ventas vivas / 1.939 anuladas,
+624 / 624 gastos, 405 movimientos, **0 duplicados por `source_row_ref`**. Los 3
+runs zombie quedaron en estado terminal (`stale_timeout` / `stale_legacy_running`),
+o sea que el sweeper de 1.4 hizo su trabajo.
+
+El usuario cerró la ventana a los 10m39s; cerrarla no cancela, y el aviso del
+modal ("se sigue procesando igual") era correcto.
+
+**Deuda:** 21m41s contra un límite blando de 25 min es 13% de margen. La próxima
+frontera medida es `insert_confirmed_data` (2.096 statements, ~800 `UPDATE` +
+~800 `SELECT` de productos). No se toca en esta tanda.
+
+## Por qué "no cambió nada" aunque la relectura terminó
+
+Tres causas medidas contra Neon, ninguna de ellas un fallo del apply:
+
+1. Los 2.288 pendientes de "Otros" no los limpia ninguna relectura (Fase 2, abajo).
+2. Los 398 productos tienen `description` vacía → la inferencia de categoría no
+   puede pasar del nivel `low` (Fase 4).
+3. Los tres `*_ROLLOUT_TENANT_IDS` siguen en `[]`: los Bloques 2/3A/5 no corrieron.
+
+> `prod_created=0 / prod_updated=0` NO prueba que el apply no hiciera nada:
+> también es el resultado esperado si los productos ya existían y no cambiaron.
+> No se usa como evidencia.
+
+## Composición real de "Otros" (2.288, medido)
+
+```
+Ganancias                        PENDING  1840
+ganancias 2                      PENDING   433   → 2.273 (99,3%)
+LD 2026 — Movimientos ambiguos   PENDING     8
+LD 2025 — Movimientos ambiguos   PENDING     4
+Fila sin fecha reconocible       PENDING     3
+
+de esos, filas TOTALMENTE vacías:            314
+con `suggested_entity`:                        3
+```
+
+## Fase 2 — implementada (rama `fix/otros-no-acumula-lo-no-importado`)
+
+Invariante, en la forma más ancha que pidió el usuario:
+
+> Un contexto no seleccionado o detectado como resumen/derivado no debe crear
+> ventas, gastos, productos, movimientos ni registros en "Otros". En una
+> relectura también deben descartarse sus registros pendientes antiguos.
+
+1. **`unclassified_records.context_id`** (mig `20260902_0001`, additive, nullable,
+   sin backfill) + índice `(uploaded_file_id, context_id)`. El label no es una
+   identidad: en el camino multi-hoja es el nombre de la hoja y en la docena de
+   capturas por fila es un MOTIVO en castellano.
+2. **El import ya no captura lo excluido** (`ingestion_import_service`, camino
+   multi-hoja): el guard va ANTES de la captura, porque `_hoja_incluida` sólo
+   protegía a las hojas cuya entidad está en `entity_bucket` — una hoja
+   desmarcada *e* inclasificable nunca lo alcanzaba.
+3. **La relectura descarta lo pendiente** de contextos que no importó
+   (`_descartar_pendientes_de_contextos_no_importados`), con motivo propio
+   (`hoja_derivada` / `hoja_no_seleccionada`), distinto del match por `row_ref`.
+   Devuelve **conteo por hoja y motivo** (`RereadApplyResult.otros_descartados`)
+   en vez de limpiar en silencio; en preview cuenta sin mutar.
+4. **Filas en blanco**: el guard mira los VALORES, no las claves. Opt-out
+   explícito (`skip_blank_rows=False`) para la captura por riesgo de columna,
+   donde el vacío ES lo que se reporta.
+5. **"Importar todo lo sugerido"** deshabilitado con motivo VISIBLE cuando no hay
+   ninguna sugerencia. El conteo es global (`/others/count` ahora devuelve
+   `pending_suggested`): el botón opera sobre todos los pendientes, así que
+   decidir con las 50 filas de la página se equivoca en las dos direcciones.
+
+### Límite deliberado del descarte automático
+
+"No seleccionada" es una decisión **explícita** (`context_confirmed[cid] is False`),
+no la ausencia de decisión. Sin `context_confirmed`, `context_is_included` cae al
+gating por tipo y una hoja ambigua (sin entidad) daría "no incluida" SIEMPRE: el
+descarte se llevaría puesta la red de FASE F, que es justo la que evita perder en
+silencio una fila que el parser no supo leer. El usuario eligió acotar el descarte
+a las hojas derivadas y conservar esa red. Cubierto por
+`test_hoja_ambigua_sin_decision_sigue_capturando`.
+
+### Verificación (criterio determinista, no "~15")
+
+Después de una relectura, los únicos pendientes que pueden quedar son los de
+contextos **incluidos** que son genuinamente ambiguos. Para ASTERIA: los 12 de
+"Movimientos ambiguos" + los 3 sin fecha; los 2.273 de `Ganancias`/`ganancias 2`
+se van con motivo `hoja_derivada`, y ninguna fila vacía puede volver a entrar.
+
+Tests (todos mutation-testeados — se revirtió cada fix y se confirmó que fallan):
+
+| Test | Qué fija |
+|---|---|
+| `test_hoja_desmarcada_no_deja_absolutamente_ningun_rastro` | el invariante completo, a nivel import |
+| `test_hoja_derivada_no_captura_aunque_no_haya_decision_explicita` | derivada sin decisión del usuario |
+| `test_hoja_ambigua_sin_decision_sigue_capturando` | la red de FASE F NO se pierde |
+| `test_filas_en_blanco_no_materializan_pendientes` | las 314 vacías |
+| `test_reread_descarta_pendientes_de_hoja_no_seleccionada` | descarte por `context_id` Y por label legacy |
+| `test_segunda_relectura_no_revive_los_pendientes_descartados` | idempotencia entre corridas |
+| `test_label_ambiguo_no_descarta_nada` | el fallback por nombre no se pasa de rosca |
+| `otros_bulk_import_gate.test.tsx` (2) | el botón y su motivo visible |
+
+## Fase B (ex Fase 4 de inventario) — CONDICIONADA, no implementada
+
+El usuario pidió confirmar tres cosas antes de tocar el chequeo temporal:
+
+1. Qué fecha representa realmente el stock del archivo.
+2. Por qué hay ventas hasta `2026-12-30`, posteriores a la relectura del `2026-09-02`.
+3. Que el mensaje provenga efectivamente de `replay_timeline()` y no sólo de las
+   560 compras bloqueadas por falta de cantidad.
+
+Lo medido hasta acá: los 405 movimientos son `catalog_initial_stock | adjustment`,
+todos fechados `2026-09-02`, contra ventas de `2025-02-15` a `2026-12-30`; y las
+324 compras de mercadería son montos globales ("compra mercadería $1.053.240") sin
+producto ni unidades.
+
+## Fase C — categorización de productos (implementada)
+
+**Medido antes y después sobre los 398 productos reales**, con la función pura
+sobre los nombres de la base:
+
+|  | antes | vocabulario | + regla de soportes |
+|---|---|---|---|
+| `high` (se aplica) | 114 (28%) | 180 (45%) | **177 (44%)** |
+| `medium` (se sugiere, no se aplica) | 0 | 0 | 0 |
+| `low` (sin categoría) | 284 (71%) | 218 (54%) | 221 (55%) |
+| de los `low`: sin ningún keyword | 280 | 213 | 213 |
+
+**Por qué 180 y no 181** (114 + 67 nuevos): una regresión de a uno. `set tabla +
+mantel` estaba en `high` por `mantel` (TEXTILES) y al entrar `tabla` (BAZAR)
+quedó empatado, o sea ambiguo, o sea sin categoría. Es la propiedad que hace
+seguro ampliar el vocabulario, funcionando al revés: sumar palabras puede dejar
+de resolver un caso, pero no puede resolverlo MAL.
+
+**Y por qué 177 y no 180:** ver "los tres falsos positivos", abajo.
+
+**Corrección al diagnóstico del plan original.** Decía que el `medium` daba 0
+"porque la `description` está vacía". Es falso por dos motivos, los dos
+verificados en el código:
+
+1. El texto de especificaciones YA llegaba a `infer_category`: sin columna
+   `description` mapeada, `_specs_raw` cae a la heurística
+   `_ESPECIFICACIONES_COLS`, que sí contiene "especificaciones".
+2. El `medium` **no se aplica por diseño**: `insert_confirmed_data` sólo asigna
+   la categoría con confianza `high`; la `medium` se guarda en `custom_fields`
+   como sugerencia para revisión humana (Bloque 5). Es la regla de no-invención
+   funcionando, no un bug.
+
+La palanca real era la **cobertura del vocabulario**: 280 de 284 no matcheaban
+ningún keyword. Nada que ver con el `medium`.
+
+**Segunda corrección — el keyword iba en el motor equivocado.** El plan apuntaba
+a `column_mapping_service.py:722`, pero ese set alimenta `_heuristic_match`, que
+**sólo lo llaman los tests**: es el motor VIEJO, conservado como foto de
+caracterización para el rediseño F-M. El motor vivo es `read_header` →
+`analyze_header`, cuyo vocabulario de conceptos está en
+`app/domain/header_semantics.py`. Editar el set viejo no habría cambiado nada en
+la aplicación.
+
+Cambios:
+
+1. `especificaciones`/`especificacion` → concepto `descripcion` en
+   `header_semantics.py`. `RESOLUCION["product"]["descripcion"]` ya llevaba a
+   `description`, así que la columna ahora se persiste (antes: 0 de 398).
+2. Vocabulario `decoracion_hogar`, elegido palabra por palabra contra los
+   nombres reales: TEXTILES `alfombra`, `frazada`, `repasador`; BAZAR `bandeja`,
+   `frasco`, `huevera`, `aceitero`, `especiero`, `salero`, `batidor`,
+   `espatula`, `utensilio`, `hermetico`, `molde`, `medidora`, `cafetera`,
+   `tabla`. Los 67 productos que se categorizan por estas palabras se revisaron
+   uno por uno.
+3. La batería de caracterización de encabezados suma la fila
+   `("product", "Especificaciones")` con el veredicto del motor viejo (`FALTA`) y
+   su lectura declarada en `LECTURA_NUEVA` — el diff entre motores sigue siendo
+   explícito, fila por fila.
+
+**Lo que queda afuera a propósito** (y no es un olvido): `canasto` (19), `cesto`
+(11) y la familia `porta*` (27) son artículos de ORGANIZACIÓN, y el catálogo de
+`decoracion_hogar` no tiene esa categoría. Meterlos en DECO o BAZAR sería elegir
+por el negocio. Es un hueco del CATÁLOGO del rubro, no del vocabulario, y se
+decide aparte. Fijado por `test_articulos_de_organizacion_siguen_sin_categoria`.
+
+### Los tres falsos positivos — corregidos, no aceptados
+
+Primero los dejé pasar argumentando que el error era "de vecindad". Es un mal
+argumento: se aplican con confianza ALTA, o sea que se escriben solos, y el
+usuario no tiene cómo enterarse de que están mal. Mejor 44% correcto que 45% con
+errores conocidos adentro.
+
+Eran tres, no dos — el tercero es preexistente y no lo trajo esta ampliación:
+
+    porta repasadores doble      -> TEXTILES  via `repasador`
+    cuelga repasador p/puerta    -> TEXTILES  via `repasador`
+    organizador de tela x 8      -> TEXTILES  via `tela`      (preexistente)
+
+**La regla no es "palabra de soporte, entonces sin categoria".** Medido sobre los
+42 productos del catálogo que llevan una: 21 recibían categoría y sólo esos 3
+estaban mal. Un `portavela` se vende con las velas (AROMAS); un `posavasos`, un
+`escurridor de cubiertos` y un `porta cubiertos` son artículos de mesa y cocina
+(BAZAR). En esas familias el soporte NO cambia de categoría.
+
+Cambia sólo en TEXTILES, y por un motivo concreto: ahí las palabras nombran un
+MATERIAL o una prenda (`tela`, `manta`, `repasador`, `funda`), y el aparato que
+las sostiene está hecho de otra cosa. Un porta repasadores es un herraje.
+
+De ahí `_SOPORTE_INVALIDA = {"TEXTILES"}`: declarativo y por categoría, no un
+`if` sobre un caso puntual. Los 18 soportes que siguen categorizados se
+revisaron uno por uno y son correctos.
+
+**`posa fuente` NO era un falso positivo:** resuelve a BAZAR por `fuente`, y un
+posafuente es bazar. Tampoco existe en este catálogo. Queda como test de
+no-regresión para que la regla de soportes no se lo lleve puesto.
+
+## Fase B — las tres confirmaciones, y una hipótesis mía que se cayó
+
+### 1. Qué fecha representa el stock del archivo
+
+La hoja `precios y stock ` tiene los encabezados `Tienda | Productos |
+Especificaciones | Stock | Precio de compra | % Envio | compra+envio | Precio de
+lista | col_8 | Precio de venta final`: **no hay ninguna columna de fecha**. O
+sea que el archivo no fecha su stock, y los 405 movimientos
+`catalog_initial_stock` quedaron con la fecha de la CORRIDA (`2026-09-02`), no
+con una del negocio. El usuario confirmó que ese número es el stock de HOY.
+
+### 2. Las 7 ventas posteriores al 2026-09-02
+
+Son **7 de 1.939 (0,36%)**, todas entre el 26 y el 30 de diciembre de 2026:
+
+    2026-12   7      <- las futuras
+    2026-08  13
+    2026-07  67
+    2026-06 136 ... serie continua hacia atrás ...
+    2025-12  55
+    2025-03   1
+    2025-02   1
+
+El patrón: diciembre de 2026 no tiene ninguna otra venta, diciembre de 2025
+tiene 55, y los extremos (2025-02 y 2025-03) tienen 1 venta cada uno. Es
+consistente con un año mal leído sobre una fecha parcial, no con ventas
+genuinamente futuras — pero **no está probado**: confirmarlo exige mirar esas 7
+filas en el Excel. Los gastos, en cambio, terminan el `2026-07-11`, sin cola
+futura.
+
+### 3. De dónde sale el mensaje — MI HIPÓTESIS ERA FALSA
+
+Sostuve que el ancla fechada hoy hacía que el replay diera negativo para todos
+los productos. **Medido contra prod, es falso.** Corriendo
+`check_products_temporal_divergence` read-only sobre los 161 productos con
+ventas vinculadas:
+
+    checked            158
+    skipped_no_anchor    3
+    divergences          9      <- 5,7%, no 158
+
+`replay_timeline` arranca del stock ACTUAL y va restando: solo da negativo en
+los productos cuyas ventas superan el stock de hoy. No es una alarma universal.
+
+Los tres avisos son superficies DISTINTAS y ninguno viene de las 560 compras
+bloqueadas:
+
+| Mensaje | Origen | Número real |
+|---|---|---|
+| "…quedan con stock negativo en algún momento" | `impacto_inventario` del confirm | **66 de 161** (10/8) |
+| "…registra ventas por fecha que superan el stock reconstruible" | `check_products_temporal_divergence` | **9 de 158** (hoy) |
+| "Compras bloqueadas (falta columna de cantidad): 560" | `estimate_unlinked_products`, panel del PREVIEW | 560 |
+
+Los 161 productos del `impacto_inventario` traen `compradas: 0` **todos**, y 66
+terminan en negativo. Ese es el aviso ruidoso que vio el usuario.
+
+### Qué queda por hacer, entonces
+
+No lo que estaba planeado. `_candidate_products` y la fecha del ancla **no se
+tocan**: el chequeo no está gritando: reporta 9 de 158, que es información
+razonable. Lo que falla es el ENCUADRE — decir "faltan compras anteriores,
+revisá las fechas de compra" cuando la situación real es que el archivo no trae
+cantidades compradas de ningún producto y el inventario no se puede reconstruir
+desde él. Es un cambio de mensaje (la opción que eligió el usuario: informar sin
+alarmar), no de cálculo.
+
+**Sin implementar. Requiere la decisión del usuario con estos números a la
+vista.**

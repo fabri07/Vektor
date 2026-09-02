@@ -79,6 +79,24 @@ export const othersService = {
     return res.data.pending;
   },
 
+  /**
+   * Pendientes totales y, de esos, cuántos traen sugerencia de destino.
+   *
+   * El conteo de sugeridos viene del backend y no se deriva de la página que se
+   * está viendo: "Importar todo lo sugerido" opera sobre TODOS los pendientes
+   * del tenant, así que decidir con 50 filas de 2.288 se equivoca en las dos
+   * direcciones (habilitar sin nada que importar, o deshabilitar habiendo).
+   */
+  async getPendingCounts(): Promise<{ pending: number; pendingSuggested: number }> {
+    const res = await api.get<{ pending: number; pending_suggested?: number }>(
+      "/others/count",
+    );
+    return {
+      pending: res.data.pending,
+      pendingSuggested: res.data.pending_suggested ?? 0,
+    };
+  },
+
   async reclassify(id: string, payload: ReclassifyPayload): Promise<void> {
     await api.post(`/others/${id}/reclassify`, payload);
   },
