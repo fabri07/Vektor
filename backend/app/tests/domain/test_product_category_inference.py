@@ -127,3 +127,55 @@ def test_una_palabra_nueva_no_le_roba_un_producto_a_otra_categoria() -> None:
     hace seguro ampliar el vocabulario: sumar palabras puede dejar de resolver un
     caso, pero no puede resolverlo MAL."""
     assert infer_category(Vertical.DECORACION_HOGAR, "set tabla + mantel").code is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "porta repasadores doble",
+        "cuelga repasador p/puerta",
+        # Preexistente, no lo trajo la ampliación del vocabulario: entra por
+        # `tela`, que nombra el MATERIAL de lo que el organizador guarda.
+        "organizador de tela x 8",
+    ],
+)
+def test_un_soporte_de_textil_no_es_un_textil(name: str) -> None:
+    """Un herraje para colgar repasadores no es ropa de casa. Estos tres eran
+    falsos positivos con confianza ALTA, o sea que se aplicaban solos y el
+    usuario no tenía cómo enterarse. Preferimos 44% de cobertura correcta antes
+    que 45% con errores conocidos adentro."""
+    assert infer_category(Vertical.DECORACION_HOGAR, name).code is None
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_code"),
+    [
+        # El soporte NO invalida cuando pertenece a la misma familia que lo que
+        # sostiene: un portavela se vende con las velas, y un posavasos o un
+        # escurridor de cubiertos son artículos de mesa y cocina.
+        ("portavela olivo", "AROMAS"),
+        ("portasahumerios corazon", "AROMAS"),
+        ("posavasos garden", "BAZAR"),
+        ("porta cubiertos metal alambre", "BAZAR"),
+        ("escurridor de cubiertos", "BAZAR"),
+        ("apoya utensilio silicona", "BAZAR"),
+        # No existe en el catálogo real, pero es el caso que hay que no romper:
+        # un posafuente es bazar, no un soporte de otra familia.
+        ("posa fuente", "BAZAR"),
+    ],
+)
+def test_el_soporte_de_la_misma_familia_conserva_su_categoria(
+    name: str, expected_code: str
+) -> None:
+    assert infer_category(Vertical.DECORACION_HOGAR, name).code == expected_code
+
+
+def test_las_especificaciones_no_convierten_un_herraje_en_textil() -> None:
+    """El soporte lo declara el NOMBRE. Desempatar con la ficha técnica no puede
+    devolverle una categoría que el nombre ya invalidó."""
+    s = infer_category(
+        Vertical.DECORACION_HOGAR,
+        name="porta repasadores doble",
+        specifications="tela de algodón",
+    )
+    assert s.code is None

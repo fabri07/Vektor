@@ -479,13 +479,20 @@ producto ni unidades.
 **Medido antes y después sobre los 398 productos reales**, con la función pura
 sobre los nombres de la base:
 
-|  | antes | después |
-|---|---|---|
-| `high` (se aplica) | 114 (28%) | **180 (45%)** |
-| `medium` (se sugiere, no se aplica) | 0 | 0 |
-| `low` (sin categoría) | 284 (71%) | 218 (54%) |
-| de los `low`: sin ningún keyword | 280 | 213 |
-| de los `low`: ambiguos (≥2 categorías) | 4 | 5 |
+|  | antes | vocabulario | + regla de soportes |
+|---|---|---|---|
+| `high` (se aplica) | 114 (28%) | 180 (45%) | **177 (44%)** |
+| `medium` (se sugiere, no se aplica) | 0 | 0 | 0 |
+| `low` (sin categoría) | 284 (71%) | 218 (54%) | 221 (55%) |
+| de los `low`: sin ningún keyword | 280 | 213 | 213 |
+
+**Por qué 180 y no 181** (114 + 67 nuevos): una regresión de a uno. `set tabla +
+mantel` estaba en `high` por `mantel` (TEXTILES) y al entrar `tabla` (BAZAR)
+quedó empatado, o sea ambiguo, o sea sin categoría. Es la propiedad que hace
+seguro ampliar el vocabulario, funcionando al revés: sumar palabras puede dejar
+de resolver un caso, pero no puede resolverlo MAL.
+
+**Y por qué 177 y no 180:** ver "los tres falsos positivos", abajo.
 
 **Corrección al diagnóstico del plan original.** Decía que el `medium` daba 0
 "porque la `description` está vacía". Es falso por dos motivos, los dos
@@ -532,11 +539,36 @@ Cambios:
 por el negocio. Es un hueco del CATÁLOGO del rubro, no del vocabulario, y se
 decide aparte. Fijado por `test_articulos_de_organizacion_siguen_sin_categoria`.
 
-**Precisión, dicha entera:** de los 67 nuevos, 65 son inequívocos. Dos son
-discutibles — "porta repasadores doble" y "cuelga repasador p/puerta" son
-soportes, no textiles, y entran por `repasador`. Se dejan: dentro de este
-catálogo no hay una categoría mejor para un colgador de repasadores, y el error
-es de vecindad, no de concepto.
+### Los tres falsos positivos — corregidos, no aceptados
+
+Primero los dejé pasar argumentando que el error era "de vecindad". Es un mal
+argumento: se aplican con confianza ALTA, o sea que se escriben solos, y el
+usuario no tiene cómo enterarse de que están mal. Mejor 44% correcto que 45% con
+errores conocidos adentro.
+
+Eran tres, no dos — el tercero es preexistente y no lo trajo esta ampliación:
+
+    porta repasadores doble      -> TEXTILES  via `repasador`
+    cuelga repasador p/puerta    -> TEXTILES  via `repasador`
+    organizador de tela x 8      -> TEXTILES  via `tela`      (preexistente)
+
+**La regla no es "palabra de soporte, entonces sin categoria".** Medido sobre los
+42 productos del catálogo que llevan una: 21 recibían categoría y sólo esos 3
+estaban mal. Un `portavela` se vende con las velas (AROMAS); un `posavasos`, un
+`escurridor de cubiertos` y un `porta cubiertos` son artículos de mesa y cocina
+(BAZAR). En esas familias el soporte NO cambia de categoría.
+
+Cambia sólo en TEXTILES, y por un motivo concreto: ahí las palabras nombran un
+MATERIAL o una prenda (`tela`, `manta`, `repasador`, `funda`), y el aparato que
+las sostiene está hecho de otra cosa. Un porta repasadores es un herraje.
+
+De ahí `_SOPORTE_INVALIDA = {"TEXTILES"}`: declarativo y por categoría, no un
+`if` sobre un caso puntual. Los 18 soportes que siguen categorizados se
+revisaron uno por uno y son correctos.
+
+**`posa fuente` NO era un falso positivo:** resuelve a BAZAR por `fuente`, y un
+posafuente es bazar. Tampoco existe en este catálogo. Queda como test de
+no-regresión para que la regla de soportes no se lo lleve puesto.
 
 ## Fase B — las tres confirmaciones, y una hipótesis mía que se cayó
 

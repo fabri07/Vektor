@@ -128,6 +128,32 @@ def _matches(catalog: dict[str, tuple[str, ...]], text: str) -> list[tuple[str, 
     return hits
 
 
+#: Palabras que convierten el nombre en "un aparato PARA X" en vez de en X.
+#: No invalidan cualquier match: un `portavela` se vende con las velas (AROMAS),
+#: un `posavasos` y un `escurridor de cubiertos` son artículos de mesa y cocina
+#: (BAZAR). El soporte pertenece a la misma familia que lo que sostiene.
+_SOPORTES = (
+    "porta", "cuelga", "posa", "apoya", "soporte", "colgador", "sujeta",
+    "organizador", "escurridor", "percha",
+)
+
+#: Categorías donde un soporte SÍ invalida el match, porque ahí las palabras
+#: nombran un material o una prenda y el aparato que las sostiene está hecho de
+#: otra cosa: un "porta repasadores" es un herraje, no un textil, igual que un
+#: "organizador de tela" es un organizador y no una tela. BAZAR y AROMAS no
+#: están porque ahí el soporte no cambia de familia.
+#:
+#: El soporte tampoco cae en otra categoría: es un artículo de ORGANIZACIÓN, y
+#: este catálogo no tiene esa categoría (misma razón por la que `canasto`,
+#: `cesto` y la familia `porta*` están fuera del vocabulario). Sin categoría es
+#: la respuesta correcta, no una respuesta incompleta.
+_SOPORTE_INVALIDA: frozenset[str] = frozenset({"TEXTILES"})
+
+
+def _es_soporte_de_otra_cosa(code: str, text: str) -> bool:
+    return code in _SOPORTE_INVALIDA and any(s in text for s in _SOPORTES)
+
+
 def infer_category(
     vertical: Vertical,
     name: str | None,
@@ -137,14 +163,23 @@ def infer_category(
 
     Nunca inventa un código fuera de `CATEGORY_KEYWORDS[vertical]`. Sin
     catálogo para el vertical (todavía no cubierto), siempre `low`/`None`.
+
+    Un soporte no hereda la categoría de lo que sostiene cuando las dos cosas
+    son de familias distintas (ver `_SOPORTE_INVALIDA`): "porta repasadores" no
+    es un textil. Preferimos no categorizar antes que categorizar mal — una
+    categoría equivocada con confianza alta se aplica sola y el usuario no tiene
+    cómo saber que está mal, mientras que "sin categoría" se ve y se corrige.
     """
     catalog = CATEGORY_KEYWORDS.get(vertical)
     if not catalog:
         return _NO_SUGGESTION
 
-    name_hits = _matches(catalog, _norm(name)) if name else []
+    name_norm = _norm(name) if name else ""
+    name_hits = _matches(catalog, name_norm) if name else []
     if len(name_hits) == 1:
         code, kw = name_hits[0]
+        if _es_soporte_de_otra_cosa(code, name_norm):
+            return _NO_SUGGESTION
         return CategorySuggestion(code=code, confidence="high", matched_text=kw, rule=f"name:{kw}")
 
     # Nombre ambiguo (0 o ≥2 candidatas): las especificaciones pueden desempatar.
@@ -154,6 +189,10 @@ def infer_category(
         spec_hits = [h for h in spec_hits if h[0] in candidate_codes]
     if len(spec_hits) == 1:
         code, kw = spec_hits[0]
+        # El soporte lo declara el NOMBRE, no las especificaciones: desempatar
+        # con la ficha técnica no convierte un herraje en un textil.
+        if _es_soporte_de_otra_cosa(code, name_norm):
+            return _NO_SUGGESTION
         return CategorySuggestion(
             code=code, confidence="medium", matched_text=kw, rule=f"specifications:{kw}"
         )
