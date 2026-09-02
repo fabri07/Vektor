@@ -35,6 +35,10 @@ from typing import Any, cast
 from sqlalchemy import update
 from sqlalchemy.engine import CursorResult
 
+from app.application.services.reread_limits import (
+    REREAD_APPLY_HARD_LIMIT_SECONDS,
+    REREAD_APPLY_SOFT_LIMIT_SECONDS,
+)
 from app.jobs.celery_app import celery_app
 from app.jobs.ingestion_worker import _build_async_session
 from app.observability.logger import bind_request_context, get_logger
@@ -42,12 +46,15 @@ from app.observability.logger import bind_request_context, get_logger
 logger = get_logger(__name__)
 
 
+# Los límites viven en `reread_limits` junto al umbral de "run abandonado" del
+# servicio: los tres se mueven juntos o se abre una carrera. Ver ese módulo — los
+# 300 s que había acá caían dentro del costo medido del apply de Asteria.
 @celery_app.task(  # type: ignore[misc]
     name="jobs.reread_apply",
     queue="ingestion",
     max_retries=0,
-    soft_time_limit=270,
-    time_limit=300,
+    soft_time_limit=REREAD_APPLY_SOFT_LIMIT_SECONDS,
+    time_limit=REREAD_APPLY_HARD_LIMIT_SECONDS,
 )
 def reread_apply(run_id: str, file_id: str, tenant_id: str) -> None:
     """Ejecuta ``reread_service.apply_reread`` sobre un run ya encolado."""

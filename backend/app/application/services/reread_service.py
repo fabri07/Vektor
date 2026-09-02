@@ -106,6 +106,7 @@ from app.application.services.ingestion_schema_decision_service import (
     lookup_remembered_decisions_for_contexts,
 )
 from app.application.services.inventory_replay_service import run_inventory_replay
+from app.application.services.reread_limits import REREAD_STALE_AFTER_SECONDS
 from app.application.services.stock_service import (
     sale_source_event_id,
     unvoid_movement,
@@ -979,7 +980,9 @@ async def _superseder_clasificados_de_otros(
             )
             for mov in movimientos:
                 mov_snap = _snapshot_movement(mov)
-                await void_movement(mov, session)
+                # Mismo lock aguas arriba que el bucle principal de `_reconcile`
+                # (único caller de esta función, vía `apply_reread`).
+                await void_movement(mov, session, lock_held=True)
                 if not dry_run:
                     session.add(
                         DataRepairItem(
@@ -1201,7 +1204,11 @@ async def _reconcile(
             movimientos_preservados.add(mov.id)
             continue
         mov_snap = _snapshot_movement(mov)
-        await void_movement(mov, session)
+        # `lock_held`: `apply_reread` —único caller de `_reconcile`— toma el shared
+        # lock del tenant en su primera línea, y `pg_advisory_xact_lock_shared` se
+        # libera recién en el commit. Volver a pedirlo por movimiento son 2
+        # round-trips de más cada vez, sin proteger nada nuevo.
+        await void_movement(mov, session, lock_held=True)
         if not dry_run:
             session.add(
                 DataRepairItem(
@@ -2469,6 +2476,28 @@ async def _reconcile_column_risk(
 # de verdad por tenant a la vez (ese alcance no se tocó).
 
 _SESSION_STATUSES_OPEN = ("PREVIEWING", "NEEDS_REVIEW", "READY_TO_APPLY")
+
+#: Estados desde los que un APPLY puede quedar colgado, y por qué.
+#:
+#: ``RUNNING`` es el estado del motor PRE-F-RR, de antes de que el apply se
+#: partiera en QUEUED (encolado) → APPLYING (reclamado por un worker). **Ningún
+#: camino vivo lo escribe para ``REPAIR_TYPE_REREAD``** — los únicos writers de
+#: "RUNNING" que quedan son ``product_dedup_service`` y ``data_repair_service``, que
+#: tienen otro ``repair_type`` y este query ya filtra por el suyo. O sea: una
+#: relectura en RUNNING es, por construcción, un zombie viejo.
+#:
+#: Sin él, el sweep dejaba afuera exactamente a los zombies más viejos, que son los
+#: que nadie va a cerrar de otra forma: los dos de Asteria del 14/8 y el 18/8
+#: seguían en RUNNING tres semanas después, mientras el del 1/9 (APPLYING) sí
+#: entraba. El motivo se distingue en la auditoría en vez de mentir un "timeout"
+#: que nunca ocurrió en este motor.
+_APPLY_STATUSES_STUCK = ("QUEUED", "APPLYING", "RUNNING")
+
+_STUCK_REASON_BY_STATUS = {
+    "QUEUED": "stale_never_picked_up",
+    "APPLYING": "stale_timeout",
+    "RUNNING": "stale_legacy_running",
+}
 # Una sesión de revisión legítima puede quedar abierta mucho más que el
 # umbral de "colgado" del apply (15 min) mientras el usuario corrige mapeos a
 # mano — por eso el umbral acá es mucho más generoso.
@@ -3167,7 +3196,13 @@ async def apply_reread(
 
 # Una relectura RUNNING más vieja que esto se considera colgada (worker caído) y
 # NO bloquea una nueva — evita que un run zombie trabe el archivo para siempre.
-_STALE_RUNNING_AFTER_SECONDS = 15 * 60
+#
+# Sale de `reread_limits` porque tiene que ser ESTRICTAMENTE MAYOR que el límite
+# duro de la task: si fuera menor, un apply que todavía está corriendo se declararía
+# muerto y un segundo apply arrancaría encima del primero. Antes eran 15 min contra
+# un límite de 5, así que sobraba; con el límite medido ya no, y el vínculo tiene que
+# ser explícito y no una coincidencia entre dos archivos.
+_STALE_RUNNING_AFTER_SECONDS = REREAD_STALE_AFTER_SECONDS
 
 
 # Namespace propio (2 claves int4) para no acoplar este guard con el advisory
@@ -3250,6 +3285,12 @@ async def start_background_apply(
         select(DataRepairRun).where(
             DataRepairRun.tenant_id == tenant_id,
             DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            # A propósito NO incluye "RUNNING" (a diferencia de
+            # `_APPLY_STATUSES_STUCK`, que usa el sweep): acá el criterio es "¿hay
+            # un apply VIVO que deba bloquear a este?", y un RUNNING solo puede ser
+            # un zombie del motor viejo — bloquear una relectura nueva por él sería
+            # el bug que este guard existe para evitar. Cerrarlo es tarea del sweep,
+            # que ahora corre inline justo antes de este guard.
             DataRepairRun.status.in_(("QUEUED", "APPLYING")),
         )
     )
@@ -3270,7 +3311,7 @@ async def start_background_apply(
         # Antes esto solo lo IGNORABA para no bloquear una relectura nueva —
         # el run zombie quedaba así para siempre en la auditoría (caso real:
         # ASTERIA, dos runs sin que ningún worker los tomara). Ahora se cierra.
-        reason = "stale_never_picked_up" if r.status == "QUEUED" else "stale_timeout"
+        reason = _STUCK_REASON_BY_STATUS[r.status]
         logger.error(
             "reread.guard.expire_stale_run",
             run_id=str(r.id),
@@ -3369,7 +3410,7 @@ async def sweep_stale_reread_runs(session: AsyncSession) -> dict[str, int]:
     running = await session.execute(
         select(DataRepairRun).where(
             DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
-            DataRepairRun.status.in_(("QUEUED", "APPLYING")),
+            DataRepairRun.status.in_(_APPLY_STATUSES_STUCK),
         )
     )
     for r in running.scalars().all():
@@ -3380,7 +3421,7 @@ async def sweep_stale_reread_runs(session: AsyncSession) -> dict[str, int]:
         # review). `updated_at` se toca en la transición real a QUEUED/APPLYING.
         if _age_seconds(r.updated_at, now) < _STALE_RUNNING_AFTER_SECONDS:
             continue
-        reason = "stale_never_picked_up" if r.status == "QUEUED" else "stale_timeout"
+        reason = _STUCK_REASON_BY_STATUS[r.status]
         logger.error(
             "reread.sweep.expire_apply",
             run_id=str(r.id),
