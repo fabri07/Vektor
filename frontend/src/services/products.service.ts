@@ -22,7 +22,14 @@ export interface ProductResponse {
   id: string;
   tenant_id: string;
   name: string;
+  /** El código que aporta el archivo o el proveedor. Puede faltar. */
   sku: string | null;
+  /**
+   * El código propio de Véktor (`VKT-…`), generado al crear el producto e
+   * inmutable. Es lo que se muestra cuando el archivo no trajo `sku`.
+   * `null`/ausente sólo en productos anteriores a la migración que lo agregó.
+   */
+  internal_sku?: string | null;
   description: string | null;
   category: string | null;
   sale_price_ars: number;

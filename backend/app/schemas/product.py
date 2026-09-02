@@ -20,7 +20,13 @@ class ProductResponse(BaseModel):
     id: UUID
     tenant_id: UUID
     name: str
+    # El código que aporta el ARCHIVO o el proveedor. Puede faltar.
     sku: str | None
+    # El código propio de Véktor, generado al crear el producto e inmutable.
+    # Existe para los productos que el archivo trae sin `sku` — que fueron los
+    # 398 del catálogo que lo motivó. `None` sólo en filas anteriores a la
+    # migración `20260903_0001`, que no backfillea.
+    internal_sku: str | None = None
     barcode: str | None = None
     expiry_date: date | None = None
     description: str | None

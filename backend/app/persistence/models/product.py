@@ -23,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, Mapper, mapped_column
 
+from app.domain.internal_sku import generate_internal_sku
 from app.domain.text_norm import (
     normalize_barcode,
     normalize_brand,
@@ -43,6 +44,12 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(300), nullable=False)
     sku: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Código propio de Véktor, generado al crear y NUNCA regenerado. Distinto de
+    # `sku`, que es el que aporta el archivo o el proveedor: conviven. Distinto
+    # de `id`, que es la identidad técnica y no se muestra. Nullable porque la
+    # migración `20260903_0001` no backfillea — las filas anteriores lo tienen
+    # en NULL hasta que se corra el backfill.
+    internal_sku: Mapped[str | None] = mapped_column(String(20), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Fase 2 (F2-T1) — identidad de producto: campo raw + columnas normalizadas
     # (fuente única de cálculo: el listener before_insert/before_update de más
@@ -124,6 +131,18 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
                 "is_active AND barcode_normalized IS NOT NULL AND barcode_normalized <> ''"
             ),
         ),
+        # El código propio: único por tenant entre los que lo tienen. A
+        # diferencia de los dos de arriba NO filtra por `is_active`: el código
+        # de un producto dado de baja no se recicla, porque puede estar escrito
+        # en una etiqueta o en un remito viejo.
+        Index(
+            "uq_products_tenant_internal_sku",
+            "tenant_id",
+            "internal_sku",
+            unique=True,
+            postgresql_where=text("internal_sku IS NOT NULL"),
+            sqlite_where=text("internal_sku IS NOT NULL"),
+        ),
         Index(
             "uq_products_tenant_sku_norm",
             "tenant_id",
@@ -140,6 +159,32 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     def __repr__(self) -> str:
         return f"<Product tenant={self.tenant_id} name={self.name!r}>"
+
+
+def _ensure_internal_sku(target: Product) -> None:
+    """Asigna el código propio si el producto todavía no tiene.
+
+    Acá y no en los constructores: son cinco rutas de alta (import de catálogo,
+    import de compra, chat, remito, POST manual) y la que se olvidara dejaría
+    productos sin código sin que nada fallara.
+
+    ``is None`` y no falsy: un código ya asignado NUNCA se regenera, ni en una
+    relectura ni en un update. Es la propiedad que lo vuelve utilizable — un
+    código que cambia no sirve para etiquetar nada.
+
+    **El ``id`` se materializa acá si hace falta.** El ``default=uuid.uuid4`` de
+    la columna se evalúa cuando SQLAlchemy arma el INSERT, o sea DESPUÉS de este
+    listener: en un ``Product(...)`` que no pasa ``id`` explícito —el chat, el
+    remito, el POST manual— acá todavía vale ``None``. Adelantarlo es exactamente
+    lo que el default iba a hacer, y deja cierto el invariante que le da valor al
+    formato: el código SIEMPRE se puede recomputar desde el id
+    (``generate_internal_sku(p.id)``), sin leer la fila ni coordinar nada. De eso
+    depende que un backfill sea idempotente y verificable.
+    """
+    if target.id is None:
+        target.id = uuid.uuid4()
+    if target.internal_sku is None:
+        target.internal_sku = generate_internal_sku(target.id)
 
 
 def _sync_product_identity_columns(target: Product) -> None:
@@ -161,6 +206,7 @@ def _sync_product_identity_columns(target: Product) -> None:
 def _product_before_insert(
     mapper: Mapper[Product], connection: Connection, target: Product
 ) -> None:
+    _ensure_internal_sku(target)
     _sync_product_identity_columns(target)
 
 
