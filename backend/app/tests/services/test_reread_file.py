@@ -24,7 +24,7 @@ import pytest_asyncio
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services import reread_service
+from app.application.services import maintenance_lock_service, reread_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     RISK_REF_KEY,
@@ -3237,3 +3237,56 @@ async def test_reread_excluye_hoja_elimina_sus_filas_previas(
     )
     # 3 originales voideadas + 2 reimportadas = 5, nunca 3+3 (sin duplicar).
     assert total_incluyendo_voided == 5
+
+
+async def test_apply_reread_toma_el_lock_antes_de_tocar_nada(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El bucle de void de `_reconcile` llama a `void_movement(..., lock_held=True)`,
+    o sea que NO pide el shared lock por movimiento. Eso es correcto solo mientras
+    `apply_reread` lo tome aguas arriba, en la misma transacción.
+
+    Este test fija esa precondición: si alguien saca el `acquire_write_lock_shared`
+    del tope de `apply_reread`, el `lock_held=True` de abajo pasaría de ser un ahorro
+    de round-trips a un agujero real de exclusión mutua contra el dedup — y nada más
+    lo notaría, porque el resultado de la relectura seguiría siendo idéntico.
+
+    Se compara contra `_load_file`, no contra el primer `void_movement`: el lock lo
+    piden también otros caminos de aguas abajo (`insert_confirmed_data` → balance),
+    así que "hubo algún lock" NO distingue. Lo que sí distingue es si el PRIMERO
+    ocurre antes de que la relectura lea siquiera el archivo, que es exactamente
+    donde `apply_reread` lo toma.
+    """
+    _patch_s3(monkeypatch, _CSV_BASE)
+    file = await _make_file(db_session, tenant, _CSV_BASE)
+    await _initial_import(db_session, tenant, file, _CSV_BASE)
+    await db_session.commit()
+
+    eventos: list[str] = []
+    original_lock = maintenance_lock_service.acquire_write_lock_shared
+    original_load = reread_service._load_file
+
+    async def _spy_lock(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+        eventos.append("lock")
+        await original_lock(db, tenant_id)
+
+    async def _spy_load(*a: object, **kw: object) -> object:
+        eventos.append("load_file")
+        return await original_load(*a, **kw)  # type: ignore[arg-type]
+
+    # El módulo es un singleton: parchearlo acá es lo mismo que parchear
+    # `reread_service.maintenance_lock_service`, sin depender de un re-export.
+    monkeypatch.setattr(
+        maintenance_lock_service, "acquire_write_lock_shared", _spy_lock
+    )
+    monkeypatch.setattr(reread_service, "_load_file", _spy_load)
+
+    await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    assert "lock" in eventos, "apply_reread dejó de tomar el shared lock del tenant"
+    assert "load_file" in eventos
+    assert eventos.index("lock") < eventos.index("load_file"), (
+        "apply_reread no toma el shared lock antes de leer el archivo: el "
+        "`lock_held=True` del bucle de void queda sin respaldo"
+    )

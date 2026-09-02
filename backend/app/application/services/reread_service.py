@@ -106,6 +106,7 @@ from app.application.services.ingestion_schema_decision_service import (
     lookup_remembered_decisions_for_contexts,
 )
 from app.application.services.inventory_replay_service import run_inventory_replay
+from app.application.services.reread_limits import REREAD_STALE_AFTER_SECONDS
 from app.application.services.stock_service import (
     sale_source_event_id,
     unvoid_movement,
@@ -979,7 +980,9 @@ async def _superseder_clasificados_de_otros(
             )
             for mov in movimientos:
                 mov_snap = _snapshot_movement(mov)
-                await void_movement(mov, session)
+                # Mismo lock aguas arriba que el bucle principal de `_reconcile`
+                # (único caller de esta función, vía `apply_reread`).
+                await void_movement(mov, session, lock_held=True)
                 if not dry_run:
                     session.add(
                         DataRepairItem(
@@ -1201,7 +1204,11 @@ async def _reconcile(
             movimientos_preservados.add(mov.id)
             continue
         mov_snap = _snapshot_movement(mov)
-        await void_movement(mov, session)
+        # `lock_held`: `apply_reread` —único caller de `_reconcile`— toma el shared
+        # lock del tenant en su primera línea, y `pg_advisory_xact_lock_shared` se
+        # libera recién en el commit. Volver a pedirlo por movimiento son 2
+        # round-trips de más cada vez, sin proteger nada nuevo.
+        await void_movement(mov, session, lock_held=True)
         if not dry_run:
             session.add(
                 DataRepairItem(
@@ -3167,7 +3174,13 @@ async def apply_reread(
 
 # Una relectura RUNNING más vieja que esto se considera colgada (worker caído) y
 # NO bloquea una nueva — evita que un run zombie trabe el archivo para siempre.
-_STALE_RUNNING_AFTER_SECONDS = 15 * 60
+#
+# Sale de `reread_limits` porque tiene que ser ESTRICTAMENTE MAYOR que el límite
+# duro de la task: si fuera menor, un apply que todavía está corriendo se declararía
+# muerto y un segundo apply arrancaría encima del primero. Antes eran 15 min contra
+# un límite de 5, así que sobraba; con el límite medido ya no, y el vínculo tiene que
+# ser explícito y no una coincidencia entre dos archivos.
+_STALE_RUNNING_AFTER_SECONDS = REREAD_STALE_AFTER_SECONDS
 
 
 # Namespace propio (2 claves int4) para no acoplar este guard con el advisory

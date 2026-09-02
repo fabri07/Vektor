@@ -3522,6 +3522,29 @@ async def confirm_file(
 # ── Relectura de archivos (REREAD_FILE) ────────────────────────────────────────
 
 
+async def _barrer_relecturas_colgadas(session: AsyncSession) -> None:
+    """Cierra los runs de relectura abandonados, en el borde de los dos endpoints
+    de relectura.
+
+    ``jobs.sweep_stale_reread_runs`` ya hace esto y está en el ``beat_schedule``,
+    pero **beat no está desplegado como servicio**: los runs zombie de Asteria del
+    14/8 y el 18/8 seguían en ``RUNNING`` tres semanas después. Los guards reactivos
+    de ``reread_service`` cierran uno solo cuando alguien vuelve a tocar ESE tenant;
+    esto lo hace global, sin infraestructura nueva, en el único momento en que el
+    costo (un UPDATE acotado) es irrelevante: el usuario ya está esperando una
+    operación de relectura.
+
+    No reemplaza a beat — es la red mientras no esté. Y es **fail-safe a propósito**:
+    limpiar auditoría de otro run no puede voltear la relectura que el usuario pidió.
+    """
+    from app.application.services import reread_service  # noqa: PLC0415
+
+    try:
+        await reread_service.sweep_stale_reread_runs(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reread.sweep.inline_failed", error=str(exc))
+
+
 @router.post(
     "/files/{file_id}/reread/preview",
     response_model=RereadPreviewResponse,
@@ -3546,6 +3569,8 @@ async def reread_preview(
     exacta que el usuario vio. Sin ``body`` (o vacío), comportamiento idéntico
     al de siempre: solo lee/recalcula, no persiste nada."""
     from app.application.services import reread_service  # noqa: PLC0415
+
+    await _barrer_relecturas_colgadas(session)
 
     try:
         run, fresh = await reread_service.start_or_resume_preview_session(
@@ -3711,6 +3736,10 @@ async def reread_apply(
     from app.application.services.reread_diagnostics_service import (  # noqa: PLC0415
         check_ingestion_workers_available,
     )
+
+    # Antes del guard anti-duplicado: un run zombie de un apply que murió por
+    # timeout no tiene que bloquear el reintento del usuario.
+    await _barrer_relecturas_colgadas(session)
 
     try:
         validated_run = await reread_service.validate_ready_to_apply(

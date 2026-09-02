@@ -135,13 +135,25 @@ async def _get_or_create_balance(
     product: Product,
     tenant_id: uuid.UUID,
     db: AsyncSession,
+    *,
+    lock_held: bool = False,
 ) -> InventoryBalance:
     # F3-T3: chokepoint COMÚN de toda mutación de balance/stock (decrement_stock,
     # increment_stock, register_stock_loss, void_movement, unvoid_movement — y
     # transitivamente decrement_for_sale/revert_sale_stock, que pasan por acá).
     # Shared lock ANTES de mutar: barrera de exclusión mutua real contra el dedup
     # (que toma el exclusive). No-op en SQLite.
-    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
+    #
+    # ``lock_held``: el caller declara que YA tomó el shared lock de este tenant en
+    # ESTA transacción. ``pg_advisory_xact_lock_shared`` se libera recién en el
+    # commit/rollback, así que volver a pedirlo es un no-op semántico que igual
+    # cuesta un round-trip entero — irrelevante en una request suelta, decisivo en
+    # un bucle: la relectura de Asteria pagaba 810 de estos (2 por movimiento × 405),
+    # el 15% de todos los statements del apply. Default ``False`` = comportamiento
+    # de siempre; solo lo pasa quien pueda PROBAR que el lock está tomado aguas
+    # arriba en la misma transacción, nunca "por las dudas".
+    if not lock_held:
+        await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     result = await db.execute(
         select(InventoryBalance).where(
             InventoryBalance.product_id == product.id,
@@ -599,6 +611,8 @@ async def register_stock_loss(
 async def void_movement(
     movement: InventoryMovement,
     db: AsyncSession,
+    *,
+    lock_held: bool = False,
 ) -> None:
     """Soft-delete de un movimiento revirtiendo EXACTAMENTE su efecto en stock/balance.
 
@@ -614,17 +628,25 @@ async def void_movement(
     intermedio se comería, por ejemplo, ventas posteriores a una compra que se relee
     (void −100 sobre stock 60 ⇒ −40; el reimport +100 ⇒ 60). El piso a 0 va, si hace
     falta, en el estado final del llamador, nunca en un paso de la reversa.
+
+    ``lock_held``: ver ``_get_or_create_balance``. Solo lo pasa un caller que ya tomó
+    el shared lock del tenant en ESTA transacción (hoy: el bucle de void de la
+    relectura, bajo el lock que ``apply_reread`` toma en su primera línea). No cambia
+    qué se protege — cambia cuántas veces se pide lo mismo.
     """
     if movement.voided_at is not None:
         return
     # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
-    await maintenance_lock_service.acquire_write_lock_shared(db, movement.tenant_id)
+    if not lock_held:
+        await maintenance_lock_service.acquire_write_lock_shared(db, movement.tenant_id)
     product = await db.get(Product, movement.product_id)
     if product is not None and product.tenant_id == movement.tenant_id:
         # Sembrar el balance ANTES de mutar stock_units: _get_or_create_balance inicializa
         # current_qty desde product.stock_units, así que si mutáramos primero el balance
         # nuevo arrancaría ya descontado y la resta siguiente lo descontaría dos veces.
-        balance = await _get_or_create_balance(product, movement.tenant_id, db)
+        balance = await _get_or_create_balance(
+            product, movement.tenant_id, db, lock_held=lock_held
+        )
         product.stock_units -= movement.qty
         balance.current_qty -= movement.qty
     movement.voided_at = datetime.now(UTC)
