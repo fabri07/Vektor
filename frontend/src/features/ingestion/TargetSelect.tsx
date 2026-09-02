@@ -1,7 +1,10 @@
 "use client";
 
 import type { ReactNode } from "react";
-import type { FieldCatalogEntry } from "@/services/ingestion.service";
+import type {
+  CrossFieldCatalogEntry,
+  FieldCatalogEntry,
+} from "@/services/ingestion.service";
 
 /**
  * Cómo se ofrece un target que NO figura en el catálogo de la entidad.
@@ -42,6 +45,7 @@ export function TargetSelect({
   target,
   onChange,
   fields,
+  crossFields = [],
   className,
   disabled,
   editingCustom = false,
@@ -58,6 +62,12 @@ export function TargetSelect({
   /** Recibe el valor crudo del `<select>`, incluido el centinela `__custom__`. */
   onChange: (value: string) => void;
   fields: FieldCatalogEntry[];
+  /**
+   * Destinos en OTRA sección (hoy: «Tienda» → `supplier:name`). Se renderizan
+   * en un `<optgroup>` aparte para que se lea que el dato NO se guarda en esta
+   * hoja. El backend publica sólo los que el importador escribe de verdad.
+   */
+  crossFields?: CrossFieldCatalogEntry[];
   className: string;
   /**
    * Deshabilitado —no vacío— mientras carga el catálogo: un select sin opciones
@@ -97,7 +107,11 @@ export function TargetSelect({
     !!target &&
     target !== "ignore" &&
     fields.length > 0 &&
-    !fields.some((f) => f.value === target);
+    !fields.some((f) => f.value === target) &&
+    // Un cruzado tiene su propia `<option>` abajo: sin esta condición se
+    // renderizaba además como «(campo desconocido)», que es justo el fallo
+    // que este componente vino a cerrar.
+    !crossFields.some((f) => f.value === target);
 
   let opcionFueraDelCatalogo: ReactNode = null;
   if (unknownTarget === "custom-only") {
@@ -134,6 +148,15 @@ export function TargetSelect({
           {f.label}
         </option>
       ))}
+      {crossFields.length > 0 && (
+        <optgroup label="Otras secciones">
+          {crossFields.map((f) => (
+            <option key={f.value} value={f.value}>
+              {f.label}
+            </option>
+          ))}
+        </optgroup>
+      )}
       {opcionFueraDelCatalogo}
       {showCustomFieldOption && (
         <option value="__custom__">+ Campo personalizado…</option>

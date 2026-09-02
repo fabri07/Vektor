@@ -353,6 +353,30 @@ export interface EntityFieldCatalog {
    */
   required_alternatives: Record<string, string[]>;
   fields: FieldCatalogEntry[];
+  /**
+   * Destinos en OTRA sección que esta hoja puede escribir — hoy, la columna
+   * "Tienda" de un catálogo declarando el proveedor del artículo
+   * (`supplier:name`).
+   *
+   * Lista SEPARADA de `fields` a propósito: un cruzado escribe en otra sección y
+   * nunca cubre un requerido de esta hoja, igual que un `custom_field:`. Si
+   * estuviera en `fields`, `coversRequired` daría por cubierto un campo que la
+   * hoja sigue sin tener.
+   *
+   * El backend publica sólo los que el importador REALMENTE escribe, no todos
+   * los que el confirm acepta. Opcional para que un backend anterior siga
+   * deserializando.
+   */
+  cross_fields?: CrossFieldCatalogEntry[];
+}
+
+export interface CrossFieldCatalogEntry {
+  /** Target tal cual lo espera el confirm: `"{entidad}:{campo}"`. */
+  value: string;
+  /** Con la sección destino adelante: "Proveedor — Nombre". */
+  label: string;
+  /** Entidad destino, para agrupar en el selector. */
+  entity: string;
 }
 
 export type FieldCatalog = Record<string, EntityFieldCatalog>;

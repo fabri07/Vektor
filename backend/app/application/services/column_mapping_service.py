@@ -1421,6 +1421,61 @@ CROSS_ENTITY_TARGETS: dict[str, dict[str, frozenset[str]]] = {
 #: y este guard rechaza igual si alguien los agrega por error.
 CROSS_ENTITY_FORBIDDEN_FIELDS: frozenset[str] = frozenset({"stock_units"})
 
+#: Nombre de cada sección en castellano, para etiquetar un destino cruzado con la
+#: entidad adelante ("Proveedor — Nombre"). Sin esto la opción del mapeador diría
+#: sólo "Nombre" y se leería como un campo de ESTA hoja.
+ENTITY_LABELS: dict[str, str] = {
+    "sale": "Venta",
+    "expense": "Gasto",
+    "product": "Producto",
+    "customer": "Cliente",
+    "supplier": "Proveedor",
+}
+
+
+#: Los cruzados que el importador **realmente escribe**, que NO son todos los que
+#: ``CROSS_ENTITY_TARGETS`` permite mandar. Son dos listas distintas a propósito:
+#:
+#: - ``CROSS_ENTITY_TARGETS`` = qué acepta el confirm sin rechazar (validación).
+#: - esto = qué produce un efecto (implementación).
+#:
+#: Hoy el importador aplica UNO solo: `insert_confirmed_data` filtra con
+#: ``{k: v for k, v in _cruzados.items() if v != "supplier:name"}`` y cuenta el
+#: resto en ``targets_cruzados_descartados`` — F-D no está entregada.
+#:
+#: La UI se deriva de ESTA lista y no de la otra. Ofrecer un destino que el
+#: confirm acepta pero que no escribe nada es peor que no ofrecerlo: el usuario
+#: mapea la columna, la pantalla no se queja, y el dato desaparece en silencio.
+#: Es la misma clase de bug que el propio `/field-catalog` vino a cerrar.
+CROSS_ENTITY_TARGETS_IMPLEMENTED: frozenset[str] = frozenset({"supplier:name"})
+
+
+def cross_targets_for(entity: str) -> list[tuple[str, str, str]]:
+    """Destinos en OTRA entidad que esta hoja puede escribir DE VERDAD.
+
+    Devuelve ``(value, label, entidad_destino)`` con ``value`` en el formato que
+    espera el confirm (``"supplier:name"``). Deriva de ``CROSS_ENTITY_TARGETS``
+    (lo permitido) ∩ ``CROSS_ENTITY_TARGETS_IMPLEMENTED`` (lo que produce efecto),
+    con las etiquetas de ``CANONICAL_FIELDS``: las mismas estructuras que valida
+    el importador, así el mapeador no puede ofrecer algo que el confirm rechace
+    ni algo que acepte y tire.
+
+    Excluye ``CROSS_ENTITY_FORBIDDEN_FIELDS``: si un campo está prohibido, no se
+    ofrece — no alcanza con rechazarlo después.
+    """
+    salida: list[tuple[str, str, str]] = []
+    for destino, campos in CROSS_ENTITY_TARGETS.get(entity, {}).items():
+        etiquetas = CANONICAL_FIELDS.get(destino, {})
+        prefijo = ENTITY_LABELS.get(destino, destino)
+        for campo in sorted(campos):
+            value = f"{destino}:{campo}"
+            if campo in CROSS_ENTITY_FORBIDDEN_FIELDS:
+                continue
+            if value not in CROSS_ENTITY_TARGETS_IMPLEMENTED:
+                continue
+            salida.append((value, f"{prefijo} — {etiquetas.get(campo, campo)}", destino))
+    return salida
+
 
 # Targets canónicos que representan la fecha de negocio de una fila.
 _DATE_TARGET_FIELDS: frozenset[str] = frozenset({"transaction_date", "expense_date"})

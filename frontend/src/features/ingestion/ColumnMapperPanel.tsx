@@ -207,6 +207,9 @@ function UnmappedModal({
 
   const { data: catalog } = useFieldCatalog();
   const fields = catalog?.[entityType]?.fields ?? [];
+  // Sin `cross_fields` a propósito: este modal resuelve una columna que dejaría
+  // un REQUERIDO sin cubrir, y un cruzado escribe en otra sección — nunca cubre
+  // un requerido de esta hoja. Ofrecerlo acá sería ofrecer una salida falsa.
 
   function handleConfirm() {
     if (mode === "field" && selected) {
@@ -552,6 +555,7 @@ function SheetMapperSection({
   // allá no existe (ver `targetSobreviveALaEntidad`).
   const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
   const fields = catalog?.[entity]?.fields ?? [];
+  const crossFields = catalog?.[entity]?.cross_fields ?? [];
 
   // Inicializar mapeos desde sugerencias, una vez POR SECCIÓN: si el usuario
   // reasigna la hoja (p. ej. de Ventas a Productos), las sugerencias vienen de
@@ -849,6 +853,7 @@ function SheetMapperSection({
                       editingCustom={customFor === s.source_column}
                       onChange={(value) => selectTarget(s.source_column, value)}
                       fields={fields}
+                      crossFields={crossFields}
                       dataSheet={context.context_id}
                       dataSuggests={s.target_field ?? ""}
                       disabled={loadingCatalog}
@@ -2045,6 +2050,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const colCount = suggestions.length;
   const unmappedCount = getUnmappedColumns().length;
   const fields = catalog?.[entityType]?.fields ?? [];
+  const crossFields = catalog?.[entityType]?.cross_fields ?? [];
   // Mismas dos reglas que en multi-hoja y que en el confirm del backend.
   const faltanRequeridos = missingRequiredFields(
     catalog?.[entityType]?.required ?? [],
@@ -2203,6 +2209,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                         target={target}
                         onChange={(value) => setMappingForColumn(s.source_column, value)}
                         fields={fields}
+                        crossFields={crossFields}
                         disabled={loadingCatalog}
                         unknownTarget="catalog-guarded"
                         className="min-w-0 flex-1 rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
@@ -2289,6 +2296,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                         target={currentTarget}
                         onChange={(value) => setMappingForColumn(s.source_column, value)}
                         fields={fields}
+                        crossFields={crossFields}
                         ignoreLabel="— Ignorar columna —"
                         unknownTarget="custom-only"
                         className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"

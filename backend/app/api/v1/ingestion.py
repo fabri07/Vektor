@@ -52,6 +52,7 @@ from app.application.services.column_mapping_service import (
     SINGLE_VALUE_FIELDS,
     ColumnMappingService,
     conditional_requirement,
+    cross_targets_for,
     missing_required_fields,
     parse_target,
     required_reason,
@@ -179,6 +180,7 @@ from app.schemas.ingestion import (
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
     ContextualColumnRisk,
+    CrossFieldCatalogEntry,
     EntityFieldCatalog,
     FieldCatalogEntry,
     FileDeletionPreviewResponse,
@@ -1498,6 +1500,13 @@ async def get_field_catalog(
                     required_when=_condicion(entity, value),
                 )
                 for value, label in fields.items()
+            ],
+            # Destinos en OTRA sección (p. ej. "Tienda" de un catálogo →
+            # `supplier:name`). Lista aparte: un cruzado NUNCA cubre un requerido
+            # de esta hoja, igual que un `custom_field:`.
+            cross_fields=[
+                CrossFieldCatalogEntry(value=value, label=label, entity=destino)
+                for value, label, destino in cross_targets_for(entity)
             ],
         )
         for entity, fields in CANONICAL_FIELDS.items()
