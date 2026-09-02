@@ -215,13 +215,24 @@ async def count_unclassified(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, int]:
+    """``pending`` y, de esos, cuántos tienen sugerencia de destino.
+
+    ``pending_suggested`` existe porque "Importar todo lo sugerido" opera sobre
+    TODOS los pendientes del tenant, no sobre la página que se está viendo: sin
+    un conteo global, el frontend tendría que decidir si habilitar el botón
+    mirando 50 filas de 2.288 y se equivocaría en las dos direcciones.
+    """
     result = await session.execute(
-        select(func.count(UnclassifiedRecord.id)).where(
+        select(
+            func.count(UnclassifiedRecord.id),
+            func.count(UnclassifiedRecord.suggested_entity),
+        ).where(
             UnclassifiedRecord.tenant_id == tenant.tenant_id,
             UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
         )
     )
-    return {"pending": int(result.scalar_one() or 0)}
+    pending, suggested = result.one()
+    return {"pending": int(pending or 0), "pending_suggested": int(suggested or 0)}
 
 
 def _snapshot_producto(producto: Product) -> dict[str, Any]:

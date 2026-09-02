@@ -56,11 +56,16 @@ export default function OtrosPage() {
     staleTime: 60 * 1000,
   });
 
-  const { data: pendingTotal = 0 } = useQuery({
+  const { data: counts } = useQuery({
     queryKey: ["others-pending-count"],
-    queryFn: () => othersService.getPendingCount(),
+    queryFn: () => othersService.getPendingCounts(),
     staleTime: 60 * 1000,
   });
+  const pendingTotal = counts?.pending ?? 0;
+  // Sin una sola sugerencia, "Importar todo lo sugerido" no tiene nada que
+  // importar: dispararlo es una importación masiva a ciegas sobre miles de
+  // filas cuyo destino Véktor no supo determinar.
+  const sinSugerencias = (counts?.pendingSuggested ?? 0) === 0;
 
   // Catálogo de categorías de producto del vertical, para el selector del modal.
   const { data: productCategories = [] } = useQuery({
@@ -319,10 +324,20 @@ export default function OtrosPage() {
             <p className="text-xs text-vk-text-muted">
               {pendingTotal} registro(s) pendiente(s)
               {totalPages > 1 ? ` — página ${page + 1} de ${totalPages}` : ""}
+              {sinSugerencias && pendingTotal > 0 ? (
+                <span className="block pt-0.5">
+                  Ninguno tiene destino sugerido: hay que revisarlos de a uno.
+                </span>
+              ) : null}
             </p>
             <button
               type="button"
-              disabled={bulkImportMutation.isPending}
+              disabled={bulkImportMutation.isPending || sinSugerencias}
+              title={
+                sinSugerencias
+                  ? "Ninguno de los registros pendientes tiene un destino sugerido: no hay nada que importar automáticamente. Revisalos y asignales destino de a uno."
+                  : undefined
+              }
               onClick={() => {
                 if (
                   confirm(

@@ -1093,11 +1093,17 @@ def _fila_con_contenido(row: dict[str, Any]) -> bool:
     (todas las celdas en blanco) y mandarlas a la bandeja la llenaría de ruido
     que nadie puede clasificar. Distinguir "no pude" de "no había nada" es el
     mismo criterio que ya rige en el resto del importador.
+
+    Las claves ``__`` son del SISTEMA (``__context__``, ``__row_ref__``,
+    ``__risk_ref__``) y por eso no cuentan como contenido: son las que Véktor le
+    agrega a la fila, así que una fila vacía que pasó por una de esas capturas
+    parecería tener algo que decir cuando no lo tiene. Antes se excluía sólo
+    ``__context__`` y las otras dos podían mantener viva una fila en blanco.
     """
     return any(
         str(v).strip().lower() not in {"", "none", "nan"}
         for k, v in row.items()
-        if k != "__context__" and v is not None
+        if not k.startswith("__") and v is not None
     )
 
 
@@ -1112,6 +1118,8 @@ def _capture_unclassified(
     suggested_entity: str | None = None,
     match_candidates: list[dict[str, Any]] | None = None,
     row_ref: str | None = None,
+    context_id: str | None = None,
+    skip_blank_rows: bool = True,
 ) -> int:
     """FASE F: persiste filas no clasificadas en la bandeja "Otros".
 
@@ -1134,6 +1142,27 @@ def _capture_unclassified(
     ``source`` libre y la relectura se nombra ``"reread"``, que la columna no
     acepta. Sin esto, capturar una fila durante una relectura levantaba
     `IntegrityError` y abortaba el apply entero.
+
+    ``context_id`` es la IDENTIDAD de la hoja/grupo de origen (la de
+    ``mapping_contexts``), no su nombre: es lo que le permite a la relectura
+    descartar después los pendientes de un contexto que no importó. Se pasa
+    donde el caller lo tiene; las capturas cuyo "contexto" es un motivo
+    (``"Fila sin monto..."``) no pertenecen a ninguna hoja y lo dejan en None.
+
+    **Una fila en blanco no es una fila** (``skip_blank_rows``, default True). El
+    guard mira los VALORES, no las claves: una fila de relleno de Excel llega con
+    todas las columnas presentes y en ``None``, así que ``if not row_data`` —que
+    sólo detecta el dict sin claves— la dejaba pasar y la materializaba como un
+    pendiente vacío que nadie puede clasificar (314 de los 2.288 de ASTERIA). El
+    guard va acá, en la primitiva, y no en cada caller: los callers son una
+    docena y el que se olvide no da error, da ruido en la bandeja del usuario.
+
+    La excepción es ``skip_blank_rows=False``, para el único caso en que el vacío
+    ES el contenido: la captura por riesgo de columna (F8b) reporta justamente
+    que un campo quedó sin valor, así que su fila puede ser toda vacía y aun así
+    tener algo que decir — lo que la identifica es su ``__risk_ref__``, no sus
+    valores. Es un opt-out explícito y no una excepción implícita por la forma
+    del payload: un caller nuevo que capture filas de una hoja hereda el guard.
     """
     from app.persistence.models.unclassified_record import (  # noqa: PLC0415
         UnclassifiedRecord,
@@ -1148,7 +1177,7 @@ def _capture_unclassified(
     count = 0
     for row in rows:
         row_data = {k: v for k, v in row.items() if k != "__context__"}
-        if not row_data:
+        if not row_data or (skip_blank_rows and not _fila_con_contenido(row_data)):
             continue
         _persistido = {k: ("" if v is None else str(v)) for k, v in row_data.items()}
         # Se agrega DESPUÉS del volcado para que una columna del archivo que se
@@ -1162,6 +1191,7 @@ def _capture_unclassified(
                 uploaded_file_id=uploaded_file_id,
                 source=_source,
                 context_label=(context_label or None),
+                context_id=(context_id or None),
                 headers=list(headers) if headers else None,
                 row_data=_persistido,
                 suggested_entity=suggested_entity,
@@ -1240,6 +1270,10 @@ async def _capture_column_risk_rows(
             source=source,
             uploaded_file_id=uploaded_file_id,
             context_label=context_label,
+            context_id=context_id,
+            # El vacío ES lo que esta captura reporta: la fila está acá porque una
+            # columna quedó sin valor. La identifica su `__risk_ref__`.
+            skip_blank_rows=False,
             suggested_entity=entity_type,
             row_ref=_source_row_ref(
                 _import_row_anchor(tenant_id, uploaded_file_id, context_id, row_index)
@@ -6695,6 +6729,39 @@ async def _insert_multisheet_data(
                 # este dispatch (orden maestro→transacción) — nada más que hacer.
                 continue
             if entity not in entity_bucket:
+                # INVARIANTE: una hoja que el usuario NO seleccionó, o que se
+                # detectó como resumen/derivada, no produce NADA — ni venta, ni
+                # gasto, ni producto, ni movimiento, ni un pendiente en "Otros".
+                # "No importar" tiene que significar no dejar rastro; capturar sus
+                # filas acá convertía cada hoja excluida en miles de pendientes que
+                # el usuario no pidió y no puede clasificar (2.273 de los 2.288 de
+                # ASTERIA salieron de `Ganancias`/`ganancias 2`).
+                #
+                # Va ANTES de la captura y no después: el chequeo de inclusión de
+                # más abajo (`_hoja_incluida`) sólo protege a las hojas cuya entidad
+                # SÍ está en `entity_bucket`, así que una hoja desmarcada que además
+                # es inclasificable nunca lo alcanzaba.
+                #
+                # "No seleccionada" tiene que ser una decisión EXPLÍCITA del usuario
+                # (`context_confirmed[cid] is False`), no la ausencia de decisión.
+                # `_hoja_incluida` no sirve acá: sin `context_confirmed` cae al
+                # gating por tipo, y una hoja inclasificable no tiene tipo, así que
+                # daría False SIEMPRE — se llevaría puesta la red de FASE F, que es
+                # justo la que evita descartar en silencio una fila que el parser no
+                # supo leer. Esa red se conserva a propósito (decisión del usuario:
+                # el descarte automático alcanza a las hojas derivadas, no a las
+                # ambiguas sin decisión).
+                _excluida_a_mano = bool(context_confirmed) and not bool(
+                    (context_confirmed or {}).get(str(ctx_id or ""), False)
+                )
+                if bool(ctx.get("is_summary_or_derived")) or _excluida_a_mano:
+                    logger.info(
+                        "ingestion.sheet_excluded_no_capture",
+                        context_id=str(ctx_id or ""),
+                        label=str(ctx.get("label") or ""),
+                        derived=bool(ctx.get("is_summary_or_derived")),
+                    )
+                    continue
                 # Hoja no clasificada y no reasignada → bandeja "Otros". Idempotente
                 # por (archivo, contexto, índice) — mismo ancla/huella que el resto
                 # del import, namespace propio "otros_hoja:{ctx}" para no colisionar
@@ -6727,6 +6794,7 @@ async def _insert_multisheet_data(
                         source,
                         uploaded_file_id,
                         context_label=str(ctx.get("label") or ctx_id or ""),
+                        context_id=str(ctx_id) if ctx_id else None,
                     )
                     counts["otros"] += _otros_captured
                     if _otros_captured and _otros_anchor is not None:
@@ -6825,6 +6893,7 @@ async def _insert_multisheet_data(
                         ),
                         suggested_entity="sale",
                         row_ref=_row_ref,
+                        context_id=str(ctx_id) if ctx_id else None,
                     )
                     counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                     _did_insert = True

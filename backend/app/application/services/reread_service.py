@@ -327,6 +327,12 @@ class RereadApplyResult:
     # efectivamente persistido; si no, el detalle del desvío — ver
     # ``_verify_unlinked_products_reconciliation``.
     reconciliation_warning: dict[str, Any] | None = None
+    #: Pendientes de "Otros" que esta relectura descartó por pertenecer a una hoja
+    #: que no importó, contados por hoja y motivo:
+    #: ``[{"hoja": "Ganancias", "motivo": "hoja_derivada", "descartados": 1840}]``.
+    #: Se informa en vez de limpiar en silencio — el usuario tiene que poder ver
+    #: qué se fue de la bandeja y por qué. En preview trae el conteo sin mutar.
+    otros_descartados: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── snapshots para auditoría ───────────────────────────────────────────────────
@@ -1049,6 +1055,124 @@ async def _descartar_recapturas_ya_clasificadas(
             fila.resolved_at = ahora
 
 
+#: Motivos por los que la relectura descarta un pendiente sin haberlo importado.
+#: Set cerrado y en castellano — es lo que se muestra en el conteo por hoja.
+DISMISS_REASON_DERIVED = "hoja_derivada"
+DISMISS_REASON_NOT_SELECTED = "hoja_no_seleccionada"
+
+
+async def _descartar_pendientes_de_contextos_no_importados(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    fresh: dict[str, Any],
+    confirmed_fields: dict[str, bool],
+    context_confirmed: dict[str, bool] | None,
+    ahora: datetime,
+    dry_run: bool,
+) -> list[dict[str, Any]]:
+    """Lo que la relectura NO importa tampoco queda pendiente en "Otros".
+
+    El invariante del usuario es que una hoja no seleccionada —o detectada como
+    resumen/derivada— no deje rastro: ni venta, ni gasto, ni producto, ni
+    movimiento, ni un pendiente en la bandeja. El import ya no las captura (ver
+    ``ingestion_import_service``), pero eso solo vale hacia adelante: los
+    pendientes que un import ANTERIOR dejó de esas mismas hojas seguían
+    ``PENDING`` para siempre, porque ``_descartar_recapturas_ya_clasificadas``
+    —el único descarte que existía— solo alcanza a las filas que la relectura
+    SÍ importó (match por ``row_ref``). En ASTERIA son 2.273 de 2.288.
+
+    **Motivo propio, distinto del match por ``row_ref``.** Aquel dice "esta fila
+    ya la clasificaste a mano"; este dice "esta hoja no entró en la relectura".
+    Se devuelven contados por hoja y motivo para que la corrida pueda informarlo
+    en vez de limpiar en silencio.
+
+    **La clave del join es ``context_id``, no el nombre.** El label se usa SOLO
+    como fallback para los registros escritos antes de la migración
+    ``20260902_0001`` (no tienen ``context_id`` y no hay de dónde derivárselo),
+    acotado a ``(tenant, archivo)`` y **solo cuando ese label identifica a un
+    único contexto del archivo**: si dos contextos comparten nombre, el label no
+    desempata y no se toca ninguno de los dos — descartar por un nombre ambiguo
+    es peor que dejar el pendiente. Los ``context_label`` que son un MOTIVO
+    ("Fila sin monto: ...") no coinciden con ninguna hoja y por construcción
+    nunca matchean.
+
+    Solo toca ``PENDING``: lo que el usuario ya clasificó está en ``IMPORTED`` y
+    es intocable. ``DISMISSED`` es cambio de status, no borrado — auditable y
+    reversible.
+
+    Con ``dry_run`` cuenta exactamente lo mismo pero no muta: el preview tiene
+    que poder decir cuánto va a limpiar.
+    """
+    excluidos: dict[str, tuple[str, str]] = {}  # context_id -> (label, motivo)
+    labels_vistos: dict[str, int] = {}
+    for ctx in resolve_contexts(fresh):
+        context_id = str(ctx.get("context_id") or "")
+        if not context_id:
+            continue
+        label = str(ctx.get("label") or context_id).strip()
+        labels_vistos[label] = labels_vistos.get(label, 0) + 1
+        entity = ctx.get("entity_type")
+        if bool(ctx.get("is_summary_or_derived")):
+            excluidos[context_id] = (label, DISMISS_REASON_DERIVED)
+        elif context_confirmed and not context_is_included(
+            context_id, entity, confirmed_fields, context_confirmed
+        ):
+            # Solo con decisión EXPLÍCITA por contexto. Sin `context_confirmed`,
+            # `context_is_included` cae al gating por tipo y una hoja sin entidad
+            # (ambigua, la que FASE F captura a propósito) daría "no incluida"
+            # siempre: descartaríamos la red de seguridad en vez de una hoja que
+            # el usuario desmarcó. Ausencia de decisión no es un "no".
+            excluidos[context_id] = (label, DISMISS_REASON_NOT_SELECTED)
+
+    if not excluidos:
+        return []
+
+    # Un label sirve de fallback solo si identifica UN contexto del archivo.
+    label_a_contexto = {
+        label: ctx_id
+        for ctx_id, (label, _motivo) in excluidos.items()
+        if labels_vistos.get(label) == 1
+    }
+
+    pendientes = (
+        (
+            await session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.uploaded_file_id == file_id,
+                    UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    conteo: dict[tuple[str, str], int] = {}
+    for fila in pendientes:
+        ctx_id = str(fila.context_id or "")
+        if ctx_id:
+            match = excluidos.get(ctx_id)
+        else:
+            # Legacy (sin `context_id`): resolver por nombre de hoja, si es único.
+            match = excluidos.get(
+                label_a_contexto.get(str(fila.context_label or "").strip(), "")
+            )
+        if match is None:
+            continue
+        label, motivo = match
+        conteo[(label, motivo)] = conteo.get((label, motivo), 0) + 1
+        if not dry_run:
+            fila.status = UNCLASSIFIED_STATUS_DISMISSED
+            fila.resolved_at = ahora
+
+    return [
+        {"hoja": label, "motivo": motivo, "descartados": n}
+        for (label, motivo), n in sorted(conteo.items(), key=lambda kv: -kv[1])
+    ]
+
+
 async def _reconcile(
     session: AsyncSession,
     file: UploadedFile,
@@ -1292,6 +1416,28 @@ async def _reconcile(
     )
     await session.flush()
 
+    # El invariante de "lo no seleccionado no deja rastro" tiene dos mitades: el
+    # import ya no captura las hojas excluidas/derivadas, y esto limpia lo que
+    # capturaron los imports anteriores. Va DESPUÉS del reimport para mirar el
+    # estado final de la bandeja, no uno intermedio.
+    _pendientes_descartados = await _descartar_pendientes_de_contextos_no_importados(
+        session,
+        tenant_id,
+        file_id,
+        fresh,
+        confirmed_fields,
+        _draft_context_confirmed,
+        datetime.now(UTC),
+        dry_run,
+    )
+    if _pendientes_descartados:
+        logger.info(
+            "reread.otros.pendientes_descartados",
+            file_id=str(file_id),
+            dry_run=dry_run,
+            detalle=_pendientes_descartados,
+        )
+
     # F9b (Task 6): auditar productos creados/actualizados por el reimport —
     # antes ``product_details`` ni se pedía acá (default ``return_details=False``),
     # así que una relectura nunca dejaba rastro de qué producto tocó. En
@@ -1438,6 +1584,7 @@ async def _reconcile(
         inserted=inserted,
         legacy_fallback=recon.legacy_fallback,
         items=void_items_payload + items_payload,
+        otros_descartados=_pendientes_descartados,
     )
 
 

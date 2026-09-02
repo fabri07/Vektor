@@ -90,6 +90,14 @@ class UnclassifiedRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     source: Mapped[str] = mapped_column(String(20), nullable=False)
     # Hoja/grupo de origen ("Hoja 3", "general") o motivo ("monto no parseable").
     context_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Identidad de la hoja/grupo del que salió la fila — el MISMO `context_id` de
+    # `mapping_contexts`. Distinto de `context_label`, que a veces es un nombre de
+    # hoja y a veces un motivo en castellano, y que en ningún caso es una identidad
+    # (dos hojas pueden llamarse igual; un rename lo cambia). Es lo que le permite a
+    # la relectura descartar los pendientes de un contexto que no importó.
+    # Nullable: las capturas anteriores a la migración `20260902_0001` no lo tienen
+    # y caen al match legacy por label acotado a (tenant, archivo).
+    context_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Headers de la fila original (orden del archivo) y datos crudos.
     headers: Mapped[list[str] | None] = mapped_column(PGJSONB, nullable=True)
     row_data: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False)
@@ -117,6 +125,9 @@ class UnclassifiedRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_unclassified_records_source",
         ),
         Index("ix_unclassified_records_tenant_status", "tenant_id", "status"),
+        Index(
+            "ix_unclassified_records_file_context", "uploaded_file_id", "context_id"
+        ),
     )
 
     def __repr__(self) -> str:

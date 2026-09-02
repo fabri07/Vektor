@@ -349,3 +349,127 @@ Fase 1 → **verificar en prod que una relectura completa** → Fase 2 → Fase 
 No arrancar una fase sin cerrar la anterior con su verificación (memoria
 `feedback_subagent_phase_gates`). Las Fases 2-5 no se pueden validar en Asteria hasta que la
 Fase 1 permita que una relectura termine.
+
+---
+
+# Estado — 2026-09-02 (tarde)
+
+## Fase 1: CERRADA y verificada en producción
+
+La relectura que el usuario disparó el 2026-09-02 **terminó**:
+
+```
+89071abe  APPLIED  16:49:23 → 17:11:04   (21m 41s)
+          sales_detected=2563  sales_voided=2563
+```
+
+Reemplazo limpio contra la base real: 1.939 ventas vivas / 1.939 anuladas,
+624 / 624 gastos, 405 movimientos, **0 duplicados por `source_row_ref`**. Los 3
+runs zombie quedaron en estado terminal (`stale_timeout` / `stale_legacy_running`),
+o sea que el sweeper de 1.4 hizo su trabajo.
+
+El usuario cerró la ventana a los 10m39s; cerrarla no cancela, y el aviso del
+modal ("se sigue procesando igual") era correcto.
+
+**Deuda:** 21m41s contra un límite blando de 25 min es 13% de margen. La próxima
+frontera medida es `insert_confirmed_data` (2.096 statements, ~800 `UPDATE` +
+~800 `SELECT` de productos). No se toca en esta tanda.
+
+## Por qué "no cambió nada" aunque la relectura terminó
+
+Tres causas medidas contra Neon, ninguna de ellas un fallo del apply:
+
+1. Los 2.288 pendientes de "Otros" no los limpia ninguna relectura (Fase 2, abajo).
+2. Los 398 productos tienen `description` vacía → la inferencia de categoría no
+   puede pasar del nivel `low` (Fase 4).
+3. Los tres `*_ROLLOUT_TENANT_IDS` siguen en `[]`: los Bloques 2/3A/5 no corrieron.
+
+> `prod_created=0 / prod_updated=0` NO prueba que el apply no hiciera nada:
+> también es el resultado esperado si los productos ya existían y no cambiaron.
+> No se usa como evidencia.
+
+## Composición real de "Otros" (2.288, medido)
+
+```
+Ganancias                        PENDING  1840
+ganancias 2                      PENDING   433   → 2.273 (99,3%)
+LD 2026 — Movimientos ambiguos   PENDING     8
+LD 2025 — Movimientos ambiguos   PENDING     4
+Fila sin fecha reconocible       PENDING     3
+
+de esos, filas TOTALMENTE vacías:            314
+con `suggested_entity`:                        3
+```
+
+## Fase 2 — implementada (rama `fix/otros-no-acumula-lo-no-importado`)
+
+Invariante, en la forma más ancha que pidió el usuario:
+
+> Un contexto no seleccionado o detectado como resumen/derivado no debe crear
+> ventas, gastos, productos, movimientos ni registros en "Otros". En una
+> relectura también deben descartarse sus registros pendientes antiguos.
+
+1. **`unclassified_records.context_id`** (mig `20260902_0001`, additive, nullable,
+   sin backfill) + índice `(uploaded_file_id, context_id)`. El label no es una
+   identidad: en el camino multi-hoja es el nombre de la hoja y en la docena de
+   capturas por fila es un MOTIVO en castellano.
+2. **El import ya no captura lo excluido** (`ingestion_import_service`, camino
+   multi-hoja): el guard va ANTES de la captura, porque `_hoja_incluida` sólo
+   protegía a las hojas cuya entidad está en `entity_bucket` — una hoja
+   desmarcada *e* inclasificable nunca lo alcanzaba.
+3. **La relectura descarta lo pendiente** de contextos que no importó
+   (`_descartar_pendientes_de_contextos_no_importados`), con motivo propio
+   (`hoja_derivada` / `hoja_no_seleccionada`), distinto del match por `row_ref`.
+   Devuelve **conteo por hoja y motivo** (`RereadApplyResult.otros_descartados`)
+   en vez de limpiar en silencio; en preview cuenta sin mutar.
+4. **Filas en blanco**: el guard mira los VALORES, no las claves. Opt-out
+   explícito (`skip_blank_rows=False`) para la captura por riesgo de columna,
+   donde el vacío ES lo que se reporta.
+5. **"Importar todo lo sugerido"** deshabilitado con motivo VISIBLE cuando no hay
+   ninguna sugerencia. El conteo es global (`/others/count` ahora devuelve
+   `pending_suggested`): el botón opera sobre todos los pendientes, así que
+   decidir con las 50 filas de la página se equivoca en las dos direcciones.
+
+### Límite deliberado del descarte automático
+
+"No seleccionada" es una decisión **explícita** (`context_confirmed[cid] is False`),
+no la ausencia de decisión. Sin `context_confirmed`, `context_is_included` cae al
+gating por tipo y una hoja ambigua (sin entidad) daría "no incluida" SIEMPRE: el
+descarte se llevaría puesta la red de FASE F, que es justo la que evita perder en
+silencio una fila que el parser no supo leer. El usuario eligió acotar el descarte
+a las hojas derivadas y conservar esa red. Cubierto por
+`test_hoja_ambigua_sin_decision_sigue_capturando`.
+
+### Verificación (criterio determinista, no "~15")
+
+Después de una relectura, los únicos pendientes que pueden quedar son los de
+contextos **incluidos** que son genuinamente ambiguos. Para ASTERIA: los 12 de
+"Movimientos ambiguos" + los 3 sin fecha; los 2.273 de `Ganancias`/`ganancias 2`
+se van con motivo `hoja_derivada`, y ninguna fila vacía puede volver a entrar.
+
+Tests (todos mutation-testeados — se revirtió cada fix y se confirmó que fallan):
+
+| Test | Qué fija |
+|---|---|
+| `test_hoja_desmarcada_no_deja_absolutamente_ningun_rastro` | el invariante completo, a nivel import |
+| `test_hoja_derivada_no_captura_aunque_no_haya_decision_explicita` | derivada sin decisión del usuario |
+| `test_hoja_ambigua_sin_decision_sigue_capturando` | la red de FASE F NO se pierde |
+| `test_filas_en_blanco_no_materializan_pendientes` | las 314 vacías |
+| `test_reread_descarta_pendientes_de_hoja_no_seleccionada` | descarte por `context_id` Y por label legacy |
+| `test_segunda_relectura_no_revive_los_pendientes_descartados` | idempotencia entre corridas |
+| `test_label_ambiguo_no_descarta_nada` | el fallback por nombre no se pasa de rosca |
+| `otros_bulk_import_gate.test.tsx` (2) | el botón y su motivo visible |
+
+## Fase B (ex Fase 4 de inventario) — CONDICIONADA, no implementada
+
+El usuario pidió confirmar tres cosas antes de tocar el chequeo temporal:
+
+1. Qué fecha representa realmente el stock del archivo.
+2. Por qué hay ventas hasta `2026-12-30`, posteriores a la relectura del `2026-09-02`.
+3. Que el mensaje provenga efectivamente de `replay_timeline()` y no sólo de las
+   560 compras bloqueadas por falta de cantidad.
+
+Lo medido hasta acá: los 405 movimientos son `catalog_initial_stock | adjustment`,
+todos fechados `2026-09-02`, contra ventas de `2025-02-15` a `2026-12-30`; y las
+324 compras de mercadería son montos globales ("compra mercadería $1.053.240") sin
+producto ni unidades.
