@@ -4,17 +4,10 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { AxiosError } from "axios";
 import { Button } from "@/components/ui/Button";
-import {
-  ingestionService,
-  type FilePreview,
-  type InventoryImpactItem,
-  type StockTreatment,
-} from "@/services/ingestion.service";
+import { ingestionService } from "@/services/ingestion.service";
 import { UploadSizeHint } from "@/components/ui/UploadSizeHint";
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
-import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
-import { InventoryImpactPanel } from "./InventoryImpactPanel";
-import { MasterPreviewPanel } from "./MasterPreviewPanel";
+import { ColumnMapperPanel } from "./ColumnMapperPanel";
 
 const ACCEPTED_EXTENSIONS = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
 const MAX_POLLS = 30;
@@ -58,34 +51,11 @@ export function FileUploadSection() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [fileId, setFileId] = useState<string | null>(null);
-  const [preview, setPreview] = useState<FilePreview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmedFields, setConfirmedFields] = useState({
-    ventas: true,
-    gastos: true,
-    productos: true,
-    // F7e: buckets de maestros — arrancan tildados como los demás en este
-    // flujo rápido (a diferencia del mapeo detallado, acá no hay per-tipo).
-    clientes: true,
-    proveedores: true,
-  });
-  const [isConfirming, setIsConfirming] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   // C: aviso no intrusivo (re-subida por nombre) + detalle del 409 (duplicado exacto).
   const [warning, setWarning] = useState<string | null>(null);
   const [duplicateDetail, setDuplicateDetail] = useState<string | null>(null);
-  // Avisos human-in-the-loop del import confirmado (sin proveedor/producto, a "Otros").
-  const [confirmWarnings, setConfirmWarnings] = useState<string[]>([]);
-  // F-H3.c: impacto proyectado en el inventario (calculado, NO aplicado). El
-  // total va aparte porque la lista viene acotada por el backend.
-  const [inventoryImpact, setInventoryImpact] = useState<InventoryImpactItem[]>(
-    [],
-  );
-  const [inventoryImpactTotal, setInventoryImpactTotal] = useState(0);
-  // A: tratamiento del stock cuando el archivo trae productos (default: saldo de apertura).
-  const [stockTreatment, setStockTreatment] =
-    useState<StockTreatment>("opening_balance");
-
   const pollCount = useRef(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -122,7 +92,10 @@ export function FileUploadSection() {
 
           if (data.processing_status === "NEEDS_CONFIRMATION") {
             stopPolling();
-            setPreview(data);
+            // El panel de mapeo lee el preview con `useQuery(["ingestion-preview",
+            // fileId])`. El polling YA lo tiene en la mano, así que se siembra en la
+            // cache con la misma queryKey en vez de dejar que lo vuelva a pedir.
+            queryClient.setQueryData(["ingestion-preview", id], data);
             setPhase("needs_confirmation");
             void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
           } else if (data.processing_status === "DONE") {
@@ -198,60 +171,16 @@ export function FileUploadSection() {
     startPolling(fileId);
   }
 
-  // A: el archivo trae stock si el summary lo indica o si se tildó "productos".
-  const hasStock =
-    (preview != null &&
-      summaryHasStock(
-        preview.parsed_summary_json as Record<string, unknown> | null,
-      )) ||
-    confirmedFields.productos;
-
-  async function handleConfirm() {
-    if (!fileId) return;
-    setIsConfirming(true);
-    try {
-      const result = await ingestionService.confirmFile(
-        fileId,
-        confirmedFields,
-        undefined,
-        undefined,
-        undefined,
-        hasStock ? stockTreatment : undefined,
-      );
-      setConfirmWarnings(result.warnings ?? []);
-      // F-H3.c: el impacto proyectado sobre el stock, para que el usuario pueda
-      // decidir si aplicarlo. El import NO lo aplicó.
-      setInventoryImpact(result.inventory_impact ?? []);
-      setInventoryImpactTotal(result.inventory_impact_total ?? 0);
-      setPhase("done");
-      void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
-    } catch {
-      setError("No se pudo confirmar la importación. Intentá de nuevo.");
-    } finally {
-      setIsConfirming(false);
-    }
-  }
-
   function handleReset() {
     stopPolling();
     setPhase("idle");
     setSelectedFile(null);
     setFileId(null);
-    setPreview(null);
     setError(null);
     setWarning(null);
-    setConfirmWarnings([]);
     setDuplicateDetail(null);
-    setStockTreatment("opening_balance");
     setUploadProgress(0);
     pollCount.current = 0;
-    setConfirmedFields({
-      ventas: true,
-      gastos: true,
-      productos: true,
-      clientes: true,
-      proveedores: true,
-    });
   }
 
   function handleFileSelect(file: File) {
@@ -416,55 +345,15 @@ export function FileUploadSection() {
         </div>
       )}
 
-      {/* Confirmation panel */}
-      {phase === "needs_confirmation" && preview && (
-        <div className="mt-4 rounded-lg border border-vk-warning/20 bg-vk-warning-bg p-4">
-          <p className="mb-3 text-sm font-medium text-vk-warning">
-            Datos detectados — seleccioná qué querés importar
-          </p>
-
-          {/* F7e: preview de maestros (clientes/proveedores) detectados en el archivo. */}
-          <MasterPreviewPanel previews={preview.master_previews ?? []} />
-
-          <div className="mb-4 space-y-2">
-            {(["ventas", "gastos", "productos", "clientes", "proveedores"] as const).map((key) => (
-              <label
-                key={key}
-                className="flex cursor-pointer items-center gap-2.5"
-              >
-                <input
-                  type="checkbox"
-                  checked={confirmedFields[key]}
-                  onChange={(e) =>
-                    setConfirmedFields((prev) => ({
-                      ...prev,
-                      [key]: e.target.checked,
-                    }))
-                  }
-                  className="h-4 w-4 rounded border-vk-border-w accent-vk-blue"
-                />
-                <span className="text-sm capitalize text-vk-text-secondary">{key}</span>
-              </label>
-            ))}
-          </div>
-
-          {/* A: si el archivo trae stock/productos, preguntar cómo tratarlo. */}
-          {hasStock && (
-            <StockTreatmentChoice
-              value={stockTreatment}
-              onChange={setStockTreatment}
-              className="mb-4"
-            />
-          )}
-
-          <Button
-            size="sm"
-            loading={isConfirming}
-            disabled={!Object.values(confirmedFields).some(Boolean)}
-            onClick={handleConfirm}
-          >
-            Confirmar datos
-          </Button>
+      {/* Revisión del mapeo: el MISMO panel que se abre desde "Archivos cargados".
+          Antes acá había un confirm propio que mandaba `column_mappings: []`, así que
+          el backend caía a la heurística de encabezados y columnas como
+          "Especificaciones" (→ descripción) o "Tienda" (→ proveedor) no se mapeaban
+          NUNCA por este camino. Era la tercera implementación del confirm en el
+          frontend; ahora hay dos, las dos adentro de este panel. */}
+      {phase === "needs_confirmation" && fileId && (
+        <div className="mt-4">
+          <ColumnMapperPanel fileId={fileId} onDone={() => setPhase("done")} />
         </div>
       )}
 
@@ -473,27 +362,6 @@ export function FileUploadSection() {
         <div className="mt-4 rounded-lg border border-vk-success/20 bg-vk-success-bg px-4 py-3 text-sm text-vk-success">
           ✓ Archivo importado correctamente.
         </div>
-      )}
-
-      {/* Avisos human-in-the-loop del import (revisá y completá) */}
-      {phase === "done" && confirmWarnings.length > 0 && (
-        <div className="mt-3 rounded-lg border border-vk-warning/20 bg-vk-warning-bg p-4">
-          <p className="mb-2 text-sm font-medium text-vk-warning">Revisá esto:</p>
-          <ul className="list-disc space-y-1 pl-5 text-sm text-vk-warning">
-            {confirmWarnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* F-H3.c: qué le pasaría al stock si se aplicara la historia del archivo */}
-      {phase === "done" && (
-        <InventoryImpactPanel
-          items={inventoryImpact}
-          total={inventoryImpactTotal}
-          fileId={fileId ?? undefined}
-        />
       )}
 
       {/* Actions */}

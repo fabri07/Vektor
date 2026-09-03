@@ -118,6 +118,16 @@ const ENTITY_OPTIONS_TEXTO = [
 // decidiera.
 const ENTITY_UNSET = "";
 
+//: Bucket de `confirmed_fields` que corresponde a cada entidad. Espejo de
+//: `INFERRED_TO_ENTITY`, para poder tildar el tipo que el parser detectó.
+const ENTITY_TO_BUCKET: Record<string, keyof ConfirmedFields> = {
+  sale: "ventas",
+  expense: "gastos",
+  product: "productos",
+  customer: "clientes",
+  supplier: "proveedores",
+};
+
 // F4: un error de confirm que NO es de mapeo — 409 (confirm concurrente / archivo
 // ya importado o importándose) o timeout del cliente (el import sigue en curso en
 // el backend). No debe pintar el banner rojo de "revisá los campos".
@@ -1695,10 +1705,18 @@ interface ColumnMapperPanelProps {
   onDone: () => void;
 }
 
+type ConfirmedFields = {
+  ventas: boolean;
+  gastos: boolean;
+  productos: boolean;
+  clientes: boolean;
+  proveedores: boolean;
+};
+
 export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
-  const [confirmedFields, setConfirmedFields] = useState({
+  const [confirmedFields, setConfirmedFields] = useState<ConfirmedFields>({
     ventas: true,
     gastos: false,
     productos: false,
@@ -1746,6 +1764,20 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const effectiveInferred = isAmbiguous ? purpose : _inferredType;
   const needsPurpose = isAmbiguous && !purpose;
   const entityType = INFERRED_TO_ENTITY[effectiveInferred] ?? "sale";
+  // Los tipos que se van a importar salen de lo DETECTADO, no de un default fijo.
+  // El camino rápido de `FileUploadSection` mandaba los cinco en `true`; este panel
+  // arrancaba con `ventas: true` y el resto en `false`. Unificar los dos caminos
+  // sobre el segundo habría cambiado en silencio QUÉ se importa —alguien podía
+  // quedarse sin productos ni gastos sin enterarse—, así que el bucket del tipo
+  // detectado se siembra tildado y el usuario lo confirma o lo desmarca A LA VISTA.
+  // La rama multi-hoja ya hace lo mismo con `included` (`c.entity_type != null`).
+  const bucketDetectado = ENTITY_TO_BUCKET[entityType];
+  useEffect(() => {
+    if (!bucketDetectado) return;
+    setConfirmedFields((prev) =>
+      prev[bucketDetectado] ? prev : { ...prev, [bucketDetectado]: true },
+    );
+  }, [bucketDetectado]);
   // F8c: riesgo contextual por columna (reemplaza el legacy columns_at_risk).
   const contextualRisk = preview?.contextual_column_risk ?? [];
   // Lo que el parser detectó sobre el archivo (hojas derivadas, movimientos
