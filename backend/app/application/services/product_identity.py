@@ -351,6 +351,10 @@ class ProductCreateBatch:
         self._session = session
         self._chunk_size = chunk_size
         self._pendientes: list[_Pendiente] = []
+        #: Índice de lo encolado. Un `any(...)` sobre la lista volvía `esta_encolado`
+        #: O(n), y el caller lo consulta por fila repetida: en un catálogo grande con
+        #: muchas identidades repetidas eso es O(n²) de CPU puro.
+        self._ids_encolados: set[uuid.UUID] = set()
 
     def __len__(self) -> int:
         return len(self._pendientes)
@@ -363,7 +367,7 @@ class ProductCreateBatch:
         está en la cola, el producto no existe en la base y ese INSERT explota con
         una violación de foreign key en el próximo flush.
         """
-        return any(p.id == product_id for p, _, _ in self._pendientes)
+        return product_id in self._ids_encolados
 
     def encolar(
         self,
@@ -388,11 +392,13 @@ class ProductCreateBatch:
                 "session.add() antes de encolarlo (ver _savepoint.py)."
             )
         self._pendientes.append((product, al_resolver, al_ser_ambiguo))
+        self._ids_encolados.add(product.id)
 
-    async def flush_si_lleno(self) -> dict[uuid.UUID, Product | None]:
-        if len(self._pendientes) < self._chunk_size:
-            return {}
-        return await self.flush()
+    @property
+    def lleno(self) -> bool:
+        """¿Conviene vaciar ya? El caller decide CUÁNDO, porque el flush también
+        dispara su post-trabajo y sólo él sabe si está en un punto seguro."""
+        return len(self._pendientes) >= self._chunk_size
 
     async def flush(self) -> dict[uuid.UUID, Product | None]:
         """Persiste lo encolado y corre el post-trabajo de cada alta.
@@ -408,6 +414,8 @@ class ProductCreateBatch:
         while self._pendientes:
             lote = self._pendientes[: self._chunk_size]
             self._pendientes = self._pendientes[self._chunk_size :]
+            for producto, _, _ in lote:
+                self._ids_encolados.discard(producto.id)
             sustituciones.update(await self._persistir_lote(lote))
         return sustituciones
 

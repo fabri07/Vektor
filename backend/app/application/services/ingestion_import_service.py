@@ -7259,6 +7259,11 @@ async def _insert_multisheet_data(
                             session, tenant_id, _prod_cap_anchor, seen_fp
                         )
                     _did_insert = False  # su huella (si hubo captura) ya se registró
+                    # Cota de memoria: sin esto, un catálogo de decenas de miles de
+                    # filas mantendría TODAS las altas encoladas hasta cerrar la hoja.
+                    # Es un punto seguro: la fila ya terminó de procesarse.
+                    if _batch_productos.lleno:
+                        await _flush_batch_productos()
                 if _ctx_anchor is not None and _did_insert:
                     await _register_import_row_fingerprint(
                         session, tenant_id, _ctx_anchor, seen_fp
