@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 
@@ -149,3 +150,81 @@ async def test_el_producto_sin_columna_de_descripcion_queda_en_none(
 
     producto = await _producto(db_session, tid, "Bandeja ginko")
     assert producto.description is None
+
+
+async def test_una_celda_mapeada_vacia_no_alimenta_la_inferencia_de_categoria(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Declarar la columna es declarar dónde está el dato: si esa celda está
+    vacía, el dato no está.
+
+    Con `_desc or <heurística>`, una fila cuya columna mapeada viene vacía caía
+    al keyword set `_ESPECIFICACIONES_COLS` — que incluye "detalle", también
+    keyword de NOMBRE — y le daba de comer otra columna a `infer_category` como
+    si fueran especificaciones.
+
+    El mapeo es "Observaciones" → `description` A PROPÓSITO: si la columna
+    mapeada fuera "especificaciones", su propio nombre matchearía la heurística
+    y devolvería su celda vacía, tapando el bug. El test no discriminaría — se
+    verificó revirtiendo el fix.
+    """
+    tid = sample_tenant.tenant_id
+    # `CATEGORY_KEYWORDS` sólo cubre decoracion_hogar; con el kiosco por default
+    # la inferencia devuelve `_NO_SUGGESTION` siempre y el test no probaría nada
+    # — se verificó revirtiendo el fix y viendo que igual pasaba.
+    from sqlalchemy import update
+
+    await db_session.execute(
+        update(BusinessProfile)
+        .where(BusinessProfile.tenant_id == tid)
+        .values(vertical_code="decoracion_hogar")
+    )
+    await db_session.commit()
+    ctx = {
+        "context_id": _CTX,
+        "label": "Catalogo",
+        "entity_type": "product",
+        "headers": ["nombre", "observaciones", "detalle", "precio_venta"],
+        "row_count": 1,
+    }
+    await insert_confirmed_data(
+        db_session,
+        tid,
+        {
+            "file_type": "spreadsheet",
+            "inferred_type": "mixed",
+            "multi_sheet": True,
+            "has_stock": True,
+            "mapping_contexts": [ctx],
+            "stock_detectado": [
+                {
+                    "nombre": "Combo x3 unidades",
+                    "observaciones": "",  # mapeada a description, pero vacía
+                    "detalle": "vela aromática de soja",  # keyword de la heurística
+                    "precio_venta": "1200",
+                    "__context__": _CTX,
+                }
+            ],
+        },
+        {"productos": True},
+        context_mappings={
+            _CTX: {
+                "nombre": "name",
+                "observaciones": "description",
+                "precio_venta": "sale_price_ars",
+            }
+        },
+        context_confirmed={_CTX: True},
+    )
+
+    producto = await _producto(db_session, tid, "Combo x3 unidades")
+    assert producto.description is None
+    # El efecto observable NO es `category`: la fuga produce una sugerencia de
+    # confianza MEDIA, y la media no se aplica (queda para revisión humana). Se
+    # asserta donde el dato realmente aparece — se verificó revirtiendo el fix,
+    # con el que este assert falla y el de `category` no.
+    assert "category_suggestion_code" not in producto.custom_fields, (
+        "la heurística se coló: sugirió una categoría desde una columna que NO "
+        "es la que el usuario mapeó como descripción"
+    )
+    assert producto.category is None

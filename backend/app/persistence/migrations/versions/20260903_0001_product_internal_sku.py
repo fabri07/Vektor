@@ -24,8 +24,13 @@ compatibilidad hacia atrás durante el deploy (``preDeployCommand`` corre la
 migración ANTES de que la versión nueva reciba tráfico, así que la vieja
 consultaría una columna que ya no existe).
 
-**Nullable y sin backfill** a propósito: el backfill es una operación aparte, y
-mientras tanto la columna vacía no rompe nada. El índice único es PARCIAL sobre
+**Nullable y sin backfill** a propósito: el backfill es una operación aparte.
+Consecuencia declarada: los productos que ya existen quedan con
+``internal_sku = NULL`` y la pantalla les sigue mostrando "—" hasta que ese
+backfill corra. `_ensure_internal_sku` sólo dispara en ``before_insert``, así que
+tampoco se los asigna un update. Para la cuenta que motivó el cambio no importa
+—se reseteó y va a re-importar desde cero—, pero para cualquier otro tenant el
+código aparece recién con los productos nuevos. El índice único es PARCIAL sobre
 ``internal_sku IS NOT NULL`` justamente para que las filas sin código no
 colisionen entre sí.
 

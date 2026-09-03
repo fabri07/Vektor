@@ -3,6 +3,7 @@ import React from "react";
 import { render, screen, within } from "@testing-library/react";
 
 import { TargetSelect } from "../TargetSelect";
+import { targetSobreviveALaEntidad } from "../ColumnMapperPanel";
 import type {
   CrossFieldCatalogEntry,
   FieldCatalogEntry,
@@ -66,5 +67,23 @@ describe("destinos en otra sección", () => {
     renderSelect({ crossFields: CRUZADOS, target: "campo_inventado" });
 
     expect(screen.getByText(/campo desconocido/i)).toBeInTheDocument();
+  });
+});
+
+describe("un cruzado elegido a mano sobrevive al cambio de sección", () => {
+  // `targetSobreviveALaEntidad` decidía sólo contra `fields`, donde un cruzado
+  // nunca está: al reasignar la sección de una hoja y volver a Productos, el
+  // `supplier:name` elegido a mano se reemplazaba por la sugerencia automática
+  // mientras TODO otro mapeo hecho a mano sobrevivía.
+  it("lo conserva cuando está en los cruzados de la entidad nueva", () => {
+    expect(targetSobreviveALaEntidad("supplier:name", CAMPOS, CRUZADOS)).toBe(true);
+  });
+
+  it("no lo conserva si la entidad nueva no lo ofrece", () => {
+    expect(targetSobreviveALaEntidad("supplier:name", CAMPOS, [])).toBe(false);
+  });
+
+  it("un canónico de otra entidad sigue cayendo, como antes", () => {
+    expect(targetSobreviveALaEntidad("amount", CAMPOS, CRUZADOS)).toBe(false);
   });
 });

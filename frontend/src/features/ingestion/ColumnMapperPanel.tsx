@@ -16,6 +16,7 @@ import {
   type ColumnRiskDecision,
   type ConfirmIngestionResult,
   type ContextualColumnRisk,
+  type CrossFieldCatalogEntry,
   type FieldCatalogEntry,
   type InventoryImpactItem,
   type MappingContext,
@@ -421,14 +422,22 @@ function effectiveStatus(
  * Cuando no sigue siendo elegible, la columna cae a la sugerencia nueva; no se
  * inventa ningún reemplazo.
  */
-function targetSobreviveALaEntidad(
+export function targetSobreviveALaEntidad(
   target: string,
   fields: FieldCatalogEntry[],
+  crossFields: CrossFieldCatalogEntry[] = [],
 ): boolean {
   if (!target || target === "ignore" || target.startsWith("custom_field:")) {
     return true;
   }
-  return fields.some((f) => f.value === target);
+  // Los cruzados cuentan como elegibles: un `supplier:name` elegido a mano NO
+  // está en `fields` (escribe en otra sección) y sin esta rama se lo tomaba por
+  // "ya no aplica", reemplazándolo por la sugerencia automática mientras todo
+  // otro mapeo hecho a mano sobrevivía.
+  return (
+    fields.some((f) => f.value === target) ||
+    crossFields.some((f) => f.value === target)
+  );
 }
 
 // ── Mapeo multi-contexto (multi-hoja): una sección por hoja/grupo ──────────────
@@ -578,7 +587,7 @@ function SheetMapperSection({
         const elegido = prev[col] ?? "";
         if (
           isColumnTouched?.(context.context_id, col) &&
-          targetSobreviveALaEntidad(elegido, fields)
+          targetSobreviveALaEntidad(elegido, fields, crossFields)
         ) {
           // Incluye el caso de un «Sin mapear» explícito: si la persona sacó esa
           // columna a propósito, cambiar de sección no es motivo para volver a

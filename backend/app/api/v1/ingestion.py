@@ -3251,6 +3251,17 @@ async def confirm_file(
     # Avisos human-in-the-loop: el import no bloquea, pero le señala al usuario qué
     # quedó incompleto para que lo complete (proveedor, producto) o lo clasifique.
     warnings: list[str] = []
+    # Una columna que el usuario mapeó a otra sección y el importador NO escribió.
+    # Pasa cuando el destino todavía no está implementado (F-D) o cuando el
+    # rollout que lo habilita está apagado para el tenant. El contador existía
+    # desde antes y no salía a ningún lado: el dato desaparecía en silencio, que
+    # es justo lo que el mapeo explícito viene a evitar.
+    if counts.get("targets_cruzados_descartados"):
+        warnings.append(
+            f"{counts['targets_cruzados_descartados']} columna(s) que mapeaste a otra "
+            "sección no se importaron todavía. El resto del archivo sí se importó; "
+            "revisá esas columnas antes de darlas por cargadas."
+        )
     if counts.get("sin_proveedor"):
         warnings.append(
             f"{counts['sin_proveedor']} compra(s) sin proveedor identificado se agruparon "

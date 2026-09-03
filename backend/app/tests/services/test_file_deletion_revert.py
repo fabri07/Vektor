@@ -722,6 +722,47 @@ class TestRestauraLoQueElArchivoModifico:
         await db_session.refresh(producto)
         assert producto.stock_units == 7  # NO 999
 
+    async def test_restaura_la_descripcion_que_el_archivo_escribio(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """Desde que el importador persiste `description`, borrar el archivo
+        tiene que devolverla a lo que era.
+
+        Sin `description` en `PRODUCT_RESTORE_FIELDS`, el texto del archivo
+        quedaba pegado al producto y el resultado igual informaba
+        `fully_reverted: true` — el invariante de F11 roto justo en el campo
+        recién agregado. El snapshot ya lo guardaba: faltaba el lado de la
+        restauración.
+        """
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Alfombra")
+        producto.description = "lo que dijo el archivo"
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"description": None, "sale_price_ars": "100"},
+                    "after": {
+                        "description": "lo que dijo el archivo",
+                        "updated_at": producto.updated_at.isoformat(),
+                    },
+                }
+            ],
+        )
+
+        await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(producto)
+        assert producto.description is None
+
 
 class TestPreviewYReversaComparten:
     """El preview anticipa; el DELETE decide.

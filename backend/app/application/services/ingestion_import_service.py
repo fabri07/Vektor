@@ -69,6 +69,7 @@ from app.domain.ingestion_schema_fingerprint import (
     compute_context_signature,
     compute_schema_fingerprint,
 )
+from app.domain.internal_sku import is_internal_sku
 from app.domain.inventory_effect import (
     HISTORICAL_REPLAY,
     IMPORT_CONTEXT_FIELD,
@@ -1083,6 +1084,23 @@ def _registrar_monto_derivado(
     if linea.original is not None:
         cf[AMOUNT_ORIGINAL_FIELD] = str(linea.original)
         counts["montos_discrepantes"] = counts.get("montos_discrepantes", 0) + 1
+
+
+def _sku_del_archivo(raw: Any) -> str | None:
+    """SKU que aporta el archivo, ignorando los que generó Véktor.
+
+    ``products.sku`` es el código del PROVEEDOR. Un `VKT-…` ahí sería Véktor
+    guardando su propio código como si se lo hubiera dado un tercero.
+
+    Pasa de verdad, y por un camino cotidiano: la tabla de Productos exporta a
+    CSV bajo el encabezado "SKU" el código que muestra —que para un producto sin
+    código de proveedor es el generado—, y ese CSV se vuelve a subir para
+    corregir precios. Sin este guard, la re-importación estampa el código interno
+    en el campo externo; y si además el nombre cambió, la identidad no matchea y
+    nace un segundo producto llevando el código interno del primero.
+    """
+    limpio = _clean_str(raw, 99)
+    return None if limpio and is_internal_sku(limpio) else limpio
 
 
 def _fila_con_contenido(row: dict[str, Any]) -> bool:
@@ -4536,11 +4554,7 @@ async def _insert_confirmed_data_impl(
                 except (ValueError, TypeError):
                     stock_val = 0
                 sku_raw = row.get(sku_col) if sku_col else None
-                sku = (
-                    str(sku_raw).strip()[:99]
-                    if sku_raw and str(sku_raw).strip() not in {"", "None", "nan"}
-                    else None
-                )
+                sku = _sku_del_archivo(sku_raw)
                 # F2-T5: código de barras de la fila (si el archivo trae la columna).
                 barcode = _clean_str(row.get(barcode_col), 64) if barcode_col else None
                 # FASE E: categoría canónica del vertical (antes se ignoraba en
@@ -6125,7 +6139,7 @@ async def _insert_multisheet_data(
             )
         except (ValueError, TypeError):
             stock_val = 0
-        sku = _clean_str(_val(row, cols.get("sku"), _SKU_COLS), 99)
+        sku = _sku_del_archivo(_val(row, cols.get("sku"), _SKU_COLS))
         # F2-T5: código de barras (columna mapeada o detección por keyword).
         barcode = _clean_str(_val(row, cols.get("barcode"), _BARCODE_COLS), 64)
         # FASE E: categoría canónica del vertical; sin columna → None.
@@ -6154,7 +6168,15 @@ async def _insert_multisheet_data(
             # Bloque 3B: sin columna de categoría, inferir desde nombre +
             # especificaciones — nunca reemplaza una categoría que el archivo
             # SÍ declara (por eso vive en el `else`, no antes).
-            _specs = _desc or _clean_str(_row_val(row, _ESPECIFICACIONES_COLS), 500)
+            # Un mapeo explícito SUPRIME la heurística, aunque la celda venga
+            # vacía. Con `_desc or <heurística>` una fila sin descripción caía al
+            # keyword set —que incluye "detalle", también keyword de NOMBRE— y le
+            # daba de comer el nombre del producto a la inferencia como si fueran
+            # especificaciones. Declarar la columna es declarar dónde está el
+            # dato: si esa celda está vacía, el dato no está.
+            _specs = (
+                _desc if _desc_col else _clean_str(_row_val(row, _ESPECIFICACIONES_COLS), 500)
+            )
             _cat_suggestion = infer_category(_vertical, name, _specs)
             if _cat_suggestion.confidence == "high":
                 cat = _cat_suggestion.code

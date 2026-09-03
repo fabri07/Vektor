@@ -179,3 +179,57 @@ async def test_una_colision_de_codigo_propio_no_fusiona_productos(
         "agregar el índice del código propio a _UQ_NAMES haría que una colisión "
         "FUSIONE dos productos distintos en vez de fallar"
     )
+
+
+async def test_el_codigo_propio_no_vuelve_a_entrar_como_sku_del_proveedor(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El viaje de ida y vuelta que lo destapa: /products exporta a CSV bajo el
+    encabezado "SKU" el código que MUESTRA —que para un producto sin código de
+    proveedor es el generado—, y ese CSV se vuelve a subir para corregir precios.
+
+    Sin el guard, la re-importación estampa el código interno en `products.sku`,
+    que es el campo del PROVEEDOR: Véktor guardaría su propio código como si se
+    lo hubiera dado un tercero. Y si además el nombre cambió, la identidad no
+    matchea y nace un segundo producto llevando el código interno del primero.
+    """
+    tid = sample_tenant.tenant_id
+    await _importar(db_session, tid, [{"nombre": "Bandeja ginko", "precio_venta": "7000"}])
+    generado = (await _productos(db_session, tid))[0].internal_sku
+    assert generado is not None
+
+    # El CSV exportado vuelve, con el código generado en la columna "SKU".
+    await insert_confirmed_data(
+        db_session,
+        tid,
+        {
+            "file_type": "spreadsheet",
+            "inferred_type": "mixed",
+            "multi_sheet": True,
+            "has_stock": True,
+            "mapping_contexts": [
+                {
+                    "context_id": _CTX,
+                    "label": "Catalogo",
+                    "entity_type": "product",
+                    "headers": ["nombre", "sku", "precio_venta"],
+                    "row_count": 1,
+                },
+            ],
+            "stock_detectado": [
+                {
+                    "nombre": "Bandeja ginko",
+                    "sku": generado,
+                    "precio_venta": "7500",
+                    "__context__": _CTX,
+                }
+            ],
+        },
+        {"productos": True},
+        context_confirmed={_CTX: True},
+    )
+
+    productos = await _productos(db_session, tid)
+    assert len(productos) == 1
+    assert productos[0].sku is None, "el código propio no es el código del proveedor"
+    assert productos[0].internal_sku == generado

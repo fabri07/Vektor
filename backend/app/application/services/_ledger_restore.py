@@ -52,6 +52,10 @@ PRODUCT_RESTORE_FIELDS: tuple[str, ...] = (
     "sku",
     "barcode",
     "category",
+    # El importador la escribe (`if desc and not existing.description`) y los
+    # snapshots la guardan: sin restaurarla, borrar el archivo dejaba su texto
+    # pegado al producto y el resultado igual informaba `fully_reverted: true`.
+    "description",
     "acquired_at",
     "expiry_date",
 )
