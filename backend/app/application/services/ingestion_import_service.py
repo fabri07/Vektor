@@ -51,7 +51,9 @@ from app.application.services.product_identity import (
     add_product_or_reuse,
 )
 from app.application.services.product_supplier_link_service import (
+    LinkIndex,
     link_product_to_declared_supplier,
+    load_declared_link_index,
     reconcile_catalog_declared_links_for_upload,
 )
 from app.config.catalog_final_cost_rollout import catalog_final_cost_enabled_for
@@ -5271,6 +5273,14 @@ async def _insert_multisheet_data(
     #: `flush_pending_balances`: con un savepoint por balance eran 784 de los
     #: 3.250 statements del confirm de Asteria.
     _pending_balances: dict[uuid.UUID, _BalancePendiente] = {}
+    #: Vínculos Producto↔Proveedor en memoria. Se carga sólo si la flag de rollout
+    #: está activa para el tenant: sin ella el importador descarta los targets
+    #: `supplier:*` y una query de más sería puro peaje.
+    _link_index: LinkIndex | None = (
+        await load_declared_link_index(session, tenant_id)
+        if product_supplier_links_enabled_for(tenant_id)
+        else None
+    )
     # F7c: índice de identidad de clientes para resolver la referencia por fila
     # en ventas — incluye los clientes recién creados por el paso maestro (arriba,
     # en _insert_confirmed_data_impl, antes de llegar acá).
@@ -6267,6 +6277,7 @@ async def _insert_multisheet_data(
                 source="purchase_evidence" if stock_is_purchase else "catalog_declared",
                 source_upload_id=uploaded_file_id,
                 source_context_id=context_id,
+                link_index=_link_index,
             )
             _declared_supplier_pairs.add((target_product_id, _supplier_id))
         # Mejora C: costo unitario narrow-first. Se resuelve ANTES que el precio

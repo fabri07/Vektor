@@ -51,6 +51,7 @@ from app.persistence.models.file import UploadedFile
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.memory import OperationFingerprint
 from app.persistence.models.product import Product
+from app.persistence.models.product_supplier_link import ProductSupplierLink
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
@@ -72,7 +73,7 @@ _CTX_PROD = "sheet:Productos"
 _CTX_VENTAS = "sheet:Ventas"
 
 
-def _summary(n_productos: int, n_ventas: int) -> dict[str, Any]:
+def _summary(n_productos: int, n_ventas: int, *, con_tienda: bool = False) -> dict[str, Any]:
     """Catálogo + ventas que vinculan contra él, con el shape real del parser."""
     return {
         "file_type": "spreadsheet",
@@ -83,7 +84,8 @@ def _summary(n_productos: int, n_ventas: int) -> dict[str, Any]:
                 "context_id": _CTX_PROD,
                 "entity_type": "product",
                 "source_kind": "sheet",
-                "headers": ["producto", "precio", "costo", "stock", "detalle"],
+                "headers": ["producto", "precio", "costo", "stock", "detalle"]
+                + (["tienda"] if con_tienda else []),
                 "row_count": n_productos,
             },
             {
@@ -101,6 +103,9 @@ def _summary(n_productos: int, n_ventas: int) -> dict[str, Any]:
                 "costo": "3000",
                 "stock": "20",
                 "detalle": f"Especificaciones del producto {i}",
+                # 10 proveedores distintos repartidos entre los productos: replica el
+                # caso real (varios productos por tienda) sin volverlo 1:1.
+                **({"tienda": f"Tienda {i % 10}"} if con_tienda else {}),
                 "__context__": _CTX_PROD,
             }
             for i in range(n_productos)
@@ -115,6 +120,13 @@ def _summary(n_productos: int, n_ventas: int) -> dict[str, Any]:
             for i in range(n_ventas)
         ],
     }
+
+
+def _mappings(*, con_tienda: bool = False) -> dict[str, dict[str, str]]:
+    mapas = {k: dict(v) for k, v in _MAPPINGS.items()}
+    if con_tienda:
+        mapas[_CTX_PROD]["tienda"] = "supplier:name"
+    return mapas
 
 
 _MAPPINGS = {
@@ -160,6 +172,7 @@ async def sm(
             for modelo in (
                 InventoryMovement,
                 InventoryBalance,
+                ProductSupplierLink,
                 UnclassifiedRecord,
                 SaleEntry,
                 Product,
@@ -180,6 +193,7 @@ async def _importar(
     *,
     n_productos: int,
     n_ventas: int,
+    con_tienda: bool = False,
 ) -> tuple[SqlProfile, dict[str, Any]]:
     perfil = SqlProfile()
 
@@ -226,9 +240,9 @@ async def _importar(
             counts = await insert_confirmed_data(
                 session,
                 tenant_id,
-                _summary(n_productos, n_ventas),
+                _summary(n_productos, n_ventas, con_tienda=con_tienda),
                 {},
-                context_mappings=_MAPPINGS,
+                context_mappings=_mappings(con_tienda=con_tienda),
                 context_entity=_ENTITIES,
                 context_confirmed=_CONFIRMED,
                 stock_treatment={_CTX_PROD: "opening_balance"},
@@ -309,6 +323,7 @@ async def test_los_statements_no_crecen_mas_rapido_que_las_filas(
             for modelo in (
                 InventoryMovement,
                 InventoryBalance,
+                ProductSupplierLink,
                 UnclassifiedRecord,
                 SaleEntry,
                 Product,
@@ -370,3 +385,54 @@ async def test_reimportar_el_mismo_archivo_no_duplica_ni_vacia_nada(
         assert segunda[nombre][0] == sku, f"{nombre}: cambió el internal_sku"
         assert segunda[nombre][1] == desc, f"{nombre}: se vació la description"
     assert len(balances) == 50, "un balance por producto, no uno por importación"
+
+
+async def test_los_vinculos_producto_proveedor_no_vuelven_a_ser_uno_por_fila(
+    sm: async_sessionmaker[AsyncSession],
+    pg_engine: AsyncEngine,
+    tenant_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El camino que se enciende junto con `Tienda → Proveedor`.
+
+    `link_product_to_declared_supplier` hacía un SELECT + un `flush` POR FILA, y ese
+    flush además rompía el agrupado de los movimientos de inventario: medido sobre
+    el archivo real de Asteria, prender la flag subía el confirm de 250 a 1.010
+    statements. Como la Fase de mapeo es justamente la que hace que esa columna se
+    use de verdad, sin esta cota el arreglo se pagaría de vuelta el día que la flag
+    se active.
+    """
+    import app.application.services.ingestion_import_service as imp
+
+    monkeypatch.setattr(imp, "product_supplier_links_enabled_for", lambda _t: True)
+
+    perfil, counts = await _importar(
+        sm, tenant_id, pg_engine, n_productos=300, n_ventas=0, con_tienda=True
+    )
+    formas = dict(perfil.counts)
+    detalle = sorted(formas.items(), key=lambda kv: -kv[1])[:12]
+
+    async with sm() as s:
+        vinculos = (
+            await s.execute(
+                select(ProductSupplierLink).where(
+                    ProductSupplierLink.tenant_id == tenant_id
+                )
+            )
+        ).scalars().all()
+        proveedores = (
+            await s.execute(select(Supplier).where(Supplier.tenant_id == tenant_id))
+        ).scalars().all()
+
+    # El trabajo se hizo: 10 proveedores reales y un vínculo por producto.
+    assert len(proveedores) == 10, [p.name for p in proveedores]
+    assert len(vinculos) == 300
+    assert counts["productos"] == 300
+
+    # Y se pagó por lote, no por fila. La cota es 20 y no 8 porque un proveedor
+    # NUEVO sí hace un `flush` (la FK del gasto y del movimiento necesitan su fila
+    # antes del commit) y eso parte los lotes: el costo queda atado a la cantidad de
+    # PROVEEDORES (10 acá), no a la de filas. Con el comportamiento viejo serían 300.
+    assert formas.get("SELECT product_supplier_links", 0) <= 2, detalle
+    assert formas.get("INSERT product_supplier_links", 0) <= 20, detalle
+    assert formas.get("INSERT inventory_movements", 0) <= 20, detalle
