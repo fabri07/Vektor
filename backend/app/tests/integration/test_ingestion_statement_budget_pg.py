@@ -436,3 +436,64 @@ async def test_los_vinculos_producto_proveedor_no_vuelven_a_ser_uno_por_fila(
     assert formas.get("SELECT product_supplier_links", 0) <= 2, detalle
     assert formas.get("INSERT product_supplier_links", 0) <= 20, detalle
     assert formas.get("INSERT inventory_movements", 0) <= 20, detalle
+
+
+async def test_la_captura_a_otros_por_riesgo_de_columna_no_paga_por_fila(
+    sm: async_sessionmaker[AsyncSession], pg_engine: AsyncEngine, tenant_id: uuid.UUID
+) -> None:
+    """`_capture_column_risk_rows` corre FUERA de `insert_confirmed_data`, así que
+    el set de huellas precargado no le llegaba: cada fila ruteada pagaba un
+    `SELECT operation_fingerprints` más un `guarded_savepoint` completo.
+
+    Sobre el archivo de Asteria pesa poco (rutea 3 filas), pero una columna
+    riesgosa sobre miles de filas hace estallar la misma bomba que el resto del
+    import ya había desactivado — y sin cota, nada lo avisaría.
+    """
+    from app.application.services.ingestion_import_service import (
+        _capture_column_risk_rows,
+    )
+
+    perfil = SqlProfile()
+
+    @event.listens_for(pg_engine.sync_engine, "before_cursor_execute")
+    def _before(conn: Any, cursor: Any, statement: Any, *rest: Any) -> None:
+        perfil.record(statement, 0.0)
+
+    upload_id = uuid.uuid4()
+    async with sm() as session:
+        session.add(Tenant(tenant_id=tenant_id, legal_name="T", display_name="T"))
+        await session.flush()
+        session.add(
+            UploadedFile(
+                id=upload_id,
+                tenant_id=tenant_id,
+                original_filename="riesgo.xlsx",
+                s3_key=f"tests/{upload_id}.xlsx",
+                content_type="text/csv",
+                size_bytes=1,
+                purpose="ingestion",
+                status="uploaded",
+                processing_status="DONE",
+            )
+        )
+        await session.commit()
+
+        filas = {i: {"documento": ""} for i in range(200)}
+        perfil.enabled = True
+        try:
+            creadas = await _capture_column_risk_rows(
+                session, tenant_id, upload_id, "sheet:X", "sale", filas
+            )
+            await session.commit()
+        finally:
+            perfil.enabled = False
+            event.remove(pg_engine.sync_engine, "before_cursor_execute", _before)
+
+    assert creadas == 200
+    formas = dict(perfil.counts)
+    detalle = sorted(formas.items(), key=lambda kv: -kv[1])[:10]
+    # Una precarga, un INSERT en lote de huellas, un INSERT en lote de "Otros".
+    assert formas.get("SELECT operation_fingerprints", 0) <= 1, detalle
+    assert formas.get("INSERT operation_fingerprints", 0) <= 2, detalle
+    assert formas.get("SAVEPOINT", 0) == 0, detalle
+    assert perfil.total <= 12, detalle

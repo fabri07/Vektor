@@ -1258,7 +1258,22 @@ async def _capture_column_risk_rows(
 
     Devuelve la cantidad de ``UnclassifiedRecord`` NUEVAS creadas (para sumar
     a ``counts["otros"]`` en el caller).
+
+    Las huellas se resuelven EN MEMORIA: una precarga (`_load_import_fingerprints`)
+    y una persistencia en lote al final, igual que el loop principal del import.
+    Antes cada fila ruteada pagaba un ``SELECT operation_fingerprints`` más un
+    ``guarded_savepoint`` completo —~5 statements por fila— porque acá no llegaba el
+    set precargado. Hoy pesa poco (el archivo de Asteria rutea 3 filas), pero es la
+    misma bomba que el resto del import ya había desactivado, y un archivo con una
+    columna riesgosa sobre miles de filas la haría estallar entera.
     """
+    if not affected_rows:
+        return 0
+    seen = await _load_import_fingerprints(session, tenant_id)
+    #: Sólo las huellas NUEVAS se persisten. `_persist_import_fingerprints` reinserta
+    #: todo lo que le pasen (con ON CONFLICT DO NOTHING): darle el set entero sería
+    #: un INSERT de miles de filas por tres capturas.
+    nuevas: set[str] = set()
     created = 0
     for row_index, row_data in affected_rows.items():
         # Fila combinada vacía (nada que capturar): se saltea SIN registrar huella,
@@ -1267,7 +1282,7 @@ async def _capture_column_risk_rows(
         if not row_data:
             continue
         anchor = _risk_row_anchor(tenant_id, uploaded_file_id, context_id, row_index)
-        if await _import_row_seen(session, tenant_id, anchor):
+        if await _import_row_seen(session, tenant_id, anchor, seen):
             continue
         context_label = (
             f"Columna riesgosa ({entity_type}, contexto '{context_id}'): "
@@ -1304,8 +1319,10 @@ async def _capture_column_risk_rows(
             # Fila combinada vacía (nada que capturar): no hay nada persistido,
             # así que NO se registra la huella — ver docstring.
             continue
-        await _register_import_row_fingerprint(session, tenant_id, anchor)
+        await _register_import_row_fingerprint(session, tenant_id, anchor, seen)
+        nuevas.add(hashlib.sha256(anchor.encode()).hexdigest())
         created += captured
+    await _persist_import_fingerprints(session, tenant_id, nuevas)
     return created
 
 
