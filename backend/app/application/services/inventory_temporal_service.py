@@ -44,6 +44,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -209,6 +210,71 @@ async def _candidate_products(
     return [(r[0], r[1], int(r[2])) for r in rows]
 
 
+#: Tamaño de chunk del `IN (...)` de las precargas. Postgres acepta muchos más,
+#: pero un `IN` gigantesco degrada el plan y satura el parser del backend.
+_PRELOAD_CHUNK = 500
+
+
+async def _movimientos_por_producto(
+    session: AsyncSession, tenant_id: uuid.UUID, product_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[str, str | None, int, Any, Any]]]:
+    """Todos los movimientos vivos de los candidatos, en pocas queries.
+
+    Antes era un ``SELECT`` por producto dentro del loop: en el confirm de Asteria eso
+    daba 158 statements, el 28% de lo que quedaba del import después de batchear los
+    savepoints (``scripts/bench_confirm_import.py``).
+    """
+    porproducto: dict[uuid.UUID, list[tuple[str, str | None, int, Any, Any]]] = {
+        pid: [] for pid in product_ids
+    }
+    for i in range(0, len(product_ids), _PRELOAD_CHUNK):
+        chunk = product_ids[i : i + _PRELOAD_CHUNK]
+        filas = (
+            await session.execute(
+                select(
+                    InventoryMovement.product_id,
+                    InventoryMovement.movement_type,
+                    InventoryMovement.source_type,
+                    InventoryMovement.qty,
+                    InventoryMovement.occurred_at,
+                    InventoryMovement.created_at,
+                ).where(
+                    InventoryMovement.tenant_id == tenant_id,
+                    InventoryMovement.product_id.in_(chunk),
+                    InventoryMovement.voided_at.is_(None),
+                )
+            )
+        ).all()
+        for pid, movement_type, source_type, qty, occurred_at, created_at in filas:
+            porproducto[pid].append(
+                (movement_type, source_type, qty, occurred_at, created_at)
+            )
+    return porproducto
+
+
+async def _ventas_por_producto(
+    session: AsyncSession, tenant_id: uuid.UUID, product_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[int, Any]]]:
+    """Ventas vivas de los candidatos, en pocas queries. Ver `_movimientos_por_producto`."""
+    porproducto: dict[uuid.UUID, list[tuple[int, Any]]] = {pid: [] for pid in product_ids}
+    for i in range(0, len(product_ids), _PRELOAD_CHUNK):
+        chunk = product_ids[i : i + _PRELOAD_CHUNK]
+        filas = (
+            await session.execute(
+                select(
+                    SaleEntry.product_id, SaleEntry.quantity, SaleEntry.transaction_date
+                ).where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.product_id.in_(chunk),
+                    SaleEntry.voided_at.is_(None),
+                )
+            )
+        ).all()
+        for pid, quantity, transaction_date in filas:
+            porproducto[pid].append((quantity, transaction_date))
+    return porproducto
+
+
 async def check_products_temporal_divergence(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -238,22 +304,14 @@ async def check_products_temporal_divergence(
     skipped_complex_ledger = 0
     divergences: list[TemporalDivergence] = []
 
+    # Precarga: dos queries (chunked) en vez de dos POR PRODUCTO. El cuerpo del loop
+    # no cambia — sólo de dónde saca las filas.
+    _ids = [pid for pid, _, _ in candidates]
+    movimientos_de = await _movimientos_por_producto(session, tenant_id, _ids)
+    ventas_de = await _ventas_por_producto(session, tenant_id, _ids)
+
     for pid, pname, stock_units in candidates:
-        mov_rows = (
-            await session.execute(
-                select(
-                    InventoryMovement.movement_type,
-                    InventoryMovement.source_type,
-                    InventoryMovement.qty,
-                    InventoryMovement.occurred_at,
-                    InventoryMovement.created_at,
-                ).where(
-                    InventoryMovement.tenant_id == tenant_id,
-                    InventoryMovement.product_id == pid,
-                    InventoryMovement.voided_at.is_(None),
-                )
-            )
-        ).all()
+        mov_rows = movimientos_de.get(pid, [])
 
         opening = 0
         total_purchases = 0
@@ -289,15 +347,7 @@ async def check_products_temporal_divergence(
             skipped_complex_ledger += 1
             continue
 
-        sale_rows = (
-            await session.execute(
-                select(SaleEntry.quantity, SaleEntry.transaction_date).where(
-                    SaleEntry.tenant_id == tenant_id,
-                    SaleEntry.product_id == pid,
-                    SaleEntry.voided_at.is_(None),
-                )
-            )
-        ).all()
+        sale_rows = ventas_de.get(pid, [])
         total_sales = 0
         for quantity, transaction_date in sale_rows:
             quantity = int(quantity)

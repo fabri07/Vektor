@@ -25,7 +25,7 @@ antes), ver el docstring de :mod:`app.application.services._savepoint`.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -38,6 +38,17 @@ from app.application.services._savepoint import SavepointConflictError, guarded_
 from app.domain.text_norm import normalize_barcode, normalize_sku
 from app.observability.logger import get_logger
 from app.persistence.models.product import Product
+
+#: Post-trabajo de un alta encolada: `(producto_final, creado)`. Corre recién
+#: cuando la identidad está resuelta — ver `ProductCreateBatch`.
+_PostAlta = Callable[[Product, bool], Awaitable[None]]
+
+#: Qué hacer con un alta encolada que resultó AMBIGUA al resolver la carrera
+#: (barcode y sku de productos distintos): no hay un existente que reusar.
+_AlSerAmbiguo = Callable[["ProductIdentityConflictError"], Awaitable[None]]
+
+#: `(producto, post-trabajo, qué-hacer-si-es-ambiguo)`.
+_Pendiente = tuple[Product, _PostAlta, _AlSerAmbiguo | None]
 
 logger = get_logger(__name__)
 
@@ -302,6 +313,147 @@ async def add_product_or_reuse(
         )
         return existing, False
     return product, True
+
+
+class ProductCreateBatch:
+    """Altas de producto por LOTE: un savepoint por lote en vez de uno por producto.
+
+    Por qué existe
+    --------------
+    ``add_product_or_reuse`` cuesta 3 round-trips por producto —``flush`` previo,
+    ``SAVEPOINT``, ``RELEASE``— y, peor, su ``flush`` **drena todo lo pendiente**: en
+    un import el batch de 500 filas nunca llega a agrupar nada, así que cada
+    ``InventoryMovement`` y cada ``InventoryBalance`` sale en su propio INSERT. Medido
+    sobre el archivo real de Asteria (``scripts/bench_confirm_import.py``): 3.250
+    statements, de los cuales **1.588 (48,9%) eran SAVEPOINT + RELEASE**.
+
+    El molde es ``stock_service.decrement_stock_bulk`` (PR #53): lote optimista,
+    fallback de a uno cuando el lote choca.
+
+    El contrato que hace esto seguro
+    --------------------------------
+    **El post-trabajo de un alta NO corre hasta que la identidad final está
+    resuelta.** El caller entrega, junto al producto, la corrutina que quiere correr
+    después (``al_resolver(producto_final, creado)``), y el lote la ejecuta recién
+    tras el flush. Sin eso, un alta que en el flush resulta ser una carrera —el SKU
+    lo ocupó otra transacción entre medio— dejaría movimientos, vínculos y filas de
+    ledger apuntando a un id que nunca se insertó, y habría que salir a remapearlos.
+    Con este orden, esa situación no existe.
+
+    Lo único que el caller SÍ tiene que registrar en el momento son sus índices en
+    memoria de identidad (para que dos filas del mismo archivo no encolen dos altas
+    del mismo producto). Si el flush sustituye una de esas altas, ``flush`` devuelve
+    las sustituciones para que el caller corrija esos índices — un mapa acotado y
+    verificable, no una búsqueda por toda la sesión.
+    """
+
+    def __init__(self, session: AsyncSession, *, chunk_size: int = 200) -> None:
+        self._session = session
+        self._chunk_size = chunk_size
+        self._pendientes: list[_Pendiente] = []
+
+    def __len__(self) -> int:
+        return len(self._pendientes)
+
+    def esta_encolado(self, product_id: uuid.UUID) -> bool:
+        """¿Este id corresponde a un alta que todavía no se insertó?
+
+        El caller lo necesita antes de escribir CUALQUIER cosa que lo referencie por
+        FK —un movimiento de inventario, un vínculo con proveedor—: mientras el alta
+        está en la cola, el producto no existe en la base y ese INSERT explota con
+        una violación de foreign key en el próximo flush.
+        """
+        return any(p.id == product_id for p, _, _ in self._pendientes)
+
+    def encolar(
+        self,
+        product: Product,
+        al_resolver: _PostAlta,
+        *,
+        al_ser_ambiguo: _AlSerAmbiguo | None = None,
+    ) -> None:
+        """Encola un alta. El producto debe llegar **transient** (igual que
+        ``add_product_or_reuse``: el ``session.add`` lo hace el lote, dentro del
+        savepoint).
+
+        ``al_ser_ambiguo``: qué hacer si al resolver la carrera resulta que el
+        barcode y el sku pertenecen a productos DISTINTOS. No hay "el existente" que
+        reusar, así que el lote no puede decidir solo; sin este callback la
+        excepción se propaga (que es lo correcto para un caller que no sabe qué
+        hacer con una fila ambigua).
+        """
+        if not sa_inspect(product).transient:
+            raise AssertionError(
+                "ProductCreateBatch.encolar espera un Product TRANSIENT: no hagas "
+                "session.add() antes de encolarlo (ver _savepoint.py)."
+            )
+        self._pendientes.append((product, al_resolver, al_ser_ambiguo))
+
+    async def flush_si_lleno(self) -> dict[uuid.UUID, Product | None]:
+        if len(self._pendientes) < self._chunk_size:
+            return {}
+        return await self.flush()
+
+    async def flush(self) -> dict[uuid.UUID, Product | None]:
+        """Persiste lo encolado y corre el post-trabajo de cada alta.
+
+        Returns:
+            ``{id_encolado: producto_final}`` SOLO para las altas cuyo id encolado
+            dejó de valer: el producto existente si la carrera se resolvió reusando,
+            o ``None`` si el alta se descartó por ambigüedad. Vacío en el camino
+            feliz, que es el único que ocurre sin un import concurrente del mismo
+            tenant.
+        """
+        sustituciones: dict[uuid.UUID, Product | None] = {}
+        while self._pendientes:
+            lote = self._pendientes[: self._chunk_size]
+            self._pendientes = self._pendientes[self._chunk_size :]
+            sustituciones.update(await self._persistir_lote(lote))
+        return sustituciones
+
+    async def _persistir_lote(
+        self, lote: list[_Pendiente]
+    ) -> dict[uuid.UUID, Product | None]:
+        try:
+            async with guarded_savepoint(self._session, _classify):
+                self._session.add_all([p for p, _, _ in lote])
+        except SavepointConflictError:
+            # El savepoint revirtió el LOTE ENTERO: `_restore_snapshot` expunga todo
+            # lo que estaba pendiente, así que los productos vuelven a ser transient
+            # —justo lo que `add_product_or_reuse` exige— y se rehacen de a uno. No se
+            # puede saber cuál chocó desde el error del lote, y adivinar descartaría
+            # altas legítimas: por eso se reintenta el lote completo, no una parte.
+            logger.warning(
+                "product_identity.batch_conflict_fallback",
+                tenant_id=str(lote[0][0].tenant_id) if lote else None,
+                lote=len(lote),
+            )
+            return await self._reintentar_de_a_uno(lote)
+        for product, al_resolver, _ in lote:
+            await al_resolver(product, True)
+        return {}
+
+    async def _reintentar_de_a_uno(
+        self, lote: list[_Pendiente]
+    ) -> dict[uuid.UUID, Product | None]:
+        sustituciones: dict[uuid.UUID, Product | None] = {}
+        for product, al_resolver, al_ser_ambiguo in lote:
+            encolado_id = product.id
+            try:
+                resuelto, creado = await add_product_or_reuse(self._session, product)
+            except ProductIdentityConflictError as conflicto:
+                # Ambigüedad real (barcode y sku de dueños distintos): no hay "el
+                # existente" que reusar. El alta se descarta y el caller decide su
+                # destino (el import la manda a "Otros").
+                if al_ser_ambiguo is None:
+                    raise
+                sustituciones[encolado_id] = None
+                await al_ser_ambiguo(conflicto)
+                continue
+            if not creado:
+                sustituciones[encolado_id] = resuelto
+            await al_resolver(resuelto, creado)
+        return sustituciones
 
 
 @asynccontextmanager

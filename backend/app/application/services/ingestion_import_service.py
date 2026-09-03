@@ -46,6 +46,7 @@ from app.application.services.inventory_movement_origin import (
 )
 from app.application.services.product_identity import (
     MatchedBy,
+    ProductCreateBatch,
     ProductIdentityConflictError,
     add_product_or_reuse,
 )
@@ -1909,6 +1910,80 @@ async def _load_balance_index(
     return {b.product_id: b for b in result.scalars().all()}
 
 
+@dataclass
+class _BalancePendiente:
+    """Un ``InventoryBalance`` nuevo esperando su INSERT en lote.
+
+    ``delta`` es la suma de los movimientos que se le aplicaron, y NO es lo mismo que
+    ``balance.current_qty``: éste arranca en el stock absoluto del producto tras el
+    import (``final_qty``). Si al flushear resulta que el balance ya existía —otra
+    transacción lo creó en el medio—, al ajeno hay que sumarle los movimientos, no
+    pisarlo con nuestro absoluto.
+    """
+
+    balance: Any
+    delta: int
+
+
+async def _existing_balance(
+    session: AsyncSession, tenant_id: uuid.UUID, product_id: uuid.UUID
+) -> Any:
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.inventory import InventoryBalance  # noqa: PLC0415
+
+    return (
+        await session.execute(
+            select(InventoryBalance).where(
+                InventoryBalance.product_id == product_id,
+                InventoryBalance.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def flush_pending_balances(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    pending: dict[uuid.UUID, _BalancePendiente],
+    balance_index: dict[uuid.UUID, Any] | None = None,
+) -> None:
+    """Inserta los balances diferidos: UN savepoint para el lote, fallback de a uno.
+
+    Mismo molde que ``stock_service.decrement_stock_bulk`` (PR #53). El fallback no
+    tiene ambigüedad posible: un ``InventoryBalance`` no tiene identidad de negocio
+    que resolver — si ya existe, se le suma el delta acumulado y listo.
+    """
+    if not pending:
+        return
+    lote = list(pending.values())
+    pending.clear()
+    try:
+        async with guarded_savepoint(session, stock_service.BALANCE_CONFLICT):
+            session.add_all([p.balance for p in lote])
+    except SavepointConflictError as conflict:
+        # El savepoint revirtió el lote entero y expungó sus objetos: se rehace de a
+        # uno para que un solo balance ya existente no descarte los demás.
+        for pendiente in lote:
+            product_id = pendiente.balance.product_id
+            existente = await _existing_balance(session, tenant_id, product_id)
+            if existente is not None:
+                existente.current_qty += pendiente.delta
+                if balance_index is not None:
+                    balance_index[product_id] = existente
+                continue
+            try:
+                async with guarded_savepoint(session, stock_service.BALANCE_CONFLICT):
+                    session.add(pendiente.balance)
+            except SavepointConflictError:  # pragma: no cover — carrera doble
+                reintento = await _existing_balance(session, tenant_id, product_id)
+                if reintento is None:
+                    raise conflict.original from conflict
+                reintento.current_qty += pendiente.delta
+                if balance_index is not None:
+                    balance_index[product_id] = reintento
+
+
 async def _record_stock_movement(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -1918,6 +1993,7 @@ async def _record_stock_movement(
     movement_type: str,
     final_qty: int,
     balance_index: dict[uuid.UUID, Any] | None = None,
+    pending_balances: dict[uuid.UUID, _BalancePendiente] | None = None,
     supplier_id: uuid.UUID | None = None,
     source_type: str | None = None,
     source_upload_id: uuid.UUID | None = None,
@@ -1999,36 +2075,46 @@ async def _record_stock_movement(
     if balance is None:
         # F5-A: acotado a productos NUEVOS (los preexistentes ya tienen balance y caen
         # en el `else`). Si otra transacción creó el balance en el medio, el índice
-        # único lo rechaza y se reusa el suyo, sumándole `qty` —el mismo efecto que la
-        # rama `else`, no `final_qty` absoluto, que pisaría lo que el otro escribió—.
-        try:
-            async with guarded_savepoint(session, stock_service.BALANCE_CONFLICT):
-                new_balance = InventoryBalance(
-                    tenant_id=tenant_id,
-                    product_id=product_id,
-                    current_qty=final_qty,
-                    reserved_qty=0,
-                )
-                session.add(new_balance)
-        except SavepointConflictError as conflict:
-            existing_balance = (
-                await session.execute(
-                    select(InventoryBalance).where(
-                        InventoryBalance.product_id == product_id,
-                        InventoryBalance.tenant_id == tenant_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if existing_balance is None:  # pragma: no cover — el índice lo garantiza
-                raise conflict.original from conflict
-            existing_balance.current_qty += qty
-            if balance_index is not None:
-                balance_index[product_id] = existing_balance
-            return
+        # único lo rechaza y se reusa el suyo, sumándole el delta acumulado —el mismo
+        # efecto que la rama `else`, no `final_qty` absoluto, que pisaría lo que el
+        # otro escribió—.
+        new_balance = InventoryBalance(
+            tenant_id=tenant_id,
+            product_id=product_id,
+            current_qty=final_qty,
+            reserved_qty=0,
+        )
+        if pending_balances is not None:
+            # Alta DIFERIDA: el INSERT lo emite `flush_pending_balances` bajo UN
+            # savepoint por lote. Con un savepoint por balance eran 4 round-trips por
+            # producto nuevo —784 de los 3.250 statements del confirm de Asteria— y,
+            # peor, su flush drenaba el batch de filas, así que cada movimiento salía
+            # además en su propio INSERT. El objeto queda igual en `balance_index`,
+            # así que los movimientos siguientes del mismo producto le suman en
+            # memoria sin tocar la base.
+            pending_balances[product_id] = _BalancePendiente(new_balance, qty)
+        else:
+            try:
+                async with guarded_savepoint(session, stock_service.BALANCE_CONFLICT):
+                    session.add(new_balance)
+            except SavepointConflictError as conflict:
+                existing_balance = await _existing_balance(session, tenant_id, product_id)
+                if existing_balance is None:  # pragma: no cover — el índice lo garantiza
+                    raise conflict.original from conflict
+                existing_balance.current_qty += qty
+                if balance_index is not None:
+                    balance_index[product_id] = existing_balance
+                return
         if balance_index is not None:
             balance_index[product_id] = new_balance
     else:
         balance.current_qty += qty
+        if pending_balances is not None and product_id in pending_balances:
+            # El balance está pendiente de INSERT: `current_qty` ya se actualizó
+            # arriba sobre el mismo objeto, pero el delta acumulado hay que llevarlo
+            # aparte — si el flush descubre que el balance ya existía, lo que se le
+            # suma al ajeno es la suma de los movimientos, no un absoluto nuestro.
+            pending_balances[product_id].delta += qty
 
 
 def _parse_qty(qty_raw: Any) -> int:
@@ -2198,6 +2284,7 @@ async def _apply_purchase_to_stock(
     qty_raw: Any,
     unit_cost: Decimal | None,
     balance_index: dict[uuid.UUID, Any] | None = None,
+    pending_balances: dict[uuid.UUID, _BalancePendiente] | None = None,
     product_cache: dict[uuid.UUID, Any] | None = None,
     source_type: str = SOURCE_PURCHASE_IMPORT,
     source_row_ref: str | None = None,
@@ -2331,6 +2418,7 @@ async def _apply_purchase_to_stock(
         "purchase",
         product.stock_units,
         balance_index=balance_index,
+        pending_balances=pending_balances,
         # FASE 3: el movimiento de compra hereda el proveedor del gasto (real o
         # sentinela "No identificado"); NULL si la compra no traía proveedor.
         supplier_id=getattr(expense, "supplier_id", None),
@@ -2404,6 +2492,7 @@ async def _apply_catalog_stock(
     uploaded_file_id: uuid.UUID | None,
     source_row_ref: str | None,
     balance_index: dict[uuid.UUID, Any] | None,
+    pending_balances: dict[uuid.UUID, _BalancePendiente] | None = None,
     is_purchase: bool = False,
 ) -> None:
     """Aplica el stock de una fila de CATÁLOGO al inventario, según su tratamiento.
@@ -2460,6 +2549,7 @@ async def _apply_catalog_stock(
         movement_type,
         final_qty,
         balance_index=balance_index,
+        pending_balances=pending_balances,
         source_type=SOURCE_CATALOG_INITIAL_STOCK,
         source_upload_id=uploaded_file_id,
         source_row_ref=source_row_ref,
@@ -5177,6 +5267,10 @@ async def _insert_multisheet_data(
     _vertical = await _load_tenant_vertical(session, tenant_id)
     # Batch: balances en una query (evita un SELECT por fila en movimientos).
     _balance_index = await _load_balance_index(session, tenant_id)
+    #: Balances de productos NUEVOS esperando su INSERT en lote. Ver
+    #: `flush_pending_balances`: con un savepoint por balance eran 784 de los
+    #: 3.250 statements del confirm de Asteria.
+    _pending_balances: dict[uuid.UUID, _BalancePendiente] = {}
     # F7c: índice de identidad de clientes para resolver la referencia por fila
     # en ventas — incluye los clientes recién creados por el paso maestro (arriba,
     # en _insert_confirmed_data_impl, antes de llegar acá).
@@ -5218,6 +5312,118 @@ async def _insert_multisheet_data(
     # F2-T2: índices de identidad pre-cargados UNA vez para esta corrida (no un
     # SELECT por fila) — alimentan el motor de resolución en _add_product.
     _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
+    # Altas de producto por LOTE: un savepoint por lote en vez de uno por producto.
+    # Medido sobre el archivo real de Asteria: los savepoints por fila eran 1.588 de
+    # los 3.250 statements del confirm (48,9%), y su `flush` incondicional drenaba el
+    # batch de 500 filas, así que cada movimiento y cada balance salía además en su
+    # propio INSERT. Ver `ProductCreateBatch` y `scripts/bench_confirm_import.py`.
+    _batch_productos = ProductCreateBatch(session)
+
+    def _remapear_indices_de_producto(sustituciones: dict[uuid.UUID, Any]) -> None:
+        """Corrige los índices EN MEMORIA cuando el flush descartó un alta encolada.
+
+        Sólo corre ante una carrera con otra transacción (mapa vacío en el camino
+        feliz). Es el único estado que puede quedar apuntando al producto
+        descartado: su post-trabajo —movimientos, vínculos, ledger— todavía no
+        corrió, por diseño de `ProductCreateBatch`.
+
+        ``None`` como reemplazo = el alta se descartó por ambigüedad. La entrada NO
+        se borra: se marca ambigua (`by_name`) o se saca (`by_sku`/identidad), que es
+        lo mismo que hace el motor cuando ve la ambigüedad en memoria — dejar el id
+        muerto vincularía ventas contra un producto que no existe.
+        """
+        if not sustituciones:
+            return
+        for clave, prod in list(products_by_identity_key.items()):
+            if prod is not None and prod.id in sustituciones:
+                reemplazo = sustituciones[prod.id]
+                if reemplazo is None:
+                    products_by_identity_key.pop(clave, None)
+                else:
+                    products_by_identity_key[clave] = reemplazo
+        for clave, pid in list(_by_sku.items()):
+            if pid in sustituciones:
+                reemplazo = sustituciones[pid]
+                if reemplazo is None:
+                    _by_sku.pop(clave, None)
+                else:
+                    _by_sku[clave] = reemplazo.id
+        for clave, pid_o_none in list(_by_name.items()):
+            if pid_o_none is not None and pid_o_none in sustituciones:
+                reemplazo = sustituciones[pid_o_none]
+                # `None` en `_by_name` significa "nombre ambiguo, no resolver a
+                # ciegas" — exactamente el estado correcto para un alta descartada.
+                _by_name[clave] = reemplazo.id if reemplazo is not None else None
+        for clave, ids in list(_by_token.items()):
+            if ids & sustituciones.keys():
+                _by_token[clave] = {
+                    (sustituciones[i].id if sustituciones.get(i) is not None else i)
+                    for i in ids
+                    if i not in sustituciones or sustituciones[i] is not None
+                }
+
+    #: ¿Ya se calentó la identity map de SQLAlchemy con los productos del tenant?
+    _identity_map_calentada = False
+    #: Referencia FUERTE a lo precargado cuando no hay `product_cache` donde dejarlo.
+    #: La identity map de la sesión es débil: sin esto, lo cargado se recolecta.
+    _retenidos: list[Any] = []
+
+    async def _calentar_identity_map() -> None:
+        """Trae los ``Product`` del tenant en pocas queries, UNA sola vez.
+
+        `session.get(Product, id)` del camino "producto existente" pegaba a la base
+        una vez por fila: 398 statements sobre el archivo de Asteria — el 90% de lo
+        que queda en una RE-importación (`scripts/bench_confirm_import.py`). Con la
+        identity map caliente, ese `get` se resuelve en memoria.
+
+        Es una carga en lote y NO contradice la decisión de
+        `_load_product_identity_indexes` ("nunca un select de entidades por fila"):
+        justamente elimina el por-fila. La memoria extra es acotada — ese índice ya
+        mantiene un dict por producto activo con nombre, sku, barcode y custom_fields.
+        """
+        nonlocal _identity_map_calentada
+        if _identity_map_calentada:
+            return
+        _identity_map_calentada = True
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from app.persistence.models.product import Product  # noqa: PLC0415
+
+        ids = list(_identity_indexes.by_id.keys())
+        for i in range(0, len(ids), 500):
+            # Dos detalles sin los cuales esto no sirve para nada:
+            #
+            # 1. `.scalars().all()` y no `execute()` a secas: el `Result` construye
+            #    las entidades al ITERARLO.
+            # 2. Guardar el resultado en `product_cache`. La identity map de la
+            #    sesión referencia DÉBILMENTE: sin una referencia fuerte, los
+            #    objetos se recolectan apenas se descarta la lista y el `session.get`
+            #    siguiente vuelve a pegarle a la base — medido: 398 gets después de
+            #    un warm "exitoso". El cache además ya lo consultan
+            #    `_apply_purchase_to_stock` y la proyección del import.
+            cargados = (
+                (
+                    await session.execute(
+                        select(Product).where(Product.id.in_(ids[i : i + 500]))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if product_cache is not None:
+                for producto in cargados:
+                    product_cache.setdefault(producto.id, producto)
+            else:
+                _retenidos.extend(cargados)
+
+    async def _flush_batch_productos() -> None:
+        """Persiste las altas encoladas y, DESPUÉS, los balances que su post-trabajo
+        acaba de crear. El orden no es opcional: el balance referencia al producto por
+        FK, y el post-trabajo de un alta es justo lo que lo crea."""
+        _remapear_indices_de_producto(await _batch_productos.flush())
+        await flush_pending_balances(
+            session, tenant_id, _pending_balances, _balance_index
+        )
     # F-H2: desde cuándo ESTE archivo puede probar que el producto existía.
     # Solo los productos que el archivo DECLARA (catálogo o compra de mercadería).
     # Un producto que ya estaba en la base queda afuera a propósito: tiene su
@@ -5986,6 +6192,7 @@ async def _insert_multisheet_data(
             exp_qty_raw,
             unit_cost,
             balance_index=_balance_index,
+            pending_balances=_pending_balances,
             product_cache=product_cache,
             source_row_ref=row_ref,
             costo_final=_costo_final,
@@ -6005,6 +6212,7 @@ async def _insert_multisheet_data(
         row_ref: str | None = None,
         context_id: str | None = None,
         cruzados: dict[str, str] | None = None,
+        capture_anchor: str | None = None,
     ) -> bool:
         """Devuelve ``True`` si la fila se CAPTURÓ a /otros (identidad ambigua o fecha
         de producto ilegible en columna mapeada a mano) — el caller registra la huella
@@ -6303,6 +6511,7 @@ async def _insert_multisheet_data(
                     uploaded_file_id=uploaded_file_id,
                     source_row_ref=row_ref,
                     balance_index=_balance_index,
+                    pending_balances=_pending_balances,
                     is_purchase=stock_is_purchase,
                 )
             if sku:
@@ -6413,8 +6622,15 @@ async def _insert_multisheet_data(
                 )
                 return True  # capturado a /otros: no se importa, no se toca nada
             if _resolution.status == "resolved" and _resolution.product_id is not None:
+                await _calentar_identity_map()
                 existing = await session.get(Product, _resolution.product_id)
         if existing:
+            # Otra fila del MISMO catálogo ya declaró este producto y su alta sigue en
+            # la cola: hay que insertarla antes de tocarlo, porque el merge escribe un
+            # movimiento de inventario que lo referencia por FK. Sólo pasa con
+            # identidades repetidas dentro de una hoja, no una vez por fila.
+            if _batch_productos.esta_encolado(existing.id):
+                await _flush_batch_productos()
             await _merge_into_existing(existing)
             await _declarar_link_proveedor(existing.id)
         else:
@@ -6486,11 +6702,27 @@ async def _insert_multisheet_data(
                 custom_fields=cf or {},
                 source_row_ref=row_ref,  # Mejora D
             )
-            # F5-A: sin ``session.add`` — ``add_product_or_reuse`` necesita el objeto
-            # TRANSIENT para emitir el INSERT dentro del savepoint.
-            try:
-                _resolved, _created = await add_product_or_reuse(session, new_product)
-            except ProductIdentityConflictError as _conflict:
+            # F5-A: sin ``session.add`` — el objeto tiene que llegar TRANSIENT al
+            # lote, que es quien emite el INSERT dentro del savepoint.
+            #
+            # El alta se ENCOLA y su post-trabajo corre recién cuando la identidad
+            # final está resuelta (ver `ProductCreateBatch`): si el flush descubre
+            # que otra transacción ocupó el SKU en el medio, el movimiento de stock,
+            # el vínculo con el proveedor y la fila del ledger tienen que hablar del
+            # producto que quedó, no del que se descartó. Correrlos antes obligaría a
+            # salir a remapear la sesión entera.
+            async def _al_resolver(_resolved: Any, _created: bool) -> None:
+                if not _created:
+                    # El índice único resolvió una carrera: es exactamente el camino
+                    # de "producto existente" —incluido el delta de stock relativo—.
+                    await _merge_into_existing(_resolved)
+                    await _declarar_link_proveedor(_resolved.id)
+                    counts["productos"] += 1
+                    return
+                await _post_alta_de_catalogo(_resolved)
+                counts["productos"] += 1
+
+            async def _al_ser_ambiguo(_conflict: ProductIdentityConflictError) -> None:
                 # Ambigüedad que el motor no vio (barcode y sku de productos
                 # distintos): mismo destino que la ambigüedad detectada arriba.
                 logger.warning(
@@ -6506,14 +6738,86 @@ async def _insert_multisheet_data(
                     "Conflicto de identidad: el código de barras y el SKU "
                     "apuntan a productos distintos",
                 )
-                return True  # capturado a /otros
-            if not _created:
-                # El índice único resolvió una carrera: es exactamente el camino de
-                # "producto existente" —incluido el delta de stock relativo—.
-                await _merge_into_existing(_resolved)
-                await _declarar_link_proveedor(_resolved.id)
-                counts["productos"] += 1
-                return False
+                # La captura ES output persistido: sin su huella, una relectura la
+                # duplicaría en la bandeja. El caller ya no puede registrarla —esto
+                # pasa al flushear el lote, no al procesar la fila—, así que el ancla
+                # viaja hasta acá y la huella se anota en el mismo set en memoria.
+                if capture_anchor is not None:
+                    await _register_import_row_fingerprint(
+                        session, tenant_id, capture_anchor, seen_fp
+                    )
+
+            async def _post_alta_de_catalogo(_resolved: Any) -> None:
+                # F-H2: el catálogo declara el producto. Su fecha es la de adquisición
+                # SI la trae; un catálogo sin esa columna —el caso común— declara
+                # identidad sin fecha, que alcanza para vincular una venta pero no
+                # para sostener que el producto ya estaba ese día.
+                _declarar_evidencia(_new_id, _acquired)
+                # F-H3.b: producto NUEVO → el saldo previo al archivo es 0, y el
+                # catálogo declara el absoluto (ver el caso análogo en _merge_into_existing).
+                if proyeccion is not None:
+                    proyeccion.declarar_catalogo(_new_id, name, 0, stock_val)
+                # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
+                # = compra real, si trae costo).
+                await _apply_catalog_stock(
+                    session,
+                    tenant_id,
+                    product_id=_new_id,
+                    product_name=name,
+                    delta=stock_val,
+                    final_qty=stock_val,
+                    unit_cost=cost,
+                    store_name=store_name,
+                    tx_date=today,
+                    uploaded_file_id=uploaded_file_id,
+                    source_row_ref=row_ref,
+                    balance_index=_balance_index,
+                    pending_balances=_pending_balances,
+                    is_purchase=stock_is_purchase,
+                )
+                await _declarar_link_proveedor(_new_id)
+                if return_details:
+                    product_details.append(
+                        {
+                            "action": "CREATED",
+                            "product_id": str(_new_id),
+                            "name": name,
+                            "before": None,
+                            "after": {
+                                "sale_price_ars": str(price or Decimal("0")),
+                                "list_price_ars": (
+                                    str(new_product.list_price_ars)
+                                    if new_product.list_price_ars is not None
+                                    else None
+                                ),
+                                "unit_cost_ars": (
+                                    str(new_product.unit_cost_ars)
+                                    if new_product.unit_cost_ars is not None
+                                    else None
+                                ),
+                                "stock_units": stock_val,
+                                "sku": new_product.sku,
+                                "barcode": new_product.barcode,
+                                "category": new_product.category,
+                                "acquired_at": (
+                                    new_product.acquired_at.isoformat()
+                                    if new_product.acquired_at
+                                    else None
+                                ),
+                                "expiry_date": (
+                                    new_product.expiry_date.isoformat()
+                                    if new_product.expiry_date
+                                    else None
+                                ),
+                            },
+                        }
+                    )
+
+            # Los índices en memoria se registran ACÁ y no en el post-trabajo: son
+            # lo que evita que dos filas del mismo catálogo con la misma identidad
+            # encolen dos altas del mismo producto. Si el flush sustituye este alta
+            # por una carrera, `_remapear_indices_de_producto` corrige estas mismas
+            # entradas — es el único estado que queda apuntando al descartado.
             _register_product_identity_cache(
                 products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
             )
@@ -6527,69 +6831,12 @@ async def _insert_multisheet_data(
             _register_product_transaction_indexes(
                 _new_id, name, sku, _by_sku, _by_name, _by_token
             )
-            # F-H2: el catálogo declara el producto. Su fecha es la de adquisición
-            # SI la trae; un catálogo sin esa columna —el caso común— declara
-            # identidad sin fecha, que alcanza para vincular una venta pero no
-            # para sostener que el producto ya estaba ese día.
-            _declarar_evidencia(_new_id, _acquired)
-            # F-H3.b: producto NUEVO → el saldo previo al archivo es 0, y el
-            # catálogo declara el absoluto (ver el caso análogo en _merge_into_existing).
-            if proyeccion is not None:
-                proyeccion.declarar_catalogo(_new_id, name, 0, stock_val)
-            # A2/A5: movimiento estampado catalog_initial_stock + COGS (stock inicial
-            # = compra real, si trae costo).
-            await _apply_catalog_stock(
-                session,
-                tenant_id,
-                product_id=_new_id,
-                product_name=name,
-                delta=stock_val,
-                final_qty=stock_val,
-                unit_cost=cost,
-                store_name=store_name,
-                tx_date=today,
-                uploaded_file_id=uploaded_file_id,
-                source_row_ref=row_ref,
-                balance_index=_balance_index,
-                is_purchase=stock_is_purchase,
+            _batch_productos.encolar(
+                new_product, _al_resolver, al_ser_ambiguo=_al_ser_ambiguo
             )
-            await _declarar_link_proveedor(_new_id)
-            if return_details:
-                product_details.append(
-                    {
-                        "action": "CREATED",
-                        "product_id": str(_new_id),
-                        "name": name,
-                        "before": None,
-                        "after": {
-                            "sale_price_ars": str(price or Decimal("0")),
-                            "list_price_ars": (
-                                str(new_product.list_price_ars)
-                                if new_product.list_price_ars is not None
-                                else None
-                            ),
-                            "unit_cost_ars": (
-                                str(new_product.unit_cost_ars)
-                                if new_product.unit_cost_ars is not None
-                                else None
-                            ),
-                            "stock_units": stock_val,
-                            "sku": new_product.sku,
-                            "barcode": new_product.barcode,
-                            "category": new_product.category,
-                            "acquired_at": (
-                                new_product.acquired_at.isoformat()
-                                if new_product.acquired_at
-                                else None
-                            ),
-                            "expiry_date": (
-                                new_product.expiry_date.isoformat()
-                                if new_product.expiry_date
-                                else None
-                            ),
-                        },
-                    }
-                )
+            # `counts` y la captura a /otros los decide el post-trabajo, que corre
+            # al flushear el lote. Acá la fila todavía no produjo output.
+            return False
         counts["productos"] += 1
         return False  # creó/actualizó producto: no es captura
 
@@ -6971,7 +7218,13 @@ async def _insert_multisheet_data(
                     ):
                         continue
                     _prod_captured = await _add_product(
-                        row, cols, cf_cols, _row_ref, context_id=ctx_id, cruzados=cruzados
+                        row,
+                        cols,
+                        cf_cols,
+                        _row_ref,
+                        context_id=ctx_id,
+                        cruzados=cruzados,
+                        capture_anchor=_prod_cap_anchor,
                     )
                     if _prod_captured and _prod_cap_anchor is not None:
                         await _register_import_row_fingerprint(
@@ -6984,6 +7237,12 @@ async def _insert_multisheet_data(
                     )
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
+
+            # Las altas encoladas se persisten al cerrar la hoja: el orden de pasada
+            # (catálogos → compras → ventas) existe justamente para que una hoja vea
+            # lo que declaró la anterior, y una cola que cruzara ese límite lo
+            # rompería. También deja `counts["productos"]` al día para los avisos.
+            await _flush_batch_productos()
 
             # F-H6.b: el envío de un comprobante se cobra UNA vez, después de las
             # líneas. Va acá y no por fila porque la decisión necesita ver la hoja
@@ -7058,12 +7317,20 @@ async def _insert_multisheet_data(
                 ):
                     continue
                 if (
-                    await _add_product(row, {}, {}, _p_ref)
+                    await _add_product(
+                        row, {}, {}, _p_ref, capture_anchor=_prod_cap_anchor
+                    )
                     and _prod_cap_anchor is not None
                 ):
                     await _register_import_row_fingerprint(
                         session, tenant_id, _prod_cap_anchor, seen_fp
                     )
+
+    # Cierre del lote: el path legacy no tiene hojas donde cerrarlo, y en el path por
+    # contexto es un no-op (cada hoja ya flusheó la suya). Igual va incondicional:
+    # una cola sin vaciar sería un import que dice haber creado productos que no
+    # insertó, que es peor que pagar un flush vacío.
+    await _flush_batch_productos()
 
     # Traza agregada (Fase 1) de las decisiones de proveedor del multi-hoja.
     if _real_suppliers:
