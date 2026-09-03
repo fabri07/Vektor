@@ -16,6 +16,7 @@ import {
   type ColumnRiskDecision,
   type ConfirmIngestionResult,
   type ContextualColumnRisk,
+  type CrossFieldCatalogEntry,
   type FieldCatalogEntry,
   type InventoryImpactItem,
   type MappingContext,
@@ -207,6 +208,9 @@ function UnmappedModal({
 
   const { data: catalog } = useFieldCatalog();
   const fields = catalog?.[entityType]?.fields ?? [];
+  // Sin `cross_fields` a propósito: este modal resuelve una columna que dejaría
+  // un REQUERIDO sin cubrir, y un cruzado escribe en otra sección — nunca cubre
+  // un requerido de esta hoja. Ofrecerlo acá sería ofrecer una salida falsa.
 
   function handleConfirm() {
     if (mode === "field" && selected) {
@@ -418,14 +422,22 @@ function effectiveStatus(
  * Cuando no sigue siendo elegible, la columna cae a la sugerencia nueva; no se
  * inventa ningún reemplazo.
  */
-function targetSobreviveALaEntidad(
+export function targetSobreviveALaEntidad(
   target: string,
   fields: FieldCatalogEntry[],
+  crossFields: CrossFieldCatalogEntry[] = [],
 ): boolean {
   if (!target || target === "ignore" || target.startsWith("custom_field:")) {
     return true;
   }
-  return fields.some((f) => f.value === target);
+  // Los cruzados cuentan como elegibles: un `supplier:name` elegido a mano NO
+  // está en `fields` (escribe en otra sección) y sin esta rama se lo tomaba por
+  // "ya no aplica", reemplazándolo por la sugerencia automática mientras todo
+  // otro mapeo hecho a mano sobrevivía.
+  return (
+    fields.some((f) => f.value === target) ||
+    crossFields.some((f) => f.value === target)
+  );
 }
 
 // ── Mapeo multi-contexto (multi-hoja): una sección por hoja/grupo ──────────────
@@ -552,6 +564,7 @@ function SheetMapperSection({
   // allá no existe (ver `targetSobreviveALaEntidad`).
   const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
   const fields = catalog?.[entity]?.fields ?? [];
+  const crossFields = catalog?.[entity]?.cross_fields ?? [];
 
   // Inicializar mapeos desde sugerencias, una vez POR SECCIÓN: si el usuario
   // reasigna la hoja (p. ej. de Ventas a Productos), las sugerencias vienen de
@@ -574,7 +587,7 @@ function SheetMapperSection({
         const elegido = prev[col] ?? "";
         if (
           isColumnTouched?.(context.context_id, col) &&
-          targetSobreviveALaEntidad(elegido, fields)
+          targetSobreviveALaEntidad(elegido, fields, crossFields)
         ) {
           // Incluye el caso de un «Sin mapear» explícito: si la persona sacó esa
           // columna a propósito, cambiar de sección no es motivo para volver a
@@ -849,6 +862,7 @@ function SheetMapperSection({
                       editingCustom={customFor === s.source_column}
                       onChange={(value) => selectTarget(s.source_column, value)}
                       fields={fields}
+                      crossFields={crossFields}
                       dataSheet={context.context_id}
                       dataSuggests={s.target_field ?? ""}
                       disabled={loadingCatalog}
@@ -2045,6 +2059,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const colCount = suggestions.length;
   const unmappedCount = getUnmappedColumns().length;
   const fields = catalog?.[entityType]?.fields ?? [];
+  const crossFields = catalog?.[entityType]?.cross_fields ?? [];
   // Mismas dos reglas que en multi-hoja y que en el confirm del backend.
   const faltanRequeridos = missingRequiredFields(
     catalog?.[entityType]?.required ?? [],
@@ -2203,6 +2218,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                         target={target}
                         onChange={(value) => setMappingForColumn(s.source_column, value)}
                         fields={fields}
+                        crossFields={crossFields}
                         disabled={loadingCatalog}
                         unknownTarget="catalog-guarded"
                         className="min-w-0 flex-1 rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
@@ -2289,6 +2305,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                         target={currentTarget}
                         onChange={(value) => setMappingForColumn(s.source_column, value)}
                         fields={fields}
+                        crossFields={crossFields}
                         ignoreLabel="— Ignorar columna —"
                         unknownTarget="custom-only"
                         className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"

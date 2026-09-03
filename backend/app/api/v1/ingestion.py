@@ -52,6 +52,7 @@ from app.application.services.column_mapping_service import (
     SINGLE_VALUE_FIELDS,
     ColumnMappingService,
     conditional_requirement,
+    cross_targets_for,
     missing_required_fields,
     parse_target,
     required_reason,
@@ -179,6 +180,7 @@ from app.schemas.ingestion import (
     ConfirmIngestionRequest,
     ConfirmIngestionResponse,
     ContextualColumnRisk,
+    CrossFieldCatalogEntry,
     EntityFieldCatalog,
     FieldCatalogEntry,
     FileDeletionPreviewResponse,
@@ -1498,6 +1500,13 @@ async def get_field_catalog(
                     required_when=_condicion(entity, value),
                 )
                 for value, label in fields.items()
+            ],
+            # Destinos en OTRA sección (p. ej. "Tienda" de un catálogo →
+            # `supplier:name`). Lista aparte: un cruzado NUNCA cubre un requerido
+            # de esta hoja, igual que un `custom_field:`.
+            cross_fields=[
+                CrossFieldCatalogEntry(value=value, label=label, entity=destino)
+                for value, label, destino in cross_targets_for(entity)
             ],
         )
         for entity, fields in CANONICAL_FIELDS.items()
@@ -3242,6 +3251,17 @@ async def confirm_file(
     # Avisos human-in-the-loop: el import no bloquea, pero le señala al usuario qué
     # quedó incompleto para que lo complete (proveedor, producto) o lo clasifique.
     warnings: list[str] = []
+    # Una columna que el usuario mapeó a otra sección y el importador NO escribió.
+    # Pasa cuando el destino todavía no está implementado (F-D) o cuando el
+    # rollout que lo habilita está apagado para el tenant. El contador existía
+    # desde antes y no salía a ningún lado: el dato desaparecía en silencio, que
+    # es justo lo que el mapeo explícito viene a evitar.
+    if counts.get("targets_cruzados_descartados"):
+        warnings.append(
+            f"{counts['targets_cruzados_descartados']} columna(s) que mapeaste a otra "
+            "sección no se importaron todavía. El resto del archivo sí se importó; "
+            "revisá esas columnas antes de darlas por cargadas."
+        )
     if counts.get("sin_proveedor"):
         warnings.append(
             f"{counts['sin_proveedor']} compra(s) sin proveedor identificado se agruparon "

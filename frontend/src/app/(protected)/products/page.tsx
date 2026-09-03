@@ -119,9 +119,32 @@ const COLUMNS = [
     key: "sku",
     header: "SKU",
     hideable: true,
-    defaultVisible: false,
-    render: (v: unknown) => String(v ?? "").trim() || "—",
-    csvValue: (v: unknown) => String(v ?? "").trim(),
+    // Visible por default: cuando el archivo no trae código, el generado por
+    // Véktor es lo único con lo que el usuario puede referirse a un producto.
+    // Estaba oculta, que es media razón por la que nunca se vio.
+    defaultVisible: true,
+    render: (v: unknown, row: Record<string, unknown>) => {
+      const propio = (row as unknown as ProductResponse).internal_sku;
+      const delArchivo = String(v ?? "").trim();
+      if (delArchivo) return delArchivo;
+      // El chip distingue "este código te lo dio tu proveedor" de "este lo
+      // inventamos nosotros": sin eso, alguien lo buscaría en el catálogo del
+      // proveedor y no lo encontraría.
+      return propio ? (
+        <span className="flex items-center gap-2">
+          <span>{propio}</span>
+          <Badge>Generado</Badge>
+        </span>
+      ) : (
+        "—"
+      );
+    },
+    // El CSV exporta el mismo valor que se ve, sin el chip: una exportación que
+    // dejara la celda vacía cuando la pantalla muestra un código estaría
+    // mintiendo sobre lo que el usuario tiene.
+    csvValue: (v: unknown, row: Record<string, unknown>) =>
+      String(v ?? "").trim() ||
+      String((row as unknown as ProductResponse).internal_sku ?? ""),
   },
   {
     key: "stock_units",

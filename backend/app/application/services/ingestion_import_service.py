@@ -69,6 +69,7 @@ from app.domain.ingestion_schema_fingerprint import (
     compute_context_signature,
     compute_schema_fingerprint,
 )
+from app.domain.internal_sku import is_internal_sku
 from app.domain.inventory_effect import (
     HISTORICAL_REPLAY,
     IMPORT_CONTEXT_FIELD,
@@ -1083,6 +1084,23 @@ def _registrar_monto_derivado(
     if linea.original is not None:
         cf[AMOUNT_ORIGINAL_FIELD] = str(linea.original)
         counts["montos_discrepantes"] = counts.get("montos_discrepantes", 0) + 1
+
+
+def _sku_del_archivo(raw: Any) -> str | None:
+    """SKU que aporta el archivo, ignorando los que generó Véktor.
+
+    ``products.sku`` es el código del PROVEEDOR. Un `VKT-…` ahí sería Véktor
+    guardando su propio código como si se lo hubiera dado un tercero.
+
+    Pasa de verdad, y por un camino cotidiano: la tabla de Productos exporta a
+    CSV bajo el encabezado "SKU" el código que muestra —que para un producto sin
+    código de proveedor es el generado—, y ese CSV se vuelve a subir para
+    corregir precios. Sin este guard, la re-importación estampa el código interno
+    en el campo externo; y si además el nombre cambió, la identidad no matchea y
+    nace un segundo producto llevando el código interno del primero.
+    """
+    limpio = _clean_str(raw, 99)
+    return None if limpio and is_internal_sku(limpio) else limpio
 
 
 def _fila_con_contenido(row: dict[str, Any]) -> bool:
@@ -3519,6 +3537,7 @@ async def _insert_confirmed_data_impl(
         notes_col: str | None = None
         payment_col: str | None = None
         category_col: str | None = None
+        description_col: str | None = None
         recurring_col: str | None = None
         custom_field_cols: dict[str, str] = {}
         # F7c: declarado siempre (no solo dentro de `if column_mappings:`) para
@@ -3599,6 +3618,10 @@ async def _insert_confirmed_data_impl(
             notes_col = target_to_col.get("notes")
             payment_col = target_to_col.get("payment_method")
             category_col = target_to_col.get("category")
+            # `description` del producto: SOLO por mapeo explícito, sin fallback
+            # heurístico (ver la nota del path multi-hoja: "detalle" es a la vez
+            # keyword de especificaciones y de NOMBRE).
+            description_col = target_to_col.get("description")
             recurring_col = target_to_col.get("is_recurring")
             # F6-B2: override explícito de fechas de producto + marca "mapeado a mano"
             # (necesaria para la política de fecha inválida → /otros).
@@ -4531,11 +4554,7 @@ async def _insert_confirmed_data_impl(
                 except (ValueError, TypeError):
                     stock_val = 0
                 sku_raw = row.get(sku_col) if sku_col else None
-                sku = (
-                    str(sku_raw).strip()[:99]
-                    if sku_raw and str(sku_raw).strip() not in {"", "None", "nan"}
-                    else None
-                )
+                sku = _sku_del_archivo(sku_raw)
                 # F2-T5: código de barras de la fila (si el archivo trae la columna).
                 barcode = _clean_str(row.get(barcode_col), 64) if barcode_col else None
                 # FASE E: categoría canónica del vertical (antes se ignoraba en
@@ -4550,6 +4569,9 @@ async def _insert_confirmed_data_impl(
                     prod_cat, prod_cat_label = normalize_product_category(
                         prod_cat_raw, _vertical
                     )
+                prod_desc = (
+                    _clean_str(row.get(description_col), 500) if description_col else None
+                )
 
                 # F2-T2: resolución de identidad por claves independientes
                 # (barcode→sku→nombre+marca). Caché intra-corrida ANTES del
@@ -4570,6 +4592,7 @@ async def _insert_confirmed_data_impl(
                     list_price: Decimal | None = list_price,
                     stock_val: int = stock_val,
                     prod_cat: str | None = prod_cat,
+                    prod_desc: str | None = prod_desc,
                     store_name: str | None = store_name,
                     _prod_row_ref: str | None = _prod_row_ref,
                     _sku_n: str | None = _sku_n,
@@ -4624,6 +4647,7 @@ async def _insert_confirmed_data_impl(
                             "sku": existing.sku,
                             "barcode": existing.barcode,
                             "category": existing.category,
+                            "description": existing.description,
                             "acquired_at": (
                                 existing.acquired_at.isoformat()
                                 if existing.acquired_at
@@ -4674,6 +4698,8 @@ async def _insert_confirmed_data_impl(
                         existing.barcode = barcode
                     if prod_cat and not existing.category:
                         existing.category = prod_cat
+                    if prod_desc and not existing.description:  # completar sin pisar
+                        existing.description = prod_desc
                     # F6-B2: acumular fechas de producto salvo edición manual del
                     # usuario. acquired_at = la más antigua; expiry_date por la regla
                     # futuro-más-próximo / vencido-más-reciente.
@@ -4712,6 +4738,7 @@ async def _insert_confirmed_data_impl(
                                     "sku": existing.sku,
                                     "barcode": existing.barcode,
                                     "category": existing.category,
+                                    "description": existing.description,
                                     "acquired_at": (
                                         existing.acquired_at.isoformat()
                                         if existing.acquired_at
@@ -4806,6 +4833,7 @@ async def _insert_confirmed_data_impl(
                         unit_cost_ars=cost,
                         stock_units=stock_val,
                         category=prod_cat,
+                        description=prod_desc,
                         # NULL = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor
                         low_stock_threshold_units=None,
                         provenance="REAL",
@@ -6111,7 +6139,7 @@ async def _insert_multisheet_data(
             )
         except (ValueError, TypeError):
             stock_val = 0
-        sku = _clean_str(_val(row, cols.get("sku"), _SKU_COLS), 99)
+        sku = _sku_del_archivo(_val(row, cols.get("sku"), _SKU_COLS))
         # F2-T5: código de barras (columna mapeada o detección por keyword).
         barcode = _clean_str(_val(row, cols.get("barcode"), _BARCODE_COLS), 64)
         # FASE E: categoría canónica del vertical; sin columna → None.
@@ -6122,15 +6150,33 @@ async def _insert_multisheet_data(
         cat: str | None = None
         cat_label: str | None = None
         _cat_suggestion: CategorySuggestion | None = None
+        # `description` se PERSISTE sólo desde la columna mapeada a mano. La
+        # heurística `_ESPECIFICACIONES_COLS` de abajo NO sirve para esto: incluye
+        # "detalle", que también está en `_NOMBRE_COLS`, así que en un archivo donde
+        # "Detalle" es el nombre del producto guardaríamos el nombre como
+        # descripción. Es la distinción que el comentario de esa constante ya
+        # declara — keyword para INFERIR, mapeo explícito para persistir.
+        #
+        # Fuera del `if/else` de categoría a propósito: antes sólo se resolvía la
+        # columna cuando el archivo NO traía categoría, y un catálogo que trae las
+        # dos cosas se quedaba sin descripción.
+        _desc_col = cols.get("description")
+        _desc = _clean_str(row.get(_desc_col), 500) if _desc_col else None
         if cat_raw:
             cat, cat_label = normalize_product_category(cat_raw, _vertical)
         else:
             # Bloque 3B: sin columna de categoría, inferir desde nombre +
             # especificaciones — nunca reemplaza una categoría que el archivo
             # SÍ declara (por eso vive en el `else`, no antes).
-            _desc_col = cols.get("description")
-            _specs_raw = row.get(_desc_col) if _desc_col else _row_val(row, _ESPECIFICACIONES_COLS)
-            _specs = _clean_str(_specs_raw, 500)
+            # Un mapeo explícito SUPRIME la heurística, aunque la celda venga
+            # vacía. Con `_desc or <heurística>` una fila sin descripción caía al
+            # keyword set —que incluye "detalle", también keyword de NOMBRE— y le
+            # daba de comer el nombre del producto a la inferencia como si fueran
+            # especificaciones. Declarar la columna es declarar dónde está el
+            # dato: si esa celda está vacía, el dato no está.
+            _specs = (
+                _desc if _desc_col else _clean_str(_row_val(row, _ESPECIFICACIONES_COLS), 500)
+            )
             _cat_suggestion = infer_category(_vertical, name, _specs)
             if _cat_suggestion.confidence == "high":
                 cat = _cat_suggestion.code
@@ -6218,6 +6264,7 @@ async def _insert_multisheet_data(
                     "sku": existing.sku,
                     "barcode": existing.barcode,
                     "category": existing.category,
+                    "description": existing.description,
                     "acquired_at": (
                         existing.acquired_at.isoformat() if existing.acquired_at else None
                     ),
@@ -6264,6 +6311,8 @@ async def _insert_multisheet_data(
                 existing.barcode = barcode
             if cat and not existing.category:
                 existing.category = cat
+            if _desc and not existing.description:  # mismo criterio: completar sin pisar
+                existing.description = _desc
             # F6-B2: acumular fechas de producto salvo edición manual del usuario
             # (has_user_edits protege ambas). acquired_at = la más antigua conocida;
             # expiry_date por la regla futuro-más-próximo / vencido-más-reciente.
@@ -6302,6 +6351,7 @@ async def _insert_multisheet_data(
                             "sku": existing.sku,
                             "barcode": existing.barcode,
                             "category": existing.category,
+                            "description": existing.description,
                             "acquired_at": (
                                 existing.acquired_at.isoformat()
                                 if existing.acquired_at
@@ -6423,6 +6473,7 @@ async def _insert_multisheet_data(
                 unit_cost_ars=cost,
                 stock_units=stock_val,
                 category=cat,
+                description=_desc,
                 low_stock_threshold_units=None,
                 provenance="REAL",
                 # FASE 3 (B2): falta precio o costo → el usuario debe completarlo.

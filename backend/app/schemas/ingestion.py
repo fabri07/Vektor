@@ -266,6 +266,31 @@ class FieldCatalogEntry(BaseModel):
     required_when: ConditionalRequirement | None = None
 
 
+class CrossFieldCatalogEntry(BaseModel):
+    """Un campo de OTRA entidad al que esta hoja puede escribir.
+
+    El caso que lo motiva: la columna "Tienda" de un catálogo de productos puede
+    declarar el proveedor del artículo (`supplier:name`). El importador ya sabe
+    ejecutarlo —crea/reusa el proveedor y deja el vínculo en
+    `product_supplier_links`—, pero el catálogo de campos no publicaba estos
+    destinos, así que el `<select>` del mapeador no tenía la opción y no había
+    forma de elegirlo desde la pantalla.
+
+    Va en una lista SEPARADA de `fields` a propósito: un cruzado escribe en otra
+    sección y **nunca** cubre un requerido de esta hoja, exactamente como un
+    `custom_field:`. Mezclarlos haría que `coversRequired` diera por cubierto un
+    campo que la hoja sigue sin tener.
+    """
+
+    #: Target tal cual lo espera el confirm: `"{entidad}:{campo}"`.
+    value: str
+    #: Etiqueta con la entidad destino adelante ("Proveedor — Nombre"), para que
+    #: se lea que el dato NO se guarda en esta sección.
+    label: str
+    #: Entidad destino, para agrupar en la UI.
+    entity: str
+
+
 class EntityFieldCatalog(BaseModel):
     """Campos disponibles y requeridos para una entidad."""
 
@@ -279,6 +304,9 @@ class EntityFieldCatalog(BaseModel):
     # que el backend acepta (o al revés). Vacío para las entidades sin alternativa.
     required_alternatives: dict[str, list[str]] = {}
     fields: list[FieldCatalogEntry]
+    # Destinos en OTRA entidad habilitados para esta hoja. Con default, para que
+    # un cliente viejo que no conoce el campo siga deserializando.
+    cross_fields: list[CrossFieldCatalogEntry] = []
 
 
 class ShippingDecision(BaseModel):
