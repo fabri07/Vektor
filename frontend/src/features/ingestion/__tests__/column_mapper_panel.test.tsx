@@ -165,13 +165,21 @@ function makeContextualRisk(
   };
 }
 
-function renderPanel() {
+function renderPanel(
+  cb: { onDone?: jest.Mock; onCancel?: jest.Mock } = {},
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
-    <QueryClientProvider client={client}>
-      <ColumnMapperPanel fileId="file-1" onDone={jest.fn()} />
-    </QueryClientProvider>,
-  );
+  const onDone = cb.onDone ?? jest.fn();
+  const onCancel = cb.onCancel ?? jest.fn();
+  return {
+    onDone,
+    onCancel,
+    ...render(
+      <QueryClientProvider client={client}>
+        <ColumnMapperPanel fileId="file-1" onDone={onDone} onCancel={onCancel} />
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 describe("ColumnMapperPanel — A3 clarificación inline", () => {
@@ -310,6 +318,11 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     const confirmBtn = await screen.findByRole("button", {
       name: /Confirmar importación/i,
     });
+    // El botón existe desde el primer render pero arranca DESHABILITADO: qué se
+    // importa se deriva del preview, que todavía no llegó. Esperar a que se
+    // habilite es esperar a que el panel esté listo — sin esto el click cae
+    // sobre un botón deshabilitado y no confirma nada.
+    await waitFor(() => expect(confirmBtn).toBeEnabled());
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -375,6 +388,11 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     const confirmBtn = await screen.findByRole("button", {
       name: /Confirmar importación/i,
     });
+    // El botón existe desde el primer render pero arranca DESHABILITADO: qué se
+    // importa se deriva del preview, que todavía no llegó. Esperar a que se
+    // habilite es esperar a que el panel esté listo — sin esto el click cae
+    // sobre un botón deshabilitado y no confirma nada.
+    await waitFor(() => expect(confirmBtn).toBeEnabled());
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -1426,12 +1444,15 @@ describe("ColumnMapperPanel — tabla única: los costos de compra no se ofrecen
     ]);
     renderPanel();
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Confirmar/i })).toBeDisabled();
-    });
+    // Esperar a que el mapeo esté cargado (la columna aparece en la tabla) y no a
+    // que el botón esté deshabilitado: eso último ya es cierto en el primer
+    // render, antes de que llegue el preview, así que no prueba nada.
     // Nombrar la columna es lo que vuelve accionable la salida «sacala del
     // mapeo»: sin eso hay que adivinar cuál de todas es.
-    expect(screen.getAllByText("Flete linea").length).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.getAllByText("Flete linea").length).toBeGreaterThan(0),
+    );
+    expect(screen.getByRole("button", { name: /Confirmar/i })).toBeDisabled();
   });
 
   test("el mismo archivo SIN columnas de envío importa igual", async () => {
@@ -2635,5 +2656,165 @@ describe("ColumnMapperPanel — F-A: la etiqueta del campo propio llega al confi
     expect(sucursal.target_field).toBe("notes");
     // La etiqueta describía al campo propio que ya no es el destino.
     expect(sucursal.target_label).toBeUndefined();
+  });
+});
+
+// ── Qué se importa arranca desde lo DETECTADO, no desde "ventas" ──────────────
+//
+// El panel arrancaba con `ventas: true` fijo y el bucket del tipo detectado se
+// AGREGABA encima, así que un archivo de productos llegaba al confirm con
+// Productos Y Ventas tildados. En un summary legacy sin `mapping_contexts`,
+// `_insert_multisheet_data` honra los dos flags: el archivo se importaba además
+// como ventas sin que nadie lo hubiera pedido.
+
+describe("ColumnMapperPanel — los buckets salen de lo detectado", () => {
+  /** El checkbox de un bucket, buscado por su rótulo visible. */
+  function bucket(nombre: string): HTMLInputElement {
+    const label = screen.getByText(nombre).closest("label")!;
+    return label.querySelector("input[type=checkbox]") as HTMLInputElement;
+  }
+
+  function previewPlano(inferred: string, headers: string[]) {
+    return {
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: inferred, headers },
+      columns_at_risk: [],
+      contextual_column_risk: [],
+    };
+  }
+
+  function sugerencia(source_column: string, target_field: string) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["1"],
+      target_field,
+      confidence: 0.9,
+      source: "heuristic",
+      status: "mapped",
+    };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+  });
+
+  test("archivo de PRODUCTOS: Productos tildado, Ventas desmarcado", async () => {
+    mockGetPreview.mockResolvedValue(previewPlano("stock", ["Nombre", "Precio"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Nombre", "name"),
+      sugerencia("Precio", "sale_price_ars"),
+    ]);
+    renderPanel();
+
+    await waitFor(() => expect(bucket("productos")).toBeChecked());
+    // Lo que rompía: ventas venía tildado igual, y en un summary legacy el
+    // backend importaba el archivo TAMBIÉN como ventas.
+    expect(bucket("ventas")).not.toBeChecked();
+    expect(bucket("gastos")).not.toBeChecked();
+    expect(bucket("clientes")).not.toBeChecked();
+    expect(bucket("proveedores")).not.toBeChecked();
+
+    const confirmar = screen.getByRole("button", { name: /Confirmar importación/i });
+    await waitFor(() => expect(confirmar).toBeEnabled());
+    fireEvent.click(confirmar);
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    // Y lo que viaja al backend dice lo mismo que la pantalla.
+    expect(mockConfirmFile.mock.calls[0]![1]).toEqual({
+      ventas: false,
+      gastos: false,
+      productos: true,
+      clientes: false,
+      proveedores: false,
+    });
+  });
+
+  test("archivo de VENTAS: Ventas tildado y nada más", async () => {
+    mockGetPreview.mockResolvedValue(
+      previewPlano("ventas", ["Fecha", "Monto"]),
+    );
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+    ]);
+    renderPanel();
+
+    await waitFor(() => expect(bucket("ventas")).toBeChecked());
+    expect(bucket("gastos")).not.toBeChecked();
+    expect(bucket("productos")).not.toBeChecked();
+
+    const confirmar = screen.getByRole("button", { name: /Confirmar importación/i });
+    await waitFor(() => expect(confirmar).toBeEnabled());
+    fireEvent.click(confirmar);
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    expect(mockConfirmFile.mock.calls[0]![1]).toEqual({
+      ventas: true,
+      gastos: false,
+      productos: false,
+      clientes: false,
+      proveedores: false,
+    });
+  });
+
+  test("archivo de GASTOS: cambiar el bucket a mano reemplaza, no acumula", async () => {
+    mockGetPreview.mockResolvedValue(previewPlano("gastos", ["Fecha", "Monto"]));
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+    ]);
+    renderPanel();
+
+    await waitFor(() => expect(bucket("gastos")).toBeChecked());
+    expect(bucket("ventas")).not.toBeChecked();
+
+    // Lo que el usuario tilda a mano SÍ se respeta: la detección siembra el
+    // punto de partida, no lo congela.
+    fireEvent.click(bucket("clientes"));
+    expect(bucket("clientes")).toBeChecked();
+    expect(bucket("gastos")).toBeChecked();
+  });
+
+  test("archivo sin clasificar: no tilda nada y no deja confirmar", async () => {
+    // `mixed` sin `mapping_contexts` (summary legacy) cae al camino plano y no
+    // resuelve a ninguna entidad. Antes acá se tildaba "ventas" por un default
+    // fijo, que es exactamente la decisión que el parser NO pudo tomar.
+    mockGetPreview.mockResolvedValue(previewPlano("mixed", ["Col A", "Col B"]));
+    mockGetColumnMappings.mockResolvedValue([]);
+    renderPanel();
+
+    await waitFor(() => expect(screen.getByText("ventas")).toBeInTheDocument());
+    for (const b of ["ventas", "gastos", "productos", "clientes", "proveedores"]) {
+      expect(bucket(b)).not.toBeChecked();
+    }
+    // Sin nada elegido no se importa: la ambigüedad se muestra, no se resuelve
+    // sola. El usuario tilda el bucket y sigue.
+    expect(screen.getByRole("button", { name: /Confirmar/i })).toBeDisabled();
+  });
+
+  test("archivo MIXTO multi-hoja: al confirmar sólo viajan las hojas clasificadas", async () => {
+    mockGetPreview.mockResolvedValue(previewConHojaSinClasificar());
+    mockGetColumnMappings.mockResolvedValue([]);
+    renderPanel();
+
+    await waitFor(() => expect(screen.getByText("Ganancias")).toBeInTheDocument());
+    const confirmar = screen.getByRole("button", { name: /Confirmar importación/ });
+    await waitFor(() => expect(confirmar).toBeEnabled());
+    fireEvent.click(confirmar);
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    // `included` (arg 4) es lo que decide qué hoja se importa: la clasificada
+    // entra, la que el parser no supo leer NO. Los 1.840 registros de
+    // "Ganancias" son resúmenes derivados — entraban como ventas.
+    expect(mockConfirmFile.mock.calls[0]![3]).toEqual({
+      "sheet:LD:ventas": true,
+      "sheet:Ganancias": false,
+    });
   });
 });

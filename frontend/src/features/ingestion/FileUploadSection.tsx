@@ -20,6 +20,10 @@ type Phase =
   | "needs_confirmation"
   | "duplicate_blocked"
   | "done"
+  // Cancelado en el mapeo: no se importó NADA y el archivo quedó pendiente de
+  // completar. Es un estado propio y no `done` porque `done` dice "importado
+  // correctamente", que es justo lo que no pasó.
+  | "canceled"
   | "failed";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -353,14 +357,28 @@ export function FileUploadSection() {
           frontend; ahora hay dos, las dos adentro de este panel. */}
       {phase === "needs_confirmation" && fileId && (
         <div className="mt-4">
-          <ColumnMapperPanel fileId={fileId} onDone={() => setPhase("done")} />
+          <ColumnMapperPanel
+            fileId={fileId}
+            onDone={() => setPhase("done")}
+            onCancel={() => setPhase("canceled")}
+          />
         </div>
       )}
 
-      {/* Done */}
+      {/* Done — SOLO tras un confirm exitoso. */}
       {phase === "done" && (
         <div className="mt-4 rounded-lg border border-vk-success/20 bg-vk-success-bg px-4 py-3 text-sm text-vk-success">
           ✓ Archivo importado correctamente.
+        </div>
+      )}
+
+      {/* Cancelado: neutral, nunca verde. El archivo sigue existiendo y se puede
+          retomar desde "Archivos cargados" (el backend lo dejó en
+          NEEDS_COMPLETION), así que lo que corresponde decir es dónde quedó. */}
+      {phase === "canceled" && (
+        <div className="mt-4 rounded-lg border border-vk-border-w bg-vk-bg-light px-4 py-3 text-sm text-vk-text-secondary">
+          Importación cancelada. No se importó ningún dato: el archivo quedó
+          pendiente en «Archivos cargados» y podés retomar el mapeo desde ahí.
         </div>
       )}
 
@@ -390,7 +408,7 @@ export function FileUploadSection() {
             Reintentar
           </Button>
         )}
-        {(phase === "done" || phase === "failed") && (
+        {(phase === "done" || phase === "canceled" || phase === "failed") && (
           <Button size="sm" variant="secondary" onClick={handleReset}>
             Subir otro archivo
           </Button>

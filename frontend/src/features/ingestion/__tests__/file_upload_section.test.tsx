@@ -157,3 +157,101 @@ test("el preview del polling se siembra en la cache que lee el panel", async () 
   // arrancar en blanco esperando un GET que ya se hizo.
   expect(qc.getQueryData(["ingestion-preview", FILE_ID])).toEqual(PREVIEW);
 });
+
+// ── Cancelar ≠ importar ───────────────────────────────────────────────────────
+//
+// El panel de mapeo llamaba al MISMO callback (`onDone`) al confirmar y al
+// cancelar, y esta pantalla lo traducía a `phase = "done"`. Resultado: el
+// usuario apretaba "Cancelar", el backend dejaba el archivo en
+// `NEEDS_COMPLETION` sin importar una sola fila, y la pantalla le decía
+// "✓ Archivo importado correctamente".
+
+const mockCancelFile = ingestionService.cancelFile as jest.Mock;
+const mockRecomputeRisk = ingestionService.recomputeColumnRisk as jest.Mock;
+const mockInventoryEffects = ingestionService.fetchInventoryEffects as jest.Mock;
+
+/** Mapeo completo del catálogo de prueba: deja el confirm habilitado. */
+const SUGERENCIAS = [
+  {
+    source_column: "Nombre",
+    normalized_column: "nombre",
+    sample_values: ["Vela"],
+    target_field: "name",
+    confidence: 0.9,
+    source: "heuristic",
+    status: "mapped",
+  },
+  {
+    source_column: "Especificaciones",
+    normalized_column: "especificaciones",
+    sample_values: ["30 cm"],
+    target_field: "description",
+    confidence: 0.9,
+    source: "heuristic",
+    status: "mapped",
+  },
+  {
+    source_column: "Tienda",
+    normalized_column: "tienda",
+    sample_values: ["Acme"],
+    target_field: "supplier:name",
+    confidence: 0.9,
+    source: "heuristic",
+    status: "mapped",
+  },
+];
+
+test("cancelar el mapeo NO dice «importado correctamente»", async () => {
+  mockRecomputeRisk.mockResolvedValue([]);
+  mockInventoryEffects.mockResolvedValue([]);
+  mockCancelFile.mockResolvedValue({ file_id: FILE_ID, status: "NEEDS_COMPLETION" });
+
+  const { container } = renderizar();
+  await llegarANeedsConfirmation(container);
+  await waitFor(() => expect(mockGetFieldCatalog).toHaveBeenCalled());
+
+  fireEvent.click(await screen.findByRole("button", { name: /^Cancelar$/i }));
+  await waitFor(() => expect(mockCancelFile).toHaveBeenCalledWith(FILE_ID));
+
+  // No se importó NADA: cancelar no confirma.
+  expect(mockConfirmFile).not.toHaveBeenCalled();
+  // Y la pantalla no puede decir lo contrario.
+  await waitFor(() =>
+    expect(screen.getByText(/Importación cancelada/i)).toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByText(/importado correctamente/i),
+  ).not.toBeInTheDocument();
+});
+
+test("el mensaje de éxito aparece SOLO después de un confirm exitoso", async () => {
+  mockRecomputeRisk.mockResolvedValue([]);
+  mockInventoryEffects.mockResolvedValue([]);
+  mockGetColumnMappings.mockResolvedValue(SUGERENCIAS);
+  mockConfirmFile.mockResolvedValue({
+    file_id: FILE_ID,
+    status: "ok",
+    message: "",
+    warnings: [],
+  });
+
+  const { container } = renderizar();
+  await llegarANeedsConfirmation(container);
+  await waitFor(() => expect(mockGetFieldCatalog).toHaveBeenCalled());
+
+  // Antes de confirmar, ningún cartel verde.
+  expect(
+    screen.queryByText(/importado correctamente/i),
+  ).not.toBeInTheDocument();
+
+  const confirmar = await screen.findByRole("button", {
+    name: /Confirmar importación/i,
+  });
+  await waitFor(() => expect(confirmar).toBeEnabled());
+  fireEvent.click(confirmar);
+
+  await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(screen.getByText(/importado correctamente/i)).toBeInTheDocument(),
+  );
+});

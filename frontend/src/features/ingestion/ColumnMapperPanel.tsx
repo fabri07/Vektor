@@ -118,6 +118,23 @@ const ENTITY_OPTIONS_TEXTO = [
 // decidiera.
 const ENTITY_UNSET = "";
 
+/**
+ * Punto de partida de los buckets: NINGUNO.
+ *
+ * Antes esto arrancaba con `ventas: true` fijo y el bucket detectado se AGREGABA
+ * encima, así que un archivo de productos llegaba al confirm con productos Y
+ * ventas tildados. En un summary legacy sin `mapping_contexts`,
+ * `_insert_multisheet_data` honra los dos flags: el archivo se importaba además
+ * como ventas sin que nadie lo hubiera pedido.
+ */
+const NINGUN_BUCKET: ConfirmedFields = {
+  ventas: false,
+  gastos: false,
+  productos: false,
+  clientes: false,
+  proveedores: false,
+};
+
 //: Bucket de `confirmed_fields` que corresponde a cada entidad. Espejo de
 //: `INFERRED_TO_ENTITY`, para poder tildar el tipo que el parser detectó.
 const ENTITY_TO_BUCKET: Record<string, keyof ConfirmedFields> = {
@@ -1004,6 +1021,7 @@ function MultiContextMapper({
   masterPreviews,
   parserWarnings,
   onDone,
+  onCancel,
 }: {
   fileId: string;
   contexts: MappingContext[];
@@ -1011,6 +1029,7 @@ function MultiContextMapper({
   contextualRisk: ContextualColumnRisk[];
   masterPreviews: MasterPreviewSummary[];
   onDone: () => void;
+  onCancel: () => void;
 }) {
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
@@ -1485,7 +1504,9 @@ function MultiContextMapper({
     mutationFn: () => ingestionService.cancelFile(fileId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
-      onDone();
+      // `onCancel`, NO `onDone`: acá no se importó nada y el archivo quedó
+      // pendiente de completar.
+      onCancel();
     },
   });
 
@@ -1702,7 +1723,16 @@ function MultiContextMapper({
 
 interface ColumnMapperPanelProps {
   fileId: string;
+  /** Import CONFIRMADO. Es lo único que habilita a un caller a decir "listo". */
   onDone: () => void;
+  /**
+   * El usuario canceló: el archivo queda en `NEEDS_COMPLETION` y NO se importó
+   * nada. Va separado de `onDone` y es OBLIGATORIO a propósito — cuando los dos
+   * caminos compartían callback, `FileUploadSection` mostraba "Archivo importado
+   * correctamente" después de cancelar. Un opcional con fallback a `onDone`
+   * dejaría al próximo caller repitiendo exactamente ese bug.
+   */
+  onCancel: () => void;
 }
 
 type ConfirmedFields = {
@@ -1713,18 +1743,22 @@ type ConfirmedFields = {
   proveedores: boolean;
 };
 
-export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
+export function ColumnMapperPanel({
+  fileId,
+  onDone,
+  onCancel,
+}: ColumnMapperPanelProps) {
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
-  const [confirmedFields, setConfirmedFields] = useState<ConfirmedFields>({
-    ventas: true,
-    gastos: false,
-    productos: false,
-    // F7e: buckets de maestros — mismo criterio que gastos/productos (el
-    // usuario los tilda a propósito, no vienen prendidos por default).
-    clientes: false,
-    proveedores: false,
-  });
+  // Qué se importa NO tiene default fijo: se deriva de lo detectado (abajo)
+  // hasta que el usuario elige. `null` = "todavía no eligió nadie".
+  //
+  // Es derivado y no un `useEffect` que siembra estado a propósito: con el
+  // efecto, el primer render tras cargar el preview mostraba TODO destildado y
+  // el confirm deshabilitado, y recién al tick siguiente aparecía lo detectado.
+  // Un click en esa ventana no hacía nada.
+  const [confirmedOverride, setConfirmedOverride] =
+    useState<ConfirmedFields | null>(null);
   const [mappings, setMappings] = useState<Record<string, string>>({});
   const [unmappedQueue, setUnmappedQueue] = useState<string[]>([]);
   const [showUnmappedModal, setShowUnmappedModal] = useState(false);
@@ -1763,21 +1797,32 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
   const isAmbiguous = _inferredType === "general";
   const effectiveInferred = isAmbiguous ? purpose : _inferredType;
   const needsPurpose = isAmbiguous && !purpose;
-  const entityType = INFERRED_TO_ENTITY[effectiveInferred] ?? "sale";
-  // Los tipos que se van a importar salen de lo DETECTADO, no de un default fijo.
-  // El camino rápido de `FileUploadSection` mandaba los cinco en `true`; este panel
-  // arrancaba con `ventas: true` y el resto en `false`. Unificar los dos caminos
-  // sobre el segundo habría cambiado en silencio QUÉ se importa —alguien podía
-  // quedarse sin productos ni gastos sin enterarse—, así que el bucket del tipo
-  // detectado se siembra tildado y el usuario lo confirma o lo desmarca A LA VISTA.
+  // Entidad que el parser DETECTÓ (o el propósito elegido si el archivo era
+  // ambiguo). `undefined` = no se pudo clasificar — y eso no es "ventas".
+  const entidadDetectada: string | undefined = INFERRED_TO_ENTITY[effectiveInferred];
+  // El schema con el que se dibuja el mapeo sí necesita un valor siempre; el
+  // fallback muere acá y NO se propaga a qué se importa.
+  const entityType = entidadDetectada ?? "sale";
+  // Los tipos que se van a importar salen de lo DETECTADO: SOLO el bucket
+  // detectado, no agregado encima de un default. Un archivo de productos arranca
+  // con Productos tildado y Ventas desmarcado, y el usuario lo confirma o lo
+  // cambia A LA VISTA. Si no se detectó nada, no se tilda nada — mostrar la
+  // ambigüedad es más honesto que resolverla eligiendo por el usuario.
   // La rama multi-hoja ya hace lo mismo con `included` (`c.entity_type != null`).
-  const bucketDetectado = ENTITY_TO_BUCKET[entityType];
-  useEffect(() => {
-    if (!bucketDetectado) return;
-    setConfirmedFields((prev) =>
-      prev[bucketDetectado] ? prev : { ...prev, [bucketDetectado]: true },
-    );
-  }, [bucketDetectado]);
+  const bucketDetectado = entidadDetectada
+    ? ENTITY_TO_BUCKET[entidadDetectada]
+    : undefined;
+  // Memoizado por identidad: `confirmedFields` es dependencia del input de
+  // riesgo/efectos, y un objeto nuevo por render invalidaría esos callbacks en
+  // cada render.
+  const confirmedFields = useMemo<ConfirmedFields>(
+    () =>
+      confirmedOverride ??
+      (bucketDetectado
+        ? { ...NINGUN_BUCKET, [bucketDetectado]: true }
+        : NINGUN_BUCKET),
+    [confirmedOverride, bucketDetectado],
+  );
   // F8c: riesgo contextual por columna (reemplaza el legacy columns_at_risk).
   const contextualRisk = preview?.contextual_column_risk ?? [];
   // Lo que el parser detectó sobre el archivo (hojas derivadas, movimientos
@@ -1875,14 +1920,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     setPurpose(value);
     const opt = PURPOSE_OPTIONS.find((o) => o.value === value);
     if (opt) {
-      setConfirmedFields({
-        ventas: false,
-        gastos: false,
-        productos: false,
-        clientes: false,
-        proveedores: false,
-        [opt.field]: true,
-      });
+      setConfirmedOverride({ ...NINGUN_BUCKET, [opt.field]: true });
     }
     // Re-inicializar el mapeo con el nuevo schema de entidad.
     setInitialized(false);
@@ -1978,7 +2016,9 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
     mutationFn: () => ingestionService.cancelFile(fileId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
-      onDone();
+      // `onCancel`, NO `onDone`: acá no se importó nada y el archivo quedó
+      // pendiente de completar.
+      onCancel();
     },
   });
 
@@ -2126,6 +2166,7 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
         masterPreviews={preview?.master_previews ?? []}
         parserWarnings={parserWarnings}
         onDone={onDone}
+        onCancel={onCancel}
       />
     );
   }
@@ -2159,7 +2200,10 @@ export function ColumnMapperPanel({ fileId, onDone }: ColumnMapperPanelProps) {
                 type="checkbox"
                 checked={confirmedFields[key]}
                 onChange={(e) => {
-                  setConfirmedFields((prev) => ({ ...prev, [key]: e.target.checked }));
+                  setConfirmedOverride({
+                    ...confirmedFields,
+                    [key]: e.target.checked,
+                  });
                   setInitialized(false);
                   setMappings({});
                   // F8c: mismo motivo que choosePurpose — el mapeo se re-deriva de
