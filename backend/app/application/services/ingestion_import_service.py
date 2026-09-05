@@ -2091,6 +2091,16 @@ async def _record_stock_movement(
                 )
             )
         ).scalar_one_or_none()
+    if balance is None and pending_balances is not None:
+        # Un balance DIFERIDO todavía no está en la base ni en el índice si el caller
+        # no pasó uno: sin mirar acá, el segundo movimiento del mismo producto
+        # encolaría OTRO pendiente, pisaría al primero en el dict y perdería su
+        # cantidad. Hoy el import pasa siempre las dos cosas, así que esto no cambia
+        # su resultado; existe para que la función sea correcta con lo que recibe y
+        # no por lo que el único caller le pasa hoy.
+        pendiente = pending_balances.get(product_id)
+        if pendiente is not None:
+            balance = pendiente.balance
     if balance is None:
         # F5-A: acotado a productos NUEVOS (los preexistentes ya tienen balance y caen
         # en el `else`). Si otra transacción creó el balance en el medio, el índice
@@ -5431,7 +5441,14 @@ async def _insert_multisheet_data(
             cargados = (
                 (
                     await session.execute(
-                        select(Product).where(Product.id.in_(ids[i : i + 500]))
+                        select(Product).where(
+                            # Los ids salen de un índice ya acotado al tenant, así
+                            # que el filtro no cambia el resultado; va igual porque
+                            # ninguna query de negocio se apoya en que su entrada
+                            # esté bien filtrada (invariante 3 de CLAUDE.md).
+                            Product.tenant_id == tenant_id,
+                            Product.id.in_(ids[i : i + 500]),
+                        )
                     )
                 )
                 .scalars()
@@ -6625,6 +6642,21 @@ async def _insert_multisheet_data(
         existing = _lookup_product_identity_cache(
             products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
         )
+        if existing is not None and _batch_productos.esta_encolado(existing.id):
+            # Otra fila del MISMO catálogo ya declaró este producto y su alta sigue
+            # en la cola: hay que insertarla antes de tocarlo, porque el merge
+            # escribe un movimiento de inventario que lo referencia por FK. Sólo
+            # pasa con identidades repetidas dentro de una hoja, no una vez por fila.
+            await _flush_batch_productos()
+            # Y hay que RE-LEER: ese flush pudo descubrir que otra transacción
+            # ocupó la clave en el medio, en cuyo caso el alta se sustituyó (o se
+            # descartó por ambigua) y `existing` quedaría apuntando a un transient
+            # que nunca se va a insertar — mergear contra él pierde la fila y deja
+            # un movimiento con una FK a un producto inexistente.
+            # `_remapear_indices_de_producto` acaba de corregir este mismo índice.
+            existing = _lookup_product_identity_cache(
+                products_by_identity_key, _sku_n, _name_n, _brand_n, _bc_n
+            )
         if existing is None:
             _resolution = _resolve_product_identity(
                 name, sku, _store_brand_for_identity, indexes=_identity_indexes, barcode=barcode
@@ -6653,12 +6685,6 @@ async def _insert_multisheet_data(
                 await _calentar_identity_map()
                 existing = await session.get(Product, _resolution.product_id)
         if existing:
-            # Otra fila del MISMO catálogo ya declaró este producto y su alta sigue en
-            # la cola: hay que insertarla antes de tocarlo, porque el merge escribe un
-            # movimiento de inventario que lo referencia por FK. Sólo pasa con
-            # identidades repetidas dentro de una hoja, no una vez por fila.
-            if _batch_productos.esta_encolado(existing.id):
-                await _flush_batch_productos()
             await _merge_into_existing(existing)
             await _declarar_link_proveedor(existing.id)
         else:
