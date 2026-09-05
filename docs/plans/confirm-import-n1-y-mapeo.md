@@ -63,9 +63,11 @@ listo, mientras el `ColumnMapperPanel` queda colapsado en una fila de la tabla d
 abajo. Por eso el último import dio `description: 0` y un único proveedor
 centinela, con el soporte ya implementado y probado.
 
-Se reemplaza por el MISMO `ColumnMapperPanel`. Los defaults se **transfieren**, no
-se reemplazan: el bucket del tipo detectado arranca tildado y a la vista (pasar de
-"los cinco en true" a "sólo ventas" habría cambiado en silencio QUÉ se importa).
+Se reemplaza por el MISMO `ColumnMapperPanel`, con el bucket del tipo detectado
+tildado y a la vista. (La primera versión de esto **sumaba** el detectado encima
+del `ventas: true` fijo que ya tenía el panel, para no cambiar en silencio QUÉ se
+importa al unificar los dos caminos; la revisión de abajo lo dejó derivando SOLO
+de lo detectado, que es lo correcto.)
 
 ## Compuertas nuevas
 
@@ -77,8 +79,57 @@ se reemplazan: el bucket del tipo detectado arranca tildado y a la vista (pasar 
 - Test de `FileUploadSection` — no existía ninguno, y ése es el hueco por el que
   entró el bug.
 
+## Segunda pasada: revisión del diff (2026-09-04)
+
+Cuatro hallazgos sobre el código ya subido. Los cuatro con test; los dos
+primeros, mutation-testeados contra el comportamiento viejo.
+
+**El alta que pierde la carrera arrastraba a la fila siguiente.** El lote
+descarta el alta encolada cuando otra transacción ocupó el SKU, y su
+post-trabajo recibe el producto que quedó. Pero el import guarda esa alta en sus
+índices EN MEMORIA, y la fila siguiente con la misma identidad la encontraba
+ahí: forzaba el flush —correcto, el merge escribe un movimiento que la
+referencia por FK— y después NO volvía a leer el índice. Seguía apuntando al
+transient descartado, así que el merge se perdía y el movimiento salía con el
+`product_id` de un producto que nunca se insertó. Verificado contra Postgres:
+`ForeignKeyViolationError` en `inventory_movements_product_id_fkey`, o sea el
+confirm entero. El fix es re-leer el índice después del flush (que
+`_remapear_indices_de_producto` acaba de corregir); el guard se movió al lookup
+de la caché, que es el único camino por el que `existing` puede ser un alta
+encolada — el otro (`session.get` tras el resolver) sólo devuelve productos que
+ya están en la base.
+
+**Cancelar decía "importado correctamente".** `ColumnMapperPanel` llamaba al
+mismo callback al confirmar y al cancelar. `onCancel` va separado y OBLIGATORIO:
+un opcional con fallback a `onDone` deja al próximo caller repitiendo el bug.
+
+**Los buckets a importar arrancaban en "ventas" fijo.** El bucket detectado se
+agregaba encima, así que un archivo de productos llegaba con Productos Y Ventas
+tildados (y en un summary legacy el backend honra los dos). Ahora la selección
+se deriva de lo detectado, y si no se detectó nada no se tilda nada: mostrar la
+ambigüedad es más honesto que resolverla eligiendo por el usuario.
+
+**Dos endurecimientos sin cambio de comportamiento.** `_record_stock_movement`
+mira `pending_balances` cuando no encuentra balance (un caller que pasara
+`pending_balances` sin `balance_index` perdía la cantidad del primer movimiento
+en silencio); la precarga de la identity map filtra por `tenant_id`.
+
+Revisado sin hallazgos: el ordenamiento de `guarded_savepoint`, el fallback de a
+uno tras `SavepointConflictError`, las huellas del camino batch (mismo hash del
+ancla en las tres funciones, y la persistencia corre DESPUÉS del flush final del
+lote), el orden altas → post-trabajo → balances, y que ninguna venta pueda
+resolver contra un producto encolado.
+
+Medición post-revisión, mismo archivo: **251 statements / 4,2 s** en frío y
+**330 con las flags encendidas**, con el estado final idéntico.
+
 ## Abierto
 
+- **El camino legacy** (summaries sin `mapping_contexts`) no chequea
+  `_batch_productos.lleno`: mantiene todas las altas encoladas en memoria hasta
+  el final. La cota del último commit cubre sólo el loop por contexto. Nombrado
+  y no corregido: no hay forma de ejercitar ese camino con volumen en un test, y
+  un punto de flush sin probar es peor que dejarlo dicho.
 - **El timeout del proxy de Railway no está medido.** Los dos que sí: el cliente
   corta el confirm a los 16 min (`CONFIRM_TIMEOUT_MS`) y el lease del backend
   expira a los 15 (`DEFAULT_IMPORT_LEASE_TTL_SECONDS`) — los 18m33s excedían LOS
