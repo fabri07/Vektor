@@ -19,6 +19,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.product_supplier_link import ProductSupplierLink
 
+#: Índice en memoria de vínculos por `(product_id, supplier_id)`. Ver
+#: `load_declared_link_index`.
+LinkIndex = dict[tuple[uuid.UUID, uuid.UUID], ProductSupplierLink]
+
+
+async def load_declared_link_index(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> LinkIndex:
+    """Todos los vínculos del tenant en UNA query, indexados por (producto, proveedor).
+
+    Existe porque el find-or-create de abajo, llamado por fila de catálogo, hacía un
+    SELECT + un `flush` cada vez: sobre el archivo real de Asteria con la flag de
+    `product_supplier_links` encendida eran 251 SELECT + 238 INSERT sueltos, y ese
+    flush por fila además rompía el agrupado de los movimientos de inventario
+    (`scripts/bench_confirm_import.py`: 250 statements sin la flag, 1.010 con ella).
+    """
+    filas = (
+        (
+            await session.execute(
+                select(ProductSupplierLink).where(
+                    ProductSupplierLink.tenant_id == tenant_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {(f.product_id, f.supplier_id): f for f in filas}
+
 
 async def link_product_to_declared_supplier(
     session: AsyncSession,
@@ -29,6 +58,7 @@ async def link_product_to_declared_supplier(
     source: str,
     source_upload_id: uuid.UUID | None,
     source_context_id: str | None,
+    link_index: LinkIndex | None = None,
 ) -> ProductSupplierLink:
     """Find-or-create/revive el vínculo (tenant, product, supplier).
 
@@ -40,16 +70,30 @@ async def link_product_to_declared_supplier(
     El `source` SOLO puede subir de `catalog_declared` a `purchase_evidence`,
     nunca al revés — degradar borraría evidencia real de compra por una
     relectura que simplemente no volvió a mapear la columna.
+
+    ``link_index``: índice precargado (ver `load_declared_link_index`). Con él, el
+    find-or-create no toca la base y el INSERT queda pendiente para el flush por
+    lote del import. Sin él se conserva el camino de a uno —SELECT + `flush`— que
+    usan los callers que resuelven un vínculo suelto.
+
+    El ``flush`` del camino sin índice NO es decorativo: con ``autoflush=False``
+    (producción) el SELECT de la fila siguiente no vería el vínculo recién
+    agregado, y dos filas del mismo archivo con el mismo par intentarían insertarlo
+    dos veces. Con índice, esa función la cumple el propio índice, que se actualiza
+    en memoria.
     """
-    existing = (
-        await session.execute(
-            select(ProductSupplierLink).where(
-                ProductSupplierLink.tenant_id == tenant_id,
-                ProductSupplierLink.product_id == product_id,
-                ProductSupplierLink.supplier_id == supplier_id,
+    if link_index is not None:
+        existing = link_index.get((product_id, supplier_id))
+    else:
+        existing = (
+            await session.execute(
+                select(ProductSupplierLink).where(
+                    ProductSupplierLink.tenant_id == tenant_id,
+                    ProductSupplierLink.product_id == product_id,
+                    ProductSupplierLink.supplier_id == supplier_id,
+                )
             )
-        )
-    ).scalar_one_or_none()
+        ).scalar_one_or_none()
 
     if existing is None:
         link = ProductSupplierLink(
@@ -62,7 +106,10 @@ async def link_product_to_declared_supplier(
             source_context_id=source_context_id,
         )
         session.add(link)
-        await session.flush()
+        if link_index is None:
+            await session.flush()
+        else:
+            link_index[(product_id, supplier_id)] = link
         return link
 
     existing.voided_at = None

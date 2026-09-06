@@ -759,6 +759,10 @@ export function FileListSection() {
                           <ColumnMapperPanel
                             fileId={file.id}
                             onDone={() => setExpandedId(null)}
+                            // Acá los dos caminos colapsan la fila; se pasan
+                            // igual por separado porque el prop es obligatorio
+                            // justamente para que nadie los vuelva a fusionar.
+                            onCancel={() => setExpandedId(null)}
                           />
                         </td>
                       </tr>

@@ -31,11 +31,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import re
 import sys
 import time
 import uuid
-from collections import defaultdict
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,6 +50,7 @@ if "--flags" not in sys.argv or "off" in sys.argv:
     for _v in _ROLLOUT_VARS:
         os.environ[_v] = ""
 
+from scripts._bench_sql import PhaseTimer, SqlProfile, attach  # noqa: E402
 from scripts.asteria_dryrun_bloque7 import (  # noqa: E402
     DRYRUN_TENANT_ID,
     FILENAME,
@@ -63,122 +62,21 @@ from scripts.asteria_dryrun_bloque7 import (  # noqa: E402
     p,
 )
 
-# ── Contador de statements por forma ──────────────────────────────────────────
+# ── Instrumentación ───────────────────────────────────────────────────────────
+#
+# `SqlProfile`/`PhaseTimer`/`attach` viven en `_bench_sql` desde que el bench del
+# confirm necesitó exactamente lo mismo: la conclusión de un bench depende de cómo
+# agrupa el SQL, así que dos agrupadores distintos darían dos diagnósticos distintos
+# sobre la misma corrida.
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-
-class SqlProfile:
-    """Cuenta statements y tiempo agrupando por FORMA de SQL, no por texto exacto.
-
-    La forma (``INSERT INTO data_repair_items``, ``SELECT products``, ``advisory
-    lock``) es lo que distingue "mucho trabajo legítimo" de un N+1: 405 llamadas a
-    ``pg_advisory_lock`` para 405 movimientos es un N+1; 2.563 INSERT para 2.563
-    registros no lo es.
-    """
-
-    def __init__(self) -> None:
-        self.counts: dict[str, int] = defaultdict(int)
-        self.seconds: dict[str, float] = defaultdict(float)
-        self.enabled = False
-        self._t0 = 0.0
-
-    def shape(self, sql: str) -> str:
-        s = " ".join(str(sql).split())[:400]
-        low = s.lower()
-        if "advisory" in low:
-            return "pg_advisory_lock (lock)"
-        for verb, pat in (
-            ("INSERT", r"insert\s+into\s+([a-z_\.\"]+)"),
-            ("UPDATE", r"update\s+([a-z_\.\"]+)"),
-            ("DELETE", r"delete\s+from\s+([a-z_\.\"]+)"),
-            ("SELECT", r"\bfrom\s+([a-z_\.\"]+)"),
-        ):
-            m = re.search(pat, low)
-            if low.startswith(verb.lower()) and m:
-                return f"{verb} {m.group(1).strip(chr(34))}"
-        return s[:60]
-
-    def record(self, sql: str, elapsed: float) -> None:
-        if not self.enabled:
-            return
-        k = self.shape(sql)
-        self.counts[k] += 1
-        self.seconds[k] += elapsed
-
-    def reset(self) -> None:
-        self.counts.clear()
-        self.seconds.clear()
-
-    @property
-    def total(self) -> int:
-        return sum(self.counts.values())
-
-    def report(self, title: str, limit: int = 25) -> None:
-        p(f"{title} — {self.total} statements")
-        print(f"  {'statements':>10}  {'seg':>8}  forma")
-        print(f"  {'-' * 10}  {'-' * 8}  {'-' * 50}")
-        for k in sorted(self.counts, key=lambda x: -self.counts[x])[:limit]:
-            print(f"  {self.counts[k]:>10}  {self.seconds[k]:>8.2f}  {k}")
-
-
 PROFILE = SqlProfile()
+TIMER = PhaseTimer(PROFILE)
 
 
 def _attach(engine: Any) -> None:
-    from sqlalchemy import event
-
-    @event.listens_for(engine.sync_engine, "before_cursor_execute")
-    def _before(conn: Any, cursor: Any, statement: Any, *rest: Any) -> None:
-        conn.info["_bench_t0"] = time.perf_counter()
-
-    @event.listens_for(engine.sync_engine, "after_cursor_execute")
-    def _after(conn: Any, cursor: Any, statement: Any, *rest: Any) -> None:
-        PROFILE.record(statement, time.perf_counter() - conn.info.get("_bench_t0", 0.0))
-
-
-# ── Cronómetro por función (sin tocar el código de producción) ─────────────────
-
-
-class PhaseTimer:
-    """Envuelve funciones del servicio para medirlas sin instrumentar el código
-    real. Se monkeypatchea en el módulo que las IMPORTÓ (``reread_service`` hace
-    ``from ... import void_movement``, así que el patch va ahí, no en el origen)."""
-
-    def __init__(self) -> None:
-        self.calls: dict[str, int] = defaultdict(int)
-        self.seconds: dict[str, float] = defaultdict(float)
-        self.stmts: dict[str, int] = defaultdict(int)
-
-    def wrap(self, module: Any, name: str) -> None:
-        original = getattr(module, name)
-
-        async def _wrapped(*a: Any, **kw: Any) -> Any:
-            t0 = time.perf_counter()
-            s0 = PROFILE.total
-            try:
-                return await original(*a, **kw)
-            finally:
-                self.calls[name] += 1
-                self.seconds[name] += time.perf_counter() - t0
-                self.stmts[name] += PROFILE.total - s0
-
-        setattr(module, name, _wrapped)
-
-    def report(self) -> None:
-        p("TIEMPO POR FASE (funciones envueltas)")
-        print(f"  {'llamadas':>9}  {'seg':>8}  {'stmts':>8}  {'stmt/llamada':>12}  función")
-        print(f"  {'-' * 9}  {'-' * 8}  {'-' * 8}  {'-' * 12}  {'-' * 30}")
-        for name in sorted(self.seconds, key=lambda x: -self.seconds[x]):
-            n = self.calls[name]
-            por = self.stmts[name] / n if n else 0
-            print(
-                f"  {n:>9}  {self.seconds[name]:>8.2f}  {self.stmts[name]:>8}  "
-                f"{por:>12.1f}  {name}"
-            )
-
-
-TIMER = PhaseTimer()
+    attach(engine, PROFILE)
 
 
 # ── Bench ─────────────────────────────────────────────────────────────────────
