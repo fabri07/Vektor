@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,6 +90,14 @@ from app.domain.line_amount import (
     LineAmount,
     resolve_line_amount,
 )
+from app.domain.numeric_parsing import (
+    CAMPOS_DE_CANTIDAD,
+    CAMPOS_MONETARIOS,
+    MOTIVO_AMBIGUO,
+    inferir_convenio,
+    parsear_cantidad,
+    parsear_monto,
+)
 from app.domain.product_categories import normalize_product_category
 from app.domain.product_category_inference import CategorySuggestion, infer_category
 from app.domain.purchase_cost import (
@@ -144,6 +152,23 @@ class EmptyImportError(Exception):
         "columnas requeridas (fecha / monto / nombre) para el tipo confirmado. "
         "Mapeá las columnas manualmente o revisá el tipo de datos del archivo."
     )
+
+    #: E4 — cuando el import vacío tiene una causa CONOCIDA, el mensaje la dice.
+    #: El default habla de columnas no detectadas, y eso era engañoso para un
+    #: archivo cuyas columnas se detectaron perfecto: lo que no se pudo decidir
+    #: fue la escala de los montos.
+    ESCALA_AMBIGUA = (
+        "No se importó ninguna fila: no se pudo determinar la escala de los "
+        "montos. La columna mezcla formatos incompatibles (por ejemplo "
+        "'12.500' junto a '12.50'), así que no hay forma de saber si el punto "
+        "separa miles o decimales. Unificá el formato de la columna y volvé a "
+        "importar el archivo."
+    )
+
+    def __init__(self, user_message: str | None = None) -> None:
+        super().__init__(user_message or self.user_message)
+        if user_message is not None:
+            self.user_message = user_message
 
 
 def check_nonempty_import(
@@ -205,7 +230,10 @@ def check_nonempty_import(
             "ingestion.import.zero_inserted",
             row_count=summary.get("row_count"),
             confirmed_fields=confirmed_fields,
+            montos_ambiguos=counts.get("montos_ambiguos", 0),
         )
+        if counts.get("montos_ambiguos"):
+            raise EmptyImportError(EmptyImportError.ESCALA_AMBIGUA)
         raise EmptyImportError(EmptyImportError.user_message)
 
 
@@ -2147,14 +2175,34 @@ async def _record_stock_movement(
 
 
 def _parse_qty(qty_raw: Any) -> int:
-    """Cantidad entera de una celda de compra. 0 si vacía/no parseable/negativa."""
-    if qty_raw in (None, "", "None", "nan"):
+    """Cantidad entera de una celda de compra. 0 si vacía, ilegible o negativa.
+
+    E4 — antes esto era ``int(float(str(qty_raw)))``, que **truncaba**:
+    ``"1.500"`` daba 1, o sea que una compra de mil quinientas unidades entraba
+    como una. Ahora la escala la resuelve la política con el convenio de la
+    columna (``_normalizar_columnas_numericas``), así que para cuando el valor
+    llega acá ya es el número correcto.
+
+    Lo que esta función agrega es la validación del DOMINIO: una cantidad es
+    entera y no negativa. Una fracción ya no se trunca — se descarta con su
+    motivo en el log, igual que un negativo o un texto.
+
+    **Sigue devolviendo 0 y no ``None``**: los diez call sites tratan el 0 como
+    "sin cantidad utilizable" y cambiarles el contrato es una migración aparte.
+    Consecuencia declarada: una cantidad inválida hace que la fila se saltee o se
+    cree sin unidades, en vez de ir a "Otros" con el motivo — eso queda para
+    cuando esos callers se migren.
+    """
+    interpretada = parsear_cantidad(qty_raw)
+    if interpretada.valor is None:
+        if interpretada.motivo is not None:
+            logger.debug(
+                "ingestion.parse.qty_descartada",
+                raw=str(qty_raw),
+                reason=interpretada.motivo,
+            )
         return 0
-    try:
-        qty = int(float(str(qty_raw)))
-    except (ValueError, TypeError):
-        return 0
-    return qty if qty > 0 else 0
+    return int(interpretada.valor)
 
 
 async def build_incomplete_product(
@@ -2921,26 +2969,33 @@ def _planificar_costos_de_la_hoja(
 
 
 def _parse_amount(raw: Any) -> Decimal | None:
-    if raw is None:
+    """Monto de una celda, ya sin decidir escalas por su cuenta (E4).
+
+    La interpretación la hace `domain/numeric_parsing` con el convenio de la
+    COLUMNA, resuelto una vez en `_normalizar_columnas_numericas`: para cuando
+    una celda llega acá ya es un `Decimal` y esta función sólo la deja pasar.
+
+    Lo que queda es el caso en que la columna NO permitió decidir la escala
+    —`12.500` junto a `12.50`—: ahí la celda llega como el string original y
+    `parsear_monto` sin convenio devuelve `None`, así que la fila cae por "sin
+    monto" y termina en "Otros" con el valor a la vista. Antes esta función tenía
+    su propia interpretación y no había rama para "sólo punto": `"12.500"` daba
+    **12,5** y `"1.234.567"` daba `None`.
+
+    Se conserva el descarte de `<= 0`, que es contrato de esta función y no de la
+    política: un monto cero o negativo no es un error de lectura.
+    """
+    interpretado = parsear_monto(raw)
+    if interpretado.valor is None:
+        if interpretado.motivo is not None:
+            logger.debug(
+                "ingestion.parse.amount_unreadable", raw=str(raw), reason=interpretado.motivo
+            )
         return None
-    s = re.sub(r"[$\s]", "", str(raw).strip())
-    if not s:
+    if interpretado.valor <= 0:
+        logger.debug("ingestion.parse.amount_discarded", raw=str(raw), reason="non_positive")
         return None
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif "," in s:
-        s = s.replace(",", ".")
-    try:
-        val = Decimal(s)
-        if val <= 0:
-            logger.debug("ingestion.parse.amount_discarded", raw=str(raw), reason="non_positive")
-            return None
-        return val
-    except InvalidOperation:
-        return None
+    return interpretado.valor
 
 
 # F6-C1: el parser vive en app/domain/date_parsing.py — es el mismo que usa el
@@ -3182,6 +3237,96 @@ def _resolve_target_cols(
             targets=sorted(set(cruzados.values())),
         )
     return target_to_col, custom_field_cols, cruzados, ignoradas
+
+
+def _columnas_numericas_de(
+    filas: list[dict[str, Any]], cols: dict[str, str]
+) -> set[str]:
+    """Qué columnas de una hoja se van a leer como número (E4).
+
+    Dos fuentes, porque el importador tiene dos: lo que el usuario MAPEÓ a un
+    campo monetario o de cantidad, y lo que la heurística por nombre va a
+    encontrar igual cuando no hay mapeo. Si se mirara sólo el mapeo, un archivo
+    sin `column_mappings` —el camino más común— se quedaría sin convenio y
+    ningún monto con separador se podría leer.
+    """
+    numericas = {
+        col
+        for campo, col in cols.items()
+        if campo in CAMPOS_MONETARIOS or campo in CAMPOS_DE_CANTIDAD
+    }
+    if not filas:
+        return numericas
+    headers = list(filas[0].keys())
+    for keywords in (
+        _VENTA_TOTAL_COLS,
+        _VENTA_AMOUNT_COLS,
+        _GASTO_AMOUNT_COLS,
+        _PRECIO_VENTA_COLS,
+        _COSTO_COLS,
+        _COSTO_UNITARIO_PRODUCT_COLS,
+        _CANTIDAD_COLS,
+        _STOCK_COLS,
+        _COMPRA_MAS_ENVIO_COLS,
+        _PRECIO_COMPRA_BASE_COLS,
+    ):
+        encontrada = _find_col(headers, keywords)
+        if encontrada:
+            numericas.add(encontrada)
+    return numericas
+
+
+def _normalizar_columnas_numericas(
+    rows: list[dict[str, Any]], columnas: set[str]
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, str]]]:
+    """Interpreta de una vez las columnas que se van a leer como números (E4).
+
+    Devuelve las filas con esas columnas ya convertidas a ``Decimal``, y los
+    motivos de las celdas que no se pudieron interpretar, indexados por
+    ``{indice_de_fila: {columna: motivo}}``.
+
+    **Por qué acá y no en cada lector.** El convenio decimal no se puede decidir
+    mirando una celda: ``"12.500"`` es $12.500 o $12,50 y sólo la columna entera
+    lo dice (ver ``domain/numeric_parsing``). Los ~35 puntos donde el importador
+    parsea un monto ven una celda por vez, así que ninguno podría decidirlo. Acá
+    se mira la columna completa una vez, y de paso ningún call site cambia: lo que
+    reciben es un valor nativo, y la política dice que un nativo no se
+    reinterpreta.
+
+    **Sólo las columnas numéricas**, nunca la fila entera: un SKU ``"1.500"`` o un
+    código con ceros a la izquierda son identificadores, y convertirlos a número
+    los rompería —justamente lo que F2 quiere evitar—.
+
+    Una celda que la columna no alcanza a resolver se deja COMO ESTABA, con su
+    motivo aparte: así el importador la trata como lo que es —un monto que no
+    pudo leer— y la fila termina en "Otros" con el original a la vista, en vez de
+    entrar con una escala inventada.
+    """
+    if not columnas or not rows:
+        return rows, {}
+
+    convenios = {
+        col: inferir_convenio([fila.get(col) for fila in rows])
+        for col in columnas
+        if any(col in fila for fila in rows)
+    }
+    if not convenios:
+        return rows, {}
+
+    motivos: dict[int, dict[str, str]] = {}
+    normalizadas: list[dict[str, Any]] = []
+    for indice, fila in enumerate(rows):
+        copia = dict(fila)
+        for col, convenio in convenios.items():
+            if col not in copia:
+                continue
+            interpretado = parsear_monto(copia[col], convenio)
+            if interpretado.valor is not None:
+                copia[col] = interpretado.valor
+            elif interpretado.motivo is not None:
+                motivos.setdefault(indice, {})[col] = interpretado.motivo
+        normalizadas.append(copia)
+    return normalizadas, motivos
 
 
 def _sin_columnas_ignoradas(
@@ -3807,6 +3952,46 @@ async def _insert_confirmed_data_impl(
             if "expiry_date" in target_to_col:
                 expiry_col = target_to_col["expiry_date"]
                 _expiry_explicit = True
+
+        # E4: las columnas numéricas se interpretan ACÁ, con la columna entera a la
+        # vista, antes de leer la primera fila. Es el único momento en que se puede
+        # decidir si `"12.500"` son doce mil quinientos o doce con cincuenta; los
+        # ~35 puntos que parsean montos ven una celda por vez.
+        _cols_numericas = {
+            c
+            for c in (
+                venta_col,
+                gasto_col,
+                costo_col,
+                precio_col,
+                lista_col,
+                stock_col,
+                qty_col,
+                unit_price_col,
+            )
+            if c
+        } | {
+            col
+            for campo, col in target_to_col.items()
+            if campo in CAMPOS_MONETARIOS or campo in CAMPOS_DE_CANTIDAD
+        }
+        rows, _motivos_numericos = _normalizar_columnas_numericas(rows, _cols_numericas)
+        _ambiguos = sum(
+            1
+            for por_columna in _motivos_numericos.values()
+            for motivo in por_columna.values()
+            if motivo == MOTIVO_AMBIGUO
+        )
+        if _ambiguos:
+            # Visible en el resumen del confirm: son celdas que NO se importaron
+            # porque su columna no permitía decidir la escala. La fila cae a
+            # "Otros" por el camino de siempre (sin monto), con el original.
+            counts["montos_ambiguos"] = _ambiguos
+            logger.warning(
+                "ingestion.montos_ambiguos",
+                cantidad=_ambiguos,
+                columnas=sorted({c for m in _motivos_numericos.values() for c in m}),
+            )
 
         # FASE 3: en archivos ambiguos ("general") se honra la confirmación EXPLÍCITA del
         # usuario (no se requiere la señal auto-detectada). Para tipos ya inferidos se
@@ -7027,6 +7212,14 @@ async def _insert_multisheet_data(
             # de importación comparten esta función justamente para no divergir, así
             # que las dos ven la fila con la misma decisión aplicada.
             _rows = _sin_columnas_ignoradas(_rows, _ignoradas)
+            # E4: mismo criterio que el camino plano — las columnas numéricas se
+            # interpretan con la columna entera a la vista, acá, y no celda por
+            # celda en cada uno de los ~35 lectores. Va después del saneo de
+            # ignoradas para no inferir el convenio de una columna que el usuario
+            # sacó.
+            _rows, _ = _normalizar_columnas_numericas(
+                _rows, _columnas_numericas_de(_rows, _cols)
+            )
             # Bloque 2: "supplier:name" en un contexto de producto no se descarta
             # — `_add_product` lo aplica (gateado por rollout). El resto de los
             # cruzados sigue contando como descartado, F-D no está entregada.

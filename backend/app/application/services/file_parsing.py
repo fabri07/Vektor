@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from app.domain.expense_categories import strip_accents
 from app.domain.header_keys import fold_header, match_key
+from app.domain.numeric_parsing import parsear_monto
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -225,7 +226,6 @@ def normalize_numeric(
     - Strings con $, comas, puntos → parseo ARS (1.234,56 → 1234.56)
     """
     import math  # noqa: PLC0415
-    from decimal import Decimal, InvalidOperation  # noqa: PLC0415
 
     if value is None:
         if required:
@@ -243,21 +243,29 @@ def normalize_numeric(
             raise ValueError(f"{field_label} es obligatorio.")
         return None
 
-    # Normalización de formato ARS: "1.234,56" → "1234.56"
-    if "," in str_val and "." in str_val:
-        str_val = str_val.replace(".", "").replace(",", ".")
-    elif "," in str_val:
-        str_val = str_val.replace(",", ".")
-    str_val = str_val.lstrip("$").strip()
-
-    try:
-        return Decimal(str_val)
-    except InvalidOperation as exc:
-        if required:
-            raise ValueError(
-                f"{field_label} tiene un formato numérico inválido: {value!r}"
-            ) from exc
-        return None
+    # E4 — la interpretación la hace la política común. Antes acá había una copia
+    # que asumía formato AR cuando venían los dos separadores, sin mirar cuál era
+    # el último: `"12,500.00"` daba **12,5**. Y sin rama para "sólo punto",
+    # `"12.500"` daba 12,5 también.
+    #
+    # Sin convenio de columna —esta función recibe UN valor suelto, no una
+    # columna— sólo se resuelve lo que no lo necesita: los numéricos nativos, los
+    # que no traen separadores y los que traen los dos. Un `"12.500"` aislado
+    # queda sin interpretar a propósito: es $12.500 o $12,50 y adivinar es lo que
+    # se vino a sacar. Los callers que SÍ tienen la columna entera
+    # (`ingestion_import_service`) la infieren antes y no pasan por acá.
+    # : acá no hay columna que mirar —esta función recibe UN
+    # valor suelto—, así que la forma es la única evidencia disponible. Los callers
+    # que SÍ tienen la columna entera la infieren antes y no pasan por acá.
+    # `desempatar_por_forma`: acá no hay columna que mirar —esta función recibe UN
+    # valor suelto, como el que llega de la carga de un remito—, así que la forma
+    # es la única evidencia disponible y usarla es mejor que no devolver nada. Los
+    # callers que SÍ tienen la columna entera (el importador) la infieren antes y
+    # no pasan por acá.
+    interpretado = parsear_monto(value, desempatar_por_forma=True)
+    if interpretado.valor is None and required:
+        raise ValueError(f"{field_label} tiene un formato numérico inválido: {value!r}")
+    return interpretado.valor
 
 
 def normalize_categorical(

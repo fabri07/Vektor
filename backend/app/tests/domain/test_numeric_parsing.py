@@ -219,3 +219,38 @@ class TestCantidadesQueNoSeTruncan:
         resultado = parsear_cantidad("dos")
         assert resultado.valor is None
         assert resultado.motivo == MOTIVO_ILEGIBLE
+
+
+class TestElDesempateEsOpcionalYExplicito:
+    """Dos situaciones que se parecen y no son lo mismo.
+
+    Que la columna sea CONTRADICTORIA (`12.500` junto a `12.50`) no es lo mismo
+    que no tener columna que mirar. En el primer caso adivinar rompería la mitad
+    de las filas y taparía que el archivo está mal armado; en el segundo la forma
+    del valor es la única evidencia que hay, y usarla es mejor que devolver nada.
+
+    El default es el estricto a propósito: un caller que no piensa en esto no
+    debería terminar adivinando escalas.
+    """
+
+    def test_por_defecto_no_desempata(self) -> None:
+        assert parsear_monto("12.500").motivo == MOTIVO_AMBIGUO
+        assert parsear_monto("800.00").motivo == MOTIVO_AMBIGUO
+
+    def test_con_desempate_lee_la_forma(self) -> None:
+        assert parsear_monto("12.500", desempatar_por_forma=True).valor == Decimal("12500")
+        assert parsear_monto("800.00", desempatar_por_forma=True).valor == Decimal("800.00")
+        assert parsear_monto("1,234", desempatar_por_forma=True).valor == Decimal("1234")
+
+    def test_el_convenio_le_gana_al_desempate(self) -> None:
+        """Si la columna decidió, su convenio manda: es evidencia más fuerte que
+        la forma de una celda suelta."""
+        assert parsear_monto("12.500", _US, desempatar_por_forma=True).valor == Decimal("12.500")
+
+    def test_lo_que_ni_la_forma_resuelve_sigue_ambiguo(self) -> None:
+        """Cuatro dígitos detrás del separador no son ni miles ni centavos."""
+        assert parsear_monto("12.5000", desempatar_por_forma=True).motivo == MOTIVO_AMBIGUO
+
+    def test_las_cantidades_tambien_lo_exponen(self) -> None:
+        assert parsear_cantidad("1.500").motivo == MOTIVO_AMBIGUO
+        assert parsear_cantidad("1.500", desempatar_por_forma=True).valor == Decimal("1500")

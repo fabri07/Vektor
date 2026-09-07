@@ -50,7 +50,28 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
+#: Campos canónicos cuyo valor es dinero. Se listan acá y no en el importador
+#: porque son una definición de DOMINIO: qué columna hay que leer con la política
+#: monetaria no depende de por qué camino entró el archivo.
+CAMPOS_MONETARIOS = frozenset(
+    {
+        "amount",
+        "unit_price",
+        "unit_cost_ars",
+        "sale_price_ars",
+        "list_price_ars",
+        "shipping_cost_line",
+        "discount",
+        "taxes",
+    }
+)
+
+#: Campos que cuentan unidades: enteros, no negativos, nunca truncados.
+CAMPOS_DE_CANTIDAD = frozenset({"quantity", "stock_units"})
+
 __all__ = [
+    "CAMPOS_DE_CANTIDAD",
+    "CAMPOS_MONETARIOS",
     "MOTIVO_AMBIGUO",
     "MOTIVO_ILEGIBLE",
     "MOTIVO_NO_FINITO",
@@ -212,12 +233,31 @@ def inferir_convenio(valores: Iterable[Any]) -> ConvenioNumerico | None:
     return None
 
 
-def parsear_monto(bruto: Any, convenio: ConvenioNumerico | None = None) -> ValorNumerico:
+def parsear_monto(
+    bruto: Any,
+    convenio: ConvenioNumerico | None = None,
+    *,
+    desempatar_por_forma: bool = False,
+) -> ValorNumerico:
     """Interpreta un monto bajo el convenio de su columna.
 
     Sin convenio sólo se resuelven los valores que no lo necesitan: nativos, sin
     separadores, o con los dos (que se dicen solos). Todo lo demás queda en
     ``MOTIVO_AMBIGUO`` — no se adivina.
+
+    ``desempatar_por_forma`` distingue dos situaciones que se parecen y no son lo
+    mismo:
+
+    * **la columna no decidió** (contradictoria: ``12.500`` junto a ``12.50``) —
+      default, estricto. Adivinar acá rompería la mitad de las filas y encima
+      taparía que el archivo está mal armado;
+    * **no hay columna que mirar** — un valor suelto, como el que recibe
+      ``normalize_numeric`` desde la carga de un remito. Ahí la forma es la única
+      evidencia disponible y usarla es mejor que devolver nada: un grupo final de
+      3 dígitos es de miles, uno de 1-2 es decimal.
+
+    El default es el estricto a propósito: un caller que no piensa en esto no
+    debería terminar adivinando escalas.
     """
     if bruto is None:
         return ValorNumerico(original=bruto, valor=None)
@@ -242,6 +282,8 @@ def parsear_monto(bruto: Any, convenio: ConvenioNumerico | None = None) -> Valor
         return ValorNumerico(original=bruto, valor=None, motivo=MOTIVO_ILEGIBLE)
 
     decimal = _senal_inequivoca(texto) or (convenio.decimal if convenio else None)
+    if decimal is None and desempatar_por_forma:
+        decimal = _senal_por_forma(texto)
     tiene_coma, tiene_punto = _separadores(texto)
     if decimal is None:
         if tiene_coma or tiene_punto:
@@ -256,7 +298,12 @@ def parsear_monto(bruto: Any, convenio: ConvenioNumerico | None = None) -> Valor
         return ValorNumerico(original=bruto, valor=None, motivo=MOTIVO_ILEGIBLE)
 
 
-def parsear_cantidad(bruto: Any, convenio: ConvenioNumerico | None = None) -> ValorNumerico:
+def parsear_cantidad(
+    bruto: Any,
+    convenio: ConvenioNumerico | None = None,
+    *,
+    desempatar_por_forma: bool = False,
+) -> ValorNumerico:
     """Cantidad de unidades: entera, no negativa, y **nunca truncada**.
 
     ``int(float("1.500"))`` daba 1 — una compra de mil quinientas unidades entraba
@@ -266,7 +313,7 @@ def parsear_cantidad(bruto: Any, convenio: ConvenioNumerico | None = None) -> Va
 
     El cero sí es un dato legítimo y se devuelve como tal.
     """
-    monto = parsear_monto(bruto, convenio)
+    monto = parsear_monto(bruto, convenio, desempatar_por_forma=desempatar_por_forma)
     if monto.valor is None:
         return monto
     if monto.valor < 0:
