@@ -4170,6 +4170,80 @@ class TestRereadPreviewSessionEndpoint:
         # aplicarse (quedó FAILED al cancelarla) — 409, no 404.
         assert apply_resp.status_code == 409
 
+    async def test_una_ignorada_no_habilita_una_decision_de_riesgo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Revisión de E2 — pasar los `ignore` al mapeo de riesgo debilitaba una validación.
+
+        `validate_column_risk_decisions` comprueba que el par (columna, target)
+        que declara una decisión exista en el mapeo efectivo: es su defensa contra
+        un payload manipulado o stale. Al hacer que las columnas ignoradas
+        entraran en ese mapeo —para arreglar la pérdida de la entidad—, una
+        decisión de rutear filas a "Otros" sobre una columna marcada `ignore`
+        encontraba su par y pasaba, ruteando por los nulos de una columna que ya
+        no se lee. Las ignoradas aportan la entidad del contexto pero no entran al
+        mapeo de riesgo.
+        """
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid8/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            primero = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            assert primero.status_code == 200
+            run_id = primero.json()["run_id"]
+
+            rechazado = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={
+                    "column_mappings": [
+                        {"source_column": "monto", "target_field": "amount"},
+                        {
+                            "source_column": "proveedor",
+                            "target_field": "ignore",
+                            "user_selected": True,
+                        },
+                    ],
+                    "context_confirmed": {"table": True},
+                    "column_risk_decisions": [
+                        {
+                            "context_id": "table",
+                            "source_column": "proveedor",
+                            "target_field": "ignore",
+                            "action": "route_affected_rows_to_others",
+                        }
+                    ],
+                },
+            )
+        assert rechazado.status_code == 422, rechazado.text
+        assert "no está mapeada" in rechazado.json()["detail"]
+
+        # Y el borrador no se escribió: una decisión inválida se rechaza upfront.
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        assert (run.details_json or {}).get("draft") is None
+
+
 
 class TestEfectoDeInventarioPorHoja:
     """F-H3.a: el contrato del efecto de inventario, en el confirm.

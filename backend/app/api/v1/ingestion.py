@@ -3663,11 +3663,9 @@ async def reread_preview(
         }
         override = body.context_entity or {}
         for mapping in body.column_mappings:
-            # `none` sigue sin generar entrada (no dice nada del contexto), pero
-            # `ignore` SÍ: una hoja cuyas columnas el usuario marcó todas como
-            # ignoradas también tiene entidad, y saltearla acá hacía perder su
-            # reasignación aunque `column_mappings` no estuviera vacío.
-            if parse_target(mapping.target_field).kind == "none":
+            # `none` no genera entrada: no dice nada del contexto.
+            _kind = parse_target(mapping.target_field).kind
+            if _kind == "none":
                 continue
             cid = mapping.context_id or "table"
             # Misma prioridad que ``_entity_for`` del confirm: override del
@@ -3679,7 +3677,20 @@ async def reread_preview(
                 or mapping.entity_type
                 or "sale"
             )
+            # Una hoja cuyas columnas el usuario marcó TODAS como ignoradas
+            # también tiene entidad, y saltearla acá hacía perder su reasignación
+            # aunque `column_mappings` no estuviera vacío.
             risk_context_entities[cid] = entity
+            if _kind == "ignore":
+                # …pero NO entra al mapeo de riesgo. `validate_column_risk_decisions`
+                # lo usa para comprobar que el par (columna, target) que declara una
+                # decisión exista de verdad en el mapeo efectivo — es su defensa
+                # contra un payload manipulado o stale. Con las ignoradas adentro,
+                # una decisión `route_affected_rows_to_others` sobre una columna
+                # marcada `ignore` (con `user_selected`, o sea "accionable")
+                # encontraría su par y pasaría, ruteando filas a "Otros" por los
+                # nulos de una columna que ya no se lee.
+                continue
             risk_context_mappings[cid].append(
                 MappingEntry(
                     source_column=mapping.source_column,
