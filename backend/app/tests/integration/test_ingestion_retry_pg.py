@@ -419,3 +419,84 @@ def test_una_base_caida_al_marcar_failed_no_reemplaza_el_error_original(
             worker.process_spreadsheet(str(file_id), str(tenant_id))
     finally:
         _correr(_limpiar(tenant_id))
+
+
+def test_un_fallo_transitorio_antes_de_reclamar_reintenta(
+    monkeypatch: pytest.MonkeyPatch, _worker_contra_pg: None
+) -> None:
+    """La base se cae al ADQUIRIR: no hay token, y aun así hay que reintentar.
+
+    La condición del reintento exigía `token is not None`, que es lo correcto para
+    decidir si hay algo que LIBERAR y no para decidir si se reintenta. Con la
+    conexión cortada durante el claim el archivo nunca salió de PENDING: nadie lo
+    tomó, no hay lease que devolver y no hay propiedad con la cual escribir un
+    FAILED. El resultado era el peor de los tres: la task moría sin reintentar y
+    el archivo quedaba PENDING para siempre, sin nada que lo volviera a encolar.
+
+    Se observa el `self.retry()` porque es la decisión que faltaba —el estado en
+    la base es el mismo con reintento y sin él, que es justamente por qué el
+    defecto podía pasar desapercibido—, y además se afirma que el archivo quedó
+    reclamable para ese reintento.
+    """
+    tenant_id = uuid.uuid4()
+    file_id = _correr(_preparar(tenant_id))
+    try:
+
+        async def _claim_con_la_base_caida(*_args: Any, **_kwargs: Any) -> Any:
+            raise ConnectionError("la base no responde")
+
+        monkeypatch.setattr(worker, "_claim_for_processing", _claim_con_la_base_caida)
+
+        reintentos: list[BaseException | None] = []
+
+        def _retry_espia(*_args: Any, **kwargs: Any) -> BaseException:
+            reintentos.append(kwargs.get("exc"))
+            raise cast("BaseException", kwargs.get("exc"))
+
+        monkeypatch.setattr(worker.process_spreadsheet, "retry", _retry_espia)
+
+        with pytest.raises(ConnectionError, match="la base no responde"):
+            worker.process_spreadsheet(str(file_id), str(tenant_id))
+
+        assert reintentos, (
+            "un corte de un segundo en la base no puede dejar el archivo sin nadie "
+            "que lo vuelva a intentar"
+        )
+        estado, token = _correr(_leer_estado(file_id))
+        assert estado == PROCESSING_STATUS_PENDING, "el reintento tiene que poder reclamarlo"
+        assert token is None, "nunca hubo propiedad: no puede haber quedado un token colgado"
+    finally:
+        _correr(_limpiar(tenant_id))
+
+
+def test_un_error_permanente_antes_de_reclamar_no_reintenta(
+    monkeypatch: pytest.MonkeyPatch, _worker_contra_pg: None
+) -> None:
+    """La otra mitad: sin token se reintenta lo TRANSITORIO, no todo.
+
+    Sin esta prueba, "reintentar cuando no hay token" pasaría igual con la
+    condición de transitoriedad borrada, y el worker se pondría a repetir tres
+    veces un error que va a dar igual las tres."""
+    tenant_id = uuid.uuid4()
+    file_id = _correr(_preparar(tenant_id))
+    try:
+
+        async def _claim_roto(*_args: Any, **_kwargs: Any) -> Any:
+            raise ValueError("bug en el claim")
+
+        monkeypatch.setattr(worker, "_claim_for_processing", _claim_roto)
+
+        reintentos: list[BaseException | None] = []
+
+        def _retry_espia(*_args: Any, **kwargs: Any) -> BaseException:
+            reintentos.append(kwargs.get("exc"))
+            raise cast("BaseException", kwargs.get("exc"))
+
+        monkeypatch.setattr(worker.process_spreadsheet, "retry", _retry_espia)
+
+        with pytest.raises(ValueError, match="bug en el claim"):
+            worker.process_spreadsheet(str(file_id), str(tenant_id))
+
+        assert not reintentos, "un error permanente no gana reintentos por no tener token"
+    finally:
+        _correr(_limpiar(tenant_id))

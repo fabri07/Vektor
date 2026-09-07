@@ -677,19 +677,38 @@ def process_spreadsheet(self: Any, file_id: str, tenant_id: str, force: bool = F
                 transitorio=_es_transitorio(exc),
                 intento=int(self.request.retries or 0),
             )
-            if (
-                _es_transitorio(exc)
-                and int(self.request.retries or 0) < int(self.max_retries or 0)
-                and token is not None
-                and await _release_for_retry(
-                    factory,
-                    file_id,
-                    tenant_id,
-                    token,
-                    task_name="jobs.process_spreadsheet",
-                    t0=t0,
-                    error=str(exc),
+            _reintentable = _es_transitorio(exc) and int(self.request.retries or 0) < int(
+                self.max_retries or 0
+            )
+            if _reintentable and token is None:
+                # El fallo ocurrió ANTES de reclamar el trabajo: no se pudo abrir
+                # la sesión, o la base se cayó durante la adquisición. El archivo
+                # sigue en PENDING —nadie lo tomó— así que no hay lease que
+                # devolver y el reintento lo va a poder reclamar limpio.
+                #
+                # Antes esto no reintentaba: la condición exigía tener token, que
+                # es lo correcto para LIBERAR pero no para decidir si reintentar.
+                # Un corte de un segundo en la base dejaba el archivo esperando
+                # para siempre, sin FAILED (no hay propiedad para escribirlo) y
+                # sin nadie que lo volviera a encolar.
+                logger.info(
+                    "ingestion.retry_antes_de_reclamar",
+                    task="jobs.process_spreadsheet",
+                    file_id=file_id,
+                    tenant_id=tenant_id,
+                    intento=int(self.request.retries or 0),
                 )
+                return exc
+            # `token is not None` es redundante —la rama de arriba ya devolvió—
+            # pero el tipo lo pide: sin él, `token` sigue siendo `UUID | None`.
+            if _reintentable and token is not None and await _release_for_retry(
+                factory,
+                file_id,
+                tenant_id,
+                token,
+                task_name="jobs.process_spreadsheet",
+                t0=t0,
+                error=str(exc),
             ):
                 # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
                 # sería mentir sobre un archivo que todavía tiene intentos, y
@@ -831,19 +850,38 @@ def process_text_document(self: Any, file_id: str, tenant_id: str, force: bool =
                 transitorio=_es_transitorio(exc),
                 intento=int(self.request.retries or 0),
             )
-            if (
-                _es_transitorio(exc)
-                and int(self.request.retries or 0) < int(self.max_retries or 0)
-                and token is not None
-                and await _release_for_retry(
-                    factory,
-                    file_id,
-                    tenant_id,
-                    token,
-                    task_name="jobs.process_text_document",
-                    t0=t0,
-                    error=str(exc),
+            _reintentable = _es_transitorio(exc) and int(self.request.retries or 0) < int(
+                self.max_retries or 0
+            )
+            if _reintentable and token is None:
+                # El fallo ocurrió ANTES de reclamar el trabajo: no se pudo abrir
+                # la sesión, o la base se cayó durante la adquisición. El archivo
+                # sigue en PENDING —nadie lo tomó— así que no hay lease que
+                # devolver y el reintento lo va a poder reclamar limpio.
+                #
+                # Antes esto no reintentaba: la condición exigía tener token, que
+                # es lo correcto para LIBERAR pero no para decidir si reintentar.
+                # Un corte de un segundo en la base dejaba el archivo esperando
+                # para siempre, sin FAILED (no hay propiedad para escribirlo) y
+                # sin nadie que lo volviera a encolar.
+                logger.info(
+                    "ingestion.retry_antes_de_reclamar",
+                    task="jobs.process_text_document",
+                    file_id=file_id,
+                    tenant_id=tenant_id,
+                    intento=int(self.request.retries or 0),
                 )
+                return exc
+            # `token is not None` es redundante —la rama de arriba ya devolvió—
+            # pero el tipo lo pide: sin él, `token` sigue siendo `UUID | None`.
+            if _reintentable and token is not None and await _release_for_retry(
+                factory,
+                file_id,
+                tenant_id,
+                token,
+                task_name="jobs.process_text_document",
+                t0=t0,
+                error=str(exc),
             ):
                 # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
                 # sería mentir sobre un archivo que todavía tiene intentos, y
@@ -991,19 +1029,38 @@ def process_image_ocr(self: Any, file_id: str, tenant_id: str, force: bool = Fal
                 transitorio=_es_transitorio(exc),
                 intento=int(self.request.retries or 0),
             )
-            if (
-                _es_transitorio(exc)
-                and int(self.request.retries or 0) < int(self.max_retries or 0)
-                and token is not None
-                and await _release_for_retry(
-                    factory,
-                    file_id,
-                    tenant_id,
-                    token,
-                    task_name="jobs.process_image_ocr",
-                    t0=t0,
-                    error=str(exc),
+            _reintentable = _es_transitorio(exc) and int(self.request.retries or 0) < int(
+                self.max_retries or 0
+            )
+            if _reintentable and token is None:
+                # El fallo ocurrió ANTES de reclamar el trabajo: no se pudo abrir
+                # la sesión, o la base se cayó durante la adquisición. El archivo
+                # sigue en PENDING —nadie lo tomó— así que no hay lease que
+                # devolver y el reintento lo va a poder reclamar limpio.
+                #
+                # Antes esto no reintentaba: la condición exigía tener token, que
+                # es lo correcto para LIBERAR pero no para decidir si reintentar.
+                # Un corte de un segundo en la base dejaba el archivo esperando
+                # para siempre, sin FAILED (no hay propiedad para escribirlo) y
+                # sin nadie que lo volviera a encolar.
+                logger.info(
+                    "ingestion.retry_antes_de_reclamar",
+                    task="jobs.process_image_ocr",
+                    file_id=file_id,
+                    tenant_id=tenant_id,
+                    intento=int(self.request.retries or 0),
                 )
+                return exc
+            # `token is not None` es redundante —la rama de arriba ya devolvió—
+            # pero el tipo lo pide: sin él, `token` sigue siendo `UUID | None`.
+            if _reintentable and token is not None and await _release_for_retry(
+                factory,
+                file_id,
+                tenant_id,
+                token,
+                task_name="jobs.process_image_ocr",
+                t0=t0,
+                error=str(exc),
             ):
                 # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
                 # sería mentir sobre un archivo que todavía tiene intentos, y
