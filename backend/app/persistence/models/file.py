@@ -92,6 +92,24 @@ class UploadedFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Fase del import en curso (inserting/finalizing) — trazabilidad opcional.
     import_phase: Mapped[str | None] = mapped_column(String(30), nullable=True, default=None)
 
+    # ── H15: propiedad del PARSEO (distinta del lease del confirm) ────────────
+    # Token del intento de parseo en curso. Lo escribe la adquisición atómica
+    # (`_claim_for_processing`, PENDING→PROCESSING con rowcount) y lo verifica
+    # CADA escritura de resultado del worker — éxito, rechazo y error.
+    #
+    # No se reusa `import_attempt_id`: son dos ciclos de vida distintos y el del
+    # confirm ya está en uso mientras un archivo se importa. Un `WHERE
+    # processing_status = 'PROCESSING'` tampoco alcanzaría como fencing, porque
+    # el camino de recuperación (`reprocess_file` devuelve a PENDING lo trabado y
+    # reencola) deja legítimamente DOS intentos en ese mismo estado: sin token, el
+    # `FAILED` tardío del worker viejo pisa el resultado del que sí terminó.
+    #
+    # NULL = sin parseo en vuelo, o archivo anterior a la migración `20260906_0001`
+    # (esos no son propiedad de nadie y se recuperan por el camino de staleness).
+    parse_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, default=None
+    )
+
     # ── F9a: versionado de lógica de ingestión ───────────────────────────────
     # Qué versión del protocolo de interpretación de ingestión fue usada
     # cuando este archivo se procesó/confirmó. Permite evolucionar el pipeline
