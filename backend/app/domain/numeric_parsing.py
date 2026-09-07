@@ -37,6 +37,14 @@ Reglas fijas
 4. **``Decimal``, nunca ``float``.** Un monto que pasa por ``float`` pierde
    exactitud antes de llegar a la base.
 
+5. **El convenio decide qué separador es cuál, no autoriza a borrarlo.** Elegido
+   el convenio, la celda todavía tiene que TENER esa forma: los grupos de miles
+   son de tres dígitos y el separador decimal aparece una sola vez. Sin esta
+   comprobación, una columna en convenio AR leía ``"12.50"`` como **1250** —el
+   punto se borraba por ser "de miles" aunque dejara un grupo de dos— y
+   ``"1.2.3"`` como **123**. Una celda que no cumple no es ambigua: su columna ya
+   decidió y ella no encaja. Va a revisión con ``MOTIVO_INCOMPATIBLE``.
+
 Agregar una regla acá y sumarle un caso a ``app/tests/domain/test_numeric_parsing.py``:
 es el contrato que comparten importador, parser de archivos y gate de calidad.
 """
@@ -60,6 +68,7 @@ CAMPOS_MONETARIOS = frozenset(
         "unit_cost_ars",
         "sale_price_ars",
         "list_price_ars",
+        "shipping_cost",
         "shipping_cost_line",
         "discount",
         "taxes",
@@ -74,6 +83,7 @@ __all__ = [
     "CAMPOS_MONETARIOS",
     "MOTIVO_AMBIGUO",
     "MOTIVO_ILEGIBLE",
+    "MOTIVO_INCOMPATIBLE",
     "MOTIVO_NO_FINITO",
     "ConvenioNumerico",
     "ValorNumerico",
@@ -95,6 +105,10 @@ _FORMA_NUMERICA = re.compile(r"^[+-]?[\d.,]+$")
 
 MOTIVO_AMBIGUO = "convenio_ambiguo"
 MOTIVO_ILEGIBLE = "ilegible"
+#: La columna decidió su convenio y esta celda no tiene esa forma (``"12.50"`` en
+#: una columna donde el punto es de miles). No es ambigua —hay convenio— ni
+#: ilegible —es un número—: es incompatible con el resto de su columna.
+MOTIVO_INCOMPATIBLE = "convenio_incompatible"
 MOTIVO_NO_FINITO = "no_finito"
 MOTIVO_FRACCIONARIA = "cantidad_fraccionaria"
 MOTIVO_NEGATIVA = "cantidad_negativa"
@@ -181,8 +195,12 @@ def _senal_por_forma(texto: str) -> str | None:
     sep = "," if tiene_coma else "."
     partes = texto.split(sep)
     if len(partes) > 2:
-        # `1.234.567`: varios separadores iguales sólo pueden ser miles.
-        return "," if sep == "." else "."
+        # `1.234.567`: varios separadores iguales sólo pueden ser miles. Pero
+        # `1.2.3` no es un número con miles, es un texto roto — y antes votaba
+        # igual, fijándole a la columna entera un convenio salido de una celda
+        # inválida.
+        candidato = "," if sep == "." else "."
+        return candidato if _forma_valida(texto, candidato) else None
     cola = partes[-1]
     if not cola.isdigit():
         return None
@@ -191,6 +209,48 @@ def _senal_por_forma(texto: str) -> str | None:
     if len(cola) in (1, 2):
         return sep  # el separador es el decimal
     return None
+
+
+def _forma_valida(texto: str, decimal: str) -> bool:
+    """¿La celda tiene la forma que su convenio dice que tiene?
+
+    Elegir el separador decimal no alcanza para poder borrar el otro. Bajo el
+    convenio AR, ``"12.50"`` pide borrar un punto que deja un grupo de DOS
+    dígitos, y ningún formato de miles escribe grupos de dos: la celda está en
+    otro convenio (o mal escrita), y borrarle el punto la multiplica por cien en
+    silencio. Lo mismo ``"1.2.3"``, que salía 123.
+
+    Se exige, entonces:
+
+    * el separador decimal aparece **una sola vez** —dos son un error, no un
+      número—, y detrás sólo dígitos (o nada: ``"1500,"`` vale 1500);
+    * si hay separador de miles, los grupos son de **exactamente tres** dígitos,
+      salvo el primero, que puede tener uno, dos o tres.
+
+    No se limita la cantidad de decimales: un costo unitario con cuatro decimales
+    es legítimo y no dice nada sobre la escala.
+    """
+    miles = "." if decimal == "," else ","
+    partes = texto.split(decimal)
+    if len(partes) > 2:
+        return False
+    if len(partes) == 2 and not (partes[1] == "" or partes[1].isdigit()):
+        return False
+
+    entera = partes[0]
+    if entera[:1] in ("+", "-"):
+        entera = entera[1:]
+    if entera == "":
+        # `",50"` es medio peso escrito sin el cero. Sólo vale si HAY decimales:
+        # un texto que se queda en el signo no es un número.
+        return len(partes) == 2 and partes[1] != ""
+
+    grupos = entera.split(miles)
+    if not all(g.isdigit() for g in grupos):
+        return False
+    if len(grupos) == 1:
+        return True
+    return len(grupos[0]) <= 3 and all(len(g) == 3 for g in grupos[1:])
 
 
 def inferir_convenio(valores: Iterable[Any]) -> ConvenioNumerico | None:
@@ -218,7 +278,12 @@ def inferir_convenio(valores: Iterable[Any]) -> ConvenioNumerico | None:
             continue
         fuerte = _senal_inequivoca(texto)
         if fuerte is not None:
-            inequivocas.add(fuerte)
+            # Sólo vota si la celda además TIENE esa forma: `"12.50,5"` se dice
+            # inequívoca (el último separador es la coma) pero deja un grupo de
+            # miles de dos dígitos. Una celda rota no puede decidir por la
+            # columna entera; se va sola a revisión.
+            if _forma_valida(texto, fuerte):
+                inequivocas.add(fuerte)
             continue
         forma = _senal_por_forma(texto)
         if forma is not None:
@@ -279,7 +344,6 @@ def parsear_monto(
     if not texto or not _FORMA_NUMERICA.match(texto):
         # No es que no sepamos con qué convenio leerlo: no es un número.
         return ValorNumerico(original=bruto, valor=None, motivo=MOTIVO_ILEGIBLE)
-        return ValorNumerico(original=bruto, valor=None, motivo=MOTIVO_ILEGIBLE)
 
     decimal = _senal_inequivoca(texto) or (convenio.decimal if convenio else None)
     if decimal is None and desempatar_por_forma:
@@ -289,6 +353,12 @@ def parsear_monto(
         if tiene_coma or tiene_punto:
             return ValorNumerico(original=bruto, valor=None, motivo=MOTIVO_AMBIGUO)
         decimal = "."  # sin separadores: da igual cuál sea
+
+    if not _forma_valida(texto, decimal):
+        # Hay convenio, y esta celda no lo cumple. Borrarle igual el separador de
+        # miles le cambiaría la escala: es exactamente el caso `"12.50"` en una
+        # columna AR, que entraba como 1250.
+        return ValorNumerico(original=bruto, valor=None, motivo=MOTIVO_INCOMPATIBLE)
 
     miles = "." if decimal == "," else ","
     normalizado = texto.replace(miles, "").replace(decimal, ".")

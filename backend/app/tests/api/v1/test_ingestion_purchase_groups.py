@@ -463,3 +463,115 @@ class TestGuardsIgualQueSusHermanos:
         )
         assert response.status_code in (401, 403)
 
+
+
+#: Los mismos importes, escritos con punto decimal y dos decimales — la forma en
+#: que los exporta medio ERP. Aislado, `"1000.00"` es ambiguo (¿mil, o uno coma
+#: cero cero?) y sólo la columna lo resuelve.
+_FILAS_CON_PUNTO_DECIMAL: list[dict[str, Any]] = [
+    {**fila, "total": f"{fila['total']}.00", "envio": f"{fila['envio']}.00"}
+    for fila in _FILAS
+]
+
+
+class TestElPreviewLeeLosNumerosComoElImport:
+    """E4 — el preview aplicaba el saneo de columnas ignoradas y NADA más.
+
+    Leía cada celda por su cuenta, sin el convenio de su columna, así que un
+    importe `"1000.00"` le quedaba ambiguo: sin columna que mirar no se puede
+    saber si el punto separa miles o decimales. Resultado: la pantalla mostraba la
+    compra sin costo mientras el importador —que sí resuelve el convenio sobre la
+    columna entera— calculaba y persistía el costo unitario.
+
+    No es un detalle de presentación: es la pantalla donde el usuario aprueba cómo
+    se va a repartir un costo. Que muestre cero y se guarde otra cosa rompe la
+    garantía que este archivo entero vigila.
+    """
+
+    async def test_un_importe_con_punto_decimal_no_deja_la_compra_sin_costo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        archivo = await _crear_archivo(
+            db_session, sample_tenant, _summary(_FILAS_CON_PUNTO_DECIMAL)
+        )
+        body = await _pedir_grupos(
+            client, auth_headers, archivo, decisiones=[_DECISION_REPARTIR]
+        )
+        hoja = body["sheets"][0]
+        anunciado = {
+            linea["producto"]: linea["costo_unitario_final"]
+            for grupo in hoja["grupos"]
+            for linea in grupo["lineas"]
+        }
+
+        assert all(valor is not None for valor in anunciado.values()), (
+            f"el preview no pudo leer los importes: {anunciado}"
+        )
+
+        await insert_confirmed_data(
+            db_session,
+            sample_tenant.tenant_id,
+            _summary(_FILAS_CON_PUNTO_DECIMAL),
+            {"gastos": True},
+            context_mappings={_CTX: _MAPEO},
+            context_confirmed={_CTX: True},
+            purchase_cost_decisions={
+                _CTX: PurchaseCostDecision(
+                    context_id=_CTX,
+                    base="monto_incluye",
+                    shared_shipping="por_subtotal",
+                    line_shipping="gasto_aparte",
+                )
+            },
+        )
+        await db_session.flush()
+        productos = (
+            (
+                await db_session.execute(
+                    select(Product).where(Product.tenant_id == sample_tenant.tenant_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        persistido = {
+            p.name: str(Decimal(str(p.unit_cost_ars)).quantize(Decimal("0.01")))
+            for p in productos
+        }
+
+        assert persistido, "el import no creó ningún producto: el test no prueba nada"
+        assert anunciado == persistido
+
+    async def test_muestra_el_valor_como_lo_escribio_el_usuario(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """La otra mitad del arreglo: se CALCULA sobre las filas preparadas, pero
+        se MUESTRA lo que trae el archivo. Si la pantalla mostrara el valor ya
+        normalizado, el usuario no podría comparar lo que escribió con lo que
+        Véktor entendió — que es justamente lo que le pedimos que revise."""
+        archivo = await _crear_archivo(
+            db_session, sample_tenant, _summary(_FILAS_CON_PUNTO_DECIMAL)
+        )
+        body = await _pedir_grupos(
+            client, auth_headers, archivo, decisiones=[_DECISION_REPARTIR]
+        )
+        proveedores = {g["proveedor"] for g in body["sheets"][0]["grupos"]}
+        assert proveedores == {"Distribuidora Sur", "Norte SRL"}
+        productos = {
+            linea["producto"]
+            for grupo in body["sheets"][0]["grupos"]
+            for linea in grupo["lineas"]
+        }
+        assert productos == {
+            "Vela aromatica 200g",
+            "Portarretrato madera",
+            "Difusor bambu",
+        }

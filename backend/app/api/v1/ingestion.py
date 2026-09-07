@@ -1098,10 +1098,18 @@ async def compute_purchase_groups(
         cols, _cf_cols, _cruzados, _ignoradas = (
             _iis._resolve_target_cols(mapeo) if mapeo else ({}, {}, {}, set())
         )
-        # Mismo saneo que `_filas_y_mapeo`: si el preview viera una columna que el
-        # importador ya no mira, mostraría un costo que la importación no va a
-        # producir — y el contrato es que con el mismo plan los dos den lo mismo.
-        filas = _iis._sin_columnas_ignoradas(filas, _ignoradas)
+        # Misma preparación que `_filas_y_mapeo`, por el mismo helper: si el
+        # preview viera una columna que el importador ya no mira —o leyera los
+        # números sin el convenio de su columna— mostraría un costo que la
+        # importación no va a producir, y el contrato es que con el mismo plan los
+        # dos den lo mismo. Con sólo el saneo de ignoradas, un monto "12500.00"
+        # quedaba ambiguo acá y valía 12.500 en el import.
+        # Lo que se MUESTRA sale de las filas originales; lo que se CALCULA, de
+        # las preparadas. El contrato del preview es mostrar el valor tal como lo
+        # escribió el usuario al lado de su interpretación, y para eso hacen falta
+        # las dos versiones.
+        filas_originales = filas
+        filas, _ = _iis.preparar_filas_de_hoja(filas, cols, _ignoradas)
 
         _costos, _ilegibles, plan = _iis._planificar_costos_de_la_hoja(
             ctx_id,
@@ -1113,7 +1121,9 @@ async def compute_purchase_groups(
 
         nombre_col = cols.get("product_name") or cols.get("name")
 
-        def _celda(row: int, col: str | None, _filas: list[dict[str, Any]] = filas) -> str | None:
+        def _celda(
+            row: int, col: str | None, _filas: list[dict[str, Any]] = filas_originales
+        ) -> str | None:
             """El valor CRUDO de una celda, como lo escribió el usuario.
 
             La clave del grupo viene normalizada (minúsculas, sin espacios al
@@ -1135,13 +1145,7 @@ async def compute_purchase_groups(
             lineas = [
                 PurchaseGroupLine(
                     row_index=row,
-                    producto=(
-                        str(filas[row].get(nombre_col)).strip() or None
-                        if nombre_col
-                        and row < len(filas)
-                        and filas[row].get(nombre_col) is not None
-                        else None
-                    ),
+                    producto=_celda(row, nombre_col),
                     subtotal=_monto(costo.base if costo else Decimal("0")),
                     envio_asignado=_monto(
                         costo.shipping_allocated if costo else Decimal("0")

@@ -19,6 +19,7 @@ from app.domain.numeric_parsing import (
     MOTIVO_AMBIGUO,
     MOTIVO_FRACCIONARIA,
     MOTIVO_ILEGIBLE,
+    MOTIVO_INCOMPATIBLE,
     MOTIVO_NEGATIVA,
     MOTIVO_NO_FINITO,
     ConvenioNumerico,
@@ -254,3 +255,65 @@ class TestElDesempateEsOpcionalYExplicito:
     def test_las_cantidades_tambien_lo_exponen(self) -> None:
         assert parsear_cantidad("1.500").motivo == MOTIVO_AMBIGUO
         assert parsear_cantidad("1.500", desempatar_por_forma=True).valor == Decimal("1500")
+
+
+class TestElConvenioNoAutorizaABorrarElSeparador:
+    """Elegir qué separador es cuál no alcanza: la celda tiene que TENER esa forma.
+
+    Con el convenio decidido, la versión anterior borraba el separador de miles
+    sin mirar qué grupos dejaba. Una columna AR (punto = miles) leía `"12.50"`
+    como **1250** y `"1.2.3"` como **123**: montos multiplicados por cien o por
+    mil, en silencio y sin nada que revisar. El convenio dice cómo LEER, no
+    autoriza a reescribir una celda que está en otro formato.
+    """
+
+    def test_un_grupo_de_dos_digitos_no_es_de_miles(self) -> None:
+        resultado = parsear_monto("12.50", _AR)
+        assert resultado.valor is None, "1250 sería cien veces el valor escrito"
+        assert resultado.motivo == MOTIVO_INCOMPATIBLE
+        assert resultado.original == "12.50"
+
+    def test_separadores_sueltos_no_son_un_numero(self) -> None:
+        assert parsear_monto("1.2.3", _AR).motivo == MOTIVO_INCOMPATIBLE
+        assert parsear_monto("12.5000", _AR).motivo == MOTIVO_INCOMPATIBLE
+
+    def test_dos_separadores_decimales_tampoco(self) -> None:
+        assert parsear_monto("12,50,5", _AR).motivo == MOTIVO_INCOMPATIBLE
+
+    def test_incompatible_no_es_ambiguo(self) -> None:
+        """Son dos problemas distintos y la pantalla los explica distinto: en uno
+        la columna no pudo decidir; en el otro decidió y esta celda no encaja."""
+        assert parsear_monto("12.500").motivo == MOTIVO_AMBIGUO
+        assert parsear_monto("12.50", _AR).motivo == MOTIVO_INCOMPATIBLE
+
+    @pytest.mark.parametrize(
+        ("bruto", "convenio", "esperado"),
+        [
+            ("1.234.567", _AR, "1234567"),  # varios grupos de tres: válido
+            ("12,500.00", _US, "12500.00"),
+            ("12.500", _US, "12.500"),  # tres decimales: legítimo
+            ("12.5000", _US, "12.5000"),  # cuatro también: no dice nada de la escala
+            (",50", _AR, "0.50"),  # medio peso escrito sin el cero
+            ("1500,", _AR, "1500"),  # separador final sin decimales
+            ("-1.500", _AR, "-1500"),  # el signo no rompe el grupo
+        ],
+    )
+    def test_lo_que_sigue_siendo_valido(
+        self, bruto: str, convenio: ConvenioNumerico, esperado: str
+    ) -> None:
+        assert parsear_monto(bruto, convenio).valor == Decimal(esperado)
+
+    def test_una_celda_rota_no_le_fija_el_convenio_a_la_columna(self) -> None:
+        """`1.2.3` "parecía" decir que el punto es de miles, y con eso decidía por
+        todas las demás filas. Una celda inválida no es evidencia de nada."""
+        assert inferir_convenio(["1.2.3"]) is None
+        assert inferir_convenio(["12.50,5"]) is None
+
+    def test_la_columna_sana_sigue_decidiendo_con_una_celda_rota_al_lado(self) -> None:
+        convenio = inferir_convenio(["1.234,56", "1.2.3", "8.900"])
+        assert convenio is not None and convenio.decimal == ","
+        assert parsear_monto("8.900", convenio).valor == Decimal("8900")
+        assert parsear_monto("1.2.3", convenio).motivo == MOTIVO_INCOMPATIBLE
+
+    def test_una_cantidad_incompatible_tampoco_se_interpreta(self) -> None:
+        assert parsear_cantidad("1.50", _AR).motivo == MOTIVO_INCOMPATIBLE

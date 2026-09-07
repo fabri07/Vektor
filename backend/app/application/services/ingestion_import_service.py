@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -94,6 +95,10 @@ from app.domain.numeric_parsing import (
     CAMPOS_DE_CANTIDAD,
     CAMPOS_MONETARIOS,
     MOTIVO_AMBIGUO,
+    MOTIVO_FRACCIONARIA,
+    MOTIVO_ILEGIBLE,
+    MOTIVO_INCOMPATIBLE,
+    MOTIVO_NEGATIVA,
     inferir_convenio,
     parsear_cantidad,
     parsear_monto,
@@ -165,6 +170,15 @@ class EmptyImportError(Exception):
         "importar el archivo."
     )
 
+    #: E4 — mismo criterio para las cantidades: el archivo tenía las columnas, y
+    #: lo que no se pudo usar fue lo que decían las celdas de cantidad.
+    CANTIDAD_ILEGIBLE = (
+        "No se importó ninguna fila: las cantidades no se pudieron leer como "
+        "unidades enteras (decimales, negativas o texto). Las filas quedaron "
+        "para revisar en Otros. Corregí la columna de cantidad y volvé a "
+        "importar el archivo."
+    )
+
     def __init__(self, user_message: str | None = None) -> None:
         super().__init__(user_message or self.user_message)
         if user_message is not None:
@@ -231,9 +245,12 @@ def check_nonempty_import(
             row_count=summary.get("row_count"),
             confirmed_fields=confirmed_fields,
             montos_ambiguos=counts.get("montos_ambiguos", 0),
+            filas_sin_cantidad=counts.get("filas_sin_cantidad", 0),
         )
         if counts.get("montos_ambiguos"):
             raise EmptyImportError(EmptyImportError.ESCALA_AMBIGUA)
+        if counts.get("filas_sin_cantidad"):
+            raise EmptyImportError(EmptyImportError.CANTIDAD_ILEGIBLE)
         raise EmptyImportError(EmptyImportError.user_message)
 
 
@@ -2205,6 +2222,59 @@ def _parse_qty(qty_raw: Any) -> int:
     return int(interpretada.valor)
 
 
+#: Qué decirle al usuario en "Otros" cuando la cantidad declarada no se pudo leer.
+#: El texto explica el problema del ARCHIVO, no el nombre interno del motivo.
+_CANTIDAD_ILEGIBLE_LABEL = {
+    MOTIVO_FRACCIONARIA: (
+        "La cantidad tiene decimales y las unidades son enteras: corregila y volvé "
+        "a clasificar la fila"
+    ),
+    MOTIVO_NEGATIVA: (
+        "La cantidad es negativa: si es una devolución, cargala como tal; si es un "
+        "error del archivo, corregilo"
+    ),
+    MOTIVO_AMBIGUO: (
+        "No se pudo decidir la escala de la cantidad: la columna mezcla formatos "
+        "(por ejemplo 1.500 junto a 1.50)"
+    ),
+    MOTIVO_INCOMPATIBLE: (
+        "La cantidad está escrita en otro formato que el resto de su columna"
+    ),
+    MOTIVO_ILEGIBLE: "No se pudo leer la cantidad",
+}
+
+
+def _label_cantidad_ilegible(motivo: str) -> str:
+    return _CANTIDAD_ILEGIBLE_LABEL.get(motivo, _CANTIDAD_ILEGIBLE_LABEL[MOTIVO_ILEGIBLE])
+
+
+def _cantidad_de_venta(qty_raw: Any) -> tuple[int, str | None]:
+    """Unidades de una venta importada, y el motivo si el archivo declaró algo ilegible.
+
+    Los tres lectores de cantidad de ventas ponían piso en 1 con un
+    ``except: return 1``, así que una celda escrita que no se podía leer —``2,5``,
+    ``-3``, ``"dos"``— entraba como **una unidad**, indistinguible de una celda
+    vacía. Y antes de eso ``int(float(...))`` truncaba: ``2.5`` eran 2.
+
+    Ahora se separan los dos casos, que no son el mismo:
+
+    * **celda vacía** → 1 unidad, como siempre. El archivo no dijo nada y una
+      venta sin cantidad es una venta de uno; sin el piso, además, el gate de
+      replay se saltearía la fila entera.
+    * **celda escrita e ilegible** → también se devuelve 1 para que ningún gate
+      se saltee la fila, pero con el motivo: el caller la manda a "Otros" con el
+      original a la vista en vez de importarla con una cantidad inventada.
+    """
+    interpretada = parsear_cantidad(qty_raw)
+    if interpretada.ausente:
+        return 1, None
+    if interpretada.valor is None:
+        return 1, interpretada.motivo
+    # El piso en 1 sobre un 0 declarado se conserva: es la semántica anterior de
+    # estos tres lectores y no la cambia esta corrección.
+    return max(1, int(interpretada.valor)), None
+
+
 async def build_incomplete_product(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -2381,10 +2451,10 @@ async def _apply_purchase_to_stock(
     """
     if expense.product_id is None:
         return
-    try:
-        qty = int(float(str(qty_raw))) if qty_raw not in (None, "", "None", "nan") else 0
-    except (ValueError, TypeError):
-        return
+    # `_parse_qty` aplica la política: sin truncar, con motivo en el log. Devuelve
+    # 0 para vacía, fraccionaria, negativa o ilegible, y acá 0 ya significaba
+    # "no hay cantidad que sumar al stock".
+    qty = _parse_qty(qty_raw)
     if qty <= 0:
         return
     from app.persistence.models.product import Product  # noqa: PLC0415
@@ -3239,6 +3309,27 @@ def _resolve_target_cols(
     return target_to_col, custom_field_cols, cruzados, ignoradas
 
 
+def preparar_filas_de_hoja(
+    filas: list[dict[str, Any]], cols: dict[str, str], ignoradas: set[str]
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, str]]]:
+    """Las filas de una hoja **como las va a leer el importador**, y los motivos
+    de las celdas numéricas que no se pudieron interpretar.
+
+    Dos pasos que siempre van juntos y en este orden: sacar las columnas que el
+    usuario mandó ignorar, y recién entonces resolver el convenio numérico de las
+    que quedan (inferirlo de una columna que el usuario sacó daría un convenio
+    que el import no usa).
+
+    **Existe para que el preview no pueda divergir del confirm.** El endpoint de
+    costos aplicaba sólo el primer paso, así que leía las celdas crudas: con la
+    columna `["12500.00"]`, el importador resuelve el convenio y calcula 12.500,
+    y el preview —sin columna que mirar— la declaraba ambigua y mostraba la
+    compra sin costo. Misma pantalla, mismo plan, dos números.
+    """
+    filas = _sin_columnas_ignoradas(filas, ignoradas)
+    return _normalizar_columnas_numericas(filas, _columnas_numericas_de(filas, cols))
+
+
 def _columnas_numericas_de(
     filas: list[dict[str, Any]], cols: dict[str, str]
 ) -> set[str]:
@@ -3976,20 +4067,27 @@ async def _insert_confirmed_data_impl(
             if campo in CAMPOS_MONETARIOS or campo in CAMPOS_DE_CANTIDAD
         }
         rows, _motivos_numericos = _normalizar_columnas_numericas(rows, _cols_numericas)
-        _ambiguos = sum(
-            1
+        # Los dos motivos cuentan como "no se pudo leer la escala", que es lo que
+        # el resumen del confirm tiene que decir, pero el log los separa porque
+        # son problemas distintos del archivo: en `ambiguo` la columna entera no
+        # alcanza a decidir; en `incompatible` decidió y esa celda está en otro
+        # formato (`"12.50"` entre miles con punto), que antes entraba como 1250.
+        _por_motivo = Counter(
+            motivo
             for por_columna in _motivos_numericos.values()
             for motivo in por_columna.values()
-            if motivo == MOTIVO_AMBIGUO
         )
-        if _ambiguos:
+        _sin_escala = _por_motivo[MOTIVO_AMBIGUO] + _por_motivo[MOTIVO_INCOMPATIBLE]
+        if _sin_escala:
             # Visible en el resumen del confirm: son celdas que NO se importaron
-            # porque su columna no permitía decidir la escala. La fila cae a
-            # "Otros" por el camino de siempre (sin monto), con el original.
-            counts["montos_ambiguos"] = _ambiguos
+            # porque no se pudo decidir su escala. La fila cae a "Otros" por el
+            # camino de siempre (sin monto), con el original.
+            counts["montos_ambiguos"] = _sin_escala
             logger.warning(
-                "ingestion.montos_ambiguos",
-                cantidad=_ambiguos,
+                "ingestion.montos_sin_escala",
+                cantidad=_sin_escala,
+                ambiguos=_por_motivo[MOTIVO_AMBIGUO],
+                incompatibles=_por_motivo[MOTIVO_INCOMPATIBLE],
                 columnas=sorted({c for m in _motivos_numericos.values() for c in m}),
             )
 
@@ -4078,7 +4176,7 @@ async def _insert_confirmed_data_impl(
 
         # F-H3.d.3: mismos lectores para el gate y para la inserción. Repetirlos
         # sería suficiente para que el gate rechace una fila y se importe otra.
-        def _venta_cantidad_plana(row: dict[str, Any]) -> int:
+        def _venta_cantidad_plana(row: dict[str, Any]) -> tuple[int, str | None]:
             # Mismo contrato que `_venta_cantidad` del camino multi-hoja: columna
             # mapeada primero, heurística de headers después, y piso en 1. Sin la
             # heurística, una hoja con "cantidad" sin mapear hacía que el gate
@@ -4086,12 +4184,7 @@ async def _insert_confirmed_data_impl(
             # negativa se saltaba el gate (`qty <= 0` → `continue`) y entraba así,
             # cuando por la otra rama del importador habría quedado en 1.
             qty_raw = row.get(qty_col) if qty_col else _row_val(row, _CANTIDAD_COLS)
-            if qty_raw in (None, "", "None", "nan"):
-                return 1
-            try:
-                return max(1, int(float(str(qty_raw))))
-            except (ValueError, TypeError):
-                return 1
+            return _cantidad_de_venta(qty_raw)
 
         # F-H4: gemelos de `_venta_cantidad_cruda`/`_venta_precio_unitario` del
         # camino multi-hoja. SIN piso en 1 y SIN heurística de headers: derivar el
@@ -4152,7 +4245,7 @@ async def _insert_confirmed_data_impl(
                         key=(_ctx_inline, _idx),
                         product_id=_pid,
                         day=_fecha.date(),
-                        qty=_venta_cantidad_plana(_row),
+                        qty=_venta_cantidad_plana(_row)[0],
                     )
                 )
             # Las compras del propio archivo, con su fecha. Las tres condiciones son
@@ -4337,6 +4430,28 @@ async def _insert_confirmed_data_impl(
                 counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                 _captured_to_otros_rows.add(row_index)
                 _captured_to_otros = True
+            _qty_plana, _qty_motivo = _venta_cantidad_plana(row)
+            if wants_ventas and not _captured_to_otros and _qty_motivo is not None:
+                # E4: el archivo declaró una cantidad que no se puede leer. Antes
+                # caía al piso en 1 y la venta entraba como una unidad, sin nada
+                # que revisar. Va a "Otros" con el original a la vista, igual que
+                # una fila sin fecha — y por el mismo criterio, arrastra a toda la
+                # fila: si no se sabe cuántas unidades son, tampoco se sabe qué
+                # compró ni qué stock mover.
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=headers,
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=_label_cantidad_ilegible(_qty_motivo),
+                    suggested_entity="sale",
+                    row_ref=_source_row_ref(_row_anchor),
+                )
+                counts["filas_sin_cantidad"] = counts.get("filas_sin_cantidad", 0) + 1
+                _captured_to_otros_rows.add(row_index)
+                _captured_to_otros = True
             if wants_ventas and not _captured_to_otros:
                 # F-H4: el monto lo trae el archivo o sale de precio × cantidad.
                 # `venta_col` puede ser None: la hoja entró por la pareja mapeada.
@@ -4347,7 +4462,7 @@ async def _insert_confirmed_data_impl(
                 )
                 amount = _linea.amount
                 if amount:
-                    qty = _venta_cantidad_plana(row)
+                    qty = _qty_plana
 
                     # Notas
                     notes_raw = row.get(notes_col) if notes_col else None
@@ -4905,15 +5020,10 @@ async def _insert_confirmed_data_impl(
                 price = _parse_amount(row.get(precio_col)) if precio_col else None
                 cost = _parse_amount(row.get(costo_col)) if costo_col else None
                 list_price = _parse_amount(row.get(lista_col)) if lista_col else None
-                try:
-                    stock_raw = row.get(stock_col) if stock_col else None
-                    stock_val = (
-                        int(float(str(stock_raw)))
-                        if stock_raw not in (None, "", "None", "nan")
-                        else 0
-                    )
-                except (ValueError, TypeError):
-                    stock_val = 0
+                # Sin truncar: un stock `2.5` no son 2 unidades. `_parse_qty`
+                # devuelve 0 con el motivo en el log, que es lo que ya significaba
+                # una celda de stock ilegible en este camino.
+                stock_val = _parse_qty(row.get(stock_col) if stock_col else None)
                 sku_raw = row.get(sku_col) if sku_col else None
                 sku = _sku_del_archivo(sku_raw)
                 # F2-T5: código de barras de la fila (si el archivo trae la columna).
@@ -5785,14 +5895,8 @@ async def _insert_multisheet_data(
         raw = _val(row, cols.get("transaction_date") or cols.get("expense_date"), _FECHA_COLS)
         return _parse_date(raw) if raw is not None else None
 
-    def _venta_cantidad(row: dict[str, Any], cols: dict[str, str]) -> int:
-        qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
-        if qty_raw in (None, "", "None", "nan"):
-            return 1
-        try:
-            return max(1, int(float(str(qty_raw))))
-        except (ValueError, TypeError):
-            return 1
+    def _venta_cantidad(row: dict[str, Any], cols: dict[str, str]) -> tuple[int, str | None]:
+        return _cantidad_de_venta(_val(row, cols.get("quantity"), _CANTIDAD_COLS))
 
     # F-H4: los dos datos que habilitan calcular el monto. Sólo por MAPEO
     # EXPLÍCITO —nada de `_val`, que cae a la heurística de headers—: derivar el
@@ -5904,7 +6008,23 @@ async def _insert_multisheet_data(
                 row_ref=row_ref,
             )
             return True
-        qty = _venta_cantidad(row, cols)
+        qty, _qty_motivo = _venta_cantidad(row, cols)
+        if _qty_motivo is not None:
+            # E4: gemelo del camino plano. Una cantidad declarada e ilegible no se
+            # convierte en 1 — la fila va a "Otros" con el original.
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,  # sin headers de hoja en este scope
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=_label_cantidad_ilegible(_qty_motivo),
+                suggested_entity="sale",
+                row_ref=row_ref,
+            )
+            counts["filas_sin_cantidad"] = counts.get("filas_sin_cantidad", 0) + 1
+            return True
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         notes = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
         # Canónico: antes se guardaba el texto crudo del archivo ("efectivo",
@@ -6625,15 +6745,8 @@ async def _insert_multisheet_data(
         # existe y queda NULL en vez de adivinarse desde un header parecido.
         _list_mapped = cols.get("list_price_ars")
         list_price = _parse_amount(row.get(_list_mapped)) if _list_mapped else None
-        try:
-            stock_raw = _val(row, cols.get("stock_units"), _STOCK_COLS)
-            stock_val = (
-                int(float(str(stock_raw)))
-                if stock_raw not in (None, "", "None", "nan")
-                else 0
-            )
-        except (ValueError, TypeError):
-            stock_val = 0
+        # Sin truncar, igual que el otro lector de catálogo.
+        stock_val = _parse_qty(_val(row, cols.get("stock_units"), _STOCK_COLS))
         sku = _sku_del_archivo(_val(row, cols.get("sku"), _SKU_COLS))
         # F2-T5: código de barras (columna mapeada o detección por keyword).
         barcode = _clean_str(_val(row, cols.get("barcode"), _BARCODE_COLS), 64)
@@ -7211,15 +7324,11 @@ async def _insert_multisheet_data(
             # por el que pasan las filas de una hoja — el gate de replay y el loop
             # de importación comparten esta función justamente para no divergir, así
             # que las dos ven la fila con la misma decisión aplicada.
-            _rows = _sin_columnas_ignoradas(_rows, _ignoradas)
-            # E4: mismo criterio que el camino plano — las columnas numéricas se
-            # interpretan con la columna entera a la vista, acá, y no celda por
-            # celda en cada uno de los ~35 lectores. Va después del saneo de
-            # ignoradas para no inferir el convenio de una columna que el usuario
-            # sacó.
-            _rows, _ = _normalizar_columnas_numericas(
-                _rows, _columnas_numericas_de(_rows, _cols)
-            )
+            # E4: las columnas numéricas se interpretan con la columna entera a
+            # la vista, acá, y no celda por celda en cada uno de los ~35 lectores.
+            # El mismo helper lo consume el preview de costos, para que la
+            # pantalla no pueda mostrar un número que el import no va a producir.
+            _rows, _ = preparar_filas_de_hoja(_rows, _cols, _ignoradas)
             # Bloque 2: "supplier:name" en un contexto de producto no se descarta
             # — `_add_product` lo aplica (gateado por rollout). El resto de los
             # cruzados sigue contando como descartado, F-D no está entregada.
@@ -7275,7 +7384,7 @@ async def _insert_multisheet_data(
                             key=(_cid, _idx),
                             product_id=_pid,
                             day=_fecha.date(),
-                            qty=_venta_cantidad(_row, _cols),
+                            qty=_venta_cantidad(_row, _cols)[0],
                             sheet_rank=_rank,
                         )
                     )
@@ -7797,13 +7906,14 @@ async def bulk_import_unclassified(
         )
 
         if rec.suggested_entity == "sale":
-            qty = 1
-            qty_raw = _row_val(row, _CANTIDAD_COLS)
-            if qty_raw not in (None, "", "None", "nan"):
-                try:
-                    qty = max(1, int(float(str(qty_raw))))
-                except (ValueError, TypeError):
-                    qty = 1
+            qty, _qty_motivo = _cantidad_de_venta(_row_val(row, _CANTIDAD_COLS))
+            if _qty_motivo is not None:
+                # E4: misma regla que el import. La fila ya está en "Otros"; una
+                # cantidad ilegible la deja donde está, para completarla a mano,
+                # en vez de importarla como una unidad. `needs_manual` es el
+                # contador que la UI ya usa para "exige atención del usuario".
+                counts["needs_manual"] += 1
+                continue
             session.add(
                 SaleEntry(
                     tenant_id=tenant_id,
