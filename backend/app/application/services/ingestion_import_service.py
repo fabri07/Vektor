@@ -64,7 +64,13 @@ from app.config.ingestion_schema_decisions_rollout import (
 from app.config.product_supplier_links_rollout import product_supplier_links_enabled_for
 from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
-from app.domain.date_parsing import parse_business_date, parse_business_datetime
+from app.domain.date_parsing import (
+    CAMPOS_DE_FECHA,
+    inferir_convenio_de_fecha,
+    parse_business_date,
+    parse_business_datetime,
+    parsear_fecha_de_columna,
+)
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -3309,6 +3315,68 @@ def _resolve_target_cols(
     return target_to_col, custom_field_cols, cruzados, ignoradas
 
 
+def _columnas_de_fecha_de(filas: list[dict[str, Any]], cols: dict[str, str]) -> set[str]:
+    """Qué columnas de una hoja se van a leer como fecha (E4).
+
+    Mismas dos fuentes que ``_columnas_numericas_de``, por la misma razón: lo que
+    el usuario mapeó a un campo de fecha, y lo que la heurística por nombre va a
+    encontrar igual en un archivo sin mapeo.
+    """
+    fechas = {col for campo, col in cols.items() if campo in CAMPOS_DE_FECHA}
+    if not filas:
+        return fechas
+    headers = list(filas[0].keys())
+    encontrada = _find_col(headers, _FECHA_COLS)
+    if encontrada:
+        fechas.add(encontrada)
+    return fechas
+
+
+def _normalizar_columnas_de_fecha(
+    rows: list[dict[str, Any]], columnas: set[str]
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, str]]]:
+    """Interpreta de una vez las columnas que se van a leer como fecha (E4).
+
+    Gemelo de ``_normalizar_columnas_numericas``, y por el mismo motivo: el orden
+    día/mes de una fecha corta no se puede decidir mirando una celda. En una
+    columna exportada en formato US, ``"04/13/2026"`` sólo se lee mm/dd, y eso
+    revela cómo hay que leer ``"03/04/2026"`` — que por sí sola es válida en los
+    dos órdenes y se leía siempre como 3 de abril.
+
+    Las celdas resueltas quedan como ``datetime`` NATIVO, así que los ~15 lectores
+    que llaman a ``_parse_date`` las dejan pasar tal cual sin cambiar una línea.
+    Una celda que la columna no alcanza a resolver se deja COMO ESTABA con su
+    motivo aparte: el importador la ve como lo que es —una fecha que no pudo
+    leer— y la fila termina en "Otros", que es lo que F6 ya hace con una fecha
+    ilegible (nunca "hoy" en silencio, invariante 2d).
+    """
+    if not columnas or not rows:
+        return rows, {}
+
+    convenios = {
+        col: inferir_convenio_de_fecha([fila.get(col) for fila in rows])
+        for col in columnas
+        if any(col in fila for fila in rows)
+    }
+    if not convenios:
+        return rows, {}
+
+    motivos: dict[int, dict[str, str]] = {}
+    normalizadas: list[dict[str, Any]] = []
+    for indice, fila in enumerate(rows):
+        copia = dict(fila)
+        for col, convenio in convenios.items():
+            if col not in copia:
+                continue
+            interpretada = parsear_fecha_de_columna(copia[col], convenio)
+            if interpretada.valor is not None:
+                copia[col] = interpretada.valor
+            elif interpretada.motivo is not None:
+                motivos.setdefault(indice, {})[col] = interpretada.motivo
+        normalizadas.append(copia)
+    return normalizadas, motivos
+
+
 def preparar_filas_de_hoja(
     filas: list[dict[str, Any]], cols: dict[str, str], ignoradas: set[str]
 ) -> tuple[list[dict[str, Any]], dict[int, dict[str, str]]]:
@@ -3327,7 +3395,15 @@ def preparar_filas_de_hoja(
     compra sin costo. Misma pantalla, mismo plan, dos números.
     """
     filas = _sin_columnas_ignoradas(filas, ignoradas)
-    return _normalizar_columnas_numericas(filas, _columnas_numericas_de(filas, cols))
+    filas, motivos = _normalizar_columnas_numericas(
+        filas, _columnas_numericas_de(filas, cols)
+    )
+    filas, motivos_fecha = _normalizar_columnas_de_fecha(
+        filas, _columnas_de_fecha_de(filas, cols)
+    )
+    for indice, por_columna in motivos_fecha.items():
+        motivos.setdefault(indice, {}).update(por_columna)
+    return filas, motivos
 
 
 def _columnas_numericas_de(
@@ -4067,6 +4143,12 @@ async def _insert_confirmed_data_impl(
             if campo in CAMPOS_MONETARIOS or campo in CAMPOS_DE_CANTIDAD
         }
         rows, _motivos_numericos = _normalizar_columnas_numericas(rows, _cols_numericas)
+        # E4: mismo criterio para las fechas — el orden día/mes lo decide la
+        # columna, no la celda. Va después de los números porque son columnas
+        # disjuntas y el orden entre las dos pasadas no cambia el resultado.
+        rows, _ = _normalizar_columnas_de_fecha(
+            rows, _columnas_de_fecha_de(rows, target_to_col) | ({fecha_col} if fecha_col else set())
+        )
         # Los dos motivos cuentan como "no se pudo leer la escala", que es lo que
         # el resumen del confirm tiene que decir, pero el log los separa porque
         # son problemas distintos del archivo: en `ambiguo` la columna entera no

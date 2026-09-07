@@ -1,9 +1,9 @@
-"""E4 — qué termina en la base cuando el archivo trae números difíciles.
+"""E4 — qué termina en la base cuando el archivo es difícil de interpretar.
 
 Por qué e2e y no unitario
 -------------------------
-La política numérica vive en ``domain/numeric_parsing`` y su corpus está en
-``app/tests/domain/test_numeric_parsing.py``. Acá se prueba otra cosa: que el
+Las políticas viven en ``domain/numeric_parsing`` y ``domain/date_parsing``, y
+sus corpus están en ``app/tests/domain/``. Acá se prueba otra cosa: que el
 importador la **use**. Los tres defectos que motivan estos casos pasaban con la
 política ya escrita y correcta:
 
@@ -13,7 +13,9 @@ política ya escrita y correcta:
 * una cantidad ``2.5`` se truncaba a **2** en seis lectores que seguían haciendo
   ``int(float(str(...)))`` aunque ``_parse_qty`` ya estuviera arreglado;
 * el camino legacy —summaries sin ``mapping_contexts``— entregaba la fila CRUDA,
-  así que ni el ``ignore`` del usuario ni el convenio de columna lo alcanzaban.
+  así que ni el ``ignore`` del usuario ni el convenio de columna lo alcanzaban;
+* una planilla exportada en formato US entraba con las fechas cambiadas de mes,
+  porque el orden día/mes se resolvía celda por celda con la convención AR.
 
 Ninguno se ve desde la función: se ven en la fila guardada. Por eso el `.xlsx` lo
 arma openpyxl, lo parsea el parser de producción, el confirm entra por HTTP y lo
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import io
 import uuid
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -373,3 +376,94 @@ async def test_el_camino_legacy_respeta_el_ignore_y_el_convenio(
         f"los montos se leyeron sin el convenio de su columna: "
         f"{[str(v.amount) for v in ventas]}"
     )
+
+
+async def test_el_orden_dia_mes_lo_decide_la_columna_no_la_celda(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    _confirmar: Any,
+) -> None:
+    """Una planilla exportada en formato US entraba con las fechas cambiadas.
+
+    `04/13/2026` sólo se puede leer mm/dd —no hay mes 13—, y eso dice cómo hay que
+    leer `03/04/2026` en esa MISMA columna: 4 de marzo. El importador la leía como
+    3 de abril, porque resolvía cada celda por su cuenta con la convención
+    argentina. El error es de un mes entero, no rompe nada visible y termina en
+    los cortes por período de todo el producto.
+    """
+    record = await _subir(
+        db_session,
+        sample_tenant,
+        _libro(
+            [
+                ["04/13/2026", _PRODUCTO, 1, 8400, _CLIENTE, "efectivo"],
+                ["03/04/2026", _PRODUCTO, 1, 6300, _CLIENTE, "efectivo"],
+            ],
+            _HEADERS,
+        ),
+        "fechas_us.xlsx",
+    )
+    resp = await _confirmar(record.id, _MAPEO_VENTAS)
+    assert resp.status_code == 200, resp.text
+
+    ventas = await _ventas(db_session, sample_tenant)
+    fechas = {v.amount: v.transaction_date.date() for v in ventas}
+    assert fechas == {
+        Decimal("8400"): date(2026, 4, 13),
+        Decimal("6300"): date(2026, 3, 4),
+    }, f"la fecha ambigua se leyó con el orden equivocado: {fechas}"
+
+
+async def test_una_planilla_argentina_sigue_leyendose_igual(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    _confirmar: Any,
+) -> None:
+    """La contracara, que es la que hace peligroso el arreglo: sin señal en la
+    columna manda la convención argentina, como siempre."""
+    record = await _subir(
+        db_session,
+        sample_tenant,
+        _libro(
+            [
+                ["13/04/2026", _PRODUCTO, 1, 8400, _CLIENTE, "efectivo"],
+                ["03/04/2026", _PRODUCTO, 1, 6300, _CLIENTE, "efectivo"],
+            ],
+            _HEADERS,
+        ),
+        "fechas_ar.xlsx",
+    )
+    resp = await _confirmar(record.id, _MAPEO_VENTAS)
+    assert resp.status_code == 200, resp.text
+
+    ventas = await _ventas(db_session, sample_tenant)
+    fechas = {v.amount: v.transaction_date.date() for v in ventas}
+    assert fechas == {
+        Decimal("8400"): date(2026, 4, 13),
+        Decimal("6300"): date(2026, 4, 3),
+    }
+
+
+async def test_un_serial_de_excel_ya_no_manda_la_fila_a_revision(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    _confirmar: Any,
+) -> None:
+    """Una celda de fecha sin formato viaja como número de días desde 1899-12-30.
+
+    Quedaba ilegible, así que la fila iba a "Otros" por "sin fecha reconocible" —
+    correcto en el sentido de no inventar nada, y aun así una pérdida evitable:
+    la fecha estaba ahí, escrita como la escribe Excel.
+    """
+    record = await _subir(
+        db_session,
+        sample_tenant,
+        _libro([[45123, _PRODUCTO, 1, 8400, _CLIENTE, "efectivo"]], _HEADERS),
+        "serial.xlsx",
+    )
+    resp = await _confirmar(record.id, _MAPEO_VENTAS)
+    assert resp.status_code == 200, resp.text
+
+    ventas = await _ventas(db_session, sample_tenant)
+    assert [v.transaction_date.date() for v in ventas] == [date(2023, 7, 16)]
+    assert await _otros(db_session, sample_tenant) == []
