@@ -487,6 +487,24 @@ async def upload_file(
             file_id=saved.id, status="PROCESSING", duplicate_of=dup_of, warning=dup_warning
         )
 
+    # H05: COMMIT ANTES DE PUBLICAR. `repo.save()` sólo hace flush y el commit lo
+    # hacía `get_db_session` al cerrar, o sea DESPUÉS de este `.delay()`: el worker
+    # abre su propia sesión, así que podía salir a buscar un `UploadedFile` que su
+    # transacción todavía no ve y morir con "not found" — y como estas tasks no
+    # reintentaban (H06), el archivo quedaba en PENDING para siempre. Peor todavía
+    # si el request hacía rollback después: quedaba un mensaje apuntando a una fila
+    # que nunca existió.
+    #
+    # Después del commit el archivo ya está en PENDING, que es un estado
+    # RECUPERABLE: si la publicación falla, `reprocess_file` lo reencola. La
+    # ventana entre el commit y la publicación no se cierra acá — eso es la cola
+    # persistida de F5 (E6c); lo que se cierra es la carrera, que es lo que hoy
+    # rompe.
+    #
+    # El mismo criterio ya estaba aplicado en el apply de la relectura ("Commit
+    # ANTES de encolar para que el worker vea el run") y en `score_trigger_service`.
+    await session.commit()
+
     # Enqueue parsing job — fall back to sync processing if Celery/Redis
     # is unavailable (beta: single Railway service without workers).
     job = _pick_job(detected_mime)
@@ -1430,6 +1448,11 @@ async def reprocess_file(
     if get_settings().USE_LOCAL_FALLBACK:
         await _process_file_sync(record, session)
     else:
+        # H05, igual que en el upload: el worker tiene que poder VER el PENDING
+        # que se acaba de escribir. Acá importa todavía más — el claim del worker
+        # sólo toma archivos en PENDING, así que si la transición no está
+        # commiteada, la task no encuentra nada que reclamar y sale sin trabajar.
+        await session.commit()
         job = _pick_job(record.content_type)
         try:
             job.delay(str(record.id), str(tenant.tenant_id))

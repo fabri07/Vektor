@@ -4481,3 +4481,48 @@ class TestInventoryReplayEndpoint:
         assert [(p["saldo_inicial"], p["saldo_final"]) for p in data["impacto"]] == [(10, 6)]
         await db_session.refresh(producto)
         assert producto.stock_units == 10
+
+
+class TestPublicacionDespuesDelCommit:
+    """E3 (H05) — el worker no puede salir a buscar un archivo que todavía no existe.
+
+    `repo.save()` sólo hace flush; el commit lo hacía `get_db_session` al cerrar,
+    o sea DESPUÉS del `.delay()`. El worker abre su PROPIA sesión, así que podía
+    consultar un `UploadedFile` que su transacción no veía y morir con "not
+    found" — y como estas tasks no reintentaban, el archivo quedaba en PENDING
+    para siempre. Si además el request hacía rollback, quedaba un mensaje
+    apuntando a una fila que nunca existió.
+
+    Lo que se afirma acá es el ORDEN, que es la causa. La consecuencia
+    —visibilidad entre dos conexiones— no se puede ejercitar con SQLite en
+    memoria, donde todas comparten la misma y el bug es invisible.
+    """
+
+    async def test_upload_commitea_antes_de_encolar(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.api.v1 import ingestion as ingestion_api
+
+        observado: dict[str, bool] = {}
+
+        class _JobEspia:
+            def delay(self, *_args: Any, **_kwargs: Any) -> None:
+                # En el momento de publicar, ¿queda transacción abierta? Con el
+                # commit hecho, no: es la señal de que el worker ya podría leerlo.
+                observado["transaccion_abierta"] = db_session.in_transaction()
+
+        monkeypatch.setattr(ingestion_api, "_pick_job", lambda _mime: _JobEspia())
+
+        resp = await client.post(
+            "/api/v1/ingestion/upload",
+            headers=auth_headers,
+            files={"file": ("ventas.csv", b"fecha,monto\n2024-03-01,100\n", "text/csv")},
+        )
+        assert resp.status_code in (200, 201), resp.text
+        assert observado.get("transaccion_abierta") is False, (
+            "se publicó el trabajo con la transacción todavía abierta"
+        )
