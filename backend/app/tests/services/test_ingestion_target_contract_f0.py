@@ -218,7 +218,7 @@ class TestResolucionDeColumnas:
         primera en silencio: el valor guardado pasa a depender del orden de las
         columnas del Excel. Es el incidente ASTERIA en versión campo propio.
         """
-        _, custom, _ = _resolve_target_cols(
+        _, custom, _, _ = _resolve_target_cols(
             {
                 "Observaciones": "custom_field:obs",
                 "Obs.": "custom_field:obs",
@@ -227,15 +227,27 @@ class TestResolucionDeColumnas:
         assert custom["obs"] == "Observaciones"
 
     def test_la_rama_canonica_sigue_siendo_first_wins(self) -> None:
-        canonicos, _, _ = _resolve_target_cols(
+        canonicos, _, _, _ = _resolve_target_cols(
             {"Total": "amount", "Importe": "amount"}
         )
         assert canonicos["amount"] == "Total"
 
     def test_ignorar_no_ocupa_ningun_campo(self) -> None:
-        canonicos, custom, _ = _resolve_target_cols({"Notas internas": "ignore"})
+        canonicos, custom, _, ignoradas = _resolve_target_cols({"Notas internas": "ignore"})
         assert canonicos == {}
         assert custom == {}
+        # E2: no ocupa campo, pero la decisión NO se pierde. Este test afirmaba
+        # sólo las dos líneas de arriba, y eso era exactamente el bug: el
+        # `continue` que las hacía pasar devolvía la columna al régimen heurístico.
+        assert ignoradas == {"Notas internas"}
+
+    def test_una_columna_sin_revisar_no_es_una_ignorada(self) -> None:
+        """`none` e `ignore` no se colapsan: uno es una columna que nadie tocó y
+        el otro una decisión tomada. La heurística sigue pudiendo mirar la
+        primera — bloquearla rompería el flujo más común, que es aceptar el
+        mapeo tal como vino."""
+        _, _, _, ignoradas = _resolve_target_cols({"Notas internas": "", "Otra": "ignore"})
+        assert ignoradas == {"Otra"}
 
 
 class TestLosCruzadosDejanRastro:
@@ -250,7 +262,7 @@ class TestLosCruzadosDejanRastro:
     """
 
     def test_un_target_cruzado_se_descarta_pero_se_reporta(self) -> None:
-        canonicos, custom, cruzados = _resolve_target_cols(
+        canonicos, custom, cruzados, _ = _resolve_target_cols(
             {"Costo": "product:unit_cost_ars", "Total": "amount"}
         )
 
@@ -262,5 +274,5 @@ class TestLosCruzadosDejanRastro:
 
     def test_sin_cruzados_no_hay_nada_que_reportar(self) -> None:
         """Control: si esto no fuera vacío, el aviso saldría en todo import."""
-        _, _, cruzados = _resolve_target_cols({"Total": "amount"})
+        _, _, cruzados, _ = _resolve_target_cols({"Total": "amount"})
         assert cruzados == {}

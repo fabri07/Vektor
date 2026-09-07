@@ -2364,6 +2364,19 @@ def _draft_effective_mappings(
     ``ingestion_import_service``) — no hace falta que el borrador cubra el
     mapeo completo de todas las hojas para que esto sea correcto.
 
+    **Pero eso vale para una columna SIN REVISAR, no para una ignorada** (E2).
+    Un `ignore` no es "el borrador no la menciona": es una decisión, y filtrarla
+    acá la devolvía al régimen heurístico — el mismo defecto que H01, entrando
+    por la relectura. Los `ignore` se PASAN; `_resolve_target_cols` los junta y
+    el importador saca esas columnas de las filas. Sólo se filtra ``none``, que
+    es la columna que nadie tocó.
+
+    Y ``context_entities`` se lee SIEMPRE, aunque no venga ni un mapeo: son dos
+    decisiones distintas del usuario. Antes esta función salía con
+    ``(None, None)`` en cuanto ``column_mappings`` estaba vacío, así que
+    reasignar una hoja a otra entidad —sin tocar ninguna columna— no llegaba al
+    reimport y la hoja se importaba con la entidad que había adivinado el parser.
+
     Una columna DROPEADA por una decisión de riesgo (``drop_column``) no se
     incluye — ``apply_column_risk_decisions`` ya la sacó del summary que se
     va a reimportar, mapearla apuntaría a una columna que ya no está.
@@ -2372,11 +2385,12 @@ def _draft_effective_mappings(
     misma convención que ``_dropped_pairs``/``reread_preview`` usan para el
     archivo de una sola hoja.
 
-    ``(None, None)`` si el borrador no trae mapeo — el caller cae al criterio
-    heurístico de siempre, sin cambios."""
+    ``(None, None)`` si el borrador no trae ni mapeo ni entidades — ahí sí el
+    caller cae al criterio heurístico de siempre, sin cambios."""
     mappings = (draft or {}).get("column_mappings") or []
+    context_entity = dict((draft or {}).get("context_entities") or {}) or None
     if not mappings:
-        return None, None
+        return None, context_entity
     dropped = {
         (d.get("context_id") or "table", d.get("source_column"))
         for d in (draft or {}).get("column_risk_decisions") or []
@@ -2385,13 +2399,14 @@ def _draft_effective_mappings(
     by_context: dict[str, dict[str, str]] = defaultdict(dict)
     for m in mappings:
         target = m.get("target_field")
-        if not target or parse_target(target).kind in ("ignore", "none"):
+        # `ignore` SÍ pasa (es una decisión); `none` no (es una columna sin
+        # revisar, y bloquear la heurística ahí trabaría el flujo más común).
+        if not target or parse_target(target).kind == "none":
             continue
         context_id = m.get("context_id") or "table"
         if (context_id, m.get("source_column")) in dropped:
             continue
         by_context[context_id][m["source_column"]] = target
-    context_entity = dict((draft or {}).get("context_entities") or {}) or None
     return (dict(by_context) or None), context_entity
 
 
