@@ -7675,8 +7675,27 @@ async def _insert_multisheet_data(
                 await _cobrar_envios_de_la_hoja(ctx_id, rows, cols, _grupos_de_compra)
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
+        #
+        # E2/E4: este camino entregaba la fila CRUDA a los lectores. Una columna
+        # que el usuario mandó ignorar seguía ahí —`_row_val` la encontraba por
+        # keyword y una `cantidad` ignorada volvía a decidir las unidades— y los
+        # números se leían celda por celda, sin el convenio de su columna. Los
+        # otros dos caminos preparan las filas antes de leerlas; éste no, y esa
+        # diferencia no la justifica nada: la decisión del usuario no depende del
+        # formato del summary. Los lectores siguen recibiendo `{}` como mapeo (en
+        # legacy resuelven por keyword); lo que cambia es la fila que ven.
+        _cols_legacy, _, _, _ign_legacy = (
+            _resolve_target_cols(column_mappings) if column_mappings else ({}, {}, {}, set())
+        )
+
+        def _filas_legacy(bucket: str) -> list[dict[str, Any]]:
+            filas, _ = preparar_filas_de_hoja(
+                summary.get(bucket, []), _cols_legacy, _ign_legacy
+            )
+            return filas
+
         if confirmed_fields.get("ventas"):
-            for _i, row in enumerate(summary.get("ventas_detectadas", [])):
+            for _i, row in enumerate(_filas_legacy("ventas_detectadas")):
                 # Chequeo READ-ONLY; registrar recién después y solo si insertó.
                 _v_anchor = (
                     _import_row_anchor(tenant_id, uploaded_file_id, "ventas", _i)
@@ -7697,7 +7716,7 @@ async def _insert_multisheet_data(
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
         if confirmed_fields.get("gastos"):
-            for _j, row in enumerate(summary.get("gastos_detectados", [])):
+            for _j, row in enumerate(_filas_legacy("gastos_detectados")):
                 _g_anchor = (
                     _import_row_anchor(tenant_id, uploaded_file_id, "gastos", _j)
                     if uploaded_file_id is not None
@@ -7715,7 +7734,7 @@ async def _insert_multisheet_data(
                         session, tenant_id, _g_anchor, seen_fp
                     )
         if confirmed_fields.get("productos"):
-            for _k, row in enumerate(summary.get("stock_detectado", [])):
+            for _k, row in enumerate(_filas_legacy("stock_detectado")):
                 _p_ref = (
                     _source_row_ref(
                         _import_row_anchor(tenant_id, uploaded_file_id, "productos", _k)

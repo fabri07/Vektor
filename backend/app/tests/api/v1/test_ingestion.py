@@ -4121,6 +4121,145 @@ class TestRereadPreviewSessionEndpoint:
         assert third.status_code == 200
         assert third.json()["draft_version"] == 1
 
+    async def test_una_correccion_parcial_no_borra_el_mapeo_ya_guardado(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """E2 — guardar sólo la inclusión de una hoja borraba el mapeo anterior.
+
+        El borrador se reescribía entero desde el body, así que cuando E2 amplió
+        la condición para que una corrección sin columnas también se persistiera,
+        cada actualización parcial pasó a ser un borrado: mandar únicamente
+        ``context_confirmed`` devolvía 200 y dejaba ``column_mappings: []``. La
+        corrección de mapeo que el usuario había hecho un minuto antes —incluida
+        una columna marcada `ignore`, que es una decisión, no una ausencia—
+        desaparecía sin aviso, y el apply se ataba a un borrador vacío.
+
+        El campo omitido y el vaciado a propósito son indistinguibles por el
+        valor: el default de Pydantic para una lista ausente es la misma lista
+        vacía que manda un cliente que borró todo. Los distingue
+        ``model_fields_set``, y por eso se prueban los dos casos acá.
+        """
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid8/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        mapeos = [
+            {"source_column": "fecha", "target_field": "transaction_date"},
+            {"source_column": "monto", "target_field": "amount"},
+            {"source_column": "producto", "target_field": "product_name"},
+            {"source_column": "proveedor", "target_field": "ignore"},
+        ]
+
+        with _patch_s3_for_reread():
+            primero = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            run_id = primero.json()["run_id"]
+
+            guardado = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"column_mappings": mapeos},
+            )
+            assert guardado.status_code == 200, guardado.text
+            assert guardado.json()["draft_version"] == 1
+
+            # Segunda corrección: SOLO la inclusión de la hoja. El cliente no
+            # vuelve a mandar el mapeo porque no lo tocó.
+            parcial = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"context_confirmed": {"table": True}},
+            )
+            assert parcial.status_code == 200, parcial.text
+            assert parcial.json()["draft_version"] == 2
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["context_confirmed"] == {"table": True}
+        assert [
+            (m["source_column"], m["target_field"]) for m in draft["column_mappings"]
+        ] == [(m["source_column"], m["target_field"]) for m in mapeos], (
+            f"la corrección parcial borró el mapeo guardado: {draft['column_mappings']}"
+        )
+
+    async def test_un_mapeo_vaciado_a_proposito_si_se_guarda_vacio(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """La contracara, y la razón de mirar ``model_fields_set`` en vez del valor:
+        un cliente que manda ``column_mappings: []`` está borrando el mapeo a
+        propósito, y eso tiene que quedar guardado. Conservarlo "porque venía
+        vacío" haría imposible deshacer un mapeo."""
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid9/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            primero = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            run_id = primero.json()["run_id"]
+
+            await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={
+                    "column_mappings": [
+                        {"source_column": "monto", "target_field": "amount"}
+                    ]
+                },
+            )
+            vaciado = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"column_mappings": [], "context_confirmed": {"table": True}},
+            )
+            assert vaciado.status_code == 200, vaciado.text
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["column_mappings"] == [], (
+            f"el vaciado explícito no se respetó: {draft['column_mappings']}"
+        )
+
     async def test_cancel_session_then_apply_rejects_stale_session(
         self,
         client: AsyncClient,

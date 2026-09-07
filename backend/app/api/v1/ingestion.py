@@ -3603,6 +3603,46 @@ async def _barrer_relecturas_colgadas(session: AsyncSession) -> None:
         logger.warning("reread.sweep.inline_failed", error=str(exc))
 
 
+#: Campo del body ↔ clave con la que se guarda en ``details_json["draft"]``.
+#: `context_entity` se guarda ya resuelto (`context_entities`), que es como lo
+#: consume el apply — ver `reread_service.draft_to_confirm_args`.
+_CAMPOS_DEL_BORRADOR = {
+    "column_mappings": "column_mappings",
+    "context_entity": "context_entities",
+    "confirmed_fields": "confirmed_fields",
+    "context_confirmed": "context_confirmed",
+    "column_risk_decisions": "column_risk_decisions",
+    "stock_treatment": "stock_treatment",
+    "master_column_mappings": "master_column_mappings",
+}
+
+
+def _fusionar_con_borrador(
+    body: RereadPreviewRequest, previo: dict[str, Any]
+) -> RereadPreviewRequest:
+    """Completa el body con lo que el cliente NO mandó, tomándolo del borrador guardado.
+
+    El borrador se reescribía entero desde el body. Cuando E2 amplió la condición
+    para que una corrección que no toca columnas también se persistiera, eso
+    convirtió cada actualización parcial en un borrado: mandar sólo
+    ``context_confirmed`` devolvía 200 y dejaba ``column_mappings: []``, así que la
+    corrección de mapeo guardada un minuto antes desaparecía sin aviso y el apply
+    se ataba a un borrador vacío.
+
+    La distinción que hace falta es "campo omitido" vs "vaciado a propósito", y no
+    la da el valor: el default de Pydantic para una lista ausente es la misma lista
+    vacía que manda un cliente que borró todo. La da ``model_fields_set``, que dice
+    qué claves venían en el JSON. Un campo omitido conserva lo guardado; uno
+    presente manda, aunque venga vacío.
+    """
+    puesto = body.model_fields_set
+    datos = body.model_dump(mode="json")
+    for campo, clave in _CAMPOS_DEL_BORRADOR.items():
+        if campo not in puesto and clave in previo:
+            datos[campo] = previo[clave]
+    return RereadPreviewRequest.model_validate(datos)
+
+
 @router.post(
     "/files/{file_id}/reread/preview",
     response_model=RereadPreviewResponse,
@@ -3655,6 +3695,10 @@ async def reread_preview(
         or body.master_column_mappings
     )
     if body is not None and _trae_decisiones:
+        # Lo que se valida es lo que se va a guardar, y lo que se va a guardar
+        # incluye lo que el cliente no mandó en ESTA llamada pero ya había
+        # corregido antes. Se fusiona primero, se valida después.
+        body = _fusionar_con_borrador(body, (run.details_json or {}).get("draft") or {})
         # Mismo criterio que el confirm (F8b Task 2): validar ANTES de
         # persistir — una decisión inválida se rechaza upfront, nunca a mitad
         # de una corrección ya guardada.

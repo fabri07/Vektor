@@ -4,7 +4,7 @@ Por qué e2e y no unitario
 -------------------------
 La política numérica vive en ``domain/numeric_parsing`` y su corpus está en
 ``app/tests/domain/test_numeric_parsing.py``. Acá se prueba otra cosa: que el
-importador la **use**. Los dos defectos que motivan estos casos pasaban con la
+importador la **use**. Los tres defectos que motivan estos casos pasaban con la
 política ya escrita y correcta:
 
 * ``"12.50"`` en una columna cuyo punto es de miles entraba como **1250**, porque
@@ -12,6 +12,9 @@ política ya escrita y correcta:
   tuviera esa forma;
 * una cantidad ``2.5`` se truncaba a **2** en seis lectores que seguían haciendo
   ``int(float(str(...)))`` aunque ``_parse_qty`` ya estuviera arreglado;
+* el camino legacy —summaries sin ``mapping_contexts``— entregaba la fila CRUDA,
+  así que ni el ``ignore`` del usuario ni el convenio de columna lo alcanzaban.
+
 Ninguno se ve desde la función: se ven en la fila guardada. Por eso el `.xlsx` lo
 arma openpyxl, lo parsea el parser de producción, el confirm entra por HTTP y lo
 que se afirma es la entidad persistida (o su ausencia, y la fila en "Otros").
@@ -293,3 +296,80 @@ async def test_una_celda_vacia_sigue_valiendo_una_unidad(
     ventas = await _ventas(db_session, sample_tenant)
     assert [(v.quantity, v.amount) for v in ventas] == [(1, Decimal("6300"))]
     assert await _otros(db_session, sample_tenant) == []
+
+
+def _libro_multihoja_con_montos_con_punto() -> bytes:
+    """Dos hojas, que es lo que hace falta: el camino legacy sólo se alcanza desde
+    ``_insert_multisheet_data`` (``inferred_type == "mixed"`` o ``multi_sheet``).
+    Un archivo de una tabla entra por el camino plano, que ya saneaba — y un test
+    de una hoja habría pasado igual con el defecto puesto."""
+    wb = Workbook()
+    ventas = wb.active
+    ventas.title = "Ventas"
+    ventas.append(_HEADERS)
+    ventas.append(["2024-03-10", _PRODUCTO, 7, "8.400", _CLIENTE, "efectivo"])
+    ventas.append(["2024-03-11", _PRODUCTO, 7, "7.000", _CLIENTE, "efectivo"])
+    gastos = wb.create_sheet("Gastos")
+    gastos.append(["fecha", "descripcion", "monto", "forma de pago"])
+    gastos.append(["2024-03-10", "Alquiler", 150000, "transferencia"])
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+async def test_el_camino_legacy_respeta_el_ignore_y_el_convenio(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """E2/E4 — un summary sin ``mapping_contexts`` no es un summary sin decisiones.
+
+    Este camino entregaba la fila CRUDA a los lectores: la columna `cantidad`
+    marcada `ignore` la encontraba igual ``_row_val`` por keyword, y los montos se
+    leían celda por celda sin el convenio de su columna. Los otros dos caminos ya
+    preparaban las filas; éste no, y la diferencia no la justifica nada — la
+    decisión del usuario no depende del formato en que se guardó el summary.
+
+    Se afirman las dos mitades sobre la misma corrida: la cantidad ignorada NO
+    llega a la venta, y los montos con separador de miles SÍ se leen (8.400 y
+    7.000, no 8,4 y 7).
+    """
+    record = await _subir(
+        db_session,
+        sample_tenant,
+        _libro_multihoja_con_montos_con_punto(),
+        "legacy.xlsx",
+        legacy=True,
+    )
+    assert "mapping_contexts" not in record.parsed_summary_json
+    assert record.parsed_summary_json.get("multi_sheet") or (
+        record.parsed_summary_json.get("inferred_type") == "mixed"
+    ), "sin esto el confirm entraría por el camino plano y el test no probaría nada"
+
+    resp = await client.post(
+        f"/api/v1/ingestion/files/{record.id}/confirm",
+        json={
+            "column_mappings": [
+                _map("fecha", "transaction_date"),
+                _map("producto", "product_name"),
+                _map("cantidad", "ignore"),
+                _map("total", "amount"),
+                _map("cliente", "customer_name"),
+                _map("forma de pago", "payment_method"),
+            ],
+            "confirmed_fields": {"ventas": True},
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    ventas = await _ventas(db_session, sample_tenant)
+    assert len(ventas) == 2, f"se esperaban las dos filas, hay {len(ventas)}"
+    assert {v.quantity for v in ventas} == {1}, (
+        f"la cantidad ignorada entró igual: {[v.quantity for v in ventas]}"
+    )
+    assert sorted(v.amount for v in ventas) == [Decimal("7000"), Decimal("8400")], (
+        f"los montos se leyeron sin el convenio de su columna: "
+        f"{[str(v.amount) for v in ventas]}"
+    )
