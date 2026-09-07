@@ -1,6 +1,7 @@
 """Tests para ValidationGate — puerta de calidad del pipeline de ingestión."""
 
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -240,3 +241,68 @@ class TestCorrectedSummary:
         result = gate.validate(_image_ocr(), force=False)
         assert not result.passed
         assert result.rejection_reason == "confidence_too_low"
+
+
+class TestElGateMideLoQueSePersiste:
+    r"""E4 — el gate borraba todos los puntos antes de parsear.
+
+    `re.sub(r"[$\s.]", "", str(v))` convertía `12.5` en 125 y `1234.56` en
+    123456, incluso sobre celdas numéricas nativas de openpyxl. Para un gate eso
+    es peor que un bug de formato: medía sobre un valor distinto del que el
+    importador iba a persistir, así que no podía detectar la discrepancia de
+    escala que existe para detectar — y encima inflaba los montos por 10 o 100
+    contra su propio techo de `_AMOUNT_CEILING`.
+    """
+
+    def test_un_decimal_nativo_no_se_multiplica_por_diez(self) -> None:
+        from app.application.services.validation_gate import _extract_amounts
+
+        montos = _extract_amounts(
+            {
+                "file_type": "spreadsheet",
+                "ventas_detectadas": [{"total": 12.5}, {"total": 1234.56}],
+                "gastos_detectados": [],
+            }
+        )
+        assert montos == [Decimal("12.5"), Decimal("1234.56")]
+
+    def test_el_convenio_se_infiere_por_columna(self) -> None:
+        """`12.500` aislado es ambiguo; con `12.500,50` en la misma columna deja
+        de serlo, y el gate lee lo mismo que va a leer el importador."""
+        from app.application.services.validation_gate import _extract_amounts
+
+        montos = _extract_amounts(
+            {
+                "file_type": "spreadsheet",
+                "ventas_detectadas": [{"total": "12.500,50"}, {"total": "1.500"}],
+                "gastos_detectados": [],
+            }
+        )
+        assert montos == [Decimal("12500.50"), Decimal("1500")]
+
+    def test_un_valor_sin_convenio_decidible_no_se_inventa(self) -> None:
+        """Sin señal en la columna, el monto no entra al chequeo en vez de entrar
+        con una escala inventada."""
+        from app.application.services.validation_gate import _extract_amounts
+
+        montos = _extract_amounts(
+            {
+                "file_type": "spreadsheet",
+                "ventas_detectadas": [{"total": "12.500"}, {"total": "12.50"}],
+                "gastos_detectados": [],
+            }
+        )
+        assert montos == []
+
+    def test_los_negativos_siguen_entrando(self) -> None:
+        """El sanity-check los busca: no se filtran."""
+        from app.application.services.validation_gate import _extract_amounts
+
+        montos = _extract_amounts(
+            {
+                "file_type": "spreadsheet",
+                "ventas_detectadas": [{"total": -350}],
+                "gastos_detectados": [],
+            }
+        )
+        assert montos == [Decimal("-350")]
