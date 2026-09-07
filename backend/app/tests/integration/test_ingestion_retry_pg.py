@@ -171,7 +171,17 @@ async def test_libera_solo_si_sigue_siendo_el_dueno(
         _, token = reclamado
         await s.commit()
 
-    assert await worker._release_for_retry(_factory, str(file_id), str(tenant_id), token) is True
+    assert (
+        await worker._release_for_retry(
+        _factory,
+        str(file_id),
+        str(tenant_id),
+        token,
+        task_name="jobs.process_spreadsheet",
+        t0=0.0,
+        error="boom",
+    )
+    ) is True
     estado, token_persistido = await _estado(sessionmaker, file_id)
     assert estado == PROCESSING_STATUS_PENDING
     assert token_persistido is None, "el token tiene que quedar limpio para el próximo intento"
@@ -181,7 +191,17 @@ async def test_libera_solo_si_sigue_siendo_el_dueno(
         otro = await worker._claim_for_processing(s, str(file_id), str(tenant_id))
         assert otro is not None
         await s.commit()
-    assert await worker._release_for_retry(_factory, str(file_id), str(tenant_id), token) is False
+    assert (
+        await worker._release_for_retry(
+        _factory,
+        str(file_id),
+        str(tenant_id),
+        token,
+        task_name="jobs.process_spreadsheet",
+        t0=0.0,
+        error="boom",
+    )
+    ) is False
     estado, _ = await _estado(sessionmaker, file_id)
     assert estado == PROCESSING_STATUS_PROCESSING
 
@@ -208,7 +228,17 @@ async def test_no_libera_un_archivo_eliminado(
         archivo.deleted_at = datetime.now(UTC)
         await s.commit()
 
-    assert await worker._release_for_retry(_factory, str(file_id), str(tenant_id), token) is False
+    assert (
+        await worker._release_for_retry(
+        _factory,
+        str(file_id),
+        str(tenant_id),
+        token,
+        task_name="jobs.process_spreadsheet",
+        t0=0.0,
+        error="boom",
+    )
+    ) is False
 
 
 # ── La task entera: qué estado queda según el tipo de error ──────────────────
@@ -329,5 +359,63 @@ def test_error_de_parseo_cierra_en_failed(
             worker.process_spreadsheet(str(file_id), str(tenant_id))
         estado, _ = _correr(_leer_estado(file_id))
         assert estado == PROCESSING_STATUS_FAILED
+    finally:
+        _correr(_limpiar(tenant_id))
+
+
+# ── El manejo del error no puede tapar el error que maneja ───────────────────
+
+
+def test_liberar_con_la_base_caida_devuelve_false_en_vez_de_propagar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La ironía del caso: el reintento por "base caída" corre justo cuando la
+    base está caída, así que la liberación también falla.
+
+    `_release_for_retry` tiene que ser TOTAL —devolver un booleano, nunca
+    levantar—, porque se la llama desde la condición de un `if` dentro de un
+    `except`. Si propagara, la nueva excepción reemplazaría al error real en el
+    resultado de Celery, saltearía `_record_failure` y se comería el `raise` del
+    caller. Se prueba contra la función real con un factory roto, no mockeándola
+    entera: lo que se afirma es que su propio manejo de error funciona.
+    """
+
+    class _SesionRota:
+        async def __aenter__(self) -> Any:
+            raise RuntimeError("la base tampoco responde")
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+    resultado = asyncio.run(
+        worker._release_for_retry(
+            _SesionRota,
+            str(uuid.uuid4()),
+            str(uuid.uuid4()),
+            uuid.uuid4(),
+            task_name="jobs.process_spreadsheet",
+            t0=0.0,
+            error="boom",
+        )
+    )
+    assert resultado is False, "una liberación que falla no puede propagar ni mentir que liberó"
+
+
+def test_una_base_caida_al_marcar_failed_no_reemplaza_el_error_original(
+    monkeypatch: pytest.MonkeyPatch, _worker_contra_pg: None
+) -> None:
+    """Mismo principio del otro lado: `_record_failure` sólo capturaba la pérdida
+    de propiedad, así que un fallo de escritura propagaba y se comía el `raise`
+    del caller — contradiciendo su propio docstring."""
+    file_id, tenant_id = _ejecutar_con_s3_roto(ValueError("hoja ilegible"), monkeypatch)
+    try:
+
+        async def _escritura_rota(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("la base tampoco responde")
+
+        monkeypatch.setattr(worker, "_save_result", _escritura_rota)
+
+        with pytest.raises(ValueError, match="hoja ilegible"):
+            worker.process_spreadsheet(str(file_id), str(tenant_id))
     finally:
         _correr(_limpiar(tenant_id))

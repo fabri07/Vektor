@@ -22,6 +22,7 @@ On unrecoverable error: processing_status = FAILED.
 import asyncio
 import time
 import uuid as _uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.application.services import pipeline_event_service
@@ -41,6 +42,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_PENDING,
     PROCESSING_STATUS_PROCESSING,
     PROCESSING_STATUS_REJECTED,
+    STALE_PROCESSING_SECONDS,
 )
 from app.persistence.models.pipeline_event import STAGE_VALIDATE
 
@@ -80,28 +82,47 @@ async def _claim_for_processing(
     ``PROCESSING`` un archivo ya confirmado y dejarlo en ``NEEDS_CONFIRMATION``,
     que es un estado que el CAS de ``acquire_import_lease`` acepta.
 
-    Sólo ``PENDING`` es reclamable, y es suficiente: los dos encolados pasan por
-    ahí (`ingestion.py`, upload y ``reprocess_file``, que devuelve a ``PENDING``
-    antes de reencolar). Un archivo ya ``PROCESSING`` NO se roba acá: eso lo
-    decide el camino de staleness del endpoint, que exige que ``updated_at``
-    tenga más de 300 s. Un archivo borrado tampoco — mismo criterio que
+    Reclamable = ``PENDING``, o ``PROCESSING`` **vencido**. Lo segundo hace falta:
+    ``task_acks_late=True`` re-entrega el mensaje si el worker muere, y esa
+    re-entrega era la recuperación automática de un parseo interrumpido (un
+    redeploy, un OOM, el ``time_limit`` de Celery). El worker muerto dejó la fila
+    en ``PROCESSING`` —la había reclamado—, así que un claim que sólo aceptara
+    ``PENDING`` haría que la re-entrega no encontrara nada, terminara "bien" sin
+    trabajar, y dejara el archivo trabado hasta que una persona apretara
+    "Reintentar": hoy no hay ningún barrido periódico de ``uploaded_files``.
+
+    El umbral es el MISMO que usa el endpoint de reproceso
+    (``STALE_PROCESSING_SECONDS``, importado de una sola fuente para que no puedan
+    divergir): por encima del ``time_limit`` de Celery más margen, un worker que
+    no escribió resultado no está trabajando. Robarle el archivo a uno que sí
+    estuviera vivo es inofensivo — el token nuevo invalida al viejo, que ya no
+    puede escribir.
+
+    Un archivo borrado no se reclama nunca — mismo criterio que
     ``acquire_import_lease``.
 
     Devuelve el registro y el token de propiedad que hay que presentar en cada
     escritura de resultado.
     """
-    from sqlalchemy import select, update  # noqa: PLC0415
+    from sqlalchemy import and_, or_, select, update  # noqa: PLC0415
 
     from app.persistence.models.file import UploadedFile  # noqa: PLC0415
 
     token = _uuid.uuid4()
+    vencido_antes_de = datetime.now(UTC) - timedelta(seconds=STALE_PROCESSING_SECONDS)
     claim = await session.execute(
         update(UploadedFile)
         .where(
             UploadedFile.id == _uuid.UUID(file_id),
             UploadedFile.tenant_id == _uuid.UUID(tenant_id),
             UploadedFile.deleted_at.is_(None),
-            UploadedFile.processing_status == PROCESSING_STATUS_PENDING,
+            or_(
+                UploadedFile.processing_status == PROCESSING_STATUS_PENDING,
+                and_(
+                    UploadedFile.processing_status == PROCESSING_STATUS_PROCESSING,
+                    UploadedFile.updated_at < vencido_antes_de,
+                ),
+            ),
         )
         .values(
             processing_status=PROCESSING_STATUS_PROCESSING,
@@ -126,7 +147,15 @@ async def _claim_for_processing(
             reason=(
                 "not_found"
                 if actual is None
-                else ("deleted" if actual.deleted_at is not None else "not_pending")
+                else (
+                    "deleted"
+                    if actual.deleted_at is not None
+                    else (
+                        "in_progress"
+                        if actual.processing_status == PROCESSING_STATUS_PROCESSING
+                        else "not_claimable"
+                    )
+                )
             ),
             current_status=None if actual is None else actual.processing_status,
         )
@@ -309,37 +338,68 @@ def _espera_antes_de_reintentar(intentos_previos: int) -> int:
 
 
 async def _release_for_retry(
-    factory: Any, file_id: str, tenant_id: str, token: _uuid.UUID
+    factory: Any,
+    file_id: str,
+    tenant_id: str,
+    token: _uuid.UUID,
+    *,
+    task_name: str,
+    t0: float,
+    error: str,
 ) -> bool:
     """Devuelve el archivo a PENDING para que el reintento lo pueda reclamar.
 
     Sin esto el reintento no serviría de nada: `_claim_for_processing` sólo toma
-    archivos en PENDING, así que el segundo intento encontraría el archivo en
-    PROCESSING —el estado en el que lo dejó el intento que falló— y saldría sin
-    hacer nada.
+    un archivo PENDING (o uno PROCESSING ya vencido), así que el segundo intento
+    encontraría el archivo en el PROCESSING que dejó el primero y tendría que
+    esperar el umbral de staleness para poder trabajar.
 
     Lleva el mismo fencing que el resto: sólo libera si este intento sigue siendo
-    el dueño. Devuelve ``False`` si ya no lo es, y entonces NO hay que reintentar
-    — otro intento se quedó con el trabajo y reintentar sería competirle.
+    el dueño. Devuelve ``False`` si ya no lo es —otro intento se quedó con el
+    trabajo y reintentar sería competirle— **y también si la liberación falla**:
+    el escenario que dispara el reintento puede ser justamente la base caída, y
+    ahí dejar propagar reemplazaría el error real por el de esta operación
+    auxiliar. El intento fallido se registra acá y no en el camino de FAILED:
+    tres fallos transitorios seguidos de un éxito tienen que verse como tres
+    fallos en las métricas, no como un único éxito.
     """
     from sqlalchemy import update  # noqa: PLC0415
 
     from app.persistence.models.file import UploadedFile  # noqa: PLC0415
 
-    async with factory() as session:
-        liberado = await session.execute(
-            update(UploadedFile)
-            .where(
-                UploadedFile.id == _uuid.UUID(file_id),
-                UploadedFile.tenant_id == _uuid.UUID(tenant_id),
-                UploadedFile.deleted_at.is_(None),
-                UploadedFile.parse_attempt_id == token,
-                UploadedFile.processing_status == PROCESSING_STATUS_PROCESSING,
+    try:
+        async with factory() as session:
+            liberado = await session.execute(
+                update(UploadedFile)
+                .where(
+                    UploadedFile.id == _uuid.UUID(file_id),
+                    UploadedFile.tenant_id == _uuid.UUID(tenant_id),
+                    UploadedFile.deleted_at.is_(None),
+                    UploadedFile.parse_attempt_id == token,
+                    UploadedFile.processing_status == PROCESSING_STATUS_PROCESSING,
+                )
+                .values(processing_status=PROCESSING_STATUS_PENDING, parse_attempt_id=None)
             )
-            .values(processing_status=PROCESSING_STATUS_PENDING, parse_attempt_id=None)
+            if liberado.rowcount != 1:
+                return False
+            await track_job_event(
+                session,
+                task_name,
+                _uuid.UUID(tenant_id),
+                success=False,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                error=f"RETRY:{error}",
+            )
+            await session.commit()
+    except Exception:  # noqa: BLE001 — el error original tiene que ganar
+        logger.warning(
+            "ingestion.release_for_retry_failed",
+            task=task_name,
+            file_id=file_id,
+            tenant_id=tenant_id,
         )
-        await session.commit()
-    return bool(liberado.rowcount == 1)
+        return False
+    return True
 
 
 async def _record_failure(
@@ -362,7 +422,8 @@ async def _record_failure(
     * propiedad perdida — otro intento se quedó con el archivo mientras éste
       fallaba. Su ``FAILED`` tardío borraría un resultado que puede estar bien.
 
-    Nunca tapa la excepción original: el caller la re-lanza después.
+    Nunca tapa la excepción original —ni siquiera si la base es lo que falla—:
+    el caller la re-lanza después.
     """
     if token is None:
         logger.warning(
@@ -399,6 +460,18 @@ async def _record_failure(
             file_id=file_id,
             tenant_id=tenant_id,
             reason="ownership_lost",
+        )
+    except Exception:  # noqa: BLE001 — ver el docstring: el error original gana
+        # Si la base es lo que está caído —una de las dos clases que
+        # `_es_transitorio` reconoce— este UPDATE falla también. Dejar propagar
+        # cambiaría el error que ve el operador por el de la operación auxiliar,
+        # y encima saltearía el `raise` del caller.
+        logger.warning(
+            "ingestion.failure_not_recorded",
+            task=task_name,
+            file_id=file_id,
+            tenant_id=tenant_id,
+            reason="write_failed",
         )
 
 
@@ -608,7 +681,15 @@ def process_spreadsheet(self: Any, file_id: str, tenant_id: str, force: bool = F
                 _es_transitorio(exc)
                 and int(self.request.retries or 0) < int(self.max_retries or 0)
                 and token is not None
-                and await _release_for_retry(factory, file_id, tenant_id, token)
+                and await _release_for_retry(
+                    factory,
+                    file_id,
+                    tenant_id,
+                    token,
+                    task_name="jobs.process_spreadsheet",
+                    t0=t0,
+                    error=str(exc),
+                )
             ):
                 # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
                 # sería mentir sobre un archivo que todavía tiene intentos, y
@@ -754,7 +835,15 @@ def process_text_document(self: Any, file_id: str, tenant_id: str, force: bool =
                 _es_transitorio(exc)
                 and int(self.request.retries or 0) < int(self.max_retries or 0)
                 and token is not None
-                and await _release_for_retry(factory, file_id, tenant_id, token)
+                and await _release_for_retry(
+                    factory,
+                    file_id,
+                    tenant_id,
+                    token,
+                    task_name="jobs.process_text_document",
+                    t0=t0,
+                    error=str(exc),
+                )
             ):
                 # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
                 # sería mentir sobre un archivo que todavía tiene intentos, y
@@ -906,7 +995,15 @@ def process_image_ocr(self: Any, file_id: str, tenant_id: str, force: bool = Fal
                 _es_transitorio(exc)
                 and int(self.request.retries or 0) < int(self.max_retries or 0)
                 and token is not None
-                and await _release_for_retry(factory, file_id, tenant_id, token)
+                and await _release_for_retry(
+                    factory,
+                    file_id,
+                    tenant_id,
+                    token,
+                    task_name="jobs.process_image_ocr",
+                    t0=t0,
+                    error=str(exc),
+                )
             ):
                 # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
                 # sería mentir sobre un archivo que todavía tiene intentos, y

@@ -156,6 +156,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_PENDING,
     PROCESSING_STATUS_PROCESSING,
     PROCESSING_STATUS_REJECTED,
+    STALE_PROCESSING_SECONDS,
     UploadedFile,
 )
 from app.persistence.models.pipeline_event import (
@@ -1422,7 +1423,7 @@ async def reprocess_file(
     # cuando lleva más que el hard time_limit de Celery (180s) + margen → sin riesgo
     # de pisar un job realmente en vuelo. Así el usuario re-lee el archivo (ya está
     # en R2) sin re-subirlo.
-    stale_after = timedelta(seconds=300)
+    stale_after = timedelta(seconds=STALE_PROCESSING_SECONDS)
     updated = record.updated_at
     if updated is not None and updated.tzinfo is None:
         updated = updated.replace(tzinfo=UTC)
@@ -1443,6 +1444,12 @@ async def reprocess_file(
 
     record.processing_status = PROCESSING_STATUS_PENDING
     record.parsed_summary_json = None
+    # El token del intento anterior se limpia junto con la transición. Si quedara,
+    # el camino de fallback (`job.delay()` falla → `_process_file_sync` vuelve a
+    # poner PROCESSING sin tocarlo) lo dejaría válido otra vez, y el worker viejo
+    # —el que estaba colgado— podría escribir su resultado encima del que produjo
+    # el fallback sync.
+    record.parse_attempt_id = None
     await repo.save(record)
 
     if get_settings().USE_LOCAL_FALLBACK:

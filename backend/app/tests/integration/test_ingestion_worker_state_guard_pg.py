@@ -33,12 +33,12 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import Table, delete, select
+from sqlalchemy import Table, delete, select, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -61,6 +61,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_PENDING,
     PROCESSING_STATUS_PROCESSING,
     PROCESSING_STATUS_REJECTED,
+    STALE_PROCESSING_SECONDS,
     UploadedFile,
 )
 from app.persistence.models.tenant import Tenant
@@ -254,6 +255,71 @@ async def test_archivo_eliminado_no_se_resucita(
     estado, token, _ = await _estado(sessionmaker, file_id)
     assert estado == PROCESSING_STATUS_PENDING
     assert token is None
+
+
+# ── 2b. La recuperación de un parseo interrumpido ────────────────────────────
+
+
+async def test_un_processing_vencido_se_puede_reclamar(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> None:
+    """La re-entrega de `task_acks_late` tiene que poder retomar lo abandonado.
+
+    Un worker muerto a mitad del parseo (redeploy, OOM, `time_limit`) deja la fila
+    en PROCESSING: la había reclamado. Si el claim aceptara SÓLO PENDING, la
+    re-entrega no encontraría nada, la task terminaría "bien" sin trabajar y el
+    archivo quedaría trabado — no hay ningún barrido periódico de
+    `uploaded_files` que lo rescate, sólo el botón "Reintentar".
+
+    El umbral es el mismo que usa el endpoint de reproceso: por encima del
+    `time_limit` de Celery más margen, un worker que no escribió resultado no está
+    trabajando.
+    """
+    file_id = await _seed_file(sessionmaker, tenant_id)
+    token_muerto = await _claim_en_sesion_propia(sessionmaker, file_id, tenant_id)
+    assert token_muerto is not None
+
+    # Recién reclamado, NO es reclamable: podría estar trabajando ahora mismo.
+    assert await _claim_en_sesion_propia(sessionmaker, file_id, tenant_id) is None
+
+    # Se envejece la fila más allá del umbral (el worker murió sin escribir nada).
+    async with sessionmaker() as s:
+        await s.execute(
+            update(UploadedFile)
+            .where(UploadedFile.id == file_id)
+            .values(
+                updated_at=datetime.now(UTC) - timedelta(seconds=STALE_PROCESSING_SECONDS + 60)
+            )
+        )
+        await s.commit()
+
+    token_nuevo = await _claim_en_sesion_propia(sessionmaker, file_id, tenant_id)
+    assert token_nuevo is not None, "un PROCESSING abandonado quedó sin forma de recuperarse"
+    assert token_nuevo != token_muerto
+
+    # Y el worker viejo, si revive, ya no puede escribir: el token lo desplazó.
+    async with sessionmaker() as s:
+        with pytest.raises(ParseOwnershipLostError):
+            await _load_owned(s, str(file_id), str(tenant_id), token_muerto)
+
+
+async def test_un_terminado_no_se_reclama_por_viejo_que_sea(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> None:
+    """La ventana de staleness es SÓLO para PROCESSING. Un archivo terminado hace
+    meses no vuelve a la cola por el paso del tiempo."""
+    file_id = await _seed_file(sessionmaker, tenant_id, status=PROCESSING_STATUS_DONE)
+    async with sessionmaker() as s:
+        await s.execute(
+            update(UploadedFile)
+            .where(UploadedFile.id == file_id)
+            .values(updated_at=datetime.now(UTC) - timedelta(days=90))
+        )
+        await s.commit()
+
+    assert await _claim_en_sesion_propia(sessionmaker, file_id, tenant_id) is None
+    estado, _, _ = await _estado(sessionmaker, file_id)
+    assert estado == PROCESSING_STATUS_DONE
 
 
 # ── 3b. Eliminado DESPUÉS del claim ───────────────────────────────────────────
