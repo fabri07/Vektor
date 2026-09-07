@@ -3988,6 +3988,120 @@ class TestRereadPreviewSessionEndpoint:
         assert draft is not None
         assert draft["column_risk_decisions"] == []
         assert len(draft["column_mappings"]) == 4
+
+    async def test_preview_persiste_el_borrador_sin_column_mappings(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """E2: un body con SÓLO una reasignación de hoja también es una decisión.
+
+        La condición era ``if body.column_mappings:``, así que este request
+        devolvía 200 —el usuario veía que "se guardó"— y el borrador quedaba sin
+        escribir: ni la entidad, ni la inclusión, ni las decisiones de riesgo.
+        Después la relectura importaba la hoja con la entidad que había adivinado
+        el parser.
+        """
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid6/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            first = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            assert first.status_code == 200
+            run_id = first.json()["run_id"]
+            assert first.json()["draft_version"] == 0
+
+            # Sin una sola columna mapeada: sólo la reasignación de la hoja.
+            second = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"context_entity": {"table": "expense"}},
+            )
+            assert second.status_code == 200
+            assert second.json()["draft_version"] == 1, (
+                "el borrador no se persistió: la decisión se perdió en silencio"
+            )
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["context_entities"] == {"table": "expense"}
+
+    async def test_preview_sin_ninguna_decision_no_pisa_el_borrador(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """La otra mitad: un body vacío NO cuenta como decisión.
+
+        Sin esto, aflojar la condición haría que cualquier POST sin contenido
+        sumara una versión y pisara con nada un borrador que el usuario ya había
+        armado.
+        """
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid7/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            first = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            run_id = first.json()["run_id"]
+
+            guardado = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"context_entity": {"table": "expense"}},
+            )
+            assert guardado.json()["draft_version"] == 1
+
+            vacio = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={},
+            )
+            assert vacio.status_code == 200
+            assert vacio.json()["draft_version"] == 1, "un body vacío sumó una versión"
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["context_entities"] == {"table": "expense"}, "el body vacío pisó el borrador"
         # La entidad efectiva por contexto quedó resuelta (mismo criterio que
         # el confirm) — el valor concreto depende de cómo el parser infiere el
         # tipo de este CSV; lo que importa acá es que el contexto "table" (flat)

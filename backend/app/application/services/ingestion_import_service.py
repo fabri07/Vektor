@@ -743,7 +743,7 @@ async def _import_master_entities(
         mapping = (context_mappings or {}).get(ctx_id) or (
             column_mappings if ctx_id == "table" else None
         ) or {}
-        target_to_col, _, _ = _resolve_target_cols(mapping)
+        target_to_col, _, _, _ = _resolve_target_cols(mapping)
         if not target_to_col:
             continue  # sin mapeo explícito: no se adivina el shape de la fila
 
@@ -3114,15 +3114,28 @@ def _row_val(
 
 def _resolve_target_cols(
     mapping: dict[str, str],
-) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], set[str]]:
     """Desde un mapeo explícito source_col→target, resuelve columnas por target canónico.
 
-    Devuelve ``(target_to_col, custom_field_cols, cruzados_descartados)``: el
-    primero mapea campo canónico (amount, transaction_date, name, ...) →
-    source_col; el segundo mapea cf_key → source_col para los targets
-    `custom_field:{key}`; el tercero, source_col → target, son los targets
-    CRUZADOS (`{entidad}:{campo}`) que este importador todavía no sabe escribir.
-    Ignora "ignore".
+    Devuelve ``(target_to_col, custom_field_cols, cruzados_descartados,
+    ignoradas)``: el primero mapea campo canónico (amount, transaction_date,
+    name, ...) → source_col; el segundo mapea cf_key → source_col para los
+    targets `custom_field:{key}`; el tercero, source_col → target, son los
+    targets CRUZADOS (`{entidad}:{campo}`) que este importador todavía no sabe
+    escribir; el cuarto son las columnas que el usuario mandó **ignorar**.
+
+    **Las ignoradas se devuelven, no se descartan.** Antes esta función las
+    salteaba con un ``continue`` y ahí moría la decisión: la columna no quedaba
+    en ``target_to_col`` —así que ningún ``.get()`` la encontraba—, pero tampoco
+    en ``_reservadas`` ni en el ``skip`` de ``_row_val``, de modo que las ~30
+    heurísticas por nombre la volvían a leer y la columna que el usuario sacó
+    terminaba siendo la fecha, el monto o la marca del producto. `ParsedTarget`
+    distingue ``ignore`` de ``none`` justamente porque uno es una decisión y el
+    otro una columna sin revisar (ver su docstring); acá se dejaba de distinguir.
+
+    Quien consuma esta función tiene que sacar esas columnas de las filas antes
+    de interpretarlas — lo hace ``_sin_columnas_ignoradas``, en los dos puntos
+    donde el importador toma las filas de un bucket.
 
     Los cruzados se descartan porque F-D no está entregada, pero hasta acá se
     evaporaban: `parse_target` puede devolver ``kind="cross"`` y no había rama
@@ -3140,9 +3153,15 @@ def _resolve_target_cols(
     target_to_col: dict[str, str] = {}
     custom_field_cols: dict[str, str] = {}
     cruzados: dict[str, str] = {}
+    ignoradas: set[str] = set()
     for src_col, target in mapping.items():
         parsed = parse_target(target)
-        if parsed.kind in ("ignore", "none"):
+        if parsed.kind == "ignore":
+            # DECISIÓN del usuario, no ausencia de mapeo: se registra.
+            ignoradas.add(src_col)
+            continue
+        if parsed.kind == "none":
+            # Columna sin revisar: la heurística sigue teniendo derecho a mirarla.
             continue
         if parsed.kind == "custom":
             # F-0: first-wins, igual que la rama canónica. Antes esta rama no
@@ -3162,7 +3181,35 @@ def _resolve_target_cols(
             columnas=sorted(cruzados),
             targets=sorted(set(cruzados.values())),
         )
-    return target_to_col, custom_field_cols, cruzados
+    return target_to_col, custom_field_cols, cruzados, ignoradas
+
+
+def _sin_columnas_ignoradas(
+    rows: list[dict[str, Any]], ignoradas: set[str]
+) -> list[dict[str, Any]]:
+    """Saca de cada fila las columnas que el usuario mandó ignorar.
+
+    Es la forma de hacer que TODOS los lectores respeten la decisión sin tener
+    que acordarse de pasarles nada: ``_find_col`` resuelve sobre
+    ``rows[0].keys()``, ``_row_val``/``_row_col``/``_val`` iteran ``row.items()``
+    y ``_resolve_sale_price_col`` recibe ``list(row.keys())`` — si la clave no
+    está en la fila, ninguno puede encontrarla. Un lector nuevo queda cubierto
+    por construcción; un parámetro más habría que acordarse de pasárselo.
+
+    Consecuencia declarada: una fila cuyo único contenido estaba en columnas
+    ignoradas queda vacía, así que no genera venta **ni va a "Otros"** — y como
+    no quema huella, una relectura con otro mapeo la vuelve a intentar. Es lo
+    correcto: no hay nada importable en ella según las decisiones vigentes.
+
+    El original no se pierde: el archivo sigue entero en R2 y en
+    ``parsed_summary_json``, que esta función no toca (devuelve filas NUEVAS; el
+    summary es ORM-tracked y mutarlo persistiría el recorte).
+
+    Sin ignoradas devuelve la MISMA lista, sin copiar: el camino común no paga.
+    """
+    if not ignoradas:
+        return rows
+    return [{k: v for k, v in row.items() if k not in ignoradas} for row in rows]
 
 
 def _resolve_stock_treatment(
@@ -3616,6 +3663,17 @@ async def _insert_confirmed_data_impl(
         if not rows:
             return counts
 
+        # El mapeo se resuelve ACÁ, antes de la heurística, y no más abajo dentro
+        # del `if column_mappings:` como estaba: las columnas ignoradas tienen que
+        # salir de las filas ANTES de que `_find_col` mire los headers, o la
+        # decisión llega tarde. Todo lo demás del mapeo se reutiliza abajo.
+        _canon, _custom, _cruzados, _ignoradas = (
+            _resolve_target_cols(column_mappings) if column_mappings else ({}, {}, {}, set())
+        )
+        rows = _sin_columnas_ignoradas(rows, _ignoradas)
+        if not rows:
+            return counts
+
         headers = list(rows[0].keys())
         fecha_col = _find_col(headers, _FECHA_COLS)
         # Usar set ampliado para columnas de monto (ej: "precio_unitario", "total")
@@ -3666,10 +3724,9 @@ async def _insert_confirmed_data_impl(
         target_to_col: dict[str, str] = {}
 
         if column_mappings:
-            # Construir lookup: target_field → primer source_col que lo mapee
-            # Misma resolución que `_resolve_target_cols` (incluido el first-wins
-            # de la rama custom): son el mismo contrato en dos caminos distintos.
-            _canon, _custom, _cruzados = _resolve_target_cols(column_mappings)
+            # `_canon`/`_custom`/`_cruzados` ya se resolvieron arriba, junto con las
+            # ignoradas: resolver dos veces el mismo mapeo abre la puerta a que las
+            # dos resoluciones diverjan.
             target_to_col.update(_canon)
             custom_field_cols.update(_custom)
             if _cruzados:
@@ -6962,9 +7019,14 @@ async def _insert_multisheet_data(
             _bucket = summary.get(_bucket_key, [])
             _rows = [r for r in _bucket if r.get("__context__") == _cid]
             _mapping = context_mappings.get(_cid or "", {})
-            _cols, _cf_cols, _cruzados = (
-                _resolve_target_cols(_mapping) if _mapping else ({}, {}, {})
+            _cols, _cf_cols, _cruzados, _ignoradas = (
+                _resolve_target_cols(_mapping) if _mapping else ({}, {}, {}, set())
             )
+            # Las columnas ignoradas salen de las filas acá, que es el único lugar
+            # por el que pasan las filas de una hoja — el gate de replay y el loop
+            # de importación comparten esta función justamente para no divergir, así
+            # que las dos ven la fila con la misma decisión aplicada.
+            _rows = _sin_columnas_ignoradas(_rows, _ignoradas)
             # Bloque 2: "supplier:name" en un contexto de producto no se descarta
             # — `_add_product` lo aplica (gateado por rollout). El resto de los
             # cruzados sigue contando como descartado, F-D no está entregada.

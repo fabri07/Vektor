@@ -1076,9 +1076,13 @@ async def compute_purchase_groups(
         )
         filas = _iis._rows_for_context(bucket, ctx_id)
         mapeo = mapeo_por_contexto.get(ctx_id, {})
-        cols, _cf_cols, _cruzados = (
-            _iis._resolve_target_cols(mapeo) if mapeo else ({}, {}, {})
+        cols, _cf_cols, _cruzados, _ignoradas = (
+            _iis._resolve_target_cols(mapeo) if mapeo else ({}, {}, {}, set())
         )
+        # Mismo saneo que `_filas_y_mapeo`: si el preview viera una columna que el
+        # importador ya no mira, mostraría un costo que la importación no va a
+        # producir — y el contrato es que con el mismo plan los dos den lo mismo.
+        filas = _iis._sin_columnas_ignoradas(filas, _ignoradas)
 
         _costos, _ilegibles, plan = _iis._planificar_costos_de_la_hoja(
             ctx_id,
@@ -3601,7 +3605,22 @@ async def reread_preview(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         ) from exc
 
-    if body is not None and body.column_mappings:
+    # E2: la condición era `body.column_mappings`, así que un body con SÓLO una
+    # reasignación de hoja (o sólo inclusión, o sólo `stock_treatment`) devolvía
+    # 200 y no persistía NADA — ni las entidades, ni `context_confirmed`, ni las
+    # decisiones de riesgo. El borrador se guarda si el body trae cualquier
+    # decisión; sigue sin guardarse un body vacío, que pisaría con nada un
+    # borrador anterior y le sumaría una versión sin cambios.
+    _trae_decisiones = body is not None and bool(
+        body.column_mappings
+        or body.context_entity
+        or body.confirmed_fields
+        or body.context_confirmed
+        or body.column_risk_decisions
+        or body.stock_treatment
+        or body.master_column_mappings
+    )
+    if body is not None and _trae_decisiones:
         # Mismo criterio que el confirm (F8b Task 2): validar ANTES de
         # persistir — una decisión inválida se rechaza upfront, nunca a mitad
         # de una corrección ya guardada.
@@ -3614,7 +3633,11 @@ async def reread_preview(
         }
         override = body.context_entity or {}
         for mapping in body.column_mappings:
-            if parse_target(mapping.target_field).kind in ("ignore", "none"):
+            # `none` sigue sin generar entrada (no dice nada del contexto), pero
+            # `ignore` SÍ: una hoja cuyas columnas el usuario marcó todas como
+            # ignoradas también tiene entidad, y saltearla acá hacía perder su
+            # reasignación aunque `column_mappings` no estuviera vacío.
+            if parse_target(mapping.target_field).kind == "none":
                 continue
             cid = mapping.context_id or "table"
             # Misma prioridad que ``_entity_for`` del confirm: override del
@@ -3635,6 +3658,11 @@ async def reread_preview(
                     user_selected=mapping.user_selected,
                 )
             )
+        # Una hoja reasignada SIN tocarle ninguna columna no aparece en el loop
+        # de arriba: su entidad viene sólo del override y hay que registrarla
+        # igual, que es el caso que motivó E2.
+        for _cid, _entidad in override.items():
+            risk_context_entities[_cid] = _entidad
         if body.column_risk_decisions:
             violations = validate_column_risk_decisions(
                 body.column_risk_decisions,
