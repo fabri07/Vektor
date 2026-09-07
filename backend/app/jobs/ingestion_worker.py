@@ -22,6 +22,7 @@ On unrecoverable error: processing_status = FAILED.
 import asyncio
 import time
 import uuid as _uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.application.services import pipeline_event_service
@@ -41,6 +42,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_PENDING,
     PROCESSING_STATUS_PROCESSING,
     PROCESSING_STATUS_REJECTED,
+    STALE_PROCESSING_SECONDS,
 )
 from app.persistence.models.pipeline_event import STAGE_VALIDATE
 
@@ -80,28 +82,47 @@ async def _claim_for_processing(
     ``PROCESSING`` un archivo ya confirmado y dejarlo en ``NEEDS_CONFIRMATION``,
     que es un estado que el CAS de ``acquire_import_lease`` acepta.
 
-    Sólo ``PENDING`` es reclamable, y es suficiente: los dos encolados pasan por
-    ahí (`ingestion.py`, upload y ``reprocess_file``, que devuelve a ``PENDING``
-    antes de reencolar). Un archivo ya ``PROCESSING`` NO se roba acá: eso lo
-    decide el camino de staleness del endpoint, que exige que ``updated_at``
-    tenga más de 300 s. Un archivo borrado tampoco — mismo criterio que
+    Reclamable = ``PENDING``, o ``PROCESSING`` **vencido**. Lo segundo hace falta:
+    ``task_acks_late=True`` re-entrega el mensaje si el worker muere, y esa
+    re-entrega era la recuperación automática de un parseo interrumpido (un
+    redeploy, un OOM, el ``time_limit`` de Celery). El worker muerto dejó la fila
+    en ``PROCESSING`` —la había reclamado—, así que un claim que sólo aceptara
+    ``PENDING`` haría que la re-entrega no encontrara nada, terminara "bien" sin
+    trabajar, y dejara el archivo trabado hasta que una persona apretara
+    "Reintentar": hoy no hay ningún barrido periódico de ``uploaded_files``.
+
+    El umbral es el MISMO que usa el endpoint de reproceso
+    (``STALE_PROCESSING_SECONDS``, importado de una sola fuente para que no puedan
+    divergir): por encima del ``time_limit`` de Celery más margen, un worker que
+    no escribió resultado no está trabajando. Robarle el archivo a uno que sí
+    estuviera vivo es inofensivo — el token nuevo invalida al viejo, que ya no
+    puede escribir.
+
+    Un archivo borrado no se reclama nunca — mismo criterio que
     ``acquire_import_lease``.
 
     Devuelve el registro y el token de propiedad que hay que presentar en cada
     escritura de resultado.
     """
-    from sqlalchemy import select, update  # noqa: PLC0415
+    from sqlalchemy import and_, or_, select, update  # noqa: PLC0415
 
     from app.persistence.models.file import UploadedFile  # noqa: PLC0415
 
     token = _uuid.uuid4()
+    vencido_antes_de = datetime.now(UTC) - timedelta(seconds=STALE_PROCESSING_SECONDS)
     claim = await session.execute(
         update(UploadedFile)
         .where(
             UploadedFile.id == _uuid.UUID(file_id),
             UploadedFile.tenant_id == _uuid.UUID(tenant_id),
             UploadedFile.deleted_at.is_(None),
-            UploadedFile.processing_status == PROCESSING_STATUS_PENDING,
+            or_(
+                UploadedFile.processing_status == PROCESSING_STATUS_PENDING,
+                and_(
+                    UploadedFile.processing_status == PROCESSING_STATUS_PROCESSING,
+                    UploadedFile.updated_at < vencido_antes_de,
+                ),
+            ),
         )
         .values(
             processing_status=PROCESSING_STATUS_PROCESSING,
@@ -126,7 +147,15 @@ async def _claim_for_processing(
             reason=(
                 "not_found"
                 if actual is None
-                else ("deleted" if actual.deleted_at is not None else "not_pending")
+                else (
+                    "deleted"
+                    if actual.deleted_at is not None
+                    else (
+                        "in_progress"
+                        if actual.processing_status == PROCESSING_STATUS_PROCESSING
+                        else "not_claimable"
+                    )
+                )
             ),
             current_status=None if actual is None else actual.processing_status,
         )
@@ -253,6 +282,126 @@ async def _save_result(
         )
 
 
+#: Códigos de S3/R2 que NO mejoran reintentando: la clave no está, no hay permiso,
+#: el objeto está archivado. Reintentar tres veces sólo retrasa el FAILED.
+_S3_PERMANENTES = frozenset(
+    {
+        "NoSuchKey",
+        "NoSuchBucket",
+        "AccessDenied",
+        "InvalidObjectState",
+        "InvalidAccessKeyId",
+        "SignatureDoesNotMatch",
+    }
+)
+
+
+def _es_transitorio(exc: BaseException) -> bool:
+    """¿Este error puede desaparecer si se vuelve a intentar?
+
+    **El default es NO.** Un error de parseo o de validación va a fallar igual las
+    tres veces: reintentarlo no arregla el archivo, retrasa el diagnóstico y
+    ocupa el worker. Sólo se reintenta lo que depende de algo externo que puede
+    estar caído un rato — la red, S3/R2, la base.
+
+    Es lo que faltaba para que `max_retries=3` significara algo: estaba declarado
+    en las tres tasks pero sin `bind=True`, sin `self.retry()` y sin
+    `autoretry_for`, así que ninguna reintentaba nunca. `task_acks_late=True` da
+    re-entrega si el worker MUERE, que es otra cosa: con una excepción, el archivo
+    iba directo a FAILED.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError  # noqa: PLC0415
+    from sqlalchemy.exc import DBAPIError  # noqa: PLC0415
+
+    # BotoCoreError cubre timeouts, DNS y fallos de conexión (no respuestas HTTP).
+    if isinstance(exc, BotoCoreError):
+        return True
+    if isinstance(exc, ClientError):
+        error = exc.response.get("Error", {}) if isinstance(exc.response, dict) else {}
+        if str(error.get("Code", "")) in _S3_PERMANENTES:
+            return False
+        meta = exc.response.get("ResponseMetadata", {}) if isinstance(exc.response, dict) else {}
+        status = meta.get("HTTPStatusCode")
+        # Sin status (no llegó respuesta) o 5xx/429: del lado del servicio.
+        return status is None or int(status) >= 500 or int(status) == 429
+    if isinstance(exc, DBAPIError):
+        # `connection_invalidated` es el corte de conexión (Neon cierra las ociosas).
+        # Un error de integridad o de sintaxis SQL no es transitorio y cae en False.
+        return bool(getattr(exc, "connection_invalidated", False))
+    return isinstance(exc, ConnectionError | TimeoutError)
+
+
+def _espera_antes_de_reintentar(intentos_previos: int) -> int:
+    """Espera creciente: 30 s, 60 s, 120 s. Un servicio caído no se recupera en
+    tres segundos, y machacarlo cada 30 s empeora una caída por saturación."""
+    return int(30 * (2**intentos_previos))
+
+
+async def _release_for_retry(
+    factory: Any,
+    file_id: str,
+    tenant_id: str,
+    token: _uuid.UUID,
+    *,
+    task_name: str,
+    t0: float,
+    error: str,
+) -> bool:
+    """Devuelve el archivo a PENDING para que el reintento lo pueda reclamar.
+
+    Sin esto el reintento no serviría de nada: `_claim_for_processing` sólo toma
+    un archivo PENDING (o uno PROCESSING ya vencido), así que el segundo intento
+    encontraría el archivo en el PROCESSING que dejó el primero y tendría que
+    esperar el umbral de staleness para poder trabajar.
+
+    Lleva el mismo fencing que el resto: sólo libera si este intento sigue siendo
+    el dueño. Devuelve ``False`` si ya no lo es —otro intento se quedó con el
+    trabajo y reintentar sería competirle— **y también si la liberación falla**:
+    el escenario que dispara el reintento puede ser justamente la base caída, y
+    ahí dejar propagar reemplazaría el error real por el de esta operación
+    auxiliar. El intento fallido se registra acá y no en el camino de FAILED:
+    tres fallos transitorios seguidos de un éxito tienen que verse como tres
+    fallos en las métricas, no como un único éxito.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+
+    try:
+        async with factory() as session:
+            liberado = await session.execute(
+                update(UploadedFile)
+                .where(
+                    UploadedFile.id == _uuid.UUID(file_id),
+                    UploadedFile.tenant_id == _uuid.UUID(tenant_id),
+                    UploadedFile.deleted_at.is_(None),
+                    UploadedFile.parse_attempt_id == token,
+                    UploadedFile.processing_status == PROCESSING_STATUS_PROCESSING,
+                )
+                .values(processing_status=PROCESSING_STATUS_PENDING, parse_attempt_id=None)
+            )
+            if liberado.rowcount != 1:
+                return False
+            await track_job_event(
+                session,
+                task_name,
+                _uuid.UUID(tenant_id),
+                success=False,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                error=f"RETRY:{error}",
+            )
+            await session.commit()
+    except Exception:  # noqa: BLE001 — el error original tiene que ganar
+        logger.warning(
+            "ingestion.release_for_retry_failed",
+            task=task_name,
+            file_id=file_id,
+            tenant_id=tenant_id,
+        )
+        return False
+    return True
+
+
 async def _record_failure(
     factory: Any,
     file_id: str,
@@ -273,7 +422,8 @@ async def _record_failure(
     * propiedad perdida — otro intento se quedó con el archivo mientras éste
       fallaba. Su ``FAILED`` tardío borraría un resultado que puede estar bien.
 
-    Nunca tapa la excepción original: el caller la re-lanza después.
+    Nunca tapa la excepción original —ni siquiera si la base es lo que falla—:
+    el caller la re-lanza después.
     """
     if token is None:
         logger.warning(
@@ -310,6 +460,18 @@ async def _record_failure(
             file_id=file_id,
             tenant_id=tenant_id,
             reason="ownership_lost",
+        )
+    except Exception:  # noqa: BLE001 — ver el docstring: el error original gana
+        # Si la base es lo que está caído —una de las dos clases que
+        # `_es_transitorio` reconoce— este UPDATE falla también. Dejar propagar
+        # cambiaría el error que ve el operador por el de la operación auxiliar,
+        # y encima saltearía el `raise` del caller.
+        logger.warning(
+            "ingestion.failure_not_recorded",
+            task=task_name,
+            file_id=file_id,
+            tenant_id=tenant_id,
+            reason="write_failed",
         )
 
 
@@ -397,18 +559,19 @@ async def _apply_validation_gate(
 @celery_app.task(  # type: ignore[misc]
     name="jobs.process_spreadsheet",
     queue="ingestion",
+    bind=True,
     max_retries=3,
     default_retry_delay=30,
     soft_time_limit=150,
     time_limit=180,
 )
-def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> None:
+def process_spreadsheet(self: Any, file_id: str, tenant_id: str, force: bool = False) -> None:
     """Parse .xlsx or .csv file and extract ventas/gastos/productos."""
     from app.config.settings import get_settings  # noqa: PLC0415
 
     s = get_settings()
 
-    async def _run() -> None:
+    async def _run() -> BaseException | None:
         from app.integrations.s3 import S3Client  # noqa: PLC0415
 
         engine, factory = _build_async_session(s.DATABASE_URL)
@@ -425,7 +588,7 @@ def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> No
                         # condiciones de parsearse. No es un error: salir sin
                         # tocar nada es exactamente lo correcto.
                         await session.commit()
-                        return
+                        return None
                     record, token = reclamado
                     await session.commit()
 
@@ -452,7 +615,7 @@ def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> No
                     token=token,
                 )
                 if validated_summary is None:
-                    return  # REJECTED — already persisted
+                    return None  # REJECTED — already persisted
 
                 async with factory() as session:
                     result_record = await _load_owned(session, file_id, tenant_id, token)
@@ -490,6 +653,8 @@ def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> No
                     rows=validated_summary.get("rows_processed"),
                 )
 
+                return None
+
         except ParseOwnershipLostError as perdida:
             # Final legítimo, no un fallo: otro intento se quedó con el trabajo.
             # No se re-lanza — hacerlo marcaría la task como fallida y, con los
@@ -502,14 +667,34 @@ def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> No
                 tenant_id=tenant_id,
                 detail=str(perdida),
             )
-            return
+            return None
         except Exception as exc:
             logger.error(
                 "ingestion.spreadsheet.failed",
                 file_id=file_id,
                 tenant_id=tenant_id,
                 error=str(exc),
+                transitorio=_es_transitorio(exc),
+                intento=int(self.request.retries or 0),
             )
+            if (
+                _es_transitorio(exc)
+                and int(self.request.retries or 0) < int(self.max_retries or 0)
+                and token is not None
+                and await _release_for_retry(
+                    factory,
+                    file_id,
+                    tenant_id,
+                    token,
+                    task_name="jobs.process_spreadsheet",
+                    t0=t0,
+                    error=str(exc),
+                )
+            ):
+                # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
+                # sería mentir sobre un archivo que todavía tiene intentos, y
+                # además lo dejaría en un estado que el claim no puede tomar.
+                return exc
             await _record_failure(
                 factory,
                 file_id,
@@ -524,24 +709,34 @@ def process_spreadsheet(file_id: str, tenant_id: str, force: bool = False) -> No
         finally:
             await engine.dispose()
 
-    asyncio.run(_run())
+    # `self.retry()` se levanta ACÁ y no adentro de `_run`: la excepción `Retry`
+    # de Celery tiene que salir del contexto sync de la task, no atravesar el
+    # `asyncio.run` de un corutina. `_run` sólo DECIDE (devolviendo la excepción
+    # que justifica el reintento) y esta capa ejecuta.
+    a_reintentar = asyncio.run(_run())
+    if a_reintentar is not None:
+        raise self.retry(
+            exc=a_reintentar,
+            countdown=_espera_antes_de_reintentar(int(self.request.retries or 0)),
+        )
 
 
 @celery_app.task(  # type: ignore[misc]
     name="jobs.process_text_document",
     queue="ingestion",
+    bind=True,
     max_retries=3,
     default_retry_delay=30,
     soft_time_limit=150,
     time_limit=180,
 )
-def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> None:
+def process_text_document(self: Any, file_id: str, tenant_id: str, force: bool = False) -> None:
     """Parse .txt, .docx, .pdf or .pptx file, extracting reusable context."""
     from app.config.settings import get_settings  # noqa: PLC0415
 
     s = get_settings()
 
-    async def _run() -> None:
+    async def _run() -> BaseException | None:
         from app.integrations.s3 import S3Client  # noqa: PLC0415
 
         engine, factory = _build_async_session(s.DATABASE_URL)
@@ -558,7 +753,7 @@ def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> 
                         # condiciones de parsearse. No es un error: salir sin
                         # tocar nada es exactamente lo correcto.
                         await session.commit()
-                        return
+                        return None
                     record, token = reclamado
                     await session.commit()
 
@@ -583,7 +778,7 @@ def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> 
                     token=token,
                 )
                 if validated_summary is None:
-                    return
+                    return None
 
                 async with factory() as session:
                     result_record = await _load_owned(session, file_id, tenant_id, token)
@@ -612,6 +807,8 @@ def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> 
                     row_count=validated_summary.get("row_count"),
                 )
 
+                return None
+
         except ParseOwnershipLostError as perdida:
             # Final legítimo, no un fallo: otro intento se quedó con el trabajo.
             # No se re-lanza — hacerlo marcaría la task como fallida y, con los
@@ -624,14 +821,34 @@ def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> 
                 tenant_id=tenant_id,
                 detail=str(perdida),
             )
-            return
+            return None
         except Exception as exc:
             logger.error(
                 "ingestion.text_document.failed",
                 file_id=file_id,
                 tenant_id=tenant_id,
                 error=str(exc),
+                transitorio=_es_transitorio(exc),
+                intento=int(self.request.retries or 0),
             )
+            if (
+                _es_transitorio(exc)
+                and int(self.request.retries or 0) < int(self.max_retries or 0)
+                and token is not None
+                and await _release_for_retry(
+                    factory,
+                    file_id,
+                    tenant_id,
+                    token,
+                    task_name="jobs.process_text_document",
+                    t0=t0,
+                    error=str(exc),
+                )
+            ):
+                # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
+                # sería mentir sobre un archivo que todavía tiene intentos, y
+                # además lo dejaría en un estado que el claim no puede tomar.
+                return exc
             await _record_failure(
                 factory,
                 file_id,
@@ -646,18 +863,28 @@ def process_text_document(file_id: str, tenant_id: str, force: bool = False) -> 
         finally:
             await engine.dispose()
 
-    asyncio.run(_run())
+    # `self.retry()` se levanta ACÁ y no adentro de `_run`: la excepción `Retry`
+    # de Celery tiene que salir del contexto sync de la task, no atravesar el
+    # `asyncio.run` de un corutina. `_run` sólo DECIDE (devolviendo la excepción
+    # que justifica el reintento) y esta capa ejecuta.
+    a_reintentar = asyncio.run(_run())
+    if a_reintentar is not None:
+        raise self.retry(
+            exc=a_reintentar,
+            countdown=_espera_antes_de_reintentar(int(self.request.retries or 0)),
+        )
 
 
 @celery_app.task(  # type: ignore[misc]
     name="jobs.process_image_ocr",
     queue="ingestion",
+    bind=True,
     max_retries=3,
     default_retry_delay=30,
     soft_time_limit=150,
     time_limit=180,
 )
-def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None:
+def process_image_ocr(self: Any, file_id: str, tenant_id: str, force: bool = False) -> None:
     """
     Run OCR on an image file (.jpg, .png, .heic).
 
@@ -669,7 +896,7 @@ def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None
 
     s = get_settings()
 
-    async def _run() -> None:
+    async def _run() -> BaseException | None:
         from app.integrations.s3 import S3Client  # noqa: PLC0415
 
         engine, factory = _build_async_session(s.DATABASE_URL)
@@ -686,7 +913,7 @@ def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None
                         # condiciones de parsearse. No es un error: salir sin
                         # tocar nada es exactamente lo correcto.
                         await session.commit()
-                        return
+                        return None
                     record, token = reclamado
                     await session.commit()
 
@@ -711,7 +938,7 @@ def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None
                     token=token,
                 )
                 if validated_summary is None:
-                    return
+                    return None
 
                 # ALWAYS NEEDS_CONFIRMATION for images — never auto-import
                 async with factory() as session:
@@ -740,6 +967,8 @@ def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None
                     has_ocr="error" not in validated_summary,
                 )
 
+                return None
+
         except ParseOwnershipLostError as perdida:
             # Final legítimo, no un fallo: otro intento se quedó con el trabajo.
             # No se re-lanza — hacerlo marcaría la task como fallida y, con los
@@ -752,14 +981,34 @@ def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None
                 tenant_id=tenant_id,
                 detail=str(perdida),
             )
-            return
+            return None
         except Exception as exc:
             logger.error(
                 "ingestion.image_ocr.failed",
                 file_id=file_id,
                 tenant_id=tenant_id,
                 error=str(exc),
+                transitorio=_es_transitorio(exc),
+                intento=int(self.request.retries or 0),
             )
+            if (
+                _es_transitorio(exc)
+                and int(self.request.retries or 0) < int(self.max_retries or 0)
+                and token is not None
+                and await _release_for_retry(
+                    factory,
+                    file_id,
+                    tenant_id,
+                    token,
+                    task_name="jobs.process_image_ocr",
+                    t0=t0,
+                    error=str(exc),
+                )
+            ):
+                # Vuelve a PENDING y se reintenta: NO se marca FAILED. Marcarlo
+                # sería mentir sobre un archivo que todavía tiene intentos, y
+                # además lo dejaría en un estado que el claim no puede tomar.
+                return exc
             await _record_failure(
                 factory,
                 file_id,
@@ -774,4 +1023,13 @@ def process_image_ocr(file_id: str, tenant_id: str, force: bool = False) -> None
         finally:
             await engine.dispose()
 
-    asyncio.run(_run())
+    # `self.retry()` se levanta ACÁ y no adentro de `_run`: la excepción `Retry`
+    # de Celery tiene que salir del contexto sync de la task, no atravesar el
+    # `asyncio.run` de un corutina. `_run` sólo DECIDE (devolviendo la excepción
+    # que justifica el reintento) y esta capa ejecuta.
+    a_reintentar = asyncio.run(_run())
+    if a_reintentar is not None:
+        raise self.retry(
+            exc=a_reintentar,
+            countdown=_espera_antes_de_reintentar(int(self.request.retries or 0)),
+        )

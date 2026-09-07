@@ -156,6 +156,7 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_PENDING,
     PROCESSING_STATUS_PROCESSING,
     PROCESSING_STATUS_REJECTED,
+    STALE_PROCESSING_SECONDS,
     UploadedFile,
 )
 from app.persistence.models.pipeline_event import (
@@ -486,6 +487,24 @@ async def upload_file(
         return UploadResponse(
             file_id=saved.id, status="PROCESSING", duplicate_of=dup_of, warning=dup_warning
         )
+
+    # H05: COMMIT ANTES DE PUBLICAR. `repo.save()` sólo hace flush y el commit lo
+    # hacía `get_db_session` al cerrar, o sea DESPUÉS de este `.delay()`: el worker
+    # abre su propia sesión, así que podía salir a buscar un `UploadedFile` que su
+    # transacción todavía no ve y morir con "not found" — y como estas tasks no
+    # reintentaban (H06), el archivo quedaba en PENDING para siempre. Peor todavía
+    # si el request hacía rollback después: quedaba un mensaje apuntando a una fila
+    # que nunca existió.
+    #
+    # Después del commit el archivo ya está en PENDING, que es un estado
+    # RECUPERABLE: si la publicación falla, `reprocess_file` lo reencola. La
+    # ventana entre el commit y la publicación no se cierra acá — eso es la cola
+    # persistida de F5 (E6c); lo que se cierra es la carrera, que es lo que hoy
+    # rompe.
+    #
+    # El mismo criterio ya estaba aplicado en el apply de la relectura ("Commit
+    # ANTES de encolar para que el worker vea el run") y en `score_trigger_service`.
+    await session.commit()
 
     # Enqueue parsing job — fall back to sync processing if Celery/Redis
     # is unavailable (beta: single Railway service without workers).
@@ -1404,7 +1423,7 @@ async def reprocess_file(
     # cuando lleva más que el hard time_limit de Celery (180s) + margen → sin riesgo
     # de pisar un job realmente en vuelo. Así el usuario re-lee el archivo (ya está
     # en R2) sin re-subirlo.
-    stale_after = timedelta(seconds=300)
+    stale_after = timedelta(seconds=STALE_PROCESSING_SECONDS)
     updated = record.updated_at
     if updated is not None and updated.tzinfo is None:
         updated = updated.replace(tzinfo=UTC)
@@ -1425,11 +1444,22 @@ async def reprocess_file(
 
     record.processing_status = PROCESSING_STATUS_PENDING
     record.parsed_summary_json = None
+    # El token del intento anterior se limpia junto con la transición. Si quedara,
+    # el camino de fallback (`job.delay()` falla → `_process_file_sync` vuelve a
+    # poner PROCESSING sin tocarlo) lo dejaría válido otra vez, y el worker viejo
+    # —el que estaba colgado— podría escribir su resultado encima del que produjo
+    # el fallback sync.
+    record.parse_attempt_id = None
     await repo.save(record)
 
     if get_settings().USE_LOCAL_FALLBACK:
         await _process_file_sync(record, session)
     else:
+        # H05, igual que en el upload: el worker tiene que poder VER el PENDING
+        # que se acaba de escribir. Acá importa todavía más — el claim del worker
+        # sólo toma archivos en PENDING, así que si la transición no está
+        # commiteada, la task no encuentra nada que reclamar y sale sin trabajar.
+        await session.commit()
         job = _pick_job(record.content_type)
         try:
             job.delay(str(record.id), str(tenant.tenant_id))

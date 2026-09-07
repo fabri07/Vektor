@@ -21,6 +21,13 @@ PROCESSING_STATUS_DONE = "DONE"
 PROCESSING_STATUS_FAILED = "FAILED"
 PROCESSING_STATUS_REJECTED = "REJECTED"
 
+#: Cuánto puede quedarse un archivo en PROCESSING antes de considerarlo abandonado.
+#: Por encima del hard `time_limit=180s` de Celery + margen: pasado eso, un worker
+#: que no escribió resultado no está trabajando, murió. Lo usan el endpoint de
+#: reproceso y la adquisición del worker — si divergieran, uno reencolaría trabajo
+#: que el otro todavía considera vivo.
+STALE_PROCESSING_SECONDS = 300
+
 # Valid reread_status values (F9a: versionado de ingestión)
 REREAD_STATUS_NONE = "NONE"
 # PREVIEWED/UP_TO_DATE están reservados para un estado más granular a futuro
