@@ -1157,6 +1157,17 @@ def _sku_del_archivo(raw: Any) -> str | None:
     return None if limpio and is_internal_sku(limpio) else limpio
 
 
+#: Clave de SISTEMA donde las dos normalizaciones (números y fechas) guardan el
+#: valor tal como venía en el archivo, por columna. Existe para que "Otros"
+#: muestre —y pueda volver a importar— lo que el usuario escribió: al persistir
+#: la fila ya interpretada, un `12.500,50` quedaba como `"12500.50"`, y ESE texto
+#: es ambiguo fuera de su columna (`_parse_amount` lo rechaza, y con razón), así
+#: que la fila capturada dejaba de poder reimportarse desde la bandeja.
+#: Prefijo `__` como el resto de las claves del sistema: no cuenta como contenido
+#: de fila y no llega a la base.
+ORIGINALES_KEY = "__originales__"
+
+
 def _fila_con_contenido(row: dict[str, Any]) -> bool:
     """¿La fila dice algo, o son celdas vacías con forma de fila?
 
@@ -1248,10 +1259,23 @@ def _capture_unclassified(
         )
     count = 0
     for row in rows:
-        row_data = {k: v for k, v in row.items() if k != "__context__"}
+        _originales = row.get(ORIGINALES_KEY) or {}
+        row_data = {
+            k: v for k, v in row.items() if k not in ("__context__", ORIGINALES_KEY)
+        }
         if not row_data or (skip_blank_rows and not _fila_con_contenido(row_data)):
             continue
-        _persistido = {k: ("" if v is None else str(v)) for k, v in row_data.items()}
+        # Se guarda lo que el archivo DECÍA, no lo que Véktor entendió. La fila
+        # llega ya interpretada (números y fechas normalizados con el convenio de
+        # su columna) y guardar eso tenía dos costos: el usuario dejaba de ver lo
+        # que escribió —que es lo que se le pide revisar— y el texto resultante
+        # (`"12500.50"`, `"2024-03-05 00:00:00"`) queda fuera de su columna, donde
+        # ya no hay convenio que lo resuelva, así que la fila no se podía volver a
+        # importar desde la bandeja.
+        _persistido = {
+            k: ("" if v is None else str(_originales.get(k, v)))
+            for k, v in row_data.items()
+        }
         # Se agrega DESPUÉS del volcado para que una columna del archivo que se
         # llamara igual no pueda pisar el vínculo (ni al revés): la clave reservada
         # es del sistema, no del archivo.
@@ -3365,11 +3389,14 @@ def _normalizar_columnas_de_fecha(
     normalizadas: list[dict[str, Any]] = []
     for indice, fila in enumerate(rows):
         copia = dict(fila)
+        if ORIGINALES_KEY in copia:
+            copia[ORIGINALES_KEY] = dict(copia[ORIGINALES_KEY])
         for col, convenio in convenios.items():
             if col not in copia:
                 continue
             interpretada = parsear_fecha_de_columna(copia[col], convenio)
             if interpretada.valor is not None:
+                copia.setdefault(ORIGINALES_KEY, {})[col] = copia[col]
                 copia[col] = interpretada.valor
             elif interpretada.motivo is not None:
                 motivos.setdefault(indice, {})[col] = interpretada.motivo
@@ -3484,11 +3511,16 @@ def _normalizar_columnas_numericas(
     normalizadas: list[dict[str, Any]] = []
     for indice, fila in enumerate(rows):
         copia = dict(fila)
+        # `dict(fila)` es superficial: sin esto, dos pasadas sobre la misma fila
+        # compartirían el dict de originales y la segunda mutaría el de la primera.
+        if ORIGINALES_KEY in copia:
+            copia[ORIGINALES_KEY] = dict(copia[ORIGINALES_KEY])
         for col, convenio in convenios.items():
             if col not in copia:
                 continue
             interpretado = parsear_monto(copia[col], convenio)
             if interpretado.valor is not None:
+                copia.setdefault(ORIGINALES_KEY, {})[col] = copia[col]
                 copia[col] = interpretado.valor
             elif interpretado.motivo is not None:
                 motivos.setdefault(indice, {})[col] = interpretado.motivo

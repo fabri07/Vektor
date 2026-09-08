@@ -467,3 +467,49 @@ async def test_un_serial_de_excel_ya_no_manda_la_fila_a_revision(
     ventas = await _ventas(db_session, sample_tenant)
     assert [v.transaction_date.date() for v in ventas] == [date(2023, 7, 16)]
     assert await _otros(db_session, sample_tenant) == []
+
+
+async def test_otros_guarda_lo_que_decia_el_archivo_no_lo_que_entendio_vektor(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    _confirmar: Any,
+) -> None:
+    """La fila capturada llega ya interpretada, y guardarla así rompía dos cosas.
+
+    Con los números y las fechas resueltos por columna, la fila que va a "Otros"
+    trae `Decimal("12500.50")` y un `datetime`. Persistir eso significaba mostrarle
+    al usuario algo distinto de lo que escribió —justo en la pantalla donde le
+    pedimos que revise— y, peor, dejaba la fila sin poder reimportarse: fuera de
+    su columna, el texto `"12500.50"` es ambiguo y `_parse_amount` lo rechaza,
+    correctamente. Antes de la normalización por columna se guardaba
+    `"12.500,50"`, que sí se lee solo.
+
+    Se afirma la ida y la vuelta: lo guardado es el original, y lo guardado se
+    puede volver a leer.
+    """
+    from app.application.services.ingestion_import_service import _parse_amount
+
+    record = await _subir(
+        db_session,
+        sample_tenant,
+        _libro(
+            [
+                ["05/03/2024", _PRODUCTO, 1, "12.500,50", _CLIENTE, "efectivo"],
+                ["06/03/2024", _PRODUCTO, 2.5, "8.400,00", _CLIENTE, "efectivo"],
+            ],
+            _HEADERS,
+        ),
+        "otros_original.xlsx",
+    )
+    resp = await _confirmar(record.id, _MAPEO_VENTAS)
+    assert resp.status_code == 200, resp.text
+
+    otros = await _otros(db_session, sample_tenant)
+    assert len(otros) == 1
+    fila = otros[0].row_data
+    assert fila["total"] == "8.400,00", f"se guardó la interpretación: {fila['total']!r}"
+    assert fila["fecha"] == "06/03/2024", f"se guardó la interpretación: {fila['fecha']!r}"
+    assert fila["cantidad"] == "2.5", "el valor problemático tiene que quedar a la vista"
+    assert _parse_amount(fila["total"]) == Decimal("8400.00"), (
+        "lo guardado no se puede volver a leer: la fila queda atrapada en la bandeja"
+    )
