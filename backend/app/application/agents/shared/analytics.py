@@ -12,48 +12,33 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.domain.numeric_parsing import parsear_monto
+
 # ── Parsing monetario type-aware ──────────────────────────────────────────────
 
 
 def parse_money(value: Any) -> float | None:
     """Convierte un valor (numérico o string) a float sin corromper decimales.
 
-    Crítico: si el valor YA es numérico (openpyxl/JSON devuelven float/int para
-    celdas numéricas), se devuelve tal cual — `replace(".", "")` corrompería
-    `1234.56` → `123456`. Para strings maneja formato argentino (`1.234,56` →
-    punto miles, coma decimal) y formato plano (`1234.56`). Devuelve None si no
-    se puede interpretar o si es <= 0 no aplica (eso lo decide el caller).
+    **La interpretación la hace la política numérica** (`domain/numeric_parsing`).
+    Esta función tenía la suya y fallaba donde el resto no: con los dos
+    separadores asumía formato argentino sin mirar cuál venía último, así que
+    `"12,500.00"` daba **12,5** — el caso que documenta H03 del programa de
+    ingesta, y el que hacía que la misma celda valiera distinto en la ingesta y en
+    el análisis.
+
+    Se desempata por la FORMA del valor porque acá no hay columna que mirar: los
+    callers son análisis de chat que reciben un valor suelto. Un grupo final de
+    tres dígitos es de miles (`1.234` = 1234); uno de uno o dos, decimales
+    (`12.50` = 12,5).
+
+    Devuelve `float` y no `Decimal` a propósito: es la entrada de cálculos
+    estadísticos, no de una escritura de negocio. Nada de lo que sale de acá se
+    persiste — la aritmética que toca plata va por `DeterministicFinance` y
+    `FactsService`.
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):  # bool es subclase de int — descartar
-        return None
-    if isinstance(value, int | float):
-        return float(value)
-    s = str(value).strip().replace("$", "").replace(" ", "")
-    if not s:
-        return None
-    has_dot = "." in s
-    has_comma = "," in s
-    try:
-        if has_dot and has_comma:
-            # formato AR: punto = miles, coma = decimal → 1.234,56
-            return float(s.replace(".", "").replace(",", "."))
-        if has_comma:
-            # solo coma → separador decimal → 1234,56
-            return float(s.replace(",", "."))
-        if has_dot:
-            # solo punto: ambiguo. En AR "1.234" = miles (1234); "12.50" = decimal.
-            # Heurística: varios puntos, o un grupo final de exactamente 3 dígitos →
-            # separador de miles. La moneda AR usa 2 decimales, no 3.
-            parts = s.split(".")
-            if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3):
-                return float(s.replace(".", ""))  # miles → 1.234 → 1234
-            return float(s)  # decimal → 1234.56 preservado
-        # sin separadores → entero
-        return float(s)
-    except (ValueError, TypeError):
-        return None
+    interpretado = parsear_monto(value, desempatar_por_forma=True)
+    return float(interpretado.valor) if interpretado.valor is not None else None
 
 
 # ── Precios y márgenes ────────────────────────────────────────────────────────

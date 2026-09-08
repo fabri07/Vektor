@@ -20,6 +20,15 @@ def test_parse_money_string_formats():
     assert analytics.parse_money("1234,5") == 1234.5
 
 
+def test_parse_money_formato_us_no_se_lee_como_argentino():
+    """Tenía su propia interpretación: con los dos separadores asumía formato AR
+    sin mirar cuál venía último, así que `"12,500.00"` daba 12,5 — la misma celda
+    valía distinto en la ingesta que en el análisis. Manda el ÚLTIMO separador:
+    los miles nunca van después del decimal."""
+    assert analytics.parse_money("12,500.00") == 12500.0
+    assert analytics.parse_money("1,234.56") == 1234.56
+
+
 def test_parse_money_invalid():
     assert analytics.parse_money("") is None
     assert analytics.parse_money(None) is None
