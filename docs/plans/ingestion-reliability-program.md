@@ -2,6 +2,19 @@
 
 Fecha: 2026-09-06. Base revisada: `a62270bf`. Estado: planificación; no implementado. La revisión anterior ejecutó 851 pruebas de backend sobre SQLite y 237 de frontend, todas satisfactorias, además de reproducciones aisladas de defectos. Esa revisión no ejecutó PostgreSQL ni inspeccionó producción — el CI sí tiene un job PostgreSQL propio (`ci-backend.yml`, `postgres:16` + `TEST_PG_DSN`, marker `postgres`), así que lo que falta es cobertura de los escenarios nuevos, no la infraestructura para correrlos. Esos resultados no son evidencia de que este programa ya esté validado.
 
+**Estado de ejecución (actualizado 2026-09-07).** El encabezado de arriba describe la planificación original; esto describe lo entregado, y manda sobre él.
+
+| Entrega | Estado |
+|---|---|
+| E1 — protección de estados del worker (H15) | **Entregada.** Adquisición atómica con token, escritura condicionada en la sentencia que escribe, y la ventana de borrado entre lectura y escritura cubierta. |
+| E2 — `ignore` y relectura completos (H01/H02) | **Entregada.** Resolución central consumida por los TRES caminos —incluido el legacy, que entregaba la fila cruda—, `context_entities` independiente del mapeo, y el borrador que se fusiona en vez de pisarse (una corrección parcial ya no borra la anterior). |
+| E3 — orden commit/publicación y retry seguro (H05/H06) | **Entregada.** El commit va antes de publicar; los reintentos existen y liberan el lease. Un fallo transitorio ANTERIOR a la adquisición también reintenta: el archivo sigue en `PENDING` y no hay nada que liberar. |
+| E4 — corpus y baseline + política de números, cantidades y fechas (F0/F2) | **Entregada.** Convenio numérico y temporal por COLUMNA, con validación estructural de la celda contra su convenio; cantidades sin truncar ni caer al piso de 1; preview y confirm comparten la preparación de filas; seriales de Excel; "Otros" conserva el valor original. Corpus versionado con baseline escrito a mano en `backend/app/tests/corpus/`. |
+| E5 — verificación operativa (H16/H10) | **Bloqueada**: necesita el estado real de Beat y de los flags por servicio en Railway, que no se puede leer desde el repositorio. |
+| E6a/E6b/E6c, E7a/E7b/E7c | Sin empezar. |
+
+Lo entregado son correcciones sobre el motor actual: la compuerta de E7a —el refactor grande— sigue sin comprometerse, y se compromete sólo si E5/E6 dejan una brecha medida.
+
 **Objetivo verificable.** Cada archivo debe producir una interpretación revisable y un resultado trazable: respetar decisiones explícitas, conservar datos originales, justificar exclusiones, cuadrar importes y stock, tolerar reintentos y permitir una relectura o reversión segura. La pantalla, la confirmación y la relectura deben compartir las reglas y la interpretación de los datos.
 
 **Alcance.** Carga, almacenamiento, parsing, clasificación, mapeo, normalización, validación, vista previa, confirmación, ejecución, identidad, deduplicación, inventario, costos, clientes/proveedores, bandeja Otros, relectura, borrado/reversa, observabilidad y reparación histórica. CSV/XLSX será la primera ruta migrada. Los formatos de texto, documentos e imágenes ya admitidos y los callers de chat, remitos y reparación se inventariarán y adaptarán al mismo contrato cuando generen operaciones de negocio. Una extracción documental para contexto debe conservar su finalidad y no convertirse automáticamente en una venta o gasto.
