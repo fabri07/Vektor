@@ -2278,6 +2278,41 @@ def _label_cantidad_ilegible(motivo: str) -> str:
     return _CANTIDAD_ILEGIBLE_LABEL.get(motivo, _CANTIDAD_ILEGIBLE_LABEL[MOTIVO_ILEGIBLE])
 
 
+#: El mensaje por defecto cuando una fila no tiene monto utilizable: el usuario
+#: tiene que mapear la columna, o la pareja que la calcula.
+_SIN_MONTO_LABEL = (
+    "Fila sin monto: no se pudo registrar. Mapeá la columna del monto, o las del "
+    "precio unitario y la cantidad para que Véktor lo calcule"
+)
+
+
+def _label_fila_sin_monto(raw: Any) -> str:
+    """Por qué esta fila se quedó sin monto, cuando se puede decir algo mejor.
+
+    El mensaje por defecto le pide al usuario que mapee la columna del monto — y
+    es lo correcto cuando falta el mapeo, pero era engañoso justo en el caso que
+    E4 vino a hacer visible: la columna estaba mapeada y lo que no se pudo fue
+    LEER la celda. Que la pantalla diga "mapeá la columna" sobre una columna ya
+    mapeada manda a corregir lo que no está roto.
+
+    No hace falta el convenio de la columna para elegir el texto: alcanza con
+    distinguir "acá hay un número que no se pudo interpretar" de "acá hay
+    cualquier otra cosa".
+    """
+    if raw is None or not str(raw).strip():
+        return _SIN_MONTO_LABEL
+    interpretado = parsear_monto(raw)
+    if interpretado.motivo in (MOTIVO_AMBIGUO, MOTIVO_INCOMPATIBLE):
+        return (
+            f"No se pudo decidir la escala del monto «{str(raw).strip()}»: la "
+            "columna mezcla formatos (por ejemplo 12.500 junto a 12.50). Unificá "
+            "el formato de la columna y volvé a importar"
+        )
+    if interpretado.motivo == MOTIVO_ILEGIBLE:
+        return f"El monto «{str(raw).strip()}» no se pudo leer como número"
+    return _SIN_MONTO_LABEL
+
+
 def _cantidad_de_venta(qty_raw: Any) -> tuple[int, str | None]:
     """Unidades de una venta importada, y el motivo si el archivo declaró algo ilegible.
 
@@ -5001,10 +5036,8 @@ async def _insert_confirmed_data_impl(
                     headers=headers,
                     source=source,
                     uploaded_file_id=uploaded_file_id,
-                    context_label=(
-                        "Fila sin monto: no se pudo registrar. Mapeá la columna "
-                        "del monto, o las del precio unitario y la cantidad para "
-                        "que Véktor lo calcule"
+                    context_label=_label_fila_sin_monto(
+                        row.get(venta_col or gasto_col or "")
                     ),
                     suggested_entity="sale" if wants_ventas else "expense",
                     row_ref=_source_row_ref(_row_anchor),
@@ -6094,10 +6127,8 @@ async def _insert_multisheet_data(
                 headers=None,  # sin headers de hoja en este scope
                 source=source,
                 uploaded_file_id=uploaded_file_id,
-                context_label=(
-                    "Fila sin monto: no se pudo registrar la venta. Mapeá la "
-                    "columna del monto, o las del precio unitario y la cantidad "
-                    "para que Véktor lo calcule"
+                context_label=_label_fila_sin_monto(
+                    row.get(cols["amount"]) if cols.get("amount") else None
                 ),
                 suggested_entity="sale",
                 row_ref=row_ref,

@@ -513,3 +513,40 @@ async def test_otros_guarda_lo_que_decia_el_archivo_no_lo_que_entendio_vektor(
     assert _parse_amount(fila["total"]) == Decimal("8400.00"), (
         "lo guardado no se puede volver a leer: la fila queda atrapada en la bandeja"
     )
+
+
+async def test_otros_explica_que_no_se_pudo_leer_el_monto_no_que_falta_mapearlo(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    _confirmar: Any,
+) -> None:
+    """El mensaje por defecto pide mapear la columna del monto, y en este archivo
+    la columna está mapeada: lo que no se pudo fue leer la celda.
+
+    Mandar a corregir lo que no está roto es la forma más rápida de que el usuario
+    concluya que la bandeja no sirve. El motivo tiene que nombrar el problema real
+    —y mostrar el valor— para que sepa qué corregir en el archivo.
+    """
+    record = await _subir(
+        db_session,
+        sample_tenant,
+        _libro(
+            [
+                ["05/03/2024", _PRODUCTO, 1, "12.500,50", _CLIENTE, "efectivo"],
+                ["06/03/2024", _PRODUCTO, 1, "12.50", _CLIENTE, "efectivo"],
+            ],
+            _HEADERS,
+        ),
+        "motivo_monto.xlsx",
+    )
+    resp = await _confirmar(record.id, _MAPEO_VENTAS)
+    assert resp.status_code == 200, resp.text
+
+    otros = await _otros(db_session, sample_tenant)
+    assert len(otros) == 1
+    label = otros[0].context_label or ""
+    assert "escala" in label, f"el motivo no dice qué pasó: {label!r}"
+    assert "12.50" in label, f"el motivo no muestra el valor del archivo: {label!r}"
+    assert "Mapeá la columna del monto" not in label, (
+        f"manda a corregir un mapeo que está bien: {label!r}"
+    )

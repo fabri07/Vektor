@@ -22,10 +22,10 @@ mapeo efectivo, y devuelve mensajes en castellano.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
+from app.domain.numeric_parsing import parsear_monto
 from app.domain.purchase_cost import (
     BASE_INCLUYE,
     COMPARTIDO_NO,
@@ -227,36 +227,37 @@ def parse_ajuste(raw: object) -> Decimal | str:
 
     Devuelve un `Decimal` o `AJUSTE_ILEGIBLE`. Tres casos, tres respuestas:
 
-    - columna ausente o celda vacía → ``Decimal("0")``: la fila no declara ajuste.
+    - columna ausente o celda en blanco → ``Decimal("0")``: la fila no declara
+      ajuste.
     - un número, **incluido el cero y los negativos** → su valor.
     - cualquier otra cosa → ``AJUSTE_ILEGIBLE``, para que el importador lo cuente
       y lo avise en vez de tratarlo como «sin descuento».
 
-    No se puede reusar `_parse_amount` del importador: ése devuelve ``None`` para
-    vacío, para ilegible **y para todo lo que no sea positivo**, porque nació para
-    montos de operación, donde un cero no tiene sentido. Acá el cero es un valor
-    normal y perfectamente frecuente.
+    **La interpretación la hace la política numérica** (`domain/numeric_parsing`),
+    no una copia local. Tenía una propia y discrepaba: `"1.500"` daba **1,5** —un
+    flete de mil quinientos entraba como uno cincuenta— porque trataba el punto
+    como decimal siempre que no hubiera coma. Acá se desempata por la FORMA del
+    valor y no por la columna, que es lo correcto para este caso: el ajuste se lee
+    en el planificador de costos sobre una fila por vez, y las columnas ya vienen
+    resueltas de `_normalizar_columnas_numericas` cuando el import las mapeó.
 
-    Acepta el mismo formato que el resto del importador —separadores de miles con
-    punto o coma, símbolo de peso, espacios— porque una planilla argentina escribe
-    «$ 1.234,56» y no es tarea del usuario normalizarla antes de subirla.
+    Lo que NO se delega son los dos bordes propios de un ajuste, que difieren de
+    los de un monto de operación:
+
+    - el **cero** es un valor normal y frecuente (`_parse_amount` lo descarta,
+      porque nació para montos donde un cero no tiene sentido);
+    - un `"s/d"` o un `"--"` son ILEGIBLES, no ausentes. Para un monto significan
+      "no hay dato"; para un ajuste significan "no sé cuánto", y tratarlos como 0
+      sería justamente afirmar que no hubo descuento.
     """
     if raw is None:
         return Decimal("0")
-    s = re.sub(r"[$\s]", "", str(raw).strip())
-    if not s:
+    if not str(raw).strip():
         return Decimal("0")
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif "," in s:
-        s = s.replace(",", ".")
-    try:
-        return Decimal(s)
-    except InvalidOperation:
+    interpretado = parsear_monto(raw, desempatar_por_forma=True)
+    if interpretado.valor is None:
         return AJUSTE_ILEGIBLE
+    return interpretado.valor
 
 
 def texto_del_ajuste_ilegible(etiqueta_hoja: str, columna: str, filas: int) -> str:

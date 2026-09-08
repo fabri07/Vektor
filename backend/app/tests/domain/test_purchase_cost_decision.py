@@ -231,6 +231,21 @@ class TestUnAjusteVacioYUnoIlegibleNoSonLoMismo:
         assert parse_ajuste("1,50") == Decimal("1.50")
         assert parse_ajuste("2,000.75") == Decimal("2000.75")
 
+    def test_un_flete_de_mil_quinientos_no_es_uno_cincuenta(self) -> None:
+        """Tenía su propia interpretación y discrepaba de la política: trataba el
+        punto como decimal siempre que no hubiera coma, así que `"1.500"` daba 1,5
+        y el flete entraba mil veces más chico. Un grupo final de tres dígitos es
+        de miles; uno de dos, decimales."""
+        assert parse_ajuste("1.500") == Decimal("1500")
+        assert parse_ajuste("1.234.567") == Decimal("1234567")
+        assert parse_ajuste("12.50") == Decimal("12.50")
+
+    def test_un_decimal_ya_interpretado_pasa_tal_cual(self) -> None:
+        """Las columnas de ajuste se normalizan con el convenio de su columna
+        ANTES de llegar acá, así que lo habitual es recibir un `Decimal`."""
+        assert parse_ajuste(Decimal("300.00")) == Decimal("300.00")
+        assert parse_ajuste(1234.56) == Decimal("1234.56")
+
     def test_un_negativo_se_lee_tal_cual(self) -> None:
         """No se decide acá si tiene sentido: eso lo resuelve la aritmética, que ya
         reporta cuando el descuento se come el monto entero."""
