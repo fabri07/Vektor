@@ -33,6 +33,7 @@ import app.application.services.ingestion_import_service as importer
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
 
 _PRODUCTO = "Vela aromatica 200g"
 _CTX = "table:0"
@@ -147,14 +148,27 @@ class TestFallbacksDelCaminoPlano:
         ).scalar_one()
         assert venta.quantity == 6
 
-    async def test_una_cantidad_negativa_no_entra_como_negativa(
+    async def test_una_cantidad_negativa_manda_la_fila_a_revision(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """El piso en 1 es el mismo del camino multi-hoja. Sin él, la fila se salta
-        el gate (`qty <= 0` → `continue`) y se persiste con cantidad negativa.
+        """E4 cambió la expectativa de este caso, a propósito.
+
+        Antes se afirmaba que la cantidad negativa quedaba en 1: el piso evitaba
+        que la fila se saltara el gate (`qty <= 0` → `continue`) y se persistiera
+        con una cantidad negativa. Eso resolvía el síntoma peligroso, pero dejaba
+        otro: la venta entraba con **una unidad que el archivo nunca dijo**, y era
+        indistinguible de una venta legítima de una unidad — el `except: return 1`
+        no separaba "la celda está vacía" de "la celda dice algo que no puedo
+        usar".
+
+        La política de E4 separa los dos: la celda vacía sigue valiendo 1 (lo
+        cubre `test_la_cantidad_cae_a_los_headers_conocidos`), y la celda escrita
+        e ilegible manda la fila a "Otros" con su motivo. Lo que el test viejo
+        protegía sigue protegido —la fila no se persiste con cantidad negativa— y
+        además no se inventa una cantidad.
 
         La cantidad va MAPEADA acá a propósito: sin mapeo, la lectura devuelve 1
-        por el camino del valor ausente y el test pasaría sin ejercer el piso.
+        por el camino del valor ausente y el test no ejercería nada.
         """
         summary = _summary_ventas()
         for fila in summary["ventas_detectadas"]:
@@ -175,9 +189,30 @@ class TestFallbacksDelCaminoPlano:
         )
         await db_session.flush()
 
-        venta = (
-            await db_session.execute(
-                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+        ventas = (
+            (
+                await db_session.execute(
+                    select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+                )
             )
-        ).scalar_one()
-        assert venta.quantity == 1
+            .scalars()
+            .all()
+        )
+        assert ventas == [], (
+            f"la cantidad ilegible se convirtió en una venta: "
+            f"{[(v.quantity, str(v.amount)) for v in ventas]}"
+        )
+
+        capturadas = (
+            (
+                await db_session.execute(
+                    select(UnclassifiedRecord).where(
+                        UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert capturadas, "la fila no puede desaparecer: va a Otros con su motivo"
+        assert "negativa" in (capturadas[0].context_label or "").lower()
