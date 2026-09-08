@@ -223,6 +223,10 @@ async def test_una_cantidad_fraccionaria_no_se_trunca(
     assert "decimales" in (otros[0].context_label or "").lower(), (
         f"el motivo tiene que explicar el problema del archivo: {otros[0].context_label!r}"
     )
+    # El confirm además lo AVISA: sin el aviso, el usuario ve una venta menos y
+    # no tiene por qué mirar la bandeja.
+    avisos = " ".join(resp.json().get("warnings") or [])
+    assert "cantidad no se pudo leer" in avisos, f"el confirm no avisó: {avisos!r}"
 
 
 async def test_una_cantidad_negativa_tampoco_entra_como_una_unidad(

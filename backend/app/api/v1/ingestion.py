@@ -3396,9 +3396,21 @@ async def confirm_file(
             "no tiene una fecha reconocible."
         )
     if counts.get("filas_sin_monto"):
+        # El texto dejó de afirmar que el archivo "no traía" el total: con la
+        # política de E4 también cae acá la fila que SÍ lo traía y no se pudo
+        # interpretar. El motivo exacto va en la etiqueta de cada fila en «Otros».
         warnings.append(
-            f"{counts['filas_sin_monto']} fila(s) sin monto quedaron en «Otros»: no "
-            "traían el total ni el precio unitario y la cantidad para calcularlo."
+            f"{counts['filas_sin_monto']} fila(s) quedaron en «Otros» sin un monto "
+            "utilizable: falta el total (o el precio unitario y la cantidad para "
+            "calcularlo), o el valor no se pudo interpretar."
+        )
+    if counts.get("filas_sin_cantidad"):
+        # E4: la fila traía cantidad y no se pudo usar. Antes entraba como 1
+        # unidad y no había nada que avisar porque no había nada que revisar.
+        warnings.append(
+            f"{counts['filas_sin_cantidad']} fila(s) quedaron en «Otros» porque su "
+            "cantidad no se pudo leer como unidades enteras (decimales, negativas o "
+            "texto). Antes entraban como 1 unidad."
         )
     if counts.get("otros"):
         # F1-fix: cubre también los productos con nombre ambiguo (F1) — ya no
