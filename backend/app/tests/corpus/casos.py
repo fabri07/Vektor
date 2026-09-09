@@ -13,6 +13,13 @@ Por eso cada caso lleva ``porque``: la decisión de negocio que fija. Si un caso
 falla, lo primero que hay que preguntarse no es "¿qué test hay que actualizar?"
 sino "¿cambiamos esta decisión a propósito?".
 
+**Qué NO es.** Estas son expectativas FUNCIONALES: qué tiene que quedar en la
+base para cada archivo. No miden nada de rendimiento, y no reemplazan los
+presupuestos que pide F0 (consultas por forma SQL, memoria máxima, tiempo por
+etapa, comportamiento con historial creciente del tenant). Un corpus verde con un
+import que tarda diez veces más sigue siendo un corpus verde. Las dos mediciones
+son necesarias y ninguna sustituye a la otra.
+
 ``REVISADO_EN`` versiona el corpus. Cambiar una expectativa exige subir esa
 versión en el caso y decir por qué en el commit: es un cambio de política sobre
 plata, no un ajuste de test.
