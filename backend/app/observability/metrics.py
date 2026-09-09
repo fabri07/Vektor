@@ -131,3 +131,42 @@ async def track_job_event(
     )
     session.add(event)
     increment(f"job.{event_type.lower()}", labels={"job_name": job_name})
+
+
+async def record_job_run(
+    session: AsyncSession,
+    job_name: str,
+    *,
+    started_at: datetime,
+    duration_ms: int,
+    success: bool,
+    counters: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    """Deja la traza durable de UNA ejecución de un job periódico (E5/H16).
+
+    Distinta de :func:`track_job_event`, que escribe en ``user_activity_events``
+    y por lo tanto exige un ``tenant_id`` real (FK a ``tenants``). Un job global
+    —el barrido de relecturas colgadas recorre TODOS los tenants y en general no
+    toca ninguno— no tiene tenant que declarar, y la rama ``tenant_id=None`` de
+    aquella función cae al UUID cero, que no existe en ``tenants``.
+
+    **Sólo agrega a la sesión; no comitea.** Así el caller puede escribir la
+    traza del éxito en la MISMA transacción que los efectos del job: si el commit
+    falla, no queda una traza afirmando un trabajo que no se guardó.
+
+    El ``error`` se trunca acá y no en cada caller: un traceback entero en una
+    tabla de observabilidad es una fuga de detalle interno que nadie lee.
+    """
+    from app.persistence.models.job_run import JobRun  # noqa: PLC0415
+
+    session.add(
+        JobRun(
+            job_name=job_name,
+            started_at=started_at,
+            duration_ms=duration_ms,
+            success=success,
+            counters=counters,
+            error=error[:500] if error else None,
+        )
+    )

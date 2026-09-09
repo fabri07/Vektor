@@ -31,6 +31,7 @@ from app.persistence.models.google_mcp_connection import GoogleMcpConnection
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 from app.persistence.models.ingestion_schema_decision import IngestionSchemaDecision
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
+from app.persistence.models.job_run import JobRun
 from app.persistence.models.maintenance_lock import TenantMaintenanceLock
 from app.persistence.models.memory import AgentMemory, BusinessMemory, OperationFingerprint
 from app.persistence.models.notification import Notification
@@ -69,6 +70,7 @@ __all__ = [
     "MomentumProfile",
     "InventoryBalance",
     "InventoryMovement",
+    "JobRun",
     "Product",
     "SaleEntry",
     "ExpenseEntry",
