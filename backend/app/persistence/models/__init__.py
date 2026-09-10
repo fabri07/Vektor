@@ -35,6 +35,10 @@ from app.persistence.models.job_run import JobRun
 from app.persistence.models.maintenance_lock import TenantMaintenanceLock
 from app.persistence.models.memory import AgentMemory, BusinessMemory, OperationFingerprint
 from app.persistence.models.notification import Notification
+from app.persistence.models.operation_identity import (
+    OperationIdentity,
+    OperationIdentityLink,
+)
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.product import Product
@@ -90,6 +94,8 @@ __all__ = [
     "AgentConversationContext",
     "PendingAction",
     "OperationFingerprint",
+    "OperationIdentity",
+    "OperationIdentityLink",
     "BusinessMemory",
     "AgentMemory",
     "GoogleMcpConnection",
