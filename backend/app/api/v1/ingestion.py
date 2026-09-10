@@ -87,6 +87,12 @@ from app.application.services.file_parsing import (
 from app.application.services.file_parsing import (
     SPREADSHEET_MIMES as _SPREADSHEET_MIMES,
 )
+from app.application.services.import_overlap_service import (
+    detectar_solapamiento,
+)
+from app.application.services.import_overlap_service import (
+    texto_del_aviso as texto_del_solapamiento,
+)
 from app.application.services.ingestion_import_service import (
     EmptyImportError,
     check_nonempty_import,
@@ -3412,6 +3418,22 @@ async def confirm_file(
             "cantidad no se pudo leer como unidades enteras (decimales, negativas o "
             "texto). Antes entraban como 1 unidad."
         )
+    # E6b: ¿estas operaciones ya estaban, importadas desde otro archivo? El guard
+    # del upload sólo ve la re-subida byte a byte, y una planilla reexportada
+    # desde Excel cambia de hash. Se AVISA con los archivos que se le parecen;
+    # no se descarta nada: sin una clave fuerte, coincidir en fecha e importe no
+    # prueba que sean la misma operación (ver `import_overlap_service`).
+    try:
+        _solapamiento = await detectar_solapamiento(session, tenant.tenant_id, record.id)
+    except Exception as exc:  # noqa: BLE001 — un aviso no puede tumbar el import
+        logger.warning(
+            "ingestion.solapamiento_no_verificado", file_id=str(record.id), error=str(exc)
+        )
+    else:
+        _aviso_solapamiento = texto_del_solapamiento(_solapamiento)
+        if _aviso_solapamiento:
+            warnings.append(_aviso_solapamiento)
+
     if counts.get("otros"):
         # F1-fix: cubre también los productos con nombre ambiguo (F1) — ya no
         # generan un warning propio, "otros" los cuenta porque la fila ambigua
