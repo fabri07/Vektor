@@ -13,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -60,7 +61,40 @@ class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Soft-delete: NULL = activo; timestamp = desactivado.
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    __table_args__ = (Index("ix_customers_tenant_id", "tenant_id"),)
+    # E6a — CÓDIGO EXTERNO: el identificador que el negocio ya usa en su propio
+    # sistema (o el que le asigna su proveedor). Es la única clave fuerte que
+    # existe para el maestro de un kiosco, donde no hay CUIT ni código de barras.
+    # Ver `domain/external_code.py`.
+    external_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    #: De qué sistema salió. NULL = código propio del negocio. Entra en la clave
+    #: porque el "1024" de un sistema no es el "1024" de otro.
+    external_source: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    #: Forma canónica indexada (`clave_de_codigo_externo`). Se persiste aparte del
+    #: crudo por la misma razón que `sku_normalized`: el índice tiene que evaluar
+    #: exactamente lo mismo que la búsqueda, y una función en el predicado dejaría
+    #: las dos definiciones libres de divergir.
+    external_code_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    __table_args__ = (
+        Index("ix_customers_tenant_id", "tenant_id"),
+        # E6a — unicidad del código externo. PARCIAL sobre los no nulos: las
+        # columnas son nuevas y nadie tiene código todavía, así que el único no
+        # necesita prevalidación de colisiones — no hay datos que colisionar.
+        #
+        # SIN filtro por baja, igual que `uq_products_tenant_internal_sku`: el
+        # código de una entidad dada de baja NO se recicla, porque sigue escrito
+        # en los documentos viejos que la nombran. Un índice que la excluyera
+        # además haría fallar la reactivación contra quien le hubiera tomado el
+        # código.
+        Index(
+            "uq_customers_tenant_external_code",
+            "tenant_id",
+            "external_code_key",
+            unique=True,
+            postgresql_where=text("external_code_key IS NOT NULL"),
+            sqlite_where=text("external_code_key IS NOT NULL"),
+        ),
+    )
 
     @property
     def is_sentinel(self) -> bool:
