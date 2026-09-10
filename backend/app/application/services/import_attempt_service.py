@@ -61,6 +61,12 @@ logger = get_logger(__name__)
 #: de los mundos — dos ejecutores corriendo lo mismo a la vez.
 LEASE_TTL_SEGUNDOS = 15 * 60
 
+#: Versión del FORMATO del payload congelado. **Subirla cada vez que cambie la
+#: forma del sobre**: un ejecutor nuevo que interpreta un sobre viejo "lo mejor
+#: posible" lee mal los campos que cambiaron de significado, en silencio. Con la
+#: versión, los rechaza diciendo que hay que volver a confirmar.
+PAYLOAD_VERSION = 1
+
 _CONFLICTO_CLAVE = unique_violation_classifier(
     "request_key",
     constraint="uq_import_attempts_request_key",
@@ -103,6 +109,7 @@ async def registrar_intento(
     ingestion_version: int = 1,
     preview_version: int | None = None,
     rows_total: int | None = None,
+    file_content_hash: str | None = None,
 ) -> ResultadoDeRegistro:
     """Registra la intención y su orden de ejecución, en la misma transacción.
 
@@ -134,8 +141,10 @@ async def registrar_intento(
         request_key=request_key,
         payload_hash=huella,
         payload_json=payload,
+        payload_version=PAYLOAD_VERSION,
         ingestion_version=ingestion_version,
         preview_version=preview_version,
+        file_content_hash=file_content_hash,
         rows_total=rows_total,
         status=PENDIENTE,
     )
@@ -409,6 +418,7 @@ async def obtener_intento(
 __all__ = [
     "COMPLETADO",
     "LEASE_TTL_SEGUNDOS",
+    "PAYLOAD_VERSION",
     "ResultadoDeRegistro",
     "SolicitudEnConflictoError",
     "cerrar_intento",

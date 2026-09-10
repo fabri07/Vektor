@@ -64,10 +64,18 @@ class ImportAttempt(Base):
     #: borrador: un usuario que edita el mapeo mientras su import está encolado no
     #: puede cambiar lo que ya confirmó.
     payload_json: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False)
-    #: Sobre qué revisión del archivo se confirmó. Si el archivo se releyó
-    #: mientras tanto, esto permite detectarlo en vez de importar contra otra cosa.
+    #: Versión del FORMATO del sobre. Cambiar la forma del payload sin subirla
+    #: deja intentos viejos que un ejecutor nuevo interpreta mal en silencio.
+    payload_version: Mapped[int] = mapped_column(
+        sa.Integer, nullable=False, default=1, server_default="1"
+    )
+    #: Sobre qué revisión del archivo se confirmó.
     ingestion_version: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1)
     preview_version: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    #: A qué versión del ARCHIVO se le dijo que sí. Si el archivo se releyó entre
+    #: el confirm y la ejecución, importar contra el contenido nuevo sería
+    #: importar algo que el usuario nunca vio.
+    file_content_hash: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
 
     status: Mapped[str] = mapped_column(
         sa.String(20), nullable=False, default=PENDIENTE, server_default=PENDIENTE

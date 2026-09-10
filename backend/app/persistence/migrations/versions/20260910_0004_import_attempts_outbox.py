@@ -40,6 +40,13 @@ está en la adquisición y el fencing, que es donde se puede sostener.
 
 Los dos únicos
 --------------
+El snapshot es COMPLETO: además de las decisiones, el intento congela a qué
+versión del archivo se le dijo que sí (``file_content_hash``) y con qué formato de
+sobre se guardó (``payload_version``). Sin lo primero, una relectura entre el
+confirm y la ejecución haría importar un contenido que el usuario nunca vio; sin
+lo segundo, cambiar la forma del payload dejaría intentos viejos que un ejecutor
+nuevo interpreta mal sin darse cuenta.
+
 ``uq_import_attempts_request_key`` es el candado de la idempotencia de PETICIÓN:
 dos requests con la misma clave no pueden crear dos intentos ni llegando a la vez.
 ``uq_import_outbox_attempt`` hace idempotente el registro de la orden ante un
@@ -87,8 +94,16 @@ def upgrade() -> None:
         sa.Column("request_key", sa.String(128), nullable=False),
         sa.Column("payload_hash", sa.String(64), nullable=False),
         sa.Column("payload_json", _JSONB, nullable=False),
+        #: Versión del FORMATO del payload congelado. Sin esto, cambiar la forma
+        #: del sobre deja intentos viejos que un ejecutor nuevo interpreta mal en
+        #: silencio; con esto, los rechaza diciendo por qué.
+        sa.Column("payload_version", sa.Integer, nullable=False, server_default="1"),
         sa.Column("ingestion_version", sa.Integer, nullable=False, server_default="1"),
         sa.Column("preview_version", sa.Integer, nullable=True),
+        #: A QUÉ versión del archivo se le dijo que sí. Si el archivo se releyó
+        #: entre el confirm y la ejecución, importar contra el contenido nuevo
+        #: sería importar algo que el usuario nunca vio.
+        sa.Column("file_content_hash", sa.String(64), nullable=True),
         sa.Column("status", sa.String(20), nullable=False, server_default="PENDIENTE"),
         sa.Column("phase", sa.String(30), nullable=True),
         sa.Column("rows_total", sa.Integer, nullable=True),
