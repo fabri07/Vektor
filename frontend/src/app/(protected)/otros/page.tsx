@@ -112,16 +112,20 @@ export default function OtrosPage() {
       entityType,
       fields,
       targetProductId,
+      pesesAlConflicto,
     }: {
       id: string;
       entityType: ReclassifyEntityType;
       fields: Record<string, unknown>;
       targetProductId?: string;
+      /** E6b: el usuario ya confirmó que quiere aplicarla igual (ver el 409). */
+      pesesAlConflicto?: boolean;
     }) =>
       othersService.reclassify(id, {
         entity_type: entityType,
         fields,
         ...(targetProductId ? { target_product_id: targetProductId } : {}),
+        ...(pesesAlConflicto ? { aplicar_pese_al_conflicto: true } : {}),
       }),
     onSuccess: async (_, vars) => {
       setReclassifying(null);
@@ -133,7 +137,7 @@ export default function OtrosPage() {
       );
       await invalidate();
     },
-    onError: async (error) => {
+    onError: async (error, vars) => {
       const code = errorCode(error);
       if (code === "DUPLICATE_PRODUCT_IDENTITY") {
         toast(
@@ -152,6 +156,20 @@ export default function OtrosPage() {
             "Vinculá el registro al que corresponda en vez de crear uno nuevo.",
           "error",
         );
+      } else if (code === "IMPORT_IDENTITY_TAKEN") {
+        // E6b: la fila tiene el mismo comprobante que algo ya cargado. NO es un
+        // problema de los campos —están bien—, es una decisión: puede ser una
+        // corrección del proveedor o un error de carga, y Véktor no puede saber
+        // cuál de las dos versiones vale. Se pregunta y, si el usuario confirma,
+        // se reintenta declarándolo explícito.
+        const igual = window.confirm(
+          "Esta fila tiene el mismo comprobante que una operación ya cargada, " +
+            "con datos distintos. Si la importás vas a quedar con las dos. " +
+            "¿La importamos igual?",
+        );
+        if (igual) {
+          reclassifyMutation.mutate({ ...vars, pesesAlConflicto: true });
+        }
       } else if (code === "INVALID_TARGET_PRODUCT") {
         // El candidato ya no está disponible (borrado/inactivo): cerrar y refrescar.
         toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");

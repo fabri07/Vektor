@@ -50,6 +50,7 @@ from app.application.services.operation_identity_service import (
     DECISION_YA_APLICADA,
     PlanDeIdentidad,
     cerrar_plan,
+    identidad_tomada,
     plan_vacio,
     planificar_identidades,
 )
@@ -920,6 +921,14 @@ RISK_REF_KEY = "__risk_ref__"
 # sin clasificar): esas filas degradan al comportamiento de F-O.1 —el registro
 # clasificado se preserva para siempre— que es seguro, no silencioso.
 ROW_REF_KEY = "__row_ref__"
+
+#: E6b — la clave de identidad de una fila que quedó en "Otros" por CONFLICTO.
+#: Viaja en el payload del registro (con el prefijo ``__``, que ``/otros`` oculta
+#: como el resto de las claves internas) porque la resolución humana **no puede
+#: ser la forma de saltearse el candado**: sin esto, mandar el conflicto a
+#: revisión y clasificarlo desde ahí aplicaría el efecto duplicado que el
+#: importador se negó a aplicar.
+IDENTITY_REF_KEY = "__identity_key__"
 
 _ROW_FINGERPRINT_CONFLICT = unique_violation_classifier(
     "fingerprint",
@@ -4623,10 +4632,15 @@ async def _insert_confirmed_data_impl(
                 # Misma identidad, contenido distinto: puede ser una corrección o
                 # un error de carga. A "Otros" con el motivo — omitirla escondería
                 # la corrección y aplicarla duplicaría el efecto.
+                _clave_conflicto = (
+                    _plan_ventas.clave.get(row_index)
+                    if _dec_venta == DECISION_CONFLICTO
+                    else _plan_gastos.clave.get(row_index)
+                ) or ""
                 counts["otros"] += _capture_unclassified(
                     session,
                     tenant_id,
-                    rows=[row],
+                    rows=[{**row, IDENTITY_REF_KEY: _clave_conflicto}],
                     headers=headers,
                     source=source,
                     uploaded_file_id=uploaded_file_id,
@@ -7946,7 +7960,7 @@ async def _insert_multisheet_data(
                     counts["otros"] += _capture_unclassified(
                         session,
                         tenant_id,
-                        rows=[row],
+                        rows=[{**row, IDENTITY_REF_KEY: _plan_ident.clave.get(_i, "")}],
                         headers=ctx.get("headers"),
                         source=source,
                         uploaded_file_id=uploaded_file_id,
@@ -8066,6 +8080,21 @@ async def _insert_multisheet_data(
                 await _cobrar_envios_de_la_hoja(ctx_id, rows, cols, _grupos_de_compra)
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
+        #
+        # E6b — comportamiento DECLARADO de este camino frente a la identidad
+        # fuerte: no la calcula y no la consulta. No es un olvido: acá no hay
+        # mapeo de columnas (los lectores resuelven por keyword), y una clave de
+        # identidad adivinada desde un encabezado es exactamente lo que
+        # `domain/operation_identity` se niega a producir — una identidad falsa
+        # hace que Véktor descarte plata real creyendo que ya la tenía.
+        #
+        # Lo seguro es que se comporte como antes: importa todo y el circuito de
+        # candidatos (`import_overlap_service`) avisa si algo se parece. El límite
+        # que eso deja es real y se declara: una fila que entre por acá puede
+        # duplicar una operación que otro archivo cargó CON identidad, porque
+        # nadie puede saber que es la misma. La salida no es adivinar en este
+        # camino, es que el archivo llegue con `mapping_contexts` — que es lo que
+        # ya hacen todos los formatos desde el mapeo universal.
         #
         # E2/E4: este camino entregaba la fila CRUDA a los lectores. Una columna
         # que el usuario mandó ignorar seguía ahí —`_row_val` la encontraba por
@@ -8298,6 +8327,17 @@ async def bulk_import_unclassified(
             counts["skipped"] += 1
             continue
         row: dict[str, Any] = rec.row_data or {}
+        # E6b: la importación EN LOTE no puede resolver un conflicto de
+        # identidad. Un registro que llegó a "Otros" porque tiene el mismo
+        # comprobante que una operación viva exige una decisión —puede ser una
+        # corrección o un error de carga— y este endpoint importa sin preguntar:
+        # si entrara acá, "importar todos los sugeridos" sería la puerta de atrás
+        # para duplicar justo lo que el confirm se negó a aplicar. Queda para el
+        # modal por registro, que sí pide la confirmación explícita.
+        _clave = str(row.get(IDENTITY_REF_KEY) or "")
+        if _clave and await identidad_tomada(session, tenant_id, _clave) is not None:
+            counts["needs_manual"] += 1
+            continue
         fecha = _parse_date(_row_val(row, _FECHA_COLS))
         amount = (
             _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))

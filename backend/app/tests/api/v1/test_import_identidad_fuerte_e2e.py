@@ -382,3 +382,99 @@ async def test_la_identidad_no_bloquea_una_fila_que_no_llego_a_aplicarse(
     ]
     await _confirmar(client, auth_headers, db_session, sample_tenant, corregida, "ok.xlsx")
     assert len(await _gastos(db_session, sample_tenant.tenant_id)) == 2
+
+
+# ── Borrado y relectura: la identidad se suelta con el efecto, no con el archivo ─
+async def test_borrar_el_archivo_libera_la_identidad_y_permite_reimportar(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Sin esto, un archivo mal mapeado quedaría bloqueado para siempre: se borra
+    para corregirlo, se vuelve a subir, y la identidad diría "ya está aplicada"
+    sobre operaciones que ya no existen."""
+    primero = await _confirmar(
+        client, auth_headers, db_session, sample_tenant, _FACTURA_2_RENGLONES, "a.xlsx"
+    )
+    assert len(await _identidades(db_session, sample_tenant.tenant_id)) == 1
+
+    borrado = await client.delete(
+        f"/api/v1/ingestion/files/{primero['_file_id']}?confirm=true", headers=auth_headers
+    )
+    assert borrado.status_code == 200, borrado.text
+    # `expunge_all` y no `expire_all`: expirar deja los objetos attachados y el
+    # refresh lazy dispara IO fuera del greenlet de SQLAlchemy async.
+    db_session.expunge_all()
+    assert not await _gastos(db_session, sample_tenant.tenant_id)
+    assert not await _identidades(db_session, sample_tenant.tenant_id), (
+        "revertidos los dos renglones, la identidad tiene que quedar libre"
+    )
+
+    await _confirmar(
+        client, auth_headers, db_session, sample_tenant, _FACTURA_2_RENGLONES, "b.xlsx"
+    )
+    assert len(await _gastos(db_session, sample_tenant.tenant_id)) == 2
+
+
+async def test_un_conflicto_no_se_puede_importar_desde_otros_sin_decidir(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """La revisión humana no puede ser la puerta de atrás del candado.
+
+    Si la fila que el confirm mandó a «Otros» por conflicto se importara desde ahí
+    sin volver a mirar, se aplicaría exactamente el efecto duplicado que el
+    importador se negó a aplicar — y el usuario ni se enteraría de que fue eso lo
+    que pasó.
+    """
+    await _confirmar(
+        client, auth_headers, db_session, sample_tenant, _FACTURA_2_RENGLONES, "original.xlsx"
+    )
+    corregida = [list(f) for f in _FACTURA_2_RENGLONES]
+    corregida[0][-1] = 6500
+    await _confirmar(
+        client, auth_headers, db_session, sample_tenant, corregida, "corregida.xlsx"
+    )
+
+    pendientes = (
+        (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert pendientes
+    registro = pendientes[0]
+
+    cuerpo = {
+        "entity_type": "expense",
+        "fields": {
+            "amount": "6500",
+            "category": "INVENTORY",
+            "expense_date": "2024-03-05T00:00:00",
+            "description": "Vela aromatica",
+        },
+    }
+    rechazo = await client.post(
+        f"/api/v1/others/{registro.id}/reclassify", json=cuerpo, headers=auth_headers
+    )
+    assert rechazo.status_code == 409, rechazo.text
+    assert rechazo.json()["detail"]["code"] == "IMPORT_IDENTITY_TAKEN"
+    assert len(await _gastos(db_session, sample_tenant.tenant_id)) == 2
+
+    # Con la decisión explícita del usuario, sí entra: Véktor no puede saber cuál
+    # de las dos versiones vale, y la última palabra es suya.
+    aceptado = await client.post(
+        f"/api/v1/others/{registro.id}/reclassify",
+        json={**cuerpo, "aplicar_pese_al_conflicto": True},
+        headers=auth_headers,
+    )
+    assert aceptado.status_code == 200, aceptado.text
+    assert len(await _gastos(db_session, sample_tenant.tenant_id)) == 3

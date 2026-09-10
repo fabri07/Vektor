@@ -49,6 +49,9 @@ from app.application.services._ledger_restore import (
     restore_from_before,
     snapshot_master,
 )
+from app.application.services.operation_identity_service import (
+    liberar_identidades_de,
+)
 from app.application.services.stock_service import void_movement
 from app.domain.file_deletion_reasons import PreservationReason
 from app.domain.ingestion_version import INGESTION_VERSION_WITH_LEDGER
@@ -974,10 +977,17 @@ async def revert_file_data(
             SaleEntry.voided_at.is_(None),
         )
     )
+    # E6b: los efectos REVERTIDOS, para soltar su identidad. Se juntan acá y no
+    # se derivan de `source_upload_id` al final porque lo que libera la identidad
+    # es haber revertido el efecto, no que el archivo lo haya traído: una venta
+    # de este archivo que ya estaba anulada no se toca ahora y su identidad no es
+    # de este borrado.
+    _efectos_revertidos: list[tuple[str, uuid.UUID]] = []
     for venta in ventas_res.scalars().all():
         venta.voided_at = ahora
         venta.void_reason = VOID_REASON_FILE_DELETED
         contadores["ventas"] += 1
+        _efectos_revertidos.append(("sale", venta.id))
 
     gastos_res = await session.execute(
         select(ExpenseEntry).where(
@@ -990,6 +1000,7 @@ async def revert_file_data(
         gasto.voided_at = ahora
         gasto.void_reason = VOID_REASON_FILE_DELETED
         contadores["gastos"] += 1
+        _efectos_revertidos.append(("expense", gasto.id))
 
     # 2. Movimientos de inventario → `void_movement` revierte el efecto de cada
     #    uno sobre stock_units/inventory_balances. Incremental e idempotente:
@@ -1132,6 +1143,16 @@ async def revert_file_data(
     #    archivo (que genera otro file_id, y por lo tanto otras anclas) funciona,
     #    pero quedan huellas colgadas de datos que ya no existen.
     await _delete_import_fingerprints(session, tenant_id, file_id)
+
+    # 5b. E6b — identidades de las operaciones que se revirtieron. Se libera SÓLO
+    #     la que quedó sin ningún efecto vivo: si el archivo trajo un remito de
+    #     tres renglones y uno sobrevivió (porque el usuario lo editó y otra
+    #     reversión lo conservó), la identidad sigue tomada. Soltarla haría que el
+    #     próximo import volviera a aplicar ese renglón ENCIMA del que quedó.
+    #
+    #     Por eso no se borra por `source_upload_id`: borrar un archivo no puede
+    #     liberar la identidad de efectos que se conservaron.
+    await liberar_identidades_de(session, tenant_id, _efectos_revertidos)
 
     # Sin ledger no se puede afirmar qué productos creó el archivo: se informa
     # como conservado en vez de adivinar.

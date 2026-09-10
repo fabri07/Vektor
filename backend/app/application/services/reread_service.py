@@ -106,6 +106,9 @@ from app.application.services.ingestion_schema_decision_service import (
     lookup_remembered_decisions_for_contexts,
 )
 from app.application.services.inventory_replay_service import run_inventory_replay
+from app.application.services.operation_identity_service import (
+    liberar_identidades_de,
+)
 from app.application.services.reread_limits import REREAD_STALE_AFTER_SECONDS
 from app.application.services.stock_service import (
     sale_source_event_id,
@@ -1300,6 +1303,25 @@ async def _reconcile(
 
     # Borrar fingerprints de los no-editados (preservando los editados).
     await _delete_fingerprints(session, tenant_id, fingerprints_to_delete)
+
+    # E6b — y su IDENTIDAD fuerte, con la misma regla: se suelta la de los
+    # no-editados, no la de los editados. Es el caso que motivó separar
+    # identidades de vínculos: si un remito de tres renglones tiene uno editado a
+    # mano, la relectura voidea dos y conserva el tercero, y la identidad tiene
+    # que seguir tomada — soltarla haría que el reimport aplicara el documento
+    # entero encima del renglón que quedó vivo.
+    #
+    # `liberar_identidades_de` sólo libera la que quedó sin ningún efecto, así que
+    # esa distinción no hay que hacerla acá: alcanza con pasarle lo que se anuló.
+    if not dry_run:
+        await liberar_identidades_de(
+            session,
+            tenant_id,
+            [
+                ("sale" if isinstance(rec, SaleEntry) else "expense", rec.id)
+                for rec in recon.non_edited
+            ],
+        )
 
     # ── Inventario: borrar la lectura ANTERIOR también del lado stock ──
     # El camino compra→stock es incremental (``_record_stock_movement`` suma). Si

@@ -50,11 +50,15 @@ from app.persistence.models.business import BusinessProfile
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.memory import OperationFingerprint
+from app.persistence.models.operation_identity import (
+    OperationIdentity,
+    OperationIdentityLink,
+)
 from app.persistence.models.product import Product
 from app.persistence.models.product_supplier_link import ProductSupplierLink
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
-from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
 
 # Mismo agrupador que usan los benchmarks (`scripts/_bench_sql.py`): si el test
@@ -170,11 +174,14 @@ async def sm(
     finally:
         async with factory() as s:
             for modelo in (
+                OperationIdentityLink,
+                OperationIdentity,
                 InventoryMovement,
                 InventoryBalance,
                 ProductSupplierLink,
                 UnclassifiedRecord,
                 SaleEntry,
+                ExpenseEntry,
                 Product,
                 Supplier,
                 OperationFingerprint,
@@ -321,11 +328,14 @@ async def test_los_statements_no_crecen_mas_rapido_que_las_filas(
     finally:
         async with sm() as s:
             for modelo in (
+                OperationIdentityLink,
+                OperationIdentity,
                 InventoryMovement,
                 InventoryBalance,
                 ProductSupplierLink,
                 UnclassifiedRecord,
                 SaleEntry,
+                ExpenseEntry,
                 Product,
                 Supplier,
                 OperationFingerprint,
@@ -497,3 +507,172 @@ async def test_la_captura_a_otros_por_riesgo_de_columna_no_paga_por_fila(
     assert formas.get("INSERT operation_fingerprints", 0) <= 2, detalle
     assert formas.get("SAVEPOINT", 0) == 0, detalle
     assert perfil.total <= 12, detalle
+
+
+# ── E6b: la identidad fuerte cuesta O(hoja), no O(filas) ─────────────────────
+_CTX_COMPRAS = "sheet:Compras"
+_COLS_COMPRA = {
+    "fecha": "expense_date",
+    "tipo": "document_type",
+    "pto": "document_series",
+    "nro": "invoice_number",
+    "cuit": "supplier_cuit",
+    "proveedor": "supplier_name",
+    "articulo": "product_name",
+    "cantidad": "quantity",
+    "total": "amount",
+}
+_SIN_IDENTIDAD = ("fecha", "proveedor", "articulo", "cantidad", "total")
+_COLS_SIN_IDENTIDAD = {k: v for k, v in _COLS_COMPRA.items() if k in _SIN_IDENTIDAD}
+
+
+def _summary_compras(n: int, *, con_identidad: bool) -> dict[str, Any]:
+    filas = []
+    for i in range(n):
+        fila: dict[str, Any] = {
+            "fecha": "2024-03-05",
+            "proveedor": f"Prov {i % 10}",
+            "articulo": f"Art {i}",
+            "cantidad": "2",
+            "total": "6000",
+            "__context__": _CTX_COMPRAS,
+        }
+        if con_identidad:
+            # Un comprobante distinto por fila: el caso más caro para la
+            # reclamación (n claves, no una).
+            fila |= {"tipo": "Factura A", "pto": "0001", "nro": f"{i:08d}",
+                     "cuit": "30-71234567-8"}
+        filas.append(fila)
+    cols = list(_COLS_COMPRA if con_identidad else _COLS_SIN_IDENTIDAD)
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {
+                "context_id": _CTX_COMPRAS,
+                "entity_type": "expense",
+                "source_kind": "sheet",
+                "headers": cols,
+                "row_count": n,
+            }
+        ],
+        "gastos_detectados": filas,
+    }
+
+
+async def _importar_compras(
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    engine: AsyncEngine,
+    *,
+    n: int,
+    con_identidad: bool,
+) -> tuple[SqlProfile, dict[str, Any]]:
+    perfil = SqlProfile()
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _before(conn: Any, cursor: Any, statement: Any, *rest: Any) -> None:
+        perfil.record(statement, 0.0)
+
+    async with factory() as session:
+        if await session.get(Tenant, tenant_id) is None:
+            session.add(Tenant(tenant_id=tenant_id, legal_name="T", display_name="T"))
+            await session.flush()
+            session.add(
+                BusinessProfile(
+                    profile_id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    vertical_code="kiosco_almacen",
+                    data_mode="M0",
+                    data_confidence="LOW",
+                    onboarding_completed=True,
+                )
+            )
+        upload_id = uuid.uuid4()
+        session.add(
+            UploadedFile(
+                id=upload_id,
+                tenant_id=tenant_id,
+                original_filename="compras.xlsx",
+                s3_key=f"tests/{upload_id}.xlsx",
+                content_type="text/csv",
+                size_bytes=1,
+                purpose="ingestion",
+                status="uploaded",
+                processing_status="DONE",
+            )
+        )
+        await session.commit()
+
+        cols = _COLS_COMPRA if con_identidad else _COLS_SIN_IDENTIDAD
+        perfil.enabled = True
+        try:
+            counts = await insert_confirmed_data(
+                session,
+                tenant_id,
+                _summary_compras(n, con_identidad=con_identidad),
+                {},
+                context_mappings={_CTX_COMPRAS: dict(cols)},
+                context_entity={_CTX_COMPRAS: "expense"},
+                context_confirmed={_CTX_COMPRAS: True},
+                source="ingestion",
+                uploaded_file_id=upload_id,
+            )
+            await session.commit()
+        finally:
+            perfil.enabled = False
+            event.remove(engine.sync_engine, "before_cursor_execute", _before)
+    return perfil, counts
+
+
+async def test_la_identidad_fuerte_no_cuesta_por_fila(
+    sm: async_sessionmaker[AsyncSession], pg_engine: AsyncEngine, tenant_id: uuid.UUID
+) -> None:
+    """El sobrecosto de la deduplicación por clave fuerte tiene que ser constante.
+
+    Es la compuerta contra el N+1 más fácil de introducir acá: consultar la
+    identidad fila por fila. Medido cuando se escribió: 57 statements sin
+    identidad y 60 con comprobante completo en 300 compras — un `INSERT ... ON
+    CONFLICT RETURNING` para reclamar, un `SELECT` para leer los ids y un
+    `INSERT` de vínculos, para la hoja entera. Si esto crece con las filas, el
+    número explota contra Neon (30-50 ms por statement) y no acá.
+
+    El escenario usa un comprobante DISTINTO por fila a propósito: es el caso más
+    caro (300 claves, no una).
+    """
+    otro_tenant = uuid.uuid4()
+    sin_ident, counts_sin = await _importar_compras(
+        sm, otro_tenant, pg_engine, n=300, con_identidad=False
+    )
+    con_ident, counts_con = await _importar_compras(
+        sm, tenant_id, pg_engine, n=300, con_identidad=True
+    )
+    assert counts_sin["gastos"] == 300
+    assert counts_con["gastos"] == 300
+
+    formas = dict(con_ident.counts)
+    detalle = sorted(formas.items(), key=lambda kv: -kv[1])[:12]
+    assert formas.get("INSERT operation_identities", 0) <= 1, detalle
+    assert formas.get("INSERT operation_identity_links", 0) <= 1, detalle
+    assert formas.get("SELECT operation_identities", 0) <= 2, detalle
+
+    sobrecosto = con_ident.total - sin_ident.total
+    assert sobrecosto <= 6, (
+        f"la identidad agregó {sobrecosto} statements sobre 300 filas "
+        f"({sin_ident.total} → {con_ident.total}). Tiene que ser constante. {detalle}"
+    )
+    async with sm() as s:
+        await s.execute(
+            delete(OperationIdentityLink).where(OperationIdentityLink.tenant_id == otro_tenant)
+        )
+        await s.execute(
+            delete(OperationIdentity).where(OperationIdentity.tenant_id == otro_tenant)
+        )
+        for modelo in (
+            InventoryMovement, InventoryBalance, ProductSupplierLink, UnclassifiedRecord,
+            ExpenseEntry, Product, Supplier, OperationFingerprint, BusinessProfile, UploadedFile,
+        ):
+            await s.execute(delete(modelo).where(modelo.tenant_id == otro_tenant))
+        await s.execute(delete(Tenant).where(Tenant.tenant_id == otro_tenant))
+        await s.commit()
