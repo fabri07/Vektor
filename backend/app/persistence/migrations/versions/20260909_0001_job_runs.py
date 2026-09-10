@@ -24,6 +24,21 @@ sobre UN tenant; no para uno global, que es el caso del barrido. Su rama
 ``tenant_id=None`` cae al UUID cero, que no existe en ``tenants``: habría fallado
 con violación de FK la primera vez que se usara.
 
+Orden de despliegue
+-------------------
+El único escritor es el worker (``jobs.sweep_stale_reread_runs``), y las
+migraciones corren en el ``preDeployCommand`` de **``vektor-api``**. Railway
+redespliega los servicios EN PARALELO y sin orden garantizado, así que el worker
+puede arrancar antes de que esta tabla exista.
+
+Consecuencia declarada, y por qué no se blinda en código: si el barrido corre sin
+la tabla, su ``INSERT`` falla, la transacción se deshace y **la task falla
+ruidosamente sin cerrar ningún run** — no corrompe nada, y Beat la vuelve a
+publicar a los 10 minutos, así que se recupera sola en cuanto la migración
+aterriza. Tragarse ese error para "no molestar" sería peor: dejaría el barrido
+funcionando sin traza, que es exactamente el estado que esta tabla vino a
+terminar. La ventana es de minutos y el único costo es housekeeping diferido.
+
 Sin FK, sin tenant y sin datos personales: nombre del job, inicio, duración,
 resultado y contadores agregados. Se escribe una fila por ejecución **también
 cuando no encuentra nada que barrer** — sin la ejecución vacía, un Beat caído y
