@@ -33,6 +33,7 @@ from app.application.services.file_parsing import (
 )
 from app.application.services.llm_file_type_detector import maybe_detect_file_type
 from app.application.services.validation_gate import ValidationGate
+from app.domain.ingestion_limits import LimiteExcedidoError
 from app.jobs.celery_app import celery_app
 from app.observability.logger import bind_request_context, get_logger, log_job
 from app.observability.metrics import track_job_event
@@ -655,6 +656,38 @@ def process_spreadsheet(self: Any, file_id: str, tenant_id: str, force: bool = F
 
                 return None
 
+        except LimiteExcedidoError as limite:
+            # E6c-2: no es un fallo interno, es un rechazo con causa que el usuario
+            # puede corregir (dividir el archivo, borrar filas vacías, exportar a
+            # CSV). Va a REJECTED con su motivo específico y NO se reintenta:
+            # el archivo va a exceder el mismo límite las tres veces.
+            #
+            # `_save_result` con el token, igual que los otros tres finales: un
+            # rechazo del intento viejo tampoco puede pisar el resultado bueno de
+            # otro que ya terminó.
+            logger.warning(
+                "ingestion.limite_excedido",
+                task="jobs.process_spreadsheet",
+                file_id=file_id,
+                tenant_id=tenant_id,
+                limite=limite.limite,
+                valor=limite.valor,
+                tope=limite.tope,
+            )
+            if token is not None:
+                async with factory() as session:
+                    record = await _load_owned(session, file_id, tenant_id, token)
+                    if record is not None:
+                        await _save_result(
+                            session,
+                            record,
+                            {"error": limite.mensaje, "limite": limite.limite},
+                            PROCESSING_STATUS_REJECTED,
+                            token=token,
+                            rejection_reason=limite.mensaje[:500],
+                        )
+                        await session.commit()
+            return None
         except ParseOwnershipLostError as perdida:
             # Final legítimo, no un fallo: otro intento se quedó con el trabajo.
             # No se re-lanza — hacerlo marcaría la task como fallida y, con los
@@ -828,6 +861,38 @@ def process_text_document(self: Any, file_id: str, tenant_id: str, force: bool =
 
                 return None
 
+        except LimiteExcedidoError as limite:
+            # E6c-2: no es un fallo interno, es un rechazo con causa que el usuario
+            # puede corregir (dividir el archivo, borrar filas vacías, exportar a
+            # CSV). Va a REJECTED con su motivo específico y NO se reintenta:
+            # el archivo va a exceder el mismo límite las tres veces.
+            #
+            # `_save_result` con el token, igual que los otros tres finales: un
+            # rechazo del intento viejo tampoco puede pisar el resultado bueno de
+            # otro que ya terminó.
+            logger.warning(
+                "ingestion.limite_excedido",
+                task="jobs.reparse_file",
+                file_id=file_id,
+                tenant_id=tenant_id,
+                limite=limite.limite,
+                valor=limite.valor,
+                tope=limite.tope,
+            )
+            if token is not None:
+                async with factory() as session:
+                    record = await _load_owned(session, file_id, tenant_id, token)
+                    if record is not None:
+                        await _save_result(
+                            session,
+                            record,
+                            {"error": limite.mensaje, "limite": limite.limite},
+                            PROCESSING_STATUS_REJECTED,
+                            token=token,
+                            rejection_reason=limite.mensaje[:500],
+                        )
+                        await session.commit()
+            return None
         except ParseOwnershipLostError as perdida:
             # Final legítimo, no un fallo: otro intento se quedó con el trabajo.
             # No se re-lanza — hacerlo marcaría la task como fallida y, con los
@@ -1007,6 +1072,38 @@ def process_image_ocr(self: Any, file_id: str, tenant_id: str, force: bool = Fal
 
                 return None
 
+        except LimiteExcedidoError as limite:
+            # E6c-2: no es un fallo interno, es un rechazo con causa que el usuario
+            # puede corregir (dividir el archivo, borrar filas vacías, exportar a
+            # CSV). Va a REJECTED con su motivo específico y NO se reintenta:
+            # el archivo va a exceder el mismo límite las tres veces.
+            #
+            # `_save_result` con el token, igual que los otros tres finales: un
+            # rechazo del intento viejo tampoco puede pisar el resultado bueno de
+            # otro que ya terminó.
+            logger.warning(
+                "ingestion.limite_excedido",
+                task="jobs.reread_file",
+                file_id=file_id,
+                tenant_id=tenant_id,
+                limite=limite.limite,
+                valor=limite.valor,
+                tope=limite.tope,
+            )
+            if token is not None:
+                async with factory() as session:
+                    record = await _load_owned(session, file_id, tenant_id, token)
+                    if record is not None:
+                        await _save_result(
+                            session,
+                            record,
+                            {"error": limite.mensaje, "limite": limite.limite},
+                            PROCESSING_STATUS_REJECTED,
+                            token=token,
+                            rejection_reason=limite.mensaje[:500],
+                        )
+                        await session.commit()
+            return None
         except ParseOwnershipLostError as perdida:
             # Final legítimo, no un fallo: otro intento se quedó con el trabajo.
             # No se re-lanza — hacerlo marcaría la task como fallida y, con los

@@ -121,6 +121,7 @@ from app.application.services.score_trigger_service import (
 from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
 from app.domain.header_keys import custom_field_slug
+from app.domain.ingestion_limits import LimiteExcedidoError
 from app.domain.inventory_effect import (
     EFFECT_LABELS,
     InvalidInventoryEffectError,
@@ -345,6 +346,31 @@ async def _process_file_sync(
             confidence=final_summary.get("confidence"),
         )
 
+    except LimiteExcedidoError as limite:
+        # E6c-2: el fallback sincrónico es el CUARTO camino que parsea, y tiene
+        # que rechazar igual que los otros tres. No es un fallo interno —el
+        # usuario puede dividir el archivo o borrarle las filas vacías—, así que
+        # va a REJECTED con su motivo y no a FAILED.
+        logger.warning(
+            "ingestion.sync_fallback.limite_excedido",
+            file_id=str(record.id),
+            limite=limite.limite,
+            valor=limite.valor,
+            tope=limite.tope,
+        )
+        await pipeline_event_service.emit_event(
+            session,
+            trace_id=trace_id,
+            tenant_id=record.tenant_id,
+            file_id=record.id,
+            stage="reject",
+            detail={"motivo": f"limite_{limite.limite}", "valor": limite.valor,
+                    "tope": limite.tope},
+        )
+        record.parsed_summary_json = {"error": limite.mensaje, "limite": limite.limite}
+        record.processing_status = PROCESSING_STATUS_REJECTED
+        record.rejection_reason = limite.mensaje[:500]
+        await repo.save(record)
     except Exception as exc:
         logger.error(
             "ingestion.sync_fallback.failed",

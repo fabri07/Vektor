@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,20 @@ if TYPE_CHECKING:
 
 from app.domain.expense_categories import strip_accents
 from app.domain.header_keys import fold_header, match_key
+from app.domain.ingestion_limits import (
+    LIMITE_ARCHIVO_DANADO,
+    LIMITE_BYTES,
+    LIMITE_CELDAS,
+    LIMITE_COLUMNAS,
+    LIMITE_EXPANDIDO,
+    LIMITE_FILAS,
+    LIMITE_HOJAS,
+    LIMITES,
+    MAX_BYTES_COMPRIMIDO,
+    LimiteExcedidoError,
+    LimitesDeArchivo,
+    RelojDeParsing,
+)
 from app.domain.numeric_parsing import parsear_monto
 from app.observability.logger import get_logger
 
@@ -30,7 +45,10 @@ logger = get_logger(__name__)
 # Límite de seguridad (anti-DOS). Archivos > 16MB se rechazan con error claro.
 # El manejo de archivos más grandes (streaming / re-arquitectura) queda para más
 # adelante; con este techo el JSONB de uploaded_files no se acerca al límite de Neon.
-MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024  # 16 MB
+# E6c-2: el tope de bytes vive en `domain/ingestion_limits` junto con los otros
+# seis. Se re-exporta acá porque los cinco endpoints que lo importan ya lo hacen
+# desde este módulo, y una segunda constante sería una segunda verdad.
+MAX_FILE_SIZE_BYTES = MAX_BYTES_COMPRIMIDO
 MAX_FILE_SIZE_LABEL = "16 MB"
 
 SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9.\-_]")
@@ -1246,17 +1264,168 @@ def _build_text_contexts(
     return contexts
 
 
-def parse_uploaded_content(content: bytes, mime: str, filename: str) -> dict[str, Any]:
-    """Parse uploaded file bytes into a summary compatible with chat and ingestion."""
+# ── E6c-2: límites verificables ─────────────────────────────────────────────
+def _leer_hoja_acotada(
+    ws: Any, reloj: RelojDeParsing, limites: LimitesDeArchivo, celdas_previas: int
+) -> tuple[list[list[Any]], int]:
+    """Materializa una hoja controlando el reloj y los topes de forma.
+
+    El control va DENTRO del bucle, no después: comprobar los límites sobre la
+    lista ya construida llega tarde — para entonces la memoria ya se gastó, que es
+    exactamente lo que el tope venía a evitar. Por la misma razón el reloj se
+    consulta mientras se itera y no al final: un timeout que devuelve error
+    mientras el proceso sigue leyendo no acota ningún recurso.
+
+    ``read_only=True`` hace que ``iter_rows`` sea perezoso, así que cortar el
+    bucle **corta el trabajo**: no quedan filas ya parseadas esperando en memoria.
+    """
+    filas: list[list[Any]] = []
+    ancho = 0
+    for fila in ws.iter_rows(values_only=True):
+        reloj.controlar()
+        valores = list(fila)
+        ancho = max(ancho, len(valores))
+        if ancho > limites.columnas:
+            raise LimiteExcedidoError(LIMITE_COLUMNAS, ancho, limites.columnas)
+        filas.append(valores)
+        if len(filas) > limites.filas:
+            raise LimiteExcedidoError(LIMITE_FILAS, len(filas), limites.filas)
+        # El acumulado de celdas se controla en caliente por el mismo motivo: un
+        # libro de 64 hojas de 100.000 celdas no pasa ningún tope individual.
+        acumuladas = celdas_previas + len(filas) * max(ancho, 1)
+        if acumuladas > limites.celdas:
+            raise LimiteExcedidoError(LIMITE_CELDAS, acumuladas, limites.celdas)
+    return filas, celdas_previas + len(filas) * max(ancho, 1)
+
+
+def verificar_tamano_expandido(
+    content: bytes, limites: LimitesDeArchivo | None = None
+) -> int:
+    """Cuánto ocupa realmente el ZIP al descomprimirse. Levanta si se pasa.
+
+    Un ``.xlsx`` es un ZIP, y 16 MB de XML repetitivo descomprimen a mucho más.
+    Sin este control, el tope de bytes del upload no acota nada de lo que después
+    se materializa en memoria.
+
+    **No se confía en los metadatos.** El encabezado de cada entrada declara su
+    ``file_size``, pero lo escribe quien arma el archivo: un ZIP puede declarar
+    1 KB y expandir 4 GB. El declarado se usa sólo como compuerta BARATA —si ya
+    con lo declarado se pasa, se corta sin descomprimir nada—; el control real es
+    descomprimir con un contador y abortar al cruzar el tope.
+
+    Se lee en bloques y se descarta: el objetivo es contar bytes, no retenerlos.
+    Descomprimir a memoria para medirlos sería el mismo problema que se quiere
+    evitar.
+
+    Devuelve los bytes expandidos (para traza). Si el contenido no es un ZIP,
+    devuelve su tamaño tal cual: no hay expansión que medir.
+    """
+    limites = limites or LIMITES
+    if not zipfile.is_zipfile(io.BytesIO(content)):
+        return len(content)
+
+    tope = limites.bytes_expandido
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        # Compuerta barata sobre lo DECLARADO. Si miente hacia abajo, el conteo
+        # real de abajo lo agarra igual; si miente hacia arriba, cortamos antes
+        # de gastar CPU.
+        declarado = sum(info.file_size for info in zf.infolist())
+        if declarado > tope:
+            raise LimiteExcedidoError(LIMITE_EXPANDIDO, declarado, tope)
+
+        total = 0
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            try:
+                with zf.open(info) as entrada:
+                    while True:
+                        bloque = entrada.read(_BLOQUE_DESCOMPRESION)
+                        if not bloque:
+                            break
+                        total += len(bloque)
+                        if total > tope:
+                            raise LimiteExcedidoError(LIMITE_EXPANDIDO, total, tope)
+            except zipfile.BadZipFile as danado:
+                # El contenido no coincide con lo que el encabezado declara: o el
+                # archivo se corrompió, o alguien lo editó por fuera del programa
+                # que lo generó. Sin esta rama salía como error genérico ("algo
+                # salió mal") y el usuario no tenía forma de saber que el problema
+                # es el archivo y no Véktor.
+                raise LimiteExcedidoError(LIMITE_ARCHIVO_DANADO, 0, 0) from danado
+    return total
+
+
+#: 256 KB por bloque: suficiente para que el overhead por llamada sea despreciable
+#: y chico para que el tope se detecte con precisión de bloque, no de archivo.
+_BLOQUE_DESCOMPRESION = 256 * 1024
+
+
+def verificar_limites_de_hoja(
+    *,
+    filas: int,
+    columnas: int,
+    limites: LimitesDeArchivo = LIMITES,
+    celdas_previas: int = 0,
+) -> int:
+    """Controla filas/columnas/celdas de UNA hoja. Devuelve el acumulado de celdas.
+
+    Las celdas se acumulan entre hojas: un libro de 64 hojas de 100.000 celdas
+    cada una no pasa ningún tope individual y son 6,4 millones de celdas.
+    """
+    if filas > limites.filas:
+        raise LimiteExcedidoError(LIMITE_FILAS, filas, limites.filas)
+    if columnas > limites.columnas:
+        raise LimiteExcedidoError(LIMITE_COLUMNAS, columnas, limites.columnas)
+    total = celdas_previas + filas * columnas
+    if total > limites.celdas:
+        raise LimiteExcedidoError(LIMITE_CELDAS, total, limites.celdas)
+    return total
+
+
+def parse_uploaded_content(
+    content: bytes, mime: str, filename: str, limites: LimitesDeArchivo | None = None
+) -> dict[str, Any]:
+    """Parse uploaded file bytes into a summary compatible with chat and ingestion.
+
+    E6c-2 — los límites se verifican **acá** y no en los endpoints. Es el único
+    punto por el que pasan los cinco caminos: los dos uploads (chat e ingestión),
+    el parseo del worker, el reparseo del fallback y la relectura. Los tres del
+    worker leen de S3 y nunca tocaron el chequeo de bytes del endpoint, así que un
+    tope que viviera sólo en HTTP no protegía justo al proceso que corre sin nadie
+    mirando.
+
+    Levanta ``LimiteExcedidoError`` con el motivo específico. El archivo se rechaza
+    ENTERO: no existe "importé las primeras 200.000 filas", que produciría libros
+    que no cuadran sin que nadie sepa que están incompletos.
+    """
+    # El default se resuelve ACÁ y no en la firma: un `= LIMITES` se liga cuando
+    # se define la función, así que reemplazar el módulo (un test, una
+    # configuración por entorno) no cambiaría nada y el tope quedaría clavado.
+    limites = limites or LIMITES
+    if len(content) > limites.bytes_comprimido:
+        raise LimiteExcedidoError(LIMITE_BYTES, len(content), limites.bytes_comprimido)
+    # Antes de descomprimir nada pesado: un `.xlsx` es un ZIP y 16 MB de XML
+    # repetitivo expanden a mucho más.
+    verificar_tamano_expandido(content, limites)
     if mime in SPREADSHEET_MIMES:
-        return _parse_spreadsheet(content, mime, filename)
+        return _parse_spreadsheet(content, mime, filename, limites)
     if mime in IMAGE_MIMES:
         return _parse_image(content, mime, filename)
     return _parse_document(content, mime, filename)
 
 
-def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, Any]:
+def _parse_spreadsheet(
+    content: bytes, mime: str, filename: str, limites: LimitesDeArchivo | None = None
+) -> dict[str, Any]:
+    limites = limites or LIMITES
     source_format = infer_source_format(filename, mime)
+    #: E6c-2: el reloj que corta la iteración. Se crea acá —una vez por archivo—
+    #: para que el tope sea del parseo completo y no de cada hoja por separado.
+    reloj = RelojDeParsing(limites)
+    #: Celdas acumuladas entre hojas: 64 hojas de 100.000 celdas no pasan ningún
+    #: tope individual y son 6,4 millones.
+    celdas = 0
     summary: dict[str, Any] = {
         "file_type": "spreadsheet",
         "source_format": source_format,
@@ -1354,6 +1523,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
     workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     try:
         sheet_names = workbook.sheetnames
+        if len(sheet_names) > limites.hojas:
+            raise LimiteExcedidoError(LIMITE_HOJAS, len(sheet_names), limites.hojas)
         is_multisheet = len(sheet_names) > 1
 
         if is_multisheet:
@@ -1373,7 +1544,7 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
             sheets_data: list[tuple[str, list[list[Any]], tuple[int, dict[str, int]] | None]] = []
             for sheet_name in sheet_names:
                 ws = workbook[sheet_name]
-                rows = [list(r) for r in ws.iter_rows(values_only=True)]
+                rows, celdas = _leer_hoja_acotada(ws, reloj, limites, celdas)
                 if len(rows) < 2:
                     continue
                 sheets_data.append((sheet_name, rows, detect_libro_diario_header(rows)))
@@ -1578,7 +1749,8 @@ def _parse_spreadsheet(content: bytes, mime: str, filename: str) -> dict[str, An
 
         # ── Una sola hoja: comportamiento original (con límite ampliado) ─────
         worksheet = workbook.active
-        all_rows = list(worksheet.iter_rows(values_only=True))
+        _filas_hoja, celdas = _leer_hoja_acotada(worksheet, reloj, limites, celdas)
+        all_rows = [tuple(f) for f in _filas_hoja]
         if not all_rows:
             summary.update(
                 {
