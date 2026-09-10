@@ -720,7 +720,17 @@ async def _load_customer_identity_index(
     existing = await CustomerRepository(session).list_for_dedup(tenant_id)
     return build_existing_index(
         existing,
-        to_record=lambda c: {"cuit": c.cuit, "dni": c.dni, "email": c.email, "phone": c.phone},
+        to_record=lambda c: {
+            "cuit": c.cuit,
+            "dni": c.dni,
+            "email": c.email,
+            "phone": c.phone,
+            # E6a: sin esto la clave de código se arma del lado del ARCHIVO pero
+            # nunca del lado de la base, así que no matchearía jamás — la clave
+            # fuerte existiría y no serviría para nada.
+            "external_code": c.external_code,
+            "external_source": c.external_source,
+        },
         doc_fields=_CUSTOMER_DOC_FIELDS,
     )
 
@@ -738,7 +748,14 @@ async def _load_supplier_identity_index(
     existing = await SupplierRepository(session).list_for_dedup(tenant_id)
     return build_existing_index(
         existing,
-        to_record=lambda s: {"cuil": s.cuil, "email": s.email, "phone": s.phone},
+        to_record=lambda s: {
+            "cuil": s.cuil,
+            "email": s.email,
+            "phone": s.phone,
+            # E6a — ver la nota del índice de clientes.
+            "external_code": s.external_code,
+            "external_source": s.external_source,
+        },
         doc_fields=_SUPPLIER_DOC_FIELDS,
     )
 

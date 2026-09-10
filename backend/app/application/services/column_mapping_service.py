@@ -152,6 +152,11 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "postal_code": "Código postal",
         "birthday": "Cumpleaños",
         "notes": "Notas",
+        # E6a — CÓDIGO EXTERNO: el identificador que el negocio ya usa en su
+        # propio sistema. Clave FUERTE (ver `domain/external_code.py`): es la
+        # única que existe cuando no hay CUIT ni código de barras.
+        "external_code": "Código en tu sistema",
+        "external_source": "Sistema de origen del código",
     },
     # F7a: maestro de PROVEEDORES — ACOTADO a lo que persiste el modelo Supplier
     # HOY (models/supplier.py). No se agregan doc_type/address/locality/province/
@@ -166,6 +171,11 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "email": "Email",
         "phone": "Teléfono",
         "notes": "Notas",
+        # E6a — CÓDIGO EXTERNO: el identificador que el negocio ya usa en su
+        # propio sistema. Clave FUERTE (ver `domain/external_code.py`): es la
+        # única que existe cuando no hay CUIT ni código de barras.
+        "external_code": "Código en tu sistema",
+        "external_source": "Sistema de origen del código",
     },
     "product": {
         "sku": "Código (SKU)",
@@ -188,6 +198,11 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "description": "Descripción",
         "acquired_at": "Fecha de alta/adquisición",
         "expiry_date": "Fecha de vencimiento",
+        # E6a — CÓDIGO EXTERNO: el identificador que el negocio ya usa en su
+        # propio sistema. Clave FUERTE (ver `domain/external_code.py`): es la
+        # única que existe cuando no hay CUIT ni código de barras.
+        "external_code": "Código en tu sistema",
+        "external_source": "Sistema de origen del código",
     },
 }
 
@@ -1349,7 +1364,9 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "product": frozenset(
-        {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units"}
+        {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units",
+         # E6a — ver la nota en `customer`.
+         "external_code", "external_source"}
     ),
     # Los maestros quedaron sin ningún campo escalar hasta acá, y no porque sus
     # campos admitan varias columnas: un proveedor tiene UN CUIL y UN teléfono
@@ -1385,11 +1402,18 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
             "province",
             "postal_code",
             "birthday",
+            # E6a: una entidad tiene UN código en UN sistema. Dos columnas al
+            # mismo destino no se desempatan sin adivinar, y adivinar acá fusiona
+            # identidades — el error más caro de este campo.
+            "external_code",
+            "external_source",
         }
     ),
     "supplier": frozenset(
         {"name", "last_name", "cuil", "cuit", "iva_condition", "payment_method",
-         "email", "phone"}
+         "email", "phone",
+         # E6a — ver la nota en `customer`.
+         "external_code", "external_source"}
     ),
 }
 

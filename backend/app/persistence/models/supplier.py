@@ -5,16 +5,20 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
     String,
     Text,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Mapped, Mapper, mapped_column
 
+from app.domain.external_code import clave_de_codigo_externo
 from app.persistence.db.base import PGJSONB, Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 # Helper del flag de sentinela ahora compartido con clientes (ver models/_sentinel).
@@ -83,6 +87,17 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # sistema (o el que le asigna su proveedor). Es la única clave fuerte que
     # existe para el maestro de un kiosco, donde no hay CUIT ni código de barras.
     # Ver `domain/external_code.py`.
+    # E6a — ¿alguien editó esta ficha A MANO? Lo marca el PATCH del endpoint, y
+    # lo lee el import: una vez que el usuario tocó la ficha, una carga posterior
+    # deja de pisar lo que él escribió y pasa a COMPLETAR sólo lo que está vacío.
+    #
+    # Es a nivel entidad y no por campo, igual que `sales_entries.has_user_edits`.
+    # La granularidad gruesa se banca porque la política es aditiva y no un
+    # bloqueo: el import sigue pudiendo llenar los campos que el usuario nunca
+    # cargó, sólo pierde el derecho a sobrescribir los que sí.
+    has_user_edits: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     external_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     #: De qué sistema salió. NULL = código propio del negocio. Entra en la clave
     #: porque el "1024" de un sistema no es el "1024" de otro.
@@ -99,18 +114,21 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # columnas son nuevas y nadie tiene código todavía, así que el único no
         # necesita prevalidación de colisiones — no hay datos que colisionar.
         #
-        # SIN filtro por baja, igual que `uq_products_tenant_internal_sku`: el
-        # código de una entidad dada de baja NO se recicla, porque sigue escrito
-        # en los documentos viejos que la nombran. Un índice que la excluyera
-        # además haría fallar la reactivación contra quien le hubiera tomado el
-        # código.
+        # El predicado excluye las bajas por una razón operativa, no estética: el
+        # índice tiene que ver lo MISMO que la búsqueda. Los índices de identidad
+        # se consultan sobre entidades vivas (`list_for_dedup` / `is_active`), así
+        # que un índice total dejaría que una entidad dada de baja —invisible para
+        # la búsqueda— hiciera fallar el insert con un IntegrityError que nadie
+        # puede explicar mirando los datos activos. Mismo predicado que
+        # `uq_products_tenant_barcode_norm`, y misma consecuencia conocida: el
+        # código de una baja se puede reciclar.
         Index(
             "uq_suppliers_tenant_external_code",
             "tenant_id",
             "external_code_key",
             unique=True,
-            postgresql_where=text("external_code_key IS NOT NULL"),
-            sqlite_where=text("external_code_key IS NOT NULL"),
+            postgresql_where=text("deactivated_at IS NULL AND external_code_key IS NOT NULL"),
+            sqlite_where=text("deactivated_at IS NULL AND external_code_key IS NOT NULL"),
         ),
     )
 
@@ -131,3 +149,29 @@ class Supplier(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     def __repr__(self) -> str:
         return f"<Supplier tenant={self.tenant_id} name={self.name!r}>"
+
+
+# ── E6a: la clave del código externo se recomputa sola ───────────────────────
+# Mismo mecanismo que `_sync_product_identity_columns`: fuente ÚNICA de cálculo
+# en `before_insert`/`before_update`, no un `@validates` ni una llamada del
+# caller. Si dependiera de que cada call site se acuerde de llenarla, el índice
+# único —que es el candado de la identidad— quedaría fuera de sincronía con el
+# dato justo en el camino que se olvidó, y eso no falla: deja pasar duplicados.
+def _sync_external_code_key(target: Supplier) -> None:
+    target.external_code_key = clave_de_codigo_externo(
+        target.external_code, target.external_source
+    )
+
+
+@event.listens_for(Supplier, "before_insert")
+def _supplier_external_code_before_insert(
+    mapper: Mapper[Supplier], connection: Connection, target: Supplier
+) -> None:
+    _sync_external_code_key(target)
+
+
+@event.listens_for(Supplier, "before_update")
+def _supplier_external_code_before_update(
+    mapper: Mapper[Supplier], connection: Connection, target: Supplier
+) -> None:
+    _sync_external_code_key(target)

@@ -510,6 +510,11 @@ async def update_customer(
         )
     for field, value in updates.items():
         setattr(customer, field, value)
+    # E6a: a partir de acá el import deja de pisar lo que el usuario escribió y
+    # pasa a completar sólo lo vacío. Se marca en el PATCH y no en el repositorio
+    # porque lo que importa no es que la fila cambió —el import también la
+    # cambia— sino que la cambió UNA PERSONA.
+    customer.has_user_edits = True
     saved = await repo.save(customer)
     _audit_data_change(
         session,

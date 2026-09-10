@@ -527,6 +527,11 @@ def test_single_value_fields_cubre_dinero_cantidad_y_fecha() -> None:
         "list_price_ars",
         "unit_cost_ars",
         "stock_units",
+        # E6a: el código externo es escalar por una razón más dura que los
+        # precios — dos columnas al mismo destino fusionan identidades, no
+        # producen un número raro que salte en un total.
+        "external_code",
+        "external_source",
     }
     # Campos donde varias columnas pueden ser legítimas: fuera del bloqueo.
     assert "notes" not in SINGLE_VALUE_FIELDS["sale"]

@@ -32,6 +32,12 @@ from app.schemas._ar_fiscal import validate_cuit
 _IMPORTABLE_FIELDS = (
     "name", "last_name", "cuil", "cuit", "iva_condition", "payment_method",
     "email", "phone", "notes",
+    # E6a — el código con que el negocio identifica a esta entidad en su propio
+    # sistema. Es clave FUERTE (ver `domain/external_code`), así que importa que
+    # entre por acá y no por un camino aparte: la actualización de un maestro ya
+    # matcheado tiene que poder traer el código, no sólo consumirlo.
+    "external_code",
+    "external_source",
 )
 
 # Documentos del proveedor: CUIT (empresa) y CUIL (persona física). No tiene DNI,
@@ -87,6 +93,11 @@ class ImportResult:
     # el mismo campo en customer_import_service.ImportResult.
     needs_review: int = 0
     invalid: int = 0
+    #: E6a: cuántos valores NO se pisaron porque la ficha tenía ediciones
+    #: manuales. Se cuenta y se reporta: una actualización que no ocurrió es
+    #: exactamente el tipo de silencio que este programa viene a cerrar — el
+    #: usuario tiene que poder saber que su archivo traía otro dato.
+    preserved_fields: int = 0
 
 
 def _record_keys(record: dict[str, Any]) -> list[IdentityKey]:
@@ -117,7 +128,17 @@ def _validate_record(record: dict[str, Any]) -> list[str]:
 
 
 def _supplier_record(sup: Supplier) -> dict[str, Any]:
-    return {"cuit": sup.cuit, "cuil": sup.cuil, "email": sup.email, "phone": sup.phone}
+    return {
+        "cuit": sup.cuit,
+        "cuil": sup.cuil,
+        "email": sup.email,
+        "phone": sup.phone,
+        # E6a: el código externo tiene que estar de los DOS lados. Si sólo se
+        # armara del lado del archivo, la clave fuerte no matchearía nunca contra
+        # la base: existiría y no serviría para nada.
+        "external_code": sup.external_code,
+        "external_source": sup.external_source,
+    }
 
 
 def _existing_index(existing: list[Supplier]) -> dict[IdentityKey, Supplier]:
@@ -243,8 +264,18 @@ async def apply_import(
             # columna MAPEADA pero con la celda vacía en esta fila arma
             # {campo: None} (clave presente, valor vacío) — is_blank() evita que
             # eso borre un valor existente (edición manual u otra carga).
+            # E6a — política de actualización explícita. Que la clave fuerte
+            # diga que es la MISMA entidad no dice cuál de las dos versiones de
+            # un teléfono vale: eso es una decisión aparte, y la toma el usuario
+            # habiendo editado la ficha. Con `has_user_edits` el import se vuelve
+            # ADITIVO sobre esa ficha —completa lo vacío, no pisa lo cargado—,
+            # que es lo que evita que cada re-importación borre sus correcciones.
+            _solo_completar = bool(getattr(match, "has_user_edits", False))
             for fname in _IMPORTABLE_FIELDS:
                 if fname not in record or is_blank(record[fname]):
+                    continue
+                if _solo_completar and not is_blank(getattr(match, fname, None)):
+                    result.preserved_fields += 1
                     continue
                 setattr(match, fname, record[fname])
             await repo.save(match)

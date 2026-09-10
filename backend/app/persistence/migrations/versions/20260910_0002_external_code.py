@@ -28,14 +28,19 @@ Si en algún momento hubiera que POBLAR estas columnas desde datos existentes, a
 sí manda la regla general: diagnosticar colisiones primero y recién después
 activar la restricción.
 
-Por qué el parcial NO filtra por baja
---------------------------------------
-El predicado es sólo ``external_code_key IS NOT NULL``, igual que
-``uq_products_tenant_internal_sku`` y a diferencia de los índices de barcode/sku
-(que sí exigen ``is_active``). El código de una entidad dada de baja **no se
-recicla**: sigue escrito en los remitos y las facturas viejas que la nombran.
-Además, un índice que excluyera las bajas haría fallar la reactivación cuando
-otro le hubiera tomado el código mientras tanto.
+Por qué el parcial excluye las bajas
+-------------------------------------
+El predicado no es sólo ``external_code_key IS NOT NULL``: además exige que la
+entidad esté viva. La razón es operativa, no estética — **el índice tiene que ver
+lo mismo que la búsqueda**. La resolución de identidad se consulta sobre entidades
+vivas (``list_for_dedup`` en maestros, ``is_active`` en productos), así que un
+índice total dejaría que una entidad dada de baja —invisible para esa búsqueda—
+hiciera fallar el insert con un ``IntegrityError`` que nadie puede explicar
+mirando los datos activos.
+
+Es el mismo predicado que ``uq_products_tenant_barcode_norm`` y trae su misma
+consecuencia conocida: el código de una baja se puede reciclar. Se prefiere eso a
+un modo de falla indiagnosticable.
 
 ``external_code_key`` se persiste ya normalizada en vez de calcularse en el
 predicado, por la misma razón que ``sku_normalized``: el índice tiene que evaluar
@@ -56,6 +61,15 @@ depends_on = None
 
 _TABLAS = ("customers", "suppliers", "products")
 
+#: El predicado de cada tabla es el ESPEJO EXACTO del `Index(...)` del ORM. Si
+#: divergen, el esquema que crea la suite (desde el ORM) deja de ser el que corre
+#: en producción (desde esta migración), y el modo de falla aparece sólo en prod.
+_PREDICADO = {
+    "customers": "deactivated_at IS NULL AND external_code_key IS NOT NULL",
+    "suppliers": "deactivated_at IS NULL AND external_code_key IS NOT NULL",
+    "products": "is_active AND external_code_key IS NOT NULL",
+}
+
 
 def upgrade() -> None:
     for tabla in _TABLAS:
@@ -67,8 +81,8 @@ def upgrade() -> None:
             tabla,
             ["tenant_id", "external_code_key"],
             unique=True,
-            postgresql_where=sa.text("external_code_key IS NOT NULL"),
-            sqlite_where=sa.text("external_code_key IS NOT NULL"),
+            postgresql_where=sa.text(_PREDICADO[tabla]),
+            sqlite_where=sa.text(_PREDICADO[tabla]),
         )
 
 
