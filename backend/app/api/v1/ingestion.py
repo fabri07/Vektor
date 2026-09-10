@@ -2363,54 +2363,42 @@ async def confirm_file(
             detail=_detalle_plano,
         )
 
-    # ── Un archivo de UNA sola tabla no puede traer costos de compra ────────────
-    # El camino plano del importador NO cobra el envío ni aplica las decisiones de
-    # costo, y no lo hace de tres maneras a la vez:
-    #   1. `_cobrar_envios_de_la_hoja` es un closure anidado dentro del camino
-    #      multi-hoja: desde el plano es estructuralmente inalcanzable;
-    #   2. el plano llama al planificador con `ctx_id=None` —que busca la decisión
-    #      bajo la clave `""`— mientras la API la manda con el `context_id` real,
-    #      así que la decisión se valida, el usuario la ve aceptada y el import la
-    #      ignora;
-    #   3. los avisos de costo nunca llegan a `counts`, así que tampoco hay rastro.
+    # ── Costos de compra en un archivo de UNA sola tabla ───────────────────────
+    # E6a. Hasta acá esto era un rechazo TOTAL: cualquier archivo plano con una
+    # columna de envío mapeada se devolvía con 422. Existía por una razón buena
+    # —el camino plano no cobraba el envío, y aceptarlo dejaba el costo más bajo
+    # que el real con el margen inflado— pero la causa no era el formato: el cobro
+    # vivía en un closure del camino multi-hoja, la clave de contexto se
+    # descartaba y los avisos no llegaban a `counts`. Arreglado eso y probada la
+    # PARIDAD entre formatos (`test_paridad_tabla_vs_hoja`), el rechazo total ya
+    # no describe ninguna limitación real: **una sola tabla también agrupa por
+    # comprobante**, porque lo que determina la agrupación son los identificadores
+    # de la fila (proveedor + número), no que exista una hoja aparte.
     #
-    # Arreglar el camino plano de verdad es otra fase. Lo que NO se puede hacer
-    # mientras tanto es aceptar el archivo: importar una compra sin cobrarle el
-    # envío que el usuario mapeó deja un costo más bajo que el real, y con él un
-    # margen inflado que nadie va a salir a buscar. Se rechaza y se dice la salida.
-    #
-    # **No está gateado por tenant**: no cobrar un envío mapeado es incorrecto con
-    # el motor de costos prendido o apagado. La compuerta gobierna el reparto, no
-    # el silencio.
-    if _plano:
-        _targets_planos = {m.target_field for m in _flat_mappings} | {
-            m.target_field for m in _ctx_mappings
-        }
-        _columnas_de_costo = sorted(
-            _targets_planos & {"shipping_cost", "shipping_cost_line"}
-        )
-        if _columnas_de_costo or body.purchase_cost_decisions:
-            _que_pasa = (
-                "tiene columnas de envío mapeadas"
-                if _columnas_de_costo
-                else "trae decisiones sobre el costo de compra"
-            )
+    # Lo que SÍ queda es un rechazo específico, para el único caso donde la
+    # decisión del usuario todavía no puede honrarse: mapeos **sin hoja**. El
+    # importador resuelve el contexto plano desde `context_mappings`, y unos
+    # mapeos con `context_id=None` no le dicen a qué hoja pertenece la decisión,
+    # así que la buscaría bajo una clave que nadie escribió y se comportaría como
+    # si no existiera — el silencio que este bloque vino a impedir.
+    if _plano and (body.purchase_cost_decisions or body.shipping_decisions):
+        _sin_hoja = not _ctx_mappings and bool(_flat_mappings)
+        if _sin_hoja:
             await _emit_validation_reject(
-                "costos_de_compra_en_archivo_plano",
+                "costos_de_compra_sin_hoja",
                 {
-                    "columnas": _columnas_de_costo,
-                    "decisiones": bool(body.purchase_cost_decisions),
+                    "decisiones_costo": bool(body.purchase_cost_decisions),
+                    "decisiones_envio": bool(body.shipping_decisions),
                 },
             )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(
-                    f"«{record.original_filename}» es un archivo de una sola tabla "
-                    f"y {_que_pasa}. Véktor todavía no sabe repartir ni cobrar el "
-                    "envío en este formato: si lo importara, la compra quedaría con "
-                    "un costo más bajo que el real y el margen inflado. Subilo como "
-                    "libro con hojas separadas (una por sección), o sacá las columnas "
-                    "de envío del mapeo y cargá ese costo como un gasto aparte."
+                    f"«{record.original_filename}» trae decisiones sobre el costo "
+                    "de compra, pero las columnas se mandaron sin identificar a "
+                    "qué hoja pertenecen, así que Véktor no puede saber a cuál "
+                    "aplicarlas. Volvé a mapear las columnas para que cada una "
+                    "quede asociada a su hoja."
                 ),
             )
 
@@ -2424,6 +2412,14 @@ async def confirm_file(
             for _cid, _ms in _mappings_por_contexto.items()
             if any(m.target_field == "shipping_cost" for m in _ms)
         }
+        # E6a: el archivo de una sola tabla también tiene su hoja, y desde que su
+        # camino cobra el envío su decisión es legítima. Sin esto, habilitar el
+        # cobro hubiera dejado el rechazo total cambiado por uno igual de ciego:
+        # toda decisión de un archivo plano rebotaría como "hoja sin columna".
+        if _plano and not _hojas_con_envio and any(
+            m.target_field == "shipping_cost" for m in _flat_mappings
+        ):
+            _hojas_con_envio = {_d.context_id for _d in body.shipping_decisions}
         for _dec in body.shipping_decisions:
             if _dec.context_id not in _hojas_con_envio:
                 await _emit_validation_reject(
