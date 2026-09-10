@@ -15,6 +15,16 @@ Fecha: 2026-09-06. Base revisada: `a62270bf`. Estado: planificación; no impleme
 
 Lo entregado son correcciones sobre el motor actual: la compuerta de E7a —el refactor grande— sigue sin comprometerse, y se compromete sólo si E5/E6 dejan una brecha medida.
 
+**Criterio de deduplicación entre archivos (acordado 2026-09-09).** Decisión de negocio, no de implementación; la escribe acá para que E6b no la re-discuta:
+
+- **Clave fuerte** = ID estable de la operación en el sistema de origen (incluyendo origen y tenant), **o** identidad completa de comprobante: emisor, tipo, serie/punto de venta y número.
+- **Un número de comprobante aislado NO alcanza**: se repite entre proveedores, tipos y series. Y un comprobante puede tener varias líneas legítimas — identificar el documento no identifica cada fila.
+- **Mismo archivo exacto**: su huella permite reconocer una carga repetida y evitar una segunda aplicación accidental. La relectura sigue su circuito de sustitución.
+- **Sin clave fuerte**: generar candidatos para revisión. **Nunca** descartar automáticamente por importe + fecha + nombre.
+- **Misma clave con contenido distinto**: presentar el conflicto o la corrección; nunca omitirlo.
+
+Medido el 2026-09-09 contra Postgres real: el mismo contenido subido como archivo NUEVO duplica todo (3 gastos → 6, $12.000 → $24.000, stock 10 → 20; el producto NO se duplica porque la identidad de producto sí dedupea). Eso justifica detectar y avisar; **no** justifica deduplicar toda operación con valores iguales.
+
 **Objetivo verificable.** Cada archivo debe producir una interpretación revisable y un resultado trazable: respetar decisiones explícitas, conservar datos originales, justificar exclusiones, cuadrar importes y stock, tolerar reintentos y permitir una relectura o reversión segura. La pantalla, la confirmación y la relectura deben compartir las reglas y la interpretación de los datos.
 
 **Alcance.** Carga, almacenamiento, parsing, clasificación, mapeo, normalización, validación, vista previa, confirmación, ejecución, identidad, deduplicación, inventario, costos, clientes/proveedores, bandeja Otros, relectura, borrado/reversa, observabilidad y reparación histórica. CSV/XLSX será la primera ruta migrada. Los formatos de texto, documentos e imágenes ya admitidos y los callers de chat, remitos y reparación se inventariarán y adaptarán al mismo contrato cuando generen operaciones de negocio. Una extracción documental para contexto debe conservar su finalidad y no convertirse automáticamente en una venta o gasto.
