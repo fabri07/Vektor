@@ -244,7 +244,15 @@ async def estado(
         )
         return {
             "gastos": [
-                (str(g.id), str(g.amount), g.voided_at is not None, str(g.product_id))
+                (
+                    str(g.id),
+                    str(g.amount),
+                    g.voided_at is not None,
+                    str(g.product_id),
+                    g.category,
+                    g.expense_type,
+                    g.has_user_edits,
+                )
                 for g in gastos
             ],
             "productos": [

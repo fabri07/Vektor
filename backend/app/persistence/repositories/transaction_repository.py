@@ -855,11 +855,20 @@ class ExpenseRepository:
         Aditivo respecto del resto del repo: muta solo los campos de clasificación
         contable, sin tocar montos ni fechas. ``product_id`` solo se setea cuando
         viene explícito (reventa → producto vendible vinculado); nunca lo limpia.
+
+        **Marca el gasto como editado a mano** si vino de un import, igual que
+        ``PATCH /expenses/{id}``. Sin esto, la relectura del archivo lo trataba
+        como "no editado": lo anulaba y lo reimportaba con la clasificación
+        ORIGINAL, así que el trabajo del usuario desaparecía en silencio.
+        Reclasificar por chat es tan manual como reclasificar por la pantalla —
+        el flag describe quién decidió el dato, no por qué endpoint entró.
         """
         entry.category = category
         entry.expense_type = expense_type
         if product_id is not None:
             entry.product_id = product_id
+        if entry.source_upload_id is not None:
+            entry.has_user_edits = True
         self._session.add(entry)
         await self._session.flush()
         return entry
