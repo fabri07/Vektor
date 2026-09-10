@@ -50,6 +50,24 @@ Medido el 2026-09-09 contra Postgres real: el mismo contenido subido como archiv
 
 *Costo:* catálogo de 300 productos 23 → 23 statements; padrones de 300 clientes/proveedores 310 → 310. Cero sobrecosto. **Hallazgo anotado, no de esta entrega:** esos 310 son un N+1 preexistente del import de maestros (un flush por fila) — material de F0.
 
+**F0 — línea de base medida (2026-09-10), con historial del tenant creciente.** Herramienta versionada: `backend/scripts/bench_f0_baseline.py` (Postgres local, matriz *filas del archivo* × *huellas históricas*). Los benchmarks anteriores medían siempre sobre tenants VACÍOS, así que respondían "¿hay un N+1 por fila?" y no la pregunta que E6c tiene que cerrar.
+
+| filas | historial | statements | pico de memoria | tiempo |
+|---:|---:|---:|---:|---:|
+| 100 | 0 | 57 | 4,6 MB | 1,19 s |
+| 100 | 20.000 | 57 | 6,9 MB (×1,50) | 0,93 s |
+| 100 | 100.000 | 57 | **32,3 MB (×6,98)** | 2,53 s |
+| 1.000 | 0 | 100 | 8,1 MB | 3,81 s |
+| 1.000 | 100.000 | 100 | 32,6 MB (×4,04) | 6,11 s |
+| 5.000 | 0 | 124 | 19,3 MB | 15,72 s |
+| 5.000 | 100.000 | 124 | 36,3 MB (×1,88) | 18,11 s |
+
+**Lectura, y es el presupuesto que E6c tiene que respetar.** Los statements **no crecen** con el historial (57/100/124 constantes): no hay N+1 por historia, y la instrumentación de E6a/E6b no lo empeoró. Lo que crece es la **memoria**, y domina sobre el tamaño del archivo: importar 100 filas contra un tenant con 100.000 huellas (32,3 MB) cuesta MÁS que importar 5.000 filas contra uno vacío (19,3 MB). El costo marginal medido es **~0,28 KB por huella histórica y por import**, así que un tenant con un millón de filas importadas paga del orden de 280 MB en el worker por cada archivo nuevo, sin importar cuán chico sea.
+
+Causa confirmada en código (H08): `_load_import_fingerprints` hace un `SELECT` sin filtro por archivo y materializa **todas** las huellas de import del tenant en un `set` de Python, y `_preloaded_fp` guarda una segunda tabla hash sobre las mismas cadenas. Objetivo de E6c: que el consumo dependa del archivo, no de la historia.
+
+*Lo que esta medición NO cubre, dicho para que no se lea como completa:* el desglose por ETAPA del endpoint (espera de cola, parsing, preview, validaciones, publicación) lo produce `StageTimings` y su herramienta es `bench_confirm_import.py`, que necesita el archivo real y credenciales de R2. Y los segundos son de Postgres local (~0,1 ms por statement); contra Neon (30-50 ms) el que manda es el conteo de statements, no estos tiempos.
+
 **Objetivo verificable.** Cada archivo debe producir una interpretación revisable y un resultado trazable: respetar decisiones explícitas, conservar datos originales, justificar exclusiones, cuadrar importes y stock, tolerar reintentos y permitir una relectura o reversión segura. La pantalla, la confirmación y la relectura deben compartir las reglas y la interpretación de los datos.
 
 **Alcance.** Carga, almacenamiento, parsing, clasificación, mapeo, normalización, validación, vista previa, confirmación, ejecución, identidad, deduplicación, inventario, costos, clientes/proveedores, bandeja Otros, relectura, borrado/reversa, observabilidad y reparación histórica. CSV/XLSX será la primera ruta migrada. Los formatos de texto, documentos e imágenes ya admitidos y los callers de chat, remitos y reparación se inventariarán y adaptarán al mismo contrato cuando generen operaciones de negocio. Una extracción documental para contexto debe conservar su finalidad y no convertirse automáticamente en una venta o gasto.
