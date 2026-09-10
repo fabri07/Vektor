@@ -55,8 +55,9 @@ servicio nuevo contra el esquema viejo todavía no existe.
 from __future__ import annotations
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 revision = "20260910_0001"
 down_revision = "20260909_0001"

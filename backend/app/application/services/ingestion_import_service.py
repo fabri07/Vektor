@@ -45,6 +45,14 @@ from app.application.services.inventory_movement_origin import (
     compute_source_row_hash,
     ensure_utc,
 )
+from app.application.services.operation_identity_service import (
+    DECISION_CONFLICTO,
+    DECISION_YA_APLICADA,
+    PlanDeIdentidad,
+    cerrar_plan,
+    plan_vacio,
+    planificar_identidades,
+)
 from app.application.services.product_identity import (
     MatchedBy,
     ProductCreateBatch,
@@ -245,7 +253,21 @@ def check_nonempty_import(
     confirmed_any = any((confirmed_fields or {}).values()) or any(
         (context_confirmed or {}).values()
     )
-    if total_inserted == 0 and routed_to_others == 0 and had_rows and confirmed_any:
+    # E6b: un archivo cuyas operaciones YA ESTABAN aplicadas —o quedaron en
+    # conflicto, esperando revisión— no está vacío: se lo miró entero y se
+    # decidió sobre cada fila. Cortar con 422 sería el peor de los dos errores:
+    # el usuario vería "no se pudo importar nada, revisá el mapeo" cuando el
+    # mapeo estaba perfecto y lo que pasó es que ya lo tenía cargado — y además
+    # el rollback se llevaría puestas las filas capturadas en «Otros». Mismo
+    # criterio que `routed_to_others` (Minor 1 de F8b).
+    _decididas = counts.get("ya_aplicadas", 0) + counts.get("conflictos_de_identidad", 0)
+    if (
+        total_inserted == 0
+        and routed_to_others == 0
+        and _decididas == 0
+        and had_rows
+        and confirmed_any
+    ):
         logger.warning(
             "ingestion.import.zero_inserted",
             row_count=summary.get("row_count"),
@@ -4523,6 +4545,40 @@ async def _insert_confirmed_data_impl(
                 counts["ajustes_ilegibles"] = counts.get("ajustes_ilegibles", 0) + _cuantas
                 _avisos_costo.append(texto_del_ajuste_ilegible("", _col, _cuantas))
 
+        # E6b — identidad fuerte, también acá: el mismo archivo tiene que
+        # deduplicarse igual entre como tabla suelta o como solapa. Son DOS planes
+        # porque una tabla suelta puede producir venta y gasto desde la misma fila
+        # (el Libro Diario lo hace), y la identidad de un comprobante propio y la
+        # de uno del proveedor son distintas — no colisionan ni se pueden
+        # compartir. Si la hoja no produce una de las dos, ese plan queda vacío y
+        # no cuesta nada.
+        _plan_ventas = (
+            await planificar_identidades(
+                session,
+                tenant_id,
+                uploaded_file_id,
+                rows=rows,
+                cols=target_to_col,
+                entity="sale",
+            )
+            if wants_ventas
+            else plan_vacio()
+        )
+        _plan_gastos = (
+            await planificar_identidades(
+                session,
+                tenant_id,
+                uploaded_file_id,
+                rows=rows,
+                cols=target_to_col,
+                entity="expense",
+            )
+            if wants_gastos
+            else plan_vacio()
+        )
+        _planes_identidad_plano = [_plan_ventas, _plan_gastos]
+        _efectos_de_la_fila_plano: list[tuple[str, uuid.UUID]] = []
+
         for row_index, row in enumerate(rows):
             # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
             # corrida previa, saltarla (re-subir el mismo archivo = 0 filas nuevas).
@@ -4544,6 +4600,44 @@ async def _insert_confirmed_data_impl(
             # como output persistido (registra fingerprint) sin usar `continue`,
             # para no saltear el bloque de idempotencia del final de la iteración.
             _captured_to_otros = False
+
+            # E6b — la decisión de identidad, ANTES de escribir nada. Una fila
+            # puede producir venta y gasto, así que se resuelve por separado: que
+            # el comprobante propio ya esté aplicado no dice nada sobre el del
+            # proveedor. `_omitir_*` apaga sólo el bloque que corresponde.
+            _dec_venta = _plan_ventas.decision.get(row_index)
+            _dec_gasto = _plan_gastos.decision.get(row_index)
+            _omitir_venta = _dec_venta in (DECISION_YA_APLICADA, DECISION_CONFLICTO)
+            _omitir_gasto = _dec_gasto in (DECISION_YA_APLICADA, DECISION_CONFLICTO)
+            for _dec in (_dec_venta, _dec_gasto):
+                if _dec == DECISION_YA_APLICADA:
+                    counts["ya_aplicadas"] = counts.get("ya_aplicadas", 0) + 1
+            _motivo_conflicto = (
+                _plan_ventas.motivo.get(row_index)
+                if _dec_venta == DECISION_CONFLICTO
+                else _plan_gastos.motivo.get(row_index)
+                if _dec_gasto == DECISION_CONFLICTO
+                else None
+            )
+            if _motivo_conflicto is not None:
+                # Misma identidad, contenido distinto: puede ser una corrección o
+                # un error de carga. A "Otros" con el motivo — omitirla escondería
+                # la corrección y aplicarla duplicaría el efecto.
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=headers,
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=_motivo_conflicto[:200],
+                    suggested_entity="sale" if _dec_venta == DECISION_CONFLICTO else "expense",
+                    row_ref=_source_row_ref(_row_anchor),
+                )
+                counts["conflictos_de_identidad"] = (
+                    counts.get("conflictos_de_identidad", 0) + 1
+                )
+                _captured_to_otros = True
 
             raw_date = row.get(fecha_col) if fecha_col else None
             tx_date = _parse_date(raw_date) if raw_date is not None else None
@@ -4642,7 +4736,7 @@ async def _insert_confirmed_data_impl(
                 counts["filas_sin_cantidad"] = counts.get("filas_sin_cantidad", 0) + 1
                 _captured_to_otros_rows.add(row_index)
                 _captured_to_otros = True
-            if wants_ventas and not _captured_to_otros:
+            if wants_ventas and not _captured_to_otros and not _omitir_venta:
                 # F-H4: el monto lo trae el archivo o sale de precio × cantidad.
                 # `venta_col` puede ser None: la hoja entró por la pareja mapeada.
                 _linea = resolve_line_amount(
@@ -4680,6 +4774,8 @@ async def _insert_confirmed_data_impl(
                     _registrar_monto_derivado(cf, _linea, counts)
 
                     entry = SaleEntry(
+                        # E6b — ver la nota en `_add_sale` (multihoja).
+                        id=uuid.uuid4(),
                         tenant_id=tenant_id,
                         amount=amount,
                         quantity=qty,
@@ -4740,8 +4836,9 @@ async def _insert_confirmed_data_impl(
                         entry.source_row_ref = _source_row_ref(_row_anchor)
                     session.add(entry)
                     counts["ventas"] += 1
+                    _efectos_de_la_fila_plano.append(("sale", entry.id))
 
-            if wants_gastos and not _captured_to_otros:
+            if wants_gastos and not _captured_to_otros and not _omitir_gasto:
                 assert gasto_col is not None  # wants_gastos implica gasto_col presente
                 amount = _parse_amount(row.get(gasto_col))
                 if amount:
@@ -4787,6 +4884,8 @@ async def _insert_confirmed_data_impl(
                         cf = {**cf, "category_label": cat_label}
 
                     expense = ExpenseEntry(
+                        # E6b — ver la nota en `_add_sale` (multihoja).
+                        id=uuid.uuid4(),
                         tenant_id=tenant_id,
                         amount=amount,
                         category=cat_code,
@@ -5053,6 +5152,7 @@ async def _insert_confirmed_data_impl(
                             expense.source_row_ref = _source_row_ref(_row_anchor)
                         session.add(expense)
                         counts["gastos"] += 1
+                        _efectos_de_la_fila_plano.append(("expense", expense.id))
 
             # F-H4: validación final de la fila. Si no produjo NADA —ni venta, ni
             # gasto, ni captura— y no es una fila de relleno, se va a "Otros" con el
@@ -5105,6 +5205,20 @@ async def _insert_confirmed_data_impl(
                 await _register_import_row_fingerprint(
                     session, tenant_id, _row_anchor, seen_fp
                 )
+            # E6b: se cuelgan los efectos REALES de esta fila a su identidad. Lo
+            # que no insertó no deja vínculo, y su reclamación se devuelve al
+            # cierre para que el archivo corregido se pueda reimportar.
+            for _tipo_efecto, _id_efecto in _efectos_de_la_fila_plano:
+                (_plan_ventas if _tipo_efecto == "sale" else _plan_gastos).registrar_efecto(
+                    row_index, _tipo_efecto, _id_efecto
+                )
+            _efectos_de_la_fila_plano.clear()
+
+        # E6b: vínculos identidad→efecto + devolución de las reclamaciones que
+        # no produjeron nada. Acá y no al final de la función porque los planes
+        # sólo existen dentro de esta rama; en la misma transacción que los
+        # efectos, para que un import revertido se lleve sus identidades.
+        await cerrar_plan(session, tenant_id, uploaded_file_id, _planes_identidad_plano)
 
         # Traza agregada de las decisiones de proveedor del path de compras.
         if _real_suppliers:
@@ -5883,6 +5997,11 @@ async def _insert_multisheet_data(
     # Traza agregada de decisiones de proveedor (Fase 1): reales desde compras,
     # marcas omitidas de catálogos, y uso del sentinela "No identificado".
     _real_suppliers: set[str] = set()
+    # E6b — deduplicación por clave fuerte. Un plan por hoja (con el candado
+    # ya tomado y las decisiones resueltas) y los efectos que produjo cada fila,
+    # para colgarle el vínculo a su identidad. Ver `operation_identity_service`.
+    _planes_identidad: list[PlanDeIdentidad] = []
+    _efectos_de_la_fila: list[tuple[str, uuid.UUID]] = []
     _skipped_brands: set[str] = set()
     _sentinel_used = False
     # F2-T2: caché intra-corrida por CLAVE DE IDENTIDAD (sku o nombre+marca),
@@ -6224,6 +6343,11 @@ async def _insert_multisheet_data(
         pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
         pay = normalize_payment_method(pay_raw) if pay_raw else "cash"
         entry = SaleEntry(
+            # E6b: el id se fija acá y no en el flush para poder colgarle el
+            # vínculo de identidad dentro de la misma transacción. El
+            # `default=uuid.uuid4` del modelo es Python-side y no corre hasta
+            # el flush, así que sin esto `entry.id` sería None cuando hace falta.
+            id=uuid.uuid4(),
             tenant_id=tenant_id,
             amount=amount,
             quantity=qty,
@@ -6280,6 +6404,10 @@ async def _insert_multisheet_data(
             entry.source_row_ref = row_ref  # Mejora D
         session.add(entry)
         counts["ventas"] += 1
+        # E6b: el efecto que produjo esta fila, para colgárselo a su identidad.
+        # Sin esto la identidad quedaría reclamada y sin efecto vivo, y el cierre
+        # del import la devolvería — o sea, el archivo se podría reimportar entero.
+        _efectos_de_la_fila.append(("sale", entry.id))
         return True
 
     async def _cobrar_envios_de_la_hoja(
@@ -6564,6 +6692,8 @@ async def _insert_multisheet_data(
         cat_code, cat_label, _ = classify_expense_with_vertical(cat_raw, _vertical)
         recurring = _parse_bool_es(_val(row, cols.get("is_recurring"), _RECURRENTE_COLS))
         expense = ExpenseEntry(
+            # E6b — ver la nota en `_add_sale`.
+            id=uuid.uuid4(),
             tenant_id=tenant_id,
             amount=amount,
             category=cat_code,
@@ -6805,6 +6935,7 @@ async def _insert_multisheet_data(
             expense.source_row_ref = row_ref  # Mejora D
         session.add(expense)
         counts["gastos"] += 1
+        _efectos_de_la_fila.append(("expense", expense.id))
         return True
 
     async def _add_product(
@@ -7755,6 +7886,21 @@ async def _insert_multisheet_data(
                             str(ctx.get("label") or ctx_id or ""), _col, _cuantas
                         )
                     )
+            # E6b: identidad fuerte de la hoja. Reclama el candado de todas sus
+            # claves en UNA sentencia y devuelve la decisión por fila. Antes del
+            # loop porque el candado tiene que estar tomado ANTES de escribir el
+            # primer efecto: entre "miré y no estaba" e "inserté" cabe otra carga
+            # entera. Una hoja sin columnas de identidad devuelve un plan vacío y
+            # no paga ni una query.
+            _plan_ident = await planificar_identidades(
+                session,
+                tenant_id,
+                uploaded_file_id,
+                rows=rows,
+                cols=cols,
+                entity=entity,
+            )
+            _planes_identidad.append(_plan_ident)
             for _i, row in enumerate(rows):
                 # B1: idempotencia por (archivo, contexto, índice). Chequeo
                 # READ-ONLY; la huella se registra recién DESPUÉS y solo si la
@@ -7779,6 +7925,47 @@ async def _insert_multisheet_data(
                     if uploaded_file_id is not None
                     else None
                 )
+                # E6b — la decisión de identidad, antes de cualquier escritura.
+                _dec_ident = _plan_ident.decision.get(_i)
+                if _dec_ident == DECISION_YA_APLICADA:
+                    # Misma identidad y mismo contenido: ya está aplicada. Es el
+                    # ÚNICO caso donde Véktor se saltea plata, y exige las dos
+                    # condiciones — la identidad sola diría "ya lo tengo" sobre
+                    # un documento corregido. No se quema la huella de fila: si
+                    # el archivo se vuelve a confirmar, la decisión se recalcula
+                    # y da lo mismo, así que es idempotente igual.
+                    counts["ya_aplicadas"] = counts.get("ya_aplicadas", 0) + 1
+                    continue
+                if _dec_ident == DECISION_CONFLICTO:
+                    # Misma identidad, contenido distinto. No se decide sola:
+                    # puede ser una corrección (el proveedor reemitió la factura)
+                    # o un error de carga, y las dos se parecen. Omitirla
+                    # escondería la corrección; aplicarla duplicaría el efecto.
+                    # Va a "Otros" con el motivo, que es el canal que ya existe
+                    # para lo que Véktor no puede decidir.
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        rows=[row],
+                        headers=ctx.get("headers"),
+                        source=source,
+                        uploaded_file_id=uploaded_file_id,
+                        context_label=_plan_ident.motivo.get(_i, "")[:200],
+                        suggested_entity=entity,
+                        row_ref=_row_ref,
+                        context_id=str(ctx_id) if ctx_id else None,
+                    )
+                    counts["conflictos_de_identidad"] = (
+                        counts.get("conflictos_de_identidad", 0) + 1
+                    )
+                    # La captura ES output persistido: se quema la huella para
+                    # que re-confirmar no la duplique en la bandeja.
+                    if _ctx_anchor is not None:
+                        await _register_import_row_fingerprint(
+                            session, tenant_id, _ctx_anchor, seen_fp
+                        )
+                    continue
+                _efectos_de_la_fila.clear()
                 if entity == "sale" and _sin_respaldo and (
                     (str(ctx_id or ""), _i) in _sin_respaldo
                 ):
@@ -7854,6 +8041,14 @@ async def _insert_multisheet_data(
                     await _register_import_row_fingerprint(
                         session, tenant_id, _ctx_anchor, seen_fp
                     )
+                # E6b: los efectos que esta fila persistió se le cuelgan a su
+                # identidad. Se registra el efecto REAL y no la intención: si la
+                # fila terminó en "Otros" o no insertó nada, la identidad queda
+                # sin vínculo y el cierre del import devuelve la reclamación, de
+                # modo que el archivo corregido se puede volver a importar.
+                for _tipo_efecto, _id_efecto in _efectos_de_la_fila:
+                    _plan_ident.registrar_efecto(_i, _tipo_efecto, _id_efecto)
+                _efectos_de_la_fila.clear()
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
 
@@ -7992,6 +8187,13 @@ async def _insert_multisheet_data(
             decision_type="SUPPLIER_SKIPPED_FROM_CATALOG",
             data={"skipped_brands": sorted(_skipped_brands), "count": len(_skipped_brands)},
         )
+
+    # E6b: se persisten los vínculos identidad→efecto y se devuelven las
+    # reclamaciones que no produjeron nada. Va acá —dentro de la misma
+    # transacción que los efectos— porque si el import se revierte, las
+    # identidades se tienen que ir con él: no puede quedar una identidad
+    # reclamada por un import que no ocurrió.
+    await cerrar_plan(session, tenant_id, uploaded_file_id, _planes_identidad)
 
     await session.flush()
     # F-H6.c: el default seguro no puede ser mudo. Una columna de costo mapeada

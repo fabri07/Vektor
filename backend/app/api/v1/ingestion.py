@@ -3418,6 +3418,23 @@ async def confirm_file(
             "cantidad no se pudo leer como unidades enteras (decimales, negativas o "
             "texto). Antes entraban como 1 unidad."
         )
+    # E6b — deduplicación por CLAVE FUERTE. A diferencia del aviso de abajo, acá
+    # sí se decidió: el archivo trae identidad de comprobante o ID de origen, y
+    # con eso se puede afirmar que la operación es la misma. Se informa igual —
+    # que Véktor haya salteado algo nunca puede ser silencioso.
+    if counts.get("ya_aplicadas"):
+        warnings.append(
+            f"{counts['ya_aplicadas']} operación(es) de este archivo ya estaban "
+            "cargadas con el mismo comprobante (o el mismo ID de origen) y los "
+            "mismos datos: no se aplicaron de nuevo."
+        )
+    if counts.get("conflictos_de_identidad"):
+        warnings.append(
+            f"{counts['conflictos_de_identidad']} fila(s) tienen el mismo "
+            "comprobante que una operación ya cargada pero con datos distintos. "
+            "Puede ser una corrección o un error de carga: quedaron en «Otros» "
+            "para que las revises, sin aplicarse."
+        )
     # E6b: ¿estas operaciones ya estaban, importadas desde otro archivo? El guard
     # del upload sólo ve la re-subida byte a byte, y una planilla reexportada
     # desde Excel cambia de hash. Se AVISA con los archivos que se le parecen;
