@@ -676,3 +676,122 @@ async def test_la_identidad_fuerte_no_cuesta_por_fila(
             await s.execute(delete(modelo).where(modelo.tenant_id == otro_tenant))
         await s.execute(delete(Tenant).where(Tenant.tenant_id == otro_tenant))
         await s.commit()
+
+
+# ── E6c-1: la deduplicación no puede volver a crecer con la historia ─────────
+async def test_las_huellas_se_consultan_acotadas_al_archivo(
+    sm: async_sessionmaker[AsyncSession], pg_engine: AsyncEngine, tenant_id: uuid.UUID
+) -> None:
+    """Ninguna consulta a ``operation_fingerprints`` puede pedir la tabla entera.
+
+    Esta compuerta mira la FORMA del SQL y no el conteo de statements, y la
+    diferencia no es un detalle de estilo: el primer intento de este test contaba
+    statements, y volver al ``SELECT`` sin filtro **no lo ponía en rojo** — una
+    query que trae 50.000 filas y una que trae 200 cuentan igual. El conteo es
+    ciego justo al defecto que E6c-1 arregló.
+
+    Lo que se afirma es el invariante real: la deduplicación pregunta por las
+    anclas de ESTE archivo (``fingerprint IN (...)``), nunca por todo lo que el
+    tenant importó alguna vez. Medido antes del cambio
+    (`scripts/bench_f0_baseline.py`): importar 100 filas contra un tenant con
+    100.000 huellas costaba 32,3 MB de pico, más que importar 5.000 filas contra
+    uno vacío.
+    """
+    consultas: list[str] = []
+
+    @event.listens_for(pg_engine.sync_engine, "before_cursor_execute")
+    def _capturar(conn: Any, cursor: Any, statement: Any, *rest: Any) -> None:
+        texto = " ".join(str(statement).split())
+        if "operation_fingerprints" in texto and texto.lower().startswith("select"):
+            consultas.append(texto)
+
+    try:
+        await _importar_compras(sm, tenant_id, pg_engine, n=200, con_identidad=False)
+    finally:
+        event.remove(pg_engine.sync_engine, "before_cursor_execute", _capturar)
+
+    assert consultas, "el import tiene que consultar huellas: si no, no hay dedup"
+    sin_acotar = [q for q in consultas if " in (" not in q.lower()]
+    assert not sin_acotar, (
+        "hay consultas a operation_fingerprints sin acotar por las anclas del "
+        f"archivo — vuelven a traer la historia entera del tenant: {sin_acotar}"
+    )
+
+
+# ── E6c-1: la deduplicación no puede volver a crecer con la historia ─────────
+async def test_el_costo_del_import_no_crece_con_la_historia(
+    sm: async_sessionmaker[AsyncSession], pg_engine: AsyncEngine, tenant_id: uuid.UUID
+) -> None:
+    """El mismo archivo contra un tenant sin historia y contra uno con 50.000
+    huellas tiene que costar lo MISMO.
+
+    Es la compuerta de E6c-1 y responde a una medición, no a una sospecha
+    (`scripts/bench_f0_baseline.py`): antes, `_load_import_fingerprints` traía
+    todas las huellas de import del tenant, y importar 100 filas contra un tenant
+    con 100.000 huellas costaba 32,3 MB de pico — más que importar 5.000 filas
+    contra uno vacío. El costo lo ponía la historia, no el archivo.
+
+    Se mide en STATEMENTS y no en memoria porque el conteo es lo determinista:
+    la memoria depende del recolector y del warm-up del proceso, y una compuerta
+    que falla sola no la mira nadie. Si alguien vuelve a traer la historia entera,
+    el conteo no cambia pero **el `SELECT operation_fingerprints` deja de estar
+    acotado**, así que también se afirma la forma: son consultas por lote sobre
+    las anclas del archivo, y su cantidad no puede depender del historial.
+    """
+    huellas_previas = 50_000
+    async with sm() as session:
+        session.add(Tenant(tenant_id=tenant_id, legal_name="T", display_name="T"))
+        await session.flush()
+        session.add(
+            BusinessProfile(
+                profile_id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                vertical_code="kiosco_almacen",
+                data_mode="M0",
+                data_confidence="LOW",
+                onboarding_completed=True,
+            )
+        )
+        await session.commit()
+
+    sin_historia, _ = await _importar_compras(
+        sm, tenant_id, pg_engine, n=200, con_identidad=False
+    )
+
+    # Historia ajena: huellas de OTROS archivos del mismo tenant. Este import no
+    # las va a usar nunca — el punto es que tampoco las traiga.
+    async with sm() as session:
+        for inicio in range(0, huellas_previas, 5_000):
+            session.add_all(
+                [
+                    OperationFingerprint(
+                        id=uuid.uuid4(),
+                        tenant_id=tenant_id,
+                        fingerprint=f"historico-{inicio + j:012d}",
+                        action_type="IMPORT_ROW",
+                    )
+                    for j in range(5_000)
+                ]
+            )
+            await session.flush()
+        await session.commit()
+
+    con_historia, _ = await _importar_compras(
+        sm, tenant_id, pg_engine, n=200, con_identidad=False
+    )
+
+    detalle = (
+        f"sin historia: {sin_historia.total} statements; "
+        f"con {huellas_previas} huellas ajenas: {con_historia.total}"
+    )
+    assert con_historia.total <= sin_historia.total + 2, (
+        f"el import empezó a pagar por la historia del tenant. {detalle}"
+    )
+    # Y la forma: las consultas de huellas son por lote sobre las anclas del
+    # archivo. Su cantidad depende de las filas (200 → 1 lote), nunca del
+    # historial; si alguien vuelve al SELECT sin filtro, esto sigue en 1 pero el
+    # `assert` de arriba lo agarra por el lado del total.
+    formas = dict(con_historia.counts)
+    assert formas.get("SELECT operation_fingerprints", 0) <= 3, sorted(
+        formas.items(), key=lambda kv: -kv[1]
+    )[:10]

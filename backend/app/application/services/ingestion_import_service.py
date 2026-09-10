@@ -962,29 +962,220 @@ STOCK_TREATMENT_PURCHASE = "purchase"
 _VALID_STOCK_TREATMENTS = frozenset({STOCK_TREATMENT_OPENING_BALANCE, STOCK_TREATMENT_PURCHASE})
 
 
-async def _load_import_fingerprints(
-    session: AsyncSession, tenant_id: uuid.UUID
-) -> set[str]:
-    """Precarga (una sola query) las huellas de filas de import del tenant.
+#: Tamaño de lote para consultar huellas. Bien por debajo del tope de parámetros
+#: de PostgreSQL (32.767) y, sobre todo, acotado en memoria: un único ``IN`` con
+#: decenas de miles de valores traslada el problema que esto viene a resolver
+#: —materializar todo de una— desde el resultado hacia la consulta.
+_LOTE_HUELLAS = 2_000
 
-    Evita el N+1: en vez de un ``SELECT`` por fila en ``_import_row_seen`` y un
-    ``begin_nested()`` por fila en ``_register_import_row_fingerprint`` (miles de
-    round-trips a la DB en archivos grandes), se carga el set una vez y la
-    deduplicación corre en memoria. El set es el estado de ``operation_fingerprints``
-    al inicio de la corrida; los anclas son únicos por (archivo, contexto, índice),
-    así que dentro de una misma corrida basta con ir agregándolos al set.
+
+async def huellas_presentes(
+    session: AsyncSession, tenant_id: uuid.UUID, fingerprints: set[str]
+) -> set[str]:
+    """Cuáles de ``fingerprints`` ya existen, preguntando POR LOTES.
+
+    Los lotes no son prolijidad: un único ``IN`` con decenas de miles de valores
+    se acerca al tope de parámetros de PostgreSQL (32.767) y, sobre todo, mueve
+    hacia la consulta el mismo problema de materializar todo de una vez que esto
+    viene a resolver del lado del resultado.
     """
+    if not fingerprints:
+        return set()
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
 
-    result = await session.execute(
-        select(OperationFingerprint.fingerprint).where(
-            OperationFingerprint.tenant_id == tenant_id,
-            OperationFingerprint.action_type == _IMPORT_ROW_ACTION,
+    ordenadas = sorted(fingerprints)
+    presentes: set[str] = set()
+    for inicio in range(0, len(ordenadas), _LOTE_HUELLAS):
+        lote = ordenadas[inicio : inicio + _LOTE_HUELLAS]
+        filas = await session.execute(
+            select(OperationFingerprint.fingerprint).where(
+                OperationFingerprint.tenant_id == tenant_id,
+                OperationFingerprint.fingerprint.in_(lote),
+            )
         )
-    )
-    return set(result.scalars().all())
+        presentes.update(filas.scalars().all())
+    return presentes
+
+
+class HuellasDelArchivo:
+    """Qué anclas ya estaban registradas, preguntando SÓLO por las que hacen falta.
+
+    Reemplaza al ``set`` con **todas** las huellas de import del tenant. Medido
+    (`scripts/bench_f0_baseline.py`, F0): importar 100 filas contra un tenant con
+    100.000 huellas costaba **32,3 MB** de pico —más que importar 5.000 filas
+    contra uno vacío (19,3 MB)—, porque el costo lo ponía la historia y no el
+    archivo. ~0,28 KB por huella histórica, en cada import, para siempre.
+
+    La idea es simple: las anclas que este import puede llegar a consultar se
+    derivan de ``(archivo, contexto, índice de fila)``, así que se enumeran antes
+    del bucle y se preguntan **por lote**. Lo que se trae es proporcional al
+    archivo, no a la historia.
+
+    Alcance explícito, que es lo que hace segura la sustitución
+    ----------------------------------------------------------
+    Un ``set`` plano no sabe qué NO contiene: si el ancla no está adentro, no se
+    puede distinguir "no está en la base" de "nunca la preguntamos". Con la
+    historia entera precargada esa distinción no existía; con una precarga
+    acotada, confundirlas volvería a cobrar un flete ya cobrado en cada
+    re-confirmación.
+
+    Por eso esta clase recuerda **qué preguntó**. Un ancla dentro de ese alcance
+    se resuelve en memoria; una de afuera —el cargo de envío, cuya ancla incluye
+    el monto y no se conoce hasta calcularlo— paga un ``SELECT`` y se cachea. Son
+    una por comprobante, no por fila: no reintroduce el N+1.
+
+    Lo que esto **no** es
+    ---------------------
+    No es la protección contra concurrencia. Precargar huellas nunca lo fue: la
+    escritura sigue yendo por ``_persist_import_fingerprints`` con
+    ``ON CONFLICT DO NOTHING``, y la exclusión entre dos imports del mismo archivo
+    la sigue dando el lease del confirm. Esto es una caché de lectura y no cambia
+    ninguna garantía.
+    """
+
+    __slots__ = ("_consultadas", "_nuevas", "_presentes")
+
+    def __init__(self) -> None:
+        #: Anclas cuya respuesta conocemos (estén o no). Es el ALCANCE.
+        self._consultadas: set[str] = set()
+        #: De las consultadas, las que ya estaban en la base.
+        self._presentes: set[str] = set()
+        #: Las registradas por ESTA corrida — lo único que hay que persistir.
+        self._nuevas: set[str] = set()
+
+    async def precargar(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        fingerprints: set[str],
+    ) -> None:
+        """Trae en lotes cuáles de ``fingerprints`` ya existen."""
+        pendientes = fingerprints - self._consultadas
+        self._presentes |= await huellas_presentes(session, tenant_id, pendientes)
+        self._consultadas |= pendientes
+
+    async def esta(
+        self, session: AsyncSession, tenant_id: uuid.UUID, fingerprint: str
+    ) -> bool:
+        """¿Esta ancla ya estaba? Fuera del alcance precargado, pregunta y cachea."""
+        if fingerprint in self._presentes or fingerprint in self._nuevas:
+            return True
+        if fingerprint in self._consultadas:
+            return False
+        await self.precargar(session, tenant_id, {fingerprint})
+        return fingerprint in self._presentes
+
+    def registrar(self, fingerprint: str) -> None:
+        """La corrida acaba de producir esta ancla: cuenta como presente desde ya."""
+        self._nuevas.add(fingerprint)
+
+    @property
+    def nuevas(self) -> set[str]:
+        return self._nuevas
+
+
+# `_load_import_fingerprints` (la precarga de TODAS las huellas del tenant) se
+# eliminó en E6c-1. No se deja como fallback a propósito: era el único camino y
+# medía 32,3 MB de pico para importar 100 filas contra un tenant con 100.000
+# huellas (F0). Un fallback que nadie llama es una invitación a volver a usarlo;
+# lo que hay ahora es `huellas_presentes` + `_anclas_candidatas`, acotado al
+# archivo. Si alguna vez hiciera falta la historia entera, tendría que
+# justificarse de nuevo.
+
+
+def _contextos_del_summary(summary: dict[str, Any]) -> list[tuple[str | None, int]]:
+    """``[(context_id, filas)]`` para enumerar las anclas candidatas del archivo.
+
+    Enumera **sólo el camino que este summary va a tomar**, no todos los posibles.
+    La primera versión enumeraba los tres —hojas declaradas, tabla suelta y los
+    contextos sintéticos del legacy— "por las dudas", y eso multiplicó por cinco
+    el trabajo: medido, un archivo de 5.000 filas pasó de 19,3 a 30,8 MB de pico y
+    de 15,7 a 21,8 s. Enumerar de más no rompe nada, pero deja de ser barato en
+    cuanto el archivo crece, que es justo donde importa.
+
+    El despacho copia el de ``insert_confirmed_data`` (``inferred_type == "mixed"``
+    o ``multi_sheet`` → camino por hoja; si no, tabla suelta). Si divergieran, la
+    precarga apuntaría a un camino y el import correría por el otro: no habría
+    error, volvería el ``SELECT`` por fila.
+    """
+    filas_totales = int(summary.get("row_count") or 0)
+    for bucket in (
+        "ventas_detectadas",
+        "gastos_detectados",
+        "stock_detectado",
+        "clientes_detectados",
+        "proveedores_detectados",
+        "otros_detectados",
+    ):
+        valores = summary.get(bucket)
+        if isinstance(valores, list):
+            filas_totales = max(filas_totales, len(valores))
+
+    _multihoja = summary.get("inferred_type") == "mixed" or bool(summary.get("multi_sheet"))
+    if not _multihoja:
+        # Camino de tabla suelta: ancla con `context_id=None`.
+        return [(None, filas_totales)]
+
+    contextos: list[tuple[str | None, int]] = [
+        (str(ctx["context_id"]), max(int(ctx.get("row_count") or 0), 1))
+        for ctx in (summary.get("mapping_contexts") or [])
+        if isinstance(ctx, dict) and ctx.get("context_id")
+    ]
+    if contextos:
+        return contextos
+    # Legacy: summaries sin `mapping_contexts`, con sus tres contextos sintéticos.
+    return [("ventas", filas_totales), ("gastos", filas_totales), ("productos", filas_totales)]
+
+
+def _anclas_candidatas(
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    contextos: list[tuple[str | None, int]],
+) -> set[str]:
+    """Las huellas que este import PUEDE llegar a consultar, enumeradas.
+
+    ``contextos`` es ``[(context_id, cantidad de filas)]``. Por cada fila se
+    derivan las tres anclas que el importador consulta con esa forma:
+
+    * la de import normal (venta/gasto),
+    * la de captura de riesgo (``risk:``, namespace propio de F8),
+    * la de captura de producto a "Otros" (``producto:{ctx}``).
+
+    Quedan afuera a propósito las de los cargos de envío: su ancla incluye el
+    monto del cargo, que no existe hasta calcular el grupo. Esas se resuelven de
+    a una contra la base — son una por comprobante, no por fila.
+
+    El costo de enumerar es CPU (tres sha256 por fila) y no memoria de la
+    historia: para 5.000 filas son 15.000 hashes, que es justamente el orden que
+    se quería acotar.
+    """
+    if uploaded_file_id is None:
+        return set()
+    anclas: set[str] = set()
+    for context_id, filas in contextos:
+        for i in range(filas):
+            anclas.add(
+                hashlib.sha256(
+                    _import_row_anchor(tenant_id, uploaded_file_id, context_id, i).encode()
+                ).hexdigest()
+            )
+            anclas.add(
+                hashlib.sha256(
+                    _risk_row_anchor(
+                        tenant_id, uploaded_file_id, str(context_id or ""), i
+                    ).encode()
+                ).hexdigest()
+            )
+            anclas.add(
+                hashlib.sha256(
+                    _import_row_anchor(
+                        tenant_id, uploaded_file_id, f"producto:{context_id}", i
+                    ).encode()
+                ).hexdigest()
+            )
+    return anclas
 
 
 async def _persist_import_fingerprints(
@@ -1040,7 +1231,7 @@ async def _register_import_row_fingerprint(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     anchor: str,
-    seen: set[str] | None = None,
+    seen: HuellasDelArchivo | None = None,
 ) -> bool:
     """Registra (idempotentemente) la huella de una fila importada.
 
@@ -1065,10 +1256,10 @@ async def _register_import_row_fingerprint(
 
     fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
     if seen is not None:
-        if fingerprint in seen:
+        if await seen.esta(session, tenant_id, fingerprint):
             return True
         # Solo se trackea en memoria; se persiste en lote al final (idempotente).
-        seen.add(fingerprint)
+        seen.registrar(fingerprint)
         return False
     # `guarded_savepoint`: ordenamiento + clasificador. Sin el clasificador, una FK
     # rota o un NOT NULL del propio fingerprint se leería como "fila ya importada" y
@@ -1091,7 +1282,7 @@ async def _import_row_seen(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     anchor: str,
-    seen: set[str] | None = None,
+    seen: HuellasDelArchivo | None = None,
 ) -> bool:
     """¿La fila (por su ancla) ya fue importada en una corrida previa?
 
@@ -1106,7 +1297,7 @@ async def _import_row_seen(
     """
     fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
     if seen is not None:
-        return fingerprint in seen
+        return await seen.esta(session, tenant_id, fingerprint)
 
     from sqlalchemy import select  # noqa: PLC0415
 
@@ -1392,7 +1583,20 @@ async def _capture_column_risk_rows(
     """
     if not affected_rows:
         return 0
-    seen = await _load_import_fingerprints(session, tenant_id)
+    # E6c-1: acotado a las anclas de ESTAS filas, no a la historia del tenant.
+    # Este camino captura tres filas en el caso de Asteria; traer 100.000 huellas
+    # para preguntar por tres era el mismo defecto que el loop principal.
+    seen = HuellasDelArchivo()
+    await seen.precargar(
+        session,
+        tenant_id,
+        {
+            hashlib.sha256(
+                _risk_row_anchor(tenant_id, uploaded_file_id, context_id, idx).encode()
+            ).hexdigest()
+            for idx in affected_rows
+        },
+    )
     #: Sólo las huellas NUEVAS se persisten. `_persist_import_fingerprints` reinserta
     #: todo lo que le pasen (con ON CONFLICT DO NOTHING): darle el set entero sería
     #: un INSERT de miles de filas por tres capturas.
@@ -3995,18 +4199,26 @@ async def _insert_confirmed_data_impl(
         context_entity=context_entity,
     )
 
-    # Batch anti-N+1: precargar las huellas de import del tenant una sola vez
-    # (solo si hay dedup activa, i.e. uploaded_file_id real). Evita un SELECT y un
-    # savepoint por fila contra la DB en archivos grandes (relectura/import).
-    seen_fp: set[str] | None = (
-        await _load_import_fingerprints(session, tenant_id)
-        if uploaded_file_id is not None
-        else None
+    # Batch anti-N+1: en vez de un SELECT y un savepoint por fila (miles de
+    # round-trips en archivos grandes), las huellas se resuelven en memoria.
+    #
+    # E6c-1 — pero acotadas al ARCHIVO, no a la historia del tenant. Antes esto
+    # traía TODAS las huellas de import del tenant: medido en F0, importar 100
+    # filas contra un tenant con 100.000 huellas costaba 32,3 MB de pico, más que
+    # importar 5.000 filas contra uno vacío. Ahora se enumeran las anclas que este
+    # import puede consultar —derivables de (archivo, contexto, índice)— y se
+    # preguntan por lotes. Ver `HuellasDelArchivo`.
+    seen_fp: HuellasDelArchivo | None = (
+        HuellasDelArchivo() if uploaded_file_id is not None else None
     )
-    # Snapshot del estado precargado para persistir SOLO las huellas nuevas al final.
-    _preloaded_fp: frozenset[str] | None = (
-        frozenset(seen_fp) if seen_fp is not None else None
-    )
+    if seen_fp is not None:
+        await seen_fp.precargar(
+            session,
+            tenant_id,
+            _anclas_candidatas(
+                tenant_id, uploaded_file_id, _contextos_del_summary(summary)
+            ),
+        )
     # Cache de productos por id (creados + tocados) para evitar un session.get por
     # fila al aplicar stock, y para que con autoflush=False los productos recién
     # creados reciban su stock (session.get no ve pendientes sin flush).
@@ -4069,10 +4281,8 @@ async def _insert_confirmed_data_impl(
                 purchase_cost_decisions=purchase_cost_decisions,
                 proyeccion=_proyeccion_recorder,
             )
-            if seen_fp is not None and _preloaded_fp is not None:
-                await _persist_import_fingerprints(
-                    session, tenant_id, seen_fp - _preloaded_fp
-                )
+            if seen_fp is not None:
+                await _persist_import_fingerprints(session, tenant_id, seen_fp.nuevas)
             _volcar_impacto_de_inventario()
             return counts
 
@@ -5929,8 +6139,8 @@ async def _insert_confirmed_data_impl(
 
     await session.flush()
     # Persistir en lote (idempotente) las huellas nuevas del camino batch.
-    if seen_fp is not None and _preloaded_fp is not None:
-        await _persist_import_fingerprints(session, tenant_id, seen_fp - _preloaded_fp)
+    if seen_fp is not None:
+        await _persist_import_fingerprints(session, tenant_id, seen_fp.nuevas)
     if return_details:
         if stamp_product_updated_at:
             await _stamp_updated_at_on_product_details(session, product_details)
@@ -5998,7 +6208,7 @@ class EntornoDeEnvios:
     uploaded_file_id: uuid.UUID | None
     #: Set precargado de huellas (camino batch). ``None`` = camino legacy, que
     #: inserta con savepoint por cargo — son pocos, no es el N+1 de las filas.
-    seen_fp: set[str] | None
+    seen_fp: HuellasDelArchivo | None
     counts: dict[str, Any]
     supplier_index: dict[str, uuid.UUID]
     supplier_ref_mode: str
@@ -6249,7 +6459,7 @@ async def _insert_multisheet_data(
     context_entity: dict[str, str] | None = None,
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
-    seen_fp: set[str] | None = None,
+    seen_fp: HuellasDelArchivo | None = None,
     product_cache: dict[uuid.UUID, Any] | None = None,
     # Resuelve el tratamiento POR HOJA (ver `stock_is_purchase_for` en el caller).
     stock_is_purchase_for: Callable[[str | None], bool] = lambda _ctx: False,

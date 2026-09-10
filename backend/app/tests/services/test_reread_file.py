@@ -28,9 +28,11 @@ from app.application.services import maintenance_lock_service, reread_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     RISK_REF_KEY,
-    _load_import_fingerprints,
+    _anclas_candidatas,
+    _contextos_del_summary,
     _persist_import_fingerprints,
     default_confirmed_fields,
+    huellas_presentes,
     insert_confirmed_data,
 )
 from app.domain.ingestion_version import INGESTION_VERSION
@@ -380,16 +382,16 @@ async def test_persist_import_fingerprints_is_idempotent(
     transacción (la protección que reemplaza al begin_nested por fila)."""
     await _persist_import_fingerprints(db_session, tenant.tenant_id, {"aaa", "bbb"})
     await db_session.commit()
-    assert await _load_import_fingerprints(db_session, tenant.tenant_id) == {"aaa", "bbb"}
+    assert await huellas_presentes(
+        db_session, tenant.tenant_id, {"aaa", "bbb", "ccc"}
+    ) == {"aaa", "bbb"}
 
     # "bbb" ya existe → no debe romper; "ccc" se agrega.
     await _persist_import_fingerprints(db_session, tenant.tenant_id, {"bbb", "ccc"})
     await db_session.commit()
-    assert await _load_import_fingerprints(db_session, tenant.tenant_id) == {
-        "aaa",
-        "bbb",
-        "ccc",
-    }
+    assert await huellas_presentes(
+        db_session, tenant.tenant_id, {"aaa", "bbb", "ccc"}
+    ) == {"aaa", "bbb", "ccc"}
 
 
 async def test_preview_returns_before_after_sample(
@@ -422,16 +424,23 @@ async def test_batch_fingerprints_preloaded_and_idempotent(
 ) -> None:
     """El camino batch (anti-N+1) precarga las huellas y dedupea en memoria.
 
-    Tras el import inicial, ``_load_import_fingerprints`` devuelve las 2 huellas
+    Tras el import inicial, ``huellas_presentes`` devuelve las 2 huellas
     registradas; reimportar el MISMO contenido con el mismo ``uploaded_file_id``
     no inserta filas nuevas (idempotencia vía el set precargado, sin SELECT/
     savepoint por fila)."""
     _patch_s3(monkeypatch, _CSV_BASE)
     file = await _make_file(db_session, tenant, _CSV_BASE)
     await _initial_import(db_session, tenant, file, _CSV_BASE)
+    summary_inicial = parse_uploaded_content(_CSV_BASE, "text/csv", "gastos.csv")
 
     # El helper batch ve las huellas que registró el import inicial (2 filas).
-    fps = await _load_import_fingerprints(db_session, tenant.tenant_id)
+    # E6c-1: se pregunta por las anclas candidatas DEL ARCHIVO, no por la historia
+    # entera del tenant — que es justamente lo que dejó de traerse.
+    fps = await huellas_presentes(
+        db_session,
+        tenant.tenant_id,
+        _anclas_candidatas(tenant.tenant_id, file.id, _contextos_del_summary(summary_inicial)),
+    )
     assert len(fps) == 2
 
     # Reimportar el mismo archivo: 0 filas nuevas (dedup por el set precargado).
@@ -2230,7 +2239,7 @@ async def test_undo_master_and_product_items_producto_tocado_dos_veces_usa_item_
 
     Test directo sobre el helper (no pasa por ``apply_reread``/``undo_reread``
     completos) — mismo patrón que otros tests de este archivo que llaman
-    funciones internas directamente (``_load_import_fingerprints`` etc.):
+    funciones internas directamente (``huellas_presentes`` etc.):
     aísla la lógica de dedup-por-más-reciente sin pelear con el timing/
     resolución de reloj de SQLite ni con el mecanismo de stock incremental."""
     producto = Product(

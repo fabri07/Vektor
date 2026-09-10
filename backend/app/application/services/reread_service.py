@@ -173,7 +173,9 @@ _parse_date = _iis._parse_date
 _parse_qty = _iis._parse_qty
 _row_val = _iis._row_val
 _resolve_product = _iis._resolve_product
-_load_import_fingerprints = _iis._load_import_fingerprints
+_anclas_candidatas = _iis._anclas_candidatas
+_contextos_del_summary = _iis._contextos_del_summary
+huellas_presentes = _iis.huellas_presentes
 _load_product_index = _iis._load_product_index
 # F-RR (Fase 4, reconciliación): MISMAS primitivas que resuelven identidad de
 # producto y categoría en el import real — el estimador del impacto proyectado
@@ -3139,7 +3141,17 @@ async def preview_reread(
     sales, expenses = await _load_existing_records(session, file_id, tenant_id)
     # Huellas de import (lo que el apply usa para deduplicar) + catálogo de productos
     # (para estimar altas/reposiciones). Dos queries, en memoria.
-    fingerprints = await _load_import_fingerprints(session, tenant_id)
+    # E6c-1: acotado al ARCHIVO. `_estimate_reread` sólo pregunta por las huellas
+    # de las filas de ESTE archivo (`fp in fingerprints`), así que traer la
+    # historia entera del tenant costaba memoria proporcional a cuánto importó el
+    # negocio antes — 32,3 MB para un archivo de 100 filas contra un tenant con
+    # 100.000 huellas, medido en F0. Es el mismo defecto que el loop del import,
+    # en el segundo de sus dos sitios.
+    fingerprints = await huellas_presentes(
+        session,
+        tenant_id,
+        _anclas_candidatas(tenant_id, file_id, _contextos_del_summary(fresh)),
+    )
     catalog = await _load_product_index(session, tenant_id)
     preview = _estimate_reread(
         file, tenant_id, fresh, confirmed_fields, sales, expenses, fingerprints, catalog
