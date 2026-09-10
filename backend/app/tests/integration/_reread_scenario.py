@@ -217,9 +217,20 @@ async def estado(
             .scalars()
             .all()
         )
-        archivo = (
-            await s.execute(select(UploadedFile).where(UploadedFile.tenant_id == tenant_id))
-        ).scalar_one()
+        # Lista y no `scalar_one()`: un escenario que sube un SEGUNDO archivo
+        # —el caso de la misma planilla cargada de nuevo— rompía el helper con
+        # `MultipleResultsFound`, y el error aparecía lejos de su causa.
+        archivos = (
+            (
+                await s.execute(
+                    select(UploadedFile)
+                    .where(UploadedFile.tenant_id == tenant_id)
+                    .order_by(UploadedFile.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
         runs = (
             (
                 await s.execute(
@@ -244,12 +255,10 @@ async def estado(
             "movimientos": [
                 (str(m.movement_type), int(m.qty), str(m.unit_cost)) for m in movimientos
             ],
-            "archivo": (
-                archivo.reread_status,
-                archivo.ingestion_version,
-                archivo.reread_at is not None,
-                archivo.reread_summary,
-            ),
+            "archivos": [
+                (a.reread_status, a.ingestion_version, a.reread_at is not None, a.reread_summary)
+                for a in archivos
+            ],
             "runs": [(r.status, r.repair_type) for r in runs],
         }
 
