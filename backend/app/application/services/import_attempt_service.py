@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from sqlalchemy import func, select, update
@@ -72,6 +72,27 @@ _CONFLICTO_CLAVE = unique_violation_classifier(
     constraint="uq_import_attempts_request_key",
     columns=("import_attempts.tenant_id", "import_attempts.request_key"),
 )
+
+
+def _vence_en(session: AsyncSession, segundos: int) -> Any:
+    """``now() + segundos`` en el reloj de la BASE, por dialecto.
+
+    El reloj tiene que ser el de la base y no el del proceso: dos workers con el
+    reloj corrido decidirían distinto sobre el mismo lease.
+
+    Y la aritmética va por dialecto porque no es portable. En SQLite,
+    ``func.now() + timedelta(...)`` renderiza una SUMA NUMÉRICA sobre un string de
+    fecha y devuelve un entero — que después revienta al leerlo como datetime.
+    Es el mismo motivo por el que `_stale_before_expr` del lease de archivo
+    existe; se sigue su forma para no tener dos maneras de escribir lo mismo.
+    """
+    bind = session.bind
+    dialecto = bind.dialect.name if bind is not None else ""
+    if dialecto == "postgresql":
+        # make_interval(años, meses, semanas, días, horas, mins, segs) — POSICIONAL:
+        # los kwargs a `func.*` no se traducen a args SQL con nombre.
+        return func.now() + func.make_interval(0, 0, 0, 0, 0, 0, segundos)
+    return func.datetime(func.now(), f"+{int(segundos)} seconds")
 
 
 @dataclass(frozen=True)
@@ -221,7 +242,7 @@ async def reclamar_intento(
         .values(
             status=EJECUTANDO,
             lease_token=token,
-            lease_expires_at=func.now() + timedelta(seconds=ttl_segundos),
+            lease_expires_at=_vence_en(session, ttl_segundos),
             started_at=func.coalesce(ImportAttempt.started_at, func.now()),
             attempts=ImportAttempt.attempts + 1,
             phase="reclamado",
@@ -250,9 +271,7 @@ async def renovar_lease(
     ejecutor que perdió el lease tampoco puede seguir publicando progreso de un
     trabajo que ya no es suyo.
     """
-    valores: dict[str, Any] = {
-        "lease_expires_at": func.now() + timedelta(seconds=ttl_segundos)
-    }
+    valores: dict[str, Any] = {"lease_expires_at": _vence_en(session, ttl_segundos)}
     if phase is not None:
         valores["phase"] = phase
     if rows_done is not None:
