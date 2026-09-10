@@ -45,6 +45,8 @@ import { MappingOriginHint } from "./MappingOriginHint";
 import { TargetSelect } from "./TargetSelect";
 import { AmbiguityHint } from "./AmbiguityHint";
 import { StatusDot } from "./StatusDot";
+import { ImportacionEnCursoPanel } from "./ImportacionEnCursoPanel";
+import { useImportacionAsincronica } from "./useImportacionAsincronica";
 import {
   customFieldCollisions,
   explainMissing,
@@ -1411,8 +1413,24 @@ function MultiContextMapper({
   const { registrar: registrarImpacto, vista: vistaImpacto } =
     useImpactoPostConfirm(onDone, fileId);
 
+  // E6c-3: seguimiento de la importación en segundo plano. Con la compuerta
+  // apagada nunca se activa —el registro devuelve `no_habilitado`— así que este
+  // hook no cambia nada para quien todavía usa `/confirm`.
+  const {
+    importacion,
+    errorDeRed: errorDeSeguimiento,
+    registrar: registrarAsincronica,
+    descartar: descartarSeguimiento,
+  } = useImportacionAsincronica(fileId, (terminada) => {
+    void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
+    if (terminada.status !== "COMPLETADO") return;
+    for (const w of terminada.result?.warnings ?? []) toast(w, "warning");
+    if (terminada.result && registrarImpacto(terminada.result)) return;
+    onDone();
+  });
+
   const confirmMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const columnMappings: ColumnMapping[] = [];
       const contextEntity: Record<string, string> = {};
       for (const ctx of contexts) {
@@ -1460,6 +1478,24 @@ function MultiContextMapper({
           shared_shipping: compartidoDe(ctxId),
           line_shipping: d.line,
         }));
+      // E6c-3: se intenta primero la ruta asíncrona. Si el backend responde 404
+      // —la compuerta está apagada para este tenant— se usa `/confirm`, que es
+      // seguro porque el servidor respondió sin mirar el cuerpo: no registró
+      // nada. Cualquier OTRO error (timeout, red, 5xx) es incertidumbre y NO
+      // habilita cambiar de ruta: la petición pudo haberse registrado, y
+      // disparar el confirm sincrónico encima importaría el archivo dos veces.
+      const resultadoAsync = await registrarAsincronica({
+        confirmed_fields: {},
+        column_mappings: columnMappings,
+        context_confirmed: included,
+        context_entity: contextEntity,
+        stock_treatment: stockTreatmentPayload,
+        column_risk_decisions: riskDecisions,
+        shipping_decisions: envioPayload,
+        purchase_cost_decisions: costoPayload,
+      });
+      if (resultadoAsync === "registrado") return null;
+
       return ingestionService.confirmFile(
         fileId,
         {},
@@ -1483,6 +1519,9 @@ function MultiContextMapper({
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
       void queryClient.invalidateQueries({ queryKey: ["column-mappings-learned"] });
+      // `null` = se registró en segundo plano. El panel queda mostrando el
+      // progreso y el resultado llega por el seguimiento, no por acá.
+      if (result === null) return;
       // Avisos human-in-the-loop: el panel se cierra en onDone(), así que van como
       // toasts (compras sin proveedor/producto, filas a "Otros").
       for (const w of result.warnings ?? []) toast(w, "warning");
@@ -1516,6 +1555,18 @@ function MultiContextMapper({
   )?.response?.data?.detail;
 
   // F-H3.c: importado y con impacto sobre el stock → mostrarlo en vez del mapeo.
+  // E6c-3: mientras la importación corre en segundo plano, el panel muestra su
+  // progreso en vez del formulario. La persona puede cerrar la pantalla y volver:
+  // el seguimiento se retoma solo (el id queda guardado).
+  if (importacion && importacion.status !== "COMPLETADO") {
+    return (
+      <ImportacionEnCursoPanel
+        importacion={importacion}
+        errorDeRed={errorDeSeguimiento}
+        onCerrar={descartarSeguimiento}
+      />
+    );
+  }
   if (vistaImpacto) return vistaImpacto;
 
   return (

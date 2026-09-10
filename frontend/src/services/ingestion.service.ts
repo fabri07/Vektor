@@ -641,6 +641,29 @@ export interface RereadCancelResponse {
   status: string; // "FAILED"
 }
 
+
+/**
+ * E6c-3 — el estado de una importación en segundo plano.
+ *
+ * `result` es el MISMO cuerpo que devuelve `/confirm`, para que la pantalla no
+ * tenga que saber por qué ruta entró la importación.
+ */
+export interface ImportacionResponse {
+  attempt_id: string;
+  file_id: string;
+  status: "PENDIENTE" | "EJECUTANDO" | "COMPLETADO" | "FALLADO" | "CANCELADO";
+  phase: string | null;
+  rows_total: number | null;
+  rows_done: number;
+  result: ConfirmIngestionResult | null;
+  /** Código estructurado: se filtra y se cuenta. */
+  error_code: string | null;
+  /** Qué pasó y qué hacer, en castellano. */
+  error_detail: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
 export const ingestionService = {
   async upload(
     file: File,
@@ -754,6 +777,34 @@ export const ingestionService = {
 
   async deleteLearnedMapping(mappingId: string): Promise<void> {
     await api.delete(`/ingestion/column-mappings/${mappingId}`);
+  },
+
+  /**
+   * E6c-3 — registra la importación y devuelve su id consultable.
+   *
+   * `202` cuando se creó, `200` cuando la petición ya estaba registrada (misma
+   * clave, mismo contenido). Las dos son éxito: el cliente puede distinguirlas
+   * por `status`, pero no tiene que hacerlo para funcionar.
+   *
+   * `409` significa que la misma clave se usó con OTRO contenido — no se resuelve
+   * solo y el usuario tiene que decidir.
+   */
+  async registrarImportacion(
+    fileId: string,
+    requestKey: string,
+    payload: Record<string, unknown>,
+  ): Promise<ImportacionResponse> {
+    const res = await api.post<ImportacionResponse>(
+      `/ingestion/files/${fileId}/imports`,
+      { ...payload, request_key: requestKey },
+    );
+    return res.data;
+  },
+
+  /** Estado de una importación registrada. El backend verifica el tenant. */
+  async estadoDeImportacion(attemptId: string): Promise<ImportacionResponse> {
+    const res = await api.get<ImportacionResponse>(`/ingestion/imports/${attemptId}`);
+    return res.data;
   },
 
   async confirmFile(
