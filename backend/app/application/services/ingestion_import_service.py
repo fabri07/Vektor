@@ -2415,6 +2415,47 @@ async def build_incomplete_product(
     return resolved.id, created
 
 
+def _ledger_item_producto_creado(
+    product_id: uuid.UUID, name: str | None, product_cache: dict[uuid.UUID, Any] | None
+) -> dict[str, Any]:
+    """Item de ledger de un producto que nació de una COMPRA.
+
+    Sin esto, borrar el archivo no podía eliminarlo —la reversa de productos sale
+    del ledger— y, peor, el DELETE respondía ``fully_reverted: true`` con el
+    producto todavía en el catálogo: un residuo silencioso, que es exactamente lo
+    que ``conservados`` existe para impedir. Es la misma clase de hueco que ya se
+    había cerrado para el costo pisado por una compra; faltaba la CREACIÓN.
+
+    El ``after`` espeja el del camino de catálogo porque lo consume el mismo
+    guard: ``entity_changed_since_ledger`` compara esos campos para decidir si
+    alguien tocó el producto después del import. Uno más pobre haría que el guard
+    no vea ediciones posteriores sobre los campos que faltan.
+    """
+    producto = (product_cache or {}).get(product_id)
+    despues: dict[str, Any] = {"name": name}
+    if producto is not None:
+        despues = {
+            "sale_price_ars": str(producto.sale_price_ars or Decimal("0")),
+            "list_price_ars": (
+                str(producto.list_price_ars) if producto.list_price_ars is not None else None
+            ),
+            "unit_cost_ars": (
+                str(producto.unit_cost_ars) if producto.unit_cost_ars is not None else None
+            ),
+            "stock_units": int(producto.stock_units or 0),
+            "sku": producto.sku,
+            "barcode": producto.barcode,
+            "category": producto.category,
+        }
+    return {
+        "action": "CREATED",
+        "product_id": str(product_id),
+        "name": name,
+        "before": None,
+        "after": despues,
+    }
+
+
 async def _ensure_product_for_purchase(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -4914,6 +4955,12 @@ async def _insert_confirmed_data_impl(
                             # "linked" reusó uno ya creado en la corrida (no cuenta).
                             if _action == "created":
                                 counts["sin_producto"] += 1
+                                if return_details and _pid is not None:
+                                    product_details.append(
+                                        _ledger_item_producto_creado(
+                                            _pid, _exp_name, _product_cache
+                                        )
+                                    )
                             # Review F2 #2: registrar en los índices transaccionales
                             # (los de _resolve_product) para que ventas/gastos
                             # POSTERIORES del mismo archivo puedan vincularlo.
@@ -6679,6 +6726,10 @@ async def _insert_multisheet_data(
             # Review F2 #3: solo "created" creó un producto incompleto.
             if _action == "created":
                 counts["sin_producto"] += 1
+                if return_details and _pid is not None:
+                    product_details.append(
+                        _ledger_item_producto_creado(_pid, _exp_name, product_cache)
+                    )
                 # F-H2: la compra que crea el producto es la evidencia más
                 # temprana que este archivo tiene de él.
                 _declarar_evidencia(_pid, tx_date)

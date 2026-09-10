@@ -24,7 +24,13 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from app.application.services.file_deletion_service import (
+    build_master_details,
+    record_import_ledger,
+    snapshot_masters_before_import,
+)
 from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.domain.ingestion_version import INGESTION_VERSION
 from app.domain.verticals import Vertical
 from app.persistence.db.base import Base
 from app.persistence.models.business import BusinessProfile
@@ -55,15 +61,22 @@ _MODELOS = (
 
 PRODUCTO = "Vela aromatica 200g"
 PROVEEDOR = "Distribuidora Sur"
-HEADERS = ["fecha", "articulo", "cantidad", "total", "proveedor"]
+#: `precio_compra` está a propósito: sin una columna de costo, el import no
+#: escribe `unit_cost_ars` y los tests del ledger no tendrían ningún costo que
+#: restaurar — el caso "reversión parcial por edición posterior" no se podría
+#: montar sobre un campo que el archivo nunca tocó.
+HEADERS = ["fecha", "articulo", "cantidad", "total", "precio_compra", "proveedor"]
 
 
-def fila(dia: int, articulo: str, cantidad: str, total: str) -> dict[str, str]:
+def fila(
+    dia: int, articulo: str, cantidad: str, total: str, precio_compra: str = "1200"
+) -> dict[str, str]:
     return {
         "fecha": f"2024-03-{dia:02d}",
         "articulo": articulo,
         "cantidad": cantidad,
         "total": total,
+        "precio_compra": precio_compra,
         "proveedor": PROVEEDOR,
     }
 
@@ -110,16 +123,23 @@ async def limpiar(factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUI
         await s.commit()
 
 
-async def importar_la_primera_vez(
+async def preparar_tenant_y_archivo(
     factory: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     filas: list[dict[str, str]],
+    *,
+    con_ledger: bool = True,
 ) -> uuid.UUID:
-    """El estado de partida: un import normal, COMMITEADO.
+    """Tenant + perfil + archivo confirmado, SIN importar todavía.
 
-    Tiene que estar commiteado de verdad — si el baseline viviera en la misma
-    transacción que la relectura, un rollback lo borraría también y el test
-    estaría comparando dos vacíos.
+    Separado del import para poder tomar un baseline del tenant antes de que el
+    archivo produzca un solo efecto: es lo único contra lo que se puede afirmar
+    que un borrado "devolvió todo".
+
+    ``con_ledger`` sella ``ingestion_version`` como lo hace
+    ``finalize_import_lease`` al confirmar. **No es cosmético**: el borrado
+    decide por ese campo si el archivo trae ledger, así que un escenario que no
+    lo selle mide el camino LEGACY creyendo medir el moderno.
     """
     file_id = uuid.uuid4()
     async with factory() as s:
@@ -150,17 +170,71 @@ async def importar_la_primera_vez(
                 purpose="gastos",
                 processing_status=PROCESSING_STATUS_DONE,
                 parsed_summary_json=summary(filas),
+                ingestion_version=INGESTION_VERSION if con_ledger else 1,
             )
         )
-        await s.flush()
-        await insert_confirmed_data(
+        await s.commit()
+    return file_id
+
+
+async def importar_archivo(
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    filas: list[dict[str, str]],
+    *,
+    con_ledger: bool = True,
+) -> None:
+    """Aplica los efectos del archivo, COMMITEADOS — como el confirm real.
+
+    **El ledger se escribe acá y no es opcional para que el escenario sea
+    fiel.** El endpoint de confirm hace tres cosas en la misma transacción:
+    snapshot de maestros, ``insert_confirmed_data(return_details=True)`` y
+    ``record_import_ledger``. Un escenario que llamara sólo a la del medio
+    produciría un archivo sellado con ``ingestion_version`` moderno pero SIN
+    ledger — un estado que la confirmación real no puede dejar—, y los tests de
+    borrado medirían un mundo inexistente: el reverso de productos y maestros
+    sale del ledger, así que sin él "no revirtió" es un artefacto del test.
+    """
+    async with factory() as s:
+        antes_clientes, antes_proveedores = await snapshot_masters_before_import(s, tenant_id)
+        counts = await insert_confirmed_data(
             s,
             tenant_id,
             summary(filas),
             {"gastos": True},
+            return_details=True,
             uploaded_file_id=file_id,
         )
+        # Mismo consumo que el confirm: los detalles viajan DENTRO de `counts`.
+        detalles = counts.pop("product_details", []) or []
+        if con_ledger:
+            maestros = await build_master_details(s, counts, antes_clientes, antes_proveedores)
+            await record_import_ledger(
+                s,
+                tenant_id=tenant_id,
+                file_id=file_id,
+                product_details=detalles,
+                master_details=maestros,
+            )
         await s.commit()
+
+
+async def importar_la_primera_vez(
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    filas: list[dict[str, str]],
+    *,
+    con_ledger: bool = True,
+) -> uuid.UUID:
+    """El estado de partida de los tests de relectura: preparar + importar.
+
+    Tiene que estar commiteado de verdad — si el baseline viviera en la misma
+    transacción que la relectura, un rollback lo borraría también y el test
+    estaría comparando dos vacíos.
+    """
+    file_id = await preparar_tenant_y_archivo(factory, tenant_id, filas, con_ledger=con_ledger)
+    await importar_archivo(factory, tenant_id, file_id, filas, con_ledger=con_ledger)
     return file_id
 
 
@@ -255,13 +329,26 @@ async def estado(
                 )
                 for g in gastos
             ],
+            # `is_active` incluido: el borrado DESACTIVA productos, no los
+            # elimina. Un snapshot que no lo mire ve residuo donde hubo reversa —
+            # y no vería una reversa que falta.
             "productos": [
-                (p.name, int(p.stock_units or 0), str(p.unit_cost_ars), p.requires_completion)
+                (
+                    p.name,
+                    int(p.stock_units or 0),
+                    str(p.unit_cost_ars),
+                    p.requires_completion,
+                    p.is_active,
+                )
                 for p in productos
             ],
             "proveedores": [(p.name, p.deactivated_at is None) for p in proveedores],
+            # `voided_at` incluido: el borrado ANULA los movimientos, no los
+            # elimina, así que un snapshot que no lo mire ve residuo donde hubo
+            # reversa (y no vería una reversa que falta).
             "movimientos": [
-                (str(m.movement_type), int(m.qty), str(m.unit_cost)) for m in movimientos
+                (str(m.movement_type), int(m.qty), str(m.unit_cost), m.voided_at is not None)
+                for m in movimientos
             ],
             "archivos": [
                 (a.reread_status, a.ingestion_version, a.reread_at is not None, a.reread_summary)
