@@ -121,7 +121,10 @@ from app.application.services.score_trigger_service import (
 from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
 from app.domain.header_keys import custom_field_slug
-from app.domain.ingestion_limits import LimiteExcedidoError
+from app.domain.ingestion_limits import (
+    TEXTO_FORMULA_SIN_RESULTADO,
+    LimiteExcedidoError,
+)
 from app.domain.inventory_effect import (
     EFFECT_LABELS,
     InvalidInventoryEffectError,
@@ -3440,6 +3443,24 @@ async def confirm_file(
             "cantidad no se pudo leer como unidades enteras (decimales, negativas o "
             "texto). Antes entraban como 1 unidad."
         )
+    # E6c-2 — fórmulas que el archivo no trae calculadas. El aviso va SIEMPRE que
+    # las haya, aunque ninguna fila se haya caído por eso: una columna calculada
+    # que se lee vacía puede no romper nada visible y cambiar igual un total.
+    _formulas = int((record.parsed_summary_json or {}).get("formulas_sin_resultado") or 0)
+    if _formulas:
+        warnings.append(
+            f"{_formulas} celda(s) del archivo tienen una fórmula que no viene "
+            f"calculada. {TEXTO_FORMULA_SIN_RESULTADO.capitalize()}."
+        )
+    elif (record.parsed_summary_json or {}).get("formulas_verificadas") is False:
+        # Distinto de "no hay": no se pudo mirar. Un cero que en realidad
+        # significa "no verifiqué" se lee como "no hay fórmulas rotas".
+        warnings.append(
+            "No se pudo verificar si el archivo trae fórmulas sin calcular. Si "
+            "alguna columna aparece vacía y no debería, abrí el archivo, dejá que "
+            "recalcule y volvé a subirlo."
+        )
+
     # E6b — deduplicación por CLAVE FUERTE. A diferencia del aviso de abajo, acá
     # sí se decidió: el archivo trae identidad de comprobante o ID de origen, y
     # con eso se puede afirmar que la operación es la misma. Se informa igual —

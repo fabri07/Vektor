@@ -84,6 +84,10 @@ from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
 )
+from app.domain.ingestion_limits import (
+    TEXTO_FORMULA_SIN_RESULTADO,
+    es_formula_sin_resultado,
+)
 from app.domain.ingestion_schema_fingerprint import (
     compute_context_signature,
     compute_schema_fingerprint,
@@ -2551,6 +2555,13 @@ def _label_fila_sin_monto(raw: Any) -> str:
     distinguir "acá hay un número que no se pudo interpretar" de "acá hay
     cualquier otra cosa".
     """
+    if es_formula_sin_resultado(raw):
+        # E6c-2: la celda TIENE una fórmula y el archivo no trae su resultado.
+        # Antes se leía como vacía —`openpyxl` devuelve None para las dos— y la
+        # fila entraba como si el usuario no hubiera cargado nada. Decirle "mapeá
+        # la columna del monto" sobre una columna calculada manda a corregir algo
+        # que no está roto.
+        return f"No se pudo leer el monto: {TEXTO_FORMULA_SIN_RESULTADO}"
     if raw is None or not str(raw).strip():
         return _SIN_MONTO_LABEL
     interpretado = parsear_monto(raw)

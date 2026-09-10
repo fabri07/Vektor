@@ -194,3 +194,31 @@ class RelojDeParsing:
     @property
     def transcurrido(self) -> float:
         return time.perf_counter() - self._t0
+
+
+# ── E6c-2: los tres estados de una celda calculada ──────────────────────────
+#: Marca que reemplaza al ``None`` de una celda que TIENE fórmula pero cuyo
+#: resultado nunca se calculó y guardó en el archivo.
+#:
+#: Existe porque los dos casos son indistinguibles al leer: ``openpyxl`` con
+#: ``data_only=True`` devuelve ``None`` tanto para una celda vacía como para una
+#: fórmula sin resultado cacheado. Un archivo generado por script, o uno que Excel
+#: nunca recalculó, entra con TODAS sus columnas calculadas leídas como vacías —
+#: y "vacío" es un dato, no un error, así que la pérdida es silenciosa.
+#:
+#: Con la marca, la fila sigue el camino que ya existe para lo ilegible (va a
+#: "Otros" con su motivo) en vez de entrar como si el usuario no hubiera cargado
+#: nada. **Nunca se sustituye por cero ni por vacío.**
+FORMULA_SIN_RESULTADO = "\x00formula-sin-resultado\x00"
+
+
+def es_formula_sin_resultado(valor: object) -> bool:
+    """¿Esta celda es una fórmula que el archivo nunca calculó?"""
+    return valor is FORMULA_SIN_RESULTADO or valor == FORMULA_SIN_RESULTADO
+
+
+TEXTO_FORMULA_SIN_RESULTADO = (
+    "la celda tiene una fórmula que el archivo no trae calculada. Abrí el archivo "
+    "en Excel o Google Sheets, dejá que recalcule, guardalo y volvé a subirlo — o "
+    "exportalo como CSV, que guarda los resultados y no las fórmulas"
+)

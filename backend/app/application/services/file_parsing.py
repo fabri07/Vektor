@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 from app.domain.expense_categories import strip_accents
 from app.domain.header_keys import fold_header, match_key
 from app.domain.ingestion_limits import (
+    FORMULA_SIN_RESULTADO,
     LIMITE_ARCHIVO_DANADO,
     LIMITE_BYTES,
     LIMITE_CELDAS,
@@ -1265,6 +1266,80 @@ def _build_text_contexts(
 
 
 # ── E6c-2: límites verificables ─────────────────────────────────────────────
+def marcar_formulas_sin_resultado(
+    content: bytes,
+    hojas: dict[str, list[list[Any]]],
+    reloj: RelojDeParsing,
+    limites: LimitesDeArchivo,
+) -> tuple[int, bool]:
+    """Distingue "celda vacía" de "fórmula que el archivo no trae calculada".
+
+    ``openpyxl`` con ``data_only=True`` devuelve ``None`` para las dos, así que un
+    archivo generado por script —o uno que Excel nunca recalculó— entra con todas
+    sus columnas calculadas leídas como vacías. Y vacío es un dato válido, no un
+    error: la pérdida no deja rastro en ningún lado.
+
+    La única forma de separarlas es una segunda lectura con ``data_only=False``,
+    donde una fórmula se ve como el texto ``"=..."`` y una celda vacía sigue en
+    ``None``. Se hace **sólo si la primera pasada dejó algún ``None``** —si no, no
+    hay nada que distinguir— y comparte el reloj: un archivo que ya consumió su
+    presupuesto no paga una segunda lectura.
+
+    Muta ``hojas`` en el lugar, reemplazando esos ``None`` por
+    ``FORMULA_SIN_RESULTADO``. Los tres estados quedan distinguidos:
+
+    * vacía → sigue en ``None``;
+    * fórmula sin resultado → la marca, que manda la fila a "Otros" con su motivo;
+    * fórmula con resultado cacheado → su valor, que es lo que siempre pasó.
+
+    Devuelve ``(cuántas marcó, si se pudo verificar)``. **El segundo dato importa
+    tanto como el primero**: cuando no se puede verificar hay que decirlo — un cero
+    que en realidad significa "no miré" se lee como "no hay fórmulas rotas".
+
+    Límite declarado: esto detecta la fórmula **sin resultado**, no la que tiene un
+    resultado VIEJO. Un archivo cuyo caché quedó desactualizado guarda un número
+    plausible, y desde afuera no hay forma de saber que ya no corresponde.
+    """
+    import openpyxl  # noqa: PLC0415
+
+    if not any(
+        celda is None for filas in hojas.values() for fila in filas for celda in fila
+    ):
+        return 0, True
+
+    try:
+        libro = openpyxl.load_workbook(
+            io.BytesIO(content), read_only=True, data_only=False
+        )
+    except Exception:  # noqa: BLE001 — no poder verificar es un resultado, no un fallo
+        return 0, False
+
+    marcadas = 0
+    try:
+        for nombre, filas in hojas.items():
+            if nombre not in libro.sheetnames:
+                continue
+            hoja = libro[nombre]
+            for indice, fila_formula in enumerate(hoja.iter_rows(values_only=True)):
+                reloj.controlar()
+                if indice >= len(filas):
+                    break
+                destino = filas[indice]
+                for col, valor in enumerate(fila_formula):
+                    if col >= len(destino) or destino[col] is not None:
+                        continue
+                    if isinstance(valor, str) and valor.startswith("="):
+                        destino[col] = FORMULA_SIN_RESULTADO
+                        marcadas += 1
+    except LimiteExcedidoError:
+        # El reloj cortó la verificación. Lo ya marcado vale; lo que falta se
+        # declara NO verificado en vez de darse por limpio.
+        return marcadas, False
+    finally:
+        libro.close()
+    return marcadas, True
+
+
 def _leer_hoja_acotada(
     ws: Any, reloj: RelojDeParsing, limites: LimitesDeArchivo, celdas_previas: int
 ) -> tuple[list[list[Any]], int]:
@@ -1542,11 +1617,23 @@ def _parse_spreadsheet(
             # Pre-pass: materializar cada hoja junto con su detección de Libro
             # Diario, para no volver a leer el workbook durante la clasificación.
             sheets_data: list[tuple[str, list[list[Any]], tuple[int, dict[str, int]] | None]] = []
+            _crudas: dict[str, list[list[Any]]] = {}
             for sheet_name in sheet_names:
                 ws = workbook[sheet_name]
                 rows, celdas = _leer_hoja_acotada(ws, reloj, limites, celdas)
                 if len(rows) < 2:
                     continue
+                _crudas[sheet_name] = rows
+            # E6c-2: separar "celda vacía" de "fórmula sin resultado cacheado"
+            # ANTES de clasificar. Después sería tarde: la detección de Libro
+            # Diario y la de tipo de hoja miran los valores, y una columna
+            # calculada que se lee vacía cambia lo que el archivo parece ser.
+            _formulas, _verificado = marcar_formulas_sin_resultado(
+                content, _crudas, reloj, limites
+            )
+            summary["formulas_sin_resultado"] = _formulas
+            summary["formulas_verificadas"] = _verificado
+            for sheet_name, rows in _crudas.items():
                 sheets_data.append((sheet_name, rows, detect_libro_diario_header(rows)))
 
             for sheet_name, rows, ld in sheets_data:
@@ -1750,6 +1837,11 @@ def _parse_spreadsheet(
         # ── Una sola hoja: comportamiento original (con límite ampliado) ─────
         worksheet = workbook.active
         _filas_hoja, celdas = _leer_hoja_acotada(worksheet, reloj, limites, celdas)
+        _formulas, _verificado = marcar_formulas_sin_resultado(
+            content, {worksheet.title: _filas_hoja}, reloj, limites
+        )
+        summary["formulas_sin_resultado"] = _formulas
+        summary["formulas_verificadas"] = _verificado
         all_rows = [tuple(f) for f in _filas_hoja]
         if not all_rows:
             summary.update(
