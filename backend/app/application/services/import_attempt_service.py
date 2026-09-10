@@ -383,6 +383,22 @@ async def marcar_publicada(session: AsyncSession, outbox_id: uuid.UUID) -> None:
     )
 
 
+async def marcar_publicada_del_intento(
+    session: AsyncSession, attempt_id: uuid.UUID
+) -> None:
+    """Marca publicada la orden de ESTE intento, por su id de intento.
+
+    El confirm publica apenas commitea —para que el caso normal no espere al
+    próximo tick del publicador— y necesita marcarla sin haber leído la fila.
+    """
+    await session.execute(
+        update(ImportOutbox)
+        .where(ImportOutbox.attempt_id == attempt_id, ImportOutbox.published_at.is_(None))
+        .values(published_at=func.now())
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def ordenes_pendientes(
     session: AsyncSession, *, limite: int = 100
 ) -> list[ImportOutbox]:
@@ -424,6 +440,7 @@ __all__ = [
     "cerrar_intento",
     "liberar_huerfanos",
     "marcar_publicada",
+    "marcar_publicada_del_intento",
     "obtener_intento",
     "ordenes_pendientes",
     "reclamar_intento",

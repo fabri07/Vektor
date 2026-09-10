@@ -709,6 +709,45 @@ class ConfirmIngestionResponse(BaseModel):
     inventory_impact_total: int = 0
 
 
+class RegistrarImportacionRequest(ConfirmIngestionRequest):
+    """Lo mismo que un confirm, más la clave con la que el cliente lo identifica.
+
+    Hereda de ``ConfirmIngestionRequest`` a propósito: el ejecutor le pasa el
+    payload congelado a ``confirm_file``, así que si los dos cuerpos divergieran,
+    una importación asíncrona y una sincrónica del mismo archivo harían cosas
+    distintas — que es justo lo que esta fase existe para evitar.
+    """
+
+    #: La clave con la que el cliente identifica SU petición. Repetirla devuelve el
+    #: mismo intento; repetirla con otro contenido es un conflicto.
+    #:
+    #: La pone el cliente y no el servidor: el punto es sobrevivir a un timeout,
+    #: y una clave que el servidor genera se pierde con la respuesta que no llegó.
+    request_key: str = Field(min_length=8, max_length=128)
+
+
+class ImportacionResponse(BaseModel):
+    """El estado de un intento. Lo devuelven el 202 y la consulta."""
+
+    attempt_id: UUID
+    file_id: UUID
+    status: str
+    #: En qué anda ahora. `None` cuando no está ejecutando.
+    phase: str | None = None
+    rows_total: int | None = None
+    rows_done: int = 0
+    #: El resultado del confirm (counts + warnings), cuando terminó bien. Es el
+    #: MISMO cuerpo que devuelve `/confirm`, para que la pantalla no tenga que
+    #: saber por qué ruta entró.
+    result: dict[str, Any] | None = None
+    #: Error ESTRUCTURADO: el código se filtra y se cuenta, el detalle lo lee una
+    #: persona y dice qué hacer.
+    error_code: str | None = None
+    error_detail: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None
+
+
 class InventoryReplayRequest(BaseModel):
     """F-H3.d.4: aplicar al inventario la historia de ventas de un archivo."""
 

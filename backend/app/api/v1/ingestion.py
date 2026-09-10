@@ -24,6 +24,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
     status,
 )
@@ -87,6 +88,12 @@ from app.application.services.file_parsing import (
 from app.application.services.file_parsing import (
     SPREADSHEET_MIMES as _SPREADSHEET_MIMES,
 )
+from app.application.services.import_attempt_service import (
+    SolicitudEnConflictoError,
+    marcar_publicada_del_intento,
+    obtener_intento,
+    registrar_intento,
+)
 from app.application.services.import_overlap_service import (
     detectar_solapamiento,
 )
@@ -118,6 +125,7 @@ from app.application.services.llm_file_type_detector import maybe_detect_file_ty
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
+from app.config.async_import_rollout import async_import_enabled_for
 from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
 from app.domain.header_keys import custom_field_slug
@@ -149,6 +157,7 @@ from app.domain.purchase_group import (
 )
 from app.domain.stage_timing import StageTimings
 from app.integrations.s3 import S3Client
+from app.jobs.celery_app import celery_app
 from app.jobs.ingestion_worker import (
     process_image_ocr,
     process_spreadsheet,
@@ -198,6 +207,7 @@ from app.schemas.ingestion import (
     FileDeletionResult,
     FilePreviewResponse,
     FileStatusItem,
+    ImportacionResponse,
     InventoryEffectOption,
     InventoryImpactItem,
     InventoryReplayRequest,
@@ -210,6 +220,7 @@ from app.schemas.ingestion import (
     PurchaseGroupLine,
     PurchaseGroupsRequest,
     PurchaseGroupsResponse,
+    RegistrarImportacionRequest,
     RereadApplyRequest,
     RereadApplyStartResponse,
     RereadCancelResponse,
@@ -4256,4 +4267,153 @@ async def inventory_replay(
         hojas=outcome.hojas,
         alcance_por_hoja=outcome.alcance_por_hoja,
         warnings=warnings,
+    )
+
+
+# ── E6c-3: importación asíncrona ──────────────────────────────────────────────
+@router.post(
+    "/files/{file_id}/imports",
+    response_model=ImportacionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Registrar una importación y devolver su id consultable",
+)
+async def registrar_importacion(
+    file_id: uuid.UUID,
+    body: RegistrarImportacionRequest,
+    response: Response,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> ImportacionResponse:
+    """Registra la intención de importar y devuelve **202** con su id.
+
+    Por qué una ruta nueva y no un cambio en ``/confirm``
+    -----------------------------------------------------
+    ``/confirm`` devuelve 200 con el resultado, y hay clientes en vuelo durante
+    cada deploy —Railway redespliega api y worker en paralelo, sin orden
+    garantizado—. Cambiarle el contrato in-place rompería a los que estén a mitad
+    de camino. Con una ruta nueva, el corte lo decide quien despliega y es
+    reversible: ``/confirm`` sigue funcionando hasta que el frontend migre.
+
+    Qué se garantiza
+    ----------------
+    * **202 con un id consultable**: el trabajo queda registrado y la respuesta no
+      espera a que termine.
+    * **Repetir la misma petición devuelve el mismo intento** — es lo que hace
+      seguro reintentar tras un timeout.
+    * **Misma clave con otro contenido es un conflicto (409)**: devolver el
+      intento viejo importaría algo que el usuario no pidió, y crear uno nuevo
+      rompería la promesa de la clave.
+
+    La solicitud se congela junto con la orden de ejecución **en la misma
+    transacción**: el commit es lo único que decide si la importación existe.
+    """
+    if not async_import_enabled_for(tenant.tenant_id):
+        # La compuerta gatea SÓLO el registro. El publicador y el recuperador
+        # siguen corriendo para todos: apagarlos dejaría huérfanas las órdenes ya
+        # commiteadas.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La importación en segundo plano todavía no está habilitada.",
+        )
+
+    record = await FileRepository(session).get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    _payload = body.model_dump(mode="json", exclude={"request_key"})
+    try:
+        registro = await registrar_intento(
+            session,
+            tenant_id=tenant.tenant_id,
+            file_id=file_id,
+            request_key=body.request_key,
+            payload=_payload,
+            ingestion_version=record.ingestion_version,
+            preview_version=record.latest_preview_version,
+            # Snapshot COMPLETO: a qué versión del archivo se le dijo que sí. Si
+            # una relectura lo cambia antes de ejecutar, el ejecutor lo detecta en
+            # vez de importar algo que el usuario nunca vio.
+            file_content_hash=record.content_hash,
+            rows_total=(record.parsed_summary_json or {}).get("row_count"),
+        )
+    except SolicitudEnConflictoError as conflicto:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "REQUEST_KEY_CONFLICT",
+                "message": (
+                    "Ya registraste una importación con esta misma clave pero con "
+                    "otro contenido. Consultá la que existe o usá una clave nueva."
+                ),
+                "attempt_id": str(conflicto.intento_existente.id),
+            },
+        ) from conflicto
+
+    await session.commit()
+
+    # Publicar DESPUÉS del commit y sin dejar que un broker caído tumbe el
+    # registro: la orden ya está en la base, así que el publicador periódico la
+    # entrega igual. Esto sólo hace que el caso normal no espere al próximo tick.
+    if registro.creado:
+        try:
+            celery_app.send_task(
+                "jobs.execute_import", args=[str(registro.intento.id)], queue="ingestion"
+            )
+        except Exception as exc:  # noqa: BLE001 — el registro ya está a salvo
+            logger.warning(
+                "ingestion.intento.publicacion_diferida",
+                attempt_id=str(registro.intento.id),
+                error=str(exc),
+            )
+        else:
+            await marcar_publicada_del_intento(session, registro.intento.id)
+            await session.commit()
+
+    # 202 sólo cuando se creó. Una petición repetida devuelve 200 con el intento
+    # que ya existe: son dos respuestas distintas y el cliente puede querer
+    # distinguirlas.
+    response.status_code = (
+        status.HTTP_202_ACCEPTED if registro.creado else status.HTTP_200_OK
+    )
+    return _a_response(registro.intento)
+
+
+@router.get(
+    "/imports/{attempt_id}",
+    response_model=ImportacionResponse,
+    summary="Estado de una importación registrada",
+)
+async def estado_de_importacion(
+    attempt_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> ImportacionResponse:
+    """Estado, progreso, y el resultado o el error.
+
+    El tenant sale del JWT y se compara contra el del intento: un id de intento no
+    es un secreto y no puede alcanzar para leer la importación de otro negocio.
+    Un intento de otro tenant responde 404 —no 403—: decir "existe pero no es
+    tuyo" ya filtra que existe.
+    """
+    intento = await obtener_intento(session, tenant.tenant_id, attempt_id)
+    if intento is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Importación no encontrada."
+        )
+    return _a_response(intento)
+
+
+def _a_response(intento: Any) -> ImportacionResponse:
+    return ImportacionResponse(
+        attempt_id=intento.id,
+        file_id=intento.file_id,
+        status=intento.status,
+        phase=intento.phase,
+        rows_total=intento.rows_total,
+        rows_done=intento.rows_done,
+        result=intento.result_json,
+        error_code=intento.error_code,
+        error_detail=intento.error_detail,
+        created_at=intento.created_at,
+        finished_at=intento.finished_at,
     )
