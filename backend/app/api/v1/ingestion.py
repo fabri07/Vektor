@@ -3425,11 +3425,23 @@ async def confirm_file(
     if counts["proveedores"]:
         parts.append(f"{counts['proveedores']} proveedor(es)")
 
-    message = (
-        f"Importados: {', '.join(parts)}. La puntuación será recalculada."
-        if parts
-        else "Datos confirmados. La puntuación de salud será recalculada."
+    # E8: cuando no se importó NADA y todo quedó esperando revisión, decirlo. El
+    # caso normal es el documento (foto/PDF/texto): F6-A4 no le extrae fecha, así
+    # que cada línea con monto se captura en «Otros» y no hay venta ni gasto que
+    # anunciar. "Datos confirmados" se leía como que el archivo ya estaba cargado.
+    _pendientes_de_revision = counts.get("otros", 0) + counts.get(
+        "filas_riesgo_a_otros", 0
     )
+    if parts:
+        message = f"Importados: {', '.join(parts)}. La puntuación será recalculada."
+    elif _pendientes_de_revision:
+        message = (
+            f"Archivo procesado: {_pendientes_de_revision} línea(s) quedaron "
+            "pendientes de revisión en «Otros». No se importó ninguna venta ni "
+            "gasto: completá los datos que falten y confirmalas desde ahí."
+        )
+    else:
+        message = "Datos confirmados. La puntuación de salud será recalculada."
 
     # Avisos human-in-the-loop: el import no bloquea, pero le señala al usuario qué
     # quedó incompleto para que lo complete (proveedor, producto) o lo clasifique.
@@ -3612,8 +3624,20 @@ async def confirm_file(
         # F1-fix: cubre también los productos con nombre ambiguo (F1) — ya no
         # generan un warning propio, "otros" los cuenta porque la fila ambigua
         # se persiste ahí (evita doble conteo/mensaje solapado).
+        #
+        # E8: el aviso es el ÚNICO canal que la pantalla muestra de este resultado
+        # (el panel se cierra y los avisos salen como toasts; `message` no se
+        # renderiza). Así que cuando no se importó nada, lo que tiene que decir es
+        # eso y no "quedaron N filas": un documento entero en la bandeja con el
+        # aviso genérico se leía como si además se hubiera importado algo.
         warnings.append(
             f"{counts['otros']} fila(s) quedaron en «Otros» para que las revises y clasifiques."
+            if parts
+            else (
+                f"No se importó ninguna venta ni gasto: las {counts['otros']} "
+                "línea(s) del archivo quedaron pendientes de revisión en «Otros». "
+                "Completá los datos que falten y confirmalas desde ahí."
+            )
         )
     # F8b: decisiones de columnas riesgosas aplicadas en este confirm.
     if counts.get("columnas_eliminadas"):

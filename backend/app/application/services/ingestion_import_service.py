@@ -266,10 +266,28 @@ def check_nonempty_import(
     # el rollback se llevaría puestas las filas capturadas en «Otros». Mismo
     # criterio que `routed_to_others` (Minor 1 de F8b).
     _decididas = counts.get("ya_aplicadas", 0) + counts.get("conflictos_de_identidad", 0)
+    # E8: en un DOCUMENTO (foto/PDF/texto), quedar en «Otros» es el resultado
+    # correcto del camino, no un fallback que tape una pérdida. Esos archivos no
+    # tienen columnas que mapear y F6-A4 no les extrae fecha: cada línea con monto
+    # se captura para que el usuario la complete. Contarlas como "nada importado"
+    # terminaba en 422, y el rollback del savepoint se llevaba puestas las propias
+    # capturas — el archivo se procesaba y en la bandeja no quedaba nada.
+    #
+    # Acotado al documento a propósito: en una planilla, «Otros» SÍ puede tapar un
+    # mapeo que falló (es el motivo de la nota de arriba), así que ahí sigue sin
+    # contar. Y un documento del que no se pudo leer un solo monto sigue siendo un
+    # import vacío: lo que cuenta es lo capturado, no lo intentado.
+    _es_documento = str(summary.get("file_type") or "spreadsheet") in ("text", "image")
+    _capturado_del_documento = (
+        counts.get("otros", 0) + counts.get("otros_ya_capturados", 0)
+        if _es_documento
+        else 0
+    )
     if (
         total_inserted == 0
         and routed_to_others == 0
         and _decididas == 0
+        and _capturado_del_documento == 0
         and had_rows
         and confirmed_any
     ):
@@ -1346,6 +1364,29 @@ def _risk_row_anchor(
     sintético (p.ej. ``"table"`` en single-sheet) no colisionen entre sí.
     """
     return f"{tenant_id}:risk:{uploaded_file_id or ''}:{context_id}:{row_index}"
+
+
+def _doc_line_anchor(
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    context_id: str,
+    line_index: int,
+) -> str:
+    """Ancla de la captura de una LÍNEA de documento (texto/imagen) en «Otros».
+
+    Namespace propio ``doc``, por el mismo motivo que ``_risk_row_anchor`` tiene el
+    suyo: una línea puede llegar a tener después su ancla de import normal (cuando
+    F7 sepa leerle la fecha) sin que la de captura la bloquee.
+
+    **La identidad es la ocurrencia, no el texto.** Dos renglones idénticos —"Coca
+    $1500" dos veces— son dos ventas legítimas, así que anclar en el contenido
+    descartaría plata real. Lo que distingue una de otra es su posición dentro del
+    grupo detectado de ESA versión del archivo: ``(archivo, contexto, ordinal)``,
+    el mismo criterio que el ancla de fila de planilla. ``uploaded_file_id`` la ata
+    a la versión: una relectura reemplaza el contenido interpretado y su
+    reconciliación es otra cosa (ver ``reread_service``), no una repetición.
+    """
+    return f"{tenant_id}:doc:{uploaded_file_id or ''}:{context_id}:{line_index}"
 
 
 def _source_row_ref(anchor: str | None) -> str | None:
@@ -6070,20 +6111,61 @@ async def _insert_confirmed_data_impl(
         # estampillaba "hoy" — fecha de negocio inventada (invariante 2d). Ahora la
         # línea va a /otros para que el usuario complete la fecha antes de importar.
         # Es degradado pero honesto: la lectura real de foto/PDF con fecha es F7.
-        def _route_text_line_to_otros(entry: dict[str, Any], suggested: str) -> None:
+        # Las capturas de este camino SÍ llevan ancla (E8). Antes no llevaban, y
+        # el motivo escrito era que la re-confirmación la impedía el lease: cierto
+        # para el `/confirm` sincrónico, pero la importación asíncrona (E6c-3)
+        # agregó una re-ENTREGA posible del mismo intento, y la relectura vuelve a
+        # recorrer el archivo. Sin ancla, cada vuelta materializaba otra copia del
+        # mismo pendiente y el usuario tenía que clasificar el mismo renglón dos
+        # veces. El ancla es `(archivo, contexto, ordinal)` — nunca el texto, ver
+        # `_doc_line_anchor`.
+        _doc_seen = HuellasDelArchivo()
+
+        async def _precargar_anclas_del_documento() -> None:
+            """Las anclas de TODAS las líneas, en un lote (E6c-1).
+
+            Preguntar de a una le costaba un ``SELECT`` por renglón: el mismo N+1
+            que el importador ya había desactivado en el resto de sus caminos.
+            Se enumeran desde el archivo —bucket + ordinal—, así que lo que se
+            trae es proporcional al documento y no a la historia del tenant. Las
+            que no entren acá igual se resuelven: ``HuellasDelArchivo`` sabe qué
+            preguntó y consulta lo que le falta.
+            """
+            _por_entidad = {"sale": "ventas_detectadas", "expense": "gastos_detectados"}
+            _pares: set[tuple[str, str]] = {
+                (f"text:{_ent}", _bucket) for _ent, _bucket in _por_entidad.items()
+            }
+            for _ctx in summary.get("mapping_contexts") or []:
+                _bucket = _por_entidad.get(str(_ctx.get("entity_type") or ""))
+                if _bucket and _ctx.get("context_id"):
+                    _pares.add((str(_ctx["context_id"]), _bucket))
+            await _doc_seen.precargar(
+                session,
+                tenant_id,
+                {
+                    hashlib.sha256(
+                        _doc_line_anchor(
+                            tenant_id, uploaded_file_id, _ctx_id, _i
+                        ).encode()
+                    ).hexdigest()
+                    for _ctx_id, _bucket in _pares
+                    for _i in range(len(summary.get(_bucket) or []))
+                },
+            )
+
+        async def _route_text_line_to_otros(
+            entry: dict[str, Any], suggested: str, ctx_id: str, line_index: int
+        ) -> None:
             # Se rutea la línea UNA vez (no N veces por cada monto detectado). Solo si
             # trae al menos un monto válido — una línea sin monto no materializa un
             # pendiente vacío. `uploaded_file_id` liga el /otros al archivo origen.
-            #
-            # No se registra fingerprint por línea (a diferencia del path spreadsheet,
-            # que ancla en (archivo, contexto, índice)): el path texto nunca tuvo
-            # anclas de fila estables. La no-duplicación la garantiza F4 aguas arriba
-            # — un confirm exitoso deja el archivo DONE y no puede re-confirmarse
-            # (CAS del lease), y un fallo revierte el savepoint entero. La relectura
-            # es un flujo distinto (reread_service) que reprocesa desde cero.
             if not any(_parse_amount(m) for m in entry.get("montos", [])):
                 return
-            counts["otros"] += _capture_unclassified(
+            anchor = _doc_line_anchor(tenant_id, uploaded_file_id, ctx_id, line_index)
+            if await _import_row_seen(session, tenant_id, anchor, _doc_seen):
+                counts["otros_ya_capturados"] = counts.get("otros_ya_capturados", 0) + 1
+                return
+            capturadas = _capture_unclassified(
                 session,
                 tenant_id,
                 rows=[entry],
@@ -6095,13 +6177,34 @@ async def _insert_confirmed_data_impl(
                     "fecha antes de importar"
                 ),
                 suggested_entity=suggested,
+                context_id=ctx_id,
+                # Lo que le permite a la relectura reconocer, cuando sepa leer la
+                # línea, que este pendiente YA fue clasificado a mano. Es el ancla
+                # de fila de import (no la de captura): el mismo derivado que usa
+                # el camino de riesgo de columna, por el mismo motivo.
+                row_ref=_source_row_ref(
+                    _import_row_anchor(tenant_id, uploaded_file_id, ctx_id, line_index)
+                ),
             )
+            if capturadas == 0:
+                # Nada persistido → no se quema el ancla: si la línea mejora en una
+                # relectura, tiene que poder capturarse. Mismo criterio que
+                # `_capture_column_risk_rows`.
+                return
+            await _register_import_row_fingerprint(session, tenant_id, anchor, _doc_seen)
+            counts["otros"] += capturadas
 
-        def _add_text_sale(entry: dict[str, Any]) -> None:
-            _route_text_line_to_otros(entry, "sale")
+        async def _add_text_sale(
+            entry: dict[str, Any], ctx_id: str, line_index: int
+        ) -> None:
+            await _route_text_line_to_otros(entry, "sale", ctx_id, line_index)
 
-        def _add_text_expense(entry: dict[str, Any]) -> None:
-            _route_text_line_to_otros(entry, "expense")
+        async def _add_text_expense(
+            entry: dict[str, Any], ctx_id: str, line_index: int
+        ) -> None:
+            await _route_text_line_to_otros(entry, "expense", ctx_id, line_index)
+
+        await _precargar_anclas_del_documento()
 
         text_contexts = summary.get("mapping_contexts")
         if text_contexts:
@@ -6127,24 +6230,40 @@ async def _insert_confirmed_data_impl(
                     "ventas" if entity == "sale" else "gastos"
                 ):
                     continue
-                rows = [
-                    r
-                    for r in summary.get(text_bucket.get(base_entity or "", ""), [])
+                # El ordinal sale del bucket ENTERO, no de la lista ya filtrada: es
+                # la posición de la línea en el grupo que el parser detectó, y es lo
+                # que tiene que coincidir entre dos corridas del mismo archivo. La
+                # lista filtrada cambia de largo según qué contextos se incluyan.
+                _lineas: list[tuple[int, dict[str, Any]]] = [
+                    (i, r)
+                    for i, r in enumerate(
+                        summary.get(text_bucket.get(base_entity or "", ""), [])
+                    )
                     if r.get("__context__") == ctx_id
                 ]
-                for text_row in rows:
+                _ctx_key = ctx_id or f"text:{entity}"
+                for _ordinal, _fila_de_texto in _lineas:
                     if entity == "sale":
-                        _add_text_sale(text_row)
+                        await _add_text_sale(_fila_de_texto, _ctx_key, _ordinal)
                     else:
-                        _add_text_expense(text_row)
+                        await _add_text_expense(_fila_de_texto, _ctx_key, _ordinal)
         else:
-            # Legacy: documentos viejos sin mapping_contexts.
+            # Legacy: documentos viejos sin mapping_contexts. El contexto del ancla
+            # es el sintético que HOY genera el parser (`text:sale`/`text:expense`),
+            # y no la cadena vacía: sin él, la línea 3 de ventas y la línea 3 de
+            # gastos compartirían ancla y la segunda se saltearía como repetida.
             if confirmed_fields.get("ventas"):
-                for text_row in summary.get("ventas_detectadas", []):
-                    _add_text_sale(text_row)
+                for _ordinal, _fila_de_texto in enumerate(
+                    summary.get("ventas_detectadas", [])
+                ):
+                    await _add_text_sale(_fila_de_texto, "text:sale", _ordinal)
             if confirmed_fields.get("gastos"):
-                for text_row in summary.get("gastos_detectados", []):
-                    _add_text_expense(text_row)
+                for _ordinal, _fila_de_texto in enumerate(
+                    summary.get("gastos_detectados", [])
+                ):
+                    await _add_text_expense(_fila_de_texto, "text:expense", _ordinal)
+        # Las huellas de captura de ESTA corrida (en lote, ON CONFLICT DO NOTHING).
+        await _persist_import_fingerprints(session, tenant_id, _doc_seen.nuevas)
 
     _volcar_impacto_de_inventario()
 
