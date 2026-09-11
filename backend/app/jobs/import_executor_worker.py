@@ -30,26 +30,39 @@ archivo mientras el ejecutor lo importa.
 Que se pueda llamar como función y no por HTTP ya estaba probado: es lo que hace
 ``scripts/bench_confirm_import.py`` para medir el endpoint entero.
 
-La ventana que queda, dicha en voz alta
-----------------------------------------
-Los efectos del import y el cierre del intento **no** se commitean juntos:
-``confirm_file`` cierra su propia transacción. Si el proceso muere entre el commit
-de los efectos y el cierre del intento, el intento queda ``EJECUTANDO`` con el
-lease vencido y la recuperación lo vuelve a encolar. La segunda corrida no
-duplica nada —las huellas de fila hacen el import idempotente: reimportar el mismo
-archivo inserta cero filas— y cierra el intento con el resultado correcto. O sea:
-la ventana existe, se recupera sola, y el precio es una corrida extra que no
-escribe nada.
+Los efectos y el resultado commitean juntos
+-------------------------------------------
+``confirm_file`` **no** commitea: abre un savepoint y lo cierra el caller. Así que
+el cierre del intento —``result_json`` + ``COMPLETADO``— va en la MISMA transacción
+que los efectos, antes del único ``commit``. Una caída en el medio no existe: o
+commitearon las dos cosas o ninguna.
+
+Esto corrige algo que este módulo afirmaba y era falso. Antes el cierre iba en una
+sesión aparte **después** del commit, con la ventana declarada como "se recupera
+sola". No se recuperaba: lo probado era que la segunda corrida no DUPLICA (las
+huellas de fila hacen el import idempotente), pero el confirm rechaza un archivo
+que ya está en ``DONE``, así que el intento terminaba ``FALLADO`` informando
+fracaso sobre una importación que había funcionado — y su resultado real no se
+podía recuperar de ningún lado.
+
+El mismo cambio cierra la otra mitad: si el CAS del cierre no encuentra el lease
+—nos reemplazaron mientras importábamos— el ``rollback`` se lleva también los
+efectos, en vez de dejarlos escritos sin dueño.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid as _uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import select
 
 from app.jobs.celery_app import celery_app
 from app.observability.logger import get_logger
+
+if TYPE_CHECKING:
+    pass
 
 logger = get_logger(__name__)
 
@@ -162,6 +175,8 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
         payload_version = intento.payload_version
         hash_congelado = intento.file_content_hash
         capacidades_congeladas = intento.capabilities_json
+        revision_ingestion = intento.ingestion_version
+        revision_preview = intento.preview_version
 
     from app.application.services.import_attempt_service import (  # noqa: PLC0415
         PAYLOAD_VERSION,
@@ -226,19 +241,62 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
 
             respuesta = await confirm_file(
                 file_id=file_id,
-                body=ConfirmIngestionRequest(**payload),
+                # La revisión congelada viaja acá y NO en el payload: así la huella
+                # de la petición no cambia de forma (ver `_payload` en el registro).
+                # `confirm_file` la verifica con el lease YA tomado, que es lo único
+                # que impide que una relectura se meta en el medio.
+                body=ConfirmIngestionRequest(
+                    **payload,
+                    revision_ingestion=revision_ingestion,
+                    revision_preview=revision_preview,
+                ),
                 background_tasks=BackgroundTasks(),
                 tenant=tenant,
                 session=session,
             )
+            # E7-review #3: el cierre del intento va en la MISMA transacción que
+            # los efectos, ANTES del commit.
+            #
+            # `confirm_file` no commitea (su savepoint lo cierra el caller, que es
+            # esta línea), así que se puede. Antes el cierre iba en una sesión
+            # aparte después del commit, y una caída en el medio dejaba los efectos
+            # escritos con el intento en EJECUTANDO. La recuperación lo reencolaba,
+            # el confirm rechazaba el archivo —ya está en DONE— y el intento
+            # terminaba FALLADO: **no duplicaba, pero informaba fracaso sobre una
+            # importación que había funcionado**, y el resultado real no se podía
+            # recuperar de ningún lado.
+            #
+            # Y cierra de paso la otra mitad: si el CAS no encuentra el lease
+            # —nos reemplazaron mientras importábamos— el `rollback` se lleva los
+            # efectos, en vez de dejarlos escritos sin dueño.
+            cerrado = await cerrar_intento(
+                session,
+                attempt_id,
+                token,
+                estado=COMPLETADO,
+                result=respuesta.model_dump(mode="json"),
+            )
+            if not cerrado:
+                await session.rollback()
+                # No se compensa el lease del archivo acá: perder el lease del
+                # INTENTO significa que otro ejecutor nos reemplazó, y el del
+                # archivo probablemente sea suyo. `release_import_lease` igual no
+                # lo tocaría (compara el token), pero ni preguntarlo: el dueño del
+                # estado es el que está corriendo.
+                logger.warning(
+                    "ingestion.intento.cierre_sin_lease", attempt_id=str(attempt_id)
+                )
+                return "lease_perdido"
             await session.commit()
         except LimiteExcedidoError as limite:
             await session.rollback()
+            await _compensar_lease_del_archivo(factory, tenant_id, file_id)
             return await _cerrar_con_error(
                 factory, attempt_id, token, ERROR_LIMITE, limite.mensaje
             )
         except Exception as exc:  # noqa: BLE001 — el detalle va al intento
             await session.rollback()
+            await _compensar_lease_del_archivo(factory, tenant_id, file_id)
             codigo, detalle = _clasificar(exc)
             logger.warning(
                 "ingestion.intento.fallo",
@@ -248,23 +306,6 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
             )
             return await _cerrar_con_error(factory, attempt_id, token, codigo, detalle)
 
-    # 3. Cerrar con el resultado. Ver la nota del encabezado sobre la ventana
-    #    entre el commit de los efectos y este cierre.
-    async with factory() as session:
-        cerrado = await cerrar_intento(
-            session,
-            attempt_id,
-            token,
-            estado=COMPLETADO,
-            result=respuesta.model_dump(mode="json"),
-        )
-        await session.commit()
-    if not cerrado:
-        # Perdimos el lease mientras importábamos. Los efectos ya se escribieron
-        # (o los revirtió `finalize_import_lease`, que es quien decide eso); lo
-        # que no podemos es pisar el estado de quien nos reemplazó.
-        logger.warning("ingestion.intento.cierre_sin_lease", attempt_id=str(attempt_id))
-        return "lease_perdido"
     _ = FALLADO, ERROR_DESCONOCIDO  # referenciados por `_clasificar`
     return "completado"
 
@@ -297,6 +338,7 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
     """
     from fastapi import HTTPException  # noqa: PLC0415
 
+    from app.api.v1.ingestion import REVISION_CAMBIADA_CODE  # noqa: PLC0415
     from app.application.services.ingestion_lease_service import (  # noqa: PLC0415
         ImportLeaseLostError,
     )
@@ -304,6 +346,7 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
         ERROR_DESCONOCIDO,
         ERROR_IMPORT_VACIO,
         ERROR_LEASE_PERDIDO,
+        ERROR_REVISION,
         ERROR_TRANSITORIO,
         ERROR_VALIDACION,
     )
@@ -314,6 +357,14 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
             "estado del archivo antes de volver a intentar."
         )
     if isinstance(exc, HTTPException):
+        # El 409 de revisión cambiada se distingue por su CÓDIGO, no por el texto:
+        # un `ERROR_VALIDACION` diría "el archivo no valida" sobre un archivo que
+        # está perfecto, y lo que cambió es su lectura.
+        if (
+            isinstance(exc.detail, dict)
+            and exc.detail.get("code") == REVISION_CAMBIADA_CODE
+        ):
+            return ERROR_REVISION, str(exc.detail.get("message") or "")
         detalle = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         if exc.status_code == 422 and "no se importó" in detalle.lower():
             return ERROR_IMPORT_VACIO, detalle
@@ -323,6 +374,43 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
         return ERROR_TRANSITORIO, "La base de datos se cortó durante la importación."
     return ERROR_DESCONOCIDO, str(exc)[:1000]
+
+
+async def _compensar_lease_del_archivo(
+    factory: Any, tenant_id: _uuid.UUID, file_id: _uuid.UUID
+) -> None:
+    """Devuelve el archivo a NEEDS_CONFIRMATION cuando el import se revirtió.
+
+    ``acquire_import_lease`` **commitea** el ``IMPORTING`` a propósito, para que un
+    confirm concurrente lo vea antes de que arranque el import largo. Eso significa
+    que un fallo POSTERIOR al retorno de ``confirm_file`` —el cierre del intento, por
+    ejemplo— no lo deshace con un ``rollback``: el propio manejador de
+    ``confirm_file`` no corre, porque la excepción pasó afuera. El archivo quedaba
+    trabado en "importando" hasta que venciera el TTL, con sus efectos revertidos:
+    el estado decía una cosa y los libros otra.
+
+    El token se lee del archivo para no pisar a un takeover: si otro ejecutor ya lo
+    tomó, ``release_import_lease`` no encuentra su token y no hace nada.
+    """
+    from app.application.services.ingestion_lease_service import (  # noqa: PLC0415
+        release_import_lease,
+    )
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+
+    # Sesión PROPIA y no la que acaba de fallar: ésa ya pasó por un rollback en
+    # medio de una excepción y no es un lugar del que se pueda depender para una
+    # compensación. Mismo criterio que `_cerrar_con_error`.
+    async with factory() as session:
+        token = (
+            await session.execute(
+                select(UploadedFile.import_attempt_id).where(
+                    UploadedFile.id == file_id, UploadedFile.tenant_id == tenant_id
+                )
+            )
+        ).scalar_one_or_none()
+        if token is None:
+            return
+        await release_import_lease(session, tenant_id, file_id, token)
 
 
 async def _cerrar_con_error(
@@ -368,13 +456,14 @@ async def _recuperar() -> int:
 
     factory, engine = _sesion_de_worker()
     async with factory() as session:
+        # `liberar_huerfanos` re-arma la orden de cada liberado en ESTA transacción.
+        # La recuperación NO llama al broker: si lo hiciera y la llamada fallara
+        # —broker caído, que es un motivo habitual de que haya huérfanos— el intento
+        # quedaría PENDIENTE sin orden pendiente, invisible para el publicador y sin
+        # ejecución para siempre. El commit es lo único que decide, igual que en el
+        # registro; la entrega es del publicador, que es reintentable.
         liberados = await liberar_huerfanos(session)
         await session.commit()
-    # Los reencolados necesitan una orden nueva: la original ya se marcó publicada.
-    for attempt_id in liberados:
-        celery_app.send_task(
-            "jobs.execute_import", args=[str(attempt_id)], queue=_QUEUE
-        )
     return len(liberados)
 
 

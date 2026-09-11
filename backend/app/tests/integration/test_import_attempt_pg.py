@@ -410,3 +410,225 @@ async def test_un_intento_que_agoto_sus_reintentos_no_vuelve_a_la_cola(
     assert attempt_id not in liberados
     assert intento is not None and intento.status == FALLADO
     assert intento.error_detail and "reintent" in intento.error_detail
+
+
+# ── Revisión externa (2026-09-10): fencing del recuperador ───────────────────
+async def test_el_recuperador_no_pisa_a_un_ejecutor_que_renovo_su_lease(
+    contexto: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID],
+) -> None:
+    """El recuperador elige candidatos con un SELECT y escribe después.
+
+    Entre esos dos pasos el ejecutor que parecía muerto puede **renovar** su lease:
+    no estaba muerto, estaba tardando. Con la mutación del objeto ORM —SELECT y
+    después ``intento.status = PENDIENTE``, sin condición en la escritura— ese
+    estado posterior se pisaba y el intento volvía a la cola mientras su ejecutor
+    seguía importando: dos ejecuciones del mismo trabajo, que es exactamente lo
+    que el lease existe para impedir.
+
+    Se fuerza el orden con una transacción abierta: el recuperador ya eligió, y la
+    renovación entra antes de que escriba.
+    """
+    factory, tenant_id, file_id = contexto
+    attempt_id, _ = await _registrar(factory, tenant_id, file_id, clave="fencing-1")
+
+    async with factory() as s:
+        token = await reclamar_intento(s, attempt_id)
+        await s.commit()
+    assert token is not None
+
+    # El lease vence: para el recuperador es un huérfano.
+    async with factory() as s:
+        await s.execute(
+            text(
+                "UPDATE import_attempts SET lease_expires_at = now() - interval "
+                "'1 hour' WHERE id = :id"
+            ),
+            {"id": attempt_id},
+        )
+        await s.commit()
+
+    # El ejecutor renueva (no estaba muerto) y eso commitea ANTES de que el
+    # recuperador escriba.
+    async with factory() as s:
+        assert await renovar_lease(s, attempt_id, token) is True
+        await s.commit()
+
+    async with factory() as s:
+        liberados = await liberar_huerfanos(s)
+        await s.commit()
+
+    assert liberados == [], "el recuperador reencoló un intento con el lease vivo"
+    async with factory() as s:
+        intento = await obtener_intento(s, tenant_id, attempt_id)
+        assert intento is not None
+        assert intento.status == EJECUTANDO
+        assert intento.lease_token == token, "le borró el token a un ejecutor vivo"
+
+
+async def test_el_recuperador_no_pisa_el_resultado_de_un_intento_que_termino(
+    contexto: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID],
+) -> None:
+    """La otra mitad, y la peor: un ``COMPLETADO`` vuelto a ``PENDIENTE``.
+
+    Se re-ejecuta un trabajo que ya terminó y se pierde su resultado — el usuario
+    ve "importando" sobre datos que ya están, y el `result_json` que tenía la
+    respuesta desaparece.
+    """
+    factory, tenant_id, file_id = contexto
+    attempt_id, _ = await _registrar(factory, tenant_id, file_id, clave="fencing-2")
+
+    async with factory() as s:
+        token = await reclamar_intento(s, attempt_id)
+        await s.commit()
+    assert token is not None
+
+    async with factory() as s:
+        await s.execute(
+            text(
+                "UPDATE import_attempts SET lease_expires_at = now() - interval "
+                "'1 hour' WHERE id = :id"
+            ),
+            {"id": attempt_id},
+        )
+        await s.commit()
+
+    # Terminó bien, con su resultado, después de que el lease venciera.
+    async with factory() as s:
+        assert await cerrar_intento(
+            s, attempt_id, token, estado=COMPLETADO, result={"gastos": 3}
+        )
+        await s.commit()
+
+    async with factory() as s:
+        assert await liberar_huerfanos(s) == []
+        await s.commit()
+
+    async with factory() as s:
+        intento = await obtener_intento(s, tenant_id, attempt_id)
+        assert intento is not None
+        assert intento.status == COMPLETADO
+        assert intento.result_json == {"gastos": 3}
+
+
+async def test_un_huerfano_sin_token_igual_se_libera(
+    contexto: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID],
+) -> None:
+    """``EJECUTANDO`` sin token es un estado corrupto, y no puede ser eterno.
+
+    El fencing compara el token, y en SQL ``lease_token = NULL`` no matchea NUNCA:
+    sin tratar el nulo aparte, ese intento no se podría liberar jamás y el usuario
+    vería "importando" para siempre. Mismo criterio que el takeover del lease de
+    archivo con ``import_started_at IS NULL``.
+    """
+    factory, tenant_id, file_id = contexto
+    attempt_id, _ = await _registrar(factory, tenant_id, file_id, clave="fencing-3")
+
+    async with factory() as s:
+        await s.execute(
+            text(
+                "UPDATE import_attempts SET status = 'EJECUTANDO', lease_token = NULL, "
+                "lease_expires_at = now() - interval '1 hour' WHERE id = :id"
+            ),
+            {"id": attempt_id},
+        )
+        await s.commit()
+
+    async with factory() as s:
+        assert await liberar_huerfanos(s) == [attempt_id]
+        await s.commit()
+
+    async with factory() as s:
+        intento = await obtener_intento(s, tenant_id, attempt_id)
+        assert intento is not None
+        assert intento.status == PENDIENTE
+
+
+async def test_el_recuperador_deja_una_orden_pendiente_por_cada_liberado(
+    contexto: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID],
+) -> None:
+    """Un ``PENDIENTE`` sin orden pendiente es un intento que nadie va a ejecutar.
+
+    La orden se re-arma en la MISMA transacción que el cambio de estado, así que
+    no puede quedar una sin la otra — antes se resolvía llamando al broker después
+    de commitear, y un broker caído dejaba el intento colgado para siempre.
+    """
+    factory, tenant_id, file_id = contexto
+    attempt_id, _ = await _registrar(factory, tenant_id, file_id, clave="fencing-4")
+
+    async with factory() as s:
+        token = await reclamar_intento(s, attempt_id)
+        await s.commit()
+    assert token is not None
+
+    # La orden original ya se entregó.
+    async with factory() as s:
+        await s.execute(
+            text("UPDATE import_outbox SET published_at = now() WHERE attempt_id = :id"),
+            {"id": attempt_id},
+        )
+        await s.execute(
+            text(
+                "UPDATE import_attempts SET lease_expires_at = now() - interval "
+                "'1 hour' WHERE id = :id"
+            ),
+            {"id": attempt_id},
+        )
+        await s.commit()
+
+    async with factory() as s:
+        assert await liberar_huerfanos(s) == [attempt_id]
+        await s.commit()
+
+    async with factory() as s:
+        pendientes = await ordenes_pendientes(s)
+        assert any(o.attempt_id == attempt_id for o in pendientes), (
+            "quedó un PENDIENTE sin orden pendiente: nadie lo va a ejecutar"
+        )
+
+
+async def test_dos_recuperadores_simultaneos_liberan_el_huerfano_una_sola_vez(
+    contexto: tuple[async_sessionmaker[AsyncSession], uuid.UUID, uuid.UUID],
+) -> None:
+    """La carrera real del recuperador, que las pruebas de arriba NO ejercitan.
+
+    Aquéllas cambian el estado **antes** de llamar a `liberar_huerfanos`, así que
+    lo que prueban es el filtro del SELECT: se verificó por mutación que pasan
+    igual con la escritura sin condiciones. La carrera que importa es la otra —el
+    SELECT ya eligió y el estado cambia **después**— y se reproduce con dos
+    recuperadores concurrentes sobre el mismo huérfano.
+
+    Con la mutación del objeto ORM los dos escriben (last write wins) y los dos lo
+    reportan liberado: dos órdenes para el mismo trabajo, que es la doble ejecución
+    que el lease existe para impedir. Con el UPDATE condicionado, el segundo ve
+    ``rowcount == 0`` y no lo cuenta.
+    """
+    factory, tenant_id, file_id = contexto
+    attempt_id, _ = await _registrar(factory, tenant_id, file_id, clave="carrera-1")
+
+    async with factory() as s:
+        token = await reclamar_intento(s, attempt_id)
+        await s.commit()
+    assert token is not None
+
+    async with factory() as s:
+        await s.execute(
+            text(
+                "UPDATE import_attempts SET lease_expires_at = now() - interval "
+                "'1 hour' WHERE id = :id"
+            ),
+            {"id": attempt_id},
+        )
+        await s.commit()
+
+    async def _recuperar() -> list[uuid.UUID]:
+        async with factory() as s:
+            liberados = await liberar_huerfanos(s)
+            await s.commit()
+            return liberados
+
+    a, b = await asyncio.gather(_recuperar(), _recuperar())
+    veces = [attempt_id in a, attempt_id in b].count(True)
+    assert veces == 1, (
+        f"{veces} recuperadores liberaron el mismo huérfano: se encola dos veces el "
+        "mismo trabajo"
+    )

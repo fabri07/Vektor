@@ -124,6 +124,11 @@ ERROR_ARCHIVO_BORRADO: Final = "archivo_borrado"
 #: que la persona vuelva a confirmar habiendo visto el preview con las reglas
 #: nuevas.
 ERROR_CAPACIDADES: Final = "capacidades_cambiaron"
+#: El archivo se volvió a LEER entre el registro y la ejecución: sus bytes son los
+#: mismos (el hash no lo detecta) pero su interpretación no. Tampoco reintentable:
+#: la interpretación nueva no se va a deshacer sola, y el archivo está perfecto —
+#: decirle "volvé a subirlo" mandaría a arreglar lo que no está roto.
+ERROR_REVISION: Final = "revision_cambiada"
 ERROR_TRANSITORIO: Final = "transitorio"
 ERROR_DESCONOCIDO: Final = "desconocido"
 

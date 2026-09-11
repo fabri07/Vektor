@@ -45,6 +45,7 @@ from app.application.services._savepoint import (
 from app.domain.import_attempt import (
     COMPLETADO,
     EJECUTANDO,
+    ERROR_TRANSITORIO,
     FALLADO,
     PENDIENTE,
     exigir_transicion,
@@ -105,7 +106,7 @@ class ResultadoDeRegistro:
 
 
 class SolicitudEnConflictoError(Exception):
-    """La misma clave de petición con un contenido distinto.
+    """La misma clave de petición para OTRA petición: otro archivo, u otro contenido.
 
     No se puede resolver sola y por eso es un error y no una decisión: devolver el
     intento viejo importaría algo que el usuario no pidió, y crear uno nuevo
@@ -117,7 +118,7 @@ class SolicitudEnConflictoError(Exception):
         self.intento_existente = intento_existente
         super().__init__(
             "Ya hay una importación registrada con esta misma clave de petición "
-            "pero con otro contenido."
+            "pero para otro archivo o con otro contenido."
         )
 
 
@@ -154,7 +155,7 @@ async def registrar_intento(
 
     existente = await _buscar_por_clave(session, tenant_id, request_key)
     if existente is not None:
-        return _resolver_existente(existente, huella)
+        return _resolver_existente(existente, huella, file_id)
 
     intento = ImportAttempt(
         id=uuid.uuid4(),
@@ -185,7 +186,7 @@ async def registrar_intento(
         ganador = await _buscar_por_clave(session, tenant_id, request_key)
         if ganador is None:  # pragma: no cover — el unique acaba de rechazarnos
             raise
-        return _resolver_existente(ganador, huella)
+        return _resolver_existente(ganador, huella, file_id)
 
     # La ORDEN, en esta misma transacción. Si el caller revierte, se van las dos.
     session.add(
@@ -200,8 +201,24 @@ async def registrar_intento(
     return ResultadoDeRegistro(intento, creado=True)
 
 
-def _resolver_existente(intento: ImportAttempt, huella: str) -> ResultadoDeRegistro:
-    if intento.payload_hash != huella:
+def _resolver_existente(
+    intento: ImportAttempt, huella: str, file_id: uuid.UUID
+) -> ResultadoDeRegistro:
+    """¿La petición que ya existe es LA MISMA petición?
+
+    El ``file_id`` entra en la comparación y no en la huella del payload, por dos
+    razones. La primera es que tiene que entrar: el archivo no está en el cuerpo
+    —es un parámetro de la ruta— así que dos archivos distintos con los mismos
+    mapeos dan la misma huella, y sin esto el segundo recibía el intento del
+    PRIMERO. El cliente creía haber registrado su importación y ese archivo no se
+    importaba nunca: no es un duplicado, es una pérdida silenciosa.
+
+    La segunda es por qué no va adentro del hash: cambiar la entrada de la huella
+    invalidaría los intentos ya registrados —la misma clave daría otra huella y
+    pasaría a ser un conflicto— y romper lo que está en vuelo es justamente lo que
+    esta ruta existe para evitar.
+    """
+    if intento.file_id != file_id or intento.payload_hash != huella:
         raise SolicitudEnConflictoError(intento)
     return ResultadoDeRegistro(intento, creado=False)
 
@@ -346,6 +363,32 @@ async def cerrar_intento(
     return True
 
 
+async def reencolar_orden(session: AsyncSession, attempt_id: uuid.UUID) -> None:
+    """Vuelve a dejar pendiente la orden de este intento. **No commitea.**
+
+    Un intento que vuelve a ``PENDIENTE`` necesita una orden pendiente, o nadie lo
+    va a ejecutar: la original ya se marcó publicada. Y tiene que quedar pendiente
+    **en la misma transacción** que el cambio de estado.
+
+    Antes la recuperación resolvía esto llamando al broker directamente después de
+    commitear. Si esa llamada fallaba —broker caído, que es un motivo habitual de
+    que un ejecutor muera y haya huérfanos que recuperar— el intento quedaba
+    ``PENDIENTE`` sin ninguna orden pendiente: invisible para el publicador y para
+    siempre sin ejecución. O sea que la recuperación reabría exactamente la ventana
+    que el outbox existe para cerrar, y en el peor momento posible.
+
+    Se re-arma la fila que ya existe en vez de insertar otra: una orden por intento,
+    y el contador ``publish_attempts`` sigue contando sobre la misma — que es lo que
+    distingue un broker caído de un archivo malo.
+    """
+    await session.execute(
+        update(ImportOutbox)
+        .where(ImportOutbox.attempt_id == attempt_id)
+        .values(published_at=None)
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def liberar_huerfanos(
     session: AsyncSession, *, limite: int = 50
 ) -> list[uuid.UUID]:
@@ -353,16 +396,33 @@ async def liberar_huerfanos(
 
     Un ``EJECUTANDO`` con el lease vencido es, por definición, un ejecutor que no
     renovó: o murió, o se colgó tanto que ya no se le puede creer. Volverlo a
-    ``PENDIENTE`` es lo que permite que el publicador lo entregue de nuevo.
+    ``PENDIENTE`` **y re-armar su orden en la misma transacción** es lo que permite
+    que el publicador lo entregue de nuevo sin depender de que el broker responda
+    justo ahora (ver ``reencolar_orden``).
 
     Los que ya agotaron ``max_attempts`` se marcan ``FALLADO`` en vez de volver a
     la cola: reintentar sin límite un trabajo que mata al ejecutor lo único que
     logra es matar a los siguientes.
     """
-    vencidos = (
+    # El SELECT sólo elige CANDIDATOS. La decisión la toma cada UPDATE, que repite
+    # las condiciones en su propio WHERE. Es el mismo patrón CAS que
+    # `reclamar_intento` y `cerrar_intento` ya usan; éste era el único de los tres
+    # que no lo seguía —hacía SELECT y después mutaba el objeto ORM, o sea escribía
+    # sobre un estado que ya no había verificado—.
+    #
+    # Lo que eso rompía, medido: dos recuperadores concurrentes sobre el mismo
+    # huérfano lo liberaban LOS DOS (last write wins, los dos lo reportan), o sea
+    # dos órdenes para el mismo trabajo — la doble ejecución que el lease existe
+    # para impedir. Con el UPDATE condicionado el segundo ve `rowcount == 0`.
+    # Compuerta: `test_dos_recuperadores_simultaneos_liberan_el_huerfano_una_sola_vez`.
+    candidatos = (
         (
             await session.execute(
-                select(ImportAttempt)
+                select(
+                    ImportAttempt.id,
+                    ImportAttempt.attempts,
+                    ImportAttempt.max_attempts,
+                )
                 .where(
                     ImportAttempt.status == EJECUTANDO,
                     ImportAttempt.lease_expires_at < func.now(),
@@ -370,29 +430,67 @@ async def liberar_huerfanos(
                 .limit(limite)
             )
         )
-        .scalars()
+        .tuples()
         .all()
     )
     liberados: list[uuid.UUID] = []
-    for intento in vencidos:
-        agotado = intento.attempts >= intento.max_attempts
-        intento.status = FALLADO if agotado else PENDIENTE
-        intento.lease_token = None
-        intento.lease_expires_at = None
-        intento.phase = None
+    tomados = 0
+    for attempt_id, intentos, maximo in candidatos:
+        agotado = intentos >= maximo
+        valores: dict[str, Any] = {
+            "status": FALLADO if agotado else PENDIENTE,
+            "lease_token": None,
+            "lease_expires_at": None,
+            "phase": None,
+        }
         if agotado:
-            intento.error_code = "transitorio"
-            intento.error_detail = (
+            valores["error_code"] = ERROR_TRANSITORIO
+            valores["error_detail"] = (
                 "La importación se interrumpió y ya se reintentó el máximo de "
                 "veces. Volvé a confirmar el archivo."
             )
-            intento.finished_at = datetime.now(UTC)
-        else:
-            liberados.append(intento.id)
-    if vencidos:
+            valores["finished_at"] = datetime.now(UTC)
+        resultado = await session.execute(
+            update(ImportAttempt)
+            .where(
+                ImportAttempt.id == attempt_id,
+                # Las dos condiciones que hacían huérfano a este intento, repetidas
+                # acá para que la escritura no pueda aplicarse sobre otro estado.
+                ImportAttempt.status == EJECUTANDO,
+                ImportAttempt.lease_expires_at < func.now(),
+                # NO se compara el `lease_token`.
+                #
+                # Parecía la pieza obvia del fencing y se probó: ningún escenario la
+                # necesita. Los tres casos que preocupaban —el ejecutor renovó,
+                # terminó, o lo reemplazó otro— mueven `status` o `lease_expires_at`,
+                # y las dos condiciones de arriba ya los excluyen; un token viejo
+                # sobre un intento que volvió a quedar huérfano describe un huérfano
+                # de verdad, así que liberarlo es correcto. Una mutación que borraba
+                # la comparación de token NO rompió ninguna prueba: código sin un
+                # caso que lo justifique, y con un borde propio (``lease_token =
+                # NULL`` no matchea NUNCA en SQL, así que un EJECUTANDO con token
+                # nulo no se habría podido liberar jamás).
+            )
+            .values(**valores)
+        )
+        if cast("CursorResult[Any]", resultado).rowcount != 1:
+            # El intento se movió solo: renovó, terminó, o lo tomó otro. No es un
+            # error — es la prueba de que no estaba huérfano.
+            logger.info(
+                "ingestion.intento.huerfano_se_movio_solo", attempt_id=str(attempt_id)
+            )
+            continue
+        tomados += 1
+        if not agotado:
+            # La orden se re-arma ACÁ —misma transacción que el cambio de estado—
+            # para que no pueda existir un PENDIENTE sin orden pendiente.
+            await reencolar_orden(session, attempt_id)
+            liberados.append(attempt_id)
+    if candidatos:
         logger.info(
             "ingestion.intento.huerfanos",
-            vencidos=len(vencidos),
+            candidatos=len(candidatos),
+            tomados=tomados,
             reencolados=len(liberados),
         )
     return liberados
@@ -469,6 +567,7 @@ __all__ = [
     "obtener_intento",
     "ordenes_pendientes",
     "reclamar_intento",
+    "reencolar_orden",
     "registrar_intento",
     "renovar_lease",
 ]

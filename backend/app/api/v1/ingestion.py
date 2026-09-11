@@ -112,6 +112,7 @@ from app.application.services.ingestion_lease_service import (
     ImportLeaseLostError,
     acquire_import_lease,
     finalize_import_lease,
+    import_lease_vivo,
     release_import_lease,
 )
 from app.application.services.ingestion_schema_decision_service import (
@@ -1799,6 +1800,69 @@ def _sanitize_error_message(exc: BaseException) -> str:
     return str(exc)[:500]
 
 
+#: Código que el ejecutor reconoce para distinguir "el archivo cambió de revisión"
+#: de "el archivo no está". El usuario no tiene que volver a SUBIR nada: su archivo
+#: está perfecto, lo que cambió es la interpretación.
+REVISION_CAMBIADA_CODE = "FILE_REVISION_CHANGED"
+
+
+async def _exigir_revision_confirmada(
+    session: AsyncSession,
+    record: UploadedFile,
+    body: ConfirmIngestionRequest,
+    file_id: uuid.UUID,
+    tenant: Tenant,
+) -> None:
+    """Rechaza el import si el archivo cambió de revisión desde que se confirmó.
+
+    Sólo aplica cuando la request trae la revisión esperada, o sea en el camino
+    asíncrono: el ejecutor la inyecta desde las columnas del intento. En el confirm
+    sincrónico los dos campos van en ``None`` y esto no hace nada — no hay ventana
+    que cubrir.
+
+    Se relee el archivo en vez de confiar en el ``record`` de arriba: ese se cargó
+    antes del lease, y justamente lo que se quiere saber es el estado de AHORA.
+    """
+    esperada_ingestion = body.revision_ingestion
+    esperada_preview = body.revision_preview
+    if esperada_ingestion is None and esperada_preview is None:
+        return
+
+    await session.refresh(record, ["ingestion_version", "latest_preview_version"])
+    actual_ingestion = record.ingestion_version
+    actual_preview = record.latest_preview_version
+
+    cambios: list[str] = []
+    if esperada_ingestion is not None and actual_ingestion != esperada_ingestion:
+        cambios.append(f"interpretación {esperada_ingestion} → {actual_ingestion}")
+    if esperada_preview is not None and actual_preview != esperada_preview:
+        cambios.append(f"revisión {esperada_preview} → {actual_preview}")
+    if not cambios:
+        return
+
+    logger.warning(
+        "ingestion.confirm.revision_cambiada",
+        file_id=str(file_id),
+        tenant_id=str(tenant.tenant_id),
+        esperada_ingestion=esperada_ingestion,
+        actual_ingestion=actual_ingestion,
+        esperada_preview=esperada_preview,
+        actual_preview=actual_preview,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": REVISION_CAMBIADA_CODE,
+            "message": (
+                "El archivo se volvió a leer después de que confirmaste esta "
+                f"importación ({', '.join(cambios)}). No se importó nada: lo que "
+                "entraría no es lo que viste. Revisá la lectura nueva y confirmá "
+                "de nuevo."
+            ),
+        },
+    )
+
+
 @router.post(
     "/files/{file_id}/confirm",
     response_model=ConfirmIngestionResponse,
@@ -2756,6 +2820,19 @@ async def confirm_file(
     # compensación. El commit final del request cierra la transacción completa.
     _import_sp = await session.begin_nested()
     try:
+        # E7-review #1: ¿el archivo sigue en la REVISIÓN que se confirmó?
+        #
+        # Va acá, con el lease YA tomado, y no junto a las validaciones previas: el
+        # lease es lo que impide que una relectura se meta entre la verificación y
+        # la lectura del resumen (`reread_apply` lo respeta desde esta misma
+        # entrega). Verificar antes del lease dejaría la ventana abierta.
+        #
+        # Y no alcanza con el hash del contenido: `content_hash` es el sha256 de los
+        # BYTES, y una relectura no los toca — reescribe `parsed_summary_json` y sube
+        # `ingestion_version`. Con sólo el hash, registrar $3.000 y ejecutar $27.000
+        # es alcanzable, y está reproducido.
+        await _exigir_revision_confirmada(session, record, body, file_id, tenant)
+
         # Crear definiciones de campos personalizados para mapeos custom_field:{key}
         # — idempotente, sin commit propio; el commit final cierra la transacción completa.
         if body.column_mappings:
@@ -3979,6 +4056,23 @@ async def reread_apply(
         check_ingestion_workers_available,
     )
 
+    # E7-review #1 (la otra mitad): la relectura respeta el lease del IMPORT.
+    #
+    # Un apply reescribe `parsed_summary_json` y sube `ingestion_version`, o sea la
+    # INTERPRETACIÓN del archivo. Si corre mientras un import la está leyendo, el
+    # import persiste números de una lectura que nadie confirmó. Este endpoint no
+    # miraba `processing_status` en absoluto, así que las dos cosas podían pasar a la
+    # vez; la verificación de revisión del confirm sin esto sólo angostaba la ventana.
+    if await import_lease_vivo(session, tenant.tenant_id, file_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Este archivo se está importando en este momento. Esperá a que "
+                "termine antes de volver a leerlo: si se relee ahora, la "
+                "importación guardaría números de una lectura que no confirmaste."
+            ),
+        )
+
     # Antes del guard anti-duplicado: un run zombie de un apply que murió por
     # timeout no tiene que bloquear el reintento del usuario.
     await _barrer_relecturas_colgadas(session)
@@ -4320,7 +4414,14 @@ async def registrar_importacion(
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
 
-    _payload = body.model_dump(mode="json", exclude={"request_key"})
+    # La revisión NO entra al payload congelado: vive en las columnas del intento
+    # (`ingestion_version`/`preview_version`) y el ejecutor la inyecta al construir
+    # la request. Metiéndola acá cambiaría la ENTRADA de la huella, y una clave de
+    # petición repetida después del deploy pasaría a ser un conflicto — romper lo
+    # que está en vuelo es lo que esta ruta existe para evitar.
+    _payload = body.model_dump(
+        mode="json", exclude={"request_key", "revision_ingestion", "revision_preview"}
+    )
     try:
         registro = await registrar_intento(
             session,
@@ -4342,8 +4443,9 @@ async def registrar_importacion(
             detail={
                 "code": "REQUEST_KEY_CONFLICT",
                 "message": (
-                    "Ya registraste una importación con esta misma clave pero con "
-                    "otro contenido. Consultá la que existe o usá una clave nueva."
+                    "Ya registraste una importación con esta misma clave pero para "
+                    "otro archivo o con otro contenido. Consultá la que existe o "
+                    "usá una clave nueva."
                 ),
                 "attempt_id": str(conflicto.intento_existente.id),
             },

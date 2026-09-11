@@ -121,6 +121,13 @@ SELECT id, tenant_id, attempts, lease_expires_at
 FROM import_attempts
 WHERE status = 'EJECUTANDO' AND lease_expires_at < now();
 
+-- Importaciones rechazadas porque el archivo se releyó después de confirmarse.
+-- No es un error del sistema: alguien apretó "volver a leer" mientras su import
+-- estaba en cola. El archivo está intacto; hay que confirmar de nuevo.
+SELECT tenant_id, file_id, error_detail, created_at
+FROM import_attempts
+WHERE error_code = 'revision_cambiada' ORDER BY created_at DESC;
+
 -- Por qué fallan. `error_code` es un set cerrado y se puede agrupar.
 SELECT error_code, count(*) FROM import_attempts
 WHERE status = 'FALLADO' GROUP BY error_code ORDER BY 2 DESC;
@@ -190,12 +197,19 @@ encolado.** Se puede girar cuando quieras, pero los intentos en vuelo de ese
 tenant se rechazan y hay que volver a confirmarlos. Es deliberado: la alternativa
 era importar bajo reglas que el usuario no vio.
 
-**Atomicidad entre los efectos y el cierre del intento.** `confirm_file` cierra su
-propia transacción. Si el proceso muere entre el commit de los efectos y el cierre
-del intento, el intento queda `EJECUTANDO`, la recuperación lo reencola, y la
-segunda corrida no duplica nada porque las huellas de fila hacen el import
-idempotente. La ventana existe, se recupera sola, y el precio es una corrida extra
-que no escribe nada. Está probado, no asumido.
+**Lo que este runbook afirmaba y era falso (corregido 2026-09-11).** Decía que los
+efectos y el cierre del intento no commitean juntos, que la ventana "se recupera
+sola" y que eso estaba probado. Lo probado era que la segunda corrida **no
+duplica**; que el intento terminara bien, no. No terminaba: el confirm rechaza un
+archivo que ya está en `DONE`, así que el intento quedaba `FALLADO` informando
+fracaso sobre una importación que había funcionado, y su resultado no se podía
+recuperar de ningún lado.
+
+Ya no hay ventana: `confirm_file` no commitea (abre un savepoint que cierra el
+caller), así que el cierre del intento va en la **misma transacción** que los
+efectos. O commitean las dos cosas o ninguna. Si el cierre falla, el rollback se
+lleva los efectos y el archivo vuelve a `NEEDS_CONFIRMATION` — el estado del
+archivo y los libros no pueden discrepar.
 
 **Que el frontend caiga a `/confirm` si el POST falla.** Sólo lo hace ante un
 **404** —la compuerta apagada, donde el servidor respondió sin mirar el cuerpo—.

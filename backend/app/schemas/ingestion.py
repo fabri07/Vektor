@@ -660,6 +660,31 @@ class ConfirmIngestionRequest(BaseModel):
             "de descuento mapeada no quede ignorada en silencio."
         ),
     )
+    #: **A qué REVISIÓN del archivo se le dijo que sí.** Los pone el ejecutor
+    #: asíncrono desde las columnas del intento, no el cliente.
+    #:
+    #: Una relectura no cambia los bytes del archivo —reescribe su interpretación—
+    #: así que el hash del contenido no la detecta: hay que comparar la revisión.
+    #: Sin esto, una relectura entre el registro y la ejecución hace que se importe
+    #: una interpretación que el usuario nunca vio.
+    #:
+    #: En el confirm sincrónico van en ``None`` y no se verifica nada: no hay
+    #: ventana que cubrir (el mismo proceso mostró el preview y escribe los
+    #: efectos) y el lease del archivo excluye al resto.
+    revision_ingestion: int | None = Field(
+        default=None,
+        description=(
+            "Interno: `ingestion_version` del archivo cuando se confirmó. Lo "
+            "completa el ejecutor asíncrono; el cliente no lo manda."
+        ),
+    )
+    revision_preview: int | None = Field(
+        default=None,
+        description=(
+            "Interno: `latest_preview_version` del archivo cuando se confirmó. Lo "
+            "completa el ejecutor asíncrono; el cliente no lo manda."
+        ),
+    )
 
 
 class InventoryImpactItem(BaseModel):
