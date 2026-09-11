@@ -144,6 +144,11 @@ from app.domain.inventory_effect import (
     replay_scope,
     resolve_inventory_effects,
 )
+from app.domain.legacy_import_guard import (
+    MENSAJE_LEGACY_SIN_CONTEXTOS,
+    MOTIVO_LEGACY_SIN_CONTEXTOS,
+    importaria_operaciones_sin_identidad,
+)
 from app.domain.purchase_cost import CENTAVO
 from app.domain.purchase_cost_decision import (
     PurchaseCostDecision as CostDecision,
@@ -2726,6 +2731,27 @@ async def confirm_file(
     # validar deja de depender de que esas compras ya estén aplicadas. Ver el
     # docstring de `domain/inventory_replay_gate`. Un archivo plano no se rechaza
     # más por serlo.
+
+    # ── E6b: el histórico sin contextos no persiste operaciones a ciegas ───────
+    # Va acá, entre las validaciones puras y el lease, por la misma razón que
+    # todas las de arriba: una request que va a rebotar no toma el lease ni
+    # escribe una fila. El valor de este rechazo es no haber escrito.
+    if importaria_operaciones_sin_identidad(_summary_for_ctx, body.confirmed_fields):
+        await _emit_validation_reject(
+            MOTIVO_LEGACY_SIN_CONTEXTOS,
+            {
+                "inferred_type": _summary_for_ctx.get("inferred_type"),
+                "multi_sheet": bool(_summary_for_ctx.get("multi_sheet")),
+                # Cuántas filas quedaron sin importar, para poder dimensionar el
+                # caso en la traza sin abrir el summary.
+                "filas_venta": len(_summary_for_ctx.get("ventas_detectadas") or []),
+                "filas_gasto": len(_summary_for_ctx.get("gastos_detectados") or []),
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=MENSAJE_LEGACY_SIN_CONTEXTOS,
+        )
 
     # ── F4: tomar el lease per-file ANTES de cualquier escritura ────────────────
     # CAS atómico NEEDS_CONFIRMATION→IMPORTING (o takeover si quedó stale),

@@ -25,6 +25,7 @@ que se afirma es la entidad persistida (o su ausencia, y la fila en "Otros").
 from __future__ import annotations
 
 import io
+import unittest.mock
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -37,8 +38,10 @@ from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import reread_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
+from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
@@ -105,6 +108,13 @@ async def _ventas(db_session: AsyncSession, tenant: Tenant) -> list[SaleEntry]:
         select(SaleEntry).where(
             SaleEntry.tenant_id == tenant.tenant_id, SaleEntry.voided_at.is_(None)
         )
+    )
+    return list(result.scalars().all())
+
+
+async def _productos(db_session: AsyncSession, tenant: Tenant) -> list[Product]:
+    result = await db_session.execute(
+        select(Product).where(Product.tenant_id == tenant.tenant_id)
     )
     return list(result.scalars().all())
 
@@ -305,6 +315,23 @@ async def test_una_celda_vacia_sigue_valiendo_una_unidad(
     assert await _otros(db_session, sample_tenant) == []
 
 
+def _libro_multihoja_de_productos_con_montos_con_punto() -> bytes:
+    """Dos hojas —catálogo + gastos— para entrar por el camino multihoja con el
+    bucket de PRODUCTOS poblado, que es el que el legacy sigue importando."""
+    wb = Workbook()
+    productos = wb.active
+    productos.title = "Productos"
+    productos.append(["producto", "precio", "cantidad"])
+    productos.append([_PRODUCTO, "8.400", 7])
+    productos.append(["Sahumerio lavanda 20u", "7.000", 3])
+    gastos = wb.create_sheet("Gastos")
+    gastos.append(["fecha", "descripcion", "monto", "forma de pago"])
+    gastos.append(["2024-03-10", "Alquiler", 150000, "transferencia"])
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
 def _libro_multihoja_con_montos_con_punto() -> bytes:
     """Dos hojas, que es lo que hace falta: el camino legacy sólo se alcanza desde
     ``_insert_multisheet_data`` (``inferred_type == "mixed"`` o ``multi_sheet``).
@@ -324,23 +351,92 @@ def _libro_multihoja_con_montos_con_punto() -> bytes:
     return buffer.getvalue()
 
 
-async def test_el_camino_legacy_respeta_el_ignore_y_el_convenio(
+@pytest_asyncio.fixture
+async def _legacy_de_productos_importado(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> list[Product]:
+    """Un catálogo histórico —sin ``mapping_contexts``— importado UNA vez.
+
+    E2/E4: este camino entregaba la fila CRUDA a los lectores. La columna marcada
+    ``ignore`` la encontraba igual ``_row_val`` por keyword, y los montos se leían
+    celda por celda sin el convenio de su columna. Los otros dos caminos ya
+    preparaban las filas; éste no, y la diferencia no la justifica nada — la
+    decisión del usuario no depende del formato en que se guardó el summary.
+
+    **Se mide sobre PRODUCTOS y ya no sobre ventas** (E6b): desde que el camino
+    legacy no puede persistir operaciones sin identidad, el bucket de productos
+    es el que lo sigue ejerciendo. No es un sustituto lejano — las filas pasan
+    por ``preparar_filas_de_hoja``, la MISMA función, con el mismo conjunto de
+    columnas ignoradas.
+
+    Las dos garantías se afirman por separado (una prueba cada una) sobre esta
+    única corrida: son defectos independientes y tienen que poder fallar por
+    separado.
+    """
+    record = await _subir(
+        db_session,
+        sample_tenant,
+        _libro_multihoja_de_productos_con_montos_con_punto(),
+        "legacy_productos.xlsx",
+        legacy=True,
+    )
+    assert "mapping_contexts" not in record.parsed_summary_json
+    assert record.parsed_summary_json.get("multi_sheet") or (
+        record.parsed_summary_json.get("inferred_type") == "mixed"
+    ), "sin esto el confirm entraría por el camino plano y el test no probaría nada"
+
+    resp = await client.post(
+        f"/api/v1/ingestion/files/{record.id}/confirm",
+        json={
+            "column_mappings": [
+                _map("producto", "name"),
+                _map("precio", "sale_price_ars"),
+                _map("cantidad", "ignore"),
+            ],
+            "confirmed_fields": {"productos": True},
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    productos = await _productos(db_session, sample_tenant)
+    assert len(productos) == 2, f"se esperaban los dos productos, hay {len(productos)}"
+    return productos
+
+
+async def test_el_legacy_de_productos_respeta_el_ignore(
+    _legacy_de_productos_importado: list[Product],
+) -> None:
+    """La columna ignorada es ``cantidad``, elegida porque su efecto es
+    observable en la fila guardada: sin el filtrado entra como stock."""
+    stocks = [p.stock_units for p in _legacy_de_productos_importado]
+    assert set(stocks) == {0}, f"la cantidad ignorada entró igual como stock: {stocks}"
+
+
+async def test_el_legacy_de_productos_respeta_el_convenio_numerico(
+    _legacy_de_productos_importado: list[Product],
+) -> None:
+    """`"8.400"` es ocho mil cuatrocientos: el punto de esa columna es de miles."""
+    precios = sorted(p.sale_price_ars for p in _legacy_de_productos_importado)
+    assert precios == [Decimal("7000"), Decimal("8400")], (
+        f"los precios se leyeron sin el convenio de su columna: {[str(p) for p in precios]}"
+    )
+
+
+async def test_el_legacy_de_ventas_ya_no_importa_y_explica_como_releer(
     client: AsyncClient,
     auth_headers: dict[str, str],
     db_session: AsyncSession,
     sample_tenant: Tenant,
 ) -> None:
-    """E2/E4 — un summary sin ``mapping_contexts`` no es un summary sin decisiones.
+    """E6b — el MISMO archivo que antes importaba ventas por acá, ahora rebota.
 
-    Este camino entregaba la fila CRUDA a los lectores: la columna `cantidad`
-    marcada `ignore` la encontraba igual ``_row_val`` por keyword, y los montos se
-    leían celda por celda sin el convenio de su columna. Los otros dos caminos ya
-    preparaban las filas; éste no, y la diferencia no la justifica nada — la
-    decisión del usuario no depende del formato en que se guardó el summary.
-
-    Se afirman las dos mitades sobre la misma corrida: la cantidad ignorada NO
-    llega a la venta, y los montos con separador de miles SÍ se leen (8.400 y
-    7.000, no 8,4 y 7).
+    El contrato cambió a propósito: este camino no calcula ni consulta identidad
+    fuerte, así que una fila que entre por acá puede duplicar una operación que
+    otro archivo ya cargó — y nadie puede saber que es la misma. Lo que se afirma
+    es el rechazo, su acción concreta y que no quedó NINGÚN efecto económico.
     """
     record = await _subir(
         db_session,
@@ -349,10 +445,6 @@ async def test_el_camino_legacy_respeta_el_ignore_y_el_convenio(
         "legacy.xlsx",
         legacy=True,
     )
-    assert "mapping_contexts" not in record.parsed_summary_json
-    assert record.parsed_summary_json.get("multi_sheet") or (
-        record.parsed_summary_json.get("inferred_type") == "mixed"
-    ), "sin esto el confirm entraría por el camino plano y el test no probaría nada"
 
     resp = await client.post(
         f"/api/v1/ingestion/files/{record.id}/confirm",
@@ -369,15 +461,64 @@ async def test_el_camino_legacy_respeta_el_ignore_y_el_convenio(
         },
         headers=auth_headers,
     )
-    assert resp.status_code == 200, resp.text
+
+    assert resp.status_code == 422, resp.text
+    detalle = resp.json()["detail"]
+    assert "volvé a leer el archivo" in detalle.lower(), detalle
+    assert "subir" not in detalle.lower(), (
+        "el archivo está perfecto: lo viejo es su interpretación, no sus bytes"
+    )
+
+    assert await _ventas(db_session, sample_tenant) == []
+    assert await _otros(db_session, sample_tenant) == []
+
+
+async def test_la_relectura_importa_el_historico_con_su_interpretacion(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    mock_score_trigger: Any,
+) -> None:
+    """La salida que ofrece el rechazo tiene que terminar con el archivo adentro.
+
+    No alcanza con que la relectura devuelva contextos: lo que cierra el circuito
+    es que las filas queden persistidas y que la interpretación numérica de E4
+    siga valiendo sobre el resumen nuevo — releer no puede ser la puerta trasera
+    por donde `8.400` vuelve a entrar como 8,4.
+
+    Y se afirma acá lo que el rechazo promete, que **no** es reconfirmar: la
+    relectura importa ella misma, con el resumen fresco. Ese resumen sí trae
+    ``mapping_contexts``, así que la fila entra por el camino que planifica
+    identidades — que es exactamente el motivo del bloqueo.
+
+    Sobre el ``ignore``: en este recorrido no hay ninguno que conservar. El
+    confirm rebotó ANTES de persistir borrador, así que no existe decisión del
+    usuario sobre estas columnas y la relectura re-deriva el mapeo. Las
+    decisiones que sí existen las cubre la suite de relectura; acá se afirma lo
+    que este archivo puede afirmar.
+    """
+    contenido = _libro_multihoja_con_montos_con_punto()
+    record = await _subir(
+        db_session, sample_tenant, contenido, "legacy.xlsx", legacy=True
+    )
+
+    with unittest.mock.patch(
+        "app.integrations.s3.S3Client.download",
+        new_callable=unittest.mock.AsyncMock,
+        return_value=contenido,
+    ):
+        resultado = await reread_service.apply_reread(
+            db_session, record.id, sample_tenant.tenant_id
+        )
+        await db_session.commit()
+
+    # `legacy_fallback` False = la relectura interpretó el archivo de verdad, no
+    # cayó al contexto único que se inventa cuando no puede.
+    assert resultado.legacy_fallback is False
+    assert resultado.inserted == 3, f"insertó {resultado.inserted}"
 
     ventas = await _ventas(db_session, sample_tenant)
-    assert len(ventas) == 2, f"se esperaban las dos filas, hay {len(ventas)}"
-    assert {v.quantity for v in ventas} == {1}, (
-        f"la cantidad ignorada entró igual: {[v.quantity for v in ventas]}"
-    )
     assert sorted(v.amount for v in ventas) == [Decimal("7000"), Decimal("8400")], (
-        f"los montos se leyeron sin el convenio de su columna: "
+        "tras la relectura los montos se leyeron sin el convenio de su columna: "
         f"{[str(v.amount) for v in ventas]}"
     )
 
