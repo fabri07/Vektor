@@ -72,6 +72,13 @@ class ImportAttempt(Base):
     #: Sobre qué revisión del archivo se confirmó.
     ingestion_version: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1)
     preview_version: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    #: **Qué compuertas de rollout estaban efectivas cuando el usuario confirmó.**
+    #: El ejecutor las verifica antes de escribir: si cambiaron, no importa nada y
+    #: lo dice, en vez de guardar números distintos de los que mostró el preview.
+    #: ``NULL`` = intento anterior a esta columna, que se ejecuta como antes (no hay
+    #: con qué comparar, y romper los intentos en vuelo de un deploy es lo que la
+    #: ruta asíncrona existe para evitar). Ver ``domain/import_capabilities.py``.
+    capabilities_json: Mapped[dict[str, Any] | None] = mapped_column(PGJSONB, nullable=True)
     #: A qué versión del ARCHIVO se le dijo que sí. Si el archivo se releyó entre
     #: el confirm y la ejecución, importar contra el contenido nuevo sería
     #: importar algo que el usuario nunca vio.

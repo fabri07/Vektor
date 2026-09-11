@@ -14,10 +14,11 @@ compuerta decide quién usa la ruta nueva; nada obliga a cortar de una vez.
 
 El orden importa y no es intercambiable.
 
-### 1. Migración aplicada
+### 1. Migraciones aplicadas
 
 ```
 20260910_0004  import_attempts + import_outbox
+20260910_0005  import_attempts.capabilities_json
 ```
 
 Additive: dos tablas nuevas, ninguna columna existente tocada. Correr antes que
@@ -123,7 +124,57 @@ WHERE status = 'EJECUTANDO' AND lease_expires_at < now();
 -- Por qué fallan. `error_code` es un set cerrado y se puede agrupar.
 SELECT error_code, count(*) FROM import_attempts
 WHERE status = 'FALLADO' GROUP BY error_code ORDER BY 2 DESC;
+
+-- Intentos que se rechazaron porque una compuerta cambió mientras estaban en
+-- vuelo. Un puñado justo después de girar una llave es lo esperado (ver abajo);
+-- un goteo constante significa que la api y el worker NO tienen el mismo
+-- entorno, y ahí el problema es la configuración, no los archivos.
+SELECT tenant_id, capabilities_json, error_detail, created_at
+FROM import_attempts
+WHERE error_code = 'capacidades_cambiaron' ORDER BY created_at DESC;
 ```
+
+---
+
+## Girar otra compuerta de rollout con importaciones en vuelo
+
+Las cuatro compuertas que cambian **qué se persiste** de un mismo archivo
+
+| variable |
+|---|
+| `PURCHASE_COST_ROLLOUT_TENANT_IDS` |
+| `PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS` |
+| `CATALOG_FINAL_COST_ROLLOUT_TENANT_IDS` |
+| `INGESTION_SCHEMA_DECISIONS_ROLLOUT_TENANT_IDS` |
+
+quedan **congeladas en cada intento** (`capabilities_json`) en el momento en que
+el usuario confirma. Antes de escribir nada, el ejecutor compara contra las
+vigentes; si cambiaron, **no importa y lo dice** (`capacidades_cambiaron`).
+
+Existe porque la api y el worker son dos servicios con entornos propios que
+Railway redespliega en paralelo: sin esto, alguien confirma viendo el preview con
+el motor de costos de compra encendido y el worker escribe los costos con el
+motor apagado. Números distintos de los que mostró la pantalla, sin un error a la
+vista.
+
+**La consecuencia operativa:** girar una de esas llaves para un tenant invalida
+los intentos que ese tenant tenía encolados. Son segundos o minutos de trabajo, y
+el usuario ve un mensaje que le dice que vuelva a confirmar — no un import a
+medias. Si querés evitarle el reintento, esperá a que no quede nada corriendo:
+
+```sql
+SELECT count(*) FROM import_attempts
+WHERE tenant_id = '<uuid>' AND status IN ('PENDIENTE','EJECUTANDO');
+```
+
+Un intento registrado **antes** de la migración `0005` tiene `capabilities_json`
+en `NULL` y se ejecuta sin verificar: no hay con qué comparar, y romper los
+intentos en vuelo durante el deploy es exactamente lo que esta ruta existe para
+evitar.
+
+El usuario no queda trabado: al llegar a un estado terminal el frontend olvida la
+clave de petición, así que volver a confirmar registra un intento nuevo con las
+capacidades vigentes. No hay que limpiar nada a mano.
 
 ---
 
@@ -133,6 +184,11 @@ WHERE status = 'FALLADO' GROUP BY error_code ORDER BY 2 DESC;
 tenerlo. La misma orden se puede entregar dos veces —el publicador entrega primero
 y marca después, porque al revés perdería órdenes— y lo que impide la doble
 ejecución es el **lease con token del intento**, no el transporte.
+
+**Que una compuerta se pueda girar sin consecuencias para lo que ya está
+encolado.** Se puede girar cuando quieras, pero los intentos en vuelo de ese
+tenant se rechazan y hay que volver a confirmarlos. Es deliberado: la alternativa
+era importar bajo reglas que el usuario no vio.
 
 **Atomicidad entre los efectos y el cierre del intento.** `confirm_file` cierra su
 propia transacción. Si el proceso muere entre el commit de los efectos y el cierre

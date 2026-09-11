@@ -50,6 +50,7 @@ from app.domain.import_attempt import (
     exigir_transicion,
     huella_de_solicitud,
 )
+from app.domain.import_capabilities import capacidades_efectivas
 from app.observability.logger import get_logger
 from app.persistence.models.import_attempt import ImportAttempt, ImportOutbox
 
@@ -163,6 +164,11 @@ async def registrar_intento(
         payload_hash=huella,
         payload_json=payload,
         payload_version=PAYLOAD_VERSION,
+        # E7a-lite: qué compuertas de rollout estaban efectivas cuando el usuario
+        # dijo que sí. Se mide ACÁ —en el proceso que atiende el confirm, que es el
+        # mismo que armó el preview— porque el que ejecuta puede tener otro
+        # entorno. El ejecutor verifica antes de escribir.
+        capabilities_json=capacidades_efectivas(tenant_id),
         ingestion_version=ingestion_version,
         preview_version=preview_version,
         file_content_hash=file_content_hash,

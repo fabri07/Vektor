@@ -430,3 +430,96 @@ async def test_un_worker_viejo_no_pierde_la_orden(
     # Aterriza el worker nuevo.
     assert await _ejecutar(attempt_id) == "completado"
     assert len(await _gastos(db_session, sample_tenant)) == 2
+
+
+# ── Capacidades efectivas (E7a-lite) ─────────────────────────────────────────
+async def test_una_compuerta_que_cambia_entre_registro_y_ejecucion_no_importa_nada(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    habilitado: None,
+    ejecutor_con_la_sesion_del_test: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La mitad del congelamiento que faltaba: el ENTORNO, no sólo el archivo.
+
+    Las compuertas de rollout se leen al importar, y el que importa no es el
+    proceso que armó el preview: la api y el worker son dos servicios con
+    entornos propios que Railway redespliega en paralelo. Sin esta verificación,
+    alguien confirma viendo el motor de costos de compra encendido y el worker
+    escribe los costos con el motor apagado — números distintos de los que mostró
+    la pantalla, sin un error a la vista.
+
+    Lo que se afirma acá es que **no se escribió nada** y que el motivo es
+    accionable, no que el intento "falló".
+    """
+    # Se engancha la COMPUERTA REAL y no `capacidades_efectivas`: así el snapshot
+    # se arma con los nombres de verdad, y el mismo hook vale para el registro y
+    # para la ejecución (`capacidades_efectivas` la resuelve en cada llamada).
+    import app.config.purchase_cost_rollout as rollout
+
+    record = await _archivo(db_session, sample_tenant)
+
+    # Se confirma con el motor de costos de compra ENCENDIDO.
+    monkeypatch.setattr(rollout, "purchase_cost_enabled_for", lambda _t: True)
+    registro = await client.post(
+        f"/api/v1/ingestion/files/{record.id}/imports",
+        json=_cuerpo("capacidades-1"),
+        headers=auth_headers,
+    )
+    assert registro.status_code == 202
+    attempt_id = registro.json()["attempt_id"]
+
+    # Entre el registro y la ejecución, alguien la apaga (o el worker corre con
+    # otro entorno, que desde acá es indistinguible y tiene la misma consecuencia).
+    monkeypatch.setattr(rollout, "purchase_cost_enabled_for", lambda _t: False)
+
+    assert await _ejecutar(attempt_id) == "fallado"
+    # Lo que importa: NO se escribió nada.
+    assert not await _gastos(db_session, sample_tenant)
+
+    consulta = await client.get(
+        f"/api/v1/ingestion/imports/{attempt_id}", headers=auth_headers
+    )
+    cuerpo = consulta.json()
+    assert cuerpo["status"] == "FALLADO"
+    assert cuerpo["error_code"] == "capacidades_cambiaron"
+    detalle = (cuerpo["error_detail"] or "").lower()
+    # El detalle nombra la compuerta (para el operador) y dice qué hacer (para el
+    # usuario). Un "configuración cambiada" a secas no sirve para ninguno de los dos.
+    assert "purchase_cost_rollout_tenant_ids" in detalle
+    assert "volvé a confirmar" in detalle
+
+
+async def test_un_intento_sin_snapshot_de_capacidades_se_ejecuta_igual(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    habilitado: None,
+    ejecutor_con_la_sesion_del_test: None,
+) -> None:
+    """Los intentos registrados antes de que la columna existiera.
+
+    Quedan con ``NULL``, que significa "no hay con qué comparar". Hacerlos fallar
+    rompería en el deploy justamente los intentos en vuelo que esta ruta existe
+    para no perder: la verificación tiene que ser una mejora para los nuevos, no
+    una trampa para los que ya estaban.
+    """
+    record = await _archivo(db_session, sample_tenant)
+    registro = await client.post(
+        f"/api/v1/ingestion/files/{record.id}/imports",
+        json=_cuerpo("capacidades-sin-snapshot"),
+        headers=auth_headers,
+    )
+    attempt_id = registro.json()["attempt_id"]
+
+    # Se simula el intento viejo: sin snapshot.
+    intento = await db_session.get(ImportAttempt, uuid.UUID(attempt_id))
+    assert intento is not None
+    intento.capabilities_json = None
+    await db_session.commit()
+
+    assert await _ejecutar(attempt_id) == "completado"
+    assert await _gastos(db_session, sample_tenant)

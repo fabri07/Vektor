@@ -132,6 +132,7 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
     from app.domain.import_attempt import (
         COMPLETADO,
         ERROR_ARCHIVO_BORRADO,
+        ERROR_CAPACIDADES,
         ERROR_DESCONOCIDO,
         ERROR_LIMITE,
         ERROR_VALIDACION,
@@ -160,6 +161,7 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
         file_id = intento.file_id
         payload_version = intento.payload_version
         hash_congelado = intento.file_content_hash
+        capacidades_congeladas = intento.capabilities_json
 
     from app.application.services.import_attempt_service import (  # noqa: PLC0415
         PAYLOAD_VERSION,
@@ -176,6 +178,34 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
             ERROR_VALIDACION,
             "Esta importación se registró con una versión anterior del sistema. "
             "Volvé a confirmar el archivo.",
+        )
+
+    # E7a-lite: ¿las compuertas de rollout siguen siendo las mismas que cuando el
+    # usuario confirmó? Este proceso NO es el que armó el preview —la api y el
+    # worker son dos servicios con entornos propios que Railway redespliega en
+    # paralelo— así que importar sin mirar esto puede guardar números distintos de
+    # los que mostró la pantalla, sin un solo error a la vista. Va ANTES de tocar
+    # nada: el valor de verificar es no haber escrito.
+    from app.domain.import_capabilities import (  # noqa: PLC0415
+        capacidades_efectivas,
+        diferencias,
+        texto_de_diferencias,
+    )
+
+    _difs = diferencias(capacidades_congeladas, capacidades_efectivas(tenant_id))
+    if _difs:
+        logger.warning(
+            "ingestion.intento.capacidades_cambiaron",
+            attempt_id=str(attempt_id),
+            tenant_id=str(tenant_id),
+            diferencias={k: list(v) for k, v in _difs.items()},
+        )
+        return await _cerrar_con_error(
+            factory,
+            attempt_id,
+            token,
+            ERROR_CAPACIDADES,
+            texto_de_diferencias(_difs),
         )
 
     # 2. Ejecutar, con el MISMO endpoint que usa la ruta sincrónica.

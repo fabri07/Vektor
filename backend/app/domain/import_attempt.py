@@ -119,6 +119,11 @@ ERROR_VALIDACION: Final = "validacion"
 ERROR_IMPORT_VACIO: Final = "import_vacio"
 ERROR_LEASE_PERDIDO: Final = "lease_perdido"
 ERROR_ARCHIVO_BORRADO: Final = "archivo_borrado"
+#: E7a-lite: las compuertas de rollout cambiaron entre el registro y la ejecución.
+#: NO es reintentable: reintentar lo volvería a encontrar cambiado, y el arreglo es
+#: que la persona vuelva a confirmar habiendo visto el preview con las reglas
+#: nuevas.
+ERROR_CAPACIDADES: Final = "capacidades_cambiaron"
 ERROR_TRANSITORIO: Final = "transitorio"
 ERROR_DESCONOCIDO: Final = "desconocido"
 
