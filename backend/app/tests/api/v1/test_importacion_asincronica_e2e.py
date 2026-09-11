@@ -421,7 +421,9 @@ async def test_un_worker_viejo_no_pierde_la_orden(
     assert not await _gastos(db_session, sample_tenant)
     db_session.expunge_all()
     intento = (
-        await db_session.execute(select(ImportAttempt).where(ImportAttempt.id == uuid.UUID(attempt_id)))
+        await db_session.execute(
+            select(ImportAttempt).where(ImportAttempt.id == uuid.UUID(attempt_id))
+        )
     ).scalar_one()
     assert intento.status == "PENDIENTE"
 

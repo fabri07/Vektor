@@ -6581,6 +6581,13 @@ async def _insert_multisheet_data(
             purchase_cost_decisions=purchase_cost_decisions,
         )
 
+    # E7a-lite: los motivos numéricos de TODAS las hojas, acumulados. El camino
+    # plano ya los contaba y publicaba `montos_ambiguos`; acá se descartaban con
+    # un `_` y el aviso específico de E4 no aparecía nunca. Peor: con el archivo
+    # entero ambiguo, el guard de import vacío tiraba el mensaje GENÉRICO ("no se
+    # detectaron las columnas requeridas"), que es exactamente la mentira que E4
+    # parte 2 arregló — manda a corregir un mapeo que estaba perfecto.
+    _motivos_numericos_del_archivo: Counter[str] = Counter()
     _planes_identidad: list[PlanDeIdentidad] = []
     _efectos_de_la_fila: list[tuple[str, uuid.UUID]] = []
     _skipped_brands: set[str] = set()
@@ -7028,7 +7035,39 @@ async def _insert_multisheet_data(
         )
         amount = _linea_gasto.amount
         if not amount:
-            return False
+            # E7a-lite: el gasto sin monto utilizable va a "Otros", igual que la
+            # venta de `_add_sale` y igual que los dos en el camino de tabla
+            # suelta. Antes devolvía False y la fila **desaparecía sin rastro**:
+            # ni importada, ni en la bandeja, ni contada.
+            #
+            # Reproducido antes de arreglarlo: el MISMO archivo con cuatro montos
+            # de escala ambigua daba 4 filas en "Otros" como tabla suelta y 0 como
+            # multihoja. Que un dato de negocio se pierda según cómo el usuario
+            # ordenó sus solapas es la clase de divergencia que este programa
+            # existe para cerrar.
+            #
+            # Misma forma que en ventas: la fila de relleno devuelve False (no hay
+            # output, no se quema la huella, una relectura corregida la reintenta);
+            # la fila con contenido se captura y devuelve True, porque la captura
+            # ES output persistido.
+            if not _fila_con_contenido(row):
+                return False
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=_label_fila_sin_monto(
+                    row.get(cols["amount"]) if cols.get("amount") else None
+                ),
+                suggested_entity="expense",
+                row_ref=row_ref,
+                context_id=context_id,
+            )
+            counts["filas_sin_monto"] += 1
+            return True
         raw_date = _val(row, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS)
         tx_date = _parse_date(raw_date) if raw_date is not None else None
         if tx_date is None:
@@ -8023,7 +8062,12 @@ async def _insert_multisheet_data(
             # la vista, acá, y no celda por celda en cada uno de los ~35 lectores.
             # El mismo helper lo consume el preview de costos, para que la
             # pantalla no pueda mostrar un número que el import no va a producir.
-            _rows, _ = preparar_filas_de_hoja(_rows, _cols, _ignoradas)
+            _rows, _motivos_hoja = preparar_filas_de_hoja(_rows, _cols, _ignoradas)
+            _motivos_numericos_del_archivo.update(
+                motivo
+                for por_columna in _motivos_hoja.values()
+                for motivo in por_columna.values()
+            )
             # Bloque 2: "supplier:name" en un contexto de producto no se descarta
             # — `_add_product` lo aplica (gateado por rollout). El resto de los
             # cruzados sigue contando como descartado, F-D no está entregada.
@@ -8465,8 +8509,13 @@ async def _insert_multisheet_data(
         )
 
         def _filas_legacy(bucket: str) -> list[dict[str, Any]]:
-            filas, _ = preparar_filas_de_hoja(
+            filas, _motivos_bucket = preparar_filas_de_hoja(
                 summary.get(bucket, []), _cols_legacy, _ign_legacy
+            )
+            _motivos_numericos_del_archivo.update(
+                motivo
+                for por_columna in _motivos_bucket.values()
+                for motivo in por_columna.values()
             )
             return filas
 
@@ -8571,6 +8620,23 @@ async def _insert_multisheet_data(
             tenant_id,
             decision_type="SUPPLIER_SKIPPED_FROM_CATALOG",
             data={"skipped_brands": sorted(_skipped_brands), "count": len(_skipped_brands)},
+        )
+
+    # E7a-lite: el mismo contador que publica el camino de tabla suelta. Los dos
+    # motivos suman "no se pudo leer la escala" —que es lo que el resumen tiene
+    # que decir— y el log los separa porque son problemas distintos del archivo.
+    _sin_escala_multi = (
+        _motivos_numericos_del_archivo[MOTIVO_AMBIGUO]
+        + _motivos_numericos_del_archivo[MOTIVO_INCOMPATIBLE]
+    )
+    if _sin_escala_multi:
+        counts["montos_ambiguos"] = _sin_escala_multi
+        logger.warning(
+            "ingestion.montos_sin_escala",
+            cantidad=_sin_escala_multi,
+            ambiguos=_motivos_numericos_del_archivo[MOTIVO_AMBIGUO],
+            incompatibles=_motivos_numericos_del_archivo[MOTIVO_INCOMPATIBLE],
+            camino="multihoja",
         )
 
     # E6b: se persisten los vínculos identidad→efecto y se devuelven las

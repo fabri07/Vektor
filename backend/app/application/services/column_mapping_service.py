@@ -254,8 +254,12 @@ REQUIRED_ALTERNATIVES: dict[str, dict[str, frozenset[str]]] = {
 #    tres y distintos, verificados contra `ingestion_import_service`:
 #      · venta sin monto/sin fecha y gasto sin fecha → van a "Otros" con el motivo
 #        (`_capture_unclassified`), o sea que la fila se puede rescatar;
-#      · gasto sin monto y producto sin nombre → se DESCARTAN, no queda rastro
-#        (`_add_expense`/`_add_product` devuelven `False`);
+#      · gasto sin monto: **desde E7a-lite también va a "Otros"**. Antes se
+#        descartaba sin rastro, y sólo en el camino multihoja — el de tabla
+#        suelta sí lo capturaba, así que el MISMO archivo perdía filas o no
+#        según cómo estuviera armado. Reproducido y cerrado;
+#      · producto sin nombre → se DESCARTA, no queda rastro (`_add_product`
+#        devuelve `False`);
 #      · cliente/proveedor sin nombre → se saltea y se cuenta como inválido en el
 #        resumen del archivo (`customer_import_service._validate_record`).
 #    Prometer "Otros" donde el importador descarta es peor que no explicar nada.
@@ -287,8 +291,8 @@ REQUIRED_REASONS: dict[str, dict[str, str]] = {
         "amount": (
             "Para registrar un gasto o una compra, Véktor necesita saber cuánta plata "
             "salió. La fila que no lo traiga —ni el precio unitario y la cantidad para "
-            "calcularlo— se descarta: no se registra el gasto y tampoco queda en "
-            "«Otros»."
+            "calcularlo— no se registra como gasto: queda en «Otros» con el motivo, "
+            "para completarla desde ahí."
         ),
         "expense_date": (
             "Para importar gastos y compras, Véktor necesita saber qué columna "

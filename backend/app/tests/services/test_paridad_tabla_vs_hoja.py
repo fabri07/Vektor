@@ -418,3 +418,214 @@ async def test_sin_decision_el_envio_sin_comprobante_no_se_cobra_y_se_reporta(
     )
     # Las compras entran igual: el envío sin resolver no bloquea la hoja.
     assert counts["gastos"] == 2
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# E7a-lite — paridad EXHAUSTIVA por contadores
+#
+# Las pruebas de arriba comparan los efectos persistidos de un contenido: compras
+# con flete. Eso cubre el defecto que E6a cerró, pero no demuestra que los dos
+# caminos coincidan en TODO lo demás — y los dos defectos que E7a reprodujo
+# estaban justamente afuera de ese contenido: el gasto sin monto desaparecía sin
+# rastro sólo en el camino multihoja, y `montos_ambiguos` sólo lo publicaba el
+# plano. Ninguna prueba los veía porque ninguna comparaba los contadores.
+#
+# Por qué contadores acá y efectos allá: un contador es lo que el importador DICE
+# que hizo, y por eso mismo es lo que llega al usuario (los avisos del confirm se
+# arman de `counts`). Una fila que se pierde en silencio no mueve ningún efecto —
+# justamente porque no produjo ninguno— pero sí tiene que mover un contador.
+#
+# La compuerta es por diferencia, no por lista de claves esperadas: cualquier
+# contador nuevo entra al alcance solo, sin que nadie se acuerde de agregarlo.
+# ───────────────────────────────────────────────────────────────────────────────
+
+#: Contadores que NO se pueden comparar por valor: llevan ids de entidades recién
+#: creadas, y dos corridas en tenants distintos generan uuids distintos por
+#: definición. Se comparan por CARDINALIDAD — que es el hecho ("creó un
+#: proveedor"), sin el identificador que no puede coincidir.
+#:
+#: Es la única excepción declarada. Cualquier otra diferencia falla la compuerta.
+_CONTADORES_CON_IDS = {
+    "proveedores_creados_ids": "uuid del proveedor creado en este tenant",
+    "proveedores_actualizados_ids": "uuid del proveedor actualizado en este tenant",
+    "clientes_creados_ids": "uuid del cliente creado en este tenant",
+    "clientes_actualizados_ids": "uuid del cliente actualizado en este tenant",
+}
+
+_COLS_GASTO = {
+    "fecha": "expense_date",
+    "nro": "invoice_number",
+    "proveedor": "supplier_name",
+    "articulo": "product_name",
+    "cantidad": "quantity",
+    "total": "amount",
+}
+_COLS_VENTA = {
+    "fecha": "transaction_date",
+    "nro": "invoice_number",
+    "cliente": "customer_name",
+    "articulo": "product_name",
+    "cantidad": "quantity",
+    "total": "amount",
+}
+
+
+def _g(**kw: str) -> dict[str, str]:
+    fila = {"fecha": "2024-01-10", "nro": "0001-00000001", "proveedor": "ACME",
+            "articulo": "Coca 500", "cantidad": "2", "total": "1000"}
+    fila.update(kw)
+    return fila
+
+
+def _v(**kw: str) -> dict[str, str]:
+    fila = {"fecha": "2024-01-10", "nro": "0001-00000001", "cliente": "Juan",
+            "articulo": "Coca 500", "cantidad": "2", "total": "1000"}
+    fila.update(kw)
+    return fila
+
+
+#: Cada escenario ejercita una RAMA distinta del importador, no una variación
+#: decorativa: sin monto, escala indecidible, sin fecha, cantidad ilegible, fila
+#: de relleno, sin proveedor, sin artículo. Son las ramas donde una fila puede
+#: perderse, que es lo que esta compuerta vigila.
+_ESCENARIOS: list[tuple[str, str, list[dict[str, str]]]] = [
+    ("gastos_limpios", "expense", [_g(), _g(nro="0001-00000002", articulo="Pan")]),
+    ("gastos_sin_monto", "expense", [_g(total=""), _g(nro="0001-00000002", articulo="Pan")]),
+    # "12.500" junto a "12.50": ningún convenio explica las dos celdas.
+    ("gastos_escala_mezclada", "expense",
+     [_g(total="12.500"), _g(nro="0001-00000002", total="12.50")]),
+    ("gastos_sin_fecha", "expense", [_g(fecha=""), _g(nro="0001-00000002", articulo="Pan")]),
+    ("gastos_cantidad_ilegible", "expense",
+     [_g(cantidad="2,5"), _g(nro="0001-00000002", articulo="Pan")]),
+    ("gastos_fila_de_relleno", "expense",
+     [{k: "" for k in _COLS_GASTO}, _g(nro="0001-00000002", articulo="Pan")]),
+    ("gastos_sin_proveedor", "expense", [_g(proveedor="")]),
+    ("gastos_sin_articulo", "expense", [_g(articulo="")]),
+    ("ventas_limpias", "sale", [_v(), _v(nro="0001-00000002", articulo="Pan")]),
+    ("ventas_sin_monto", "sale", [_v(total=""), _v(nro="0001-00000002", articulo="Pan")]),
+    ("ventas_escala_mezclada", "sale",
+     [_v(total="12.500"), _v(nro="0001-00000002", total="12.50")]),
+    ("ventas_sin_fecha", "sale", [_v(fecha="")]),
+    ("ventas_cantidad_ilegible", "sale", [_v(cantidad="2,5")]),
+]
+
+
+def _summary_generico(
+    filas: list[dict[str, str]], *, multi: bool, entity: str
+) -> dict[str, Any]:
+    clave = "gastos_detectados" if entity == "expense" else "ventas_detectadas"
+    cols = _COLS_GASTO if entity == "expense" else _COLS_VENTA
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos" if entity == "expense" else "ventas",
+        "multi_sheet": multi,
+        "row_count": len(filas),
+        "mapping_contexts": [
+            {
+                "context_id": _CTX,
+                "entity_type": entity,
+                "source_kind": "sheet",
+                "headers": list(cols),
+                "row_count": len(filas),
+            }
+        ],
+        clave: [{**f, "__context__": _CTX} for f in filas],
+    }
+
+
+async def _contadores(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    filas: list[dict[str, str]],
+    *,
+    entity: str,
+    multi: bool,
+) -> dict[str, Any]:
+    """Importa y devuelve los contadores, normalizando los que llevan uuids."""
+    _perfil = (
+        await db.execute(
+            select(BusinessProfile).where(BusinessProfile.tenant_id == tenant_id)
+        )
+    ).scalar_one_or_none()
+    if _perfil is None:
+        db.add(
+            BusinessProfile(
+                profile_id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                vertical_code="kiosco_almacen",
+                data_mode="M0",
+                data_confidence="LOW",
+                onboarding_completed=True,
+            )
+        )
+    upload_id = uuid.uuid4()
+    db.add(
+        UploadedFile(
+            id=upload_id,
+            tenant_id=tenant_id,
+            original_filename="archivo.xlsx",
+            s3_key=f"tests/{upload_id}.xlsx",
+            content_type="text/csv",
+            size_bytes=1,
+            purpose="ingestion",
+            status="uploaded",
+            processing_status="DONE",
+        )
+    )
+    await db.flush()
+    cols = _COLS_GASTO if entity == "expense" else _COLS_VENTA
+    counts = await insert_confirmed_data(
+        db,
+        tenant_id,
+        _summary_generico(filas, multi=multi, entity=entity),
+        {},
+        context_mappings={_CTX: dict(cols)},
+        context_entity={_CTX: entity},
+        context_confirmed={_CTX: True},
+        source="ingestion",
+        uploaded_file_id=upload_id,
+    )
+    await db.commit()
+    return {
+        k: (len(v) if k in _CONTADORES_CON_IDS and isinstance(v, list) else v)
+        for k, v in counts.items()
+        if not k.startswith("_")
+    }
+
+
+@pytest.mark.parametrize(("nombre", "entity", "filas"), _ESCENARIOS, ids=[
+    e[0] for e in _ESCENARIOS
+])
+async def test_los_dos_caminos_reportan_los_mismos_contadores(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    second_tenant: Tenant,
+    nombre: str,
+    entity: str,
+    filas: list[dict[str, str]],
+) -> None:
+    """El mismo contenido, los dos caminos, TODOS los contadores.
+
+    Dos tenants para que las huellas de fila de un camino no hagan que el otro
+    saltee las filas: el dedup es por tenant.
+    """
+    plano = await _contadores(
+        db_session, sample_tenant.tenant_id, filas, entity=entity, multi=False
+    )
+    multi = await _contadores(
+        db_session, second_tenant.tenant_id, filas, entity=entity, multi=True
+    )
+
+    difs = {
+        k: (plano.get(k), multi.get(k))
+        for k in sorted(set(plano) | set(multi))
+        if plano.get(k) != multi.get(k)
+    }
+    assert not difs, (
+        f"«{nombre}»: los dos caminos reportan distinto. "
+        f"Si la diferencia es legítima, declarala con su motivo; si no, es una "
+        f"fila que se comporta distinto según cómo esté armado el archivo. {difs}"
+    )
+    # Y que la comparación no sea vacía: dos caminos que no hacen NADA también
+    # coinciden. Cada escenario tiene que haber movido algún contador.
+    assert any(v for v in plano.values()), f"«{nombre}» no movió ningún contador"

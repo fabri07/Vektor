@@ -215,14 +215,20 @@ async def test_multisheet_reimport_is_idempotent(
     assert expenses[0].source_upload_id == uploaded.id
 
 
-async def test_multisheet_invalid_row_not_burned_reimport_corrected(
+async def test_multisheet_gasto_sin_monto_va_a_otros_y_no_se_duplica(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """B1 (registración diferida) en el path por contexto.
+    """E7a-lite: el gasto sin monto va a "Otros", y la captura es idempotente.
 
-    Una fila de gastos sin monto no inserta nada y NO se quema. Al re-subir el
-    MISMO archivo con esa fila corregida, se importa (no quedó marcada); la fila
-    que ya había entrado sigue idempotente.
+    Antes esta fila **desaparecía sin rastro** en este camino (``_add_expense``
+    devolvía ``False`` sin capturar) mientras el de tabla suelta sí la capturaba:
+    el mismo archivo perdía filas o no según cómo estuviera armado. Ahora hace lo
+    mismo que ``_add_sale`` — va a "Otros" con su motivo, y la huella se quema
+    justamente porque el ``UnclassifiedRecord`` ES output persistido: sin quemarla,
+    cada reimport del archivo crearía otra copia de la misma fila en "Otros".
+
+    La vía de recuperación es clasificarla desde "Otros" (o la relectura, que
+    libera las refs de las filas capturadas), no reimportar el archivo.
     """
     import uuid as _uuid
 
@@ -280,35 +286,41 @@ async def test_multisheet_invalid_row_not_burned_reimport_corrected(
         "uploaded_file_id": uploaded.id,
     }
 
-    # 1er import: fila 0 sin monto → no inserta; fila 1 → inserta.
+    from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+    async def _otros() -> list[UnclassifiedRecord]:
+        res = await db_session.execute(select(UnclassifiedRecord))
+        return list(res.scalars().all())
+
+    # 1er import: fila 0 sin monto → "Otros" con el motivo; fila 1 → gasto.
     first = await insert_confirmed_data(
         db_session, sample_tenant.tenant_id, _summary(""), {"gastos": True}, **kwargs
     )
     assert first["gastos"] == 1
+    assert first["otros"] == 1
+    assert first["filas_sin_monto"] == 1
     descs = {
         e.description
         for e in (await db_session.execute(select(ExpenseEntry))).scalars().all()
     }
     assert descs == {"Agua"}
 
-    # 2do import del MISMO archivo, fila 0 ahora con monto → entra (no quemada);
-    # fila 1 ya estaba → idempotente.
-    second = await insert_confirmed_data(
-        db_session, sample_tenant.tenant_id, _summary("4500"), {"gastos": True}, **kwargs
-    )
-    assert second["gastos"] == 1
-    descs = {
-        e.description
-        for e in (await db_session.execute(select(ExpenseEntry))).scalars().all()
-    }
-    assert descs == {"Luz", "Agua"}
+    # La fila perdida ahora tiene rastro, y con la entidad sugerida correcta: es lo
+    # que permite completarla desde /otros en vez de volver a cargar el archivo.
+    capturadas = await _otros()
+    assert len(capturadas) == 1
+    assert capturadas[0].suggested_entity == "expense"
+    assert "monto" in (capturadas[0].context_label or "").lower()
 
-    # 3er import idéntico → 0 nuevas.
-    third = await insert_confirmed_data(
-        db_session, sample_tenant.tenant_id, _summary("4500"), {"gastos": True}, **kwargs
+    # 2do import del MISMO archivo: ni un gasto nuevo ni una segunda copia en
+    # "Otros". La huella quemada es lo que lo garantiza.
+    second = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, _summary(""), {"gastos": True}, **kwargs
     )
-    assert third["gastos"] == 0
-    assert len((await db_session.execute(select(ExpenseEntry))).scalars().all()) == 2
+    assert second["gastos"] == 0
+    assert second["otros"] == 0
+    assert len(await _otros()) == 1
+    assert len((await db_session.execute(select(ExpenseEntry))).scalars().all()) == 1
 
 
 def _text_summary() -> dict[str, Any]:
@@ -489,3 +501,88 @@ async def test_text_context_entity_override_va_a_otros_con_sugerencia(
     assert counts["otros"] == 1
     record = (await db_session.execute(select(UnclassifiedRecord))).scalar_one()
     assert record.suggested_entity == "expense"
+
+
+async def test_multisheet_cuenta_montos_sin_escala_como_el_camino_plano(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """E7a-lite: el camino multihoja también publica ``montos_ambiguos``.
+
+    El camino de tabla suelta ya lo contaba y lo publicaba; el multihoja
+    **descartaba los motivos** de ``preparar_filas_de_hoja``, así que el mismo
+    archivo con los mismos montos ilegibles dejaba el contador en ``None`` según
+    cómo estuviera armado. Ese contador no es decorativo: discrimina el mensaje de
+    ``EmptyImportError`` (escala ambigua vs. import vacío genérico) y es lo que
+    aparece en el log cuando hay que explicarle al usuario por qué su archivo de
+    números «no entró».
+    """
+    import uuid as _uuid
+
+    from app.persistence.models.file import UploadedFile
+
+    uploaded = UploadedFile(
+        id=_uuid.uuid4(),
+        tenant_id=sample_tenant.tenant_id,
+        original_filename="gastos_escala.xlsx",
+        s3_key="test/gastos_escala.xlsx",
+        content_type="application/vnd.ms-excel",
+        size_bytes=1024,
+        purpose="ingestion",
+    )
+    db_session.add(uploaded)
+    await db_session.flush()
+
+    # La columna mezcla "12.500" (miles AR) con "12.50" (decimal US): no hay un
+    # convenio que explique las tres celdas, así que ninguna se interpreta. No se
+    # adivina — cada fila va a "Otros" con el motivo.
+    summary: dict[str, Any] = {
+        "file_type": "spreadsheet",
+        "inferred_type": "expense",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Gastos",
+                "entity_type": "expense",
+                "source_kind": "sheet",
+                "headers": ["fecha", "concepto", "monto"],
+                "fields": None,
+                "preview_rows": [],
+                "row_count": 3,
+            }
+        ],
+        "ventas_detectadas": [],
+        "gastos_detectados": [
+            {
+                "fecha": "2024-01-15",
+                "concepto": "Luz",
+                "monto": "12.500",
+                "__context__": "sheet:Gastos",
+            },
+            {
+                "fecha": "2024-01-16",
+                "concepto": "Agua",
+                "monto": "8.750",
+                "__context__": "sheet:Gastos",
+            },
+            {
+                "fecha": "2024-01-17",
+                "concepto": "Gas",
+                "monto": "12.50",
+                "__context__": "sheet:Gastos",
+            },
+        ],
+        "stock_detectado": [],
+    }
+
+    counts = await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"gastos": True},
+        context_confirmed={"sheet:Gastos": True},
+        uploaded_file_id=uploaded.id,
+    )
+
+    assert counts["gastos"] == 0
+    assert counts["montos_ambiguos"] == 3
+    assert counts["otros"] == 3
