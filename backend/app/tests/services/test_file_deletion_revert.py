@@ -763,6 +763,44 @@ class TestRestauraLoQueElArchivoModifico:
         await db_session.refresh(producto)
         assert producto.description is None
 
+    async def test_restaura_el_codigo_externo_que_el_archivo_escribio(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """E6a-B (quirúrgico): mismo caso que `description` — `external_code`
+        es aditivo (`_assign_external_code`), y su snapshot debe restaurarse
+        igual al borrar el archivo que lo completó."""
+        archivo = await _archivo(db_session, sample_tenant)
+        producto = await _producto(db_session, sample_tenant, "Alfombra")
+        producto.external_code = "ABC-123"
+        producto.external_source = "erp_viejo"
+        await db_session.flush()
+        await db_session.refresh(producto)
+
+        await record_import_ledger(
+            db_session,
+            tenant_id=sample_tenant.tenant_id,
+            file_id=archivo.id,
+            product_details=[
+                {
+                    "action": "UPDATED",
+                    "product_id": str(producto.id),
+                    "name": producto.name,
+                    "before": {"external_code": None, "external_source": None},
+                    "after": {
+                        "external_code": "ABC-123",
+                        "external_source": "erp_viejo",
+                        "updated_at": producto.updated_at.isoformat(),
+                    },
+                }
+            ],
+        )
+
+        await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+
+        await db_session.refresh(producto)
+        assert producto.external_code is None
+        assert producto.external_source is None
+
 
 class TestPreviewYReversaComparten:
     """El preview anticipa; el DELETE decide.

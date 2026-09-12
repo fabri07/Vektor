@@ -34,7 +34,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.inspection import inspect as sa_inspect
 
-from app.application.services._savepoint import SavepointConflictError, guarded_savepoint
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+    unique_violation_classifier,
+)
 from app.domain.text_norm import normalize_barcode, normalize_sku
 from app.observability.logger import get_logger
 from app.persistence.models.product import Product
@@ -501,3 +505,51 @@ async def product_identity_guard(
         raise ProductIdentityConflictError(
             existing, matched_by, ambiguous=other is not None, other=other
         ) from conflict.original
+
+
+# ── E6a-B (quirúrgico): external_code — NUNCA fusiona, siempre descarta ──
+#
+# A propósito, esto NO se resuelve con `MatchedBy`/`_resolve_conflict_owner`
+# de arriba: barcode/sku son identidad real (un choque significa "es el mismo
+# producto físico", y fusionar — devolver el existente — es lo correcto). Un
+# choque de `external_code` es distinto: dos productos YA distinguidos por
+# barcode/sku/nombre pueden compartir el mismo código por un error de carga.
+# Fusionarlos ahí sería un bug nuevo, no una resolución de identidad. Por eso
+# tiene su propio guard, separado, que corre DESPUÉS de que la identidad del
+# producto (por barcode/sku/nombre) ya está resuelta.
+
+_classify_external_code = unique_violation_classifier(
+    "external_code",
+    constraint="uq_products_tenant_external_code",
+    columns=("products.external_code_key",),
+)
+
+
+class ProductExternalCodeConflictError(Exception):
+    """Otro producto ACTIVO del tenant ya tiene este ``external_code``.
+
+    A diferencia de :class:`ProductIdentityConflictError`, esto NUNCA se
+    resuelve fusionando: dos productos ya distinguidos por otra identidad no
+    se convierten en uno porque comparten un código por error de carga. El
+    caller descarta el campo para esta fila y sigue el import."""
+
+
+@asynccontextmanager
+async def external_code_guard(session: AsyncSession) -> AsyncIterator[None]:
+    """Protege el ``setattr`` de ``external_code``/``external_source`` contra
+    otro producto ACTIVO del tenant que ya lo tenga.
+
+    Se usa DESPUÉS de que el producto (nuevo o existente) ya resolvió su
+    identidad real — barcode/sku nunca participan acá. El caller **muta
+    DENTRO del bloque** (mismo contrato que :func:`product_identity_guard`):
+    pasarle un objeto ya mutado emite el UPDATE fuera del savepoint.
+
+    Raises:
+        ProductExternalCodeConflictError: otro producto activo ya tiene esta
+            clave. Nunca se resuelve devolviendo ese otro producto.
+    """
+    try:
+        async with guarded_savepoint(session, _classify_external_code):
+            yield
+    except SavepointConflictError as conflict:
+        raise ProductExternalCodeConflictError() from conflict.original

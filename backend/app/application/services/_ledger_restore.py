@@ -58,6 +58,11 @@ PRODUCT_RESTORE_FIELDS: tuple[str, ...] = (
     "description",
     "acquired_at",
     "expiry_date",
+    # E6a-B (quirúrgico): mismo caso que `description` — el importador la
+    # escribe (`_assign_external_code`, aditivo) y los merges la snapshotean;
+    # sin restaurarla, borrar el archivo dejaba el código pegado al producto.
+    "external_code",
+    "external_source",
 )
 
 RESTORE_FIELDS: dict[str, tuple[str, ...]] = {

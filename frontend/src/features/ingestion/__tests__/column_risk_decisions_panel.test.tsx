@@ -83,6 +83,40 @@ describe("ColumnRiskDecisionsPanel — F8c decisiones de columnas riesgosas", ()
     expect(screen.getAllByText(/45 fila\(s\) afectada\(s\)/).length).toBe(2);
   });
 
+  test("invalid_rows > 0 muestra el segmento de valores inválidos", () => {
+    render(
+      <ColumnRiskDecisionsPanel
+        initialRisks={[
+          makeRisk({
+            source_column: "monto",
+            null_ratio: 0,
+            null_rows: 0,
+            invalid_rows: 3,
+            affected_rows: 3,
+          }),
+        ]}
+        recomputeKey="k0"
+        recompute={jest.fn()}
+        onDecisionsChange={jest.fn()}
+        onCancelAndComplete={jest.fn()}
+      />,
+    );
+    expect(screen.getByText(/3 valor\(es\) inválido\(s\)/)).toBeInTheDocument();
+  });
+
+  test("invalid_rows == 0 no muestra el segmento de valores inválidos", () => {
+    render(
+      <ColumnRiskDecisionsPanel
+        initialRisks={[makeRisk({ invalid_rows: 0 })]}
+        recomputeKey="k0"
+        recompute={jest.fn()}
+        onDecisionsChange={jest.fn()}
+        onCancelAndComplete={jest.fn()}
+      />,
+    );
+    expect(screen.queryByText(/valor\(es\) inválido\(s\)/)).not.toBeInTheDocument();
+  });
+
   test("botones según allowed_actions (ambas acciones)", () => {
     render(
       <ColumnRiskDecisionsPanel
