@@ -3570,12 +3570,22 @@ async def _assign_external_code(
     significa "es el mismo producto")."""
     if not ext_code or target.external_code:
         return
+    # Capturados ANTES del guard: tras un rollback a savepoint, SQLAlchemy
+    # expira los atributos del objeto y leerlos requeriría un refresh async
+    # que un `except` no puede awaitear (MissingGreenlet).
+    _tenant_id, _product_id = target.tenant_id, target.id
     try:
         async with external_code_guard(session):
             target.external_code = ext_code
             target.external_source = ext_source
     except ProductExternalCodeConflictError:
         counts["external_code_conflict"] += 1
+        logger.warning(
+            "ingestion.external_code_conflict",
+            tenant_id=str(_tenant_id),
+            product_id=str(_product_id),
+            external_code=ext_code,
+        )
 
 
 # F6-C1: el parser vive en app/domain/date_parsing.py — es el mismo que usa el
