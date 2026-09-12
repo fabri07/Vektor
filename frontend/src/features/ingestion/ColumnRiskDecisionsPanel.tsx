@@ -279,7 +279,11 @@ export function ColumnRiskDecisionsPanel({
                     {requirementLabel(risk.field_requirement)}
                   </span>
                   <div className="mt-0.5">
-                    {pct}% vacío · {risk.affected_rows} fila(s) afectada(s)
+                    {pct}% vacío
+                    {risk.invalid_rows > 0
+                      ? ` · ${risk.invalid_rows} valor(es) inválido(s)`
+                      : ""}{" "}
+                    · {risk.affected_rows} fila(s) afectada(s)
                   </div>
                   {risk.recommendation && (
                     <div className="mt-0.5 text-vk-text-muted">

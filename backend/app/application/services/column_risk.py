@@ -21,8 +21,14 @@ Exactitud de ``invalid_rows`` — solo cuentan los campos donde el importador
 RECHAZA/RUTEA un valor no vacío. Los campos que el importador COERCE (nunca
 rechaza) tienen ``invalid_rows == 0`` (solo su vaciedad importa):
 
-- ``amount`` → ``_parse_amount`` (descarta ≤0 y no numérico → la fila no se
-  inserta / se rutea) — se REUSA el parser real, no ``normalize_numeric``.
+- ``amount`` → mismo criterio que ``_parse_amount`` (descarta ≤0 y no numérico
+  → la fila no se inserta / se rutea), pero infiriendo el CONVENIO de la
+  columna completa primero (``inferir_convenio``, igual que
+  ``_normalizar_columnas_numericas`` en el import real) antes de interpretar
+  cada celda con ``parsear_monto``: evaluar la celda aislada sin convenio (lo
+  que hacía ``_parse_amount`` directo) marcaba como ambigua una columna
+  homogénea de un solo separador (``"12500.00"``) que el import real resuelve
+  bien.
 - ``transaction_date`` / ``expense_date`` → ``parse_business_datetime``; ilegible
   ⇒ la fila va a Otros (F6, invariante 2d).
 - ``dni``/``cuit``/``cuil`` (maestros) → validadores fiscales; inválido ⇒ el
@@ -55,8 +61,8 @@ from app.application.services.file_parsing import (
     _TYPE_TO_ENTITY,
     NULL_COLUMN_WARN_THRESHOLD,
 )
-from app.application.services.ingestion_import_service import _parse_amount
 from app.domain.date_parsing import parse_business_datetime
+from app.domain.numeric_parsing import inferir_convenio, parsear_monto
 from app.schemas._ar_fiscal import validate_cuit, validate_dni
 from app.schemas.ingestion import ColumnMapping, ColumnRiskDecision
 
@@ -113,9 +119,21 @@ def _valid_date(value: object) -> bool:
     return parse_business_datetime(value) is not None
 
 
-def _valid_amount(value: object) -> bool:
-    # Reusa el parser REAL del importador: descarta ≤0 y no numérico.
-    return _parse_amount(value) is not None
+def _validador_amount_por_columna(
+    rows: list[dict[str, Any]], source_column: str
+) -> Callable[[object], bool]:
+    """Espeja ``_parse_amount`` pero con el convenio de ESTA columna (E4): sin
+    esto, un monto homogéneo como ``"12500.00"`` sale ambiguo aislado aunque el
+    import real lo resuelva bien vía ``_normalizar_columnas_numericas``.
+    Conserva el descarte de ``<= 0`` de ``_parse_amount`` — ``parsear_monto()``
+    por sí sola no lo hace, solo resuelve el formato."""
+    convenio = inferir_convenio(row.get(source_column) for row in rows)
+
+    def _check(value: object) -> bool:
+        interpretado = parsear_monto(value, convenio)
+        return interpretado.valor is not None and interpretado.valor > 0
+
+    return _check
 
 
 def _valid_fiscal(validator: Callable[[str | None], str | None]) -> Callable[[object], bool]:
@@ -131,9 +149,10 @@ def _valid_fiscal(validator: Callable[[str | None], str | None]) -> Callable[[ob
 
 # target canónico → validador de valor NO vacío (True = el importador lo acepta).
 # Solo los campos que el importador RECHAZA/RUTEA. Los coercidos NO están acá
-# (invalid_rows==0 para ellos) — ver docstring del módulo.
+# (invalid_rows==0 para ellos) — ver docstring del módulo. "amount" NO está acá:
+# necesita el convenio de la columna completa, armado por columna en
+# `_validador_para` (no hay un validador fijo posible para ese target).
 _TARGET_VALIDATORS: dict[str, Callable[[object], bool]] = {
-    "amount": _valid_amount,
     "transaction_date": _valid_date,
     "expense_date": _valid_date,
     "dni": _valid_fiscal(validate_dni),
@@ -143,6 +162,22 @@ _TARGET_VALIDATORS: dict[str, Callable[[object], bool]] = {
     "cuil": _valid_fiscal(validate_cuit),
     "supplier_cuil": _valid_fiscal(validate_cuit),
 }
+
+
+def _validador_para(
+    target: str, rows: list[dict[str, Any]], source_column: str
+) -> Callable[[object], bool] | None:
+    """Validador de una celda no vacía de ``source_column`` contra ``target``.
+
+    ``amount`` infiere el convenio de TODA la columna (misma función que
+    ``_normalizar_columnas_numericas``) antes de validar cada celda — si no,
+    una columna homogénea con un solo separador (``"12.500"``) se marca
+    ambigua aunque el import real la resuelva. Los demás targets usan el
+    validador fijo de ``_TARGET_VALIDATORS`` (no dependen de convenio de
+    columna)."""
+    if target == "amount":
+        return _validador_amount_por_columna(rows, source_column)
+    return _TARGET_VALIDATORS.get(target)
 
 
 def _classify_cell(value: object, validator: Callable[[object], bool] | None) -> str | None:
@@ -291,7 +326,7 @@ def build_contextual_column_risk(
             if not _is_real_target(target):
                 continue
 
-            validator = _TARGET_VALIDATORS.get(target)
+            validator = _validador_para(target, rows, entry.source_column)
             null_rows = 0
             invalid_rows = 0
             for row in rows:
@@ -541,13 +576,18 @@ def affected_rows_for_context(
     sus columnas malas en un solo dict (invariante 6: máx una captura por fila).
 
     Recalculado con el MISMO criterio que ``build_contextual_column_risk``
-    (``_classify_cell`` + ``_TARGET_VALIDATORS``): el backend NUNCA confía en un
-    ``affected_rows`` provisto por el cliente — lo recomputa (invariante 3)."""
+    (``_classify_cell`` + ``_validador_para``): el backend NUNCA confía en un
+    ``affected_rows`` provisto por el cliente — lo recomputa (invariante 3).
+    Los validadores se arman UNA vez por columna (fuera del loop de filas):
+    ``amount`` necesita el convenio de toda la columna, no por celda."""
+    validators = {
+        (col, target): _validador_para(target, rows, col) for col, target in col_targets
+    }
     affected: dict[int, dict[str, Any]] = {}
     for idx, row in enumerate(rows):
         bad: dict[str, Any] = {}
         for source_column, target in col_targets:
-            validator = _TARGET_VALIDATORS.get(target)
+            validator = validators[(source_column, target)]
             if _classify_cell(row.get(source_column), validator) is not None:
                 bad[source_column] = row.get(source_column)
         if bad:
