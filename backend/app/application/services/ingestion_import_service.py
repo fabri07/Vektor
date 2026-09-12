@@ -122,6 +122,7 @@ from app.domain.numeric_parsing import (
     MOTIVO_NEGATIVA,
     ConvenioNumerico,
     inferir_convenio,
+    monto_positivo,
     parsear_cantidad,
     parsear_monto,
 )
@@ -3532,20 +3533,22 @@ def _parse_amount(raw: Any) -> Decimal | None:
     su propia interpretación y no había rama para "sólo punto": `"12.500"` daba
     **12,5** y `"1.234.567"` daba `None`.
 
-    Se conserva el descarte de `<= 0`, que es contrato de esta función y no de la
-    política: un monto cero o negativo no es un error de lectura.
+    El descarte de `<= 0` es `monto_positivo()` (`domain/numeric_parsing.py`),
+    compartido con el validador de `column_risk.py` (F8) para que diagnóstico
+    e import acuerden qué cuenta como "monto inválido" — acá se le suma el log
+    por motivo, que es específico de esta función y no del criterio puro.
     """
     interpretado = parsear_monto(raw)
-    if interpretado.valor is None:
-        if interpretado.motivo is not None:
+    valor = monto_positivo(interpretado)
+    if valor is None:
+        if interpretado.valor is None and interpretado.motivo is not None:
             logger.debug(
                 "ingestion.parse.amount_unreadable", raw=str(raw), reason=interpretado.motivo
             )
+        elif interpretado.valor is not None:
+            logger.debug("ingestion.parse.amount_discarded", raw=str(raw), reason="non_positive")
         return None
-    if interpretado.valor <= 0:
-        logger.debug("ingestion.parse.amount_discarded", raw=str(raw), reason="non_positive")
-        return None
-    return interpretado.valor
+    return valor
 
 
 # E6a-B: mismos topes que las columnas `Product.external_code`/`external_source`

@@ -62,7 +62,7 @@ from app.application.services.file_parsing import (
     NULL_COLUMN_WARN_THRESHOLD,
 )
 from app.domain.date_parsing import parse_business_datetime
-from app.domain.numeric_parsing import inferir_convenio, parsear_monto
+from app.domain.numeric_parsing import inferir_convenio, monto_positivo, parsear_monto
 from app.schemas._ar_fiscal import validate_cuit, validate_dni
 from app.schemas.ingestion import ColumnMapping, ColumnRiskDecision
 
@@ -122,16 +122,16 @@ def _valid_date(value: object) -> bool:
 def _validador_amount_por_columna(
     rows: list[dict[str, Any]], source_column: str
 ) -> Callable[[object], bool]:
-    """Espeja ``_parse_amount`` pero con el convenio de ESTA columna (E4): sin
-    esto, un monto homogéneo como ``"12500.00"`` sale ambiguo aislado aunque el
-    import real lo resuelva bien vía ``_normalizar_columnas_numericas``.
-    Conserva el descarte de ``<= 0`` de ``_parse_amount`` — ``parsear_monto()``
-    por sí sola no lo hace, solo resuelve el formato."""
+    """Valida montos con el convenio de ESTA columna (E4): sin esto, un monto
+    homogéneo como ``"12500.00"`` sale ambiguo aislado aunque el import real
+    lo resuelva bien vía ``_normalizar_columnas_numericas``. El criterio de
+    aceptación (``monto_positivo``, `domain/numeric_parsing.py`) es el MISMO
+    que usa ``_parse_amount`` del importador real — comparten esa función a
+    propósito, para no divergir sobre qué cuenta como monto inválido."""
     convenio = inferir_convenio(row.get(source_column) for row in rows)
 
     def _check(value: object) -> bool:
-        interpretado = parsear_monto(value, convenio)
-        return interpretado.valor is not None and interpretado.valor > 0
+        return monto_positivo(parsear_monto(value, convenio)) is not None
 
     return _check
 

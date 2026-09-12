@@ -368,6 +368,22 @@ def parsear_monto(
         return ValorNumerico(original=bruto, valor=None, motivo=MOTIVO_ILEGIBLE)
 
 
+def monto_positivo(interpretado: ValorNumerico) -> Decimal | None:
+    """Acepta un ``ValorNumerico`` de monto solo si es legible y ``> 0``.
+
+    Criterio COMPARTIDO entre el import real (``_parse_amount`` en
+    ``ingestion_import_service.py``, que llama ``parsear_monto`` sobre un
+    valor que YA resolvió su convenio de columna) y el diagnóstico F8
+    (``column_risk.py``, que infiere el convenio por columna y se lo pasa
+    explícito a ``parsear_monto``) — para que ambos caminos acuerden qué
+    cuenta como "monto inválido" sin reimplementar el gate por separado. Un
+    monto cero o negativo no es un error de LECTURA (``interpretado.motivo``
+    queda ``None``); es la política de esta función, no de ``parsear_monto``."""
+    if interpretado.valor is None or interpretado.valor <= 0:
+        return None
+    return interpretado.valor
+
+
 def parsear_cantidad(
     bruto: Any,
     convenio: ConvenioNumerico | None = None,
