@@ -4235,6 +4235,11 @@ async def _insert_confirmed_data_impl(
         # sin_producto: compras sin producto detallado → Product incompleto (requires_completion).
         "sin_proveedor": 0,
         "sin_producto": 0,
+        # supplier_link_not_enabled: la fila mapeó "Proveedor — Nombre" en la hoja
+        # de Productos (Bloque 2), pero el tenant no tiene el rollout prendido
+        # (product_supplier_links_enabled_for) — no se crea el vínculo, solo se
+        # avisa (el dropdown ofrece la opción a todos los tenants por igual).
+        "supplier_link_not_enabled": 0,
         # F1 (hotfix puente): fila de producto ambigua (≥2 activos con el mismo
         # nombre normalizado) — NO se importa, NO se toca ningún existente.
         "productos_ambiguos": 0,
@@ -7597,12 +7602,18 @@ async def _insert_multisheet_data(
         store_name: str | None = _clean_str(
             row.get(_store_col) if _store_col else None, 300
         )
-        _store_mapped_as_supplier = bool(
-            store_name
-            and _store_col
-            and (cruzados or {}).get(_store_col) == "supplier:name"
-            and product_supplier_links_enabled_for(tenant_id)
+        _mapeado_a_proveedor = bool(
+            store_name and _store_col and (cruzados or {}).get(_store_col) == "supplier:name"
         )
+        _store_mapped_as_supplier = _mapeado_a_proveedor and product_supplier_links_enabled_for(
+            tenant_id
+        )
+        # El dropdown ofrece "Proveedor — Nombre" a todos los tenants por igual
+        # (field-catalog es estático por deploy) pero el efecto real depende del
+        # rollout: sin esto, un tenant sin el flag elegía la opción y no pasaba
+        # nada, sin ningún aviso.
+        if _mapeado_a_proveedor and not _store_mapped_as_supplier:
+            counts["supplier_link_not_enabled"] += 1
         if store_name and not _store_mapped_as_supplier:
             _skipped_brands.add(store_name)
 

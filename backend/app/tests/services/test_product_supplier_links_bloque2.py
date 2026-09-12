@@ -401,12 +401,15 @@ async def test_flag_apagado_conserva_el_comportamiento_actual(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """Sin habilitar el rollout, "Tienda" sigue siendo marca — cero Supplier,
-    cero product_supplier_links, comportamiento idéntico al de hoy."""
+    cero product_supplier_links, comportamiento idéntico al de hoy. Además, el
+    dropdown ofrece "Proveedor — Nombre" a todos los tenants por igual, así que
+    con el flag apagado el usuario que la elige tiene que recibir un aviso —
+    counts["supplier_link_not_enabled"] es la señal para ese warning."""
     tid = sample_tenant.tenant_id
     assert get_settings().PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS == []
 
     summary = _summary([_row("Producto G", "El pasillo")])
-    await insert_confirmed_data(
+    counts = await insert_confirmed_data(
         db_session,
         tid,
         summary,
@@ -425,3 +428,27 @@ async def test_flag_apagado_conserva_el_comportamiento_actual(
     ).scalar_one()
     assert product.custom_fields.get("marca") == "El pasillo"
     assert "tienda_original" not in product.custom_fields
+    assert counts.get("supplier_link_not_enabled") == 1
+
+
+async def test_flag_encendido_no_incrementa_el_contador(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Con el flag prendido, el vínculo SÍ se crea — no debe contarse como "no
+    habilitado". Blinda contra un futuro cambio que incremente el contador sin
+    condicionarlo al estado real del rollout."""
+    tid = sample_tenant.tenant_id
+    _enable(monkeypatch, tid)
+
+    summary = _summary([_row("Producto H", "El pasillo")])
+    counts = await insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"productos": True},
+        context_mappings=_CONTEXT_MAPPINGS,
+        context_confirmed={"sheet:Catalogo": True},
+    )
+
+    assert not counts.get("supplier_link_not_enabled")
+    assert len(await _active_links(db_session, tid)) == 1

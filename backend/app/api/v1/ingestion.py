@@ -3467,6 +3467,12 @@ async def confirm_file(
             f"{counts['sin_producto']} compra(s) sin producto detallado crearon un producto "
             "incompleto. Completá precio de venta y datos en Productos."
         )
+    if counts.get("supplier_link_not_enabled"):
+        warnings.append(
+            f"{counts['supplier_link_not_enabled']} producto(s) declararon proveedor por "
+            "nombre, pero tu cuenta todavía no tiene habilitada la vinculación automática "
+            "Producto↔Proveedor. Contactá a soporte para activarla."
+        )
     # F7d: taxonomía reconciliada de resolución de referencia. "anonimo" (venta de
     # mostrador / compra sin proveedor informado) NUNCA avisa — es el caso normal.
     # Solo "no_resuelto" (trajo una referencia que no matcheó contra ningún
