@@ -29,6 +29,10 @@ protegía contra concurrencia real y no integraba con la reversión F11):
   columna se preserva completo en `custom_fields`, nunca se asigna.
 - Integrado con F11 (`PRODUCT_RESTORE_FIELDS`) — ver el caso de reversión en
   `test_file_deletion_revert.py::test_restaura_el_codigo_externo...`.
+- La asignación es POR LOTE (`ExternalCodeBatch`, un savepoint por lote en
+  vez de uno por producto — mismo molde que `ProductCreateBatch`, PR #53):
+  un código repetido en el medio de un catálogo grande NO paga un savepoint
+  por fila para el resto, y tampoco bloquea que los demás se guarden.
 """
 
 from __future__ import annotations
@@ -38,13 +42,14 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import app.application.services.ingestion_import_service as importer
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.tests.conftest import add_business_profile
+from scripts._bench_sql import SqlProfile
 
 pytestmark = pytest.mark.asyncio
 
@@ -527,3 +532,119 @@ async def test_concurrencia_real_entre_dos_imports_separados(
         assert len(products) == 2
         codes = [p.external_code for p in products if p.external_code]
         assert codes == ["ERP-RACE"]  # solo el import 1 se quedó con el código
+
+
+async def _importar_catalogo_medido(
+    isolated_db_engine: AsyncEngine, rows: list[dict[str, Any]]
+) -> tuple[dict[str, Any], SqlProfile, uuid.UUID]:
+    """Corre un catálogo completo contando statements por forma (SqlProfile,
+    `scripts/_bench_sql.py` — el mismo contador que usa el presupuesto de
+    statements del programa de ingesta). Tenant nuevo por corrida."""
+    factory = async_sessionmaker(
+        isolated_db_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
+    )
+    tenant_id = uuid.uuid4()
+    profile = SqlProfile()
+
+    async with factory() as session:
+        tenant = Tenant(
+            tenant_id=tenant_id,
+            legal_name="Lote",
+            display_name="Lote",
+            currency="ARS",
+            pricing_reference_mode="MEP",
+            status="ACTIVE",
+        )
+        session.add(tenant)
+        await session.flush()
+        await add_business_profile(session, tenant_id)
+        await session.commit()
+
+        def _before(conn: Any, cursor: Any, statement: Any, *rest: Any) -> None:
+            profile.record(statement, 0.0)
+
+        event.listen(isolated_db_engine.sync_engine, "before_cursor_execute", _before)
+        profile.enabled = True
+        try:
+            counts = await importer.insert_confirmed_data(
+                session,
+                tenant_id,
+                _multisheet_summary(rows),
+                {"productos": True},
+                context_mappings=_MULTISHEET_MAPPINGS,
+                context_confirmed={"sheet:Catalogo": True},
+            )
+            await session.commit()
+        finally:
+            profile.enabled = False
+            event.remove(isolated_db_engine.sync_engine, "before_cursor_execute", _before)
+
+    return counts, profile, tenant_id
+
+
+async def test_lote_sin_conflictos_paga_un_puñado_de_savepoints(
+    isolated_db_engine: AsyncEngine,
+) -> None:
+    """El caso que ExternalCodeBatch existe para resolver: cientos de códigos
+    DISTINTOS no deberían pagar un SAVEPOINT por producto. Con chunk_size=200
+    y 300 filas sin ningún choque, son 2 lotes de productos + 2 lotes de
+    external_code = 4 SAVEPOINT — muy lejos de los ~300 que pagaría
+    `_assign_external_code` llamado directo por fila."""
+    n = 300
+    rows = [_multisheet_row(f"Producto Lote {i}", f"ERP-{i:04d}") for i in range(n)]
+
+    counts, profile, tenant_id = await _importar_catalogo_medido(isolated_db_engine, rows)
+
+    assert not counts.get("external_code_conflict")
+    savepoints = profile.counts.get("SAVEPOINT", 0)
+    # Cota generosa (no exacta, para no acoplar el test al chunk_size interno)
+    # pero muy por debajo de "uno por producto": confirma que SÍ hay batching.
+    assert savepoints <= 10, f"esperaba un puñado de SAVEPOINT por lote, hubo {savepoints}"
+
+    factory = async_sessionmaker(isolated_db_engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as verify_session:
+        products = (
+            await verify_session.execute(
+                select(Product).where(Product.tenant_id == tenant_id)
+            )
+        ).scalars().all()
+        assert len(products) == n
+        assert {p.external_code for p in products} == {f"ERP-{i:04d}" for i in range(n)}
+
+
+async def test_codigo_repetido_en_el_lote_no_bloquea_al_resto(
+    isolated_db_engine: AsyncEngine,
+) -> None:
+    """Un código repetido en el medio de un catálogo grande hace fallar el
+    LOTE que lo contiene (rollback), pero el reintento de a uno —el fallback
+    de `ExternalCodeBatch`— salva a los demás productos de ESE mismo lote;
+    el otro lote (sin el duplicado) ni se entera."""
+    n = 300
+    rows = [_multisheet_row(f"Producto Lote {i}", f"ERP-{i:04d}") for i in range(n)]
+    # Fila 150 repite el código de la fila 100 — ambas caen en el PRIMER lote
+    # (chunk_size=200), que es el que paga el fallback de a uno.
+    rows[150] = _multisheet_row("Producto Lote Duplicado", "ERP-0100")
+
+    counts, profile, tenant_id = await _importar_catalogo_medido(isolated_db_engine, rows)
+
+    assert counts.get("external_code_conflict") == 1
+    # Sigue MUY por debajo de "uno por producto sin ningún batching" (300),
+    # aunque el fallback de a uno del lote que chocó pague más que el caso
+    # limpio — es exactamente el costo que el usuario aceptó: el camino feliz
+    # es barato, el choque es el único que paga caro, y solo para SU lote.
+    savepoints = profile.counts.get("SAVEPOINT", 0)
+    assert savepoints < n
+
+    factory = async_sessionmaker(isolated_db_engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as verify_session:
+        products = (
+            await verify_session.execute(
+                select(Product).where(Product.tenant_id == tenant_id)
+            )
+        ).scalars().all()
+        assert len(products) == n  # las 300 filas crearon su producto igual
+        codigos = {p.external_code for p in products if p.external_code}
+        # 299 códigos DECLARADOS (300 filas, una repite el código de otra) →
+        # uno de los dos duplicados pierde, pero el VALOR sigue usado por el
+        # que ganó: siguen siendo 299 valores distintos persistidos.
+        assert len(codigos) == n - 1

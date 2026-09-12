@@ -3562,26 +3562,16 @@ _MAX_EXTERNAL_CODE_LEN = 100
 _MAX_EXTERNAL_SOURCE_LEN = 60
 
 
-async def _assign_external_code(
-    session: AsyncSession,
+def _prepare_external_code(
     target: Product,
     ext_code: str | None,
     ext_source: str | None,
     counts: dict[str, Any],
-) -> None:
-    """E6a-B (quirúrgico): completa ``external_code``/``external_source`` en un
-    producto que YA tiene fila real en la base (nuevo recién insertado, o
-    existente resuelto por barcode/sku/nombre) — se llama DESPUÉS, nunca
-    dentro del INSERT que resuelve identidad.
-
-    Aditivo: nunca pisa un valor ya cargado. Protegido a nivel de BASE DE
-    DATOS (``external_code_guard``) contra la carrera entre imports
-    concurrentes del mismo tenant — el lease de import es per-archivo y el
-    lock de mantenimiento es shared, así que dos confirms del mismo tenant sí
-    pueden competir por el mismo código. Ante conflicto: descarta el campo
-    para esta fila, cuenta, NO bloquea el resto del import ni fusiona
-    productos (a diferencia de barcode/sku, un código externo repetido NUNCA
-    significa "es el mismo producto").
+) -> bool:
+    """Política aditiva + validación de longitud de ``external_code`` — PURO,
+    sin sesión, sin round-trip. Devuelve ``True`` si corresponde intentar la
+    asignación real (directa o por lote); ``False`` si ya se resolvió acá (no
+    hay nada que asignar, o el valor es demasiado largo).
 
     ``ext_code``/``ext_source`` llegan SIN truncar (ver los call sites, que
     usan ``_clean_str_unbounded``): truncar ANTES de comparar longitudes
@@ -3592,7 +3582,7 @@ async def _assign_external_code(
     ``custom_fields`` para revisión manual, se cuenta y el producto se sigue
     importando normalmente."""
     if not ext_code or target.external_code:
-        return
+        return False
     if len(ext_code) > _MAX_EXTERNAL_CODE_LEN or (
         ext_source is not None and len(ext_source) > _MAX_EXTERNAL_SOURCE_LEN
     ):
@@ -3610,6 +3600,34 @@ async def _assign_external_code(
             "external_source": ext_source,
         }
         target.custom_fields = cf
+        return False
+    return True
+
+
+async def _assign_external_code(
+    session: AsyncSession,
+    target: Product,
+    ext_code: str | None,
+    ext_source: str | None,
+    counts: dict[str, Any],
+) -> None:
+    """E6a-B (quirúrgico): completa ``external_code``/``external_source`` en un
+    producto que YA tiene fila real en la base (nuevo recién insertado, o
+    existente resuelto por barcode/sku/nombre) — se llama DESPUÉS, nunca
+    dentro del INSERT que resuelve identidad.
+
+    Asignación DIRECTA, de a un producto por vez (un savepoint propio). Es el
+    fallback que usa ``ExternalCodeBatch`` cuando un lote choca y hay que
+    reintentar de a uno para saber cuál — para el camino de catálogo normal,
+    preferir encolar en el batch (menos round-trips). Protegido a nivel de
+    BASE DE DATOS (``external_code_guard``) contra la carrera entre imports
+    concurrentes del mismo tenant — el lease de import es per-archivo y el
+    lock de mantenimiento es shared, así que dos confirms del mismo tenant sí
+    pueden competir por el mismo código. Ante conflicto: descarta el campo
+    para esta fila, cuenta, NO bloquea el resto del import ni fusiona
+    productos (a diferencia de barcode/sku, un código externo repetido NUNCA
+    significa "es el mismo producto")."""
+    if not _prepare_external_code(target, ext_code, ext_source, counts):
         return
     # Capturados ANTES del guard: tras un rollback a savepoint, SQLAlchemy
     # expira los atributos del objeto y leerlos requeriría un refresh async
@@ -3633,6 +3651,101 @@ async def _assign_external_code(
         # lectura synchronous dispara el mismo MissingGreenlet que el log de
         # arriba evita capturando los valores ANTES del guard.
         await session.refresh(target)
+
+
+@dataclass
+class _PendienteExternalCode:
+    """Una asignación de código externo encolada en ``ExternalCodeBatch``.
+
+    ``after`` es el dict "after" YA appendeado a ``product_details`` (F11) —
+    se completa retroactivamente cuando el lote resuelve, nunca antes: a la
+    hora de encolar todavía no se sabe si la asignación va a chocar."""
+
+    product: Product
+    ext_code: str
+    ext_source: str | None
+    counts: dict[str, Any]
+    after: dict[str, Any] | None
+
+
+class ExternalCodeBatch:
+    """Asigna ``external_code``/``external_source`` por LOTE: un savepoint
+    por lote en vez de uno por producto, con fallback de a uno cuando el
+    lote choca — mismo molde que ``ProductCreateBatch`` (PR #53, ver su
+    docstring: el savepoint por fila fue el 48,9% de los statements de un
+    confirm real).
+
+    El índice único de la base (``uq_products_tenant_external_code``) sigue
+    siendo la ÚNICA protección real contra la carrera entre imports
+    concurrentes del mismo tenant — el lote es una optimización de
+    round-trips, no la reemplaza: si dos productos del mismo lote (o de dos
+    corridas distintas) chocan, el fallback de a uno los resuelve igual que
+    ``_assign_external_code`` directo.
+
+    La política aditiva y la validación de longitud (``_prepare_external_code``)
+    se resuelven al ENCOLAR, no al flushear — son puro Python, sin round-trip,
+    así que no hace falta diferirlas."""
+
+    def __init__(self, session: AsyncSession, *, chunk_size: int = 200) -> None:
+        self._session = session
+        self._chunk_size = chunk_size
+        self._pendientes: list[_PendienteExternalCode] = []
+
+    def encolar(
+        self,
+        product: Product,
+        ext_code: str | None,
+        ext_source: str | None,
+        counts: dict[str, Any],
+        *,
+        after: dict[str, Any] | None = None,
+    ) -> None:
+        if not _prepare_external_code(product, ext_code, ext_source, counts):
+            self._sync_after(product, after)
+            return
+        assert ext_code is not None  # _prepare_external_code ya lo garantiza
+        self._pendientes.append(
+            _PendienteExternalCode(product, ext_code, ext_source, counts, after)
+        )
+
+    async def flush(self) -> None:
+        while self._pendientes:
+            lote = self._pendientes[: self._chunk_size]
+            self._pendientes = self._pendientes[self._chunk_size :]
+            await self._persistir_lote(lote)
+
+    async def _persistir_lote(self, lote: list[_PendienteExternalCode]) -> None:
+        try:
+            async with external_code_guard(self._session):
+                for item in lote:
+                    item.product.external_code = item.ext_code
+                    item.product.external_source = item.ext_source
+        except ProductExternalCodeConflictError:
+            # El savepoint revirtió el LOTE ENTERO: no se puede saber desde
+            # el error cuál de los N chocó, así que se reintenta uno por uno
+            # con el helper directo (que sí aísla al culpable). El rollback
+            # dejó los atributos de TODOS los productos del lote expirados —
+            # `refresh` antes de tocar cualquiera, mismo motivo que en
+            # `_assign_external_code`.
+            logger.warning(
+                "ingestion.external_code_batch_conflict_fallback",
+                lote=len(lote),
+            )
+            for item in lote:
+                await self._session.refresh(item.product)
+                await _assign_external_code(
+                    self._session, item.product, item.ext_code, item.ext_source, item.counts
+                )
+                self._sync_after(item.product, item.after)
+            return
+        for item in lote:
+            self._sync_after(item.product, item.after)
+
+    @staticmethod
+    def _sync_after(product: Product, after: dict[str, Any] | None) -> None:
+        if after is not None:
+            after["external_code"] = product.external_code
+            after["external_source"] = product.external_source
 
 
 # F6-C1: el parser vive en app/domain/date_parsing.py — es el mismo que usa el
@@ -5765,6 +5878,10 @@ async def _insert_confirmed_data_impl(
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
             _skipped_brands: set[str] = set()
+            # E6a-B: un savepoint por LOTE para external_code en vez de uno por
+            # producto (mismo motivo que ProductCreateBatch) — se flushea una
+            # sola vez al cerrar el bloque, más abajo.
+            _ext_code_batch = ExternalCodeBatch(session)
             # F2-T4/T5: ``_identity_indexes`` y ``products_by_identity_key`` ya se
             # cargaron/crearon hoisteados arriba (compartidos con el link de
             # ventas/gastos/compras — motor unificado). La caché de identidad es la
@@ -6033,9 +6150,48 @@ async def _insert_confirmed_data_impl(
                         )
                         if _acc_exp is not None:
                             existing.expiry_date = _acc_exp
-                    await _assign_external_code(session, existing, _ext_code, _ext_source, counts)
                     _register_product_identity_cache(
                         products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
+                    )
+                    # El "after" se arma ANTES de encolar (E6a-B por lote): el
+                    # external_code/external_source de acá abajo son un
+                    # placeholder con el valor ACTUAL — ExternalCodeBatch los
+                    # sobreescribe cuando el lote resuelve, sea al flushear o
+                    # (si choca) tras el reintento de a uno.
+                    _ext_code_after: dict[str, Any] | None = None
+                    if return_details:
+                        _ext_code_after = {
+                            "sale_price_ars": str(price or existing.sale_price_ars),
+                            "list_price_ars": (
+                                str(list_price or existing.list_price_ars)
+                                if (list_price or existing.list_price_ars) is not None
+                                else None
+                            ),
+                            "unit_cost_ars": (
+                                str(cost or existing.unit_cost_ars)
+                                if (cost or existing.unit_cost_ars) is not None
+                                else None
+                            ),
+                            "stock_units": stock_val or existing.stock_units,
+                            "sku": existing.sku,
+                            "barcode": existing.barcode,
+                            "category": existing.category,
+                            "description": existing.description,
+                            "acquired_at": (
+                                existing.acquired_at.isoformat()
+                                if existing.acquired_at
+                                else None
+                            ),
+                            "expiry_date": (
+                                existing.expiry_date.isoformat()
+                                if existing.expiry_date
+                                else None
+                            ),
+                            "external_code": existing.external_code,
+                            "external_source": existing.external_source,
+                        }
+                    _ext_code_batch.encolar(
+                        existing, _ext_code, _ext_source, counts, after=_ext_code_after
                     )
                     if return_details:
                         product_details.append(
@@ -6044,36 +6200,7 @@ async def _insert_confirmed_data_impl(
                                 "product_id": str(existing.id),
                                 "name": name,
                                 "before": before_snap,
-                                "after": {
-                                    "sale_price_ars": str(price or existing.sale_price_ars),
-                                    "list_price_ars": (
-                                        str(list_price or existing.list_price_ars)
-                                        if (list_price or existing.list_price_ars) is not None
-                                        else None
-                                    ),
-                                    "unit_cost_ars": (
-                                        str(cost or existing.unit_cost_ars)
-                                        if (cost or existing.unit_cost_ars) is not None
-                                        else None
-                                    ),
-                                    "stock_units": stock_val or existing.stock_units,
-                                    "sku": existing.sku,
-                                    "barcode": existing.barcode,
-                                    "category": existing.category,
-                                    "description": existing.description,
-                                    "acquired_at": (
-                                        existing.acquired_at.isoformat()
-                                        if existing.acquired_at
-                                        else None
-                                    ),
-                                    "expiry_date": (
-                                        existing.expiry_date.isoformat()
-                                        if existing.expiry_date
-                                        else None
-                                    ),
-                                    "external_code": existing.external_code,
-                                    "external_source": existing.external_source,
-                                },
+                                "after": _ext_code_after,
                             }
                         )
 
@@ -6216,9 +6343,10 @@ async def _insert_confirmed_data_impl(
                     _register_product_identity_cache(
                         products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
                     )
-                    await _assign_external_code(
-                        session, new_product, _ext_code, _ext_source, counts
-                    )
+                    # Alta nueva: sin `after` — un producto CREADO por este
+                    # archivo se revierte entero al borrarlo (F11), no por
+                    # campo, así que no hace falta trackear el resultado acá.
+                    _ext_code_batch.encolar(new_product, _ext_code, _ext_source, counts)
                     # F-H3.b: producto NUEVO → el saldo previo al archivo es 0.
                     _proyeccion_recorder.declarar_catalogo(
                         new_product_id, name, 0, stock_val
@@ -6290,6 +6418,7 @@ async def _insert_confirmed_data_impl(
                         "count": len(_skipped_brands),
                     },
                 )
+            await _ext_code_batch.flush()
 
         # FASE F: filas ambiguas (otros_detectados) que el usuario NO reasignó a
         # ningún tipo importable → bandeja "Otros" en vez de descartarse.
@@ -6974,6 +7103,10 @@ async def _insert_multisheet_data(
     # batch de 500 filas, así que cada movimiento y cada balance salía además en su
     # propio INSERT. Ver `ProductCreateBatch` y `scripts/bench_confirm_import.py`.
     _batch_productos = ProductCreateBatch(session)
+    # E6a-B: mismo motivo, para external_code — un savepoint por LOTE en vez
+    # de uno por producto. Se flushea al cierre del lote de productos, más
+    # abajo (`_flush_batch_productos`).
+    _ext_code_batch = ExternalCodeBatch(session)
 
     def _remapear_indices_de_producto(sustituciones: dict[uuid.UUID, Any]) -> None:
         """Corrige los índices EN MEMORIA cuando el flush descartó un alta encolada.
@@ -8052,10 +8185,43 @@ async def _insert_multisheet_data(
                 )
                 if _acc_exp is not None:
                     existing.expiry_date = _acc_exp
-            await _assign_external_code(session, existing, _ext_code, _ext_source, counts)
             _register_product_identity_cache(
                 products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
             )
+            # El "after" se arma ANTES de encolar (E6a-B por lote): el
+            # external_code/external_source de acá abajo son un placeholder
+            # con el valor ACTUAL — ExternalCodeBatch los sobreescribe cuando
+            # el lote resuelve, sea al flushear o (si choca) tras el
+            # reintento de a uno.
+            _ext_code_after: dict[str, Any] | None = None
+            if return_details:
+                _ext_code_after = {
+                    "sale_price_ars": str(price or existing.sale_price_ars),
+                    "list_price_ars": (
+                        str(list_price or existing.list_price_ars)
+                        if (list_price or existing.list_price_ars) is not None
+                        else None
+                    ),
+                    "unit_cost_ars": (
+                        str(cost or existing.unit_cost_ars)
+                        if (cost or existing.unit_cost_ars) is not None
+                        else None
+                    ),
+                    "stock_units": stock_val or existing.stock_units,
+                    "sku": existing.sku,
+                    "barcode": existing.barcode,
+                    "category": existing.category,
+                    "description": existing.description,
+                    "acquired_at": (
+                        existing.acquired_at.isoformat() if existing.acquired_at else None
+                    ),
+                    "expiry_date": (
+                        existing.expiry_date.isoformat() if existing.expiry_date else None
+                    ),
+                    "external_code": existing.external_code,
+                    "external_source": existing.external_source,
+                }
+            _ext_code_batch.encolar(existing, _ext_code, _ext_source, counts, after=_ext_code_after)
             if return_details:
                 product_details.append(
                     {
@@ -8063,36 +8229,7 @@ async def _insert_multisheet_data(
                         "product_id": str(existing.id),
                         "name": name,
                         "before": before_snap,
-                        "after": {
-                            "sale_price_ars": str(price or existing.sale_price_ars),
-                            "list_price_ars": (
-                                str(list_price or existing.list_price_ars)
-                                if (list_price or existing.list_price_ars) is not None
-                                else None
-                            ),
-                            "unit_cost_ars": (
-                                str(cost or existing.unit_cost_ars)
-                                if (cost or existing.unit_cost_ars) is not None
-                                else None
-                            ),
-                            "stock_units": stock_val or existing.stock_units,
-                            "sku": existing.sku,
-                            "barcode": existing.barcode,
-                            "category": existing.category,
-                            "description": existing.description,
-                            "acquired_at": (
-                                existing.acquired_at.isoformat()
-                                if existing.acquired_at
-                                else None
-                            ),
-                            "expiry_date": (
-                                existing.expiry_date.isoformat()
-                                if existing.expiry_date
-                                else None
-                            ),
-                            "external_code": existing.external_code,
-                            "external_source": existing.external_source,
-                        },
+                        "after": _ext_code_after,
                     }
                 )
 
@@ -8306,7 +8443,9 @@ async def _insert_multisheet_data(
                     is_purchase=stock_is_purchase,
                 )
                 await _declarar_link_proveedor(_new_id)
-                await _assign_external_code(session, new_product, _ext_code, _ext_source, counts)
+                # Alta nueva: sin `after` — un producto CREADO por este
+                # archivo se revierte entero al borrarlo (F11), no por campo.
+                _ext_code_batch.encolar(new_product, _ext_code, _ext_source, counts)
                 if return_details:
                     product_details.append(
                         {
@@ -8986,6 +9125,10 @@ async def _insert_multisheet_data(
     # una cola sin vaciar sería un import que dice haber creado productos que no
     # insertó, que es peor que pagar un flush vacío.
     await _flush_batch_productos()
+    # E6a-B: `_ext_code_batch` solo encola productos que `_batch_productos` YA
+    # flusheó (existentes, o nuevos resueltos vía `_al_resolver`) — no hace
+    # falta sincronizar su flush con los flushes intermedios de arriba.
+    await _ext_code_batch.flush()
 
     # Traza agregada (Fase 1) de las decisiones de proveedor del multi-hoja.
     if _real_suppliers:
