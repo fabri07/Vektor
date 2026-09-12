@@ -46,6 +46,19 @@ un modo de falla indiagnosticable.
 predicado, por la misma razón que ``sku_normalized``: el índice tiene que evaluar
 exactamente lo mismo que la búsqueda, y dos definiciones de la misma
 normalización quedan libres de divergir.
+
+Idempotente (E8c)
+-----------------
+``upgrade()`` saltea lo que ya existe y ``downgrade()`` sólo borra lo que está.
+El ``preDeployCommand`` de Railway corre ``alembic upgrade head`` en cada deploy,
+y un esquema que quedó por delante de ``alembic_version`` —pasó el 2026-09-12—
+hace fallar el deploy entero con ``DuplicateColumn``. Misma convención que
+``20260806_0001``, que ya lo documenta: "el ``preDeployCommand`` puede correr dos
+veces".
+
+Límite declarado: comprueba PRESENCIA, no forma. Una columna que exista con otro
+tipo se saltea igual; detectar eso pide comparar el esquema entero y es otro
+problema.
 """
 
 from __future__ import annotations
@@ -71,24 +84,44 @@ _PREDICADO = {
 }
 
 
+def _columnas(tabla: str) -> set[str]:
+    return {c["name"] for c in sa.inspect(op.get_bind()).get_columns(tabla)}
+
+
+def _indices(tabla: str) -> set[str]:
+    return {ix["name"] for ix in sa.inspect(op.get_bind()).get_indexes(tabla)}
+
+
 def upgrade() -> None:
     for tabla in _TABLAS:
-        op.add_column(tabla, sa.Column("external_code", sa.String(100), nullable=True))
-        op.add_column(tabla, sa.Column("external_source", sa.String(60), nullable=True))
-        op.add_column(tabla, sa.Column("external_code_key", sa.String(200), nullable=True))
-        op.create_index(
-            f"uq_{tabla}_tenant_external_code",
-            tabla,
-            ["tenant_id", "external_code_key"],
-            unique=True,
-            postgresql_where=sa.text(_PREDICADO[tabla]),
-            sqlite_where=sa.text(_PREDICADO[tabla]),
-        )
+        # Columna por columna y no "si falta la primera, agrego las tres": el
+        # índice necesita `external_code_key`, así que saltear en bloque por una
+        # columna presente dejaría el índice sin crear.
+        existentes = _columnas(tabla)
+        if "external_code" not in existentes:
+            op.add_column(tabla, sa.Column("external_code", sa.String(100), nullable=True))
+        if "external_source" not in existentes:
+            op.add_column(tabla, sa.Column("external_source", sa.String(60), nullable=True))
+        if "external_code_key" not in existentes:
+            op.add_column(
+                tabla, sa.Column("external_code_key", sa.String(200), nullable=True)
+            )
+        if f"uq_{tabla}_tenant_external_code" not in _indices(tabla):
+            op.create_index(
+                f"uq_{tabla}_tenant_external_code",
+                tabla,
+                ["tenant_id", "external_code_key"],
+                unique=True,
+                postgresql_where=sa.text(_PREDICADO[tabla]),
+                sqlite_where=sa.text(_PREDICADO[tabla]),
+            )
 
 
 def downgrade() -> None:
     for tabla in _TABLAS:
-        op.drop_index(f"uq_{tabla}_tenant_external_code", table_name=tabla)
-        op.drop_column(tabla, "external_code_key")
-        op.drop_column(tabla, "external_source")
-        op.drop_column(tabla, "external_code")
+        if f"uq_{tabla}_tenant_external_code" in _indices(tabla):
+            op.drop_index(f"uq_{tabla}_tenant_external_code", table_name=tabla)
+        existentes = _columnas(tabla)
+        for columna in ("external_code_key", "external_source", "external_code"):
+            if columna in existentes:
+                op.drop_column(tabla, columna)

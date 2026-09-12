@@ -56,6 +56,16 @@ Orden de despliegue
 -------------------
 Sin riesgo: las tablas nacen vacías y sin lectores. Un servicio viejo contra el
 esquema nuevo las ignora; el ejecutor nuevo no existe hasta el commit siguiente.
+
+Idempotente (E8c)
+-----------------
+``upgrade()`` saltea lo que ya existe y ``downgrade()`` sólo borra lo que está.
+El ``preDeployCommand`` de Railway corre ``alembic upgrade head`` en cada deploy,
+y un esquema que quedó por delante de ``alembic_version`` —pasó el 2026-09-12—
+hace fallar el deploy entero. Misma convención que ``20260806_0001``, que ya lo
+documenta: "el ``preDeployCommand`` puede correr dos veces".
+
+Límite declarado: comprueba PRESENCIA, no forma.
 """
 
 from __future__ import annotations
@@ -75,99 +85,128 @@ branch_labels = None
 depends_on = None
 
 
-def upgrade() -> None:
-    op.create_table(
-        "import_attempts",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "tenant_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column(
-            "file_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("uploaded_files.id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column("request_key", sa.String(128), nullable=False),
-        sa.Column("payload_hash", sa.String(64), nullable=False),
-        sa.Column("payload_json", _JSONB, nullable=False),
-        #: Versión del FORMATO del payload congelado. Sin esto, cambiar la forma
-        #: del sobre deja intentos viejos que un ejecutor nuevo interpreta mal en
-        #: silencio; con esto, los rechaza diciendo por qué.
-        sa.Column("payload_version", sa.Integer, nullable=False, server_default="1"),
-        sa.Column("ingestion_version", sa.Integer, nullable=False, server_default="1"),
-        sa.Column("preview_version", sa.Integer, nullable=True),
-        #: A QUÉ versión del archivo se le dijo que sí. Si el archivo se releyó
-        #: entre el confirm y la ejecución, importar contra el contenido nuevo
-        #: sería importar algo que el usuario nunca vio.
-        sa.Column("file_content_hash", sa.String(64), nullable=True),
-        sa.Column("status", sa.String(20), nullable=False, server_default="PENDIENTE"),
-        sa.Column("phase", sa.String(30), nullable=True),
-        sa.Column("rows_total", sa.Integer, nullable=True),
-        sa.Column("rows_done", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("error_code", sa.String(30), nullable=True),
-        sa.Column("error_detail", sa.Text(), nullable=True),
-        sa.Column("result_json", _JSONB, nullable=True),
-        sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("max_attempts", sa.Integer, nullable=False, server_default="3"),
-        sa.Column("lease_token", UUID(as_uuid=True), nullable=True),
-        sa.Column("lease_expires_at", sa.TIMESTAMP(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.TIMESTAMP(timezone=True),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.TIMESTAMP(timezone=True),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-            nullable=False,
-        ),
-        sa.Column("started_at", sa.TIMESTAMP(timezone=True), nullable=True),
-        sa.Column("finished_at", sa.TIMESTAMP(timezone=True), nullable=True),
-        sa.UniqueConstraint("tenant_id", "request_key", name="uq_import_attempts_request_key"),
-    )
-    op.create_index("ix_import_attempts_status", "import_attempts", ["status", "lease_expires_at"])
-    op.create_index("ix_import_attempts_file", "import_attempts", ["tenant_id", "file_id"])
+def _tablas() -> set[str]:
+    return set(sa.inspect(op.get_bind()).get_table_names())
 
-    op.create_table(
-        "import_outbox",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "attempt_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("import_attempts.id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column(
-            "tenant_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column("published_at", sa.TIMESTAMP(timezone=True), nullable=True),
-        sa.Column("publish_attempts", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("last_error", sa.Text(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.TIMESTAMP(timezone=True),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-            nullable=False,
-        ),
-        sa.UniqueConstraint("attempt_id", name="uq_import_outbox_attempt"),
-    )
-    op.create_index(
-        "ix_import_outbox_pendientes", "import_outbox", ["published_at", "created_at"]
-    )
+
+def _indices(tabla: str) -> set[str]:
+    # Vacío si la tabla no está: el `downgrade` pregunta por los índices de una
+    # tabla que quizá ya no exista, y `get_indexes` sobre eso levanta
+    # `NoSuchTableError`.
+    insp = sa.inspect(op.get_bind())
+    if tabla not in insp.get_table_names():
+        return set()
+    return {ix["name"] for ix in insp.get_indexes(tabla)}
+
+
+def upgrade() -> None:
+    if "import_attempts" not in _tablas():
+        op.create_table(
+            "import_attempts",
+            sa.Column("id", UUID(as_uuid=True), primary_key=True),
+            sa.Column(
+                "tenant_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column(
+                "file_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("uploaded_files.id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column("request_key", sa.String(128), nullable=False),
+            sa.Column("payload_hash", sa.String(64), nullable=False),
+            sa.Column("payload_json", _JSONB, nullable=False),
+            #: Versión del FORMATO del payload congelado. Sin esto, cambiar la forma
+            #: del sobre deja intentos viejos que un ejecutor nuevo interpreta mal en
+            #: silencio; con esto, los rechaza diciendo por qué.
+            sa.Column("payload_version", sa.Integer, nullable=False, server_default="1"),
+            sa.Column("ingestion_version", sa.Integer, nullable=False, server_default="1"),
+            sa.Column("preview_version", sa.Integer, nullable=True),
+            #: A QUÉ versión del archivo se le dijo que sí. Si el archivo se releyó
+            #: entre el confirm y la ejecución, importar contra el contenido nuevo
+            #: sería importar algo que el usuario nunca vio.
+            sa.Column("file_content_hash", sa.String(64), nullable=True),
+            sa.Column("status", sa.String(20), nullable=False, server_default="PENDIENTE"),
+            sa.Column("phase", sa.String(30), nullable=True),
+            sa.Column("rows_total", sa.Integer, nullable=True),
+            sa.Column("rows_done", sa.Integer, nullable=False, server_default="0"),
+            sa.Column("error_code", sa.String(30), nullable=True),
+            sa.Column("error_detail", sa.Text(), nullable=True),
+            sa.Column("result_json", _JSONB, nullable=True),
+            sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
+            sa.Column("max_attempts", sa.Integer, nullable=False, server_default="3"),
+            sa.Column("lease_token", UUID(as_uuid=True), nullable=True),
+            sa.Column("lease_expires_at", sa.TIMESTAMP(timezone=True), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.TIMESTAMP(timezone=True),
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            sa.Column(
+                "updated_at",
+                sa.TIMESTAMP(timezone=True),
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            sa.Column("started_at", sa.TIMESTAMP(timezone=True), nullable=True),
+            sa.Column("finished_at", sa.TIMESTAMP(timezone=True), nullable=True),
+            sa.UniqueConstraint("tenant_id", "request_key", name="uq_import_attempts_request_key"),
+        )
+    _ix_attempts = _indices("import_attempts")
+    if "ix_import_attempts_status" not in _ix_attempts:
+        op.create_index(
+            "ix_import_attempts_status", "import_attempts", ["status", "lease_expires_at"]
+        )
+    if "ix_import_attempts_file" not in _ix_attempts:
+        op.create_index(
+            "ix_import_attempts_file", "import_attempts", ["tenant_id", "file_id"]
+        )
+
+    if "import_outbox" not in _tablas():
+        op.create_table(
+            "import_outbox",
+            sa.Column("id", UUID(as_uuid=True), primary_key=True),
+            sa.Column(
+                "attempt_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("import_attempts.id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column(
+                "tenant_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column("published_at", sa.TIMESTAMP(timezone=True), nullable=True),
+            sa.Column("publish_attempts", sa.Integer, nullable=False, server_default="0"),
+            sa.Column("last_error", sa.Text(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.TIMESTAMP(timezone=True),
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            sa.UniqueConstraint("attempt_id", name="uq_import_outbox_attempt"),
+        )
+    if "ix_import_outbox_pendientes" not in _indices("import_outbox"):
+        op.create_index(
+            "ix_import_outbox_pendientes", "import_outbox", ["published_at", "created_at"]
+        )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_import_outbox_pendientes", table_name="import_outbox")
-    op.drop_table("import_outbox")
-    op.drop_index("ix_import_attempts_file", table_name="import_attempts")
-    op.drop_index("ix_import_attempts_status", table_name="import_attempts")
-    op.drop_table("import_attempts")
+    if "ix_import_outbox_pendientes" in _indices("import_outbox"):
+        op.drop_index("ix_import_outbox_pendientes", table_name="import_outbox")
+    if "import_outbox" in _tablas():
+        op.drop_table("import_outbox")
+    if "ix_import_attempts_file" in _indices("import_attempts"):
+        op.drop_index("ix_import_attempts_file", table_name="import_attempts")
+    if "ix_import_attempts_status" in _indices("import_attempts"):
+        op.drop_index("ix_import_attempts_status", table_name="import_attempts")
+    if "import_attempts" in _tablas():
+        op.drop_table("import_attempts")
