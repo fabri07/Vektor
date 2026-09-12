@@ -22,6 +22,11 @@ protegía contra concurrencia real y no integraba con la reversión F11):
   es per-archivo y el lock de mantenimiento es shared, así que dos imports
   del mismo tenant SÍ pueden competir por el mismo código.
 - Aditivo: nunca pisa un `external_code` ya cargado.
+- Se lee SIN truncar y se valida la longitud real ANTES de comparar/asignar
+  (`_clean_str_unbounded`): truncar primero volvería iguales a dos códigos
+  distintos que comparten el prefijo de 100 caracteres, reportando un
+  "conflicto" que nunca existió. Un valor que excede el límite real de la
+  columna se preserva completo en `custom_fields`, nunca se asigna.
 - Integrado con F11 (`PRODUCT_RESTORE_FIELDS`) — ver el caso de reversión en
   `test_file_deletion_revert.py::test_restaura_el_codigo_externo...`.
 """
@@ -198,6 +203,106 @@ async def test_no_pisa_un_external_code_ya_cargado(
 
     await db_session.refresh(producto)
     assert producto.external_code == "CODIGO-MANUAL"
+
+
+async def test_codigo_demasiado_largo_no_se_asigna_ni_se_trunca(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Dos códigos que comparten el prefijo de 100 caracteres pero difieren
+    después NO deben terminar identificados como "el mismo código" — la
+    validación de longitud pasa ANTES que la comparación de igualdad, así
+    que ninguno de los dos productos con código demasiado largo llega
+    siquiera a competir por el índice único."""
+    tid = sample_tenant.tenant_id
+    prefijo = "X" * 100
+    codigo_1 = prefijo + "-UNO"
+    codigo_2 = prefijo + "-DOS"
+    summary = _multisheet_summary(
+        [
+            _multisheet_row("Producto Largo 1", codigo_1),
+            _multisheet_row("Producto Largo 2", codigo_2),
+        ]
+    )
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"productos": True},
+        context_mappings=_MULTISHEET_MAPPINGS,
+        context_confirmed={"sheet:Catalogo": True},
+    )
+
+    assert counts.get("external_code_too_long") == 2
+    assert not counts.get("external_code_conflict")  # nunca llegaron a competir
+
+    products = (
+        await db_session.execute(select(Product).where(Product.tenant_id == tid))
+    ).scalars().all()
+    assert len(products) == 2
+    for p in products:
+        assert p.external_code is None  # nunca se asignó, ni truncado
+        pendiente = p.custom_fields.get("_external_code_pendiente_revision")
+        assert pendiente is not None
+        assert len(pendiente["external_code"]) == 104  # se preservó COMPLETO
+    codigos_preservados = {
+        p.custom_fields["_external_code_pendiente_revision"]["external_code"] for p in products
+    }
+    assert codigos_preservados == {codigo_1, codigo_2}  # distintos, no colapsados
+
+
+async def test_sistema_de_origen_demasiado_largo_tampoco_asigna_el_par(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Si el código entra pero el sistema de origen excede su propio límite
+    (60), no se asigna NINGUNO de los dos — es "ese par" o nada."""
+    tid = sample_tenant.tenant_id
+    mappings = {
+        "sheet:Catalogo": {
+            "nombre": "name",
+            "clave_z9": "external_code",
+            "fuente_z9": "external_source",
+            "precio": "sale_price_ars",
+        },
+    }
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_stock": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Catalogo",
+                "label": "Catalogo",
+                "entity_type": "product",
+                "headers": ["nombre", "clave_z9", "fuente_z9", "precio"],
+                "row_count": 1,
+            },
+        ],
+        "stock_detectado": [
+            {
+                "nombre": "Producto Fuente Larga",
+                "clave_z9": "OK-123",
+                "fuente_z9": "Y" * 61,
+                "precio": "100",
+                "__context__": "sheet:Catalogo",
+            }
+        ],
+    }
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"productos": True},
+        context_mappings=mappings,
+        context_confirmed={"sheet:Catalogo": True},
+    )
+
+    assert counts.get("external_code_too_long") == 1
+    product = (
+        await db_session.execute(select(Product).where(Product.tenant_id == tid))
+    ).scalar_one()
+    assert product.external_code is None
+    assert product.external_source is None
 
 
 async def test_dos_filas_mismo_codigo_identidad_distinta_no_fusiona(

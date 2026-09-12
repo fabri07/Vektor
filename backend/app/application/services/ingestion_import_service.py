@@ -3548,6 +3548,17 @@ def _parse_amount(raw: Any) -> Decimal | None:
     return interpretado.valor
 
 
+# E6a-B: mismos topes que las columnas `Product.external_code`/`external_source`
+# (`String(100)`/`String(60)`, `models/product.py`) y que `_MAX_CODIGO`/
+# `_MAX_SISTEMA` en `domain/external_code.py`. No se importan esos privados
+# desde acá — se duplica el número, no la lógica de truncado silencioso que
+# `_plegar()` hace puertas adentro: acá el valor que la EXCEDE nunca llega a
+# pisarla, así que ese truncado no se ejecuta nunca para lo que este import
+# escribe (ver `_assign_external_code`).
+_MAX_EXTERNAL_CODE_LEN = 100
+_MAX_EXTERNAL_SOURCE_LEN = 60
+
+
 async def _assign_external_code(
     session: AsyncSession,
     target: Product,
@@ -3567,8 +3578,35 @@ async def _assign_external_code(
     pueden competir por el mismo código. Ante conflicto: descarta el campo
     para esta fila, cuenta, NO bloquea el resto del import ni fusiona
     productos (a diferencia de barcode/sku, un código externo repetido NUNCA
-    significa "es el mismo producto")."""
+    significa "es el mismo producto").
+
+    ``ext_code``/``ext_source`` llegan SIN truncar (ver los call sites, que
+    usan ``_clean_str_unbounded``): truncar ANTES de comparar longitudes
+    convertiría dos códigos distintos que comparten los primeros 100
+    caracteres en el mismo valor, y el índice único los reportaría como
+    "conflicto" cuando en realidad nunca fueron iguales. Un valor que excede
+    el límite real de la columna NUNCA se asigna — se preserva completo en
+    ``custom_fields`` para revisión manual, se cuenta y el producto se sigue
+    importando normalmente."""
     if not ext_code or target.external_code:
+        return
+    if len(ext_code) > _MAX_EXTERNAL_CODE_LEN or (
+        ext_source is not None and len(ext_source) > _MAX_EXTERNAL_SOURCE_LEN
+    ):
+        counts["external_code_too_long"] += 1
+        logger.warning(
+            "ingestion.external_code_too_long",
+            tenant_id=str(target.tenant_id),
+            product_id=str(target.id),
+            code_len=len(ext_code),
+            source_len=len(ext_source) if ext_source else 0,
+        )
+        cf = dict(target.custom_fields or {})
+        cf["_external_code_pendiente_revision"] = {
+            "external_code": ext_code,
+            "external_source": ext_source,
+        }
+        target.custom_fields = cf
         return
     # Capturados ANTES del guard: tras un rollback a savepoint, SQLAlchemy
     # expira los atributos del objeto y leerlos requeriría un refresh async
@@ -4292,6 +4330,11 @@ async def _insert_confirmed_data_impl(
         # producto ACTIVO del tenant ya lo tiene — se descarta el campo para esta
         # fila (nunca se fusiona con el otro producto, ver external_code_guard).
         "external_code_conflict": 0,
+        # external_code_too_long: el código o el sistema de origen mapeados
+        # exceden el límite real de la columna (100/60) — no se asigna (evita
+        # el truncado silencioso que volvería iguales a dos códigos distintos
+        # con el mismo prefijo), se preserva completo en custom_fields.
+        "external_code_too_long": 0,
         # F1 (hotfix puente): fila de producto ambigua (≥2 activos con el mismo
         # nombre normalizado) — NO se importa, NO se toca ningún existente.
         "productos_ambiguos": 0,
@@ -5831,11 +5874,15 @@ async def _insert_confirmed_data_impl(
                 prod_desc = (
                     _clean_str(row.get(description_col), 500) if description_col else None
                 )
+                # Sin truncar: _assign_external_code valida la longitud real
+                # antes de decidir si el valor entra (ver su docstring).
                 _ext_code = (
-                    _clean_str(row.get(external_code_col), 100) if external_code_col else None
+                    _clean_str_unbounded(row.get(external_code_col))
+                    if external_code_col
+                    else None
                 )
                 _ext_source = (
-                    _clean_str(row.get(external_source_col), 60)
+                    _clean_str_unbounded(row.get(external_source_col))
                     if external_source_col
                     else None
                 )
@@ -6496,6 +6543,19 @@ def _clean_str(val: Any, max_len: int = 99) -> str | None:
         return None
     s = str(val).strip()
     return s[:max_len] if s and s.lower() not in {"none", "nan", ""} else None
+
+
+def _clean_str_unbounded(val: Any) -> str | None:
+    """Como ``_clean_str`` pero SIN truncar.
+
+    E6a-B: para ``external_code``/``external_source`` el largo real importa
+    para decidir si el valor entra — truncar acá y recién después comparar
+    longitudes volvería indistinguibles dos códigos distintos que comparten
+    el mismo prefijo."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s and s.lower() not in {"none", "nan", ""} else None
 
 
 @dataclass
@@ -7817,8 +7877,12 @@ async def _insert_multisheet_data(
         # matching — no participa de _resolve_product_identity).
         _ext_code_col = cols.get("external_code")
         _ext_source_col = cols.get("external_source")
-        _ext_code = _clean_str(row.get(_ext_code_col), 100) if _ext_code_col else None
-        _ext_source = _clean_str(row.get(_ext_source_col), 60) if _ext_source_col else None
+        # Sin truncar: _assign_external_code valida la longitud real antes de
+        # decidir si el valor entra (ver su docstring).
+        _ext_code = _clean_str_unbounded(row.get(_ext_code_col)) if _ext_code_col else None
+        _ext_source = (
+            _clean_str_unbounded(row.get(_ext_source_col)) if _ext_source_col else None
+        )
         if cat_raw:
             cat, cat_label = normalize_product_category(cat_raw, _vertical)
         else:

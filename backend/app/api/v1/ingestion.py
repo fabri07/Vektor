@@ -3478,6 +3478,12 @@ async def confirm_file(
             f"{counts['external_code_conflict']} producto(s) no se pudieron vincular por "
             "código externo: el código ya pertenece a otro producto de tu catálogo."
         )
+    if counts.get("external_code_too_long"):
+        warnings.append(
+            f"{counts['external_code_too_long']} producto(s) tienen un código externo "
+            "demasiado largo para guardarse — quedó en observaciones del producto para "
+            "revisar a mano."
+        )
     # F7d: taxonomía reconciliada de resolución de referencia. "anonimo" (venta de
     # mostrador / compra sin proveedor informado) NUNCA avisa — es el caso normal.
     # Solo "no_resuelto" (trajo una referencia que no matcheó contra ningún
