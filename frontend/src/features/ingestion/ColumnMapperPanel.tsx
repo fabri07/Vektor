@@ -1368,29 +1368,43 @@ function MultiContextMapper({
   );
   // Se recuerda aunque cambie la clave: `error` de react-query vuelve a `null`
   // con cada clave nueva, y la compuerta es del TENANT, no del mapeo.
-  const [sinMotor, setSinMotor] = useState(false);
-  const { data: purchaseGroups = [], error: errorGrupos } = useQuery({
+  //
+  // REF y no state+effect: un `useEffect` que reacciona a `errorGrupos` corre
+  // recién en el commit POSTERIOR al que puso el error — un tick después de que
+  // la promesa del 403 se resolvió. Si el usuario edita el mapeo en ese hueco
+  // (cambia `riskRecomputeKey`/`draftKey`), `enabled` todavía lee el estado
+  // viejo y se cuela OTRA consulta antes de que el freno cierre (race real,
+  // reproducido corriendo el archivo completo con --runInBand: falla ~1 de 3).
+  // Marcar el ref DENTRO del `catch` de `queryFn` lo fija en el mismo tick en
+  // que la promesa rechaza, antes de que React llegue a re-renderizar por
+  // cualquier motivo — así el siguiente `enabled` (sea por el error o por la
+  // edición del usuario) ya lo ve puesto.
+  const sinMotorRef = useRef(false);
+  const { data: purchaseGroups = [] } = useQuery({
     queryKey: ["purchase-groups", fileId, riskRecomputeKey, draftKey],
-    queryFn: ({ signal }) =>
-      ingestionService.fetchPurchaseGroups(
-        fileId,
-        {
-          ...riskRecomputeInput,
-          shippingDecisions: envioPayload,
-          purchaseCostDecisions: costoDraft,
-        },
-        signal,
-      ),
-    enabled: hayEnvioCompartido && !sinMotor,
+    queryFn: async ({ signal }) => {
+      try {
+        return await ingestionService.fetchPurchaseGroups(
+          fileId,
+          {
+            ...riskRecomputeInput,
+            shippingDecisions: envioPayload,
+            purchaseCostDecisions: costoDraft,
+          },
+          signal,
+        );
+      } catch (err) {
+        if (esMotorDeCostosDeshabilitado(err)) sinMotorRef.current = true;
+        throw err;
+      }
+    },
+    enabled: hayEnvioCompartido && !sinMotorRef.current,
     // Mismo motivo que en `/inventory-effects`: la clave cambia con cada edición
     // del mapeo, y sin conservar lo anterior el selector del tercer eje
     // desaparecería en cada recálculo.
     placeholderData: (prev) => prev,
     retry: false,
   });
-  useEffect(() => {
-    if (esMotorDeCostosDeshabilitado(errorGrupos)) setSinMotor(true);
-  }, [errorGrupos]);
   const gruposByCtx = useMemo(
     () => Object.fromEntries(purchaseGroups.map((h) => [h.context_id, h])),
     [purchaseGroups],
