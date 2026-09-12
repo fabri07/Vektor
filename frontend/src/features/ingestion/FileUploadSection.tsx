@@ -12,6 +12,11 @@ import { ColumnMapperPanel } from "./ColumnMapperPanel";
 const ACCEPTED_EXTENSIONS = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
 const MAX_POLLS = 30;
 const POLL_INTERVAL_MS = 2_000;
+// Un blip de red (ej. redeploy de Railway a mitad de un GET) no significa que el
+// archivo falló — el backend ya lo puede tener en NEEDS_CONFIRMATION. Solo se
+// declara "failed" del lado del cliente tras fallos CONSECUTIVOS; un tick exitoso
+// resetea el contador.
+const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
 type Phase =
   | "idle"
@@ -61,6 +66,7 @@ export function FileUploadSection() {
   const [warning, setWarning] = useState<string | null>(null);
   const [duplicateDetail, setDuplicateDetail] = useState<string | null>(null);
   const pollCount = useRef(0);
+  const pollErrorCount = useRef(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -77,6 +83,7 @@ export function FileUploadSection() {
 
   function startPolling(id: string) {
     pollCount.current = 0;
+    pollErrorCount.current = 0;
     stopPolling();
 
     pollTimer.current = setInterval(() => {
@@ -92,6 +99,7 @@ export function FileUploadSection() {
       ingestionService
         .getPreview(id)
         .then((data) => {
+          pollErrorCount.current = 0;
           if (data === null) return; // still PENDING/PROCESSING — keep polling
 
           if (data.processing_status === "NEEDS_CONFIRMATION") {
@@ -114,6 +122,10 @@ export function FileUploadSection() {
           }
         })
         .catch(() => {
+          pollErrorCount.current += 1;
+          // Blip transitorio (ej. redeploy en curso) — reintenta en el próximo
+          // tick en vez de declarar el archivo fallido de entrada.
+          if (pollErrorCount.current < MAX_CONSECUTIVE_POLL_ERRORS) return;
           stopPolling();
           setPhase("failed");
           setError("Error al verificar el estado del archivo.");

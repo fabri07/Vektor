@@ -158,6 +158,55 @@ test("el preview del polling se siembra en la cache que lee el panel", async () 
   expect(qc.getQueryData(["ingestion-preview", FILE_ID])).toEqual(PREVIEW);
 });
 
+// ── Blip transitorio de red durante el polling ──────────────────────────────
+//
+// Un GET de polling puede cortarse a mitad de un redeploy de Railway (visto en
+// producción: un 499 mientras el servicio hacía swap de contenedor) sin que el
+// archivo haya fallado — el backend ya lo puede tener en NEEDS_CONFIRMATION.
+// Antes, el primer error de CUALQUIER tick declaraba "failed" de una, tapando
+// un archivo que en realidad estaba bien.
+
+test("un blip transitorio del polling no marca el archivo como fallido", async () => {
+  mockGetPreview
+    .mockRejectedValueOnce(new Error("network blip"))
+    .mockRejectedValueOnce(new Error("network blip"))
+    .mockResolvedValue(PREVIEW);
+
+  const { container } = renderizar();
+  await subirArchivo(container);
+  await waitFor(() => expect(mockUpload).toHaveBeenCalled());
+
+  // Dos ticks fallan (por debajo del umbral de fallos consecutivos): no se
+  // declara "failed" todavía.
+  await jest.advanceTimersByTimeAsync(2_000);
+  await waitFor(() => expect(mockGetPreview).toHaveBeenCalledTimes(1));
+  await jest.advanceTimersByTimeAsync(2_000);
+  await waitFor(() => expect(mockGetPreview).toHaveBeenCalledTimes(2));
+  expect(
+    screen.queryByText(/Error al verificar el estado del archivo/i),
+  ).not.toBeInTheDocument();
+
+  // El tercer tick, ya resuelto del lado del servidor, saca adelante el flujo
+  // normal — el error transitorio no dejó ninguna marca.
+  await jest.advanceTimersByTimeAsync(2_000);
+  await waitFor(() => expect(mockGetFieldCatalog).toHaveBeenCalled());
+});
+
+test("fallos consecutivos del polling sí marcan el archivo como fallido", async () => {
+  mockGetPreview.mockRejectedValue(new Error("network down"));
+
+  const { container } = renderizar();
+  await subirArchivo(container);
+  await waitFor(() => expect(mockUpload).toHaveBeenCalled());
+
+  await jest.advanceTimersByTimeAsync(2_000 * 3);
+  await waitFor(() =>
+    expect(
+      screen.getByText(/Error al verificar el estado del archivo/i),
+    ).toBeInTheDocument(),
+  );
+});
+
 // ── Cancelar ≠ importar ───────────────────────────────────────────────────────
 //
 // El panel de mapeo llamaba al MISMO callback (`onDone`) al confirmar y al
