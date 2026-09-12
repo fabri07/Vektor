@@ -24,6 +24,19 @@ Los intentos registrados antes de este deploy quedan con ``NULL``, y ``NULL``
 significa "no hay con qué comparar": esos intentos se ejecutan como antes. Hacerlos
 fallar sería romper en el deploy justamente los intentos en vuelo que la ruta
 asíncrona existe para no perder.
+
+Idempotente (E8c)
+-----------------
+``upgrade()`` saltea lo que ya existe y ``downgrade()`` sólo borra lo que está.
+El ``preDeployCommand`` de Railway corre ``alembic upgrade head`` en cada deploy,
+y un esquema que quedó por delante de ``alembic_version`` —pasó el 2026-09-12—
+hace fallar el deploy entero con ``DuplicateColumn``. Misma convención que
+``20260806_0001``, que ya lo documenta: "el ``preDeployCommand`` puede correr dos
+veces".
+
+Límite declarado: comprueba PRESENCIA, no forma. Una columna que exista con otro
+tipo se saltea igual; detectar eso pide comparar el esquema entero y es otro
+problema.
 """
 
 from __future__ import annotations
@@ -41,7 +54,18 @@ depends_on = None
 _JSONB = postgresql.JSONB(astext_type=sa.Text()).with_variant(sa.JSON(), "sqlite")
 
 
+def _columnas(tabla: str) -> set[str]:
+    # Vacío si la tabla no está: `import_attempts` la crea `20260910_0004`, y una
+    # cadena a medias no tiene por qué hacer explotar el inspector.
+    insp = sa.inspect(op.get_bind())
+    if tabla not in insp.get_table_names():
+        return set()
+    return {c["name"] for c in insp.get_columns(tabla)}
+
+
 def upgrade() -> None:
+    if "capabilities_json" in _columnas("import_attempts"):
+        return
     op.add_column(
         "import_attempts",
         sa.Column("capabilities_json", _JSONB, nullable=True),
@@ -49,4 +73,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("import_attempts", "capabilities_json")
+    if "capabilities_json" in _columnas("import_attempts"):
+        op.drop_column("import_attempts", "capabilities_json")

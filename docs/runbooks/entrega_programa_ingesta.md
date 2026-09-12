@@ -205,6 +205,58 @@ No "si anduvo", sino datos concretos:
   interpretación empeoró aunque nada haya fallado.
 - Sentry, filtrando por `service` (api / worker / mcp).
 
+## Cómo se verifica que el código nuevo está DESPLEGADO
+
+Esta sección existe porque la primera versión del runbook decía "mirar Railway",
+y eso **no alcanza**: cuando un deploy falla, Railway lo marca Failed y deja el
+anterior **Active y en verde**. "Todo verde y corriendo" es exactamente el mismo
+cuadro para «se desplegó bien» y para «no se desplegó y quedó el viejo».
+
+Lo que NO sirve, comprobado el 2026-09-12:
+
+- **El ID de deployment de Railway** no es el commit. Son UUIDs internos.
+- **`/health`** devuelve `version: "1.0.0"` **hardcodeada** (`app/main.py`). No
+  dice nada del commit.
+- **Que el esquema esté al día** tampoco: las migraciones las aplica un
+  contenedor one-off, y alguien pudo correrlas a mano desde su shell.
+- **`job_runs` vacía** no prueba nada: la escribe SÓLO el barrido de relecturas,
+  que agenda Beat — y Beat no está desplegado. Cero filas se explica entero por
+  eso.
+
+Lo que sí sirve: **una sonda de ruta**. Se elige un endpoint que exista sólo en
+el código nuevo y que pida autenticación, y se lo llama SIN token desde el
+navegador:
+
+```
+https://<api>/health                                     ← control: debe dar 200
+https://<api>/api/v1/ingestion/imports/00000000-0000-0000-0000-000000000000
+```
+
+- `{"detail":"Not authenticated"}` → **la ruta existe** → el código nuevo está
+  desplegado. (Que rechace por credenciales ya prueba que la ruta está.)
+- `{"detail":"Not Found"}` → la ruta no existe → corre código viejo.
+
+El control (`/health`) evita el falso negativo más obvio: un 404 porque la URL
+estaba mal. La URL pública sale de Railway → `vektor-api` → Settings →
+Networking, o de `NEXT_PUBLIC_API_URL` en Vercel.
+
+Para el próximo deploy hay que elegir una sonda nueva: la de arriba ya está en
+`main` y a partir de ahora responde igual con código viejo y nuevo.
+
+## Deriva entre esquema y `alembic_version`
+
+`scripts/diag_schema_drift.py` (read-only, lee `DATABASE_URL` del `.env` solo —
+sin argumentos, sin comillas, sin `$()`):
+
+```
+cd backend && .venv/bin/python scripts/diag_schema_drift.py
+```
+
+Compara cada objeto contra la versión declarada y clasifica en cuatro estados. El
+que importa es **DERIVA** (el objeto existe pero su migración no está aplicada):
+es lo que hace fallar el `preDeployCommand` con `DuplicateColumn`, y el mensaje
+de alembic no alcanza para saber si es una columna suelta o media cadena.
+
 ## Reversa — tres cosas distintas, en este orden
 
 No son escalones de lo mismo. Cada una revierte algo diferente, cuesta distinto y
@@ -245,3 +297,41 @@ Sin ellas, reimportar el mismo archivo vuelve a duplicar.
 Nunca es parte de una reversa de rutina. Requiere: motivo escrito, backup de
 Neon tomado antes, y la decisión explícita de que esos datos se pueden perder.
 Para casi todo lo demás, alcanza con (1) o (2).
+
+---
+
+## Registro del despliegue — 2026-09-12
+
+Primera entrega ejecutada con este runbook. Lo verificado, con la evidencia:
+
+| Ítem | Estado | Evidencia |
+|---|---|---|
+| Merge a `main` | ✅ | `e1d1b920`, merge commit con los 66 commits preservados |
+| Esquema de Neon | ✅ | `diag_schema_drift.py`: `alembic_version` = `20260910_0005`, 13/13 objetos, **sin deriva ni faltantes** |
+| Código nuevo sirviendo | ✅ | Sonda de ruta: `/api/v1/ingestion/imports/{uuid}` devuelve `Not authenticated` (la ruta existe; entró a `main` sólo con este merge, commit `aedb34af`) |
+| `vektor-api` / `vektor-worker` | ✅ | Ambos Active |
+| Compuertas | Apagadas, como se planeó | `ASYNC_IMPORT_ROLLOUT_TENANT_IDS` y `PURCHASE_COST_ROLLOUT_TENANT_IDS` vacías |
+| Cola `ingestion` | **NO VERIFICADO** | Falta el valor efectivo de `CELERY_QUEUES` en `vektor-worker` |
+| Beat | **NO VERIFICADO** | `job_runs` vacía es consistente con «no desplegado» y también con «desplegado y sin ejecuciones»: no distingue |
+
+### Lo que salió mal y qué dejó
+
+Un deploy falló con `DuplicateColumn` sobre `uploaded_files.parse_attempt_id`:
+`alembic_version` decía `20260903_0001` y la columna ya existía. El fail-safe
+funcionó — `set -e` abortó, la versión vieja siguió sirviendo, nada a medias.
+
+Un deploy posterior sí aplicó la cadena completa. **No se estableció cuál de los
+dos órdenes ocurrió** (si el log era de un intento anterior al del merge, o si
+hubo un reintento): los dos terminan igual en la base, y la distinción se perdió
+por no mirar la lista de deploys con sus commits en el momento.
+
+Lo que sí quedó aprendido y ya está arriba: cómo verificar qué código corre, y
+que ni el ID de deployment, ni `/health`, ni el estado del esquema lo responden.
+
+### Pendiente que este deploy dejó abierto
+
+Las 7 migraciones **no son idempotentes**. El repo documenta en `20260806_0001`
+que «el `preDeployCommand` puede correr dos veces» y usa `sa.inspect(bind)` +
+chequeo previo; las 7 nuevas no siguieron esa convención, y por eso un esquema
+con deriva las hace fallar en vez de saltear lo que ya está. No urge —la deriva
+se resolvió sola— pero es la causa raíz de la caída y vuelve a morder.

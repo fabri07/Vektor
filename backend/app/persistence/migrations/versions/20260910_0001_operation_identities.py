@@ -50,6 +50,18 @@ Sin riesgo de orden invertido: los dos escritores (api y worker) sólo tocan est
 tablas desde el camino de import, y el camino de import no las lee hasta el
 commit siguiente. Un servicio viejo contra el esquema nuevo ignora las tablas; un
 servicio nuevo contra el esquema viejo todavía no existe.
+
+Idempotente (E8c)
+-----------------
+``upgrade()`` saltea lo que ya existe y ``downgrade()`` sólo borra lo que está.
+El ``preDeployCommand`` de Railway corre ``alembic upgrade head`` en cada deploy,
+y un esquema que quedó por delante de ``alembic_version`` —pasó el 2026-09-12—
+hace fallar el deploy entero. Misma convención que ``20260806_0001``, que ya lo
+documenta: "el ``preDeployCommand`` puede correr dos veces".
+
+Límite declarado: comprueba PRESENCIA, no forma. Una tabla que exista con otras
+columnas se saltea igual; detectar eso pide comparar el esquema entero y es otro
+problema.
 """
 
 from __future__ import annotations
@@ -65,79 +77,101 @@ branch_labels = None
 depends_on = None
 
 
-def upgrade() -> None:
-    op.create_table(
-        "operation_identities",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "tenant_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column("identity_key", sa.Text(), nullable=False),
-        sa.Column("content_hash", sa.Text(), nullable=False),
-        sa.Column("entity_type", sa.String(10), nullable=False),
-        sa.Column(
-            "first_seen_upload_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("uploaded_files.id", ondelete="SET NULL"),
-            nullable=True,
-        ),
-        sa.Column(
-            "created_at",
-            sa.TIMESTAMP(timezone=True),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-            nullable=False,
-        ),
-        # El candado. Ver el encabezado: sin esto la reclamación masiva no
-        # protege de dos confirmaciones simultáneas.
-        sa.UniqueConstraint("tenant_id", "identity_key", name="uq_operation_identities_tenant_key"),
-    )
+def _tablas() -> set[str]:
+    return set(sa.inspect(op.get_bind()).get_table_names())
 
-    op.create_table(
-        "operation_identity_links",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "identity_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("operation_identities.id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column(
-            "tenant_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column("entity_type", sa.String(10), nullable=False),
-        sa.Column("entity_id", UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "source_upload_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("uploaded_files.id", ondelete="SET NULL"),
-            nullable=True,
-        ),
-        sa.Column(
-            "created_at",
-            sa.TIMESTAMP(timezone=True),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-            nullable=False,
-        ),
-        # Un efecto no puede estar dos veces bajo la misma identidad: hace
-        # idempotente el registro del vínculo ante un reintento.
-        sa.UniqueConstraint(
-            "identity_id", "entity_type", "entity_id", name="uq_operation_identity_links_efecto"
-        ),
-    )
-    op.create_index(
-        "ix_operation_identity_links_efecto",
-        "operation_identity_links",
-        ["tenant_id", "entity_type", "entity_id"],
-    )
+
+def _indices(tabla: str) -> set[str]:
+    # Vacío si la tabla no está: el `downgrade` pregunta por los índices de una
+    # tabla que quizá ya no exista, y `get_indexes` sobre eso levanta
+    # `NoSuchTableError`.
+    insp = sa.inspect(op.get_bind())
+    if tabla not in insp.get_table_names():
+        return set()
+    return {ix["name"] for ix in insp.get_indexes(tabla)}
+
+
+def upgrade() -> None:
+    if "operation_identities" not in _tablas():
+        op.create_table(
+            "operation_identities",
+            sa.Column("id", UUID(as_uuid=True), primary_key=True),
+            sa.Column(
+                "tenant_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column("identity_key", sa.Text(), nullable=False),
+            sa.Column("content_hash", sa.Text(), nullable=False),
+            sa.Column("entity_type", sa.String(10), nullable=False),
+            sa.Column(
+                "first_seen_upload_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+                nullable=True,
+            ),
+            sa.Column(
+                "created_at",
+                sa.TIMESTAMP(timezone=True),
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            # El candado. Ver el encabezado: sin esto la reclamación masiva no
+            # protege de dos confirmaciones simultáneas.
+            sa.UniqueConstraint(
+                "tenant_id", "identity_key", name="uq_operation_identities_tenant_key"
+            ),
+        )
+
+    if "operation_identity_links" not in _tablas():
+        op.create_table(
+            "operation_identity_links",
+            sa.Column("id", UUID(as_uuid=True), primary_key=True),
+            sa.Column(
+                "identity_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("operation_identities.id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column(
+                "tenant_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("tenants.tenant_id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            sa.Column("entity_type", sa.String(10), nullable=False),
+            sa.Column("entity_id", UUID(as_uuid=True), nullable=False),
+            sa.Column(
+                "source_upload_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey("uploaded_files.id", ondelete="SET NULL"),
+                nullable=True,
+            ),
+            sa.Column(
+                "created_at",
+                sa.TIMESTAMP(timezone=True),
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            # Un efecto no puede estar dos veces bajo la misma identidad: hace
+            # idempotente el registro del vínculo ante un reintento.
+            sa.UniqueConstraint(
+                "identity_id", "entity_type", "entity_id", name="uq_operation_identity_links_efecto"
+            ),
+        )
+    if "ix_operation_identity_links_efecto" not in _indices("operation_identity_links"):
+        op.create_index(
+            "ix_operation_identity_links_efecto",
+            "operation_identity_links",
+            ["tenant_id", "entity_type", "entity_id"],
+        )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_operation_identity_links_efecto", table_name="operation_identity_links")
-    op.drop_table("operation_identity_links")
-    op.drop_table("operation_identities")
+    if "ix_operation_identity_links_efecto" in _indices("operation_identity_links"):
+        op.drop_index("ix_operation_identity_links_efecto", table_name="operation_identity_links")
+    if "operation_identity_links" in _tablas():
+        op.drop_table("operation_identity_links")
+    if "operation_identities" in _tablas():
+        op.drop_table("operation_identities")

@@ -34,6 +34,19 @@ A nivel entidad, igual que ``sales_entries.has_user_edits``, y no por campo. Se
 banca porque la política que habilita es ADITIVA, no un bloqueo: el import sigue
 pudiendo completar los campos que el usuario nunca cargó, y sólo pierde el derecho
 a sobrescribir los que sí.
+
+Idempotente (E8c)
+-----------------
+``upgrade()`` saltea lo que ya existe y ``downgrade()`` sólo borra lo que está.
+El ``preDeployCommand`` de Railway corre ``alembic upgrade head`` en cada deploy,
+y un esquema que quedó por delante de ``alembic_version`` —pasó el 2026-09-12—
+hace fallar el deploy entero con ``DuplicateColumn``. Misma convención que
+``20260806_0001``, que ya lo documenta: "el ``preDeployCommand`` puede correr dos
+veces".
+
+Límite declarado: comprueba PRESENCIA, no forma. Una columna que exista con otro
+tipo se saltea igual; detectar eso pide comparar el esquema entero y es otro
+problema.
 """
 
 from __future__ import annotations
@@ -50,8 +63,14 @@ depends_on = None
 _TABLAS = ("customers", "suppliers")
 
 
+def _columnas(tabla: str) -> set[str]:
+    return {c["name"] for c in sa.inspect(op.get_bind()).get_columns(tabla)}
+
+
 def upgrade() -> None:
     for tabla in _TABLAS:
+        if "has_user_edits" in _columnas(tabla):
+            continue
         op.add_column(
             tabla,
             sa.Column(
@@ -65,4 +84,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for tabla in _TABLAS:
-        op.drop_column(tabla, "has_user_edits")
+        if "has_user_edits" in _columnas(tabla):
+            op.drop_column(tabla, "has_user_edits")

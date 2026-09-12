@@ -42,6 +42,19 @@ escritura de resultado va a reconocerlos como propios — terminan por el camino
 recuperación (``reprocess_file`` los devuelve a ``PENDING`` pasados los 300 s), que
 es exactamente lo que ya hacían cuando el worker moría. No se backfillea un token
 inventado: eso le daría propiedad a un intento cuyo dueño real no se conoce.
+
+Idempotente (E8c)
+-----------------
+``upgrade()`` saltea lo que ya existe y ``downgrade()`` sólo borra lo que está.
+El ``preDeployCommand`` de Railway corre ``alembic upgrade head`` en cada deploy,
+y un esquema que quedó por delante de ``alembic_version`` —pasó el 2026-09-12—
+hace fallar el deploy entero con ``DuplicateColumn``. Misma convención que
+``20260806_0001``, que ya lo documenta: "el ``preDeployCommand`` puede correr dos
+veces".
+
+Límite declarado: comprueba PRESENCIA, no forma. Una columna que exista con otro
+tipo se saltea igual; detectar eso pide comparar el esquema entero y es otro
+problema.
 """
 
 from __future__ import annotations
@@ -57,7 +70,13 @@ branch_labels = None
 depends_on = None
 
 
+def _columnas(tabla: str) -> set[str]:
+    return {c["name"] for c in sa.inspect(op.get_bind()).get_columns(tabla)}
+
+
 def upgrade() -> None:
+    if "parse_attempt_id" in _columnas("uploaded_files"):
+        return
     op.add_column(
         "uploaded_files",
         sa.Column("parse_attempt_id", UUID(as_uuid=True), nullable=True),
@@ -65,4 +84,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("uploaded_files", "parse_attempt_id")
+    if "parse_attempt_id" in _columnas("uploaded_files"):
+        op.drop_column("uploaded_files", "parse_attempt_id")
