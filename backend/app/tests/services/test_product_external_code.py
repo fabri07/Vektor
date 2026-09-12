@@ -232,6 +232,83 @@ async def test_dos_filas_mismo_codigo_identidad_distinta_no_fusiona(
     assert codes == ["ERP-DUP"]  # solo uno de los dos se quedó con el código
 
 
+async def test_conflicto_con_return_details_no_crashea_por_atributos_expirados(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Regresión: el rollback al savepoint del conflicto deja el producto con
+    los atributos expirados. Los callers (ledger de reversión F11, vía
+    `product_details`) siguen leyendo el mismo objeto Python DESPUÉS del
+    conflicto — sin `session.refresh()` en el except, esa lectura dispara
+    `MissingGreenlet` (bug real, encontrado por review, no cubierto por los
+    tests anteriores porque todos re-consultaban el producto con un SELECT
+    fresco en vez de leer el objeto que el import ya tenía en mano)."""
+    tid = sample_tenant.tenant_id
+    summary = _multisheet_summary(
+        [
+            _multisheet_row("Producto G", "ERP-DUP-2"),
+            _multisheet_row("Producto H", "ERP-DUP-2"),
+        ]
+    )
+    result = await importer.insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"productos": True},
+        context_mappings=_MULTISHEET_MAPPINGS,
+        context_confirmed={"sheet:Catalogo": True},
+        return_details=True,
+    )
+
+    assert result.get("external_code_conflict") == 1
+    details = result["product_details"]
+    assert len(details) == 2
+    assert all(d["action"] == "CREATED" for d in details)
+    # Ninguna entrada debería quedar con datos a medio escribir por el
+    # conflicto — ambas describen el producto tal como terminó persistido.
+    for d in details:
+        assert d["product_id"]
+        assert Decimal(d["after"]["sale_price_ars"]) == Decimal("100")
+
+
+async def test_conflicto_en_producto_existente_con_return_details_no_crashea(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Mismo caso que arriba, pero el conflicto ocurre al ENRIQUECER un
+    producto YA EXISTENTE (_merge_into_existing) en vez de al crear uno
+    nuevo — es el camino que arma before/after para el ledger de F11."""
+    tid = sample_tenant.tenant_id
+    otro = Product(
+        tenant_id=tid,
+        name="Producto Ocupante",
+        sale_price_ars=Decimal("50"),
+        external_code="ERP-OCUPADO",
+    )
+    db_session.add(otro)
+    await db_session.flush()
+
+    existente = Product(tenant_id=tid, name="Producto I", sale_price_ars=Decimal("100"))
+    db_session.add(existente)
+    await db_session.flush()
+
+    summary = _multisheet_summary([_multisheet_row("Producto I", "ERP-OCUPADO")])
+    result = await importer.insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"productos": True},
+        context_mappings=_MULTISHEET_MAPPINGS,
+        context_confirmed={"sheet:Catalogo": True},
+        return_details=True,
+    )
+
+    assert result.get("external_code_conflict") == 1
+    detalle = next(d for d in result["product_details"] if d["product_id"] == str(existente.id))
+    assert detalle["action"] == "UPDATED"
+    assert detalle["after"]["external_code"] is None  # se descartó, no se pisó
+    await db_session.refresh(existente)
+    assert existente.external_code is None
+
+
 async def test_mismo_codigo_en_tenants_distintos_no_interfiere(
     db_session: AsyncSession,
 ) -> None:

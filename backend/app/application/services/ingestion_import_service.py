@@ -3586,6 +3586,12 @@ async def _assign_external_code(
             product_id=str(_product_id),
             external_code=ext_code,
         )
+        # El rollback al savepoint deja los atributos de `target` expirados —
+        # los callers (ledger de reversión, caché de identidad) siguen
+        # leyéndolo después de este return; sin refrescar acá, esa primera
+        # lectura synchronous dispara el mismo MissingGreenlet que el log de
+        # arriba evita capturando los valores ANTES del guard.
+        await session.refresh(target)
 
 
 # F6-C1: el parser vive en app/domain/date_parsing.py — es el mismo que usa el
