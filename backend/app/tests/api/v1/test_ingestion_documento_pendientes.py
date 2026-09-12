@@ -51,6 +51,14 @@ _DOCUMENTO = (
     b"Gracias por su compra\n"
 )
 _VACIO = b"Gracias por su compra\nVuelva pronto\n"
+
+#: El documento mezcla `$12.500` con `$12.50`, así que NO hay convenio posible:
+#: ninguno de los dos se interpreta y los dos se conservan con su motivo.
+_AMBIGUO = b"Venta Coca $12.500\nVenta Agua $12.50\nGracias por su compra\n"
+
+#: Un documento entero escrito con punto de miles: la evidencia alcanza, y es la
+#: MISMA regla de forma que resuelve una columna (no una excepción más laxa).
+_MILES = b"Venta Coca $12.500\nVenta pack $1.234.567\nVenta Agua $800\n"
 _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -454,3 +462,213 @@ class TestElRecorridoAsincronico:
             f"la segunda entrega volvió a ejecutar el intento ({segunda})"
         )
         assert len(await _pendientes(db_session, sample_tenant)) == 3
+
+
+class TestUnMontoQueNoSePudoLeerNoBorraLaLinea:
+    """E8b — el camino de documentos era el único que leía montos fuera de la
+    política de E4, y una interpretación fallida hacía desaparecer la línea.
+
+    `parsear_monto` sin convenio se niega —con razón— a decidir si el punto de
+    `$12.500` separa miles o decimales, y el llamador leía ese `None` como "la
+    línea no tiene monto": ni se importaba, ni iba a «Otros», ni se contaba, ni
+    se avisaba. El arreglo NO es adivinar: es darle al documento el mismo
+    tratamiento que a una columna —es la unidad que fija el convenio— y
+    conservar con su motivo todo lo que aun así no se pueda interpretar.
+    """
+
+    async def test_el_documento_fija_el_convenio_como_lo_hace_una_columna(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Con evidencia suficiente el monto se interpreta y la línea se conserva.
+
+        Antes esta línea desaparecía: era el formato más común de cinco cifras.
+        """
+        documento = await _documento(db_session, sample_tenant, _MILES)
+
+        response = await _confirmar(client, auth_headers, documento.id)
+
+        assert response.status_code == 200, response.text
+        pendientes = await _pendientes(db_session, sample_tenant)
+        assert len(pendientes) == 3, "una línea con monto legible no puede perderse"
+        # Se conservan como estaban escritas, no como Véktor las entendió.
+        assert "$12.500" in str((pendientes[0].row_data or {}).get("montos"))
+        # Y como el monto SÍ se pudo leer, el ÚNICO motivo pendiente es la fecha:
+        # ninguna línea puede quedar marcada como ambigua (los dos rótulos hablan
+        # de la fecha, así que buscar "fecha" no distinguiría nada).
+        assert all(
+            (p.context_label or "").startswith("Documento sin fecha")
+            for p in pendientes
+        ), [p.context_label for p in pendientes]
+        assert not any(
+            "no se pudo interpretar" in w for w in response.json()["warnings"]
+        ), response.json()["warnings"]
+
+    async def test_sin_evidencia_no_se_fuerza_y_la_linea_queda_con_su_motivo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Un documento que mezcla formatos no se resuelve a la fuerza."""
+        documento = await _documento(db_session, sample_tenant, _AMBIGUO)
+
+        response = await _confirmar(client, auth_headers, documento.id)
+        assert response.status_code == 200, response.text
+
+        pendientes = await _pendientes(db_session, sample_tenant)
+        assert len(pendientes) == 2, "las dos líneas con monto tienen que quedar"
+        for pendiente in pendientes:
+            assert "ambiguo" in (pendiente.context_label or "").lower(), (
+                f"el motivo no está a la vista: {pendiente.context_label!r}"
+            )
+        # El valor ORIGINAL, no una interpretación que nadie eligió.
+        montos = {str((p.row_data or {}).get("montos")) for p in pendientes}
+        assert any("$12.500" in m for m in montos)
+        assert any("$12.50" in m for m in montos)
+        assert any(
+            "no se pudo interpretar" in w for w in response.json()["warnings"]
+        ), response.json()["warnings"]
+
+    async def test_un_monto_en_cero_no_es_lo_mismo_que_no_tener_monto(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """`$0` se leyó bien; lo que pasa es que no se admite como operación.
+
+        La guarda anterior usaba `any(...)` sobre los montos parseados, así que un
+        `Decimal(0)` legítimo era falsy y la línea se trataba como si no tuviera
+        monto. Son dos cosas distintas y el usuario tiene que poder verlas.
+        """
+        documento = await _documento(
+            db_session, sample_tenant, b"Venta anulada $0\nVenta Agua $800\n"
+        )
+
+        response = await _confirmar(client, auth_headers, documento.id)
+        assert response.status_code == 200, response.text
+
+        pendientes = await _pendientes(db_session, sample_tenant)
+        assert len(pendientes) == 2, "la línea en cero no puede desaparecer"
+        en_cero = [p for p in pendientes if "cero" in (p.context_label or "").lower()]
+        assert len(en_cero) == 1, [p.context_label for p in pendientes]
+        assert "$0" in str((en_cero[0].row_data or {}).get("montos"))
+        assert any(
+            "cero o negativo" in w for w in response.json()["warnings"]
+        ), response.json()["warnings"]
+
+    async def test_el_texto_incidental_no_se_convierte_en_una_operacion(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Conservar lo ilegible no es materializar cualquier renglón.
+
+        "Gracias por su compra" no tiene ningún token de monto: no hay operación
+        que revisar, y un pendiente vacío es ruido que nadie puede clasificar.
+        """
+        documento = await _documento(db_session, sample_tenant, _AMBIGUO)
+
+        await _confirmar(client, auth_headers, documento.id)
+
+        pendientes = await _pendientes(db_session, sample_tenant)
+        assert all(
+            "Gracias" not in str((p.row_data or {}).get("linea")) for p in pendientes
+        )
+
+    async def test_las_lineas_ambiguas_tampoco_se_duplican_al_releer(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """El ancla es por ocurrencia, no por lo que se haya podido leer del monto."""
+        documento = await _documento(db_session, sample_tenant, _AMBIGUO)
+        await _confirmar(client, auth_headers, documento.id)
+        assert len(await _pendientes(db_session, sample_tenant)) == 2
+
+        from app.application.services import reread_service
+        from app.integrations.s3 import S3Client
+
+        async def _download(_self: S3Client, _key: str) -> bytes:
+            return _AMBIGUO
+
+        async def _head(_self: S3Client, _key: str) -> dict[str, Any]:
+            return {
+                "etag": '"fake"',
+                "size": len(_AMBIGUO),
+                "last_modified": "2026-01-01T00:00:00Z",
+            }
+
+        with unittest.mock.patch.multiple(S3Client, download=_download, head=_head):
+            await reread_service.apply_reread(
+                db_session, documento.id, sample_tenant.tenant_id
+            )
+        await db_session.commit()
+
+        assert len(await _pendientes(db_session, sample_tenant)) == 2
+
+
+    async def test_por_la_ruta_asincronica_y_reentregado_dos_veces(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Los estados nuevos no son un caso aparte de la idempotencia.
+
+        Una línea ambigua se conserva igual por la ruta de segundo plano, y una
+        segunda entrega del mismo intento no la vuelve a materializar.
+        """
+        import app.api.v1.ingestion as api
+        import app.jobs.import_executor_worker as worker
+
+        monkeypatch.setattr(api, "async_import_enabled_for", lambda _t: True)
+
+        @contextlib.asynccontextmanager
+        async def _factory() -> Any:
+            yield db_session
+
+        monkeypatch.setattr(worker, "_sesion_de_worker", lambda: (_factory, None))
+
+        documento = await _documento(db_session, sample_tenant, _AMBIGUO)
+        registro = await client.post(
+            f"/api/v1/ingestion/files/{documento.id}/imports",
+            json={
+                "request_key": "documento-ambiguo-1",
+                "column_mappings": [],
+                "confirmed_fields": {"ventas": True},
+            },
+            headers=auth_headers,
+        )
+        assert registro.status_code == 202, registro.text
+        attempt_id = uuid.UUID(registro.json()["attempt_id"])
+
+        assert str(await worker._ejecutar(attempt_id)) == "completado"
+        assert len(await _pendientes(db_session, sample_tenant)) == 2
+
+        # Re-entrega: no re-ejecuta, y no deja pendientes nuevos.
+        assert str(await worker._ejecutar(attempt_id)) != "completado"
+        assert len(await _pendientes(db_session, sample_tenant)) == 2
+
+        db_session.expunge_all()
+        estado = (
+            await client.get(
+                f"/api/v1/ingestion/imports/{attempt_id}", headers=auth_headers
+            )
+        ).json()
+        assert estado["status"] == "COMPLETADO", estado
+        assert any(
+            "no se pudo interpretar" in w for w in estado["result"]["warnings"]
+        ), estado["result"]["warnings"]

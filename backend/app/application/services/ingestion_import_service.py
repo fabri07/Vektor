@@ -118,6 +118,7 @@ from app.domain.numeric_parsing import (
     MOTIVO_ILEGIBLE,
     MOTIVO_INCOMPATIBLE,
     MOTIVO_NEGATIVA,
+    ConvenioNumerico,
     inferir_convenio,
     parsear_cantidad,
     parsear_monto,
@@ -1387,6 +1388,73 @@ def _doc_line_anchor(
     reconciliación es otra cosa (ver ``reread_service``), no una repetición.
     """
     return f"{tenant_id}:doc:{uploaded_file_id or ''}:{context_id}:{line_index}"
+
+#: Qué se pudo leer de los montos de una línea de documento. Los cuatro estados
+#: son distintos y ninguno se puede colapsar en otro: SIN_TOKEN es texto
+#: incidental (no es una operación), AMBIGUO es un monto que está escrito y no se
+#: pudo interpretar, y NO_POSITIVO es un monto que SÍ se leyó y que la regla de
+#: negocio no admite. Confundir los dos últimos con el primero era lo que hacía
+#: desaparecer la línea sin rastro (E8b).
+LINEA_SIN_TOKEN = "sin_token"
+LINEA_MONTO_UTILIZABLE = "utilizable"
+LINEA_MONTO_AMBIGUO = "ambiguo"
+LINEA_MONTO_NO_POSITIVO = "no_positivo"
+
+#: Contador por estado, para que el aviso del confirm pueda distinguirlos.
+_CONTADOR_POR_ESTADO_DE_LINEA = {
+    LINEA_MONTO_AMBIGUO: "lineas_monto_ambiguo",
+    LINEA_MONTO_NO_POSITIVO: "lineas_monto_no_positivo",
+}
+
+
+def leer_montos_de_linea(
+    entry: dict[str, Any], convenio: ConvenioNumerico | None
+) -> tuple[str, str | None]:
+    """El estado de los montos de una línea de documento, y el token que lo explica.
+
+    Devuelve ``LINEA_MONTO_UTILIZABLE`` apenas encuentra un monto positivo: una
+    línea con varios números ("2 x $12.500 = $25.000") es importable si alguno
+    sirve, y el usuario ve la línea entera cuando la revise.
+    """
+    tokens = [str(m) for m in (entry.get("montos") or [])]
+    if not tokens:
+        return LINEA_SIN_TOKEN, None
+    ambiguo: str | None = None
+    no_positivo: str | None = None
+    for token in tokens:
+        leido = parsear_monto(token, convenio)
+        if leido.valor is None:
+            ambiguo = ambiguo if ambiguo is not None else token
+            continue
+        if leido.valor > 0:
+            return LINEA_MONTO_UTILIZABLE, None
+        no_positivo = no_positivo if no_positivo is not None else token
+    if ambiguo is not None:
+        return LINEA_MONTO_AMBIGUO, ambiguo
+    return LINEA_MONTO_NO_POSITIVO, no_positivo
+
+
+def motivo_de_la_captura(estado: str, token: str | None) -> str:
+    """Lo que el usuario lee en la bandeja: QUÉ pasó y con cuál valor.
+
+    "Revisá el monto" sobre una línea con tres números no le dice cuál mirar.
+    """
+    if estado == LINEA_MONTO_AMBIGUO:
+        texto = (
+            f"Monto ambiguo ({token}): no se pudo determinar si el punto separa "
+            "miles o decimales. Revisá el monto y completá la fecha."
+        )
+    elif estado == LINEA_MONTO_NO_POSITIVO:
+        texto = (
+            f"Monto en cero o negativo ({token}): no se registra como operación. "
+            "Revisá el monto y completá la fecha."
+        )
+    else:
+        texto = (
+            "Documento sin fecha reconocible: revisá el monto y completá la fecha "
+            "antes de importar"
+        )
+    return texto[:200]
 
 
 def _source_row_ref(anchor: str | None) -> str | None:
@@ -6121,6 +6189,31 @@ async def _insert_confirmed_data_impl(
         # `_doc_line_anchor`.
         _doc_seen = HuellasDelArchivo()
 
+        # E8b: el DOCUMENTO es la unidad que resuelve la escala, igual que la
+        # columna lo es en una planilla. Un documento no tiene columnas, pero sí
+        # un autor y una convención, y sus tokens de monto son la evidencia.
+        #
+        # Sin esto, cada token se leía solo y `parsear_monto` —que con razón no
+        # adivina— devolvía `None` para `$12.500`, el formato más común de cinco
+        # cifras en Argentina. El llamador leía ese `None` como "la línea no tiene
+        # monto" y la línea **desaparecía**: ni importada, ni en «Otros», ni
+        # contada, ni avisada. Es la pérdida silenciosa que este programa existe
+        # para eliminar, y estaba en el único camino que todavía leía montos
+        # fuera de la política de E4.
+        #
+        # La evidencia que alcanza es la MISMA que para una columna (no una regla
+        # nueva y más laxa): si el documento mezcla `$12.500` con `$12.50` no hay
+        # convenio, y **no se fuerza ninguno** — esas líneas van a «Otros» con su
+        # motivo y su valor original a la vista.
+        _convenio_del_documento = inferir_convenio(
+            [
+                m
+                for _b in ("ventas_detectadas", "gastos_detectados")
+                for _fila in (summary.get(_b) or [])
+                for m in (_fila.get("montos") or [])
+            ]
+        )
+
         async def _precargar_anclas_del_documento() -> None:
             """Las anclas de TODAS las líneas, en un lote (E6c-1).
 
@@ -6156,10 +6249,19 @@ async def _insert_confirmed_data_impl(
         async def _route_text_line_to_otros(
             entry: dict[str, Any], suggested: str, ctx_id: str, line_index: int
         ) -> None:
-            # Se rutea la línea UNA vez (no N veces por cada monto detectado). Solo si
-            # trae al menos un monto válido — una línea sin monto no materializa un
-            # pendiente vacío. `uploaded_file_id` liga el /otros al archivo origen.
-            if not any(_parse_amount(m) for m in entry.get("montos", [])):
+            # Se rutea la línea UNA vez (no N veces por cada monto detectado).
+            # `uploaded_file_id` liga el /otros al archivo origen.
+            #
+            # E8b: lo único que NO se conserva es la línea sin ningún token de
+            # monto — ahí no hay operación que revisar y materializarla sería
+            # convertir texto incidental ("Gracias por su compra") en un pendiente
+            # que nadie puede clasificar. Todo lo demás se conserva CON SU MOTIVO,
+            # incluido el monto que no se pudo interpretar y el que se interpretó
+            # en cero: los tres estados eran indistinguibles bajo el
+            # `any(_parse_amount(...))` anterior, que además trataba un
+            # `Decimal(0)` legítimo como ausencia por ser falsy.
+            estado, token = leer_montos_de_linea(entry, _convenio_del_documento)
+            if estado == LINEA_SIN_TOKEN:
                 return
             anchor = _doc_line_anchor(tenant_id, uploaded_file_id, ctx_id, line_index)
             if await _import_row_seen(session, tenant_id, anchor, _doc_seen):
@@ -6172,10 +6274,7 @@ async def _insert_confirmed_data_impl(
                 headers=None,
                 source=source,
                 uploaded_file_id=uploaded_file_id,
-                context_label=(
-                    "Documento sin fecha reconocible: revisá el monto y completá la "
-                    "fecha antes de importar"
-                ),
+                context_label=motivo_de_la_captura(estado, token),
                 suggested_entity=suggested,
                 context_id=ctx_id,
                 # Lo que le permite a la relectura reconocer, cuando sepa leer la
@@ -6193,6 +6292,9 @@ async def _insert_confirmed_data_impl(
                 return
             await _register_import_row_fingerprint(session, tenant_id, anchor, _doc_seen)
             counts["otros"] += capturadas
+            _contador = _CONTADOR_POR_ESTADO_DE_LINEA.get(estado)
+            if _contador:
+                counts[_contador] = counts.get(_contador, 0) + capturadas
 
         async def _add_text_sale(
             entry: dict[str, Any], ctx_id: str, line_index: int

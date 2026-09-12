@@ -3639,6 +3639,25 @@ async def confirm_file(
                 "Completá los datos que falten y confirmalas desde ahí."
             )
         )
+    # E8b: los dos motivos por los que una línea de documento queda en «Otros»
+    # sin ser un problema de fecha. Van separados del aviso genérico porque no
+    # dicen lo mismo y no se arreglan igual: uno se corrige unificando cómo está
+    # escrito el archivo, el otro es un monto que se leyó bien y que no es una
+    # operación. Antes ninguno de los dos llegaba a ningún lado — la línea
+    # desaparecía sin aviso.
+    if counts.get("lineas_monto_ambiguo"):
+        warnings.append(
+            f"{counts['lineas_monto_ambiguo']} línea(s) traían un monto que no se "
+            "pudo interpretar: el documento mezcla formatos y no hay forma de "
+            "saber si el punto separa miles o decimales. Quedaron en «Otros» con "
+            "el valor tal como estaba escrito."
+        )
+    if counts.get("lineas_monto_no_positivo"):
+        warnings.append(
+            f"{counts['lineas_monto_no_positivo']} línea(s) traían un monto en cero "
+            "o negativo, que no se registra como operación. Quedaron en «Otros» "
+            "para que las revises."
+        )
     # F8b: decisiones de columnas riesgosas aplicadas en este confirm.
     if counts.get("columnas_eliminadas"):
         warnings.append(
