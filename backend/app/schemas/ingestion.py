@@ -660,6 +660,31 @@ class ConfirmIngestionRequest(BaseModel):
             "de descuento mapeada no quede ignorada en silencio."
         ),
     )
+    #: **A qué REVISIÓN del archivo se le dijo que sí.** Los pone el ejecutor
+    #: asíncrono desde las columnas del intento, no el cliente.
+    #:
+    #: Una relectura no cambia los bytes del archivo —reescribe su interpretación—
+    #: así que el hash del contenido no la detecta: hay que comparar la revisión.
+    #: Sin esto, una relectura entre el registro y la ejecución hace que se importe
+    #: una interpretación que el usuario nunca vio.
+    #:
+    #: En el confirm sincrónico van en ``None`` y no se verifica nada: no hay
+    #: ventana que cubrir (el mismo proceso mostró el preview y escribe los
+    #: efectos) y el lease del archivo excluye al resto.
+    revision_ingestion: int | None = Field(
+        default=None,
+        description=(
+            "Interno: `ingestion_version` del archivo cuando se confirmó. Lo "
+            "completa el ejecutor asíncrono; el cliente no lo manda."
+        ),
+    )
+    revision_preview: int | None = Field(
+        default=None,
+        description=(
+            "Interno: `latest_preview_version` del archivo cuando se confirmó. Lo "
+            "completa el ejecutor asíncrono; el cliente no lo manda."
+        ),
+    )
 
 
 class InventoryImpactItem(BaseModel):
@@ -707,6 +732,45 @@ class ConfirmIngestionResponse(BaseModel):
     inventory_impact: list[InventoryImpactItem] = Field(default_factory=list)
     #: Cuántos productos tienen impacto en total, incluidos los que no se listan.
     inventory_impact_total: int = 0
+
+
+class RegistrarImportacionRequest(ConfirmIngestionRequest):
+    """Lo mismo que un confirm, más la clave con la que el cliente lo identifica.
+
+    Hereda de ``ConfirmIngestionRequest`` a propósito: el ejecutor le pasa el
+    payload congelado a ``confirm_file``, así que si los dos cuerpos divergieran,
+    una importación asíncrona y una sincrónica del mismo archivo harían cosas
+    distintas — que es justo lo que esta fase existe para evitar.
+    """
+
+    #: La clave con la que el cliente identifica SU petición. Repetirla devuelve el
+    #: mismo intento; repetirla con otro contenido es un conflicto.
+    #:
+    #: La pone el cliente y no el servidor: el punto es sobrevivir a un timeout,
+    #: y una clave que el servidor genera se pierde con la respuesta que no llegó.
+    request_key: str = Field(min_length=8, max_length=128)
+
+
+class ImportacionResponse(BaseModel):
+    """El estado de un intento. Lo devuelven el 202 y la consulta."""
+
+    attempt_id: UUID
+    file_id: UUID
+    status: str
+    #: En qué anda ahora. `None` cuando no está ejecutando.
+    phase: str | None = None
+    rows_total: int | None = None
+    rows_done: int = 0
+    #: El resultado del confirm (counts + warnings), cuando terminó bien. Es el
+    #: MISMO cuerpo que devuelve `/confirm`, para que la pantalla no tenga que
+    #: saber por qué ruta entró.
+    result: dict[str, Any] | None = None
+    #: Error ESTRUCTURADO: el código se filtra y se cuenta, el detalle lo lee una
+    #: persona y dice qué hacer.
+    error_code: str | None = None
+    error_detail: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None
 
 
 class InventoryReplayRequest(BaseModel):

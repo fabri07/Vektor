@@ -498,6 +498,11 @@ async def update_supplier(
         _reject_brand_collapsed_flag(updates["custom_fields"])
     for field, value in updates.items():
         setattr(supplier, field, value)
+    # E6a: a partir de acá el import deja de pisar lo que el usuario escribió y
+    # pasa a completar sólo lo vacío. Se marca en el PATCH y no en el repositorio
+    # porque lo que importa no es que la fila cambió —el import también la
+    # cambia— sino que la cambió UNA PERSONA.
+    supplier.has_user_edits = True
     saved = await repo.save(supplier)
     _audit_data_change(
         session,

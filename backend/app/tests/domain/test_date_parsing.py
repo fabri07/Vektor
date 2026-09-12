@@ -12,8 +12,13 @@ from datetime import date, datetime
 import pytest
 
 from app.domain.date_parsing import (
+    MOTIVO_FECHA_AMBIGUA,
+    MOTIVO_FECHA_ILEGIBLE,
+    inferir_convenio_de_fecha,
     parse_business_date,
     parse_business_datetime,
+    parse_excel_serial,
+    parsear_fecha_de_columna,
 )
 
 
@@ -124,3 +129,93 @@ class TestPivoteDeSiglo:
     )
     def test_pivote(self, raw: str, pivote: int | None, esperado: date) -> None:
         assert parse_business_date(raw, century_pivot=pivote) == esperado
+
+
+class TestElOrdenDiaMesLoDecideLaColumna:
+    """`03/04/2026` es el 3 de abril o el 4 de marzo, y la celda no lo dice.
+
+    El orden de `BUSINESS_DATE_FORMATS` la resuelve como 3 de abril, que es la
+    convención argentina y está bien mientras el archivo sea argentino. Deja de
+    estarlo cuando no lo es: en una columna exportada en formato US, `04/13/2026`
+    sólo se puede leer mm/dd —no hay mes 13— y esa evidencia vale para TODA la
+    columna, incluida la fecha ambigua de al lado, que se leía al revés y erraba
+    por un mes entero sin que nada lo marcara.
+    """
+
+    def test_una_fecha_imposible_revela_el_orden_de_su_columna(self) -> None:
+        convenio = inferir_convenio_de_fecha(["04/13/2026", "03/04/2026"])
+        assert convenio is not None
+        assert convenio.orden == "mdy" and convenio.origen == "inequivoco"
+        assert parsear_fecha_de_columna("03/04/2026", convenio).valor == datetime(2026, 3, 4)
+
+    def test_la_columna_argentina_sigue_leyendose_como_siempre(self) -> None:
+        convenio = inferir_convenio_de_fecha(["13/04/2026", "03/04/2026"])
+        assert convenio is not None and convenio.orden == "dmy"
+        assert parsear_fecha_de_columna("03/04/2026", convenio).valor == datetime(2026, 4, 3)
+
+    def test_sin_ninguna_senal_manda_la_convencion_argentina(self) -> None:
+        """No es una adivinanza: es la convención declarada del importador, y
+        cambiarla rompería todos los imports que hoy andan bien. Lo que sí cambia
+        es que ahora queda explícito que salió del default y no de la columna."""
+        convenio = inferir_convenio_de_fecha(["03/04/2026", "05/06/2026"])
+        assert convenio is not None
+        assert convenio.orden == "dmy" and convenio.origen == "default"
+        assert parsear_fecha_de_columna("03/04/2026", convenio).valor == datetime(2026, 4, 3)
+
+    def test_una_columna_contradictoria_manda_lo_ambiguo_a_revision(self) -> None:
+        """`13/04` y `04/13` en la misma columna: cada una excluye el orden de la
+        otra. Elegir uno le erraría a la mitad de las filas, así que lo que se
+        puede leer se lee y lo ambiguo va a revisión con el original."""
+        assert inferir_convenio_de_fecha(["13/04/2026", "04/13/2026"]) is None
+        ambigua = parsear_fecha_de_columna("03/04/2026", None)
+        assert ambigua.valor is None
+        assert ambigua.motivo == MOTIVO_FECHA_AMBIGUA
+        assert ambigua.original == "03/04/2026"
+        # Las que se explican solas no dependen del convenio y entran igual.
+        assert parsear_fecha_de_columna("13/04/2026", None).valor == datetime(2026, 4, 13)
+        assert parsear_fecha_de_columna("2026-03-04", None).valor == datetime(2026, 3, 4)
+
+    def test_un_nativo_no_se_reinterpreta(self) -> None:
+        nativo = datetime(2026, 3, 4, 14, 30)
+        assert parsear_fecha_de_columna(nativo, None).valor == nativo
+
+    def test_una_fecha_ilegible_no_es_ambigua(self) -> None:
+        rota = parsear_fecha_de_columna("ayer", None)
+        assert rota.valor is None
+        assert rota.motivo == MOTIVO_FECHA_ILEGIBLE
+
+    def test_vacio_no_genera_motivo(self) -> None:
+        assert parsear_fecha_de_columna("", None).ausente is True
+        assert parsear_fecha_de_columna(None, None).ausente is True
+
+
+class TestSerialesDeExcel:
+    """Un `.xlsx` con la celda sin formato de fecha —y todo CSV exportado desde
+    Excel— trae el número de días desde 1899-12-30. openpyxl ya devuelve
+    `datetime` para las celdas formateadas, así que esto cubre justo el caso que
+    quedaba ilegible y mandaba la fila a revisión sin motivo real."""
+
+    @pytest.mark.parametrize(
+        ("serial", "esperado"),
+        [
+            (45123, datetime(2023, 7, 16)),
+            (45123.5, datetime(2023, 7, 16, 12)),
+            (32874, datetime(1990, 1, 1)),
+        ],
+    )
+    def test_convierte_dentro_de_la_ventana(self, serial: float, esperado: datetime) -> None:
+        assert parse_excel_serial(serial) == esperado
+        assert parsear_fecha_de_columna(serial, None).valor == esperado
+
+    def test_un_serial_escrito_como_texto_tambien_cuenta(self) -> None:
+        """El parser de archivos normaliza toda celda a texto antes de llegar acá:
+        un serial SIEMPRE viaja como `"45123"`. Rechazar los strings dejaba la
+        conversión sin ningún caso real — lo descubrió el test e2e, no éste."""
+        assert parse_excel_serial("45123") == datetime(2023, 7, 16)
+
+    @pytest.mark.parametrize("valor", [1500, 0, -5, 99999, True, "hoy", "45.123,5", None])
+    def test_afuera_de_la_ventana_no_se_convierte(self, valor: object) -> None:
+        """La ventana existe para que un precio mal mapeado no se vuelva una fecha
+        de 1904 perfectamente plausible que nadie iba a notar. Un `True` tampoco
+        es el día 1."""
+        assert parse_excel_serial(valor) is None

@@ -23,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, Mapper, mapped_column
 
+from app.domain.external_code import clave_de_codigo_externo
 from app.domain.internal_sku import generate_internal_sku
 from app.domain.text_norm import (
     normalize_barcode,
@@ -50,6 +51,14 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # migración `20260903_0001` no backfillea — las filas anteriores lo tienen
     # en NULL hasta que se corra el backfill.
     internal_sku: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # E6a — CÓDIGO EXTERNO del negocio o de su proveedor. Distinto de `sku` (el
+    # que aporta el archivo/proveedor como código de artículo) y de `internal_sku`
+    # (el que genera Véktor): éste identifica al producto en el SISTEMA de origen,
+    # y por eso lleva de qué sistema salió. Ver `domain/external_code.py`.
+    external_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    external_source: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    external_code_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Fase 2 (F2-T1) — identidad de producto: campo raw + columnas normalizadas
     # (fuente única de cálculo: el listener before_insert/before_update de más
@@ -135,6 +144,26 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # diferencia de los dos de arriba NO filtra por `is_active`: el código
         # de un producto dado de baja no se recicla, porque puede estar escrito
         # en una etiqueta o en un remito viejo.
+        # E6a — unicidad del código externo. PARCIAL sobre los no nulos: las
+        # columnas son nuevas y nadie tiene código todavía, así que el único no
+        # necesita prevalidación de colisiones — no hay datos que colisionar.
+        #
+        # El predicado excluye las bajas por una razón operativa, no estética: el
+        # índice tiene que ver lo MISMO que la búsqueda. Los índices de identidad
+        # se consultan sobre entidades vivas (`list_for_dedup` / `is_active`), así
+        # que un índice total dejaría que una entidad dada de baja —invisible para
+        # la búsqueda— hiciera fallar el insert con un IntegrityError que nadie
+        # puede explicar mirando los datos activos. Mismo predicado que
+        # `uq_products_tenant_barcode_norm`, y misma consecuencia conocida: el
+        # código de una baja se puede reciclar.
+        Index(
+            "uq_products_tenant_external_code",
+            "tenant_id",
+            "external_code_key",
+            unique=True,
+            postgresql_where=text("is_active AND external_code_key IS NOT NULL"),
+            sqlite_where=text("is_active AND external_code_key IS NOT NULL"),
+        ),
         Index(
             "uq_products_tenant_internal_sku",
             "tenant_id",
@@ -188,7 +217,7 @@ def _ensure_internal_sku(target: Product) -> None:
 
 
 def _sync_product_identity_columns(target: Product) -> None:
-    """Recomputa las 4 columnas ``*_normalized`` desde los campos raw.
+    """Recomputa las columnas normalizadas de identidad desde los campos raw.
 
     Fuente ÚNICA de cálculo (no duplicar con ``@validates``): cubre todos los
     ``session.add(Product(...))``/updates del código sin depender de timing de
@@ -200,6 +229,12 @@ def _sync_product_identity_columns(target: Product) -> None:
     target.barcode_normalized = normalize_barcode(target.barcode)
     marca = target.custom_fields.get("marca") if isinstance(target.custom_fields, dict) else None
     target.brand_normalized = normalize_brand(marca)
+    # E6a: la clave del código externo entra acá y no en un listener propio —
+    # es una columna normalizada más y comparte exactamente el mismo motivo por
+    # el que ésta es la fuente única de cálculo.
+    target.external_code_key = clave_de_codigo_externo(
+        target.external_code, target.external_source
+    )
 
 
 @event.listens_for(Product, "before_insert")

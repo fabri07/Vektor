@@ -92,20 +92,28 @@ class TestElMotivoDiceLoQueElImportadorHace:
     """El copy no puede prometer un destino que el importador no le da a la fila.
 
     Los tres destinos son distintos y verificados contra
-    `ingestion_import_service`: la venta sin monto y todo lo que no tiene fecha
-    van a «Otros» (`_capture_unclassified`, rescatable); el gasto sin monto y el
-    producto sin nombre se DESCARTAN (`return False`, sin rastro); el maestro sin
-    nombre se cuenta como inválido en el resumen. Decirle a alguien que busque en
-    «Otros» una fila que se descartó lo manda a buscar algo que no está.
+    `ingestion_import_service`: la venta **y el gasto** sin monto, y todo lo que no
+    tiene fecha, van a «Otros» (`_capture_unclassified`, rescatable); el producto
+    sin nombre se DESCARTA (`return False`, sin rastro); el maestro sin nombre se
+    cuenta como inválido en el resumen. Decirle a alguien que busque en «Otros»
+    una fila que se descartó lo manda a buscar algo que no está, y prometerle un
+    descarte donde la fila SÍ quedó guardada le esconde el trabajo que puede
+    terminar.
+
+    El gasto sin monto cambió de destino en E7a-lite: antes desaparecía sin rastro
+    y sólo en el camino multihoja, mientras el de tabla suelta lo capturaba. Este
+    test acompaña ese cambio a propósito — el texto del motivo es una promesa al
+    usuario y tiene que seguir al comportamiento, no al revés.
     """
 
     def test_la_venta_sin_monto_promete_otros(self) -> None:
         assert "«Otros»" in required_reason("sale", "amount")
 
-    def test_el_gasto_sin_monto_avisa_que_se_descarta(self) -> None:
+    def test_el_gasto_sin_monto_promete_otros_igual_que_la_venta(self) -> None:
+        """E7a-lite: los dos caminos capturan, así que el motivo promete lo mismo."""
         motivo = required_reason("expense", "amount")
-        assert "descarta" in motivo
-        assert "tampoco queda en «Otros»" in motivo
+        assert "«Otros»" in motivo
+        assert "descarta" not in motivo
 
     @pytest.mark.parametrize(
         ("entidad", "campo"), [("sale", "transaction_date"), ("expense", "expense_date")]

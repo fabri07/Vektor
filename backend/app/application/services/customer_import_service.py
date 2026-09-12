@@ -49,6 +49,12 @@ _IMPORTABLE_FIELDS = (
     "province",
     "postal_code",
     "birthday",
+    # E6a — el código con que el negocio identifica a esta entidad en su propio
+    # sistema. Es clave FUERTE (ver `domain/external_code`), así que importa que
+    # entre por acá y no por un camino aparte: la actualización de un maestro ya
+    # matcheado tiene que poder traer el código, no sólo consumirlo.
+    "external_code",
+    "external_source",
 )
 
 
@@ -101,6 +107,11 @@ class ImportResult:
     # sin romper `skipped` (usado hoy en la respuesta pública del import manual).
     needs_review: int = 0
     invalid: int = 0
+    #: E6a: cuántos valores NO se pisaron porque la ficha tenía ediciones
+    #: manuales. Se cuenta y se reporta: una actualización que no ocurrió es
+    #: exactamente el tipo de silencio que este programa viene a cerrar — el
+    #: usuario tiene que poder saber que su archivo traía otro dato.
+    preserved_fields: int = 0
 
 
 def _record_keys(record: dict[str, Any]) -> list[IdentityKey]:
@@ -142,7 +153,17 @@ def _existing_doc_map(existing: list[Customer]) -> dict[IdentityKey, Customer]:
 
 
 def _customer_record(cust: Customer) -> dict[str, Any]:
-    return {"cuit": cust.cuit, "dni": cust.dni, "email": cust.email, "phone": cust.phone}
+    return {
+        "cuit": cust.cuit,
+        "dni": cust.dni,
+        "email": cust.email,
+        "phone": cust.phone,
+        # E6a: el código externo tiene que estar de los DOS lados. Si sólo se
+        # armara del lado del archivo, la clave fuerte no matchearía nunca contra
+        # la base: existiría y no serviría para nada.
+        "external_code": cust.external_code,
+        "external_source": cust.external_source,
+    }
 
 
 def build_import_preview(
@@ -268,8 +289,18 @@ async def apply_import(
             # columna MAPEADA pero con la celda vacía en esta fila arma
             # {campo: None} (clave presente, valor vacío) — is_blank() evita que
             # eso borre un valor existente (edición manual u otra carga).
+            # E6a — política de actualización explícita. Que la clave fuerte
+            # diga que es la MISMA entidad no dice cuál de las dos versiones de
+            # un teléfono vale: eso es una decisión aparte, y la toma el usuario
+            # habiendo editado la ficha. Con `has_user_edits` el import se vuelve
+            # ADITIVO sobre esa ficha —completa lo vacío, no pisa lo cargado—,
+            # que es lo que evita que cada re-importación borre sus correcciones.
+            _solo_completar = bool(getattr(match, "has_user_edits", False))
             for fname in _IMPORTABLE_FIELDS:
                 if fname not in record or is_blank(record[fname]):
+                    continue
+                if _solo_completar and not is_blank(getattr(match, fname, None)):
+                    result.preserved_fields += 1
                     continue
                 value = (
                     _coerce_birthday(record[fname])

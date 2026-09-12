@@ -324,6 +324,18 @@ class Settings(BaseSettings):
     def parse_ingestion_schema_decisions_rollout_tenant_ids(cls, v: object) -> list[str]:
         return parse_rollout_tenant_ids(v)
 
+    # E6c-3 — quién puede REGISTRAR importaciones asíncronas. Gatea sólo la
+    # creación de intentos nuevos: el publicador y el recuperador NUNCA se apagan
+    # con esto. Si se apagaran, las órdenes ya commiteadas quedarían huérfanas —
+    # exactamente lo contrario de lo que una compuerta de rollout tiene que
+    # garantizar, que es poder frenar lo nuevo sin abandonar lo que ya entró.
+    ASYNC_IMPORT_ROLLOUT_TENANT_IDS: list[str] = Field(default_factory=list)
+
+    @field_validator("ASYNC_IMPORT_ROLLOUT_TENANT_IDS", mode="before")
+    @classmethod
+    def parse_async_import_rollout_tenant_ids(cls, v: object) -> list[str]:
+        return parse_rollout_tenant_ids(v)
+
     # Auth social
     ENABLE_GOOGLE_LOGIN: bool = False
     ENABLE_FACEBOOK_LOGIN: bool = False  # Diferido — solo abstracción en fase 1

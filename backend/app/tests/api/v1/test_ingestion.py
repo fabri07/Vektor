@@ -32,6 +32,9 @@ from app.persistence.models.file import (
     PROCESSING_STATUS_DONE,
     PROCESSING_STATUS_IMPORTING,
     PROCESSING_STATUS_NEEDS_CONFIRMATION,
+    PROCESSING_STATUS_PENDING,
+    PROCESSING_STATUS_PROCESSING,
+    STALE_PROCESSING_SECONDS,
     UploadedFile,
 )
 from app.persistence.models.inventory import InventoryMovement
@@ -3988,6 +3991,120 @@ class TestRereadPreviewSessionEndpoint:
         assert draft is not None
         assert draft["column_risk_decisions"] == []
         assert len(draft["column_mappings"]) == 4
+
+    async def test_preview_persiste_el_borrador_sin_column_mappings(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """E2: un body con SÓLO una reasignación de hoja también es una decisión.
+
+        La condición era ``if body.column_mappings:``, así que este request
+        devolvía 200 —el usuario veía que "se guardó"— y el borrador quedaba sin
+        escribir: ni la entidad, ni la inclusión, ni las decisiones de riesgo.
+        Después la relectura importaba la hoja con la entidad que había adivinado
+        el parser.
+        """
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid6/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            first = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            assert first.status_code == 200
+            run_id = first.json()["run_id"]
+            assert first.json()["draft_version"] == 0
+
+            # Sin una sola columna mapeada: sólo la reasignación de la hoja.
+            second = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"context_entity": {"table": "expense"}},
+            )
+            assert second.status_code == 200
+            assert second.json()["draft_version"] == 1, (
+                "el borrador no se persistió: la decisión se perdió en silencio"
+            )
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["context_entities"] == {"table": "expense"}
+
+    async def test_preview_sin_ninguna_decision_no_pisa_el_borrador(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """La otra mitad: un body vacío NO cuenta como decisión.
+
+        Sin esto, aflojar la condición haría que cualquier POST sin contenido
+        sumara una versión y pisara con nada un borrador que el usuario ya había
+        armado.
+        """
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid7/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            first = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            run_id = first.json()["run_id"]
+
+            guardado = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"context_entity": {"table": "expense"}},
+            )
+            assert guardado.json()["draft_version"] == 1
+
+            vacio = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={},
+            )
+            assert vacio.status_code == 200
+            assert vacio.json()["draft_version"] == 1, "un body vacío sumó una versión"
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["context_entities"] == {"table": "expense"}, "el body vacío pisó el borrador"
         # La entidad efectiva por contexto quedó resuelta (mismo criterio que
         # el confirm) — el valor concreto depende de cómo el parser infiere el
         # tipo de este CSV; lo que importa acá es que el contexto "table" (flat)
@@ -4003,6 +4120,145 @@ class TestRereadPreviewSessionEndpoint:
             )
         assert third.status_code == 200
         assert third.json()["draft_version"] == 1
+
+    async def test_una_correccion_parcial_no_borra_el_mapeo_ya_guardado(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """E2 — guardar sólo la inclusión de una hoja borraba el mapeo anterior.
+
+        El borrador se reescribía entero desde el body, así que cuando E2 amplió
+        la condición para que una corrección sin columnas también se persistiera,
+        cada actualización parcial pasó a ser un borrado: mandar únicamente
+        ``context_confirmed`` devolvía 200 y dejaba ``column_mappings: []``. La
+        corrección de mapeo que el usuario había hecho un minuto antes —incluida
+        una columna marcada `ignore`, que es una decisión, no una ausencia—
+        desaparecía sin aviso, y el apply se ataba a un borrador vacío.
+
+        El campo omitido y el vaciado a propósito son indistinguibles por el
+        valor: el default de Pydantic para una lista ausente es la misma lista
+        vacía que manda un cliente que borró todo. Los distingue
+        ``model_fields_set``, y por eso se prueban los dos casos acá.
+        """
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid8/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        mapeos = [
+            {"source_column": "fecha", "target_field": "transaction_date"},
+            {"source_column": "monto", "target_field": "amount"},
+            {"source_column": "producto", "target_field": "product_name"},
+            {"source_column": "proveedor", "target_field": "ignore"},
+        ]
+
+        with _patch_s3_for_reread():
+            primero = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            run_id = primero.json()["run_id"]
+
+            guardado = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"column_mappings": mapeos},
+            )
+            assert guardado.status_code == 200, guardado.text
+            assert guardado.json()["draft_version"] == 1
+
+            # Segunda corrección: SOLO la inclusión de la hoja. El cliente no
+            # vuelve a mandar el mapeo porque no lo tocó.
+            parcial = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"context_confirmed": {"table": True}},
+            )
+            assert parcial.status_code == 200, parcial.text
+            assert parcial.json()["draft_version"] == 2
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["context_confirmed"] == {"table": True}
+        assert [
+            (m["source_column"], m["target_field"]) for m in draft["column_mappings"]
+        ] == [(m["source_column"], m["target_field"]) for m in mapeos], (
+            f"la corrección parcial borró el mapeo guardado: {draft['column_mappings']}"
+        )
+
+    async def test_un_mapeo_vaciado_a_proposito_si_se_guarda_vacio(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """La contracara, y la razón de mirar ``model_fields_set`` en vez del valor:
+        un cliente que manda ``column_mappings: []`` está borrando el mapeo a
+        propósito, y eso tiene que quedar guardado. Conservarlo "porque venía
+        vacío" haría imposible deshacer un mapeo."""
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid9/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            primero = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            run_id = primero.json()["run_id"]
+
+            await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={
+                    "column_mappings": [
+                        {"source_column": "monto", "target_field": "amount"}
+                    ]
+                },
+            )
+            vaciado = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={"column_mappings": [], "context_confirmed": {"table": True}},
+            )
+            assert vaciado.status_code == 200, vaciado.text
+
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        draft = (run.details_json or {}).get("draft")
+        assert draft is not None
+        assert draft["column_mappings"] == [], (
+            f"el vaciado explícito no se respetó: {draft['column_mappings']}"
+        )
 
     async def test_cancel_session_then_apply_rejects_stale_session(
         self,
@@ -4052,6 +4308,80 @@ class TestRereadPreviewSessionEndpoint:
         # La sesión existe (se encontró por id) pero ya no está lista para
         # aplicarse (quedó FAILED al cancelarla) — 409, no 404.
         assert apply_resp.status_code == 409
+
+    async def test_una_ignorada_no_habilita_una_decision_de_riesgo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Revisión de E2 — pasar los `ignore` al mapeo de riesgo debilitaba una validación.
+
+        `validate_column_risk_decisions` comprueba que el par (columna, target)
+        que declara una decisión exista en el mapeo efectivo: es su defensa contra
+        un payload manipulado o stale. Al hacer que las columnas ignoradas
+        entraran en ese mapeo —para arreglar la pérdida de la entidad—, una
+        decisión de rutear filas a "Otros" sobre una columna marcada `ignore`
+        encontraba su par y pasaba, ruteando por los nulos de una columna que ya
+        no se lee. Las ignoradas aportan la entidad del contexto pero no entran al
+        mapeo de riesgo.
+        """
+        from app.persistence.models.repair import DataRepairRun
+
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="ventas.csv",
+            s3_key="uploads/test/uuid8/ventas.csv",
+            content_type="text/csv",
+            size_bytes=128,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_DONE,
+        )
+        db_session.add(record)
+        await db_session.commit()
+
+        with _patch_s3_for_reread():
+            primero = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+            )
+            assert primero.status_code == 200
+            run_id = primero.json()["run_id"]
+
+            rechazado = await client.post(
+                f"/api/v1/ingestion/files/{record.id}/reread/preview",
+                headers=auth_headers,
+                json={
+                    "column_mappings": [
+                        {"source_column": "monto", "target_field": "amount"},
+                        {
+                            "source_column": "proveedor",
+                            "target_field": "ignore",
+                            "user_selected": True,
+                        },
+                    ],
+                    "context_confirmed": {"table": True},
+                    "column_risk_decisions": [
+                        {
+                            "context_id": "table",
+                            "source_column": "proveedor",
+                            "target_field": "ignore",
+                            "action": "route_affected_rows_to_others",
+                        }
+                    ],
+                },
+            )
+        assert rechazado.status_code == 422, rechazado.text
+        assert "no está mapeada" in rechazado.json()["detail"]
+
+        # Y el borrador no se escribió: una decisión inválida se rechaza upfront.
+        run = await db_session.get(DataRepairRun, uuid.UUID(run_id))
+        assert run is not None
+        assert (run.details_json or {}).get("draft") is None
+
 
 
 class TestEfectoDeInventarioPorHoja:
@@ -4481,3 +4811,108 @@ class TestInventoryReplayEndpoint:
         assert [(p["saldo_inicial"], p["saldo_final"]) for p in data["impacto"]] == [(10, 6)]
         await db_session.refresh(producto)
         assert producto.stock_units == 10
+
+
+class TestPublicacionDespuesDelCommit:
+    """E3 (H05) — el worker no puede salir a buscar un archivo que todavía no existe.
+
+    `repo.save()` sólo hace flush; el commit lo hacía `get_db_session` al cerrar,
+    o sea DESPUÉS del `.delay()`. El worker abre su PROPIA sesión, así que podía
+    consultar un `UploadedFile` que su transacción no veía y morir con "not
+    found" — y como estas tasks no reintentaban, el archivo quedaba en PENDING
+    para siempre. Si además el request hacía rollback, quedaba un mensaje
+    apuntando a una fila que nunca existió.
+
+    Lo que se afirma acá es el ORDEN, que es la causa. La consecuencia
+    —visibilidad entre dos conexiones— no se puede ejercitar con SQLite en
+    memoria, donde todas comparten la misma y el bug es invisible.
+    """
+
+    async def test_upload_commitea_antes_de_encolar(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_s3_upload: unittest.mock.AsyncMock,
+    ) -> None:
+        from app.api.v1 import ingestion as ingestion_api
+
+        observado: dict[str, bool] = {}
+
+        class _JobEspia:
+            def delay(self, *_args: Any, **_kwargs: Any) -> None:
+                # En el momento de publicar, ¿queda transacción abierta? Con el
+                # commit hecho, no: es la señal de que el worker ya podría leerlo.
+                observado["transaccion_abierta"] = db_session.in_transaction()
+
+        monkeypatch.setattr(ingestion_api, "_pick_job", lambda _mime: _JobEspia())
+
+        resp = await client.post(
+            "/api/v1/ingestion/upload",
+            headers=auth_headers,
+            files={"file": ("ventas.csv", b"fecha,monto\n2024-03-01,100\n", "text/csv")},
+        )
+        assert resp.status_code in (200, 201), resp.text
+        assert observado.get("transaccion_abierta") is False, (
+            "se publicó el trabajo con la transacción todavía abierta"
+        )
+
+
+class TestReprocesoLimpiaElToken:
+    """Revisión de E3 — revivir un PROCESSING trabado tiene que invalidar al worker viejo.
+
+    `reprocess_file` devolvía la fila a PENDING pero dejaba `parse_attempt_id`
+    intacto. Normalmente da igual (el próximo claim lo pisa con uno nuevo), pero
+    en el camino de fallback —`job.delay()` falla → `_process_file_sync` vuelve a
+    poner PROCESSING sin tocar el token— el token viejo queda válido otra vez, y
+    el `WHERE parse_attempt_id = T AND processing_status = 'PROCESSING'` del
+    worker colgado vuelve a matchear: puede escribir su resultado encima del que
+    produjo el fallback.
+    """
+
+    async def test_al_reencolar_se_limpia_el_token_del_intento_anterior(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.api.v1 import ingestion as ingestion_api
+
+        token_viejo = uuid.uuid4()
+        record = UploadedFile(
+            tenant_id=sample_tenant.tenant_id,
+            uploaded_by=None,
+            original_filename="colgado.csv",
+            s3_key="uploads/test/colgado/colgado.csv",
+            content_type="text/csv",
+            size_bytes=10,
+            purpose="ventas",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_PROCESSING,
+            parse_attempt_id=token_viejo,
+        )
+        db_session.add(record)
+        await db_session.commit()
+        # Más viejo que el umbral: el endpoint lo considera abandonado.
+        record.updated_at = datetime.now(UTC) - timedelta(seconds=STALE_PROCESSING_SECONDS + 60)
+        await db_session.commit()
+
+        class _JobMudo:
+            def delay(self, *_args: Any, **_kwargs: Any) -> None:
+                return None
+
+        monkeypatch.setattr(ingestion_api, "_pick_job", lambda _mime: _JobMudo())
+
+        resp = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/reprocess", headers=auth_headers
+        )
+        assert resp.status_code == 202, resp.text
+
+        await db_session.refresh(record)
+        assert record.processing_status == PROCESSING_STATUS_PENDING
+        assert record.parse_attempt_id is None, (
+            "el token del intento colgado sigue vivo: puede pisar el resultado nuevo"
+        )

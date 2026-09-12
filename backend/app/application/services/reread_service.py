@@ -106,6 +106,9 @@ from app.application.services.ingestion_schema_decision_service import (
     lookup_remembered_decisions_for_contexts,
 )
 from app.application.services.inventory_replay_service import run_inventory_replay
+from app.application.services.operation_identity_service import (
+    liberar_identidades_de,
+)
 from app.application.services.reread_limits import REREAD_STALE_AFTER_SECONDS
 from app.application.services.stock_service import (
     sale_source_event_id,
@@ -170,7 +173,9 @@ _parse_date = _iis._parse_date
 _parse_qty = _iis._parse_qty
 _row_val = _iis._row_val
 _resolve_product = _iis._resolve_product
-_load_import_fingerprints = _iis._load_import_fingerprints
+_anclas_candidatas = _iis._anclas_candidatas
+_contextos_del_summary = _iis._contextos_del_summary
+huellas_presentes = _iis.huellas_presentes
 _load_product_index = _iis._load_product_index
 # F-RR (Fase 4, reconciliación): MISMAS primitivas que resuelven identidad de
 # producto y categoría en el import real — el estimador del impacto proyectado
@@ -1301,6 +1306,25 @@ async def _reconcile(
     # Borrar fingerprints de los no-editados (preservando los editados).
     await _delete_fingerprints(session, tenant_id, fingerprints_to_delete)
 
+    # E6b — y su IDENTIDAD fuerte, con la misma regla: se suelta la de los
+    # no-editados, no la de los editados. Es el caso que motivó separar
+    # identidades de vínculos: si un remito de tres renglones tiene uno editado a
+    # mano, la relectura voidea dos y conserva el tercero, y la identidad tiene
+    # que seguir tomada — soltarla haría que el reimport aplicara el documento
+    # entero encima del renglón que quedó vivo.
+    #
+    # `liberar_identidades_de` sólo libera la que quedó sin ningún efecto, así que
+    # esa distinción no hay que hacerla acá: alcanza con pasarle lo que se anuló.
+    if not dry_run:
+        await liberar_identidades_de(
+            session,
+            tenant_id,
+            [
+                ("sale" if isinstance(rec, SaleEntry) else "expense", rec.id)
+                for rec in recon.non_edited
+            ],
+        )
+
     # ── Inventario: borrar la lectura ANTERIOR también del lado stock ──
     # El camino compra→stock es incremental (``_record_stock_movement`` suma). Si
     # no voideamos los ``InventoryMovement`` del import previo antes de reimportar,
@@ -2364,6 +2388,19 @@ def _draft_effective_mappings(
     ``ingestion_import_service``) — no hace falta que el borrador cubra el
     mapeo completo de todas las hojas para que esto sea correcto.
 
+    **Pero eso vale para una columna SIN REVISAR, no para una ignorada** (E2).
+    Un `ignore` no es "el borrador no la menciona": es una decisión, y filtrarla
+    acá la devolvía al régimen heurístico — el mismo defecto que H01, entrando
+    por la relectura. Los `ignore` se PASAN; `_resolve_target_cols` los junta y
+    el importador saca esas columnas de las filas. Sólo se filtra ``none``, que
+    es la columna que nadie tocó.
+
+    Y ``context_entities`` se lee SIEMPRE, aunque no venga ni un mapeo: son dos
+    decisiones distintas del usuario. Antes esta función salía con
+    ``(None, None)`` en cuanto ``column_mappings`` estaba vacío, así que
+    reasignar una hoja a otra entidad —sin tocar ninguna columna— no llegaba al
+    reimport y la hoja se importaba con la entidad que había adivinado el parser.
+
     Una columna DROPEADA por una decisión de riesgo (``drop_column``) no se
     incluye — ``apply_column_risk_decisions`` ya la sacó del summary que se
     va a reimportar, mapearla apuntaría a una columna que ya no está.
@@ -2372,11 +2409,12 @@ def _draft_effective_mappings(
     misma convención que ``_dropped_pairs``/``reread_preview`` usan para el
     archivo de una sola hoja.
 
-    ``(None, None)`` si el borrador no trae mapeo — el caller cae al criterio
-    heurístico de siempre, sin cambios."""
+    ``(None, None)`` si el borrador no trae ni mapeo ni entidades — ahí sí el
+    caller cae al criterio heurístico de siempre, sin cambios."""
     mappings = (draft or {}).get("column_mappings") or []
+    context_entity = dict((draft or {}).get("context_entities") or {}) or None
     if not mappings:
-        return None, None
+        return None, context_entity
     dropped = {
         (d.get("context_id") or "table", d.get("source_column"))
         for d in (draft or {}).get("column_risk_decisions") or []
@@ -2385,13 +2423,14 @@ def _draft_effective_mappings(
     by_context: dict[str, dict[str, str]] = defaultdict(dict)
     for m in mappings:
         target = m.get("target_field")
-        if not target or parse_target(target).kind in ("ignore", "none"):
+        # `ignore` SÍ pasa (es una decisión); `none` no (es una columna sin
+        # revisar, y bloquear la heurística ahí trabaría el flujo más común).
+        if not target or parse_target(target).kind == "none":
             continue
         context_id = m.get("context_id") or "table"
         if (context_id, m.get("source_column")) in dropped:
             continue
         by_context[context_id][m["source_column"]] = target
-    context_entity = dict((draft or {}).get("context_entities") or {}) or None
     return (dict(by_context) or None), context_entity
 
 
@@ -3102,7 +3141,17 @@ async def preview_reread(
     sales, expenses = await _load_existing_records(session, file_id, tenant_id)
     # Huellas de import (lo que el apply usa para deduplicar) + catálogo de productos
     # (para estimar altas/reposiciones). Dos queries, en memoria.
-    fingerprints = await _load_import_fingerprints(session, tenant_id)
+    # E6c-1: acotado al ARCHIVO. `_estimate_reread` sólo pregunta por las huellas
+    # de las filas de ESTE archivo (`fp in fingerprints`), así que traer la
+    # historia entera del tenant costaba memoria proporcional a cuánto importó el
+    # negocio antes — 32,3 MB para un archivo de 100 filas contra un tenant con
+    # 100.000 huellas, medido en F0. Es el mismo defecto que el loop del import,
+    # en el segundo de sus dos sitios.
+    fingerprints = await huellas_presentes(
+        session,
+        tenant_id,
+        _anclas_candidatas(tenant_id, file_id, _contextos_del_summary(fresh)),
+    )
     catalog = await _load_product_index(session, tenant_id)
     preview = _estimate_reread(
         file, tenant_id, fresh, confirmed_fields, sales, expenses, fingerprints, catalog

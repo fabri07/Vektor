@@ -24,14 +24,23 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
+from app.domain.external_code import clave_de_codigo_externo
+
 T = TypeVar("T")
 
-KeyType = Literal["doc", "email", "phone"]
+KeyType = Literal["code", "doc", "email", "phone"]
 Outcome = Literal["matched", "conflict", "needs_review", "none"]
 
 # Prioridad de match cuando varias claves del mismo record matchean a LA MISMA
-# entidad: documento gana, después email, después teléfono.
-_KEY_PRIORITY: tuple[KeyType, ...] = ("doc", "email", "phone")
+# entidad: el CÓDIGO EXTERNO gana, después documento, email y teléfono.
+#
+# El código va primero porque es la identidad que el NEGOCIO le asigna a la
+# entidad dentro de su propio sistema, y por lo tanto la más específica de este
+# tenant: el CUIT lo asigna el Estado y puede repetirse entre una persona y su
+# monotributo, el email y el teléfono se comparten entre parientes y sucursales.
+# Sólo importa para elegir la clave GANADORA de un match ya resuelto — cuando dos
+# claves apuntan a entidades DISTINTAS eso es `conflict` y no lo desempata nadie.
+_KEY_PRIORITY: tuple[KeyType, ...] = ("code", "doc", "email", "phone")
 
 
 def normalize_digits(value: Any) -> str:
@@ -92,14 +101,24 @@ def record_keys(
     doc_fields: tuple[str, ...],
     email_field: str = "email",
     phone_field: str = "phone",
+    code_field: str = "external_code",
+    source_field: str = "external_source",
 ) -> list[IdentityKey]:
     """Arma las claves candidatas de un record, EN ORDEN DE PRIORIDAD de match.
 
     ``doc_fields`` son los campos de documento del record en orden de prioridad
     (p. ej. ``("cuit", "dni")`` para cliente, ``("cuil",)`` para proveedor).
     Vacías (sin dígitos / sin email) se descartan — no entran como clave.
+
+    E6a: el CÓDIGO EXTERNO entra como clave fuerte y va primero. La normalización
+    la hace ``domain/external_code`` —la MISMA que llena la columna indexada—, no
+    ``normalize_digits``: un código no es un número y recortarle los ceros
+    fusionaría ``007`` con ``7``.
     """
     keys: list[IdentityKey] = []
+    codigo = clave_de_codigo_externo(record.get(code_field), record.get(source_field))
+    if codigo:
+        keys.append(IdentityKey("code", codigo))
     for f in doc_fields:
         digits = normalize_digits(record.get(f))
         if digits:
@@ -120,6 +139,8 @@ def build_existing_index(
     doc_fields: tuple[str, ...],
     email_field: str = "email",
     phone_field: str = "phone",
+    code_field: str = "external_code",
+    source_field: str = "external_source",
 ) -> dict[IdentityKey, T]:
     """Índice ``IdentityKey → entidad`` a partir de una lista de entidades existentes.
 
@@ -133,6 +154,8 @@ def build_existing_index(
             doc_fields=doc_fields,
             email_field=email_field,
             phone_field=phone_field,
+            code_field=code_field,
+            source_field=source_field,
         ):
             index.setdefault(key, entity)
     return index

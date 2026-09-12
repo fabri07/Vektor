@@ -23,6 +23,13 @@ jest.mock("@/services/ingestion.service", () => ({
     getColumnMappings: jest.fn(),
     getFieldCatalog: jest.fn(),
     confirmFile: jest.fn(),
+    // E6c-3: el panel intenta primero la ruta asíncrona. El default del sistema
+    // es la compuerta APAGADA, que el backend responde con 404 — y ése es el
+    // único error que habilita usar `/confirm`. Se moldea así a propósito: si el
+    // mock devolviera otra cosa, el panel NO caería al confirm sincrónico, que es
+    // justamente la protección contra duplicar ante una respuesta incierta.
+    registrarImportacion: jest.fn(),
+    estadoDeImportacion: jest.fn(),
     cancelFile: jest.fn(),
     recomputeColumnRisk: jest.fn(),
     fetchInventoryEffects: jest.fn(),
@@ -34,6 +41,7 @@ const mockGetPreview = ingestionService.getPreview as jest.Mock;
 const mockGetColumnMappings = ingestionService.getColumnMappings as jest.Mock;
 const mockGetFieldCatalog = ingestionService.getFieldCatalog as jest.Mock;
 const mockConfirmFile = ingestionService.confirmFile as jest.Mock;
+const mockRegistrarImportacion = ingestionService.registrarImportacion as jest.Mock;
 const mockRecomputeColumnRisk = ingestionService.recomputeColumnRisk as jest.Mock;
 const mockInventoryEffects = ingestionService.fetchInventoryEffects as jest.Mock;
 const mockPurchaseGroups = ingestionService.fetchPurchaseGroups as jest.Mock;
@@ -187,6 +195,14 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    // E6c-3: el seguimiento de importaciones vive en localStorage para poder
+    // retomarse al recargar. Entre tests hay que limpiarlo, o una importación
+    // dejada abierta por un test hace que el siguiente monte el panel de
+    // progreso en vez del formulario — que es la recuperación funcionando, pero
+    // en el lugar equivocado.
+    window.localStorage.clear();
+    // Compuerta apagada (el default): 404, y el panel usa `/confirm`.
+    mockRegistrarImportacion.mockRejectedValue({ response: { status: 404 } });
     // Default: el recompute no cambia el set (evita vaciar el panel si el
     // debounce llega a dispararse durante un test).
     mockRecomputeColumnRisk.mockResolvedValue([]);
@@ -1030,6 +1046,14 @@ describe("ColumnMapperPanel — hojas sin clasificar", () => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    // E6c-3: el seguimiento de importaciones vive en localStorage para poder
+    // retomarse al recargar. Entre tests hay que limpiarlo, o una importación
+    // dejada abierta por un test hace que el siguiente monte el panel de
+    // progreso en vez del formulario — que es la recuperación funcionando, pero
+    // en el lugar equivocado.
+    window.localStorage.clear();
+    // Compuerta apagada (el default): 404, y el panel usa `/confirm`.
+    mockRegistrarImportacion.mockRejectedValue({ response: { status: 404 } });
     mockRecomputeColumnRisk.mockResolvedValue([]);
     // Sin hojas: los tests que no miran el inventario no renderizan el selector.
     mockInventoryEffects.mockResolvedValue([]);
@@ -1179,6 +1203,14 @@ describe("ColumnMapperPanel — corregir una hoja mal clasificada", () => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    // E6c-3: el seguimiento de importaciones vive en localStorage para poder
+    // retomarse al recargar. Entre tests hay que limpiarlo, o una importación
+    // dejada abierta por un test hace que el siguiente monte el panel de
+    // progreso en vez del formulario — que es la recuperación funcionando, pero
+    // en el lugar equivocado.
+    window.localStorage.clear();
+    // Compuerta apagada (el default): 404, y el panel usa `/confirm`.
+    mockRegistrarImportacion.mockRejectedValue({ response: { status: 404 } });
     mockRecomputeColumnRisk.mockResolvedValue([]);
     // Sin hojas: los tests que no miran el inventario no renderizan el selector.
     mockInventoryEffects.mockResolvedValue([]);
@@ -1215,6 +1247,90 @@ describe("ColumnMapperPanel — corregir una hoja mal clasificada", () => {
     await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
     const contextEntity = mockConfirmFile.mock.calls[0]![4];
     expect(contextEntity).toEqual({ "sheet:Ventas": "sale" });
+  });
+
+  test("un timeout del registro asíncrono NO dispara el confirm sincrónico", async () => {
+    // La afirmación central de E6c-3 del lado del cliente.
+    //
+    // Un timeout no dice que la petición no llegó: dice que no sabemos si llegó.
+    // Si el backend la registró y además se dispara `/confirm`, el archivo se
+    // importa DOS VECES — y ninguna de las dos rutas puede darse cuenta, porque
+    // cada una cree ser la única.
+    //
+    // Lo correcto es reintentar con la MISMA clave (el backend devuelve el
+    // intento que ya existe), no cambiar de ruta.
+    mockGetPreview.mockResolvedValue(previewConHojaMalClasificada());
+    mockRegistrarImportacion.mockRejectedValue(new Error("timeout of 0ms exceeded"));
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Confirmar importación/ })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/ }));
+
+    await waitFor(() => expect(mockRegistrarImportacion).toHaveBeenCalled());
+    expect(mockConfirmFile).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["500 del servidor", { response: { status: 500 } }],
+    ["502 del proxy", { response: { status: 502 } }],
+  ])("un %s tampoco lo dispara: la petición pudo haberse registrado", async (
+    _caso,
+    error,
+  ) => {
+    mockGetPreview.mockResolvedValue(previewConHojaMalClasificada());
+    mockRegistrarImportacion.mockRejectedValue(error);
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Confirmar importación/ })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/ }));
+
+    await waitFor(() => expect(mockRegistrarImportacion).toHaveBeenCalled());
+    expect(mockConfirmFile).not.toHaveBeenCalled();
+  });
+
+  test("con la compuerta prendida, el confirm sincrónico no se usa", async () => {
+    mockGetPreview.mockResolvedValue(previewConHojaMalClasificada());
+    mockRegistrarImportacion.mockResolvedValue({
+      attempt_id: "intento-1",
+      file_id: "file-1",
+      status: "PENDIENTE",
+      phase: null,
+      rows_total: 100,
+      rows_done: 0,
+      result: null,
+      error_code: null,
+      error_detail: null,
+      created_at: new Date().toISOString(),
+      finished_at: null,
+    });
+    (ingestionService.estadoDeImportacion as jest.Mock).mockResolvedValue({
+      attempt_id: "intento-1",
+      file_id: "file-1",
+      status: "EJECUTANDO",
+      phase: "importando",
+      rows_total: 100,
+      rows_done: 40,
+      result: null,
+      error_code: null,
+      error_detail: null,
+      created_at: new Date().toISOString(),
+      finished_at: null,
+    });
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Confirmar importación/ })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/ }));
+
+    await waitFor(() => expect(mockRegistrarImportacion).toHaveBeenCalled());
+    expect(mockConfirmFile).not.toHaveBeenCalled();
+    // Y la pantalla pasa a mostrar el progreso, con el aviso de que se puede ir.
+    expect(await screen.findByText(/Podés cerrar esta pantalla/)).toBeInTheDocument();
   });
 
   test("Clientes y Proveedores son destinos ofrecidos", async () => {

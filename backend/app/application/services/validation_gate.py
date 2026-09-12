@@ -7,14 +7,15 @@ debe marcar el archivo como REJECTED, nunca llegar al agente.
 
 from __future__ import annotations
 
-import contextlib
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from app.domain.date_parsing import parse_business_date
+from app.domain.numeric_parsing import inferir_convenio, parsear_monto
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,36 +37,51 @@ class ValidationResult:
 
 
 def _extract_amounts(summary: dict[str, Any]) -> list[Decimal]:
-    """Extrae todos los montos numéricos del summary para sanity-check."""
-    amounts: list[Decimal] = []
+    r"""Extrae los montos del summary para el sanity-check de escala.
+
+    E4 — antes esto hacía ``re.sub(r"[$\s.]", "", str(v))``, o sea **borraba
+    todos los puntos** antes de parsear: un ``12.5`` se volvía 125 y un
+    ``1234.56``, 123456, incluso sobre celdas numéricas nativas de openpyxl.
+
+    Dos consecuencias, las dos malas para un gate: medía sobre un valor distinto
+    del que el importador iba a persistir —así que no podía detectar la
+    discrepancia que existe para detectar— y además inflaba los montos por 10 o
+    100, empujándolos contra el techo de ``_AMOUNT_CEILING`` que él mismo aplica.
+
+    Ahora usa la política común, con el convenio inferido **por columna**: las
+    filas son dicts, así que cada clave es una columna y se puede mirar entera
+    antes de interpretar sus celdas — que es lo único que desambigua un
+    ``"12.500"``.
+    """
     file_type = summary.get("file_type", "spreadsheet")
+    filas = summary.get("ventas_detectadas", []) + summary.get("gastos_detectados", [])
 
-    rows: list[Any] = []
-    if file_type == "spreadsheet":
-        rows = summary.get("ventas_detectadas", []) + summary.get("gastos_detectados", [])
-    else:
-        for entry in summary.get("ventas_detectadas", []) + summary.get("gastos_detectados", []):
-            for raw in entry.get("montos", []):
-                cleaned = re.sub(r"[$\s.]", "", str(raw)).replace(",", ".")
-                with contextlib.suppress(InvalidOperation):
-                    amounts.append(Decimal(cleaned))
-        return amounts
+    if file_type != "spreadsheet":
+        montos: list[Decimal] = []
+        for entry in filas:
+            valores = entry.get("montos", []) if isinstance(entry, dict) else []
+            convenio = inferir_convenio(valores)
+            for raw in valores:
+                interpretado = parsear_monto(raw, convenio)
+                if interpretado.valor is not None:
+                    montos.append(interpretado.valor)
+        return montos
 
-    for row in rows:
+    columnas: dict[str, list[Any]] = defaultdict(list)
+    for row in filas:
         if not isinstance(row, dict):
             continue
-        for v in row.values():
-            if v is None:
-                continue
-            cleaned = re.sub(r"[$\s.]", "", str(v)).replace(",", ".")
-            try:
-                val = Decimal(cleaned)
-                # Include negatives so the sanity check can catch them
-                if val != 0:
-                    amounts.append(val)
-            except InvalidOperation:
-                pass
+        for clave, valor in row.items():
+            columnas[clave].append(valor)
 
+    amounts: list[Decimal] = []
+    for valores in columnas.values():
+        convenio = inferir_convenio(valores)
+        for bruto in valores:
+            interpretado = parsear_monto(bruto, convenio)
+            # Los negativos entran a propósito: el sanity-check los busca.
+            if interpretado.valor is not None and interpretado.valor != 0:
+                amounts.append(interpretado.valor)
     return amounts
 
 

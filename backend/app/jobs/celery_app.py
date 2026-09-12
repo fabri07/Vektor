@@ -35,6 +35,7 @@ celery_app = Celery(
         "app.jobs.report_worker",
         "app.jobs.ingestion_worker",
         "app.jobs.reread_worker",
+        "app.jobs.import_executor_worker",
         "app.jobs.reread_sweep_worker",
         "app.jobs.update_momentum",
         "app.jobs.send_weekly_email",
@@ -89,6 +90,10 @@ celery_app.conf.update(
         # Mismo criterio que `inventory_integrity_check` (también un auditor
         # periódico, no la carga primaria que audita): vive en `scores`.
         "jobs.sweep_stale_reread_runs": {"queue": "scores"},
+        # E6c-3: mismo criterio — el recuperador de intentos es el AUDITOR de la
+        # cola `ingestion`, así que no puede vivir en ella. Si la cola de
+        # ingestión se traba, el que la destraba tiene que estar afuera.
+        "jobs.recover_import_attempts": {"queue": "scores"},
         "jobs.inventory_integrity_check": {"queue": "scores"},
         "jobs.inventory_integrity_check_all_tenants": {"queue": "scores"},
     },
@@ -123,6 +128,23 @@ celery_app.conf.beat_schedule = {
         # horario del lunes (momentum/email) ya ocupado; no es una alerta
         # accionable el mismo día, no necesita cadencia diaria.
         "schedule": _crontab(hour=6, minute=0, day_of_week=3),
+        "options": {"queue": "scores"},
+    },
+    "publish-import-orders": {
+        "task": "jobs.publish_import_orders",
+        # E6c-3: la red de seguridad del publicador. El camino normal publica
+        # apenas commitea el confirm; esto está para lo que se quedó sin entregar
+        # —el broker estaba caído, el proceso murió entre el commit y el envío—.
+        # Cada minuto: es una consulta a un índice sobre una tabla que en el caso
+        # sano está vacía.
+        "schedule": 60,
+        "options": {"queue": "ingestion"},
+    },
+    "recover-import-attempts": {
+        "task": "jobs.recover_import_attempts",
+        # Intentos cuyo ejecutor murió. Sin esto quedan en EJECUTANDO para
+        # siempre y el usuario ve "importando" sin que nadie esté importando.
+        "schedule": 5 * 60,
         "options": {"queue": "scores"},
     },
     "sweep-stale-reread-runs": {

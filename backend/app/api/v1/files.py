@@ -15,6 +15,7 @@ from app.application.services.file_parsing import (
     parse_uploaded_content,
     sanitize_filename,
 )
+from app.domain.ingestion_limits import LimiteExcedidoError
 from app.integrations.s3 import S3Client
 from app.persistence.db.session import get_db_session
 from app.persistence.models.file import (
@@ -85,6 +86,14 @@ async def upload_file(
                     f"¿Querés cargar estos {rows} registros de {pre_check.intent_type}?"
                 )
             processing_status = PROCESSING_STATUS_DONE
+        except LimiteExcedidoError as limite:
+            # E6c-2: 413 y no 422. El archivo no está mal formado — es más grande
+            # de lo que Véktor lee, y el mensaje dice cuál de los siete topes se
+            # excedió y qué hacer al respecto.
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=limite.mensaje,
+            ) from limite
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

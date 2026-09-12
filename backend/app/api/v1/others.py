@@ -36,6 +36,8 @@ from app.application.services.file_deletion_service import (
     ACTION_UPDATE_PRODUCT,
     REPAIR_TYPE_IMPORT,
 )
+from app.application.services.ingestion_import_service import IDENTITY_REF_KEY
+from app.application.services.operation_identity_service import identidad_tomada
 from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
@@ -118,6 +120,13 @@ class ReclassifyRequest(BaseModel):
     # SIEMPRE se re-valida contra el tenant en el handler — nunca se confía en el
     # id que manda el cliente.
     target_product_id: UUID | None = None
+    # E6b: la fila llegó a "Otros" porque tiene el mismo comprobante que una
+    # operación ya cargada, con datos distintos. Importarla desde acá sin volver a
+    # mirar el candado convertiría la revisión humana en la forma de saltearse la
+    # protección: se aplicaría el efecto duplicado que el importador se negó a
+    # aplicar. Sin este flag el endpoint responde 409; con él, el usuario declara
+    # que revisó y que la quiere igual.
+    aplicar_pese_al_conflicto: bool = False
 
 
 class ResolvePurchaseRequest(BaseModel):
@@ -410,6 +419,35 @@ async def reclassify_record(
     # es estable aunque el usuario corrija un campo antes de clasificar.
     _upload_id = record.uploaded_file_id
     _row_ref = unclassified_row_ref(record.id) if _upload_id else None
+
+    # E6b — el candado también rige acá. Una fila que quedó en "Otros" por
+    # conflicto de identidad guarda su clave; si esa clave sigue tomada por una
+    # operación viva, importarla duplicaría el efecto que el confirm no aplicó.
+    # Se exige una decisión explícita en vez de resolverlo solo: puede ser una
+    # corrección legítima (el proveedor reemitió), y Véktor no puede saber cuál
+    # de las dos versiones vale.
+    _clave_identidad = str(record.row_data.get(IDENTITY_REF_KEY) or "")
+    if (
+        _clave_identidad
+        and body.entity_type in ("sale", "expense")
+        and not body.aplicar_pese_al_conflicto
+        and await identidad_tomada(session, tenant.tenant_id, _clave_identidad) is not None
+    ):
+        # Detalle ESTRUCTURADO y no un string: el frontend rutea por
+        # `detail.code`, y sin código este 409 caería en el catch-all "Revisá los
+        # campos" — que apunta al lugar equivocado. Acá los campos están bien; lo
+        # que hay es una decisión pendiente.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "IMPORT_IDENTITY_TAKEN",
+                "message": (
+                    "Esta fila tiene el mismo comprobante que una operación ya "
+                    "cargada. Si la importás igual vas a tener las dos: revisá "
+                    "cuál corresponde."
+                ),
+            },
+        )
 
     try:
         if body.entity_type == "sale":

@@ -41,7 +41,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, cast
 
-from sqlalchemy import ColumnElement, func, update
+from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,6 +99,42 @@ def _stale_before_expr(dialect_name: str, ttl_seconds: int) -> ColumnElement[Any
         # make_interval(years, months, weeks, days, hours, mins, secs) — secs 7º, POSICIONAL.
         return func.now() - func.make_interval(0, 0, 0, 0, 0, 0, ttl_seconds)
     return func.datetime(func.now(), f"-{int(ttl_seconds)} seconds")
+
+
+async def import_lease_vivo(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    ttl_seconds: int | None = None,
+) -> bool:
+    """¿Hay un import corriendo AHORA sobre este archivo?
+
+    ``IMPORTING`` con ``import_started_at`` posterior al umbral de stale — la misma
+    condición que usa el takeover del paso 2 de ``acquire_import_lease``, por el
+    mismo motivo: un ``IMPORTING`` viejo es un proceso muerto, no un import vivo, y
+    tratarlo como vivo bloquearía el archivo hasta que venza el TTL.
+
+    Existe para que la RELECTURA respete el lease del import. Sin esto, un apply
+    podía reescribir la interpretación del archivo mientras un import la estaba
+    leyendo: el import terminaba persistiendo números de una lectura que nadie
+    confirmó. `reread_apply` no miraba `processing_status` en absoluto.
+    """
+    ttl_seconds = _resolve_ttl(ttl_seconds)
+    bind = session.get_bind()
+    stale_before = _stale_before_expr(bind.dialect.name, ttl_seconds)
+    vivo = (
+        await session.execute(
+            select(UploadedFile.id).where(
+                UploadedFile.id == file_id,
+                UploadedFile.tenant_id == tenant_id,
+                UploadedFile.deleted_at.is_(None),
+                UploadedFile.processing_status == PROCESSING_STATUS_IMPORTING,
+                UploadedFile.import_started_at.is_not(None),
+                UploadedFile.import_started_at > stale_before,
+            )
+        )
+    ).scalar_one_or_none()
+    return vivo is not None
 
 
 async def acquire_import_lease(

@@ -6,10 +6,11 @@ import hashlib
 import json
 import re
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +45,15 @@ from app.application.services.inventory_movement_origin import (
     compute_source_row_hash,
     ensure_utc,
 )
+from app.application.services.operation_identity_service import (
+    DECISION_CONFLICTO,
+    DECISION_YA_APLICADA,
+    PlanDeIdentidad,
+    cerrar_plan,
+    identidad_tomada,
+    plan_vacio,
+    planificar_identidades,
+)
 from app.application.services.product_identity import (
     MatchedBy,
     ProductCreateBatch,
@@ -63,10 +73,20 @@ from app.config.ingestion_schema_decisions_rollout import (
 from app.config.product_supplier_links_rollout import product_supplier_links_enabled_for
 from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
-from app.domain.date_parsing import parse_business_date, parse_business_datetime
+from app.domain.date_parsing import (
+    CAMPOS_DE_FECHA,
+    inferir_convenio_de_fecha,
+    parse_business_date,
+    parse_business_datetime,
+    parsear_fecha_de_columna,
+)
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
+)
+from app.domain.ingestion_limits import (
+    TEXTO_FORMULA_SIN_RESULTADO,
+    es_formula_sin_resultado,
 )
 from app.domain.ingestion_schema_fingerprint import (
     compute_context_signature,
@@ -89,6 +109,19 @@ from app.domain.line_amount import (
     AMOUNT_SOURCE_FIELD,
     LineAmount,
     resolve_line_amount,
+)
+from app.domain.numeric_parsing import (
+    CAMPOS_DE_CANTIDAD,
+    CAMPOS_MONETARIOS,
+    MOTIVO_AMBIGUO,
+    MOTIVO_FRACCIONARIA,
+    MOTIVO_ILEGIBLE,
+    MOTIVO_INCOMPATIBLE,
+    MOTIVO_NEGATIVA,
+    ConvenioNumerico,
+    inferir_convenio,
+    parsear_cantidad,
+    parsear_monto,
 )
 from app.domain.product_categories import normalize_product_category
 from app.domain.product_category_inference import CategorySuggestion, infer_category
@@ -145,6 +178,32 @@ class EmptyImportError(Exception):
         "Mapeá las columnas manualmente o revisá el tipo de datos del archivo."
     )
 
+    #: E4 — cuando el import vacío tiene una causa CONOCIDA, el mensaje la dice.
+    #: El default habla de columnas no detectadas, y eso era engañoso para un
+    #: archivo cuyas columnas se detectaron perfecto: lo que no se pudo decidir
+    #: fue la escala de los montos.
+    ESCALA_AMBIGUA = (
+        "No se importó ninguna fila: no se pudo determinar la escala de los "
+        "montos. La columna mezcla formatos incompatibles (por ejemplo "
+        "'12.500' junto a '12.50'), así que no hay forma de saber si el punto "
+        "separa miles o decimales. Unificá el formato de la columna y volvé a "
+        "importar el archivo."
+    )
+
+    #: E4 — mismo criterio para las cantidades: el archivo tenía las columnas, y
+    #: lo que no se pudo usar fue lo que decían las celdas de cantidad.
+    CANTIDAD_ILEGIBLE = (
+        "No se importó ninguna fila: las cantidades no se pudieron leer como "
+        "unidades enteras (decimales, negativas o texto). Las filas quedaron "
+        "para revisar en Otros. Corregí la columna de cantidad y volvé a "
+        "importar el archivo."
+    )
+
+    def __init__(self, user_message: str | None = None) -> None:
+        super().__init__(user_message or self.user_message)
+        if user_message is not None:
+            self.user_message = user_message
+
 
 def check_nonempty_import(
     counts: dict[str, Any],
@@ -200,12 +259,50 @@ def check_nonempty_import(
     confirmed_any = any((confirmed_fields or {}).values()) or any(
         (context_confirmed or {}).values()
     )
-    if total_inserted == 0 and routed_to_others == 0 and had_rows and confirmed_any:
+    # E6b: un archivo cuyas operaciones YA ESTABAN aplicadas —o quedaron en
+    # conflicto, esperando revisión— no está vacío: se lo miró entero y se
+    # decidió sobre cada fila. Cortar con 422 sería el peor de los dos errores:
+    # el usuario vería "no se pudo importar nada, revisá el mapeo" cuando el
+    # mapeo estaba perfecto y lo que pasó es que ya lo tenía cargado — y además
+    # el rollback se llevaría puestas las filas capturadas en «Otros». Mismo
+    # criterio que `routed_to_others` (Minor 1 de F8b).
+    _decididas = counts.get("ya_aplicadas", 0) + counts.get("conflictos_de_identidad", 0)
+    # E8: en un DOCUMENTO (foto/PDF/texto), quedar en «Otros» es el resultado
+    # correcto del camino, no un fallback que tape una pérdida. Esos archivos no
+    # tienen columnas que mapear y F6-A4 no les extrae fecha: cada línea con monto
+    # se captura para que el usuario la complete. Contarlas como "nada importado"
+    # terminaba en 422, y el rollback del savepoint se llevaba puestas las propias
+    # capturas — el archivo se procesaba y en la bandeja no quedaba nada.
+    #
+    # Acotado al documento a propósito: en una planilla, «Otros» SÍ puede tapar un
+    # mapeo que falló (es el motivo de la nota de arriba), así que ahí sigue sin
+    # contar. Y un documento del que no se pudo leer un solo monto sigue siendo un
+    # import vacío: lo que cuenta es lo capturado, no lo intentado.
+    _es_documento = str(summary.get("file_type") or "spreadsheet") in ("text", "image")
+    _capturado_del_documento = (
+        counts.get("otros", 0) + counts.get("otros_ya_capturados", 0)
+        if _es_documento
+        else 0
+    )
+    if (
+        total_inserted == 0
+        and routed_to_others == 0
+        and _decididas == 0
+        and _capturado_del_documento == 0
+        and had_rows
+        and confirmed_any
+    ):
         logger.warning(
             "ingestion.import.zero_inserted",
             row_count=summary.get("row_count"),
             confirmed_fields=confirmed_fields,
+            montos_ambiguos=counts.get("montos_ambiguos", 0),
+            filas_sin_cantidad=counts.get("filas_sin_cantidad", 0),
         )
+        if counts.get("montos_ambiguos"):
+            raise EmptyImportError(EmptyImportError.ESCALA_AMBIGUA)
+        if counts.get("filas_sin_cantidad"):
+            raise EmptyImportError(EmptyImportError.CANTIDAD_ILEGIBLE)
         raise EmptyImportError(EmptyImportError.user_message)
 
 
@@ -646,7 +743,17 @@ async def _load_customer_identity_index(
     existing = await CustomerRepository(session).list_for_dedup(tenant_id)
     return build_existing_index(
         existing,
-        to_record=lambda c: {"cuit": c.cuit, "dni": c.dni, "email": c.email, "phone": c.phone},
+        to_record=lambda c: {
+            "cuit": c.cuit,
+            "dni": c.dni,
+            "email": c.email,
+            "phone": c.phone,
+            # E6a: sin esto la clave de código se arma del lado del ARCHIVO pero
+            # nunca del lado de la base, así que no matchearía jamás — la clave
+            # fuerte existiría y no serviría para nada.
+            "external_code": c.external_code,
+            "external_source": c.external_source,
+        },
         doc_fields=_CUSTOMER_DOC_FIELDS,
     )
 
@@ -664,7 +771,14 @@ async def _load_supplier_identity_index(
     existing = await SupplierRepository(session).list_for_dedup(tenant_id)
     return build_existing_index(
         existing,
-        to_record=lambda s: {"cuil": s.cuil, "email": s.email, "phone": s.phone},
+        to_record=lambda s: {
+            "cuil": s.cuil,
+            "email": s.email,
+            "phone": s.phone,
+            # E6a — ver la nota del índice de clientes.
+            "external_code": s.external_code,
+            "external_source": s.external_source,
+        },
         doc_fields=_SUPPLIER_DOC_FIELDS,
     )
 
@@ -743,7 +857,7 @@ async def _import_master_entities(
         mapping = (context_mappings or {}).get(ctx_id) or (
             column_mappings if ctx_id == "table" else None
         ) or {}
-        target_to_col, _, _ = _resolve_target_cols(mapping)
+        target_to_col, _, _, _ = _resolve_target_cols(mapping)
         if not target_to_col:
             continue  # sin mapeo explícito: no se adivina el shape de la fila
 
@@ -848,6 +962,14 @@ RISK_REF_KEY = "__risk_ref__"
 # clasificado se preserva para siempre— que es seguro, no silencioso.
 ROW_REF_KEY = "__row_ref__"
 
+#: E6b — la clave de identidad de una fila que quedó en "Otros" por CONFLICTO.
+#: Viaja en el payload del registro (con el prefijo ``__``, que ``/otros`` oculta
+#: como el resto de las claves internas) porque la resolución humana **no puede
+#: ser la forma de saltearse el candado**: sin esto, mandar el conflicto a
+#: revisión y clasificarlo desde ahí aplicaría el efecto duplicado que el
+#: importador se negó a aplicar.
+IDENTITY_REF_KEY = "__identity_key__"
+
 _ROW_FINGERPRINT_CONFLICT = unique_violation_classifier(
     "fingerprint",
     constraint="uq_operation_fingerprints_tenant_fp",
@@ -863,29 +985,220 @@ STOCK_TREATMENT_PURCHASE = "purchase"
 _VALID_STOCK_TREATMENTS = frozenset({STOCK_TREATMENT_OPENING_BALANCE, STOCK_TREATMENT_PURCHASE})
 
 
-async def _load_import_fingerprints(
-    session: AsyncSession, tenant_id: uuid.UUID
-) -> set[str]:
-    """Precarga (una sola query) las huellas de filas de import del tenant.
+#: Tamaño de lote para consultar huellas. Bien por debajo del tope de parámetros
+#: de PostgreSQL (32.767) y, sobre todo, acotado en memoria: un único ``IN`` con
+#: decenas de miles de valores traslada el problema que esto viene a resolver
+#: —materializar todo de una— desde el resultado hacia la consulta.
+_LOTE_HUELLAS = 2_000
 
-    Evita el N+1: en vez de un ``SELECT`` por fila en ``_import_row_seen`` y un
-    ``begin_nested()`` por fila en ``_register_import_row_fingerprint`` (miles de
-    round-trips a la DB en archivos grandes), se carga el set una vez y la
-    deduplicación corre en memoria. El set es el estado de ``operation_fingerprints``
-    al inicio de la corrida; los anclas son únicos por (archivo, contexto, índice),
-    así que dentro de una misma corrida basta con ir agregándolos al set.
+
+async def huellas_presentes(
+    session: AsyncSession, tenant_id: uuid.UUID, fingerprints: set[str]
+) -> set[str]:
+    """Cuáles de ``fingerprints`` ya existen, preguntando POR LOTES.
+
+    Los lotes no son prolijidad: un único ``IN`` con decenas de miles de valores
+    se acerca al tope de parámetros de PostgreSQL (32.767) y, sobre todo, mueve
+    hacia la consulta el mismo problema de materializar todo de una vez que esto
+    viene a resolver del lado del resultado.
     """
+    if not fingerprints:
+        return set()
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.persistence.models.memory import OperationFingerprint  # noqa: PLC0415
 
-    result = await session.execute(
-        select(OperationFingerprint.fingerprint).where(
-            OperationFingerprint.tenant_id == tenant_id,
-            OperationFingerprint.action_type == _IMPORT_ROW_ACTION,
+    ordenadas = sorted(fingerprints)
+    presentes: set[str] = set()
+    for inicio in range(0, len(ordenadas), _LOTE_HUELLAS):
+        lote = ordenadas[inicio : inicio + _LOTE_HUELLAS]
+        filas = await session.execute(
+            select(OperationFingerprint.fingerprint).where(
+                OperationFingerprint.tenant_id == tenant_id,
+                OperationFingerprint.fingerprint.in_(lote),
+            )
         )
-    )
-    return set(result.scalars().all())
+        presentes.update(filas.scalars().all())
+    return presentes
+
+
+class HuellasDelArchivo:
+    """Qué anclas ya estaban registradas, preguntando SÓLO por las que hacen falta.
+
+    Reemplaza al ``set`` con **todas** las huellas de import del tenant. Medido
+    (`scripts/bench_f0_baseline.py`, F0): importar 100 filas contra un tenant con
+    100.000 huellas costaba **32,3 MB** de pico —más que importar 5.000 filas
+    contra uno vacío (19,3 MB)—, porque el costo lo ponía la historia y no el
+    archivo. ~0,28 KB por huella histórica, en cada import, para siempre.
+
+    La idea es simple: las anclas que este import puede llegar a consultar se
+    derivan de ``(archivo, contexto, índice de fila)``, así que se enumeran antes
+    del bucle y se preguntan **por lote**. Lo que se trae es proporcional al
+    archivo, no a la historia.
+
+    Alcance explícito, que es lo que hace segura la sustitución
+    ----------------------------------------------------------
+    Un ``set`` plano no sabe qué NO contiene: si el ancla no está adentro, no se
+    puede distinguir "no está en la base" de "nunca la preguntamos". Con la
+    historia entera precargada esa distinción no existía; con una precarga
+    acotada, confundirlas volvería a cobrar un flete ya cobrado en cada
+    re-confirmación.
+
+    Por eso esta clase recuerda **qué preguntó**. Un ancla dentro de ese alcance
+    se resuelve en memoria; una de afuera —el cargo de envío, cuya ancla incluye
+    el monto y no se conoce hasta calcularlo— paga un ``SELECT`` y se cachea. Son
+    una por comprobante, no por fila: no reintroduce el N+1.
+
+    Lo que esto **no** es
+    ---------------------
+    No es la protección contra concurrencia. Precargar huellas nunca lo fue: la
+    escritura sigue yendo por ``_persist_import_fingerprints`` con
+    ``ON CONFLICT DO NOTHING``, y la exclusión entre dos imports del mismo archivo
+    la sigue dando el lease del confirm. Esto es una caché de lectura y no cambia
+    ninguna garantía.
+    """
+
+    __slots__ = ("_consultadas", "_nuevas", "_presentes")
+
+    def __init__(self) -> None:
+        #: Anclas cuya respuesta conocemos (estén o no). Es el ALCANCE.
+        self._consultadas: set[str] = set()
+        #: De las consultadas, las que ya estaban en la base.
+        self._presentes: set[str] = set()
+        #: Las registradas por ESTA corrida — lo único que hay que persistir.
+        self._nuevas: set[str] = set()
+
+    async def precargar(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        fingerprints: set[str],
+    ) -> None:
+        """Trae en lotes cuáles de ``fingerprints`` ya existen."""
+        pendientes = fingerprints - self._consultadas
+        self._presentes |= await huellas_presentes(session, tenant_id, pendientes)
+        self._consultadas |= pendientes
+
+    async def esta(
+        self, session: AsyncSession, tenant_id: uuid.UUID, fingerprint: str
+    ) -> bool:
+        """¿Esta ancla ya estaba? Fuera del alcance precargado, pregunta y cachea."""
+        if fingerprint in self._presentes or fingerprint in self._nuevas:
+            return True
+        if fingerprint in self._consultadas:
+            return False
+        await self.precargar(session, tenant_id, {fingerprint})
+        return fingerprint in self._presentes
+
+    def registrar(self, fingerprint: str) -> None:
+        """La corrida acaba de producir esta ancla: cuenta como presente desde ya."""
+        self._nuevas.add(fingerprint)
+
+    @property
+    def nuevas(self) -> set[str]:
+        return self._nuevas
+
+
+# `_load_import_fingerprints` (la precarga de TODAS las huellas del tenant) se
+# eliminó en E6c-1. No se deja como fallback a propósito: era el único camino y
+# medía 32,3 MB de pico para importar 100 filas contra un tenant con 100.000
+# huellas (F0). Un fallback que nadie llama es una invitación a volver a usarlo;
+# lo que hay ahora es `huellas_presentes` + `_anclas_candidatas`, acotado al
+# archivo. Si alguna vez hiciera falta la historia entera, tendría que
+# justificarse de nuevo.
+
+
+def _contextos_del_summary(summary: dict[str, Any]) -> list[tuple[str | None, int]]:
+    """``[(context_id, filas)]`` para enumerar las anclas candidatas del archivo.
+
+    Enumera **sólo el camino que este summary va a tomar**, no todos los posibles.
+    La primera versión enumeraba los tres —hojas declaradas, tabla suelta y los
+    contextos sintéticos del legacy— "por las dudas", y eso multiplicó por cinco
+    el trabajo: medido, un archivo de 5.000 filas pasó de 19,3 a 30,8 MB de pico y
+    de 15,7 a 21,8 s. Enumerar de más no rompe nada, pero deja de ser barato en
+    cuanto el archivo crece, que es justo donde importa.
+
+    El despacho copia el de ``insert_confirmed_data`` (``inferred_type == "mixed"``
+    o ``multi_sheet`` → camino por hoja; si no, tabla suelta). Si divergieran, la
+    precarga apuntaría a un camino y el import correría por el otro: no habría
+    error, volvería el ``SELECT`` por fila.
+    """
+    filas_totales = int(summary.get("row_count") or 0)
+    for bucket in (
+        "ventas_detectadas",
+        "gastos_detectados",
+        "stock_detectado",
+        "clientes_detectados",
+        "proveedores_detectados",
+        "otros_detectados",
+    ):
+        valores = summary.get(bucket)
+        if isinstance(valores, list):
+            filas_totales = max(filas_totales, len(valores))
+
+    _multihoja = summary.get("inferred_type") == "mixed" or bool(summary.get("multi_sheet"))
+    if not _multihoja:
+        # Camino de tabla suelta: ancla con `context_id=None`.
+        return [(None, filas_totales)]
+
+    contextos: list[tuple[str | None, int]] = [
+        (str(ctx["context_id"]), max(int(ctx.get("row_count") or 0), 1))
+        for ctx in (summary.get("mapping_contexts") or [])
+        if isinstance(ctx, dict) and ctx.get("context_id")
+    ]
+    if contextos:
+        return contextos
+    # Legacy: summaries sin `mapping_contexts`, con sus tres contextos sintéticos.
+    return [("ventas", filas_totales), ("gastos", filas_totales), ("productos", filas_totales)]
+
+
+def _anclas_candidatas(
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    contextos: list[tuple[str | None, int]],
+) -> set[str]:
+    """Las huellas que este import PUEDE llegar a consultar, enumeradas.
+
+    ``contextos`` es ``[(context_id, cantidad de filas)]``. Por cada fila se
+    derivan las tres anclas que el importador consulta con esa forma:
+
+    * la de import normal (venta/gasto),
+    * la de captura de riesgo (``risk:``, namespace propio de F8),
+    * la de captura de producto a "Otros" (``producto:{ctx}``).
+
+    Quedan afuera a propósito las de los cargos de envío: su ancla incluye el
+    monto del cargo, que no existe hasta calcular el grupo. Esas se resuelven de
+    a una contra la base — son una por comprobante, no por fila.
+
+    El costo de enumerar es CPU (tres sha256 por fila) y no memoria de la
+    historia: para 5.000 filas son 15.000 hashes, que es justamente el orden que
+    se quería acotar.
+    """
+    if uploaded_file_id is None:
+        return set()
+    anclas: set[str] = set()
+    for context_id, filas in contextos:
+        for i in range(filas):
+            anclas.add(
+                hashlib.sha256(
+                    _import_row_anchor(tenant_id, uploaded_file_id, context_id, i).encode()
+                ).hexdigest()
+            )
+            anclas.add(
+                hashlib.sha256(
+                    _risk_row_anchor(
+                        tenant_id, uploaded_file_id, str(context_id or ""), i
+                    ).encode()
+                ).hexdigest()
+            )
+            anclas.add(
+                hashlib.sha256(
+                    _import_row_anchor(
+                        tenant_id, uploaded_file_id, f"producto:{context_id}", i
+                    ).encode()
+                ).hexdigest()
+            )
+    return anclas
 
 
 async def _persist_import_fingerprints(
@@ -941,7 +1254,7 @@ async def _register_import_row_fingerprint(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     anchor: str,
-    seen: set[str] | None = None,
+    seen: HuellasDelArchivo | None = None,
 ) -> bool:
     """Registra (idempotentemente) la huella de una fila importada.
 
@@ -966,10 +1279,10 @@ async def _register_import_row_fingerprint(
 
     fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
     if seen is not None:
-        if fingerprint in seen:
+        if await seen.esta(session, tenant_id, fingerprint):
             return True
         # Solo se trackea en memoria; se persiste en lote al final (idempotente).
-        seen.add(fingerprint)
+        seen.registrar(fingerprint)
         return False
     # `guarded_savepoint`: ordenamiento + clasificador. Sin el clasificador, una FK
     # rota o un NOT NULL del propio fingerprint se leería como "fila ya importada" y
@@ -992,7 +1305,7 @@ async def _import_row_seen(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     anchor: str,
-    seen: set[str] | None = None,
+    seen: HuellasDelArchivo | None = None,
 ) -> bool:
     """¿La fila (por su ancla) ya fue importada en una corrida previa?
 
@@ -1007,7 +1320,7 @@ async def _import_row_seen(
     """
     fingerprint = hashlib.sha256(anchor.encode()).hexdigest()
     if seen is not None:
-        return fingerprint in seen
+        return await seen.esta(session, tenant_id, fingerprint)
 
     from sqlalchemy import select  # noqa: PLC0415
 
@@ -1052,6 +1365,96 @@ def _risk_row_anchor(
     sintético (p.ej. ``"table"`` en single-sheet) no colisionen entre sí.
     """
     return f"{tenant_id}:risk:{uploaded_file_id or ''}:{context_id}:{row_index}"
+
+
+def _doc_line_anchor(
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    context_id: str,
+    line_index: int,
+) -> str:
+    """Ancla de la captura de una LÍNEA de documento (texto/imagen) en «Otros».
+
+    Namespace propio ``doc``, por el mismo motivo que ``_risk_row_anchor`` tiene el
+    suyo: una línea puede llegar a tener después su ancla de import normal (cuando
+    F7 sepa leerle la fecha) sin que la de captura la bloquee.
+
+    **La identidad es la ocurrencia, no el texto.** Dos renglones idénticos —"Coca
+    $1500" dos veces— son dos ventas legítimas, así que anclar en el contenido
+    descartaría plata real. Lo que distingue una de otra es su posición dentro del
+    grupo detectado de ESA versión del archivo: ``(archivo, contexto, ordinal)``,
+    el mismo criterio que el ancla de fila de planilla. ``uploaded_file_id`` la ata
+    a la versión: una relectura reemplaza el contenido interpretado y su
+    reconciliación es otra cosa (ver ``reread_service``), no una repetición.
+    """
+    return f"{tenant_id}:doc:{uploaded_file_id or ''}:{context_id}:{line_index}"
+
+#: Qué se pudo leer de los montos de una línea de documento. Los cuatro estados
+#: son distintos y ninguno se puede colapsar en otro: SIN_TOKEN es texto
+#: incidental (no es una operación), AMBIGUO es un monto que está escrito y no se
+#: pudo interpretar, y NO_POSITIVO es un monto que SÍ se leyó y que la regla de
+#: negocio no admite. Confundir los dos últimos con el primero era lo que hacía
+#: desaparecer la línea sin rastro (E8b).
+LINEA_SIN_TOKEN = "sin_token"
+LINEA_MONTO_UTILIZABLE = "utilizable"
+LINEA_MONTO_AMBIGUO = "ambiguo"
+LINEA_MONTO_NO_POSITIVO = "no_positivo"
+
+#: Contador por estado, para que el aviso del confirm pueda distinguirlos.
+_CONTADOR_POR_ESTADO_DE_LINEA = {
+    LINEA_MONTO_AMBIGUO: "lineas_monto_ambiguo",
+    LINEA_MONTO_NO_POSITIVO: "lineas_monto_no_positivo",
+}
+
+
+def leer_montos_de_linea(
+    entry: dict[str, Any], convenio: ConvenioNumerico | None
+) -> tuple[str, str | None]:
+    """El estado de los montos de una línea de documento, y el token que lo explica.
+
+    Devuelve ``LINEA_MONTO_UTILIZABLE`` apenas encuentra un monto positivo: una
+    línea con varios números ("2 x $12.500 = $25.000") es importable si alguno
+    sirve, y el usuario ve la línea entera cuando la revise.
+    """
+    tokens = [str(m) for m in (entry.get("montos") or [])]
+    if not tokens:
+        return LINEA_SIN_TOKEN, None
+    ambiguo: str | None = None
+    no_positivo: str | None = None
+    for token in tokens:
+        leido = parsear_monto(token, convenio)
+        if leido.valor is None:
+            ambiguo = ambiguo if ambiguo is not None else token
+            continue
+        if leido.valor > 0:
+            return LINEA_MONTO_UTILIZABLE, None
+        no_positivo = no_positivo if no_positivo is not None else token
+    if ambiguo is not None:
+        return LINEA_MONTO_AMBIGUO, ambiguo
+    return LINEA_MONTO_NO_POSITIVO, no_positivo
+
+
+def motivo_de_la_captura(estado: str, token: str | None) -> str:
+    """Lo que el usuario lee en la bandeja: QUÉ pasó y con cuál valor.
+
+    "Revisá el monto" sobre una línea con tres números no le dice cuál mirar.
+    """
+    if estado == LINEA_MONTO_AMBIGUO:
+        texto = (
+            f"Monto ambiguo ({token}): no se pudo determinar si el punto separa "
+            "miles o decimales. Revisá el monto y completá la fecha."
+        )
+    elif estado == LINEA_MONTO_NO_POSITIVO:
+        texto = (
+            f"Monto en cero o negativo ({token}): no se registra como operación. "
+            "Revisá el monto y completá la fecha."
+        )
+    else:
+        texto = (
+            "Documento sin fecha reconocible: revisá el monto y completá la fecha "
+            "antes de importar"
+        )
+    return texto[:200]
 
 
 def _source_row_ref(anchor: str | None) -> str | None:
@@ -1104,6 +1507,17 @@ def _sku_del_archivo(raw: Any) -> str | None:
     """
     limpio = _clean_str(raw, 99)
     return None if limpio and is_internal_sku(limpio) else limpio
+
+
+#: Clave de SISTEMA donde las dos normalizaciones (números y fechas) guardan el
+#: valor tal como venía en el archivo, por columna. Existe para que "Otros"
+#: muestre —y pueda volver a importar— lo que el usuario escribió: al persistir
+#: la fila ya interpretada, un `12.500,50` quedaba como `"12500.50"`, y ESE texto
+#: es ambiguo fuera de su columna (`_parse_amount` lo rechaza, y con razón), así
+#: que la fila capturada dejaba de poder reimportarse desde la bandeja.
+#: Prefijo `__` como el resto de las claves del sistema: no cuenta como contenido
+#: de fila y no llega a la base.
+ORIGINALES_KEY = "__originales__"
 
 
 def _fila_con_contenido(row: dict[str, Any]) -> bool:
@@ -1197,10 +1611,23 @@ def _capture_unclassified(
         )
     count = 0
     for row in rows:
-        row_data = {k: v for k, v in row.items() if k != "__context__"}
+        _originales = row.get(ORIGINALES_KEY) or {}
+        row_data = {
+            k: v for k, v in row.items() if k not in ("__context__", ORIGINALES_KEY)
+        }
         if not row_data or (skip_blank_rows and not _fila_con_contenido(row_data)):
             continue
-        _persistido = {k: ("" if v is None else str(v)) for k, v in row_data.items()}
+        # Se guarda lo que el archivo DECÍA, no lo que Véktor entendió. La fila
+        # llega ya interpretada (números y fechas normalizados con el convenio de
+        # su columna) y guardar eso tenía dos costos: el usuario dejaba de ver lo
+        # que escribió —que es lo que se le pide revisar— y el texto resultante
+        # (`"12500.50"`, `"2024-03-05 00:00:00"`) queda fuera de su columna, donde
+        # ya no hay convenio que lo resuelva, así que la fila no se podía volver a
+        # importar desde la bandeja.
+        _persistido = {
+            k: ("" if v is None else str(_originales.get(k, v)))
+            for k, v in row_data.items()
+        }
         # Se agrega DESPUÉS del volcado para que una columna del archivo que se
         # llamara igual no pueda pisar el vínculo (ni al revés): la clave reservada
         # es del sistema, no del archivo.
@@ -1269,7 +1696,20 @@ async def _capture_column_risk_rows(
     """
     if not affected_rows:
         return 0
-    seen = await _load_import_fingerprints(session, tenant_id)
+    # E6c-1: acotado a las anclas de ESTAS filas, no a la historia del tenant.
+    # Este camino captura tres filas en el caso de Asteria; traer 100.000 huellas
+    # para preguntar por tres era el mismo defecto que el loop principal.
+    seen = HuellasDelArchivo()
+    await seen.precargar(
+        session,
+        tenant_id,
+        {
+            hashlib.sha256(
+                _risk_row_anchor(tenant_id, uploaded_file_id, context_id, idx).encode()
+            ).hexdigest()
+            for idx in affected_rows
+        },
+    )
     #: Sólo las huellas NUEVAS se persisten. `_persist_import_fingerprints` reinserta
     #: todo lo que le pasen (con ON CONFLICT DO NOTHING): darle el set entero sería
     #: un INSERT de miles de filas por tres capturas.
@@ -2147,14 +2587,129 @@ async def _record_stock_movement(
 
 
 def _parse_qty(qty_raw: Any) -> int:
-    """Cantidad entera de una celda de compra. 0 si vacía/no parseable/negativa."""
-    if qty_raw in (None, "", "None", "nan"):
+    """Cantidad entera de una celda de compra. 0 si vacía, ilegible o negativa.
+
+    E4 — antes esto era ``int(float(str(qty_raw)))``, que **truncaba**:
+    ``"1.500"`` daba 1, o sea que una compra de mil quinientas unidades entraba
+    como una. Ahora la escala la resuelve la política con el convenio de la
+    columna (``_normalizar_columnas_numericas``), así que para cuando el valor
+    llega acá ya es el número correcto.
+
+    Lo que esta función agrega es la validación del DOMINIO: una cantidad es
+    entera y no negativa. Una fracción ya no se trunca — se descarta con su
+    motivo en el log, igual que un negativo o un texto.
+
+    **Sigue devolviendo 0 y no ``None``**: los diez call sites tratan el 0 como
+    "sin cantidad utilizable" y cambiarles el contrato es una migración aparte.
+    Consecuencia declarada: una cantidad inválida hace que la fila se saltee o se
+    cree sin unidades, en vez de ir a "Otros" con el motivo — eso queda para
+    cuando esos callers se migren.
+    """
+    interpretada = parsear_cantidad(qty_raw)
+    if interpretada.valor is None:
+        if interpretada.motivo is not None:
+            logger.debug(
+                "ingestion.parse.qty_descartada",
+                raw=str(qty_raw),
+                reason=interpretada.motivo,
+            )
         return 0
-    try:
-        qty = int(float(str(qty_raw)))
-    except (ValueError, TypeError):
-        return 0
-    return qty if qty > 0 else 0
+    return int(interpretada.valor)
+
+
+#: Qué decirle al usuario en "Otros" cuando la cantidad declarada no se pudo leer.
+#: El texto explica el problema del ARCHIVO, no el nombre interno del motivo.
+_CANTIDAD_ILEGIBLE_LABEL = {
+    MOTIVO_FRACCIONARIA: (
+        "La cantidad tiene decimales y las unidades son enteras: corregila y volvé "
+        "a clasificar la fila"
+    ),
+    MOTIVO_NEGATIVA: (
+        "La cantidad es negativa: si es una devolución, cargala como tal; si es un "
+        "error del archivo, corregilo"
+    ),
+    MOTIVO_AMBIGUO: (
+        "No se pudo decidir la escala de la cantidad: la columna mezcla formatos "
+        "(por ejemplo 1.500 junto a 1.50)"
+    ),
+    MOTIVO_INCOMPATIBLE: (
+        "La cantidad está escrita en otro formato que el resto de su columna"
+    ),
+    MOTIVO_ILEGIBLE: "No se pudo leer la cantidad",
+}
+
+
+def _label_cantidad_ilegible(motivo: str) -> str:
+    return _CANTIDAD_ILEGIBLE_LABEL.get(motivo, _CANTIDAD_ILEGIBLE_LABEL[MOTIVO_ILEGIBLE])
+
+
+#: El mensaje por defecto cuando una fila no tiene monto utilizable: el usuario
+#: tiene que mapear la columna, o la pareja que la calcula.
+_SIN_MONTO_LABEL = (
+    "Fila sin monto: no se pudo registrar. Mapeá la columna del monto, o las del "
+    "precio unitario y la cantidad para que Véktor lo calcule"
+)
+
+
+def _label_fila_sin_monto(raw: Any) -> str:
+    """Por qué esta fila se quedó sin monto, cuando se puede decir algo mejor.
+
+    El mensaje por defecto le pide al usuario que mapee la columna del monto — y
+    es lo correcto cuando falta el mapeo, pero era engañoso justo en el caso que
+    E4 vino a hacer visible: la columna estaba mapeada y lo que no se pudo fue
+    LEER la celda. Que la pantalla diga "mapeá la columna" sobre una columna ya
+    mapeada manda a corregir lo que no está roto.
+
+    No hace falta el convenio de la columna para elegir el texto: alcanza con
+    distinguir "acá hay un número que no se pudo interpretar" de "acá hay
+    cualquier otra cosa".
+    """
+    if es_formula_sin_resultado(raw):
+        # E6c-2: la celda TIENE una fórmula y el archivo no trae su resultado.
+        # Antes se leía como vacía —`openpyxl` devuelve None para las dos— y la
+        # fila entraba como si el usuario no hubiera cargado nada. Decirle "mapeá
+        # la columna del monto" sobre una columna calculada manda a corregir algo
+        # que no está roto.
+        return f"No se pudo leer el monto: {TEXTO_FORMULA_SIN_RESULTADO}"
+    if raw is None or not str(raw).strip():
+        return _SIN_MONTO_LABEL
+    interpretado = parsear_monto(raw)
+    if interpretado.motivo in (MOTIVO_AMBIGUO, MOTIVO_INCOMPATIBLE):
+        return (
+            f"No se pudo decidir la escala del monto «{str(raw).strip()}»: la "
+            "columna mezcla formatos (por ejemplo 12.500 junto a 12.50). Unificá "
+            "el formato de la columna y volvé a importar"
+        )
+    if interpretado.motivo == MOTIVO_ILEGIBLE:
+        return f"El monto «{str(raw).strip()}» no se pudo leer como número"
+    return _SIN_MONTO_LABEL
+
+
+def _cantidad_de_venta(qty_raw: Any) -> tuple[int, str | None]:
+    """Unidades de una venta importada, y el motivo si el archivo declaró algo ilegible.
+
+    Los tres lectores de cantidad de ventas ponían piso en 1 con un
+    ``except: return 1``, así que una celda escrita que no se podía leer —``2,5``,
+    ``-3``, ``"dos"``— entraba como **una unidad**, indistinguible de una celda
+    vacía. Y antes de eso ``int(float(...))`` truncaba: ``2.5`` eran 2.
+
+    Ahora se separan los dos casos, que no son el mismo:
+
+    * **celda vacía** → 1 unidad, como siempre. El archivo no dijo nada y una
+      venta sin cantidad es una venta de uno; sin el piso, además, el gate de
+      replay se saltearía la fila entera.
+    * **celda escrita e ilegible** → también se devuelve 1 para que ningún gate
+      se saltee la fila, pero con el motivo: el caller la manda a "Otros" con el
+      original a la vista en vez de importarla con una cantidad inventada.
+    """
+    interpretada = parsear_cantidad(qty_raw)
+    if interpretada.ausente:
+        return 1, None
+    if interpretada.valor is None:
+        return 1, interpretada.motivo
+    # El piso en 1 sobre un 0 declarado se conserva: es la semántica anterior de
+    # estos tres lectores y no la cambia esta corrección.
+    return max(1, int(interpretada.valor)), None
 
 
 async def build_incomplete_product(
@@ -2230,6 +2785,47 @@ async def build_incomplete_product(
     if product_cache is not None:
         product_cache[resolved.id] = resolved
     return resolved.id, created
+
+
+def _ledger_item_producto_creado(
+    product_id: uuid.UUID, name: str | None, product_cache: dict[uuid.UUID, Any] | None
+) -> dict[str, Any]:
+    """Item de ledger de un producto que nació de una COMPRA.
+
+    Sin esto, borrar el archivo no podía eliminarlo —la reversa de productos sale
+    del ledger— y, peor, el DELETE respondía ``fully_reverted: true`` con el
+    producto todavía en el catálogo: un residuo silencioso, que es exactamente lo
+    que ``conservados`` existe para impedir. Es la misma clase de hueco que ya se
+    había cerrado para el costo pisado por una compra; faltaba la CREACIÓN.
+
+    El ``after`` espeja el del camino de catálogo porque lo consume el mismo
+    guard: ``entity_changed_since_ledger`` compara esos campos para decidir si
+    alguien tocó el producto después del import. Uno más pobre haría que el guard
+    no vea ediciones posteriores sobre los campos que faltan.
+    """
+    producto = (product_cache or {}).get(product_id)
+    despues: dict[str, Any] = {"name": name}
+    if producto is not None:
+        despues = {
+            "sale_price_ars": str(producto.sale_price_ars or Decimal("0")),
+            "list_price_ars": (
+                str(producto.list_price_ars) if producto.list_price_ars is not None else None
+            ),
+            "unit_cost_ars": (
+                str(producto.unit_cost_ars) if producto.unit_cost_ars is not None else None
+            ),
+            "stock_units": int(producto.stock_units or 0),
+            "sku": producto.sku,
+            "barcode": producto.barcode,
+            "category": producto.category,
+        }
+    return {
+        "action": "CREATED",
+        "product_id": str(product_id),
+        "name": name,
+        "before": None,
+        "after": despues,
+    }
 
 
 async def _ensure_product_for_purchase(
@@ -2333,10 +2929,10 @@ async def _apply_purchase_to_stock(
     """
     if expense.product_id is None:
         return
-    try:
-        qty = int(float(str(qty_raw))) if qty_raw not in (None, "", "None", "nan") else 0
-    except (ValueError, TypeError):
-        return
+    # `_parse_qty` aplica la política: sin truncar, con motivo en el log. Devuelve
+    # 0 para vacía, fraccionaria, negativa o ilegible, y acá 0 ya significaba
+    # "no hay cantidad que sumar al stock".
+    qty = _parse_qty(qty_raw)
     if qty <= 0:
         return
     from app.persistence.models.product import Product  # noqa: PLC0415
@@ -2806,7 +3402,7 @@ def _planificar_costos_de_la_hoja(
     Corre ANTES del bucle de filas, no después: distribuir un costo compartido
     exige ver el grupo entero, y el bucle necesita el resultado para escribir
     el costo unitario de cada compra. Es la misma razón por la que
-    `_cobrar_envios_de_la_hoja` es una pasada aparte, sólo que al revés — aquél
+    `cobrar_envios_de_la_hoja` es una pasada aparte, sólo que al revés — aquél
     puede correr al final porque no cambia ninguna fila.
 
     **El reparto es por GRUPO, no por hoja** (F-H6.d). Una sola llamada a
@@ -2853,7 +3449,7 @@ def _planificar_costos_de_la_hoja(
     _prov_col = cols.get("supplier_name")
 
     def _clave(row: dict[str, Any], col: str | None) -> str:
-        # Misma normalización que `_cobrar_envios_de_la_hoja`: la clave del
+        # Misma normalización que `cobrar_envios_de_la_hoja`: la clave del
         # comprobante tiene que ser insensible a mayúsculas y espacios, y las dos
         # pasadas TIENEN que agrupar igual o el preview miente sobre el import.
         return (_clean_str(row.get(col), 199) or "").strip().lower() if col else ""
@@ -2921,26 +3517,33 @@ def _planificar_costos_de_la_hoja(
 
 
 def _parse_amount(raw: Any) -> Decimal | None:
-    if raw is None:
+    """Monto de una celda, ya sin decidir escalas por su cuenta (E4).
+
+    La interpretación la hace `domain/numeric_parsing` con el convenio de la
+    COLUMNA, resuelto una vez en `_normalizar_columnas_numericas`: para cuando
+    una celda llega acá ya es un `Decimal` y esta función sólo la deja pasar.
+
+    Lo que queda es el caso en que la columna NO permitió decidir la escala
+    —`12.500` junto a `12.50`—: ahí la celda llega como el string original y
+    `parsear_monto` sin convenio devuelve `None`, así que la fila cae por "sin
+    monto" y termina en "Otros" con el valor a la vista. Antes esta función tenía
+    su propia interpretación y no había rama para "sólo punto": `"12.500"` daba
+    **12,5** y `"1.234.567"` daba `None`.
+
+    Se conserva el descarte de `<= 0`, que es contrato de esta función y no de la
+    política: un monto cero o negativo no es un error de lectura.
+    """
+    interpretado = parsear_monto(raw)
+    if interpretado.valor is None:
+        if interpretado.motivo is not None:
+            logger.debug(
+                "ingestion.parse.amount_unreadable", raw=str(raw), reason=interpretado.motivo
+            )
         return None
-    s = re.sub(r"[$\s]", "", str(raw).strip())
-    if not s:
+    if interpretado.valor <= 0:
+        logger.debug("ingestion.parse.amount_discarded", raw=str(raw), reason="non_positive")
         return None
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif "," in s:
-        s = s.replace(",", ".")
-    try:
-        val = Decimal(s)
-        if val <= 0:
-            logger.debug("ingestion.parse.amount_discarded", raw=str(raw), reason="non_positive")
-            return None
-        return val
-    except InvalidOperation:
-        return None
+    return interpretado.valor
 
 
 # F6-C1: el parser vive en app/domain/date_parsing.py — es el mismo que usa el
@@ -3114,15 +3717,28 @@ def _row_val(
 
 def _resolve_target_cols(
     mapping: dict[str, str],
-) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], set[str]]:
     """Desde un mapeo explícito source_col→target, resuelve columnas por target canónico.
 
-    Devuelve ``(target_to_col, custom_field_cols, cruzados_descartados)``: el
-    primero mapea campo canónico (amount, transaction_date, name, ...) →
-    source_col; el segundo mapea cf_key → source_col para los targets
-    `custom_field:{key}`; el tercero, source_col → target, son los targets
-    CRUZADOS (`{entidad}:{campo}`) que este importador todavía no sabe escribir.
-    Ignora "ignore".
+    Devuelve ``(target_to_col, custom_field_cols, cruzados_descartados,
+    ignoradas)``: el primero mapea campo canónico (amount, transaction_date,
+    name, ...) → source_col; el segundo mapea cf_key → source_col para los
+    targets `custom_field:{key}`; el tercero, source_col → target, son los
+    targets CRUZADOS (`{entidad}:{campo}`) que este importador todavía no sabe
+    escribir; el cuarto son las columnas que el usuario mandó **ignorar**.
+
+    **Las ignoradas se devuelven, no se descartan.** Antes esta función las
+    salteaba con un ``continue`` y ahí moría la decisión: la columna no quedaba
+    en ``target_to_col`` —así que ningún ``.get()`` la encontraba—, pero tampoco
+    en ``_reservadas`` ni en el ``skip`` de ``_row_val``, de modo que las ~30
+    heurísticas por nombre la volvían a leer y la columna que el usuario sacó
+    terminaba siendo la fecha, el monto o la marca del producto. `ParsedTarget`
+    distingue ``ignore`` de ``none`` justamente porque uno es una decisión y el
+    otro una columna sin revisar (ver su docstring); acá se dejaba de distinguir.
+
+    Quien consuma esta función tiene que sacar esas columnas de las filas antes
+    de interpretarlas — lo hace ``_sin_columnas_ignoradas``, en los dos puntos
+    donde el importador toma las filas de un bucket.
 
     Los cruzados se descartan porque F-D no está entregada, pero hasta acá se
     evaporaban: `parse_target` puede devolver ``kind="cross"`` y no había rama
@@ -3140,9 +3756,15 @@ def _resolve_target_cols(
     target_to_col: dict[str, str] = {}
     custom_field_cols: dict[str, str] = {}
     cruzados: dict[str, str] = {}
+    ignoradas: set[str] = set()
     for src_col, target in mapping.items():
         parsed = parse_target(target)
-        if parsed.kind in ("ignore", "none"):
+        if parsed.kind == "ignore":
+            # DECISIÓN del usuario, no ausencia de mapeo: se registra.
+            ignoradas.add(src_col)
+            continue
+        if parsed.kind == "none":
+            # Columna sin revisar: la heurística sigue teniendo derecho a mirarla.
             continue
         if parsed.kind == "custom":
             # F-0: first-wins, igual que la rama canónica. Antes esta rama no
@@ -3162,7 +3784,224 @@ def _resolve_target_cols(
             columnas=sorted(cruzados),
             targets=sorted(set(cruzados.values())),
         )
-    return target_to_col, custom_field_cols, cruzados
+    return target_to_col, custom_field_cols, cruzados, ignoradas
+
+
+def _columnas_de_fecha_de(filas: list[dict[str, Any]], cols: dict[str, str]) -> set[str]:
+    """Qué columnas de una hoja se van a leer como fecha (E4).
+
+    Mismas dos fuentes que ``_columnas_numericas_de``, por la misma razón: lo que
+    el usuario mapeó a un campo de fecha, y lo que la heurística por nombre va a
+    encontrar igual en un archivo sin mapeo.
+    """
+    fechas = {col for campo, col in cols.items() if campo in CAMPOS_DE_FECHA}
+    if not filas:
+        return fechas
+    headers = list(filas[0].keys())
+    encontrada = _find_col(headers, _FECHA_COLS)
+    if encontrada:
+        fechas.add(encontrada)
+    return fechas
+
+
+def _normalizar_columnas_de_fecha(
+    rows: list[dict[str, Any]], columnas: set[str]
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, str]]]:
+    """Interpreta de una vez las columnas que se van a leer como fecha (E4).
+
+    Gemelo de ``_normalizar_columnas_numericas``, y por el mismo motivo: el orden
+    día/mes de una fecha corta no se puede decidir mirando una celda. En una
+    columna exportada en formato US, ``"04/13/2026"`` sólo se lee mm/dd, y eso
+    revela cómo hay que leer ``"03/04/2026"`` — que por sí sola es válida en los
+    dos órdenes y se leía siempre como 3 de abril.
+
+    Las celdas resueltas quedan como ``datetime`` NATIVO, así que los ~15 lectores
+    que llaman a ``_parse_date`` las dejan pasar tal cual sin cambiar una línea.
+    Una celda que la columna no alcanza a resolver se deja COMO ESTABA con su
+    motivo aparte: el importador la ve como lo que es —una fecha que no pudo
+    leer— y la fila termina en "Otros", que es lo que F6 ya hace con una fecha
+    ilegible (nunca "hoy" en silencio, invariante 2d).
+    """
+    if not columnas or not rows:
+        return rows, {}
+
+    convenios = {
+        col: inferir_convenio_de_fecha([fila.get(col) for fila in rows])
+        for col in columnas
+        if any(col in fila for fila in rows)
+    }
+    if not convenios:
+        return rows, {}
+
+    motivos: dict[int, dict[str, str]] = {}
+    normalizadas: list[dict[str, Any]] = []
+    for indice, fila in enumerate(rows):
+        copia = dict(fila)
+        if ORIGINALES_KEY in copia:
+            copia[ORIGINALES_KEY] = dict(copia[ORIGINALES_KEY])
+        for col, convenio in convenios.items():
+            if col not in copia:
+                continue
+            interpretada = parsear_fecha_de_columna(copia[col], convenio)
+            if interpretada.valor is not None:
+                copia.setdefault(ORIGINALES_KEY, {})[col] = copia[col]
+                copia[col] = interpretada.valor
+            elif interpretada.motivo is not None:
+                motivos.setdefault(indice, {})[col] = interpretada.motivo
+        normalizadas.append(copia)
+    return normalizadas, motivos
+
+
+def preparar_filas_de_hoja(
+    filas: list[dict[str, Any]], cols: dict[str, str], ignoradas: set[str]
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, str]]]:
+    """Las filas de una hoja **como las va a leer el importador**, y los motivos
+    de las celdas numéricas que no se pudieron interpretar.
+
+    Dos pasos que siempre van juntos y en este orden: sacar las columnas que el
+    usuario mandó ignorar, y recién entonces resolver el convenio numérico de las
+    que quedan (inferirlo de una columna que el usuario sacó daría un convenio
+    que el import no usa).
+
+    **Existe para que el preview no pueda divergir del confirm.** El endpoint de
+    costos aplicaba sólo el primer paso, así que leía las celdas crudas: con la
+    columna `["12500.00"]`, el importador resuelve el convenio y calcula 12.500,
+    y el preview —sin columna que mirar— la declaraba ambigua y mostraba la
+    compra sin costo. Misma pantalla, mismo plan, dos números.
+    """
+    filas = _sin_columnas_ignoradas(filas, ignoradas)
+    filas, motivos = _normalizar_columnas_numericas(
+        filas, _columnas_numericas_de(filas, cols)
+    )
+    filas, motivos_fecha = _normalizar_columnas_de_fecha(
+        filas, _columnas_de_fecha_de(filas, cols)
+    )
+    for indice, por_columna in motivos_fecha.items():
+        motivos.setdefault(indice, {}).update(por_columna)
+    return filas, motivos
+
+
+def _columnas_numericas_de(
+    filas: list[dict[str, Any]], cols: dict[str, str]
+) -> set[str]:
+    """Qué columnas de una hoja se van a leer como número (E4).
+
+    Dos fuentes, porque el importador tiene dos: lo que el usuario MAPEÓ a un
+    campo monetario o de cantidad, y lo que la heurística por nombre va a
+    encontrar igual cuando no hay mapeo. Si se mirara sólo el mapeo, un archivo
+    sin `column_mappings` —el camino más común— se quedaría sin convenio y
+    ningún monto con separador se podría leer.
+    """
+    numericas = {
+        col
+        for campo, col in cols.items()
+        if campo in CAMPOS_MONETARIOS or campo in CAMPOS_DE_CANTIDAD
+    }
+    if not filas:
+        return numericas
+    headers = list(filas[0].keys())
+    for keywords in (
+        _VENTA_TOTAL_COLS,
+        _VENTA_AMOUNT_COLS,
+        _GASTO_AMOUNT_COLS,
+        _PRECIO_VENTA_COLS,
+        _COSTO_COLS,
+        _COSTO_UNITARIO_PRODUCT_COLS,
+        _CANTIDAD_COLS,
+        _STOCK_COLS,
+        _COMPRA_MAS_ENVIO_COLS,
+        _PRECIO_COMPRA_BASE_COLS,
+    ):
+        encontrada = _find_col(headers, keywords)
+        if encontrada:
+            numericas.add(encontrada)
+    return numericas
+
+
+def _normalizar_columnas_numericas(
+    rows: list[dict[str, Any]], columnas: set[str]
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, str]]]:
+    """Interpreta de una vez las columnas que se van a leer como números (E4).
+
+    Devuelve las filas con esas columnas ya convertidas a ``Decimal``, y los
+    motivos de las celdas que no se pudieron interpretar, indexados por
+    ``{indice_de_fila: {columna: motivo}}``.
+
+    **Por qué acá y no en cada lector.** El convenio decimal no se puede decidir
+    mirando una celda: ``"12.500"`` es $12.500 o $12,50 y sólo la columna entera
+    lo dice (ver ``domain/numeric_parsing``). Los ~35 puntos donde el importador
+    parsea un monto ven una celda por vez, así que ninguno podría decidirlo. Acá
+    se mira la columna completa una vez, y de paso ningún call site cambia: lo que
+    reciben es un valor nativo, y la política dice que un nativo no se
+    reinterpreta.
+
+    **Sólo las columnas numéricas**, nunca la fila entera: un SKU ``"1.500"`` o un
+    código con ceros a la izquierda son identificadores, y convertirlos a número
+    los rompería —justamente lo que F2 quiere evitar—.
+
+    Una celda que la columna no alcanza a resolver se deja COMO ESTABA, con su
+    motivo aparte: así el importador la trata como lo que es —un monto que no
+    pudo leer— y la fila termina en "Otros" con el original a la vista, en vez de
+    entrar con una escala inventada.
+    """
+    if not columnas or not rows:
+        return rows, {}
+
+    convenios = {
+        col: inferir_convenio([fila.get(col) for fila in rows])
+        for col in columnas
+        if any(col in fila for fila in rows)
+    }
+    if not convenios:
+        return rows, {}
+
+    motivos: dict[int, dict[str, str]] = {}
+    normalizadas: list[dict[str, Any]] = []
+    for indice, fila in enumerate(rows):
+        copia = dict(fila)
+        # `dict(fila)` es superficial: sin esto, dos pasadas sobre la misma fila
+        # compartirían el dict de originales y la segunda mutaría el de la primera.
+        if ORIGINALES_KEY in copia:
+            copia[ORIGINALES_KEY] = dict(copia[ORIGINALES_KEY])
+        for col, convenio in convenios.items():
+            if col not in copia:
+                continue
+            interpretado = parsear_monto(copia[col], convenio)
+            if interpretado.valor is not None:
+                copia.setdefault(ORIGINALES_KEY, {})[col] = copia[col]
+                copia[col] = interpretado.valor
+            elif interpretado.motivo is not None:
+                motivos.setdefault(indice, {})[col] = interpretado.motivo
+        normalizadas.append(copia)
+    return normalizadas, motivos
+
+
+def _sin_columnas_ignoradas(
+    rows: list[dict[str, Any]], ignoradas: set[str]
+) -> list[dict[str, Any]]:
+    """Saca de cada fila las columnas que el usuario mandó ignorar.
+
+    Es la forma de hacer que TODOS los lectores respeten la decisión sin tener
+    que acordarse de pasarles nada: ``_find_col`` resuelve sobre
+    ``rows[0].keys()``, ``_row_val``/``_row_col``/``_val`` iteran ``row.items()``
+    y ``_resolve_sale_price_col`` recibe ``list(row.keys())`` — si la clave no
+    está en la fila, ninguno puede encontrarla. Un lector nuevo queda cubierto
+    por construcción; un parámetro más habría que acordarse de pasárselo.
+
+    Consecuencia declarada: una fila cuyo único contenido estaba en columnas
+    ignoradas queda vacía, así que no genera venta **ni va a "Otros"** — y como
+    no quema huella, una relectura con otro mapeo la vuelve a intentar. Es lo
+    correcto: no hay nada importable en ella según las decisiones vigentes.
+
+    El original no se pierde: el archivo sigue entero en R2 y en
+    ``parsed_summary_json``, que esta función no toca (devuelve filas NUEVAS; el
+    summary es ORM-tracked y mutarlo persistiría el recorte).
+
+    Sin ignoradas devuelve la MISMA lista, sin copiar: el camino común no paga.
+    """
+    if not ignoradas:
+        return rows
+    return [{k: v for k, v in row.items() if k not in ignoradas} for row in rows]
 
 
 def _resolve_stock_treatment(
@@ -3480,18 +4319,26 @@ async def _insert_confirmed_data_impl(
         context_entity=context_entity,
     )
 
-    # Batch anti-N+1: precargar las huellas de import del tenant una sola vez
-    # (solo si hay dedup activa, i.e. uploaded_file_id real). Evita un SELECT y un
-    # savepoint por fila contra la DB en archivos grandes (relectura/import).
-    seen_fp: set[str] | None = (
-        await _load_import_fingerprints(session, tenant_id)
-        if uploaded_file_id is not None
-        else None
+    # Batch anti-N+1: en vez de un SELECT y un savepoint por fila (miles de
+    # round-trips en archivos grandes), las huellas se resuelven en memoria.
+    #
+    # E6c-1 — pero acotadas al ARCHIVO, no a la historia del tenant. Antes esto
+    # traía TODAS las huellas de import del tenant: medido en F0, importar 100
+    # filas contra un tenant con 100.000 huellas costaba 32,3 MB de pico, más que
+    # importar 5.000 filas contra uno vacío. Ahora se enumeran las anclas que este
+    # import puede consultar —derivables de (archivo, contexto, índice)— y se
+    # preguntan por lotes. Ver `HuellasDelArchivo`.
+    seen_fp: HuellasDelArchivo | None = (
+        HuellasDelArchivo() if uploaded_file_id is not None else None
     )
-    # Snapshot del estado precargado para persistir SOLO las huellas nuevas al final.
-    _preloaded_fp: frozenset[str] | None = (
-        frozenset(seen_fp) if seen_fp is not None else None
-    )
+    if seen_fp is not None:
+        await seen_fp.precargar(
+            session,
+            tenant_id,
+            _anclas_candidatas(
+                tenant_id, uploaded_file_id, _contextos_del_summary(summary)
+            ),
+        )
     # Cache de productos por id (creados + tocados) para evitar un session.get por
     # fila al aplicar stock, y para que con autoflush=False los productos recién
     # creados reciban su stock (session.get no ve pendientes sin flush).
@@ -3554,10 +4401,8 @@ async def _insert_confirmed_data_impl(
                 purchase_cost_decisions=purchase_cost_decisions,
                 proyeccion=_proyeccion_recorder,
             )
-            if seen_fp is not None and _preloaded_fp is not None:
-                await _persist_import_fingerprints(
-                    session, tenant_id, seen_fp - _preloaded_fp
-                )
+            if seen_fp is not None:
+                await _persist_import_fingerprints(session, tenant_id, seen_fp.nuevas)
             _volcar_impacto_de_inventario()
             return counts
 
@@ -3571,8 +4416,17 @@ async def _insert_confirmed_data_impl(
         # El gate de `historical_replay` lo destapó: sin `quantity` toda venta
         # valía 1 unidad y el respaldo se evaluaba contra una cantidad inventada.
         # Sólo con UN contexto: con varios, el camino correcto es el multi-hoja.
-        if not column_mappings and context_mappings and len(context_mappings) == 1:
-            column_mappings = next(iter(context_mappings.values()))
+        # E6a: y se conserva la CLAVE, no sólo el mapeo. Descartarla era el
+        # segundo de los tres motivos por los que este camino no cobraba el envío:
+        # las decisiones de costo y de envío viajan indexadas por `context_id`, la
+        # API las manda con el id real de la hoja, y acá se las buscaba bajo `""`.
+        # O sea: la decisión se validaba, el usuario la veía aceptada, y el import
+        # la ignoraba. Un silencio que no dejaba rastro en ningún contador.
+        _ctx_plano: str | None = None
+        if context_mappings and len(context_mappings) == 1:
+            _ctx_plano = next(iter(context_mappings))
+            if not column_mappings:
+                column_mappings = context_mappings[_ctx_plano]
 
         # Índice de identidad de clientes para resolver la referencia por fila en
         # ventas (F7c). Incluye los clientes recién creados por el paso maestro de
@@ -3613,6 +4467,17 @@ async def _insert_confirmed_data_impl(
                 # la confirmación explícita del usuario sigue pudiendo importarlos.
                 rows = summary.get("otros_detectados", [])
                 rows_from_otros = bool(rows)
+        if not rows:
+            return counts
+
+        # El mapeo se resuelve ACÁ, antes de la heurística, y no más abajo dentro
+        # del `if column_mappings:` como estaba: las columnas ignoradas tienen que
+        # salir de las filas ANTES de que `_find_col` mire los headers, o la
+        # decisión llega tarde. Todo lo demás del mapeo se reutiliza abajo.
+        _canon, _custom, _cruzados, _ignoradas = (
+            _resolve_target_cols(column_mappings) if column_mappings else ({}, {}, {}, set())
+        )
+        rows = _sin_columnas_ignoradas(rows, _ignoradas)
         if not rows:
             return counts
 
@@ -3666,10 +4531,9 @@ async def _insert_confirmed_data_impl(
         target_to_col: dict[str, str] = {}
 
         if column_mappings:
-            # Construir lookup: target_field → primer source_col que lo mapee
-            # Misma resolución que `_resolve_target_cols` (incluido el first-wins
-            # de la rama custom): son el mismo contrato en dos caminos distintos.
-            _canon, _custom, _cruzados = _resolve_target_cols(column_mappings)
+            # `_canon`/`_custom`/`_cruzados` ya se resolvieron arriba, junto con las
+            # ignoradas: resolver dos veces el mismo mapeo abre la puerta a que las
+            # dos resoluciones diverjan.
             target_to_col.update(_canon)
             custom_field_cols.update(_custom)
             if _cruzados:
@@ -3750,6 +4614,59 @@ async def _insert_confirmed_data_impl(
             if "expiry_date" in target_to_col:
                 expiry_col = target_to_col["expiry_date"]
                 _expiry_explicit = True
+
+        # E4: las columnas numéricas se interpretan ACÁ, con la columna entera a la
+        # vista, antes de leer la primera fila. Es el único momento en que se puede
+        # decidir si `"12.500"` son doce mil quinientos o doce con cincuenta; los
+        # ~35 puntos que parsean montos ven una celda por vez.
+        _cols_numericas = {
+            c
+            for c in (
+                venta_col,
+                gasto_col,
+                costo_col,
+                precio_col,
+                lista_col,
+                stock_col,
+                qty_col,
+                unit_price_col,
+            )
+            if c
+        } | {
+            col
+            for campo, col in target_to_col.items()
+            if campo in CAMPOS_MONETARIOS or campo in CAMPOS_DE_CANTIDAD
+        }
+        rows, _motivos_numericos = _normalizar_columnas_numericas(rows, _cols_numericas)
+        # E4: mismo criterio para las fechas — el orden día/mes lo decide la
+        # columna, no la celda. Va después de los números porque son columnas
+        # disjuntas y el orden entre las dos pasadas no cambia el resultado.
+        rows, _ = _normalizar_columnas_de_fecha(
+            rows, _columnas_de_fecha_de(rows, target_to_col) | ({fecha_col} if fecha_col else set())
+        )
+        # Los dos motivos cuentan como "no se pudo leer la escala", que es lo que
+        # el resumen del confirm tiene que decir, pero el log los separa porque
+        # son problemas distintos del archivo: en `ambiguo` la columna entera no
+        # alcanza a decidir; en `incompatible` decidió y esa celda está en otro
+        # formato (`"12.50"` entre miles con punto), que antes entraba como 1250.
+        _por_motivo = Counter(
+            motivo
+            for por_columna in _motivos_numericos.values()
+            for motivo in por_columna.values()
+        )
+        _sin_escala = _por_motivo[MOTIVO_AMBIGUO] + _por_motivo[MOTIVO_INCOMPATIBLE]
+        if _sin_escala:
+            # Visible en el resumen del confirm: son celdas que NO se importaron
+            # porque no se pudo decidir su escala. La fila cae a "Otros" por el
+            # camino de siempre (sin monto), con el original.
+            counts["montos_ambiguos"] = _sin_escala
+            logger.warning(
+                "ingestion.montos_sin_escala",
+                cantidad=_sin_escala,
+                ambiguos=_por_motivo[MOTIVO_AMBIGUO],
+                incompatibles=_por_motivo[MOTIVO_INCOMPATIBLE],
+                columnas=sorted({c for m in _motivos_numericos.values() for c in m}),
+            )
 
         # FASE 3: en archivos ambiguos ("general") se honra la confirmación EXPLÍCITA del
         # usuario (no se requiere la señal auto-detectada). Para tipos ya inferidos se
@@ -3836,7 +4753,7 @@ async def _insert_confirmed_data_impl(
 
         # F-H3.d.3: mismos lectores para el gate y para la inserción. Repetirlos
         # sería suficiente para que el gate rechace una fila y se importe otra.
-        def _venta_cantidad_plana(row: dict[str, Any]) -> int:
+        def _venta_cantidad_plana(row: dict[str, Any]) -> tuple[int, str | None]:
             # Mismo contrato que `_venta_cantidad` del camino multi-hoja: columna
             # mapeada primero, heurística de headers después, y piso en 1. Sin la
             # heurística, una hoja con "cantidad" sin mapear hacía que el gate
@@ -3844,12 +4761,7 @@ async def _insert_confirmed_data_impl(
             # negativa se saltaba el gate (`qty <= 0` → `continue`) y entraba así,
             # cuando por la otra rama del importador habría quedado en 1.
             qty_raw = row.get(qty_col) if qty_col else _row_val(row, _CANTIDAD_COLS)
-            if qty_raw in (None, "", "None", "nan"):
-                return 1
-            try:
-                return max(1, int(float(str(qty_raw))))
-            except (ValueError, TypeError):
-                return 1
+            return _cantidad_de_venta(qty_raw)
 
         # F-H4: gemelos de `_venta_cantidad_cruda`/`_venta_precio_unitario` del
         # camino multi-hoja. SIN piso en 1 y SIN heurística de headers: derivar el
@@ -3910,7 +4822,7 @@ async def _insert_confirmed_data_impl(
                         key=(_ctx_inline, _idx),
                         product_id=_pid,
                         day=_fecha.date(),
-                        qty=_venta_cantidad_plana(_row),
+                        qty=_venta_cantidad_plana(_row)[0],
                     )
                 )
             # Las compras del propio archivo, con su fecha. Las tres condiciones son
@@ -3992,11 +4904,51 @@ async def _insert_confirmed_data_impl(
                 _celdas_ilegibles,
                 _grupos_de_compra,
             ) = _planificar_costos_de_la_hoja(
-                None, rows, target_to_col, purchase_cost_decisions
+                # E6a: el contexto REAL, no `None`. Con `None` este planificador
+                # buscaba la decisión bajo `""` y nunca encontraba la del usuario.
+                _ctx_plano,
+                rows,
+                target_to_col,
+                purchase_cost_decisions,
+                sin_comprobante=(shipping_decisions or {}).get(_ctx_plano or ""),
             )
             for _col, _cuantas in _celdas_ilegibles.items():
                 counts["ajustes_ilegibles"] = counts.get("ajustes_ilegibles", 0) + _cuantas
                 _avisos_costo.append(texto_del_ajuste_ilegible("", _col, _cuantas))
+
+        # E6b — identidad fuerte, también acá: el mismo archivo tiene que
+        # deduplicarse igual entre como tabla suelta o como solapa. Son DOS planes
+        # porque una tabla suelta puede producir venta y gasto desde la misma fila
+        # (el Libro Diario lo hace), y la identidad de un comprobante propio y la
+        # de uno del proveedor son distintas — no colisionan ni se pueden
+        # compartir. Si la hoja no produce una de las dos, ese plan queda vacío y
+        # no cuesta nada.
+        _plan_ventas = (
+            await planificar_identidades(
+                session,
+                tenant_id,
+                uploaded_file_id,
+                rows=rows,
+                cols=target_to_col,
+                entity="sale",
+            )
+            if wants_ventas
+            else plan_vacio()
+        )
+        _plan_gastos = (
+            await planificar_identidades(
+                session,
+                tenant_id,
+                uploaded_file_id,
+                rows=rows,
+                cols=target_to_col,
+                entity="expense",
+            )
+            if wants_gastos
+            else plan_vacio()
+        )
+        _planes_identidad_plano = [_plan_ventas, _plan_gastos]
+        _efectos_de_la_fila_plano: list[tuple[str, uuid.UUID]] = []
 
         for row_index, row in enumerate(rows):
             # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
@@ -4019,6 +4971,49 @@ async def _insert_confirmed_data_impl(
             # como output persistido (registra fingerprint) sin usar `continue`,
             # para no saltear el bloque de idempotencia del final de la iteración.
             _captured_to_otros = False
+
+            # E6b — la decisión de identidad, ANTES de escribir nada. Una fila
+            # puede producir venta y gasto, así que se resuelve por separado: que
+            # el comprobante propio ya esté aplicado no dice nada sobre el del
+            # proveedor. `_omitir_*` apaga sólo el bloque que corresponde.
+            _dec_venta = _plan_ventas.decision.get(row_index)
+            _dec_gasto = _plan_gastos.decision.get(row_index)
+            _omitir_venta = _dec_venta in (DECISION_YA_APLICADA, DECISION_CONFLICTO)
+            _omitir_gasto = _dec_gasto in (DECISION_YA_APLICADA, DECISION_CONFLICTO)
+            for _dec in (_dec_venta, _dec_gasto):
+                if _dec == DECISION_YA_APLICADA:
+                    counts["ya_aplicadas"] = counts.get("ya_aplicadas", 0) + 1
+            _motivo_conflicto = (
+                _plan_ventas.motivo.get(row_index)
+                if _dec_venta == DECISION_CONFLICTO
+                else _plan_gastos.motivo.get(row_index)
+                if _dec_gasto == DECISION_CONFLICTO
+                else None
+            )
+            if _motivo_conflicto is not None:
+                # Misma identidad, contenido distinto: puede ser una corrección o
+                # un error de carga. A "Otros" con el motivo — omitirla escondería
+                # la corrección y aplicarla duplicaría el efecto.
+                _clave_conflicto = (
+                    _plan_ventas.clave.get(row_index)
+                    if _dec_venta == DECISION_CONFLICTO
+                    else _plan_gastos.clave.get(row_index)
+                ) or ""
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[{**row, IDENTITY_REF_KEY: _clave_conflicto}],
+                    headers=headers,
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=_motivo_conflicto[:200],
+                    suggested_entity="sale" if _dec_venta == DECISION_CONFLICTO else "expense",
+                    row_ref=_source_row_ref(_row_anchor),
+                )
+                counts["conflictos_de_identidad"] = (
+                    counts.get("conflictos_de_identidad", 0) + 1
+                )
+                _captured_to_otros = True
 
             raw_date = row.get(fecha_col) if fecha_col else None
             tx_date = _parse_date(raw_date) if raw_date is not None else None
@@ -4095,7 +5090,29 @@ async def _insert_confirmed_data_impl(
                 counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                 _captured_to_otros_rows.add(row_index)
                 _captured_to_otros = True
-            if wants_ventas and not _captured_to_otros:
+            _qty_plana, _qty_motivo = _venta_cantidad_plana(row)
+            if wants_ventas and not _captured_to_otros and _qty_motivo is not None:
+                # E4: el archivo declaró una cantidad que no se puede leer. Antes
+                # caía al piso en 1 y la venta entraba como una unidad, sin nada
+                # que revisar. Va a "Otros" con el original a la vista, igual que
+                # una fila sin fecha — y por el mismo criterio, arrastra a toda la
+                # fila: si no se sabe cuántas unidades son, tampoco se sabe qué
+                # compró ni qué stock mover.
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=headers,
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=_label_cantidad_ilegible(_qty_motivo),
+                    suggested_entity="sale",
+                    row_ref=_source_row_ref(_row_anchor),
+                )
+                counts["filas_sin_cantidad"] = counts.get("filas_sin_cantidad", 0) + 1
+                _captured_to_otros_rows.add(row_index)
+                _captured_to_otros = True
+            if wants_ventas and not _captured_to_otros and not _omitir_venta:
                 # F-H4: el monto lo trae el archivo o sale de precio × cantidad.
                 # `venta_col` puede ser None: la hoja entró por la pareja mapeada.
                 _linea = resolve_line_amount(
@@ -4105,7 +5122,7 @@ async def _insert_confirmed_data_impl(
                 )
                 amount = _linea.amount
                 if amount:
-                    qty = _venta_cantidad_plana(row)
+                    qty = _qty_plana
 
                     # Notas
                     notes_raw = row.get(notes_col) if notes_col else None
@@ -4133,6 +5150,8 @@ async def _insert_confirmed_data_impl(
                     _registrar_monto_derivado(cf, _linea, counts)
 
                     entry = SaleEntry(
+                        # E6b — ver la nota en `_add_sale` (multihoja).
+                        id=uuid.uuid4(),
                         tenant_id=tenant_id,
                         amount=amount,
                         quantity=qty,
@@ -4193,8 +5212,9 @@ async def _insert_confirmed_data_impl(
                         entry.source_row_ref = _source_row_ref(_row_anchor)
                     session.add(entry)
                     counts["ventas"] += 1
+                    _efectos_de_la_fila_plano.append(("sale", entry.id))
 
-            if wants_gastos and not _captured_to_otros:
+            if wants_gastos and not _captured_to_otros and not _omitir_gasto:
                 assert gasto_col is not None  # wants_gastos implica gasto_col presente
                 amount = _parse_amount(row.get(gasto_col))
                 if amount:
@@ -4240,6 +5260,8 @@ async def _insert_confirmed_data_impl(
                         cf = {**cf, "category_label": cat_label}
 
                     expense = ExpenseEntry(
+                        # E6b — ver la nota en `_add_sale` (multihoja).
+                        id=uuid.uuid4(),
                         tenant_id=tenant_id,
                         amount=amount,
                         category=cat_code,
@@ -4408,6 +5430,12 @@ async def _insert_confirmed_data_impl(
                             # "linked" reusó uno ya creado en la corrida (no cuenta).
                             if _action == "created":
                                 counts["sin_producto"] += 1
+                                if return_details and _pid is not None:
+                                    product_details.append(
+                                        _ledger_item_producto_creado(
+                                            _pid, _exp_name, _product_cache
+                                        )
+                                    )
                             # Review F2 #2: registrar en los índices transaccionales
                             # (los de _resolve_product) para que ventas/gastos
                             # POSTERIORES del mismo archivo puedan vincularlo.
@@ -4500,6 +5528,7 @@ async def _insert_confirmed_data_impl(
                             expense.source_row_ref = _source_row_ref(_row_anchor)
                         session.add(expense)
                         counts["gastos"] += 1
+                        _efectos_de_la_fila_plano.append(("expense", expense.id))
 
             # F-H4: validación final de la fila. Si no produjo NADA —ni venta, ni
             # gasto, ni captura— y no es una fila de relleno, se va a "Otros" con el
@@ -4530,10 +5559,8 @@ async def _insert_confirmed_data_impl(
                     headers=headers,
                     source=source,
                     uploaded_file_id=uploaded_file_id,
-                    context_label=(
-                        "Fila sin monto: no se pudo registrar. Mapeá la columna "
-                        "del monto, o las del precio unitario y la cantidad para "
-                        "que Véktor lo calcule"
+                    context_label=_label_fila_sin_monto(
+                        row.get(venta_col or gasto_col or "")
                     ),
                     suggested_entity="sale" if wants_ventas else "expense",
                     row_ref=_source_row_ref(_row_anchor),
@@ -4554,6 +5581,60 @@ async def _insert_confirmed_data_impl(
                 await _register_import_row_fingerprint(
                     session, tenant_id, _row_anchor, seen_fp
                 )
+            # E6b: se cuelgan los efectos REALES de esta fila a su identidad. Lo
+            # que no insertó no deja vínculo, y su reclamación se devuelve al
+            # cierre para que el archivo corregido se pueda reimportar.
+            for _tipo_efecto, _id_efecto in _efectos_de_la_fila_plano:
+                (_plan_ventas if _tipo_efecto == "sale" else _plan_gastos).registrar_efecto(
+                    row_index, _tipo_efecto, _id_efecto
+                )
+            _efectos_de_la_fila_plano.clear()
+
+        # E6b: vínculos identidad→efecto + devolución de las reclamaciones que
+        # no produjeron nada. Acá y no al final de la función porque los planes
+        # sólo existen dentro de esta rama; en la misma transacción que los
+        # efectos, para que un import revertido se lleve sus identidades.
+        await cerrar_plan(session, tenant_id, uploaded_file_id, _planes_identidad_plano)
+
+        # E6a — el envío se cobra acá, DESPUÉS de las líneas y con la misma
+        # función que el camino multi-hoja. Va después porque la decisión necesita
+        # ver la tabla entera: la misma cifra repetida en diez filas del mismo
+        # remito es un flete, no diez.
+        #
+        # Que sea una sola tabla no impide agrupar por comprobante — lo que
+        # determina la agrupación son los identificadores de la fila (proveedor +
+        # número), no que exista una hoja aparte. Si esos identificadores no
+        # están, `plan_shipping_charges` no cobra y lo reporta, exactamente igual
+        # que en el multi-hoja.
+        if wants_gastos:
+            await cobrar_envios_de_la_hoja(
+                EntornoDeEnvios(
+                    session=session,
+                    tenant_id=tenant_id,
+                    uploaded_file_id=uploaded_file_id,
+                    seen_fp=seen_fp,
+                    counts=counts,
+                    supplier_index=_supplier_index,
+                    supplier_ref_mode=_supplier_ref_mode,
+                    shipping_decisions=shipping_decisions,
+                    purchase_cost_decisions=purchase_cost_decisions,
+                ),
+                _ctx_plano,
+                rows,
+                target_to_col,
+                _grupos_de_compra,
+            )
+
+        # E6a — tercer motivo del silencio: los avisos de costo de este camino se
+        # armaban y no llegaban a ningún lado. `counts["avisos"]` es lo que el
+        # confirm publica como warnings.
+        for _cid, _targets_ignorados in hojas_que_necesitan_aviso(
+            list((purchase_cost_decisions or {}).values()),
+            {_ctx_plano: target_to_col} if _ctx_plano else {},
+        ).items():
+            _avisos_costo.append(texto_del_aviso(_cid, _targets_ignorados))
+        if _avisos_costo:
+            counts["avisos"] = [*counts.get("avisos", []), *_avisos_costo]
 
         # Traza agregada de las decisiones de proveedor del path de compras.
         if _real_suppliers:
@@ -4663,15 +5744,10 @@ async def _insert_confirmed_data_impl(
                 price = _parse_amount(row.get(precio_col)) if precio_col else None
                 cost = _parse_amount(row.get(costo_col)) if costo_col else None
                 list_price = _parse_amount(row.get(lista_col)) if lista_col else None
-                try:
-                    stock_raw = row.get(stock_col) if stock_col else None
-                    stock_val = (
-                        int(float(str(stock_raw)))
-                        if stock_raw not in (None, "", "None", "nan")
-                        else 0
-                    )
-                except (ValueError, TypeError):
-                    stock_val = 0
+                # Sin truncar: un stock `2.5` no son 2 unidades. `_parse_qty`
+                # devuelve 0 con el motivo en el log, que es lo que ya significaba
+                # una celda de stock ilegible en este camino.
+                stock_val = _parse_qty(row.get(stock_col) if stock_col else None)
                 sku_raw = row.get(sku_col) if sku_col else None
                 sku = _sku_del_archivo(sku_raw)
                 # F2-T5: código de barras de la fila (si el archivo trae la columna).
@@ -5103,38 +6179,134 @@ async def _insert_confirmed_data_impl(
         # estampillaba "hoy" — fecha de negocio inventada (invariante 2d). Ahora la
         # línea va a /otros para que el usuario complete la fecha antes de importar.
         # Es degradado pero honesto: la lectura real de foto/PDF con fecha es F7.
-        def _route_text_line_to_otros(entry: dict[str, Any], suggested: str) -> None:
-            # Se rutea la línea UNA vez (no N veces por cada monto detectado). Solo si
-            # trae al menos un monto válido — una línea sin monto no materializa un
-            # pendiente vacío. `uploaded_file_id` liga el /otros al archivo origen.
+        # Las capturas de este camino SÍ llevan ancla (E8). Antes no llevaban, y
+        # el motivo escrito era que la re-confirmación la impedía el lease: cierto
+        # para el `/confirm` sincrónico, pero la importación asíncrona (E6c-3)
+        # agregó una re-ENTREGA posible del mismo intento, y la relectura vuelve a
+        # recorrer el archivo. Sin ancla, cada vuelta materializaba otra copia del
+        # mismo pendiente y el usuario tenía que clasificar el mismo renglón dos
+        # veces. El ancla es `(archivo, contexto, ordinal)` — nunca el texto, ver
+        # `_doc_line_anchor`.
+        _doc_seen = HuellasDelArchivo()
+
+        # E8b: el DOCUMENTO es la unidad que resuelve la escala, igual que la
+        # columna lo es en una planilla. Un documento no tiene columnas, pero sí
+        # un autor y una convención, y sus tokens de monto son la evidencia.
+        #
+        # Sin esto, cada token se leía solo y `parsear_monto` —que con razón no
+        # adivina— devolvía `None` para `$12.500`, el formato más común de cinco
+        # cifras en Argentina. El llamador leía ese `None` como "la línea no tiene
+        # monto" y la línea **desaparecía**: ni importada, ni en «Otros», ni
+        # contada, ni avisada. Es la pérdida silenciosa que este programa existe
+        # para eliminar, y estaba en el único camino que todavía leía montos
+        # fuera de la política de E4.
+        #
+        # La evidencia que alcanza es la MISMA que para una columna (no una regla
+        # nueva y más laxa): si el documento mezcla `$12.500` con `$12.50` no hay
+        # convenio, y **no se fuerza ninguno** — esas líneas van a «Otros» con su
+        # motivo y su valor original a la vista.
+        _convenio_del_documento = inferir_convenio(
+            [
+                m
+                for _b in ("ventas_detectadas", "gastos_detectados")
+                for _fila in (summary.get(_b) or [])
+                for m in (_fila.get("montos") or [])
+            ]
+        )
+
+        async def _precargar_anclas_del_documento() -> None:
+            """Las anclas de TODAS las líneas, en un lote (E6c-1).
+
+            Preguntar de a una le costaba un ``SELECT`` por renglón: el mismo N+1
+            que el importador ya había desactivado en el resto de sus caminos.
+            Se enumeran desde el archivo —bucket + ordinal—, así que lo que se
+            trae es proporcional al documento y no a la historia del tenant. Las
+            que no entren acá igual se resuelven: ``HuellasDelArchivo`` sabe qué
+            preguntó y consulta lo que le falta.
+            """
+            _por_entidad = {"sale": "ventas_detectadas", "expense": "gastos_detectados"}
+            _pares: set[tuple[str, str]] = {
+                (f"text:{_ent}", _bucket) for _ent, _bucket in _por_entidad.items()
+            }
+            for _ctx in summary.get("mapping_contexts") or []:
+                _bucket = _por_entidad.get(str(_ctx.get("entity_type") or ""))
+                if _bucket and _ctx.get("context_id"):
+                    _pares.add((str(_ctx["context_id"]), _bucket))
+            await _doc_seen.precargar(
+                session,
+                tenant_id,
+                {
+                    hashlib.sha256(
+                        _doc_line_anchor(
+                            tenant_id, uploaded_file_id, _ctx_id, _i
+                        ).encode()
+                    ).hexdigest()
+                    for _ctx_id, _bucket in _pares
+                    for _i in range(len(summary.get(_bucket) or []))
+                },
+            )
+
+        async def _route_text_line_to_otros(
+            entry: dict[str, Any], suggested: str, ctx_id: str, line_index: int
+        ) -> None:
+            # Se rutea la línea UNA vez (no N veces por cada monto detectado).
+            # `uploaded_file_id` liga el /otros al archivo origen.
             #
-            # No se registra fingerprint por línea (a diferencia del path spreadsheet,
-            # que ancla en (archivo, contexto, índice)): el path texto nunca tuvo
-            # anclas de fila estables. La no-duplicación la garantiza F4 aguas arriba
-            # — un confirm exitoso deja el archivo DONE y no puede re-confirmarse
-            # (CAS del lease), y un fallo revierte el savepoint entero. La relectura
-            # es un flujo distinto (reread_service) que reprocesa desde cero.
-            if not any(_parse_amount(m) for m in entry.get("montos", [])):
+            # E8b: lo único que NO se conserva es la línea sin ningún token de
+            # monto — ahí no hay operación que revisar y materializarla sería
+            # convertir texto incidental ("Gracias por su compra") en un pendiente
+            # que nadie puede clasificar. Todo lo demás se conserva CON SU MOTIVO,
+            # incluido el monto que no se pudo interpretar y el que se interpretó
+            # en cero: los tres estados eran indistinguibles bajo el
+            # `any(_parse_amount(...))` anterior, que además trataba un
+            # `Decimal(0)` legítimo como ausencia por ser falsy.
+            estado, token = leer_montos_de_linea(entry, _convenio_del_documento)
+            if estado == LINEA_SIN_TOKEN:
                 return
-            counts["otros"] += _capture_unclassified(
+            anchor = _doc_line_anchor(tenant_id, uploaded_file_id, ctx_id, line_index)
+            if await _import_row_seen(session, tenant_id, anchor, _doc_seen):
+                counts["otros_ya_capturados"] = counts.get("otros_ya_capturados", 0) + 1
+                return
+            capturadas = _capture_unclassified(
                 session,
                 tenant_id,
                 rows=[entry],
                 headers=None,
                 source=source,
                 uploaded_file_id=uploaded_file_id,
-                context_label=(
-                    "Documento sin fecha reconocible: revisá el monto y completá la "
-                    "fecha antes de importar"
-                ),
+                context_label=motivo_de_la_captura(estado, token),
                 suggested_entity=suggested,
+                context_id=ctx_id,
+                # Lo que le permite a la relectura reconocer, cuando sepa leer la
+                # línea, que este pendiente YA fue clasificado a mano. Es el ancla
+                # de fila de import (no la de captura): el mismo derivado que usa
+                # el camino de riesgo de columna, por el mismo motivo.
+                row_ref=_source_row_ref(
+                    _import_row_anchor(tenant_id, uploaded_file_id, ctx_id, line_index)
+                ),
             )
+            if capturadas == 0:
+                # Nada persistido → no se quema el ancla: si la línea mejora en una
+                # relectura, tiene que poder capturarse. Mismo criterio que
+                # `_capture_column_risk_rows`.
+                return
+            await _register_import_row_fingerprint(session, tenant_id, anchor, _doc_seen)
+            counts["otros"] += capturadas
+            _contador = _CONTADOR_POR_ESTADO_DE_LINEA.get(estado)
+            if _contador:
+                counts[_contador] = counts.get(_contador, 0) + capturadas
 
-        def _add_text_sale(entry: dict[str, Any]) -> None:
-            _route_text_line_to_otros(entry, "sale")
+        async def _add_text_sale(
+            entry: dict[str, Any], ctx_id: str, line_index: int
+        ) -> None:
+            await _route_text_line_to_otros(entry, "sale", ctx_id, line_index)
 
-        def _add_text_expense(entry: dict[str, Any]) -> None:
-            _route_text_line_to_otros(entry, "expense")
+        async def _add_text_expense(
+            entry: dict[str, Any], ctx_id: str, line_index: int
+        ) -> None:
+            await _route_text_line_to_otros(entry, "expense", ctx_id, line_index)
+
+        await _precargar_anclas_del_documento()
 
         text_contexts = summary.get("mapping_contexts")
         if text_contexts:
@@ -5160,31 +6332,47 @@ async def _insert_confirmed_data_impl(
                     "ventas" if entity == "sale" else "gastos"
                 ):
                     continue
-                rows = [
-                    r
-                    for r in summary.get(text_bucket.get(base_entity or "", ""), [])
+                # El ordinal sale del bucket ENTERO, no de la lista ya filtrada: es
+                # la posición de la línea en el grupo que el parser detectó, y es lo
+                # que tiene que coincidir entre dos corridas del mismo archivo. La
+                # lista filtrada cambia de largo según qué contextos se incluyan.
+                _lineas: list[tuple[int, dict[str, Any]]] = [
+                    (i, r)
+                    for i, r in enumerate(
+                        summary.get(text_bucket.get(base_entity or "", ""), [])
+                    )
                     if r.get("__context__") == ctx_id
                 ]
-                for text_row in rows:
+                _ctx_key = ctx_id or f"text:{entity}"
+                for _ordinal, _fila_de_texto in _lineas:
                     if entity == "sale":
-                        _add_text_sale(text_row)
+                        await _add_text_sale(_fila_de_texto, _ctx_key, _ordinal)
                     else:
-                        _add_text_expense(text_row)
+                        await _add_text_expense(_fila_de_texto, _ctx_key, _ordinal)
         else:
-            # Legacy: documentos viejos sin mapping_contexts.
+            # Legacy: documentos viejos sin mapping_contexts. El contexto del ancla
+            # es el sintético que HOY genera el parser (`text:sale`/`text:expense`),
+            # y no la cadena vacía: sin él, la línea 3 de ventas y la línea 3 de
+            # gastos compartirían ancla y la segunda se saltearía como repetida.
             if confirmed_fields.get("ventas"):
-                for text_row in summary.get("ventas_detectadas", []):
-                    _add_text_sale(text_row)
+                for _ordinal, _fila_de_texto in enumerate(
+                    summary.get("ventas_detectadas", [])
+                ):
+                    await _add_text_sale(_fila_de_texto, "text:sale", _ordinal)
             if confirmed_fields.get("gastos"):
-                for text_row in summary.get("gastos_detectados", []):
-                    _add_text_expense(text_row)
+                for _ordinal, _fila_de_texto in enumerate(
+                    summary.get("gastos_detectados", [])
+                ):
+                    await _add_text_expense(_fila_de_texto, "text:expense", _ordinal)
+        # Las huellas de captura de ESTA corrida (en lote, ON CONFLICT DO NOTHING).
+        await _persist_import_fingerprints(session, tenant_id, _doc_seen.nuevas)
 
     _volcar_impacto_de_inventario()
 
     await session.flush()
     # Persistir en lote (idempotente) las huellas nuevas del camino batch.
-    if seen_fp is not None and _preloaded_fp is not None:
-        await _persist_import_fingerprints(session, tenant_id, seen_fp - _preloaded_fp)
+    if seen_fp is not None:
+        await _persist_import_fingerprints(session, tenant_id, seen_fp.nuevas)
     if return_details:
         if stamp_product_updated_at:
             await _stamp_updated_at_on_product_details(session, product_details)
@@ -5228,6 +6416,264 @@ def _clean_str(val: Any, max_len: int = 99) -> str | None:
     return s[:max_len] if s and s.lower() not in {"none", "nan", ""} else None
 
 
+@dataclass
+class EntornoDeEnvios:
+    """Lo que el cobro de envíos necesita del import que lo invoca.
+
+    Existe porque ``cobrar_envios_de_la_hoja`` era un **closure anidado dentro
+    del camino multi-hoja**, y eso no era una decisión de diseño sino la causa de
+    un agujero: desde el camino de tabla suelta era estructuralmente inalcanzable,
+    así que un archivo de una sola tabla con una columna de envío mapeada
+    importaba las compras y **no cobraba el flete**, dejando el costo más bajo que
+    el real y el margen inflado. El confirm lo tapaba rechazando el archivo con un
+    422; el importador, llamado directo, lo dejaba pasar en silencio (medido: 300
+    compras y 0 envíos, contra 30 por el camino multi-hoja).
+
+    Las nueve variables que el closure tomaba del scope viajan explícitas. No es
+    ceremonia: es lo que permite que los DOS caminos llamen a la MISMA función y
+    que "el mismo archivo da el mismo resultado" deje de depender de que nadie
+    reescriba una de las dos copias.
+    """
+
+    session: AsyncSession
+    tenant_id: uuid.UUID
+    uploaded_file_id: uuid.UUID | None
+    #: Set precargado de huellas (camino batch). ``None`` = camino legacy, que
+    #: inserta con savepoint por cargo — son pocos, no es el N+1 de las filas.
+    seen_fp: HuellasDelArchivo | None
+    counts: dict[str, Any]
+    supplier_index: dict[str, uuid.UUID]
+    supplier_ref_mode: str
+    shipping_decisions: dict[str, str] | None
+    purchase_cost_decisions: dict[str, PurchaseCostDecision] | None
+
+
+async def cobrar_envios_de_la_hoja(
+    entorno: EntornoDeEnvios,
+    ctx_id: str | None,
+    rows: list[dict[str, Any]],
+    cols: dict[str, str],
+    grupos: PurchaseGroupPlan | None = None,
+) -> None:
+    """F-H6.b: crea UN gasto de logística por envío declarado en la hoja.
+
+    Una planilla de compras repite el mismo flete en cada línea del remito;
+    importarlo fila por fila multiplica el costo de logística por la cantidad
+    de artículos. La agrupación es por comprobante —proveedor + número—, que
+    es lo único que permite AFIRMAR que dos filas comparten un envío.
+
+    Sin esa identidad no se cobra nada y se reporta: un 2.000 repetido diez
+    veces es indistinguible de diez envíos de 2.000, y elegir uno de los dos
+    sería inventar un dato contable (regla no-invention).
+
+    El gasto es OPEX ``LOGISTICS``, sin producto ni stock — mismo tratamiento
+    que ya le da el remito manual (``supplier_receipt``), para que el mismo
+    hecho de negocio no quede clasificado de dos formas según por dónde entró.
+    """
+    session = entorno.session
+    tenant_id = entorno.tenant_id
+    uploaded_file_id = entorno.uploaded_file_id
+    seen_fp = entorno.seen_fp
+    counts = entorno.counts
+    shipping_decisions = entorno.shipping_decisions
+    purchase_cost_decisions = entorno.purchase_cost_decisions
+
+    _envio_col = cols.get("shipping_cost")
+    _flete_linea_col = cols.get("shipping_cost_line")
+    if not _envio_col and not _flete_linea_col:
+        return
+    _comp_col = cols.get("invoice_number")
+    _prov_col = cols.get("supplier_name")
+
+    def _leer_envios(col: str) -> list[ShippingLine]:
+        leidas: list[ShippingLine] = []
+        for _idx, _row in enumerate(rows):
+            _monto = _parse_amount(_row.get(col))
+            if _monto is None:
+                continue
+            leidas.append(
+                ShippingLine(
+                    row_index=_idx,
+                    # Se normalizan acá porque la clave de agrupación tiene que ser
+                    # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
+                    # el mismo comprobante.
+                    supplier=(_clean_str(_row.get(_prov_col), 199) or "")
+                    .strip()
+                    .lower()
+                    if _prov_col
+                    else "",
+                    invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
+                    if _comp_col
+                    else "",
+                    amount=_monto,
+                )
+            )
+        return leidas
+
+    async def _emitir_cargo(
+        _cargo: ShippingCharge,
+        *,
+        namespace: str,
+        descripcion: str,
+        atribuido_a_inventario: bool,
+    ) -> bool:
+        """Crea el gasto de logística de UN cargo. Devuelve si lo creó."""
+        # Idempotencia con namespace propio: la clave es el CARGO (comprobante
+        # + cifra), no la fila. Re-confirmar el archivo no puede volver a
+        # cobrar el mismo flete, y usar el ancla de la fila lo ataría a una
+        # línea arbitraria del grupo. El namespace separa los dos fletes: son
+        # cargos distintos y uno no puede tapar al otro.
+        _anchor = (
+            _import_row_anchor(
+                tenant_id,
+                uploaded_file_id,
+                f"{namespace}:{ctx_id or ''}:{_cargo.invoice}"
+                + (f":fila{_cargo.row_indexes[0]}" if not _cargo.invoice else ""),
+                int(_cargo.amount * 100),
+            )
+            if uploaded_file_id is not None
+            else None
+        )
+        if _anchor is not None and await _import_row_seen(
+            session, tenant_id, _anchor, seen_fp
+        ):
+            return False
+
+        _fila = rows[_cargo.row_indexes[0]]
+        # Columna mapeada si la hay; si no, detección por keyword. Es lo que hacía
+        # el `_val` del closure, escrito acá porque aquél era otro helper anidado.
+        _col_fecha = cols.get("expense_date") or cols.get("transaction_date")
+        _raw_fecha = _fila.get(_col_fecha) if _col_fecha else _row_val(_fila, _FECHA_COLS)
+        _fecha = _parse_date(_raw_fecha) if _raw_fecha is not None else None
+        if _fecha is None:
+            # Sin fecha no se inventa "hoy" (invariante 2d). El envío queda sin
+            # cobrar y se cuenta: el resto de la hoja entra igual.
+            counts["envios_sin_fecha"] = counts.get("envios_sin_fecha", 0) + 1
+            return False
+
+        _sup_id: uuid.UUID | None = None
+        _sup_nombre = _clean_str(_fila.get(_prov_col), 199) if _prov_col else None
+        if _sup_nombre and entorno.supplier_ref_mode != "link_only":
+            _sup_id, _sup_nombre = await _resolve_or_create_supplier(
+                session,
+                tenant_id,
+                _sup_nombre,
+                entorno.supplier_index,
+                counts.setdefault("proveedores_creados_ids", []),
+            )
+
+        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+        session.add(
+            ExpenseEntry(
+                tenant_id=tenant_id,
+                amount=_cargo.amount.quantize(Decimal("0.01")),
+                category="LOGISTICS",
+                expense_type="OPEX",
+                transaction_date=_fecha,
+                description=descripcion[:500],
+                is_recurring=False,
+                payment_method="transfer",
+                provenance="REAL",
+                supplier_id=_sup_id,
+                supplier_name=_sup_nombre,
+                product_id=None,
+                source_upload_id=uploaded_file_id,
+                # El flete que se capitalizó en el costo del stock sigue siendo
+                # una salida de caja y se registra igual, pero los agregados de
+                # RESULTADO no pueden contarlo otra vez: ya está adentro del
+                # valor del inventario. La marca es el hecho consumado, no la
+                # intención — se pone sólo si el costo efectivamente lo comió.
+                custom_fields=(
+                    {ATRIBUIDO_A_INVENTARIO_FIELD: True}
+                    if atribuido_a_inventario
+                    else None
+                ),
+            )
+        )
+        if _anchor is not None:
+            await _register_import_row_fingerprint(session, tenant_id, _anchor, seen_fp)
+        return True
+
+    if _envio_col:
+        _lineas = _leer_envios(_envio_col)
+        if _lineas:
+            # F-H6.b: la decisión del usuario para ESTA hoja. Sin decisión no se
+            # cobra lo que no tiene comprobante — no hay default, a propósito.
+            plan = plan_shipping_charges(
+                _lineas, sin_comprobante=(shipping_decisions or {}).get(ctx_id or "")
+            )
+            if plan.sin_identidad:
+                counts["envios_sin_comprobante"] = counts.get(
+                    "envios_sin_comprobante", 0
+                ) + len(plan.sin_identidad)
+            if plan.cifras_distintas:
+                counts["envios_cifras_distintas"] = counts.get(
+                    "envios_cifras_distintas", 0
+                ) + len(plan.cifras_distintas)
+            _dec_hoja = (purchase_cost_decisions or {}).get(
+                ctx_id or ""
+            ) or PurchaseCostDecision(context_id=ctx_id or "")
+            _repartidos: set[tuple[str, str]] = (
+                {
+                    (g.key[0], g.key[1])
+                    for g in (grupos.groups if grupos else [])
+                    if g.distribuible and g.key is not None
+                }
+                if _dec_hoja.shared_shipping == COMPARTIDO_SUBTOTAL
+                else set()
+            )
+            for _cargo in plan.charges:
+                if not await _emitir_cargo(
+                    _cargo,
+                    namespace="envio",
+                    descripcion=(
+                        f"Envío — comprobante {_cargo.invoice}"
+                        if _cargo.invoice
+                        else "Envío (sin comprobante en el archivo)"
+                    ),
+                    # El envío que SÍ se repartió quedó adentro del costo de
+                    # los productos: se marca por el HECHO CONSUMADO (el grupo
+                    # repartió), no por la intención (el usuario pidió
+                    # repartir). Un grupo no distribuible pidió reparto y no
+                    # lo tuvo: ese flete sigue siendo gasto del período.
+                    atribuido_a_inventario=(
+                        (_cargo.supplier, _cargo.invoice) in _repartidos
+                    ),
+                ):
+                    continue
+                counts["envios"] = counts.get("envios", 0) + 1
+                if _cargo.repetido_en > 1:
+                    counts["envios_repetidos_colapsados"] = (
+                        counts.get("envios_repetidos_colapsados", 0) + 1
+                    )
+
+    if _flete_linea_col:
+        # F-H6.e: el flete que el archivo ya asignó a cada línea NUNCA generaba
+        # un gasto, en ninguno de sus dos modos. Con `al_costo` subía el valor
+        # del stock y el dinero no salía de ningún lado —un asiento que no
+        # cierra—, y con `gasto_aparte` (el default) era un no-op puro pese a
+        # que el nombre del modo prometía un gasto.
+        _lineas_propias = _leer_envios(_flete_linea_col)
+        if _lineas_propias:
+            _dec = (purchase_cost_decisions or {}).get(
+                ctx_id or ""
+            ) or PurchaseCostDecision(context_id=ctx_id or "")
+            _al_costo = _dec.line_shipping == LINEA_AL_COSTO
+            for _cargo in plan_line_shipping(_lineas_propias).charges:
+                if await _emitir_cargo(
+                    _cargo,
+                    namespace="envio_linea",
+                    descripcion=(
+                        f"Envío de las líneas — comprobante {_cargo.invoice}"
+                        if _cargo.invoice
+                        else "Envío de las líneas (sin comprobante en el archivo)"
+                    ),
+                    atribuido_a_inventario=_al_costo,
+                ):
+                    counts["envios_de_linea"] = counts.get("envios_de_linea", 0) + 1
+
+
 async def _insert_multisheet_data(
     *,
     session: AsyncSession,
@@ -5245,7 +6691,7 @@ async def _insert_multisheet_data(
     context_entity: dict[str, str] | None = None,
     source: str = "ingestion",
     uploaded_file_id: uuid.UUID | None = None,
-    seen_fp: set[str] | None = None,
+    seen_fp: HuellasDelArchivo | None = None,
     product_cache: dict[uuid.UUID, Any] | None = None,
     # Resuelve el tratamiento POR HOJA (ver `stock_is_purchase_for` en el caller).
     stock_is_purchase_for: Callable[[str | None], bool] = lambda _ctx: False,
@@ -5337,6 +6783,34 @@ async def _insert_multisheet_data(
     # Traza agregada de decisiones de proveedor (Fase 1): reales desde compras,
     # marcas omitidas de catálogos, y uso del sentinela "No identificado".
     _real_suppliers: set[str] = set()
+    # E6b — deduplicación por clave fuerte. Un plan por hoja (con el candado
+    # ya tomado y las decisiones resueltas) y los efectos que produjo cada fila,
+    # para colgarle el vínculo a su identidad. Ver `operation_identity_service`.
+    def _entorno_de_envios() -> EntornoDeEnvios:
+        """El entorno se arma al invocar y no antes: `_supplier_index` se puebla
+        a medida que las hojas crean proveedores, y capturarlo temprano le daría
+        al cobro del envío un índice viejo."""
+        return EntornoDeEnvios(
+            session=session,
+            tenant_id=tenant_id,
+            uploaded_file_id=uploaded_file_id,
+            seen_fp=seen_fp,
+            counts=counts,
+            supplier_index=_supplier_index,
+            supplier_ref_mode=_supplier_ref_mode,
+            shipping_decisions=shipping_decisions,
+            purchase_cost_decisions=purchase_cost_decisions,
+        )
+
+    # E7a-lite: los motivos numéricos de TODAS las hojas, acumulados. El camino
+    # plano ya los contaba y publicaba `montos_ambiguos`; acá se descartaban con
+    # un `_` y el aviso específico de E4 no aparecía nunca. Peor: con el archivo
+    # entero ambiguo, el guard de import vacío tiraba el mensaje GENÉRICO ("no se
+    # detectaron las columnas requeridas"), que es exactamente la mentira que E4
+    # parte 2 arregló — manda a corregir un mapeo que estaba perfecto.
+    _motivos_numericos_del_archivo: Counter[str] = Counter()
+    _planes_identidad: list[PlanDeIdentidad] = []
+    _efectos_de_la_fila: list[tuple[str, uuid.UUID]] = []
     _skipped_brands: set[str] = set()
     _sentinel_used = False
     # F2-T2: caché intra-corrida por CLAVE DE IDENTIDAD (sku o nombre+marca),
@@ -5543,14 +7017,8 @@ async def _insert_multisheet_data(
         raw = _val(row, cols.get("transaction_date") or cols.get("expense_date"), _FECHA_COLS)
         return _parse_date(raw) if raw is not None else None
 
-    def _venta_cantidad(row: dict[str, Any], cols: dict[str, str]) -> int:
-        qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
-        if qty_raw in (None, "", "None", "nan"):
-            return 1
-        try:
-            return max(1, int(float(str(qty_raw))))
-        except (ValueError, TypeError):
-            return 1
+    def _venta_cantidad(row: dict[str, Any], cols: dict[str, str]) -> tuple[int, str | None]:
+        return _cantidad_de_venta(_val(row, cols.get("quantity"), _CANTIDAD_COLS))
 
     # F-H4: los dos datos que habilitan calcular el monto. Sólo por MAPEO
     # EXPLÍCITO —nada de `_val`, que cae a la heurística de headers—: derivar el
@@ -5634,10 +7102,8 @@ async def _insert_multisheet_data(
                 headers=None,  # sin headers de hoja en este scope
                 source=source,
                 uploaded_file_id=uploaded_file_id,
-                context_label=(
-                    "Fila sin monto: no se pudo registrar la venta. Mapeá la "
-                    "columna del monto, o las del precio unitario y la cantidad "
-                    "para que Véktor lo calcule"
+                context_label=_label_fila_sin_monto(
+                    row.get(cols["amount"]) if cols.get("amount") else None
                 ),
                 suggested_entity="sale",
                 row_ref=row_ref,
@@ -5662,7 +7128,23 @@ async def _insert_multisheet_data(
                 row_ref=row_ref,
             )
             return True
-        qty = _venta_cantidad(row, cols)
+        qty, _qty_motivo = _venta_cantidad(row, cols)
+        if _qty_motivo is not None:
+            # E4: gemelo del camino plano. Una cantidad declarada e ilegible no se
+            # convierte en 1 — la fila va a "Otros" con el original.
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,  # sin headers de hoja en este scope
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=_label_cantidad_ilegible(_qty_motivo),
+                suggested_entity="sale",
+                row_ref=row_ref,
+            )
+            counts["filas_sin_cantidad"] = counts.get("filas_sin_cantidad", 0) + 1
+            return True
         _name_col = cols.get("notes") or cols.get("product_name") or cols.get("name")
         notes = _clean_str(_val(row, _name_col, _NOMBRE_COLS), 499)
         # Canónico: antes se guardaba el texto crudo del archivo ("efectivo",
@@ -5670,6 +7152,11 @@ async def _insert_multisheet_data(
         pay_raw = _clean_str(_val(row, cols.get("payment_method"), _PAGO_COLS), 30)
         pay = normalize_payment_method(pay_raw) if pay_raw else "cash"
         entry = SaleEntry(
+            # E6b: el id se fija acá y no en el flush para poder colgarle el
+            # vínculo de identidad dentro de la misma transacción. El
+            # `default=uuid.uuid4` del modelo es Python-side y no corre hasta
+            # el flush, así que sin esto `entry.id` sería None cuando hace falta.
+            id=uuid.uuid4(),
             tenant_id=tenant_id,
             amount=amount,
             quantity=qty,
@@ -5726,220 +7213,11 @@ async def _insert_multisheet_data(
             entry.source_row_ref = row_ref  # Mejora D
         session.add(entry)
         counts["ventas"] += 1
+        # E6b: el efecto que produjo esta fila, para colgárselo a su identidad.
+        # Sin esto la identidad quedaría reclamada y sin efecto vivo, y el cierre
+        # del import la devolvería — o sea, el archivo se podría reimportar entero.
+        _efectos_de_la_fila.append(("sale", entry.id))
         return True
-
-    async def _cobrar_envios_de_la_hoja(
-        ctx_id: str | None,
-        rows: list[dict[str, Any]],
-        cols: dict[str, str],
-        grupos: PurchaseGroupPlan | None = None,
-    ) -> None:
-        """F-H6.b: crea UN gasto de logística por envío declarado en la hoja.
-
-        Una planilla de compras repite el mismo flete en cada línea del remito;
-        importarlo fila por fila multiplica el costo de logística por la cantidad
-        de artículos. La agrupación es por comprobante —proveedor + número—, que
-        es lo único que permite AFIRMAR que dos filas comparten un envío.
-
-        Sin esa identidad no se cobra nada y se reporta: un 2.000 repetido diez
-        veces es indistinguible de diez envíos de 2.000, y elegir uno de los dos
-        sería inventar un dato contable (regla no-invention).
-
-        El gasto es OPEX ``LOGISTICS``, sin producto ni stock — mismo tratamiento
-        que ya le da el remito manual (``supplier_receipt``), para que el mismo
-        hecho de negocio no quede clasificado de dos formas según por dónde entró.
-        """
-        _envio_col = cols.get("shipping_cost")
-        _flete_linea_col = cols.get("shipping_cost_line")
-        if not _envio_col and not _flete_linea_col:
-            return
-        _comp_col = cols.get("invoice_number")
-        _prov_col = cols.get("supplier_name")
-
-        def _leer_envios(col: str) -> list[ShippingLine]:
-            leidas: list[ShippingLine] = []
-            for _idx, _row in enumerate(rows):
-                _monto = _parse_amount(_row.get(col))
-                if _monto is None:
-                    continue
-                leidas.append(
-                    ShippingLine(
-                        row_index=_idx,
-                        # Se normalizan acá porque la clave de agrupación tiene que ser
-                        # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
-                        # el mismo comprobante.
-                        supplier=(_clean_str(_row.get(_prov_col), 199) or "")
-                        .strip()
-                        .lower()
-                        if _prov_col
-                        else "",
-                        invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
-                        if _comp_col
-                        else "",
-                        amount=_monto,
-                    )
-                )
-            return leidas
-
-        async def _emitir_cargo(
-            _cargo: ShippingCharge,
-            *,
-            namespace: str,
-            descripcion: str,
-            atribuido_a_inventario: bool,
-        ) -> bool:
-            """Crea el gasto de logística de UN cargo. Devuelve si lo creó."""
-            # Idempotencia con namespace propio: la clave es el CARGO (comprobante
-            # + cifra), no la fila. Re-confirmar el archivo no puede volver a
-            # cobrar el mismo flete, y usar el ancla de la fila lo ataría a una
-            # línea arbitraria del grupo. El namespace separa los dos fletes: son
-            # cargos distintos y uno no puede tapar al otro.
-            _anchor = (
-                _import_row_anchor(
-                    tenant_id,
-                    uploaded_file_id,
-                    f"{namespace}:{ctx_id or ''}:{_cargo.invoice}"
-                    + (f":fila{_cargo.row_indexes[0]}" if not _cargo.invoice else ""),
-                    int(_cargo.amount * 100),
-                )
-                if uploaded_file_id is not None
-                else None
-            )
-            if _anchor is not None and await _import_row_seen(
-                session, tenant_id, _anchor, seen_fp
-            ):
-                return False
-
-            _fila = rows[_cargo.row_indexes[0]]
-            _raw_fecha = _val(
-                _fila, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS
-            )
-            _fecha = _parse_date(_raw_fecha) if _raw_fecha is not None else None
-            if _fecha is None:
-                # Sin fecha no se inventa "hoy" (invariante 2d). El envío queda sin
-                # cobrar y se cuenta: el resto de la hoja entra igual.
-                counts["envios_sin_fecha"] = counts.get("envios_sin_fecha", 0) + 1
-                return False
-
-            _sup_id: uuid.UUID | None = None
-            _sup_nombre = _clean_str(_fila.get(_prov_col), 199) if _prov_col else None
-            if _sup_nombre and _supplier_ref_mode != "link_only":
-                _sup_id, _sup_nombre = await _resolve_or_create_supplier(
-                    session,
-                    tenant_id,
-                    _sup_nombre,
-                    _supplier_index,
-                    counts.setdefault("proveedores_creados_ids", []),
-                )
-
-            session.add(
-                ExpenseEntry(
-                    tenant_id=tenant_id,
-                    amount=_cargo.amount.quantize(Decimal("0.01")),
-                    category="LOGISTICS",
-                    expense_type="OPEX",
-                    transaction_date=_fecha,
-                    description=descripcion[:500],
-                    is_recurring=False,
-                    payment_method="transfer",
-                    provenance="REAL",
-                    supplier_id=_sup_id,
-                    supplier_name=_sup_nombre,
-                    product_id=None,
-                    source_upload_id=uploaded_file_id,
-                    # El flete que se capitalizó en el costo del stock sigue siendo
-                    # una salida de caja y se registra igual, pero los agregados de
-                    # RESULTADO no pueden contarlo otra vez: ya está adentro del
-                    # valor del inventario. La marca es el hecho consumado, no la
-                    # intención — se pone sólo si el costo efectivamente lo comió.
-                    custom_fields=(
-                        {ATRIBUIDO_A_INVENTARIO_FIELD: True}
-                        if atribuido_a_inventario
-                        else None
-                    ),
-                )
-            )
-            if _anchor is not None:
-                await _register_import_row_fingerprint(session, tenant_id, _anchor, seen_fp)
-            return True
-
-        if _envio_col:
-            _lineas = _leer_envios(_envio_col)
-            if _lineas:
-                # F-H6.b: la decisión del usuario para ESTA hoja. Sin decisión no se
-                # cobra lo que no tiene comprobante — no hay default, a propósito.
-                plan = plan_shipping_charges(
-                    _lineas, sin_comprobante=(shipping_decisions or {}).get(ctx_id or "")
-                )
-                if plan.sin_identidad:
-                    counts["envios_sin_comprobante"] = counts.get(
-                        "envios_sin_comprobante", 0
-                    ) + len(plan.sin_identidad)
-                if plan.cifras_distintas:
-                    counts["envios_cifras_distintas"] = counts.get(
-                        "envios_cifras_distintas", 0
-                    ) + len(plan.cifras_distintas)
-                _dec_hoja = (purchase_cost_decisions or {}).get(
-                    ctx_id or ""
-                ) or PurchaseCostDecision(context_id=ctx_id or "")
-                _repartidos: set[tuple[str, str]] = (
-                    {
-                        (g.key[0], g.key[1])
-                        for g in (grupos.groups if grupos else [])
-                        if g.distribuible and g.key is not None
-                    }
-                    if _dec_hoja.shared_shipping == COMPARTIDO_SUBTOTAL
-                    else set()
-                )
-                for _cargo in plan.charges:
-                    if not await _emitir_cargo(
-                        _cargo,
-                        namespace="envio",
-                        descripcion=(
-                            f"Envío — comprobante {_cargo.invoice}"
-                            if _cargo.invoice
-                            else "Envío (sin comprobante en el archivo)"
-                        ),
-                        # El envío que SÍ se repartió quedó adentro del costo de
-                        # los productos: se marca por el HECHO CONSUMADO (el grupo
-                        # repartió), no por la intención (el usuario pidió
-                        # repartir). Un grupo no distribuible pidió reparto y no
-                        # lo tuvo: ese flete sigue siendo gasto del período.
-                        atribuido_a_inventario=(
-                            (_cargo.supplier, _cargo.invoice) in _repartidos
-                        ),
-                    ):
-                        continue
-                    counts["envios"] = counts.get("envios", 0) + 1
-                    if _cargo.repetido_en > 1:
-                        counts["envios_repetidos_colapsados"] = (
-                            counts.get("envios_repetidos_colapsados", 0) + 1
-                        )
-
-        if _flete_linea_col:
-            # F-H6.e: el flete que el archivo ya asignó a cada línea NUNCA generaba
-            # un gasto, en ninguno de sus dos modos. Con `al_costo` subía el valor
-            # del stock y el dinero no salía de ningún lado —un asiento que no
-            # cierra—, y con `gasto_aparte` (el default) era un no-op puro pese a
-            # que el nombre del modo prometía un gasto.
-            _lineas_propias = _leer_envios(_flete_linea_col)
-            if _lineas_propias:
-                _dec = (purchase_cost_decisions or {}).get(
-                    ctx_id or ""
-                ) or PurchaseCostDecision(context_id=ctx_id or "")
-                _al_costo = _dec.line_shipping == LINEA_AL_COSTO
-                for _cargo in plan_line_shipping(_lineas_propias).charges:
-                    if await _emitir_cargo(
-                        _cargo,
-                        namespace="envio_linea",
-                        descripcion=(
-                            f"Envío de las líneas — comprobante {_cargo.invoice}"
-                            if _cargo.invoice
-                            else "Envío de las líneas (sin comprobante en el archivo)"
-                        ),
-                        atribuido_a_inventario=_al_costo,
-                    ):
-                        counts["envios_de_linea"] = counts.get("envios_de_linea", 0) + 1
 
     async def _add_expense(
         row: dict[str, Any],
@@ -5978,7 +7256,39 @@ async def _insert_multisheet_data(
         )
         amount = _linea_gasto.amount
         if not amount:
-            return False
+            # E7a-lite: el gasto sin monto utilizable va a "Otros", igual que la
+            # venta de `_add_sale` y igual que los dos en el camino de tabla
+            # suelta. Antes devolvía False y la fila **desaparecía sin rastro**:
+            # ni importada, ni en la bandeja, ni contada.
+            #
+            # Reproducido antes de arreglarlo: el MISMO archivo con cuatro montos
+            # de escala ambigua daba 4 filas en "Otros" como tabla suelta y 0 como
+            # multihoja. Que un dato de negocio se pierda según cómo el usuario
+            # ordenó sus solapas es la clase de divergencia que este programa
+            # existe para cerrar.
+            #
+            # Misma forma que en ventas: la fila de relleno devuelve False (no hay
+            # output, no se quema la huella, una relectura corregida la reintenta);
+            # la fila con contenido se captura y devuelve True, porque la captura
+            # ES output persistido.
+            if not _fila_con_contenido(row):
+                return False
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=_label_fila_sin_monto(
+                    row.get(cols["amount"]) if cols.get("amount") else None
+                ),
+                suggested_entity="expense",
+                row_ref=row_ref,
+                context_id=context_id,
+            )
+            counts["filas_sin_monto"] += 1
+            return True
         raw_date = _val(row, cols.get("expense_date") or cols.get("transaction_date"), _FECHA_COLS)
         tx_date = _parse_date(raw_date) if raw_date is not None else None
         if tx_date is None:
@@ -6010,6 +7320,8 @@ async def _insert_multisheet_data(
         cat_code, cat_label, _ = classify_expense_with_vertical(cat_raw, _vertical)
         recurring = _parse_bool_es(_val(row, cols.get("is_recurring"), _RECURRENTE_COLS))
         expense = ExpenseEntry(
+            # E6b — ver la nota en `_add_sale`.
+            id=uuid.uuid4(),
             tenant_id=tenant_id,
             amount=amount,
             category=cat_code,
@@ -6172,6 +7484,10 @@ async def _insert_multisheet_data(
             # Review F2 #3: solo "created" creó un producto incompleto.
             if _action == "created":
                 counts["sin_producto"] += 1
+                if return_details and _pid is not None:
+                    product_details.append(
+                        _ledger_item_producto_creado(_pid, _exp_name, product_cache)
+                    )
                 # F-H2: la compra que crea el producto es la evidencia más
                 # temprana que este archivo tiene de él.
                 _declarar_evidencia(_pid, tx_date)
@@ -6247,6 +7563,7 @@ async def _insert_multisheet_data(
             expense.source_row_ref = row_ref  # Mejora D
         session.add(expense)
         counts["gastos"] += 1
+        _efectos_de_la_fila.append(("expense", expense.id))
         return True
 
     async def _add_product(
@@ -6383,15 +7700,8 @@ async def _insert_multisheet_data(
         # existe y queda NULL en vez de adivinarse desde un header parecido.
         _list_mapped = cols.get("list_price_ars")
         list_price = _parse_amount(row.get(_list_mapped)) if _list_mapped else None
-        try:
-            stock_raw = _val(row, cols.get("stock_units"), _STOCK_COLS)
-            stock_val = (
-                int(float(str(stock_raw)))
-                if stock_raw not in (None, "", "None", "nan")
-                else 0
-            )
-        except (ValueError, TypeError):
-            stock_val = 0
+        # Sin truncar, igual que el otro lector de catálogo.
+        stock_val = _parse_qty(_val(row, cols.get("stock_units"), _STOCK_COLS))
         sku = _sku_del_archivo(_val(row, cols.get("sku"), _SKU_COLS))
         # F2-T5: código de barras (columna mapeada o detección por keyword).
         barcode = _clean_str(_val(row, cols.get("barcode"), _BARCODE_COLS), 64)
@@ -6962,8 +8272,22 @@ async def _insert_multisheet_data(
             _bucket = summary.get(_bucket_key, [])
             _rows = [r for r in _bucket if r.get("__context__") == _cid]
             _mapping = context_mappings.get(_cid or "", {})
-            _cols, _cf_cols, _cruzados = (
-                _resolve_target_cols(_mapping) if _mapping else ({}, {}, {})
+            _cols, _cf_cols, _cruzados, _ignoradas = (
+                _resolve_target_cols(_mapping) if _mapping else ({}, {}, {}, set())
+            )
+            # Las columnas ignoradas salen de las filas acá, que es el único lugar
+            # por el que pasan las filas de una hoja — el gate de replay y el loop
+            # de importación comparten esta función justamente para no divergir, así
+            # que las dos ven la fila con la misma decisión aplicada.
+            # E4: las columnas numéricas se interpretan con la columna entera a
+            # la vista, acá, y no celda por celda en cada uno de los ~35 lectores.
+            # El mismo helper lo consume el preview de costos, para que la
+            # pantalla no pueda mostrar un número que el import no va a producir.
+            _rows, _motivos_hoja = preparar_filas_de_hoja(_rows, _cols, _ignoradas)
+            _motivos_numericos_del_archivo.update(
+                motivo
+                for por_columna in _motivos_hoja.values()
+                for motivo in por_columna.values()
             )
             # Bloque 2: "supplier:name" en un contexto de producto no se descarta
             # — `_add_product` lo aplica (gateado por rollout). El resto de los
@@ -7020,7 +8344,7 @@ async def _insert_multisheet_data(
                             key=(_cid, _idx),
                             product_id=_pid,
                             day=_fecha.date(),
-                            qty=_venta_cantidad(_row, _cols),
+                            qty=_venta_cantidad(_row, _cols)[0],
                             sheet_rank=_rank,
                         )
                     )
@@ -7195,6 +8519,21 @@ async def _insert_multisheet_data(
                             str(ctx.get("label") or ctx_id or ""), _col, _cuantas
                         )
                     )
+            # E6b: identidad fuerte de la hoja. Reclama el candado de todas sus
+            # claves en UNA sentencia y devuelve la decisión por fila. Antes del
+            # loop porque el candado tiene que estar tomado ANTES de escribir el
+            # primer efecto: entre "miré y no estaba" e "inserté" cabe otra carga
+            # entera. Una hoja sin columnas de identidad devuelve un plan vacío y
+            # no paga ni una query.
+            _plan_ident = await planificar_identidades(
+                session,
+                tenant_id,
+                uploaded_file_id,
+                rows=rows,
+                cols=cols,
+                entity=entity,
+            )
+            _planes_identidad.append(_plan_ident)
             for _i, row in enumerate(rows):
                 # B1: idempotencia por (archivo, contexto, índice). Chequeo
                 # READ-ONLY; la huella se registra recién DESPUÉS y solo si la
@@ -7219,6 +8558,47 @@ async def _insert_multisheet_data(
                     if uploaded_file_id is not None
                     else None
                 )
+                # E6b — la decisión de identidad, antes de cualquier escritura.
+                _dec_ident = _plan_ident.decision.get(_i)
+                if _dec_ident == DECISION_YA_APLICADA:
+                    # Misma identidad y mismo contenido: ya está aplicada. Es el
+                    # ÚNICO caso donde Véktor se saltea plata, y exige las dos
+                    # condiciones — la identidad sola diría "ya lo tengo" sobre
+                    # un documento corregido. No se quema la huella de fila: si
+                    # el archivo se vuelve a confirmar, la decisión se recalcula
+                    # y da lo mismo, así que es idempotente igual.
+                    counts["ya_aplicadas"] = counts.get("ya_aplicadas", 0) + 1
+                    continue
+                if _dec_ident == DECISION_CONFLICTO:
+                    # Misma identidad, contenido distinto. No se decide sola:
+                    # puede ser una corrección (el proveedor reemitió la factura)
+                    # o un error de carga, y las dos se parecen. Omitirla
+                    # escondería la corrección; aplicarla duplicaría el efecto.
+                    # Va a "Otros" con el motivo, que es el canal que ya existe
+                    # para lo que Véktor no puede decidir.
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        rows=[{**row, IDENTITY_REF_KEY: _plan_ident.clave.get(_i, "")}],
+                        headers=ctx.get("headers"),
+                        source=source,
+                        uploaded_file_id=uploaded_file_id,
+                        context_label=_plan_ident.motivo.get(_i, "")[:200],
+                        suggested_entity=entity,
+                        row_ref=_row_ref,
+                        context_id=str(ctx_id) if ctx_id else None,
+                    )
+                    counts["conflictos_de_identidad"] = (
+                        counts.get("conflictos_de_identidad", 0) + 1
+                    )
+                    # La captura ES output persistido: se quema la huella para
+                    # que re-confirmar no la duplique en la bandeja.
+                    if _ctx_anchor is not None:
+                        await _register_import_row_fingerprint(
+                            session, tenant_id, _ctx_anchor, seen_fp
+                        )
+                    continue
+                _efectos_de_la_fila.clear()
                 if entity == "sale" and _sin_respaldo and (
                     (str(ctx_id or ""), _i) in _sin_respaldo
                 ):
@@ -7294,6 +8674,14 @@ async def _insert_multisheet_data(
                     await _register_import_row_fingerprint(
                         session, tenant_id, _ctx_anchor, seen_fp
                     )
+                # E6b: los efectos que esta fila persistió se le cuelgan a su
+                # identidad. Se registra el efecto REAL y no la intención: si la
+                # fila terminó en "Otros" o no insertó nada, la identidad queda
+                # sin vínculo y el cierre del import devuelve la reclamación, de
+                # modo que el archivo corregido se puede volver a importar.
+                for _tipo_efecto, _id_efecto in _efectos_de_la_fila:
+                    _plan_ident.registrar_efecto(_i, _tipo_efecto, _id_efecto)
+                _efectos_de_la_fila.clear()
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
 
@@ -7308,11 +8696,52 @@ async def _insert_multisheet_data(
             # entera: la misma cifra repetida en diez filas del mismo remito es un
             # flete, no diez.
             if entity == "expense":
-                await _cobrar_envios_de_la_hoja(ctx_id, rows, cols, _grupos_de_compra)
+                await cobrar_envios_de_la_hoja(
+                    _entorno_de_envios(), ctx_id, rows, cols, _grupos_de_compra
+                )
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
+        #
+        # E6b — comportamiento DECLARADO de este camino frente a la identidad
+        # fuerte: no la calcula y no la consulta. No es un olvido: acá no hay
+        # mapeo de columnas (los lectores resuelven por keyword), y una clave de
+        # identidad adivinada desde un encabezado es exactamente lo que
+        # `domain/operation_identity` se niega a producir — una identidad falsa
+        # hace que Véktor descarte plata real creyendo que ya la tenía.
+        #
+        # Lo seguro es que se comporte como antes: importa todo y el circuito de
+        # candidatos (`import_overlap_service`) avisa si algo se parece. El límite
+        # que eso deja es real y se declara: una fila que entre por acá puede
+        # duplicar una operación que otro archivo cargó CON identidad, porque
+        # nadie puede saber que es la misma. La salida no es adivinar en este
+        # camino, es que el archivo llegue con `mapping_contexts` — que es lo que
+        # ya hacen todos los formatos desde el mapeo universal.
+        #
+        # E2/E4: este camino entregaba la fila CRUDA a los lectores. Una columna
+        # que el usuario mandó ignorar seguía ahí —`_row_val` la encontraba por
+        # keyword y una `cantidad` ignorada volvía a decidir las unidades— y los
+        # números se leían celda por celda, sin el convenio de su columna. Los
+        # otros dos caminos preparan las filas antes de leerlas; éste no, y esa
+        # diferencia no la justifica nada: la decisión del usuario no depende del
+        # formato del summary. Los lectores siguen recibiendo `{}` como mapeo (en
+        # legacy resuelven por keyword); lo que cambia es la fila que ven.
+        _cols_legacy, _, _, _ign_legacy = (
+            _resolve_target_cols(column_mappings) if column_mappings else ({}, {}, {}, set())
+        )
+
+        def _filas_legacy(bucket: str) -> list[dict[str, Any]]:
+            filas, _motivos_bucket = preparar_filas_de_hoja(
+                summary.get(bucket, []), _cols_legacy, _ign_legacy
+            )
+            _motivos_numericos_del_archivo.update(
+                motivo
+                for por_columna in _motivos_bucket.values()
+                for motivo in por_columna.values()
+            )
+            return filas
+
         if confirmed_fields.get("ventas"):
-            for _i, row in enumerate(summary.get("ventas_detectadas", [])):
+            for _i, row in enumerate(_filas_legacy("ventas_detectadas")):
                 # Chequeo READ-ONLY; registrar recién después y solo si insertó.
                 _v_anchor = (
                     _import_row_anchor(tenant_id, uploaded_file_id, "ventas", _i)
@@ -7333,7 +8762,7 @@ async def _insert_multisheet_data(
                 if (_i + 1) % _flush_every == 0:
                     await session.flush()
         if confirmed_fields.get("gastos"):
-            for _j, row in enumerate(summary.get("gastos_detectados", [])):
+            for _j, row in enumerate(_filas_legacy("gastos_detectados")):
                 _g_anchor = (
                     _import_row_anchor(tenant_id, uploaded_file_id, "gastos", _j)
                     if uploaded_file_id is not None
@@ -7351,7 +8780,7 @@ async def _insert_multisheet_data(
                         session, tenant_id, _g_anchor, seen_fp
                     )
         if confirmed_fields.get("productos"):
-            for _k, row in enumerate(summary.get("stock_detectado", [])):
+            for _k, row in enumerate(_filas_legacy("stock_detectado")):
                 _p_ref = (
                     _source_row_ref(
                         _import_row_anchor(tenant_id, uploaded_file_id, "productos", _k)
@@ -7413,6 +8842,30 @@ async def _insert_multisheet_data(
             decision_type="SUPPLIER_SKIPPED_FROM_CATALOG",
             data={"skipped_brands": sorted(_skipped_brands), "count": len(_skipped_brands)},
         )
+
+    # E7a-lite: el mismo contador que publica el camino de tabla suelta. Los dos
+    # motivos suman "no se pudo leer la escala" —que es lo que el resumen tiene
+    # que decir— y el log los separa porque son problemas distintos del archivo.
+    _sin_escala_multi = (
+        _motivos_numericos_del_archivo[MOTIVO_AMBIGUO]
+        + _motivos_numericos_del_archivo[MOTIVO_INCOMPATIBLE]
+    )
+    if _sin_escala_multi:
+        counts["montos_ambiguos"] = _sin_escala_multi
+        logger.warning(
+            "ingestion.montos_sin_escala",
+            cantidad=_sin_escala_multi,
+            ambiguos=_motivos_numericos_del_archivo[MOTIVO_AMBIGUO],
+            incompatibles=_motivos_numericos_del_archivo[MOTIVO_INCOMPATIBLE],
+            camino="multihoja",
+        )
+
+    # E6b: se persisten los vínculos identidad→efecto y se devuelven las
+    # reclamaciones que no produjeron nada. Va acá —dentro de la misma
+    # transacción que los efectos— porque si el import se revierte, las
+    # identidades se tienen que ir con él: no puede quedar una identidad
+    # reclamada por un import que no ocurrió.
+    await cerrar_plan(session, tenant_id, uploaded_file_id, _planes_identidad)
 
     await session.flush()
     # F-H6.c: el default seguro no puede ser mudo. Una columna de costo mapeada
@@ -7517,6 +8970,17 @@ async def bulk_import_unclassified(
             counts["skipped"] += 1
             continue
         row: dict[str, Any] = rec.row_data or {}
+        # E6b: la importación EN LOTE no puede resolver un conflicto de
+        # identidad. Un registro que llegó a "Otros" porque tiene el mismo
+        # comprobante que una operación viva exige una decisión —puede ser una
+        # corrección o un error de carga— y este endpoint importa sin preguntar:
+        # si entrara acá, "importar todos los sugeridos" sería la puerta de atrás
+        # para duplicar justo lo que el confirm se negó a aplicar. Queda para el
+        # modal por registro, que sí pide la confirmación explícita.
+        _clave = str(row.get(IDENTITY_REF_KEY) or "")
+        if _clave and await identidad_tomada(session, tenant_id, _clave) is not None:
+            counts["needs_manual"] += 1
+            continue
         fecha = _parse_date(_row_val(row, _FECHA_COLS))
         amount = (
             _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))
@@ -7542,13 +9006,14 @@ async def bulk_import_unclassified(
         )
 
         if rec.suggested_entity == "sale":
-            qty = 1
-            qty_raw = _row_val(row, _CANTIDAD_COLS)
-            if qty_raw not in (None, "", "None", "nan"):
-                try:
-                    qty = max(1, int(float(str(qty_raw))))
-                except (ValueError, TypeError):
-                    qty = 1
+            qty, _qty_motivo = _cantidad_de_venta(_row_val(row, _CANTIDAD_COLS))
+            if _qty_motivo is not None:
+                # E4: misma regla que el import. La fila ya está en "Otros"; una
+                # cantidad ilegible la deja donde está, para completarla a mano,
+                # en vez de importarla como una unidad. `needs_manual` es el
+                # contador que la UI ya usa para "exige atención del usuario".
+                counts["needs_manual"] += 1
+                continue
             session.add(
                 SaleEntry(
                     tenant_id=tenant_id,

@@ -45,6 +45,14 @@ export interface ReclassifyPayload {
    * nuevo. El backend re-valida que el id pertenezca al tenant y esté activo.
    */
   target_product_id?: string;
+  /**
+   * E6b: la fila llegó a "Otros" porque tiene el mismo comprobante que una
+   * operación ya cargada, con datos distintos. Sin este flag el backend responde
+   * 409 (`IMPORT_IDENTITY_TAKEN`); con él, el usuario declara que revisó y la
+   * quiere igual. Es a propósito que haya que pedirlo dos veces: importarla sin
+   * mirar deja las dos versiones cargadas y nadie se entera.
+   */
+  aplicar_pese_al_conflicto?: boolean;
 }
 
 export interface ResolvePurchasePayload {

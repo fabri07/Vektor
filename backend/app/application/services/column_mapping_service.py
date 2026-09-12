@@ -58,6 +58,20 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "customer_email": "Cliente — Email",
         "customer_phone": "Cliente — Teléfono",
         "customer_name": "Cliente — Nombre",
+        # E6b — IDENTIDAD de la operación. No son datos de negocio que Véktor
+        # muestre: son lo que permite afirmar que una venta ya importada desde
+        # otro archivo es la MISMA venta y no aplicarla dos veces. Ver
+        # `domain/operation_identity.py`.
+        #
+        # En una venta propia el comprobante lo emite el negocio: el cliente es
+        # el RECEPTOR y no entra en la identidad. Por eso acá alcanza con tipo +
+        # punto de venta + número.
+        "invoice_number": "Número de comprobante / factura",
+        "document_type": "Tipo de comprobante",
+        "document_series": "Punto de venta / serie",
+        "external_operation_id": "ID de la operación en tu sistema",
+        "external_source": "Sistema de origen del ID",
+        "external_line_id": "ID del renglón del comprobante",
     },
     "expense": {
         "amount": "Monto del gasto",
@@ -105,8 +119,21 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         # F7a: campos de referencia al proveedor (aditivo, ver nota de sale arriba).
         # Ver la nota de los campos de cliente: mismo criterio de agrupación.
         "supplier_cuil": "Proveedor — CUIL",
+        # E6b: en una COMPRA el emisor del comprobante es el proveedor, y su
+        # identidad estable es el CUIT/CUIL — nunca el nombre. Sin uno de los dos
+        # el documento no produce clave fuerte y queda como candidato.
+        "supplier_cuit": "Proveedor — CUIT",
         "supplier_email": "Proveedor — Email",
         "supplier_phone": "Proveedor — Teléfono",
+        # E6b — el resto de la identidad del comprobante. `invoice_number` ya
+        # estaba (F-H6.b lo usa para agrupar el flete); sin tipo y punto de venta
+        # un número suelto no identifica: se repite entre tipos y entre bocas de
+        # facturación del mismo emisor.
+        "document_type": "Tipo de comprobante",
+        "document_series": "Punto de venta / serie",
+        "external_operation_id": "ID de la operación en tu sistema",
+        "external_source": "Sistema de origen del ID",
+        "external_line_id": "ID del renglón del comprobante",
     },
     # F7a: maestro de CLIENTES — campos que persiste el modelo Customer.
     "customer": {
@@ -125,6 +152,11 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "postal_code": "Código postal",
         "birthday": "Cumpleaños",
         "notes": "Notas",
+        # E6a — CÓDIGO EXTERNO: el identificador que el negocio ya usa en su
+        # propio sistema. Clave FUERTE (ver `domain/external_code.py`): es la
+        # única que existe cuando no hay CUIT ni código de barras.
+        "external_code": "Código en tu sistema",
+        "external_source": "Sistema de origen del código",
     },
     # F7a: maestro de PROVEEDORES — ACOTADO a lo que persiste el modelo Supplier
     # HOY (models/supplier.py). No se agregan doc_type/address/locality/province/
@@ -139,6 +171,11 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "email": "Email",
         "phone": "Teléfono",
         "notes": "Notas",
+        # E6a — CÓDIGO EXTERNO: el identificador que el negocio ya usa en su
+        # propio sistema. Clave FUERTE (ver `domain/external_code.py`): es la
+        # única que existe cuando no hay CUIT ni código de barras.
+        "external_code": "Código en tu sistema",
+        "external_source": "Sistema de origen del código",
     },
     "product": {
         "sku": "Código (SKU)",
@@ -161,6 +198,11 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "description": "Descripción",
         "acquired_at": "Fecha de alta/adquisición",
         "expiry_date": "Fecha de vencimiento",
+        # E6a — CÓDIGO EXTERNO: el identificador que el negocio ya usa en su
+        # propio sistema. Clave FUERTE (ver `domain/external_code.py`): es la
+        # única que existe cuando no hay CUIT ni código de barras.
+        "external_code": "Código en tu sistema",
+        "external_source": "Sistema de origen del código",
     },
 }
 
@@ -212,8 +254,12 @@ REQUIRED_ALTERNATIVES: dict[str, dict[str, frozenset[str]]] = {
 #    tres y distintos, verificados contra `ingestion_import_service`:
 #      · venta sin monto/sin fecha y gasto sin fecha → van a "Otros" con el motivo
 #        (`_capture_unclassified`), o sea que la fila se puede rescatar;
-#      · gasto sin monto y producto sin nombre → se DESCARTAN, no queda rastro
-#        (`_add_expense`/`_add_product` devuelven `False`);
+#      · gasto sin monto: **desde E7a-lite también va a "Otros"**. Antes se
+#        descartaba sin rastro, y sólo en el camino multihoja — el de tabla
+#        suelta sí lo capturaba, así que el MISMO archivo perdía filas o no
+#        según cómo estuviera armado. Reproducido y cerrado;
+#      · producto sin nombre → se DESCARTA, no queda rastro (`_add_product`
+#        devuelve `False`);
 #      · cliente/proveedor sin nombre → se saltea y se cuenta como inválido en el
 #        resumen del archivo (`customer_import_service._validate_record`).
 #    Prometer "Otros" donde el importador descarta es peor que no explicar nada.
@@ -245,8 +291,8 @@ REQUIRED_REASONS: dict[str, dict[str, str]] = {
         "amount": (
             "Para registrar un gasto o una compra, Véktor necesita saber cuánta plata "
             "salió. La fila que no lo traiga —ni el precio unitario y la cantidad para "
-            "calcularlo— se descarta: no se registra el gasto y tampoco queda en "
-            "«Otros»."
+            "calcularlo— no se registra como gasto: queda en «Otros» con el motivo, "
+            "para completarla desde ahí."
         ),
         "expense_date": (
             "Para importar gastos y compras, Véktor necesita saber qué columna "
@@ -510,6 +556,30 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
             "telefono_cliente", "cliente_telefono", "telefono", "teléfono", "whatsapp_cliente",
         },
         "customer_name": {"cliente", "nombre_cliente", "cliente_nombre"},
+        # E6b — por qué el resto de los campos de IDENTIDAD (`document_type`,
+        # `document_series`, `external_*`) NO tiene keywords acá: el reconocedor
+        # de encabezados (F-M) hoy lee «Punto de venta» como MONTO de venta y
+        # «ID operación» como SKU. Agregarles keywords haría que las dos cadenas
+        # digan cosas distintas sobre la misma columna, que es el defecto que
+        # `test_header_corpus_vs_heuristics` existe para impedir.
+        #
+        # Y el costo de equivocarse acá es más alto que en cualquier otro campo:
+        # una columna mal sugerida a `document_series` no produce un dato raro,
+        # produce una identidad falsa. Se mapean a mano la primera vez y
+        # `tenant_column_mappings` aprende el alias para las siguientes — que es
+        # justamente el mecanismo que no adivina.
+        # `invoice_number` sí: son los mismos keywords que `expense` ya usaba y
+        # una columna «Comprobante» en una hoja de ventas es el número de la
+        # factura propia, no otra cosa.
+        "invoice_number": {
+            "numero_comprobante",
+            "nro_comprobante",
+            "comprobante_numero",
+            "numero_factura",
+            "nro_factura",
+            "factura_numero",
+            "n_factura",
+        },
     },
     "expense": {
         "amount": {
@@ -606,6 +676,21 @@ _HEURISTICS: dict[str, dict[str, set[str]]] = {
         "supplier_phone": {
             "telefono_proveedor", "proveedor_telefono", "telefono", "teléfono",
         },
+        # E6b: el emisor del comprobante de una compra. Es el ÚNICO identificador
+        # de emisor que produce clave fuerte — el nombre no sirve.
+        "supplier_cuit": {"cuit_proveedor", "proveedor_cuit", "cuit"},
+        # E6b — por qué el resto de los campos de IDENTIDAD (`document_type`,
+        # `document_series`, `external_*`) NO tiene keywords acá: el reconocedor
+        # de encabezados (F-M) hoy lee «Punto de venta» como MONTO de venta y
+        # «ID operación» como SKU. Agregarles keywords haría que las dos cadenas
+        # digan cosas distintas sobre la misma columna, que es el defecto que
+        # `test_header_corpus_vs_heuristics` existe para impedir.
+        #
+        # Y el costo de equivocarse acá es más alto que en cualquier otro campo:
+        # una columna mal sugerida a `document_series` no produce un dato raro,
+        # produce una identidad falsa. Se mapean a mano la primera vez y
+        # `tenant_column_mappings` aprende el alias para las siguientes — que es
+        # justamente el mecanismo que no adivina.
     },
     # F7a: maestro de CLIENTES (identidad fiscal/contacto — sin datos transaccionales).
     "customer": {
@@ -893,6 +978,10 @@ _CONTACTO_NO_DICE_QUE_DATO_ES = (
 RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
     "sale": {
         "fecha": (_r(target="transaction_date"),),
+        # E6b: una hoja de ventas también tiene comprobante — es el que emitió el
+        # propio negocio. Sin esta entrada, `expense` lo resolvía y `sale` no, y
+        # la misma columna se leía distinto según la hoja.
+        "comprobante": (_r(target="invoice_number"),),
         "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
         "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "monto": (
@@ -984,6 +1073,9 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "descuento": (_r(target="discount"),),
         "impuesto": (_r(target="taxes"),),
         "cuil": (_r(target="supplier_cuil"),),
+        # E6b: el CUIT del proveedor es el emisor del comprobante — el único
+        # identificador que produce clave fuerte en una compra.
+        "cuit": (_r(target="supplier_cuit"),),
         "email": (_r(target="supplier_email"),),
         "telefono": (_r(target="supplier_phone"),),
         "nota": (_r(target="notes"),),
@@ -1228,7 +1320,26 @@ MASTER_REFERENCE_TARGETS: frozenset[str] = frozenset(
 )
 
 SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
-    "sale": frozenset({"amount", "quantity", "transaction_date", "unit_price"}),
+    "sale": frozenset(
+        {
+            "amount",
+            "quantity",
+            "transaction_date",
+            "unit_price",
+            # E6b: los campos de IDENTIDAD son escalares por una razón más dura
+            # que la de los montos. Una fila tiene UN número de comprobante; dos
+            # columnas al mismo destino no se desempatan sin adivinar, y acá
+            # adivinar no produce un monto raro que salte en un total: produce
+            # una identidad falsa, que hace que Véktor descarte una operación
+            # real creyendo que ya la tenía.
+            "invoice_number",
+            "document_type",
+            "document_series",
+            "external_operation_id",
+            "external_source",
+            "external_line_id",
+        }
+    ),
     # F-H6.a: los nuevos son escalares por la misma razón que en `sale` — dos
     # columnas al mismo destino no se pueden desempatar sin inventar, y hasta F-0
     # `_resolve_target_cols` se quedaba con la primera del orden del Excel.
@@ -1243,10 +1354,23 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
             "shipping_cost_line",
             "discount",
             "taxes",
+            # E6b — identidad (ver la nota en `sale`). Incluye el CUIT/CUIL del
+            # proveedor: es el emisor del comprobante, y dos columnas de CUIT
+            # sobre la misma línea eligen a quién le atribuimos el documento.
+            "invoice_number",
+            "document_type",
+            "document_series",
+            "external_operation_id",
+            "external_source",
+            "external_line_id",
+            "supplier_cuit",
+            "supplier_cuil",
         }
     ),
     "product": frozenset(
-        {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units"}
+        {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units",
+         # E6a — ver la nota en `customer`.
+         "external_code", "external_source"}
     ),
     # Los maestros quedaron sin ningún campo escalar hasta acá, y no porque sus
     # campos admitan varias columnas: un proveedor tiene UN CUIL y UN teléfono
@@ -1282,11 +1406,18 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
             "province",
             "postal_code",
             "birthday",
+            # E6a: una entidad tiene UN código en UN sistema. Dos columnas al
+            # mismo destino no se desempatan sin adivinar, y adivinar acá fusiona
+            # identidades — el error más caro de este campo.
+            "external_code",
+            "external_source",
         }
     ),
     "supplier": frozenset(
         {"name", "last_name", "cuil", "cuit", "iva_condition", "payment_method",
-         "email", "phone"}
+         "email", "phone",
+         # E6a — ver la nota en `customer`.
+         "external_code", "external_source"}
     ),
 }
 

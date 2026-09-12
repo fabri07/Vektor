@@ -44,7 +44,11 @@ def test_ingestion_error_logs_tenant_id(monkeypatch: pytest.MonkeyPatch) -> None
         "_build_async_session",
         lambda database_url: (_FakeEngine(), _fake_factory),
     )
-    monkeypatch.setattr(worker, "_load_and_lock", fail_load)
+    # H15: la adquisición reemplazó a `_load_and_lock`. El caso que este test
+    # cubre sigue siendo el mismo — un fallo REAL al tomar el trabajo (no un
+    # "no era reclamable", que devuelve None y sale sin error) se loguea con el
+    # tenant y se re-lanza.
+    monkeypatch.setattr(worker, "_claim_for_processing", fail_load)
     monkeypatch.setattr(worker.logger, "error", capture_error)
 
     with pytest.raises(RuntimeError, match="load failed"):

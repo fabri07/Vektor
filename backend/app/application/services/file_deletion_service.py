@@ -49,6 +49,9 @@ from app.application.services._ledger_restore import (
     restore_from_before,
     snapshot_master,
 )
+from app.application.services.operation_identity_service import (
+    liberar_identidades_de,
+)
 from app.application.services.stock_service import void_movement
 from app.domain.file_deletion_reasons import PreservationReason
 from app.domain.ingestion_version import INGESTION_VERSION_WITH_LEDGER
@@ -667,6 +670,54 @@ async def _has_import_ledger(
     return version is not None and version >= INGESTION_VERSION_WITH_LEDGER
 
 
+async def _otros_clasificados_huerfanos(
+    session: AsyncSession,
+    file_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    ids_con_procedencia: set[uuid.UUID],
+) -> int:
+    """Filas de "Otros" ya clasificadas que el borrado NO puede revertir.
+
+    Son las de antes de F11: su venta/gasto derivado nació sin
+    ``source_upload_id``, así que la reversa no lo alcanza y su fila de staging
+    queda como único rastro hacia el archivo.
+
+    Vive acá —y no calculado en cada lado— porque el preview y el DELETE lo
+    informaban distinto: el preview lo reportaba y el DELETE, que según el
+    contrato es el autoritativo, respondía ``fully_reverted: true`` con el gasto
+    huérfano todavía vivo. Dos cuentas separadas de la misma regla vuelven a
+    divergir; una sola, no.
+    """
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(UnclassifiedRecord)
+                .where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.uploaded_file_id == file_id,
+                    UnclassifiedRecord.status != UNCLASSIFIED_STATUS_PENDING,
+                    # `notin_` con un conjunto vacío es válido y no filtra nada,
+                    # que es justo lo que corresponde cuando ninguna dejó
+                    # procedencia: todas las clasificadas son huérfanas.
+                    UnclassifiedRecord.id.notin_(ids_con_procedencia),
+                )
+            )
+        ).scalar_one()
+    )
+
+
+def _conservado_por_otros_huerfanos(cantidad: int, file_id: uuid.UUID) -> dict[str, Any]:
+    """La entrada de ``conservados``, en un solo lugar para los dos caminos."""
+    return {
+        "entity_type": "unclassified",
+        "id": str(file_id),
+        "name": f"{cantidad} filas ya clasificadas desde «Otros»",
+        "reasons": [PreservationReason.OTRO_CLASIFICADO_HISTORICO_SIN_PROCEDENCIA.value],
+        "fields": [],
+    }
+
+
 async def preview_file_deletion(
     session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
 ) -> dict[str, Any]:
@@ -786,20 +837,12 @@ async def preview_file_deletion(
     # resto. Reportarlas todas como "sin procedencia" sería avisar de un problema
     # que ya no existe.
     _con_procedencia = await _otros_clasificados_revertidos(session, file_id, tenant_id)
-    _clasificadas_huerfanas = max(0, otros_ya_clasificados - len(_con_procedencia))
+    _clasificadas_huerfanas = await _otros_clasificados_huerfanos(
+        session, file_id, tenant_id, _con_procedencia
+    )
     if _clasificadas_huerfanas:
         conservados.append(
-            {
-                "entity_type": "unclassified",
-                "id": str(file_id),
-                "name": (
-                    f"{_clasificadas_huerfanas} filas ya clasificadas desde «Otros»"
-                ),
-                "reasons": [
-                    PreservationReason.OTRO_CLASIFICADO_HISTORICO_SIN_PROCEDENCIA.value
-                ],
-                "fields": [],
-            }
+            _conservado_por_otros_huerfanos(_clasificadas_huerfanas, file_id)
         )
 
     return {
@@ -934,10 +977,17 @@ async def revert_file_data(
             SaleEntry.voided_at.is_(None),
         )
     )
+    # E6b: los efectos REVERTIDOS, para soltar su identidad. Se juntan acá y no
+    # se derivan de `source_upload_id` al final porque lo que libera la identidad
+    # es haber revertido el efecto, no que el archivo lo haya traído: una venta
+    # de este archivo que ya estaba anulada no se toca ahora y su identidad no es
+    # de este borrado.
+    _efectos_revertidos: list[tuple[str, uuid.UUID]] = []
     for venta in ventas_res.scalars().all():
         venta.voided_at = ahora
         venta.void_reason = VOID_REASON_FILE_DELETED
         contadores["ventas"] += 1
+        _efectos_revertidos.append(("sale", venta.id))
 
     gastos_res = await session.execute(
         select(ExpenseEntry).where(
@@ -950,6 +1000,7 @@ async def revert_file_data(
         gasto.voided_at = ahora
         gasto.void_reason = VOID_REASON_FILE_DELETED
         contadores["gastos"] += 1
+        _efectos_revertidos.append(("expense", gasto.id))
 
     # 2. Movimientos de inventario → `void_movement` revierte el efecto de cada
     #    uno sobre stock_units/inventory_balances. Incremental e idempotente:
@@ -1063,6 +1114,16 @@ async def revert_file_data(
     _ids_con_procedencia = await _otros_clasificados_revertidos(
         session, file_id, tenant_id
     )
+    # …y ese "se informan aparte" del comentario de arriba se cumple ACÁ. Estaba
+    # escrito y no ocurría: sólo el preview las reportaba, así que el DELETE —que
+    # es el resultado autoritativo, el que recalcula dentro de su transacción—
+    # respondía `fully_reverted: true` con el gasto huérfano todavía vivo. Se
+    # cuenta ANTES de borrar las filas, que es cuando todavía están todas.
+    _huerfanas = await _otros_clasificados_huerfanos(
+        session, file_id, tenant_id, _ids_con_procedencia
+    )
+    if _huerfanas:
+        conservados.append(_conservado_por_otros_huerfanos(_huerfanas, file_id))
     otros_res = await session.execute(
         select(UnclassifiedRecord.id).where(
             UnclassifiedRecord.tenant_id == tenant_id,
@@ -1082,6 +1143,16 @@ async def revert_file_data(
     #    archivo (que genera otro file_id, y por lo tanto otras anclas) funciona,
     #    pero quedan huellas colgadas de datos que ya no existen.
     await _delete_import_fingerprints(session, tenant_id, file_id)
+
+    # 5b. E6b — identidades de las operaciones que se revirtieron. Se libera SÓLO
+    #     la que quedó sin ningún efecto vivo: si el archivo trajo un remito de
+    #     tres renglones y uno sobrevivió (porque el usuario lo editó y otra
+    #     reversión lo conservó), la identidad sigue tomada. Soltarla haría que el
+    #     próximo import volviera a aplicar ese renglón ENCIMA del que quedó.
+    #
+    #     Por eso no se borra por `source_upload_id`: borrar un archivo no puede
+    #     liberar la identidad de efectos que se conservaron.
+    await liberar_identidades_de(session, tenant_id, _efectos_revertidos)
 
     # Sin ledger no se puede afirmar qué productos creó el archivo: se informa
     # como conservado en vez de adivinar.
