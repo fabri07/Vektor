@@ -57,8 +57,10 @@ from app.application.services.operation_identity_service import (
 from app.application.services.product_identity import (
     MatchedBy,
     ProductCreateBatch,
+    ProductExternalCodeConflictError,
     ProductIdentityConflictError,
     add_product_or_reuse,
+    external_code_guard,
 )
 from app.application.services.product_supplier_link_service import (
     LinkIndex,
@@ -3546,6 +3548,36 @@ def _parse_amount(raw: Any) -> Decimal | None:
     return interpretado.valor
 
 
+async def _assign_external_code(
+    session: AsyncSession,
+    target: Product,
+    ext_code: str | None,
+    ext_source: str | None,
+    counts: dict[str, Any],
+) -> None:
+    """E6a-B (quirúrgico): completa ``external_code``/``external_source`` en un
+    producto que YA tiene fila real en la base (nuevo recién insertado, o
+    existente resuelto por barcode/sku/nombre) — se llama DESPUÉS, nunca
+    dentro del INSERT que resuelve identidad.
+
+    Aditivo: nunca pisa un valor ya cargado. Protegido a nivel de BASE DE
+    DATOS (``external_code_guard``) contra la carrera entre imports
+    concurrentes del mismo tenant — el lease de import es per-archivo y el
+    lock de mantenimiento es shared, así que dos confirms del mismo tenant sí
+    pueden competir por el mismo código. Ante conflicto: descarta el campo
+    para esta fila, cuenta, NO bloquea el resto del import ni fusiona
+    productos (a diferencia de barcode/sku, un código externo repetido NUNCA
+    significa "es el mismo producto")."""
+    if not ext_code or target.external_code:
+        return
+    try:
+        async with external_code_guard(session):
+            target.external_code = ext_code
+            target.external_source = ext_source
+    except ProductExternalCodeConflictError:
+        counts["external_code_conflict"] += 1
+
+
 # F6-C1: el parser vive en app/domain/date_parsing.py — es el mismo que usa el
 # gate de calidad, así que ya no pueden discrepar sobre el mismo archivo.
 _parse_date = parse_business_datetime
@@ -4240,6 +4272,10 @@ async def _insert_confirmed_data_impl(
         # (product_supplier_links_enabled_for) — no se crea el vínculo, solo se
         # avisa (el dropdown ofrece la opción a todos los tenants por igual).
         "supplier_link_not_enabled": 0,
+        # external_code_conflict: la fila mapeó "Código en tu sistema" pero otro
+        # producto ACTIVO del tenant ya lo tiene — se descarta el campo para esta
+        # fila (nunca se fusiona con el otro producto, ver external_code_guard).
+        "external_code_conflict": 0,
         # F1 (hotfix puente): fila de producto ambigua (≥2 activos con el mismo
         # nombre normalizado) — NO se importa, NO se toca ningún existente.
         "productos_ambiguos": 0,
@@ -4504,6 +4540,9 @@ async def _insert_confirmed_data_impl(
         # Sin heurística: el precio de lista solo existe si el usuario lo mapeó
         # explícitamente (se resuelve más abajo, con el resto del mapeo).
         lista_col: str | None = None
+        # E6a-B: mismo criterio — sin heurística, solo mapeo explícito.
+        external_code_col: str | None = None
+        external_source_col: str | None = None
         stock_col = _find_col(headers, _STOCK_COLS)
         # F2-T5: barcode ANTES que sku para poder desambiguar la colisión ("código
         # de barras" matchea también "codigo" de _SKU_COLS). Si el único header
@@ -4591,6 +4630,10 @@ async def _insert_confirmed_data_impl(
             # queda NULL. Inventarlo desde un header parecido sería justamente lo
             # que rompió el import de ASTERIA.
             lista_col = target_to_col.get("list_price_ars")
+            # E6a-B: identidad externa, SOLO por mapeo explícito (nunca clave de
+            # matching — no participa de _resolve_product_identity).
+            external_code_col = target_to_col.get("external_code")
+            external_source_col = target_to_col.get("external_source")
             sku_col = target_to_col.get("sku") or sku_col
             barcode_col = target_to_col.get("barcode") or barcode_col
             if sku_col is not None and sku_col == barcode_col:
@@ -5772,6 +5815,14 @@ async def _insert_confirmed_data_impl(
                 prod_desc = (
                     _clean_str(row.get(description_col), 500) if description_col else None
                 )
+                _ext_code = (
+                    _clean_str(row.get(external_code_col), 100) if external_code_col else None
+                )
+                _ext_source = (
+                    _clean_str(row.get(external_source_col), 60)
+                    if external_source_col
+                    else None
+                )
 
                 # F2-T2: resolución de identidad por claves independientes
                 # (barcode→sku→nombre+marca). Caché intra-corrida ANTES del
@@ -5801,6 +5852,8 @@ async def _insert_confirmed_data_impl(
                     _bc_n: str | None = _bc_n,
                     _acquired: datetime | None = _acquired,
                     _expiry: date | None = _expiry,
+                    _ext_code: str | None = _ext_code,
+                    _ext_source: str | None = _ext_source,
                 ) -> None:
                     """Aplica la fila del catálogo a un producto que YA existe.
 
@@ -5858,6 +5911,8 @@ async def _insert_confirmed_data_impl(
                                 if existing.expiry_date
                                 else None
                             ),
+                            "external_code": existing.external_code,
+                            "external_source": existing.external_source,
                         }
                     if price:
                         existing.sale_price_ars = price
@@ -5912,6 +5967,7 @@ async def _insert_confirmed_data_impl(
                         )
                         if _acc_exp is not None:
                             existing.expiry_date = _acc_exp
+                    await _assign_external_code(session, existing, _ext_code, _ext_source, counts)
                     _register_product_identity_cache(
                         products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
                     )
@@ -5949,6 +6005,8 @@ async def _insert_confirmed_data_impl(
                                         if existing.expiry_date
                                         else None
                                     ),
+                                    "external_code": existing.external_code,
+                                    "external_source": existing.external_source,
                                 },
                             }
                         )
@@ -6091,6 +6149,9 @@ async def _insert_confirmed_data_impl(
                         continue
                     _register_product_identity_cache(
                         products_by_identity_key, new_product, _sku_n, _name_n, _brand_n, _bc_n
+                    )
+                    await _assign_external_code(
+                        session, new_product, _ext_code, _ext_source, counts
                     )
                     # F-H3.b: producto NUEVO → el saldo previo al archivo es 0.
                     _proyeccion_recorder.declarar_catalogo(
@@ -7736,6 +7797,12 @@ async def _insert_multisheet_data(
         # dos cosas se quedaba sin descripción.
         _desc_col = cols.get("description")
         _desc = _clean_str(row.get(_desc_col), 500) if _desc_col else None
+        # E6a-B: identidad externa, SOLO por mapeo explícito (nunca clave de
+        # matching — no participa de _resolve_product_identity).
+        _ext_code_col = cols.get("external_code")
+        _ext_source_col = cols.get("external_source")
+        _ext_code = _clean_str(row.get(_ext_code_col), 100) if _ext_code_col else None
+        _ext_source = _clean_str(row.get(_ext_source_col), 60) if _ext_source_col else None
         if cat_raw:
             cat, cat_label = normalize_product_category(cat_raw, _vertical)
         else:
@@ -7845,6 +7912,8 @@ async def _insert_multisheet_data(
                     "expiry_date": (
                         existing.expiry_date.isoformat() if existing.expiry_date else None
                     ),
+                    "external_code": existing.external_code,
+                    "external_source": existing.external_source,
                 }
             if price:
                 existing.sale_price_ars = price
@@ -7900,6 +7969,7 @@ async def _insert_multisheet_data(
                 )
                 if _acc_exp is not None:
                     existing.expiry_date = _acc_exp
+            await _assign_external_code(session, existing, _ext_code, _ext_source, counts)
             _register_product_identity_cache(
                 products_by_identity_key, existing, _sku_n, _name_n, _brand_n, _bc_n
             )
@@ -7937,6 +8007,8 @@ async def _insert_multisheet_data(
                                 if existing.expiry_date
                                 else None
                             ),
+                            "external_code": existing.external_code,
+                            "external_source": existing.external_source,
                         },
                     }
                 )
@@ -8151,6 +8223,7 @@ async def _insert_multisheet_data(
                     is_purchase=stock_is_purchase,
                 )
                 await _declarar_link_proveedor(_new_id)
+                await _assign_external_code(session, new_product, _ext_code, _ext_source, counts)
                 if return_details:
                     product_details.append(
                         {

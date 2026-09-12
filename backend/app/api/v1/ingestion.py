@@ -3473,6 +3473,11 @@ async def confirm_file(
             "nombre, pero tu cuenta todavía no tiene habilitada la vinculación automática "
             "Producto↔Proveedor. Contactá a soporte para activarla."
         )
+    if counts.get("external_code_conflict"):
+        warnings.append(
+            f"{counts['external_code_conflict']} producto(s) no se pudieron vincular por "
+            "código externo: el código ya pertenece a otro producto de tu catálogo."
+        )
     # F7d: taxonomía reconciliada de resolución de referencia. "anonimo" (venta de
     # mostrador / compra sin proveedor informado) NUNCA avisa — es el caso normal.
     # Solo "no_resuelto" (trajo una referencia que no matcheó contra ningún
