@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+import sys
 import uuid
 from collections.abc import Iterator
 
@@ -49,9 +50,15 @@ def _sync_dsn(dsn: str) -> str:
 
 
 def _alembic(base: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Alembic con el MISMO intérprete que corre pytest.
+
+    `python -m alembic` y no la ruta al ejecutable: local hay un `.venv` y en CI
+    las dependencias van al Python del sistema, así que apuntar a
+    `backend/.venv/bin/alembic` pasa acá y falla allá con `FileNotFoundError`.
+    """
     entorno = {**os.environ, "DATABASE_URL": base, "DATABASE_URL_SYNC": base}
     return subprocess.run(
-        [str(BACKEND / ".venv" / "bin" / "alembic"), *args],
+        [sys.executable, "-m", "alembic", *args],
         cwd=BACKEND,
         env=entorno,
         capture_output=True,
