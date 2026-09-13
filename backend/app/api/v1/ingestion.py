@@ -127,9 +127,14 @@ from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
 from app.config.async_import_rollout import async_import_enabled_for
+from app.config.product_supplier_links_rollout import product_supplier_links_enabled_for
 from app.config.purchase_cost_rollout import purchase_cost_enabled_for
 from app.config.settings import get_settings
 from app.domain.header_keys import custom_field_slug
+from app.domain.import_capabilities import (
+    capacidades_efectivas,
+    contexts_mapping_disabled_supplier_link,
+)
 from app.domain.ingestion_limits import (
     TEXTO_FORMULA_SIN_RESULTADO,
     LimiteExcedidoError,
@@ -1604,6 +1609,29 @@ async def get_field_catalog(
 
 
 @router.get(
+    "/capabilities",
+    response_model=dict[str, bool],
+    summary="Cambio 4: capacidades efectivas de ESTE tenant, ahora mismo",
+)
+async def get_effective_capabilities(
+    tenant: Tenant = Depends(get_current_tenant),
+) -> dict[str, bool]:
+    """A diferencia de ``GET /field-catalog`` (estático por deploy), esto SÍ
+    depende del tenant: son las mismas cuatro compuertas de rollout que
+    ``import_capabilities.capacidades_efectivas`` ya congela en
+    ``import_attempts.capabilities_json`` (E7a-lite), servidas ahora también
+    ANTES de confirmar para que el mapeador pueda deshabilitar un destino no
+    ejecutable y explicar por qué, en vez de dejar que el usuario lo elija y
+    se entere recién en el 422 (o, peor, en un downgrade silencioso).
+
+    Las claves son los nombres de variable de entorno de cada compuerta (ver
+    ``import_capabilities.py``) — no un alias interno — por la misma razón
+    que ahí: que no puedan quedar desfasadas del campo real de ``Settings``.
+    """
+    return capacidades_efectivas(tenant.tenant_id)
+
+
+@router.get(
     "/files/{file_id}/column-mappings",
     response_model=list[ColumnMappingSuggestion],
     summary="Get column mapping suggestions for a file",
@@ -2724,6 +2752,24 @@ async def confirm_file(
         for d in _effective_risk_decisions
         if d.action == "drop_column"
     }
+
+    # ── Cambio 4: rechazar "Proveedor — Nombre" con el flag apagado ────────────
+    # Reemplaza (para el caso de mapeo elegido EN esta llamada) el downgrade
+    # silencioso a "marca" de _add_product — un payload viejo/replayado que no
+    # pasa por acá sigue cubierto por esa red, ver import_capabilities.py.
+    _supplier_link_contexts = contexts_mapping_disabled_supplier_link(
+        ((m.context_id or "table", m.target_field) for m in body.column_mappings),
+        enabled=product_supplier_links_enabled_for(tenant.tenant_id),
+    )
+    if _supplier_link_contexts:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Tu cuenta todavía no tiene habilitada la vinculación automática "
+                "Producto↔Proveedor. Elegí otro destino para la columna 'Proveedor "
+                "— Nombre' (por ejemplo Marca) o contactá a soporte para activarla."
+            ),
+        )
 
     # F-F: acá vivía el rechazo pre-lease del archivo de UNA sola tabla que declara
     # el stock y las ventas juntas (F-H3.d.6). Ya no hace falta: el gate recibe las
@@ -4020,6 +4066,29 @@ async def reread_preview(
         # igual, que es el caso que motivó E2.
         for _cid, _entidad in override.items():
             risk_context_entities[_cid] = _entidad
+        # Cambio 4: mismo rechazo que el confirm — acá cubre el caso de una
+        # relectura donde el usuario RESUBMITE el mapeo (corrige columnas).
+        # Una relectura que no toca el mapeo y replica uno aprendido de cuando
+        # el flag estaba prendido sigue sin pasar por acá — ver
+        # import_capabilities.contexts_mapping_disabled_supplier_link.
+        _supplier_link_contexts = contexts_mapping_disabled_supplier_link(
+            (
+                (cid, m.target_field)
+                for cid, mappings in risk_context_mappings.items()
+                for m in mappings
+            ),
+            enabled=product_supplier_links_enabled_for(tenant.tenant_id),
+        )
+        if _supplier_link_contexts:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Tu cuenta todavía no tiene habilitada la vinculación "
+                    "automática Producto↔Proveedor. Elegí otro destino para la "
+                    "columna 'Proveedor — Nombre' (por ejemplo Marca) o contactá "
+                    "a soporte para activarla."
+                ),
+            )
         if body.column_risk_decisions:
             violations = validate_column_risk_decisions(
                 body.column_risk_decisions,

@@ -4916,3 +4916,121 @@ class TestReprocesoLimpiaElToken:
         assert record.parse_attempt_id is None, (
             "el token del intento colgado sigue vivo: puede pisar el resultado nuevo"
         )
+
+
+class TestSupplierLinkHardReject:
+    """Cambio 4: rechazo duro (422) de 'Proveedor — Nombre' con el flag
+    PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS apagado — reemplaza, para el
+    mapeo elegido EN esta llamada, el downgrade silencioso a "marca" que
+    counts["supplier_link_not_enabled"] describía sin avisar al usuario."""
+
+    @staticmethod
+    def _catalogo_record(tenant_id: uuid.UUID) -> UploadedFile:
+        return UploadedFile(
+            tenant_id=tenant_id,
+            uploaded_by=None,
+            original_filename="catalogo.xlsx",
+            s3_key="uploads/test/uuid/catalogo.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=512,
+            purpose="productos",
+            status="uploaded",
+            processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+            parsed_summary_json={
+                "confidence": "HIGH",
+                "file_type": "spreadsheet",
+                "inferred_type": "productos",
+                "has_producto": True,
+                "row_count": 1,
+                "stock_detectado": [
+                    {"nombre": "Silla de living", "tienda": "El pasillo", "precio": "5000"}
+                ],
+            },
+        )
+
+    async def test_confirm_rechaza_supplier_name_con_flag_apagado(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        record = self._catalogo_record(sample_tenant.tenant_id)
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"productos": True},
+                "column_mappings": [
+                    {"source_column": "nombre", "target_field": "name"},
+                    {"source_column": "tienda", "target_field": "supplier:name"},
+                    {"source_column": "precio", "target_field": "sale_price_ars"},
+                ],
+            },
+        )
+        assert response.status_code == 422
+        assert "Producto↔Proveedor" in response.json()["detail"]
+
+        # Nada se escribió: un 422 antes del lease no deja producto a medias.
+        productos = (await db_session.execute(select(Product))).scalars().all()
+        assert productos == []
+
+    async def test_confirm_permite_supplier_name_con_flag_prendido(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.config.settings import get_settings
+
+        monkeypatch.setattr(
+            get_settings(),
+            "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS",
+            [str(sample_tenant.tenant_id)],
+        )
+        record = self._catalogo_record(sample_tenant.tenant_id)
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"productos": True},
+                "column_mappings": [
+                    {"source_column": "nombre", "target_field": "name"},
+                    {"source_column": "tienda", "target_field": "supplier:name"},
+                    {"source_column": "precio", "target_field": "sale_price_ars"},
+                ],
+            },
+        )
+        # No es el 422 nuevo — con el flag prendido, el guard de Cambio 4 no
+        # tiene que interponerse (lo que pase más adelante en el import es
+        # responsabilidad de otro camino, no de este guard).
+        assert "Producto↔Proveedor" not in response.text
+
+    async def test_capabilities_endpoint_es_tenant_aware(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        sample_tenant: Tenant,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.config.settings import get_settings
+
+        apagado = await client.get("/api/v1/ingestion/capabilities", headers=auth_headers)
+        assert apagado.status_code == 200
+        assert apagado.json()["PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS"] is False
+
+        monkeypatch.setattr(
+            get_settings(),
+            "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS",
+            [str(sample_tenant.tenant_id)],
+        )
+        prendido = await client.get("/api/v1/ingestion/capabilities", headers=auth_headers)
+        assert prendido.json()["PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS"] is True

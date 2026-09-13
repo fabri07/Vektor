@@ -38,6 +38,7 @@ del rollout lo dice.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -83,6 +84,27 @@ def capacidades_efectivas(tenant_id: uuid.UUID | str) -> dict[str, bool]:
         ENV_CATALOG: catalog_final_cost_enabled_for(tenant_id),
         ENV_SCHEMA: ingestion_schema_decisions_enabled_for(tenant_id),
     }
+
+
+def contexts_mapping_disabled_supplier_link(
+    mapped_targets: Iterable[tuple[str, str]], *, enabled: bool
+) -> list[str]:
+    """``context_id``s que mapean ``supplier:name`` mientras la vinculación
+    Producto↔Proveedor está apagada para el tenant (compuerta
+    ``PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS``).
+
+    Antes esto se degradaba en silencio a "marca" (ver
+    ``ingestion_import_service._add_product``, contador
+    ``supplier_link_not_enabled``) — el usuario elegía una opción que el
+    dropdown le ofrecía como disponible y no pasaba nada. Se usa en los dos
+    caminos donde el usuario elige el mapeo en la misma llamada — confirm y
+    reread preview — para rechazar ANTES de escribir. El downgrade
+    silencioso sigue vigente como red para el caso todavía no cubierto: una
+    relectura que no resubmite mapeo y replica uno aprendido de cuando el
+    flag estaba prendido (ver docstring de ``_add_product``)."""
+    if enabled:
+        return []
+    return sorted({cid for cid, target in mapped_targets if target == "supplier:name"})
 
 
 def diferencias(
