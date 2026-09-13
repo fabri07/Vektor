@@ -161,6 +161,57 @@ const COLUMNS = [
     csvValue: (v: unknown) => String(Number(v ?? 0)),
   },
   {
+    key: "unit_cost_ars",
+    header: "Costo unitario",
+    hideable: true,
+    render: (v: unknown) => (v != null ? formatARS(Number(v)) : "—"),
+    csvValue: (v: unknown) => (v != null ? String(Number(v)) : ""),
+  },
+  {
+    key: "list_price_ars",
+    header: "Precio de lista (sugerido)",
+    hideable: true,
+    // Oculta por default: en la práctica la trae una minoría de productos
+    // (informativo, no entra al margen) — no vale la pena mostrarla vacía en
+    // el 90%+ de las filas, pero el dato no se pierde: sigue seleccionable.
+    defaultVisible: false,
+    render: (v: unknown) => (v != null ? formatARS(Number(v)) : "—"),
+    csvValue: (v: unknown) => (v != null ? String(Number(v)) : ""),
+  },
+  {
+    key: "_purchase_base_cost",
+    header: "Precio de compra (costo base, sin envío)",
+    hideable: true,
+    // Auxiliar del costo (F-H6.d): el archivo lo trae por separado del costo
+    // final (`unit_cost_ars`, que ya puede incluir el flete), preservado tal
+    // cual para no perder de dónde salió. Solo lectura: no es lo que usa el
+    // margen, así que no se edita desde acá.
+    render: (_: unknown, row: Record<string, unknown>) => {
+      const raw = (row.custom_fields as Record<string, unknown> | undefined)?.purchase_base_cost;
+      return raw != null && raw !== "" ? formatARS(Number(raw)) : "—";
+    },
+    csvValue: (_: unknown, row: Record<string, unknown>) => {
+      const raw = (row.custom_fields as Record<string, unknown> | undefined)?.purchase_base_cost;
+      return raw != null && raw !== "" ? String(Number(raw)) : "";
+    },
+  },
+  {
+    key: "_shipping_percentage",
+    header: "% de envío sobre el costo base",
+    hideable: true,
+    // Sparse en la práctica (la mayoría de los archivos no la traen) — oculta
+    // por default, disponible en el selector de columnas.
+    defaultVisible: false,
+    render: (_: unknown, row: Record<string, unknown>) => {
+      const raw = (row.custom_fields as Record<string, unknown> | undefined)?.shipping_percentage;
+      return raw != null && raw !== "" ? String(raw) : "—";
+    },
+    csvValue: (_: unknown, row: Record<string, unknown>) => {
+      const raw = (row.custom_fields as Record<string, unknown> | undefined)?.shipping_percentage;
+      return raw != null && raw !== "" ? String(raw) : "";
+    },
+  },
+  {
     key: "margin_pct",
     header: "Margen",
     hideable: true,
@@ -283,6 +334,7 @@ export default function ProductsPage() {
         category: payload.category,
         sale_price_ars: Number(payload.sale_price_ars),
         unit_cost_ars: payload.unit_cost_ars == null ? null : Number(payload.unit_cost_ars),
+        list_price_ars: payload.list_price_ars == null ? null : Number(payload.list_price_ars),
         stock_units: Number(payload.stock_units),
         // null = no configurado (usa default 5 del servidor); 0 = umbral explícito
         low_stock_threshold_units: payload.low_stock_threshold_units == null ? null : Number(payload.low_stock_threshold_units),
@@ -532,6 +584,10 @@ function ProductEditModal({
           <label className="grid gap-1 text-sm text-vektor-body">Precio<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.sale_price_ars} onChange={(e) => set("sale_price_ars", Number(e.target.value))} /></label>
           <label className="grid gap-1 text-sm text-vektor-body">Costo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.unit_cost_ars ?? ""} onChange={(e) => set("unit_cost_ars", e.target.value ? Number(e.target.value) : null)} /></label>
         </div>
+        <label className="grid gap-1 text-sm text-vektor-body">
+          Precio de lista (sugerido)
+          <input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.list_price_ars ?? ""} onChange={(e) => set("list_price_ars", e.target.value ? Number(e.target.value) : null)} />
+        </label>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vektor-body">Stock<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} value={form.stock_units} onChange={(e) => set("stock_units", Number(e.target.value))} /></label>
           <label className="grid gap-1 text-sm text-vektor-body">Umbral mínimo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} placeholder="5 (default)" value={form.low_stock_threshold_units ?? ""} onChange={(e) => set("low_stock_threshold_units", e.target.value === "" ? null : Number(e.target.value))} /></label>

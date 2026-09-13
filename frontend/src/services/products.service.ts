@@ -4,6 +4,8 @@ export interface CreateProductPayload {
   name: string;
   sale_price_ars: number;
   unit_cost_ars?: number | null;
+  /** Precio de lista/sugerido por proveedor. Informativo: no entra al margen. */
+  list_price_ars?: number | null;
   stock_units?: number;
   // null = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor; 0 = umbral explícito
   low_stock_threshold_units?: number | null;
@@ -34,6 +36,8 @@ export interface ProductResponse {
   category: string | null;
   sale_price_ars: number;
   unit_cost_ars: number | null;
+  /** Precio de lista/sugerido por proveedor. Informativo: no entra al margen. */
+  list_price_ars: number | null;
   stock_units: number;
   // null = umbral no configurado (servidor aplica DEFAULT_LOW_STOCK_THRESHOLD_UNITS = 5)
   // 0   = umbral explícito: solo sin-stock aplica

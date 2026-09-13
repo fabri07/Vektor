@@ -58,6 +58,13 @@ CATEGORY_KEYWORDS: dict[Vertical, dict[str, tuple[str, ...]]] = {
             # mapa de alias de `product_categories`, así que la inferencia estaba
             # diciendo algo distinto de lo que el mismo dominio ya afirmaba.
             "alfombra", "frazada", "repasador",
+            # Segunda ronda, medida contra el mismo cliente (ASTERIA 2026-09-12):
+            # "cover"/"cobertor" son cubrecamas con otro nombre (conviven con
+            # "cubrecama" sin pisarlo — ninguno es substring del otro). "trapo"
+            # es la misma familia de paño utilitario que ya justificó
+            # "repasador": cinco variantes reales de "trapo(s)/trapito de piso"
+            # no matcheaban nada.
+            "toalla", "cover", "cobertor", "trapo",
         ),
         "ILUMINACION": (
             "lampara", "luz", "velador", "candelabro", "aplique",
@@ -70,6 +77,13 @@ CATEGORY_KEYWORDS: dict[Vertical, dict[str, tuple[str, ...]]] = {
         "DECO": (
             "cuadro", "florero", "adorno", "decoracion", "espejo",
             "portarretrato", "figura", "jarron",
+            # Segunda ronda (ASTERIA 2026-09-12): "colgante" (adorno colgante
+            # tipo macramé) cubrió 13 variantes reales por sí solo. "porta
+            # retrato" con espacio es el mismo artículo que "portarretrato" ya
+            # cubre pegado — el archivo lo traía separado y el substring no
+            # cruza el espacio. "atrapasol"/"atrapa sol" cubren las dos formas
+            # en que el archivo escribía el mismo adorno.
+            "colgante", "porta retrato", "atrapasol", "atrapa sol",
         ),
         "BAZAR": (
             "vajilla", "taza", "plato", "cocina", "cubierto", "fuente",
@@ -82,6 +96,12 @@ CATEGORY_KEYWORDS: dict[Vertical, dict[str, tuple[str, ...]]] = {
             "bandeja", "frasco", "huevera", "aceitero", "especiero", "salero",
             "batidor", "espatula", "utensilio", "hermetico", "molde",
             "medidora", "cafetera", "tabla",
+            # Segunda ronda (ASTERIA 2026-09-12), mismo criterio: verificados uno
+            # por uno contra los nombres reales sin categoría. "escurridor" solo
+            # ("escurridor panal") no tenía otro keyword del que colgarse —
+            # "escurridor de cubiertos" ya funcionaba por "cubierto".
+            "escurridor", "colador", "cubetera", "frutera", "mantequera",
+            "servilletero", "afilador", "abridor",
         ),
         "JARDIN": (
             "maceta", "jardin", "exterior", "regadera", "planta", "reja",
@@ -91,6 +111,15 @@ CATEGORY_KEYWORDS: dict[Vertical, dict[str, tuple[str, ...]]] = {
         ),
     },
 }
+
+#: Deliberadamente AFUERA de la segunda ronda (ASTERIA 2026-09-12), aunque son
+#: productos reales sin categoría: la familia "dispensador"/"dispenser"/
+#: "jabonera" (jaboneras y dispensers de jabón — mayoría de baño, no de cocina)
+#: y las bolsas/mochilas/neceseres de uso personal ("mochila", "cartuchera",
+#: "tote bag", "neceser"). Ninguna categoría de este catálogo es BAÑO ni
+#: ACCESORIOS — meterlos en BAZAR o DECO sería elegir por el negocio, mismo
+#: criterio que ya excluye "canasto"/"cesto"/"organizador"/"porta*". Es un hueco
+#: del catálogo, no del vocabulario.
 
 
 @dataclass(frozen=True)

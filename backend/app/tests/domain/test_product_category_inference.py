@@ -110,6 +110,55 @@ def test_vocabulario_medido_contra_nombres_reales(name: str, expected_code: str)
 
 
 @pytest.mark.parametrize(
+    ("name", "expected_code"),
+    [
+        # Segunda ronda, nombres reales de ASTERIA (2026-09-12) que no
+        # matcheaban nada antes de esta ampliación. La cobertura con confianza
+        # alta pasó de 177/398 (44%) a ~213/398 (~54%).
+        ("toalla removedora maquillaje", "TEXTILES"),
+        ("cover bordado queen", "TEXTILES"),
+        ("cobertor de colchon", "TEXTILES"),
+        ("trapos de piso c/estampa", "TEXTILES"),
+        ("colgante bohemian", "DECO"),
+        ("porta retrato x 4", "DECO"),
+        ("atrapa soles", "DECO"),
+        ("atrapasoles con plata", "DECO"),
+        ("escurridor panal", "BAZAR"),
+        ("set x 4 coladores", "BAZAR"),
+        ("cubetera base silicona", "BAZAR"),
+        ("frutera cuadrada", "BAZAR"),
+        ("mantequera", "BAZAR"),
+        ("servilletero encastrable", "BAZAR"),
+        ("afilador de cuchillos", "BAZAR"),
+    ],
+)
+def test_segunda_ronda_de_vocabulario_medida_contra_asteria(
+    name: str, expected_code: str
+) -> None:
+    suggestion = infer_category(Vertical.DECORACION_HOGAR, name)
+    assert suggestion.code == expected_code
+    assert suggestion.confidence == "high"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Bathroom, no bazar/cocina: sin categoría "BAÑO" en este catálogo,
+        # meterlos en BAZAR sería elegir por el negocio.
+        "dispenser de jabon",
+        "jabonera cromada",
+        # Accesorios personales: sin categoría "ACCESORIOS" en este catálogo.
+        "mochila lentejuelas",
+        "cartuchera velvet",
+    ],
+)
+def test_familias_deliberadamente_afuera_de_la_segunda_ronda(name: str) -> None:
+    """No es un olvido, mismo criterio que la familia canasto/cesto/porta*:
+    el catálogo del rubro no tiene categoría de baño ni de accesorios."""
+    assert infer_category(Vertical.DECORACION_HOGAR, name).code is None
+
+
+@pytest.mark.parametrize(
     "name",
     ["canasto yute grande", "Cesto organizador", "porta bolsas mascota", "porta llaves"],
 )
