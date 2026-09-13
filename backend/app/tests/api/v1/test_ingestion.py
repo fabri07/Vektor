@@ -692,6 +692,13 @@ class TestPreviewEndpoint:
         monkeypatch.setattr(
             get_settings(), "INGESTION_SCHEMA_DECISIONS_ROLLOUT_TENANT_IDS", [str(tid)]
         )
+        # Cambio 4: la sesión 1 confirma un mapeo real a supplier:name — hace
+        # falta el flag prendido para que insert_confirmed_data no lo rechace
+        # (SupplierLinkNotEnabledError). Lo que este test verifica es que el
+        # mapeo se RECUERDA en el preview, no el estado del flag.
+        monkeypatch.setattr(
+            get_settings(), "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS", [str(tid)]
+        )
         headers = ["nombre", "tienda", "precio_venta"]
         mapping = {"nombre": "name", "tienda": "supplier:name", "precio_venta": "sale_price_ars"}
         ctx = {
@@ -4920,9 +4927,11 @@ class TestReprocesoLimpiaElToken:
 
 class TestSupplierLinkHardReject:
     """Cambio 4: rechazo duro (422) de 'Proveedor — Nombre' con el flag
-    PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS apagado — reemplaza, para el
-    mapeo elegido EN esta llamada, el downgrade silencioso a "marca" que
-    counts["supplier_link_not_enabled"] describía sin avisar al usuario."""
+    PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS apagado. Estos tests cubren el
+    rechazo TEMPRANO (pre-lease, antes de tocar datos) para el mapeo elegido
+    EN esta llamada; el chokepoint real (SupplierLinkNotEnabledError en
+    `_add_product`, que reemplazó por completo el downgrade silencioso a
+    "marca" y su contador) se cubre en test_product_supplier_links_bloque2.py."""
 
     @staticmethod
     def _catalogo_record(tenant_id: uuid.UUID) -> UploadedFile:
@@ -4939,7 +4948,11 @@ class TestSupplierLinkHardReject:
             parsed_summary_json={
                 "confidence": "HIGH",
                 "file_type": "spreadsheet",
-                "inferred_type": "productos",
+                # "stock", no "productos": `_entity_map` en confirm_file solo
+                # conoce ventas/gastos/stock/clientes/proveedores — con el
+                # valor incorrecto, `_entity_type` caía al default "sale" y
+                # `_context_included("table", "sale", ...)` daba False.
+                "inferred_type": "stock",
                 "has_producto": True,
                 "row_count": 1,
                 "stock_detectado": [
@@ -4974,9 +4987,51 @@ class TestSupplierLinkHardReject:
         assert response.status_code == 422
         assert "Producto↔Proveedor" in response.json()["detail"]
 
-        # Nada se escribió: un 422 antes del lease no deja producto a medias.
-        productos = (await db_session.execute(select(Product))).scalars().all()
-        assert productos == []
+    async def test_confirm_no_rechaza_si_la_columna_se_dropea(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Mapear a supplier:name y DROPEAR esa misma columna (dato ilegible)
+        es un no-op para _add_product — rechazarlo igual sería un 422 falso
+        sobre un mapeo que nunca iba a tener efecto (hallazgo de code review)."""
+        record = self._catalogo_record(sample_tenant.tenant_id)
+        db_session.add(record)
+        await db_session.commit()
+
+        response = await client.post(
+            f"/api/v1/ingestion/files/{record.id}/confirm",
+            headers=auth_headers,
+            json={
+                "confirmed_fields": {"productos": True},
+                "column_mappings": [
+                    {"source_column": "nombre", "target_field": "name"},
+                    {"source_column": "tienda", "target_field": "supplier:name"},
+                    {"source_column": "precio", "target_field": "sale_price_ars"},
+                ],
+                "column_risk_decisions": [
+                    {
+                        "context_id": "table",
+                        "source_column": "tienda",
+                        "target_field": "supplier:name",
+                        "action": "drop_column",
+                    }
+                ],
+            },
+        )
+        assert "Producto↔Proveedor" not in response.text
+        assert response.status_code == 200, response.text
+
+        # La columna dropeada no se guarda como marca ni como proveedor —
+        # el producto se crea igual, solo sin ese dato.
+        producto = (
+            await db_session.execute(
+                select(Product).where(Product.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalar_one()
+        assert producto.custom_fields.get("marca") is None
 
     async def test_confirm_permite_supplier_name_con_flag_prendido(
         self,

@@ -93,15 +93,16 @@ def contexts_mapping_disabled_supplier_link(
     Producto↔Proveedor está apagada para el tenant (compuerta
     ``PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS``).
 
-    Antes esto se degradaba en silencio a "marca" (ver
-    ``ingestion_import_service._add_product``, contador
-    ``supplier_link_not_enabled``) — el usuario elegía una opción que el
-    dropdown le ofrecía como disponible y no pasaba nada. Se usa en los dos
-    caminos donde el usuario elige el mapeo en la misma llamada — confirm y
-    reread preview — para rechazar ANTES de escribir. El downgrade
-    silencioso sigue vigente como red para el caso todavía no cubierto: una
-    relectura que no resubmite mapeo y replica uno aprendido de cuando el
-    flag estaba prendido (ver docstring de ``_add_product``)."""
+    Antes esto se degradaba en silencio a "marca" — el usuario elegía una
+    opción que el dropdown le ofrecía como disponible y no pasaba nada. Se usa
+    en los dos caminos donde el usuario elige el mapeo en la misma llamada —
+    confirm y reread preview — para rechazar ANTES de escribir, con un mensaje
+    más específico (columna/hoja) que el chokepoint tardío. El chokepoint real
+    y autoritativo — el único que ve el mapeo REALMENTE efectivo, cubriendo
+    también una relectura que no resubmite mapeo — es
+    ``ingestion_import_service.SupplierLinkNotEnabledError``, levantada dentro
+    de ``_add_product``; esta función es sólo la versión rápida/temprana para
+    el caso común."""
     if enabled:
         return []
     return sorted({cid for cid, target in mapped_targets if target == "supplier:name"})

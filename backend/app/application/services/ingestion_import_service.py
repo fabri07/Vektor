@@ -209,6 +209,31 @@ class EmptyImportError(Exception):
             self.user_message = user_message
 
 
+class SupplierLinkNotEnabledError(Exception):
+    """Cambio 4 — una fila mapea 'Proveedor — Nombre' (``supplier:name``) pero
+    ``PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS`` está apagado para este tenant.
+
+    Reemplaza el downgrade silencioso a "marca" que hacía esta misma función:
+    el dropdown ofrece esa opción a todos los tenants por igual (el catálogo de
+    mapeo es estático por deploy) y sin este rechazo el usuario la elegía sin
+    que pasara nada. Se levanta acá — el ÚNICO punto que ve el mapeo REALMENTE
+    efectivo de la fila — porque es el chokepoint que cubre los tres caminos
+    que pueden llegar a esta función: confirm sincrónico, la ejecución
+    asíncrona (que llama al mismo ``confirm_file``) y una relectura que NO
+    resubmite mapeo y replica uno aprendido de cuando el flag estaba prendido
+    (ese caso no pasa por los rechazos pre-lease de ``confirm_file``/
+    ``reread_preview``, que solo ven el mapeo de la llamada actual)."""
+
+    def __init__(self, store_name: str) -> None:
+        self.user_message = (
+            "Tu cuenta todavía no tiene habilitada la vinculación automática "
+            f'Producto↔Proveedor. Una fila declara el proveedor "{store_name}" '
+            "por nombre; elegí otro destino para esa columna (por ejemplo "
+            "Marca) o contactá a soporte para activarla."
+        )
+        super().__init__(self.user_message)
+
+
 def check_nonempty_import(
     counts: dict[str, Any],
     summary: dict[str, Any],
@@ -4438,11 +4463,6 @@ async def _insert_confirmed_data_impl(
         # sin_producto: compras sin producto detallado → Product incompleto (requires_completion).
         "sin_proveedor": 0,
         "sin_producto": 0,
-        # supplier_link_not_enabled: la fila mapeó "Proveedor — Nombre" en la hoja
-        # de Productos (Bloque 2), pero el tenant no tiene el rollout prendido
-        # (product_supplier_links_enabled_for) — no se crea el vínculo, solo se
-        # avisa (el dropdown ofrece la opción a todos los tenants por igual).
-        "supplier_link_not_enabled": 0,
         # external_code_conflict: la fila mapeó "Código en tu sistema" pero otro
         # producto ACTIVO del tenant ya lo tiene — se descarta el campo para esta
         # fila (nunca se fusiona con el otro producto, ver external_code_guard).
@@ -7896,15 +7916,16 @@ async def _insert_multisheet_data(
         _mapeado_a_proveedor = bool(
             store_name and _store_col and (cruzados or {}).get(_store_col) == "supplier:name"
         )
-        _store_mapped_as_supplier = _mapeado_a_proveedor and product_supplier_links_enabled_for(
-            tenant_id
-        )
         # El dropdown ofrece "Proveedor — Nombre" a todos los tenants por igual
         # (field-catalog es estático por deploy) pero el efecto real depende del
-        # rollout: sin esto, un tenant sin el flag elegía la opción y no pasaba
-        # nada, sin ningún aviso.
-        if _mapeado_a_proveedor and not _store_mapped_as_supplier:
-            counts["supplier_link_not_enabled"] += 1
+        # rollout. Cambio 4: rechazar acá (chokepoint único, ver
+        # SupplierLinkNotEnabledError) en vez de degradar en silencio a
+        # "marca" — cubre confirm, la ejecución asíncrona y la relectura sin
+        # resubmisión de mapeo, que no pasan por el rechazo pre-lease de
+        # confirm_file/reread_preview (solo ven el mapeo de esa llamada).
+        if _mapeado_a_proveedor and not product_supplier_links_enabled_for(tenant_id):
+            raise SupplierLinkNotEnabledError(cast("str", store_name))
+        _store_mapped_as_supplier = _mapeado_a_proveedor
         if store_name and not _store_mapped_as_supplier:
             _skipped_brands.add(store_name)
 

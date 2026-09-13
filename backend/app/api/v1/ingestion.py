@@ -102,6 +102,7 @@ from app.application.services.import_overlap_service import (
 )
 from app.application.services.ingestion_import_service import (
     EmptyImportError,
+    SupplierLinkNotEnabledError,
     check_nonempty_import,
     insert_confirmed_data,
 )
@@ -2757,8 +2758,16 @@ async def confirm_file(
     # Reemplaza (para el caso de mapeo elegido EN esta llamada) el downgrade
     # silencioso a "marca" de _add_product — un payload viejo/replayado que no
     # pasa por acá sigue cubierto por esa red, ver import_capabilities.py.
+    # Excluye lo DROPEADO por una decisión de riesgo (`_dropped_pairs`): una
+    # columna que el usuario mapeó a supplier:name pero también dropeó (dato
+    # ilegible) ya es un no-op para _add_product — rechazarla igual sería un
+    # 422 falso sobre un mapeo que nunca iba a tener efecto.
     _supplier_link_contexts = contexts_mapping_disabled_supplier_link(
-        ((m.context_id or "table", m.target_field) for m in body.column_mappings),
+        (
+            (m.context_id or "table", m.target_field)
+            for m in body.column_mappings
+            if (m.context_id or "table", m.source_column) not in _dropped_pairs
+        ),
         enabled=product_supplier_links_enabled_for(tenant.tenant_id),
     )
     if _supplier_link_contexts:
@@ -3064,41 +3073,54 @@ async def confirm_file(
         # probable de fallar era justo la única que no quedaba en la traza del
         # rechazo — medido: el 500 por la FK de proveedor no dejó ningún `import`.
         with _timings.stage("import") as _etapa_import:
-            counts = await insert_confirmed_data(
-                session,
-                tenant.tenant_id,
-                updated_summary,
-                body.confirmed_fields,
-                column_mappings=explicit_mappings,
-                context_mappings=context_mappings,
-                context_confirmed=body.context_confirmed or None,
-                context_entity=cast("dict[str, str]", body.context_entity) or None,
-                source="ingestion",
-                uploaded_file_id=file_id,
-                # El schema lo tipa con Literals (valida la entrada); el importador
-                # acepta el tipo ancho porque también lee el valor guardado en el
-                # summary por una relectura anterior, que llega como str/dict plano.
-                stock_treatment=cast("str | dict[str, str] | None", body.stock_treatment),
-                # F-H3: el efecto RESUELTO (default + override), no el crudo del body:
-                # el default no viaja en el payload y el importador no sabe calcularlo.
-                inventory_effect=_inventory_effects,
-                # F-H6.b: sin decisión para una hoja, sus envíos sin comprobante no
-                # se cobran. El dict va tal cual: acá no hay default que resolver.
-                shipping_decisions={d.context_id: d.action for d in body.shipping_decisions},
-                purchase_cost_decisions={
-                    d.context_id: CostDecision(
-                        context_id=d.context_id,
-                        base=d.base,
-                        shared_shipping=d.shared_shipping,
-                        line_shipping=d.line_shipping,
-                    )
-                    for d in body.purchase_cost_decisions
-                },
-                # Ledger de reversa: `products` no tiene columna de origen, así que
-                # sin este detalle no hay forma de saber qué productos creó este
-                # archivo — y borrarlo no podría deshacerlos.
-                return_details=True,
-            )
+            try:
+                counts = await insert_confirmed_data(
+                    session,
+                    tenant.tenant_id,
+                    updated_summary,
+                    body.confirmed_fields,
+                    column_mappings=explicit_mappings,
+                    context_mappings=context_mappings,
+                    context_confirmed=body.context_confirmed or None,
+                    context_entity=cast("dict[str, str]", body.context_entity) or None,
+                    source="ingestion",
+                    uploaded_file_id=file_id,
+                    # El schema lo tipa con Literals (valida la entrada); el importador
+                    # acepta el tipo ancho porque también lee el valor guardado en el
+                    # summary por una relectura anterior, que llega como str/dict plano.
+                    stock_treatment=cast("str | dict[str, str] | None", body.stock_treatment),
+                    # F-H3: el efecto RESUELTO (default + override), no el crudo del body:
+                    # el default no viaja en el payload y el importador no sabe calcularlo.
+                    inventory_effect=_inventory_effects,
+                    # F-H6.b: sin decisión para una hoja, sus envíos sin comprobante no
+                    # se cobran. El dict va tal cual: acá no hay default que resolver.
+                    shipping_decisions={
+                        d.context_id: d.action for d in body.shipping_decisions
+                    },
+                    purchase_cost_decisions={
+                        d.context_id: CostDecision(
+                            context_id=d.context_id,
+                            base=d.base,
+                            shared_shipping=d.shared_shipping,
+                            line_shipping=d.line_shipping,
+                        )
+                        for d in body.purchase_cost_decisions
+                    },
+                    # Ledger de reversa: `products` no tiene columna de origen, así que
+                    # sin este detalle no hay forma de saber qué productos creó este
+                    # archivo — y borrarlo no podría deshacerlos.
+                    return_details=True,
+                )
+            except SupplierLinkNotEnabledError as exc:
+                # Cambio 4: chokepoint ÚNICO — cubre confirm, la ejecución
+                # asíncrona (que llama a este mismo confirm_file) Y la
+                # relectura sin resubmisión de mapeo (que no pasa por el
+                # rechazo pre-lease de más arriba porque replica un mapeo
+                # aprendido sin que el usuario lo haya vuelto a elegir acá).
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=exc.user_message,
+                ) from exc
             # Las filas que el import REALMENTE procesó, incluidas las que
             # terminaron en "Otros": son trabajo hecho, y dejarlas afuera daba un
             # denominador más chico que el real justo en los archivos ambiguos,
@@ -3512,12 +3534,6 @@ async def confirm_file(
         warnings.append(
             f"{counts['sin_producto']} compra(s) sin producto detallado crearon un producto "
             "incompleto. Completá precio de venta y datos en Productos."
-        )
-    if counts.get("supplier_link_not_enabled"):
-        warnings.append(
-            f"{counts['supplier_link_not_enabled']} producto(s) declararon proveedor por "
-            "nombre, pero tu cuenta todavía no tiene habilitada la vinculación automática "
-            "Producto↔Proveedor. Contactá a soporte para activarla."
         )
     if counts.get("external_code_conflict"):
         warnings.append(
@@ -4071,11 +4087,20 @@ async def reread_preview(
         # Una relectura que no toca el mapeo y replica uno aprendido de cuando
         # el flag estaba prendido sigue sin pasar por acá — ver
         # import_capabilities.contexts_mapping_disabled_supplier_link.
+        # Excluye lo DROPEADO por una decisión de riesgo: mapear a
+        # supplier:name y dropear esa misma columna (dato ilegible) ya es un
+        # no-op, y rechazarlo sería un 422 falso.
+        _dropped_pairs_preview: set[tuple[str, str]] = {
+            (d.context_id, d.source_column)
+            for d in (body.column_risk_decisions or [])
+            if d.action == "drop_column"
+        }
         _supplier_link_contexts = contexts_mapping_disabled_supplier_link(
             (
                 (cid, m.target_field)
                 for cid, mappings in risk_context_mappings.items()
                 for m in mappings
+                if (cid, m.source_column) not in _dropped_pairs_preview
             ),
             enabled=product_supplier_links_enabled_for(tenant.tenant_id),
         )

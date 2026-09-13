@@ -72,6 +72,20 @@ def _enable(monkeypatch: pytest.MonkeyPatch, tenant_id: Any) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _supplier_link_no_rechaza(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Este archivo prueba memoria de mapeo (Bloque 5), no vínculos de
+    proveedor — `_MAPPING` usa `supplier:name` porque es el caso real de
+    Asteria que motivó el bloque, pero con Cambio 4
+    (`SupplierLinkNotEnabledError`) cada `insert_confirmed_data` de este
+    archivo necesita la compuerta prendida para no ser rechazado por algo
+    ajeno a lo que el test verifica. Autouse: todos los tests del archivo
+    usan `_MAPPING`."""
+    import app.application.services.ingestion_import_service as imp
+
+    monkeypatch.setattr(imp, "product_supplier_links_enabled_for", lambda _t: True)
+
+
 def _fp_and_sig(headers: list[str] | None = None) -> tuple[str, str]:
     ctx = {**_CTX, "headers": headers if headers is not None else _HEADERS}
     fp = compute_schema_fingerprint(_FILE_TYPE, [ctx])
