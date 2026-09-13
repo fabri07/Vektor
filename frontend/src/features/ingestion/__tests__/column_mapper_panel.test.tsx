@@ -2314,6 +2314,10 @@ describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a m
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
     mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    // Compuerta apagada (el default): 404, y el panel usa `/confirm`. Sin esto
+    // el test que confirma queda a merced de qué mock dejó el describe anterior
+    // (clearAllMocks no borra mockRejectedValue de otro bloque).
+    mockRegistrarImportacion.mockRejectedValue({ response: { status: 404 } });
     mockGetPreview.mockResolvedValue(PREVIEW);
     mockGetColumnMappings.mockImplementation((_fileId: string, entity: string) =>
       Promise.resolve(POR_ENTIDAD[entity] ?? []),
@@ -2380,6 +2384,32 @@ describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a m
       expect(selectDe("Fecha").value).toBe("expense_date");
     });
     expect(selectDe("Detalle").value).toBe("custom_field:obs_libres");
+  });
+
+  test("el nombre tipeado al crear un campo propio viaja como target_label (hallazgo ASTERIA 2026-09-13)", async () => {
+    renderPanel();
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    fireEvent.change(selectDe("Detalle"), { target: { value: "__custom__" } });
+    const entrada = screen.getByPlaceholderText("nombre_del_campo");
+    fireEvent.change(entrada, { target: { value: "Proveedores" } });
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("custom_field:proveedores");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+    const detalle = enviado.find((m) => m.source_column === "Detalle")!;
+    expect(detalle.target_field).toBe("custom_field:proveedores");
+    // Antes del fix, el label caía al header original de la columna
+    // ("Detalle") en vez del nombre que la persona tipeó al crear el campo.
+    expect(detalle.target_label).toBe("Proveedores");
   });
 
   test("sin tocar nada, todo se recalcula con el schema nuevo", async () => {
@@ -2680,6 +2710,24 @@ describe("ColumnMapperPanel — B.1: el modal de columnas sin mapear usa el sele
         expect.objectContaining({ source_column: "Sucursal", target_field: "notes" }),
       ]),
     );
+  });
+
+  test("crear un campo propio desde el modal manda el nombre tipeado como target_label (hallazgo ASTERIA 2026-09-13)", async () => {
+    const modal = await abrirModal();
+    fireEvent.click(
+      within(modal).getByRole("button", { name: /Guardar como campo personalizado/i }),
+    );
+    const entrada = within(modal).getByPlaceholderText("nombre_del_campo (sin espacios)");
+    fireEvent.change(entrada, { target: { value: "Proveedores" } });
+    fireEvent.click(within(modal).getByRole("button", { name: /^Confirmar$/i }));
+
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+    const sucursal = enviado.find((m) => m.source_column === "Sucursal")!;
+    expect(sucursal.target_field).toBe("custom_field:proveedores");
+    // Antes del fix, el label caía al header original de la columna
+    // ("Sucursal") en vez del nombre que la persona tipeó en el modal.
+    expect(sucursal.target_label).toBe("Proveedores");
   });
 });
 

@@ -244,7 +244,7 @@ function UnmappedModal({
 }: {
   column: string;
   entityType: string;
-  onResolve: (target: string) => void;
+  onResolve: (target: string, label?: string) => void;
   onClose: () => void;
 }) {
   const [selected, setSelected] = useState("");
@@ -261,7 +261,9 @@ function UnmappedModal({
     if (mode === "field" && selected) {
       onResolve(selected);
     } else if (mode === "custom" && customKey.trim()) {
-      onResolve(`custom_field:${customKey.trim().toLowerCase().replace(/\s+/g, "_")}`);
+      const nombre = customKey.trim();
+      const key = nombre.toLowerCase().replace(/\s+/g, "_");
+      onResolve(`custom_field:${key}`, nombre);
     } else if (mode === "ignore") {
       onResolve("ignore");
     }
@@ -572,6 +574,13 @@ function SheetMapperSection({
   // Columna que está creando un custom field + su key en edición.
   const [customFor, setCustomFor] = useState<string | null>(null);
   const [customKey, setCustomKey] = useState("");
+  // F-A (hallazgo real, ASTERIA 2026-09-13): el nombre que la persona TIPEA acá
+  // ("Proveedores") solo se usaba para derivar la clave interna ("proveedores")
+  // y se descartaba — el backend, sin `target_label`, caía al nombre de la
+  // columna del ARCHIVO ("Tienda") como etiqueta. La columna terminaba
+  // guardada bien pero mostrada con un título que nadie reconocía como el que
+  // había elegido.
+  const [customLabels, setCustomLabels] = useState<Record<string, string>>({});
 
   function selectTarget(col: string, value: string) {
     if (value === "__custom__") {
@@ -586,9 +595,11 @@ function SheetMapperSection({
   }
 
   function commitCustom(col: string) {
-    const key = customKey.trim().toLowerCase().replace(/\s+/g, "_");
+    const nombre = customKey.trim();
+    const key = nombre.toLowerCase().replace(/\s+/g, "_");
     if (key) {
       setMappings((p) => ({ ...p, [col]: `custom_field:${key}` }));
+      setCustomLabels((p) => ({ ...p, [col]: nombre }));
       onColumnTouched?.(context.context_id, col);
     }
     setCustomFor(null);
@@ -675,14 +686,23 @@ function SheetMapperSection({
   // tocar los cuatro lugares que lo leen.
   useEffect(() => {
     const labels: Record<string, string> = {};
+    // El nombre tipeado a mano manda: es la elección explícita más reciente
+    // de la persona. Solo cuenta mientras la columna SIGA apuntando al mismo
+    // campo personalizado — si después la remapeó a otra cosa, el nombre
+    // viejo ya no describe el destino actual.
+    for (const [col, label] of Object.entries(customLabels)) {
+      if (mappings[col]?.startsWith("custom_field:")) {
+        labels[col] = label;
+      }
+    }
     for (const sug of suggestions) {
       const actual = mappings[sug.source_column];
-      if (actual && actual === sug.target_field && sug.target_label) {
+      if (!labels[sug.source_column] && actual && actual === sug.target_field && sug.target_label) {
         labels[sug.source_column] = sug.target_label;
       }
     }
     onLabelsChange?.(context.context_id, labels);
-  }, [mappings, suggestions, context.context_id, onLabelsChange]);
+  }, [mappings, suggestions, customLabels, context.context_id, onLabelsChange]);
   // Requeridos REALES de la entidad: un requerido está cubierto solo si alguna
   // columna lo mapea a su campo canónico. Antes esto miraba el `status` que
   // mandó el backend por columna, así que mover la columna del nombre a un
@@ -1849,6 +1869,9 @@ export function ColumnMapperPanel({
   const [mappings, setMappings] = useState<Record<string, string>>({});
   const [unmappedQueue, setUnmappedQueue] = useState<string[]>([]);
   const [showUnmappedModal, setShowUnmappedModal] = useState(false);
+  // F-A (mismo hallazgo que en SheetMapperSection): el nombre tipeado en
+  // "Columna sin mapear" → campo personalizado, para no perderlo como label.
+  const [customLabelsPlanas, setCustomLabelsPlanas] = useState<Record<string, string>>({});
   const [initialized, setInitialized] = useState(false);
   // F8c: decisiones de columnas riesgosas + touched-set (user_selected). El
   // touched-set solo se marca en cambios MANUALES de mapeo (no en la
@@ -2162,9 +2185,14 @@ export function ColumnMapperPanel({
     }
   }
 
-  function handleUnmappedResolve(target: string) {
+  function handleUnmappedResolve(target: string, label?: string) {
     const current = unmappedQueue[0];
     const updatedMappings = current ? { ...mappings, [current]: target } : { ...mappings };
+    const updatedLabels =
+      current && label ? { ...customLabelsPlanas, [current]: label } : customLabelsPlanas;
+    if (current && label) {
+      setCustomLabelsPlanas(updatedLabels);
+    }
     if (current) {
       // El usuario asignó un target a esta columna → cambio manual.
       touchedRef.current.add(riskKey("table", current));
@@ -2176,18 +2204,32 @@ export function ColumnMapperPanel({
     } else {
       setShowUnmappedModal(false);
       setUnmappedQueue([]);
-      doConfirm(updatedMappings);
+      // Pasa `updatedLabels` explícito: `setCustomLabelsPlanas` recién de arriba
+      // todavía no se reflejó en el state (el set y este confirm corren en el
+      // mismo tick) — leer el state acá daría la etiqueta anterior.
+      doConfirm(updatedMappings, updatedLabels);
     }
   }
 
-  function doConfirm(currentMappings: Record<string, string>) {
+  function doConfirm(
+    currentMappings: Record<string, string>,
+    currentCustomLabels: Record<string, string> = customLabelsPlanas,
+  ) {
     // F-A: etiquetas de los campos propios que propuso el backend, sólo mientras
     // el destino siga siendo el sugerido (si la persona lo cambió, esa etiqueta
     // ya no describe nada). Misma regla que la sección multi-hoja.
     const etiquetasPlanas: Record<string, string> = {};
+    // El nombre tipeado a mano manda, y solo mientras la columna siga
+    // apuntando al mismo campo personalizado — ver mismo criterio en
+    // SheetMapperSection.
+    for (const [col, label] of Object.entries(currentCustomLabels)) {
+      if (currentMappings[col]?.startsWith("custom_field:")) {
+        etiquetasPlanas[col] = label;
+      }
+    }
     for (const sug of suggestions) {
       const actual = currentMappings[sug.source_column];
-      if (actual && actual === sug.target_field && sug.target_label) {
+      if (!etiquetasPlanas[sug.source_column] && actual && actual === sug.target_field && sug.target_label) {
         etiquetasPlanas[sug.source_column] = sug.target_label;
       }
     }
