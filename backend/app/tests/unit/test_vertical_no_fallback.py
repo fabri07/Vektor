@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.fields import _get_vertical_code
+from app.api.v1._tenant_vertical import get_vertical_code as _get_vertical_code
 from app.application.agents.expense.agent import AgentExpense
 from app.application.agents.health.agent import AgentHealth
 from app.application.agents.income.agent import AgentIncome
