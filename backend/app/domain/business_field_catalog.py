@@ -35,20 +35,39 @@ from typing import Literal
 Origin = Literal["canonical", "evidence"]
 
 
+def field_id_for(entity_type: str, value_path: str) -> str:
+    """Identidad estable = DÓNDE vive el dato, no cómo se llama.
+
+    Dos campos con el mismo `field_key` pero storage distinto (ej.
+    `product.name`, la columna real, y un `custom_field:name` que un tenant
+    declaró sin saber que colisionaba) son datos DISTINTOS y tienen que
+    coexistir — si la identidad se basara en el label o el field_key, uno de
+    los dos desaparecería en la deduplicación. Basarla en `value_path`
+    resuelve esto por construcción: solo colapsan dos entradas que apuntan
+    literalmente al mismo lugar.
+    """
+    return f"{entity_type}:{value_path}"
+
+
 @dataclass(frozen=True)
 class FieldDescriptor:
-    #: Identidad estable: `{entity_type}:{field_key}`. Independiente del label
-    #: — renombrar un campo (F10 invariant) nunca cambia este id.
+    #: `field_id_for(entity_type, value_path)` — ver esa función. Independiente
+    #: del label: renombrar un campo (F10 invariant) nunca cambia este id.
     field_id: str
     entity_type: str
     field_key: str
     label: str
     data_type: Literal["text", "number", "date", "boolean", "enum"]
-    #: "canonical" = columna real del ORM. "evidence" = vive en `custom_fields`
-    #: pero es un target de mapeo de primera clase, no un adicional libre.
+    #: "canonical" = columna real del ORM O campo propio del rubro (aunque su
+    #: storage sea `custom_fields`, ej. "Color"/"Estilo"). "evidence" = vive en
+    #: `custom_fields` y es target de mapeo de primera clase (F-H6.d), pero no
+    #: es un atributo que el rubro declare como propio. "additional" (fuera de
+    #: este dataclass, ver el service) = lo declaró el tenant libremente.
     origin: Origin
     #: Dónde vive el valor: nombre de atributo ORM (`"unit_cost_ars"`) o
-    #: `"custom_fields.<key>"`. Nunca código ejecutable — solo una ruta.
+    #: `"custom_fields.<key>"`. Nunca código ejecutable — solo una ruta. UN
+    #: campo del rubro (`VerticalFieldDefinition`) NO implica columna real —
+    #: la mayoría vive en `custom_fields` porque el ORM no tiene esa columna.
     value_path: str
     unit: str | None = None
     editable: bool = True
@@ -58,6 +77,7 @@ class FieldDescriptor:
     #: Explicación legible de una restricción financiera existente (F10/F-H6.d),
     #: si la hay. No es una regla nueva — documenta la que ya rige.
     financial_rule: str | None = None
+    enum_options: tuple[dict[str, str], ...] | None = None
 
 
 #: Campos de PRODUCTO reconocidos por el importador que hoy no tienen una
@@ -200,7 +220,7 @@ PRODUCT_FIELDS: tuple[FieldDescriptor, ...] = (
     # ── Evidencia del costo (F-H6.d): viven en custom_fields, son targets de
     # mapeo de primera clase, y nunca se suman al costo final ni al margen.
     FieldDescriptor(
-        field_id="product:purchase_base_cost",
+        field_id=field_id_for("product", "custom_fields.purchase_base_cost"),
         entity_type="product",
         field_key="purchase_base_cost",
         label="Precio de compra (costo base, sin envío)",
@@ -215,7 +235,7 @@ PRODUCT_FIELDS: tuple[FieldDescriptor, ...] = (
         ),
     ),
     FieldDescriptor(
-        field_id="product:shipping_percentage",
+        field_id=field_id_for("product", "custom_fields.shipping_percentage"),
         entity_type="product",
         field_key="shipping_percentage",
         label="% de envío sobre el costo base",

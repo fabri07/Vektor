@@ -69,15 +69,16 @@ async def test_identidad_estable_no_depende_del_label(
     assert por_key["unit_cost_ars"]["field_id"] == "product:unit_cost_ars"
 
 
-async def test_un_adicional_declarado_no_duplica_un_canonico(
+async def test_un_libre_que_apunta_al_mismo_lugar_que_la_evidencia_no_duplica(
     client: AsyncClient,
     auth_headers: dict[str, Any],
     db_session: AsyncSession,
     sample_tenant: Tenant,
 ) -> None:
-    """Si algún día `purchase_base_cost` también quedara registrado como
-    TenantCustomFieldDefinition (no pasa hoy, pero el catálogo no debe asumirlo
-    para siempre), el field_id estático gana y no aparece dos veces."""
+    """Si `purchase_base_cost` también quedara declarado como
+    TenantCustomFieldDefinition, apunta al MISMO lugar (`custom_fields.
+    purchase_base_cost`) que el descriptor estático — ahí sí corresponde
+    deduplicar: no son dos datos, es la misma clave JSON."""
     from app.application.services.field_definition_service import create_custom_field
 
     await create_custom_field(
@@ -91,7 +92,41 @@ async def test_un_adicional_declarado_no_duplica_un_canonico(
 
     campos = await _disponibles(client, auth_headers)
     ids = [c["field_id"] for c in campos]
-    assert ids.count("product:purchase_base_cost") == 1
+    assert ids.count("product:custom_fields.purchase_base_cost") == 1
+
+
+async def test_un_libre_que_comparte_nombre_con_una_columna_real_no_se_pierde(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Bug real encontrado en la revisión del primer commit: `product.name` (la
+    columna real) y un `custom_field:name` que un tenant declaró sin saber que
+    colisionaba son datos DISTINTOS en lugares distintos. Deduplicar por
+    field_key los fusionaba y uno desaparecía en silencio."""
+    from app.application.services.field_definition_service import create_custom_field
+
+    await create_custom_field(
+        db_session,
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_tenant.tenant_id,
+        entity_type="product",
+        field_key="name",
+        label="Nombre interno (otro dato)",
+    )
+
+    campos = await _disponibles(client, auth_headers)
+    por_id = {c["field_id"]: c for c in campos}
+
+    assert "product:name" in por_id
+    assert por_id["product:name"]["value_path"] == "name"
+    assert por_id["product:name"]["label"] == "Nombre"  # el canónico no se pisa
+
+    assert "product:custom_fields.name" in por_id
+    assert por_id["product:custom_fields.name"]["value_path"] == "custom_fields.name"
+    assert por_id["product:custom_fields.name"]["label"] == "Nombre interno (otro dato)"
+    assert por_id["product:custom_fields.name"]["origin"] == "additional"
 
 
 async def test_un_campo_libre_del_tenant_aparece_como_additional(
@@ -115,6 +150,214 @@ async def test_un_campo_libre_del_tenant_aparece_como_additional(
     por_key = {c["field_key"]: c for c in campos}
     assert por_key["col_8"]["origin"] == "additional"
     assert por_key["col_8"]["value_path"] == "custom_fields.col_8"
+
+
+async def test_campo_del_rubro_sin_columna_real_vive_en_custom_fields(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Bug real encontrado en la revisión: "Color"/"Estilo" (decoración del
+    hogar) son campos del RUBRO (`VerticalFieldDefinition`, is_base_field=True
+    al leerlos) pero `Product` no tiene esas columnas — asumir que
+    is_base_field==columna real los dejaba apuntando a un atributo que no
+    existe. Acá se prueba con "color" contra el vertical del propio tenant
+    (kiosco), sin depender del JSON real de decoración del hogar."""
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    from app.persistence.models.field_definitions import VerticalFieldDefinition
+
+    db_session.add(
+        VerticalFieldDefinition(
+            id=_uuid.uuid4(),
+            vertical_code="kiosco_almacen",
+            entity_type="product",
+            field_key="color",
+            label="Color",
+            data_type="text",
+            is_required=False,
+            display_order=1,
+            context_weight=0.0,
+            affects_scoring=False,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await db_session.commit()
+
+    campos = await _disponibles(client, auth_headers)
+    por_key = {c["field_key"]: c for c in campos}
+    assert por_key["color"]["value_path"] == "custom_fields.color"
+    assert por_key["color"]["origin"] == "canonical"  # es propio del rubro, no libre del tenant
+    assert por_key["color"]["field_id"] == "product:custom_fields.color"
+
+
+async def test_override_de_un_campo_del_rubro_no_lo_pisa_el_estatico(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Un tenant puede renombrar "Color" a "Tono" (`update_custom_field`, la
+    misma vía que usa /settings). El catálogo de lectura tiene que mostrar ESE
+    label, no el estático — pero solo cuando es un override REAL del campo del
+    rubro (`is_base_field=True`), nunca por compartir field_key nomás."""
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    from app.persistence.models.field_definitions import VerticalFieldDefinition
+
+    db_session.add(
+        VerticalFieldDefinition(
+            id=_uuid.uuid4(),
+            vertical_code="kiosco_almacen",
+            entity_type="product",
+            field_key="color",
+            label="Color",
+            data_type="text",
+            is_required=False,
+            display_order=1,
+            context_weight=0.0,
+            affects_scoring=False,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await db_session.commit()
+
+    from app.application.services.field_definition_service import update_custom_field
+
+    await update_custom_field(
+        db_session,
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_tenant.tenant_id,
+        field_key="color",
+        entity_type="product",
+        vertical_code="kiosco_almacen",
+        label="Tono",
+    )
+
+    campos = await _disponibles(client, auth_headers)
+    por_key = {c["field_key"]: c for c in campos}
+    assert por_key["color"]["label"] == "Tono"
+    assert por_key["color"]["value_path"] == "custom_fields.color"
+
+
+async def test_deshabilitado_sigue_siendo_consultable_en_historico(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """`get_merged_definitions` (contrato de EDICIÓN) excluye deshabilitados a
+    propósito — apagar un campo para nuevas cargas no puede borrar el pasado.
+    El catálogo de LECTURA los sigue mostrando, marcados."""
+    from app.application.services.field_definition_service import (
+        create_custom_field,
+        toggle_field,
+    )
+
+    await create_custom_field(
+        db_session,
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_tenant.tenant_id,
+        entity_type="product",
+        field_key="atributo_viejo",
+        label="Atributo viejo",
+    )
+    await toggle_field(
+        db_session,
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_tenant.tenant_id,
+        field_key="atributo_viejo",
+        entity_type="product",
+        vertical_code="kiosco_almacen",
+        enabled=False,
+    )
+
+    campos = await _disponibles(client, auth_headers)
+    por_key = {c["field_key"]: c for c in campos}
+    assert "atributo_viejo" in por_key  # sigue consultable
+    assert por_key["atributo_viejo"]["enabled_for_new_entries"] is False
+
+
+async def test_recuperado_por_backfill_arranca_de_solo_lectura(
+    client: AsyncClient,
+    auth_headers: dict[str, Any],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """El plan es explícito: "las evidencias y recuperaciones históricas
+    empiezan como solo lectura". Simula lo que hace el backfill (crea la
+    definición + un TenantFieldChangeLog con `source` del script) sin
+    depender de Postgres — la marca de origen es la misma que usa el script
+    real."""
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    from app.persistence.models.field_definitions import (
+        TenantCustomFieldDefinition,
+        TenantFieldChangeLog,
+    )
+
+    now = datetime.now(UTC)
+    db_session.add(
+        TenantCustomFieldDefinition(
+            id=_uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            entity_type="product",
+            field_key="marca",
+            override_label="Marca",
+            data_type="text",
+            is_enabled=True,
+            is_base_field=False,
+            display_order=0,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    db_session.add(
+        TenantFieldChangeLog(
+            id=_uuid.uuid4(),
+            tenant_id=sample_tenant.tenant_id,
+            field_key="marca",
+            entity_type="product",
+            action="created",
+            previous_state=None,
+            new_state={
+                "field_key": "marca",
+                "entity_type": "product",
+                "source": "backfill_field_definitions_from_history",
+            },
+            changed_by=None,
+            changed_at=now,
+        )
+    )
+    await db_session.commit()
+
+    campos = await _disponibles(client, auth_headers)
+    por_key = {c["field_key"]: c for c in campos}
+    assert por_key["marca"]["editable"] is False
+
+    # Un humano lo edita después (misma vía que /settings) — deja de estar
+    # "sin revisar": el plan pide que arranque de solo lectura, no que quede
+    # así para siempre una vez que alguien lo tocó.
+    from app.application.services.field_definition_service import update_custom_field
+
+    await update_custom_field(
+        db_session,
+        tenant_id=sample_tenant.tenant_id,
+        user_id=sample_tenant.tenant_id,
+        field_key="marca",
+        entity_type="product",
+        vertical_code="kiosco_almacen",
+        label="Marca del producto",
+    )
+
+    campos = await _disponibles(client, auth_headers)
+    por_key = {c["field_key"]: c for c in campos}
+    assert por_key["marca"]["editable"] is True
+    assert por_key["marca"]["label"] == "Marca del producto"
 
 
 async def test_entidad_no_cubierta_todavia_da_404(

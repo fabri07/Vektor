@@ -61,10 +61,15 @@ class AvailableFieldResponse(BaseModel):
     unit: str | None = None
     origin: str
     value_path: str
+    enum_options: list[EnumOption] | None = None
     editable: bool
     exportable: bool
     searchable: bool
     default_visible: bool
+    # Un adicional apagado (`toggle_field(enabled=False)`) sigue acá con
+    # `False` — apagarlo para nuevas cargas no borra el histórico. Los
+    # canónicos/evidencia no tienen este concepto: siempre `True`.
+    enabled_for_new_entries: bool = True
     financial_rule: str | None = None
 
 

@@ -5879,6 +5879,9 @@ async def _insert_confirmed_data_impl(
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
             _skipped_brands: set[str] = set()
+            # Cambio 1: asegurar la definición de "marca" UNA vez por import, no
+            # una consulta por producto (N+1 sobre un catálogo de miles de filas).
+            _ensured_custom_fields: set[tuple[str, str]] = set()
             # E6a-B: un savepoint por LOTE para external_code en vez de uno por
             # producto (mismo motivo que ProductCreateBatch) — se flushea una
             # sola vez al cerrar el bloque, más abajo.
@@ -6277,10 +6280,13 @@ async def _insert_confirmed_data_impl(
                         # "marca" no pasa por el mapeo de columnas (se arma acá
                         # mismo, no vía `custom_field:{key}`), así que sin esto
                         # queda guardada pero invisible en cualquier selector de
-                        # columnas o exportación — nadie declara dónde vive.
-                        await ensure_custom_field_exists(
-                            session, tenant_id, "product", "marca", "Marca"
-                        )
+                        # columnas o exportación — nadie declara dónde vive. Una
+                        # vez por import, no por fila: ver `_ensured_custom_fields`.
+                        if ("product", "marca") not in _ensured_custom_fields:
+                            await ensure_custom_field_exists(
+                                session, tenant_id, "product", "marca", "Marca"
+                            )
+                            _ensured_custom_fields.add(("product", "marca"))
                     new_product = Product(
                         id=new_product_id,
                         tenant_id=tenant_id,
@@ -7095,6 +7101,9 @@ async def _insert_multisheet_data(
     _planes_identidad: list[PlanDeIdentidad] = []
     _efectos_de_la_fila: list[tuple[str, uuid.UUID]] = []
     _skipped_brands: set[str] = set()
+    # Cambio 1: asegurar la definición de "marca"/"tienda_original" UNA vez por
+    # import, no una consulta por producto.
+    _ensured_custom_fields: set[tuple[str, str]] = set()
     _sentinel_used = False
     # F2-T2: caché intra-corrida por CLAVE DE IDENTIDAD (sku o nombre+marca),
     # propia de esta función (no se comparte con _insert_confirmed_data_impl).
@@ -8352,14 +8361,19 @@ async def _insert_multisheet_data(
                 cf = {**cf, _store_field_key: store_name}
                 # Cambio 1 (docs/plans/conservacion-y-acceso-datos-negocio.md):
                 # ninguna de las dos claves pasa por `custom_field:{key}` del
-                # mapeo — sin esto quedan guardadas pero invisibles.
-                await ensure_custom_field_exists(
-                    session,
-                    tenant_id,
-                    "product",
-                    _store_field_key,
-                    "Marca" if _store_field_key == "marca" else "Tienda (proveedor no vinculado)",
-                )
+                # mapeo — sin esto quedan guardadas pero invisibles. Una vez por
+                # import, no por fila.
+                if ("product", _store_field_key) not in _ensured_custom_fields:
+                    await ensure_custom_field_exists(
+                        session,
+                        tenant_id,
+                        "product",
+                        _store_field_key,
+                        "Marca"
+                        if _store_field_key == "marca"
+                        else "Tienda (proveedor no vinculado)",
+                    )
+                    _ensured_custom_fields.add(("product", _store_field_key))
             _new_id = uuid.uuid4()
             new_product = Product(
                 id=_new_id,

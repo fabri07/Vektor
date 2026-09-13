@@ -39,8 +39,17 @@ async def get_merged_definitions(
     tenant_id: uuid.UUID,
     vertical_code: str,
     entity_type: str | None = None,
+    include_disabled: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return base vertical fields merged with tenant overrides. Disabled fields excluded.
+    """Return base vertical fields merged with tenant overrides.
+
+    Por default excluye deshabilitados — el contrato de EDICIÓN (ERD,
+    FieldDefinitionsPanel, mapeo de ingesta): un campo apagado no se ofrece
+    para cargar datos nuevos. `include_disabled=True` es para el catálogo de
+    LECTURA (`business_field_catalog_service.py`, Cambio 1 del plan de
+    conservación): un campo deshabilitado sigue siendo consultable en el
+    histórico y exportable — apagarlo no borra lo que ya se guardó. Cada
+    entrada lleva `is_enabled` para que el caller distinga los dos casos.
 
     Note: custom_fields values on transactions are NOT validated against these definitions
     at write time (MVP). Validation against field keys, types and enum options is a
@@ -71,7 +80,8 @@ async def get_merged_definitions(
     for base in base_rows:
         key = (base.field_key, base.entity_type)
         override = tenant_index.get(key)
-        if override and not override.is_enabled:
+        is_enabled = not (override and not override.is_enabled)
+        if not is_enabled and not include_disabled:
             seen.add(key)
             continue
         entry: dict[str, Any] = {
@@ -94,6 +104,7 @@ async def get_merged_definitions(
             "display_order": override.display_order if override else base.display_order,
             "is_base_field": True,
             "affects_scoring": base.affects_scoring,
+            "is_enabled": is_enabled,
         }
         result.append(entry)
         seen.add(key)
@@ -102,7 +113,7 @@ async def get_merged_definitions(
         key = (tenant_field.field_key, tenant_field.entity_type)
         if key in seen:
             continue
-        if not tenant_field.is_enabled:
+        if not tenant_field.is_enabled and not include_disabled:
             continue
         result.append(
             {
@@ -115,6 +126,7 @@ async def get_merged_definitions(
                 "display_order": tenant_field.display_order,
                 "is_base_field": False,
                 "affects_scoring": False,
+                "is_enabled": tenant_field.is_enabled,
             }
         )
 
