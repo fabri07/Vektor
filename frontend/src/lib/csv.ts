@@ -48,3 +48,19 @@ export function downloadCSV(
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Dispara la descarga de un `Blob` ya armado (ej. la respuesta de
+ * `GET /export/{entity_type}`, Cambio 3 — el CSV completo lo arma el
+ * servidor, acá solo se materializa como archivo). `filename` va COMPLETO
+ * (con extensión): a diferencia de `downloadCSV`, el nombre ya lo decidió
+ * quien pidió el archivo.
+ */
+export function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}

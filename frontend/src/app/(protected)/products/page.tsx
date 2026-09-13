@@ -22,6 +22,7 @@ import { fieldCatalogService } from "@/services/fieldCatalog.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
 import { buildAvailableFieldColumns } from "@/lib/fieldCatalog";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { AllDataModal } from "@/features/customFields/AllDataModal";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
@@ -540,7 +541,12 @@ export default function ProductsPage() {
           columns={columns}
           data={tableData as Record<string, unknown>[]}
           exportFilename="vektor-productos"
-          toolbarActions={<AddColumnButton entityType="product" entityLabel="Productos" />}
+          toolbarActions={
+            <>
+              <AddColumnButton entityType="product" entityLabel="Productos" />
+              <ExportAllFieldsButton entityType="product" entityLabel="Productos" />
+            </>
+          }
           // Cambio 2: preferencias de columnas versionadas por tenant+usuario+
           // sección. Sin usuario logueado (no debería pasar en una ruta
           // protegida) queda sin persistir — mismo comportamiento de siempre.

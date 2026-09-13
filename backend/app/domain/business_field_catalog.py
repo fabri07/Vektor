@@ -30,9 +30,23 @@ nueva.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 Origin = Literal["canonical", "evidence"]
+
+
+def read_by_value_path(row: Any, value_path: str) -> Any:
+    """Lee el valor de una fila ORM según `value_path` — espejo backend de
+    `readByValuePath` en `frontend/src/lib/fieldCatalog.ts`. Atributo real del
+    modelo, o clave de `custom_fields` si el path empieza con ese prefijo.
+    Nunca ejecuta código: `value_path` es una ruta de datos fija del catálogo
+    estático, no una expresión que venga de afuera.
+    """
+    if value_path.startswith("custom_fields."):
+        key = value_path.removeprefix("custom_fields.")
+        cf = getattr(row, "custom_fields", None) or {}
+        return cf.get(key)
+    return getattr(row, value_path, None)
 
 
 def field_id_for(entity_type: str, value_path: str) -> str:

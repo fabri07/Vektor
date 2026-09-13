@@ -37,6 +37,9 @@ jest.mock("@/services/fieldDefinitions.service", () => ({
 jest.mock("@/services/fieldCatalog.service", () => ({
   fieldCatalogService: { getAvailableFields: jest.fn() },
 }));
+jest.mock("@/services/entityExport.service", () => ({
+  entityExportService: { exportAll: jest.fn() },
+}));
 
 const mockGetAllProducts = productsService.getAllProducts as jest.Mock;
 const mockCountProducts = productsService.countProducts as jest.Mock;
@@ -159,4 +162,10 @@ test("«Ver todos los datos» abre el detalle con Marca (adicional)", async () =
   await waitFor(() =>
     expect(screen.getByText("Todos los datos guardados de este registro, estén o no visibles en la tabla.")).toBeInTheDocument(),
   );
+});
+
+test("«Exportar todo» (Cambio 3) está disponible junto al selector de columnas", async () => {
+  renderizar();
+  await waitFor(() => expect(screen.getByText("Alfombra nórdica")).toBeInTheDocument());
+  expect(screen.getByRole("button", { name: /exportar todo/i })).toBeInTheDocument();
 });
