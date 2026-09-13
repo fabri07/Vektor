@@ -555,3 +555,79 @@ async def test_reread_race_flag_apagado_entre_preview_y_apply_rechaza(
         await db_session.execute(select(Product).where(Product.tenant_id == tid))
     ).scalars().all()
     assert products == []
+
+
+async def test_reread_apply_persiste_comprobante_en_el_run(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cambio 4: una relectura exitosa deja el comprobante en
+    `run.details_json["receipt"]`, con el mismo contrato que el confirm —
+    incluida una columna que NUNCA se mapeó (visible desde mapping_contexts,
+    no desde el mapeo elegido)."""
+    from app.application.services import reread_service
+    from app.application.services.reread_service import REPAIR_TYPE_REREAD
+    from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
+    from app.persistence.models.repair import DataRepairRun
+
+    tid = sample_tenant.tenant_id
+    _enable(monkeypatch, tid)
+
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_stock": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Catalogo",
+                "label": "Catalogo",
+                "entity_type": "product",
+                "headers": ["nombre", "tienda", "precio", "notas_internas"],
+                "row_count": 1,
+            },
+        ],
+        "stock_detectado": [_row("Producto W", "El pasillo")],
+    }
+    file = UploadedFile(
+        tenant_id=tid,
+        uploaded_by=None,
+        original_filename="catalogo.xlsx",
+        s3_key=f"tenants/{tid}/catalogo.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=512,
+        purpose="productos",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={"confirmed_fields": {"productos": True}},
+    )
+    db_session.add(file)
+    await db_session.commit()
+
+    run = DataRepairRun(
+        tenant_id=tid,
+        repair_type=REPAIR_TYPE_REREAD,
+        status="APPLYING",
+        dry_run=False,
+        details_json={
+            "file_id": str(file.id),
+            "draft": {"column_mappings": [dict(m, context_id="sheet:Catalogo")
+                                           for m in [
+                {"source_column": "nombre", "target_field": "name"},
+                {"source_column": "tienda", "target_field": "supplier:name"},
+                {"source_column": "precio", "target_field": "sale_price_ars"},
+            ]]},
+        },
+    )
+    db_session.add(run)
+    await db_session.commit()
+
+    await reread_service.apply_reread(db_session, file.id, tid, run=run, fresh_override=summary)
+    await db_session.commit()
+
+    assert run.details_json is not None
+    receipt = run.details_json["receipt"]
+    assert receipt["version"] == 1
+    columns = {c["source_column"]: c for c in receipt["columns"]}
+    assert columns["nombre"]["result"] == "guardado"
+    assert columns["precio"]["result"] == "transformado"
+    assert columns["notas_internas"]["result"] == "excluido"
+    assert columns["notas_internas"]["reason_kind"] == "system_rule"

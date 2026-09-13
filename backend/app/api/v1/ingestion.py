@@ -136,6 +136,7 @@ from app.domain.import_capabilities import (
     capacidades_efectivas,
     contexts_mapping_disabled_supplier_link,
 )
+from app.domain.import_receipt import build_import_receipt
 from app.domain.ingestion_limits import (
     TEXTO_FORMULA_SIN_RESULTADO,
     LimiteExcedidoError,
@@ -831,6 +832,149 @@ async def get_file_preview(
         master_previews=master_previews,
         remembered_decisions=remembered_decisions,
     )
+
+
+@router.get(
+    "/files/{file_id}/receipt",
+    summary="Cambio 4: comprobante de la última ejecución de este archivo",
+)
+async def get_import_receipt(
+    file_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Junta lo que hoy vive en dos lugares distintos — el `STAGE_CONFIRM` de
+    `pipeline_events` (confirm) y el `DataRepairRun` REREAD_FILE más reciente
+    (relectura) — en una sola respuesta por archivo.
+
+    Separa ``last_applied`` (la ejecución más reciente que EFECTIVAMENTE
+    guardó algo — confirm siempre cuenta como uno; una relectura solo si
+    quedó APPLIED) de ``last_attempt`` (el intento de relectura más reciente,
+    aunque haya fallado — un archivo no puede mostrar éxito por defecto
+    cuando el último intento fue un FAILED posterior).
+
+    ``file_reverted`` viene de `deleted_at` (F11): el archivo puede borrarse
+    sin que la explicación de lo que pasó desaparezca — F11 nunca toca
+    `pipeline_events` ni `data_repair_runs`.
+
+    Para un evento/run anterior a Cambio 4 (sin `detail.receipt`), reconstruye
+    SOLO lo demostrable desde `mappings` guardado y marca
+    ``historical_incomplete: true`` — nunca inventa el resto.
+    """
+    from sqlalchemy import select as _select  # noqa: PLC0415
+
+    from app.application.services import pipeline_event_service  # noqa: PLC0415
+    from app.application.services.reread_service import REPAIR_TYPE_REREAD  # noqa: PLC0415
+    from app.persistence.models.repair import DataRepairRun  # noqa: PLC0415
+
+    repo = FileRepository(session)
+    record = await repo.get_by_id(file_id, tenant.tenant_id, include_deleted=True)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+
+    confirm_event = await pipeline_event_service.get_latest_stage_event(
+        session, file_id=file_id, tenant_id=tenant.tenant_id, stage=STAGE_CONFIRM
+    )
+
+    # Mismo patrón que el resto de reread_service para ubicar runs de un
+    # archivo: DataRepairRun no tiene columna file_id propia (vive en
+    # details_json), así que se filtra en Python — ya establecido para el
+    # guard de sesión activa y el barrido de huérfanas.
+    reread_rows = (
+        await session.execute(
+            _select(DataRepairRun).where(
+                DataRepairRun.tenant_id == tenant.tenant_id,
+                DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+            )
+        )
+    ).scalars().all()
+    reread_for_file = [
+        r for r in reread_rows if (r.details_json or {}).get("file_id") == str(file_id)
+    ]
+
+    def _run_at(r: Any) -> datetime:
+        return cast("datetime", r.completed_at or r.created_at)
+
+    last_reread = max(reread_for_file, key=_run_at, default=None)
+    last_reread_applied = max(
+        (r for r in reread_for_file if r.status == "APPLIED"), key=_run_at, default=None
+    )
+
+    reconstruction_reason = (
+        "Detalle histórico no registrado (import previo al comprobante de Cambio 4)."
+    )
+
+    def _receipt_from_confirm(ev: Any) -> dict[str, Any]:
+        detail = ev.detail or {}
+        stored = detail.get("receipt")
+        if stored is not None:
+            return {**stored, "historical_incomplete": False}
+        mappings = detail.get("mappings") or {}
+        columns: list[dict[str, Any]] = [
+            {
+                "context_id": cid, "context_label": cid, "source_column": col,
+                "target_field": target, "result": "guardado",
+                "reason": reconstruction_reason, "reason_kind": None, "rows_affected": None,
+            }
+            for cid, cols in (mappings.get("context") or {}).items()
+            for col, target in cols.items()
+        ] + [
+            {
+                "context_id": "table", "context_label": "Archivo", "source_column": col,
+                "target_field": target, "result": "guardado",
+                "reason": reconstruction_reason, "reason_kind": None, "rows_affected": None,
+            }
+            for col, target in (mappings.get("flat") or {}).items()
+        ]
+        return {"version": 0, "columns": columns, "historical_incomplete": True}
+
+    def _receipt_from_reread(run: Any) -> dict[str, Any]:
+        stored = (run.details_json or {}).get("receipt")
+        if stored is not None:
+            return {**stored, "historical_incomplete": False}
+        return {"version": 0, "columns": [], "historical_incomplete": True}
+
+    executions: list[tuple[datetime, str, Any]] = []
+    if confirm_event is not None:
+        executions.append((confirm_event.created_at, "confirm", confirm_event))
+    if last_reread_applied is not None:
+        executions.append((_run_at(last_reread_applied), "reread", last_reread_applied))
+    last_applied_entry = max(executions, key=lambda t: t[0], default=None)
+
+    last_applied: dict[str, Any] | None = None
+    if last_applied_entry is not None:
+        _at, kind, obj = last_applied_entry
+        last_applied = {
+            "kind": kind,
+            "execution_id": str(obj.id) if kind == "reread" else str(obj.trace_id),
+            "applied_at": _at.isoformat(),
+            "receipt": (
+                _receipt_from_confirm(obj) if kind == "confirm" else _receipt_from_reread(obj)
+            ),
+        }
+
+    last_attempt: dict[str, Any] | None = None
+    if last_reread is not None and (
+        last_reread_applied is None or last_reread.id != last_reread_applied.id
+    ):
+        # El intento de relectura MÁS RECIENTE no es el que quedó aplicado —
+        # hay un intento posterior (típicamente FAILED) que se pierde si solo
+        # se muestra la última aplicación exitosa.
+        details = last_reread.details_json or {}
+        last_attempt = {
+            "kind": "reread",
+            "execution_id": str(last_reread.id),
+            "status": last_reread.status,
+            "at": _run_at(last_reread).isoformat(),
+            "error": details.get("error") or details.get("reason"),
+        }
+
+    return {
+        "file_id": str(file_id),
+        "file_reverted": record.deleted_at is not None,
+        "last_applied": last_applied,
+        "last_attempt": last_attempt,
+    }
 
 
 @router.post(
@@ -3376,6 +3520,29 @@ async def confirm_file(
                 cid for cid, cols in _applied.dropped_columns.items() if cols
             )
 
+        # Cambio 4: comprobante de importación — columna por columna, destino
+        # elegido + resultado EFECTIVO + motivo. `effective_mapping` viene del
+        # payload CRUDO (no filtrado): build_import_receipt necesita ver
+        # incluso lo que no se mapeó o se ignoró, para no hacerlo desaparecer.
+        _receipt_mapping: dict[str, dict[str, str]] = defaultdict(dict)
+        for _rm in body.column_mappings:
+            _receipt_mapping[_rm.context_id or "table"][_rm.source_column] = _rm.target_field
+        _receipt_contexts = updated_summary.get("mapping_contexts") or [
+            {
+                "context_id": "table",
+                "label": "Archivo",
+                "headers": list(_receipt_mapping.get("table", {})),
+                "row_count": updated_summary.get("row_count"),
+            }
+        ]
+        _receipt = build_import_receipt(
+            contexts=_receipt_contexts,
+            effective_mapping=dict(_receipt_mapping),
+            dropped_columns=_applied.dropped_columns if _applied is not None else None,
+            routed_rows=_applied.routed_rows if _applied is not None else None,
+            external_code_conflicts=counts.get("external_code_conflict", 0),
+        )
+
         await pipeline_event_service.emit_event(
             session,
             trace_id=_trace_id,
@@ -3424,7 +3591,16 @@ async def confirm_file(
                     "filas_riesgo_importadas": counts.get("filas_riesgo_importadas", 0),
                     "columnas_eliminadas": counts.get("columnas_eliminadas", 0),
                 },
+                # Cambio 4: comprobante — versionado para que una reconstrucción
+                # histórica (evento viejo sin esta clave) sepa distinguir "no
+                # hay comprobante" de "comprobante vacío".
+                "receipt": {"version": 1, "columns": [c.as_dict() for c in _receipt]},
             },
+            # Cambio 4: `required=True` — este evento dejó de ser observabilidad
+            # y pasó a ser el dato que sirve GET .../receipt. Fail-silent acá
+            # dejaría una importación "exitosa" sin comprobante, indistinguible
+            # para el usuario de una que nunca guardó su explicación.
+            required=True,
         )
         # Import OK: liberar el savepoint (los cambios quedan en la transacción del
         # request, que los commitea al final).

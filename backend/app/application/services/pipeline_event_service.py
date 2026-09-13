@@ -38,14 +38,26 @@ async def emit_event(
     latency_ms: int | None = None,
     confidence: str | None = None,
     detail: dict[str, Any] | None = None,
+    required: bool = False,
 ) -> None:
-    """Inserta un PipelineEvent. Fail-silent: loguea y sigue ante cualquier error.
+    """Inserta un PipelineEvent. Fail-silent por default: loguea y sigue ante
+    cualquier error — la observabilidad no debe romper el pipeline.
 
     El flush corre dentro de un SAVEPOINT propio (`begin_nested`): si el INSERT
     falla, se revierte SOLO ese savepoint (async-safe) y la transacción del caller
     queda limpia. Sin esto, un flush fallido dejaría el subtx de Postgres en
     estado abortado y envenenaría al caller (p.ej. abortaría un import ya exitoso
     cuando `emit_event` corre dentro del savepoint del confirm — F4).
+
+    ``required=True`` (Cambio 4 — comprobante de importación): ESTE evento en
+    particular deja de ser observabilidad y pasa a ser el dato — el
+    comprobante que ``GET /ingestion/files/{id}/receipt`` sirve. Fail-silent
+    ahí sería peor que fallar el confirm entero: una importación "exitosa"
+    sin comprobante es indistinguible, para el usuario, de una que nunca
+    guardó su explicación. Con `required=True` la excepción se propaga (el
+    savepoint de ESTE insert ya se revirtió arriba, así que el caller recibe
+    una sesión limpia) para que el `except BaseException` del confirm haga el
+    rollback+compensación real, en vez de dejar pasar un import sin traza.
     """
     try:
         event = PipelineEvent(
@@ -64,6 +76,8 @@ async def emit_event(
             session.add(event)
             await session.flush()
     except Exception as exc:  # noqa: BLE001 — la observabilidad nunca debe romper el pipeline
+        if required:
+            raise
         logger.warning(
             "pipeline_event.emit_failed",
             stage=stage,
@@ -130,6 +144,29 @@ async def get_trace(
         }
         for r in rows
     ]
+
+
+async def get_latest_stage_event(
+    session: AsyncSession,
+    *,
+    file_id: uuid.UUID | str,
+    tenant_id: uuid.UUID | str,
+    stage: str,
+) -> PipelineEvent | None:
+    """El evento más reciente de un `stage` para este archivo (Cambio 4: sirve
+    para localizar el `STAGE_CONFIRM` — y su comprobante — de la ÚLTIMA
+    ejecución, sin tener que conocer su `trace_id` de antemano)."""
+    stmt = (
+        select(PipelineEvent)
+        .where(
+            PipelineEvent.file_id == _as_uuid(file_id),
+            PipelineEvent.tenant_id == _as_uuid(tenant_id),
+            PipelineEvent.stage == stage,
+        )
+        .order_by(PipelineEvent.created_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_stats(session: AsyncSession, since: str) -> list[dict[str, Any]]:

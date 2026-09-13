@@ -116,6 +116,7 @@ from app.application.services.stock_service import (
     void_movement,
 )
 from app.domain.expense_categories import classify_expense_with_vertical
+from app.domain.import_receipt import build_import_receipt
 from app.domain.ingestion_version import INGESTION_VERSION
 from app.domain.inventory_effect import (
     SheetInventoryProfile,
@@ -338,6 +339,14 @@ class RereadApplyResult:
     #: Se informa en vez de limpiar en silencio — el usuario tiene que poder ver
     #: qué se fue de la bandeja y por qué. En preview trae el conteo sin mutar.
     otros_descartados: list[dict[str, Any]] = field(default_factory=list)
+    #: Cambio 4: los `counts` crudos que devolvió `insert_confirmed_data` de
+    #: ESTE reimport — el comprobante los necesita (p. ej.
+    #: `external_code_conflict`) y no están en ninguno de los campos de
+    #: arriba, que son conteos de la RECONCILIACIÓN, no del import en sí.
+    import_counts: dict[str, Any] = field(default_factory=dict)
+    #: Cambio 4: comprobante columna por columna de esta relectura — mismo
+    #: contrato que `pipeline_events.detail.receipt.columns` del confirm.
+    receipt: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── snapshots para auditoría ───────────────────────────────────────────────────
@@ -1609,6 +1618,7 @@ async def _reconcile(
         legacy_fallback=recon.legacy_fallback,
         items=void_items_payload + items_payload,
         otros_descartados=_pendientes_descartados,
+        import_counts=dict(_reimport_detail),
     )
 
 
@@ -3280,6 +3290,20 @@ async def apply_reread(
     if resolved.applied is not None:
         await _reconcile_column_risk(session, file, tenant_id, resolved.applied)
 
+    # Cambio 4: comprobante de importación de ESTA relectura — mismo criterio
+    # que confirm_file. `_draft_effective_mappings` es pura y barata: se
+    # recalcula acá en vez de hacer viajar el resultado por `_reconcile`.
+    _receipt_mapping, _ = _draft_effective_mappings(draft)
+    _receipt_contexts = summary_for_import.get("mapping_contexts") or []
+    receipt = build_import_receipt(
+        contexts=_receipt_contexts,
+        effective_mapping=_receipt_mapping or {},
+        dropped_columns=resolved.applied.dropped_columns if resolved.applied else None,
+        routed_rows=resolved.applied.routed_rows if resolved.applied else None,
+        external_code_conflicts=result.import_counts.get("external_code_conflict", 0),
+    )
+    result.receipt = [c.as_dict() for c in receipt]
+
     # F-RR (Fase 4): reconciliación post-apply — compara lo que el preview
     # proyectó (guardado en `run.details_json["projected_impact"]` cuando el
     # usuario lo VIO, en `preview_reread`) contra lo que efectivamente quedó
@@ -3381,6 +3405,10 @@ async def apply_reread(
             "Products no se vinculan por source_upload_id; insert_confirmed_data "
             "los re-deriva idempotentemente (upsert por SKU/nombre)."
         ),
+        # Cambio 4: mismo contrato que pipeline_events.detail.receipt del
+        # confirm — versionado para que una reconstrucción histórica sepa
+        # distinguir "no hay comprobante" de "comprobante vacío".
+        "receipt": {"version": 1, "columns": result.receipt},
     }
     await session.flush()
 
