@@ -958,8 +958,10 @@ async def get_import_receipt(
         last_reread_applied is None or last_reread.id != last_reread_applied.id
     ):
         # El intento de relectura MÁS RECIENTE no es el que quedó aplicado —
-        # hay un intento posterior (típicamente FAILED) que se pierde si solo
-        # se muestra la última aplicación exitosa.
+        # o falló, o fue REVERTIDO (undo_reread deja el status en "REVERTED"
+        # sin tocar details_json — el comprobante original sigue entero). En
+        # los dos casos se pierde si solo se muestra la última aplicación
+        # vigente, así que va acá con su propia explicación conservada.
         details = last_reread.details_json or {}
         last_attempt = {
             "kind": "reread",
@@ -967,6 +969,7 @@ async def get_import_receipt(
             "status": last_reread.status,
             "at": _run_at(last_reread).isoformat(),
             "error": details.get("error") or details.get("reason"),
+            "receipt": _receipt_from_reread(last_reread),
         }
 
     return {

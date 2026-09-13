@@ -585,3 +585,96 @@ class TestImportReceiptEndpoint:
         assert receipt["historical_incomplete"] is True
         assert receipt["columns"][0]["source_column"] == "nombre"
         assert receipt["columns"][0]["reason_kind"] is None
+
+    async def test_relectura_revertida_se_ve_como_ultimo_intento_sin_perder_su_comprobante(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Cambio 4 (punto 3 de la revisión): deshacer una relectura NO borra
+        su explicación — `undo_reread` solo cambia `run.status` a "REVERTED",
+        nunca toca `details_json`. El estado de la EJECUCIÓN (revertida) tiene
+        que poder verse separado del estado del ARCHIVO (que sigue vivo)."""
+        from app.application.services import reread_service
+
+        tid = sample_tenant.tenant_id
+        f = await self._file(db_session, tid)
+        summary = {
+            "file_type": "spreadsheet",
+            "inferred_type": "mixed",
+            "multi_sheet": True,
+            "has_stock": True,
+            "mapping_contexts": [
+                {
+                    "context_id": "sheet:Catalogo",
+                    "label": "Catalogo",
+                    "entity_type": "product",
+                    "headers": ["nombre", "precio", "notas"],
+                    "row_count": 1,
+                },
+            ],
+            "stock_detectado": [
+                {
+                    "nombre": "Producto R",
+                    "precio": "1000",
+                    "__context__": "sheet:Catalogo",
+                }
+            ],
+        }
+        f.parsed_summary_json = {"confirmed_fields": {"productos": True}}
+        await db_session.commit()
+
+        run = DataRepairRun(
+            tenant_id=tid,
+            repair_type=REPAIR_TYPE_REREAD,
+            status="APPLYING",
+            dry_run=False,
+            details_json={
+                "file_id": str(f.id),
+                "draft": {
+                    "column_mappings": [
+                        {
+                            "context_id": "sheet:Catalogo",
+                            "source_column": "nombre",
+                            "target_field": "name",
+                        },
+                        {
+                            "context_id": "sheet:Catalogo",
+                            "source_column": "precio",
+                            "target_field": "sale_price_ars",
+                        },
+                    ]
+                },
+            },
+        )
+        db_session.add(run)
+        await db_session.commit()
+
+        result = await reread_service.apply_reread(
+            db_session, f.id, tid, run=run, fresh_override=summary
+        )
+        await db_session.commit()
+
+        resp_antes = await client.get(
+            f"/api/v1/ingestion/files/{f.id}/receipt", headers=auth_headers
+        )
+        assert resp_antes.json()["last_applied"]["kind"] == "reread"
+
+        await reread_service.undo_reread(db_session, result.run_id, tid)
+        await db_session.commit()
+
+        resp = await client.get(f"/api/v1/ingestion/files/{f.id}/receipt", headers=auth_headers)
+        data = resp.json()
+        # Nada más aplicado (no había confirm previo): la relectura revertida
+        # ya no cuenta como "última aplicación vigente".
+        assert data["last_applied"] is None
+        assert data["file_reverted"] is False  # el ARCHIVO sigue vivo
+        # Pero la EJECUCIÓN revertida se ve, con su comprobante intacto.
+        assert data["last_attempt"]["status"] == "REVERTED"
+        receipt = data["last_attempt"]["receipt"]
+        assert receipt["historical_incomplete"] is False
+        columns = {c["source_column"]: c for c in receipt["columns"]}
+        assert columns["nombre"]["result"] == "guardado"
+        assert columns["notas"]["result"] == "excluido"
