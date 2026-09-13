@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Trash2, RotateCcw } from "lucide-react";
+import { Pencil, Trash2, Eye, RotateCcw } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -24,12 +24,14 @@ import {
   paymentLabel,
 } from "@/lib/suppliers";
 import { IVA_CONDITION_OPTIONS, ivaConditionLabel } from "@/lib/fiscal";
-import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
-import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AllDataModal } from "@/features/customFields/AllDataModal";
+import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFieldColumns";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
+import { useAuthStore } from "@/stores/authStore";
 
 const COLUMNS = [
   {
@@ -111,6 +113,7 @@ const COLUMNS = [
   },
   {
     key: "_status",
+    fieldId: "supplier:is_active",
     header: "Estado",
     hideable: true,
     render: (_: unknown, row: Record<string, unknown>) => {
@@ -147,6 +150,8 @@ const COLUMNS = [
 ];
 
 export default function SuppliersPage() {
+  const user = useAuthStore((s) => s.user);
+  const [viewingAllData, setViewingAllData] = useState<SupplierResponse | null>(null);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<SupplierResponse | null>(null);
   const queryClient = useQueryClient();
@@ -158,12 +163,6 @@ export default function SuppliersPage() {
     queryKey: ["suppliers-list", { include_inactive: true }],
     queryFn: () => suppliersService.getAllSuppliers({ include_inactive: true }),
     staleTime: 2 * 60 * 1000,
-  });
-
-  const { data: fieldDefs = [] } = useQuery({
-    queryKey: ["field-definitions", "supplier"],
-    queryFn: () => fieldDefinitionsService.getAll("supplier"),
-    staleTime: 5 * 60 * 1000,
   });
 
   const createMutation = useMutation({
@@ -249,13 +248,12 @@ export default function SuppliersPage() {
     update: (id, custom_fields) => suppliersService.updateSupplier(id, { custom_fields }),
   });
 
-  const columns = [
-    ...COLUMNS,
-    ...buildEditableCustomFieldColumns<Record<string, unknown>>(
-      fieldDefs,
-      saveSupplierCustomField,
-    ),
-  ];
+  const columns = useBusinessFieldColumns<Record<string, unknown>>({
+    entityType: "supplier",
+    existingColumns: COLUMNS,
+    onSaveCustomField: saveSupplierCustomField,
+    isReadOnly: (row) => Boolean(row.is_sentinel),
+  });
 
   return (
     <PageWrapper
@@ -289,11 +287,26 @@ export default function SuppliersPage() {
           columns={columns}
           data={tableData as Record<string, unknown>[]}
           exportFilename="vektor-proveedores"
-          toolbarActions={<AddColumnButton entityType="supplier" entityLabel="Proveedores" />}
+          storageKey={user ? `${user.tenant_id}:${user.id}:suppliers` : undefined}
+          toolbarActions={
+            <>
+              <AddColumnButton entityType="supplier" entityLabel="Proveedores" />
+              <ExportAllFieldsButton entityType="supplier" entityLabel="Proveedores" />
+            </>
+          }
           renderActions={(row) => {
             const supplier = row as unknown as SupplierResponse;
             return (
               <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  title="Todos los datos"
+                  aria-label="Todos los datos del proveedor"
+                  onClick={() => setViewingAllData(supplier)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+                >
+                  <Eye className="h-4 w-4" />
+                </button>
                 {/* El centinela "No identificado" no se edita ni elimina (backend lo protege). */}
                 {!supplier.is_sentinel && supplier.is_active && (
                   <>
@@ -341,6 +354,16 @@ export default function SuppliersPage() {
               </div>
             );
           }}
+        />
+      )}
+
+      {viewingAllData && (
+        <AllDataModal
+          entityType="supplier"
+          title={viewingAllData.name}
+          row={viewingAllData}
+          isOpen={true}
+          onClose={() => setViewingAllData(null)}
         />
       )}
 

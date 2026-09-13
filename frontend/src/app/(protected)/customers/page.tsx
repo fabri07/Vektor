@@ -27,12 +27,14 @@ import {
   isValidDni,
 } from "@/lib/fiscal";
 import { CustomerFileModal } from "@/features/customers/CustomerFileModal";
-import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
-import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AllDataModal } from "@/features/customFields/AllDataModal";
+import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFieldColumns";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
+import { useAuthStore } from "@/stores/authStore";
 
 function customerDoc(c: CustomerResponse): string {
   if (c.cuit?.trim()) return `CUIT ${c.cuit.trim()}`;
@@ -115,6 +117,7 @@ const COLUMNS = [
   },
   {
     key: "_status",
+    fieldId: "customer:is_active",
     header: "Estado",
     hideable: true,
     render: (_: unknown, row: Record<string, unknown>) =>
@@ -137,6 +140,8 @@ const COLUMNS = [
 ];
 
 export default function CustomersPage() {
+  const user = useAuthStore((s) => s.user);
+  const [viewingAllData, setViewingAllData] = useState<CustomerResponse | null>(null);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<CustomerResponse | null>(null);
   const [fileOpen, setFileOpen] = useState(false);
@@ -152,12 +157,6 @@ export default function CustomersPage() {
     queryFn: () =>
       customersService.getAllCustomers({ include_sentinel: true, include_inactive: true }),
     staleTime: 2 * 60 * 1000,
-  });
-
-  const { data: fieldDefs = [] } = useQuery({
-    queryKey: ["field-definitions", "customer"],
-    queryFn: () => fieldDefinitionsService.getAll("customer"),
-    staleTime: 5 * 60 * 1000,
   });
 
   const createMutation = useMutation({
@@ -232,15 +231,13 @@ export default function CustomersPage() {
     update: (id, custom_fields) => customersService.updateCustomer(id, { custom_fields }),
   });
 
-  const columns = [
-    ...COLUMNS,
-    ...buildEditableCustomFieldColumns<Record<string, unknown>>(
-      fieldDefs,
-      saveCustomerCustomField,
-      // El centinela "Local" no es editable (el back da 400): celdas read-only.
-      (row) => isSentinelCustomer(row),
-    ),
-  ];
+  const columns = useBusinessFieldColumns<Record<string, unknown>>({
+    entityType: "customer",
+    existingColumns: COLUMNS,
+    onSaveCustomField: saveCustomerCustomField,
+    // El centinela se puede consultar, pero no editar.
+    isReadOnly: (row) => isSentinelCustomer(row),
+  });
 
   return (
     <PageWrapper
@@ -285,11 +282,26 @@ export default function CustomersPage() {
           columns={columns}
           data={tableData as Record<string, unknown>[]}
           exportFilename="vektor-clientes"
-          toolbarActions={<AddColumnButton entityType="customer" entityLabel="Clientes" />}
+          storageKey={user ? `${user.tenant_id}:${user.id}:customers` : undefined}
+          toolbarActions={
+            <>
+              <AddColumnButton entityType="customer" entityLabel="Clientes" />
+              <ExportAllFieldsButton entityType="customer" entityLabel="Clientes" />
+            </>
+          }
           renderActions={(row) => {
             const customer = row as unknown as CustomerResponse;
             return (
               <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  title="Todos los datos"
+                  aria-label="Todos los datos del cliente"
+                  onClick={() => setViewingAllData(customer)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+                >
+                  <Eye className="h-4 w-4" />
+                </button>
                 <Link
                   href={`/customers/${customer.id}`}
                   title="Ver"
@@ -345,6 +357,16 @@ export default function CustomersPage() {
               </div>
             );
           }}
+        />
+      )}
+
+      {viewingAllData && (
+        <AllDataModal
+          entityType="customer"
+          title={viewingAllData.name}
+          row={viewingAllData}
+          isOpen={true}
+          onClose={() => setViewingAllData(null)}
         />
       )}
 

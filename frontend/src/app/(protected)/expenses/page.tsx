@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Trash2 } from "lucide-react";
+import { Eye, Pencil, Trash2 } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 import { StatCard } from "@/components/ui/StatCard";
@@ -11,9 +11,11 @@ import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { expensesService, type ExpenseEntryResponse } from "@/services/expenses.service";
-import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
-import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AllDataModal } from "@/features/customFields/AllDataModal";
+import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFieldColumns";
+import { useAuthStore } from "@/stores/authStore";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime, parseDateOnly, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
@@ -141,6 +143,8 @@ export default function ExpensesPage() {
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState<"all" | "OPEX" | "COGS">("all");
   const [editing, setEditing] = useState<ExpenseEntryResponse | null>(null);
+  const [viewingAllData, setViewingAllData] = useState<ExpenseEntryResponse | null>(null);
+  const user = useAuthStore((s) => s.user);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
 
@@ -157,12 +161,6 @@ export default function ExpensesPage() {
     queryKey: ["expenses-entries", from, to],
     queryFn: () => expensesService.getAllEntries({ from_date: from, to_date: to }),
     staleTime: 60 * 1000,
-  });
-
-  const { data: fieldDefs = [] } = useQuery({
-    queryKey: ["field-definitions", "expense"],
-    queryFn: () => fieldDefinitionsService.getAll("expense"),
-    staleTime: 5 * 60 * 1000,
   });
 
   const { data: prevEntries = [] } = useQuery({
@@ -247,6 +245,12 @@ export default function ExpensesPage() {
   const saveCustomField = useSaveCustomField({
     listKey: ["expenses-entries"],
     update: (id, custom_fields) => expensesService.updateExpense(id, { custom_fields }),
+  });
+
+  const columns = useBusinessFieldColumns<ExpenseEntryResponse>({
+    entityType: "expense",
+    existingColumns: COLUMNS,
+    onSaveCustomField: saveCustomField,
   });
 
   return (
@@ -348,15 +352,27 @@ export default function ExpensesPage() {
         )
       ) : (
         <SmartTable
-          columns={[
-            ...COLUMNS,
-            ...buildEditableCustomFieldColumns<ExpenseEntryResponse>(fieldDefs, saveCustomField),
-          ]}
+          columns={columns}
           data={sorted}
+            storageKey={user ? `${user.tenant_id}:${user.id}:expenses` : undefined}
           exportFilename="vektor-gastos"
-          toolbarActions={<AddColumnButton entityType="expense" entityLabel="Gastos" />}
+          toolbarActions={
+            <>
+              <AddColumnButton entityType="expense" entityLabel="Gastos" />
+              <ExportAllFieldsButton entityType="expense" entityLabel="Gastos" />
+            </>
+          }
           renderActions={(row) => (
             <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  title="Ver todos los datos"
+                  aria-label="Ver todos los datos"
+                  onClick={() => setViewingAllData(row)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+                >
+                  <Eye className="h-4 w-4" />
+                </button>
               <button type="button" title="Editar" aria-label="Editar gasto" onClick={() => setEditing(row)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary">
                 <Pencil className="h-4 w-4" />
               </button>
@@ -382,6 +398,15 @@ export default function ExpensesPage() {
         onClose={() => setEditing(null)}
         onSave={(expense) => updateMutation.mutate(expense)}
       />
+      {viewingAllData && (
+        <AllDataModal
+          entityType="expense"
+          title={viewingAllData.description || "Gasto"}
+          row={entries.find((entry) => entry.id === viewingAllData.id) ?? viewingAllData}
+          isOpen={true}
+          onClose={() => setViewingAllData(null)}
+        />
+      )}
     </PageWrapper>
   );
 }

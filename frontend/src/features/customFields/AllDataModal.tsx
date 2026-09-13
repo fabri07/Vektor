@@ -7,6 +7,7 @@ import {
   type AvailableFieldEntityType,
 } from "@/services/fieldCatalog.service";
 import { buildAllDataRows, type AllDataRow } from "@/lib/fieldCatalog";
+import { useAuthStore } from "@/stores/authStore";
 
 /**
  * "Todos los datos" — Cambio 2 del plan de conservación y acceso a datos de
@@ -39,8 +40,9 @@ interface Props {
 }
 
 export function AllDataModal({ entityType, title, row, isOpen, onClose }: Props) {
-  const { data: available = [], isLoading } = useQuery({
-    queryKey: ["fields-available", entityType],
+  const user = useAuthStore((s) => s.user);
+  const { data: available = [], isLoading, isError, refetch } = useQuery({
+    queryKey: ["fields-available", entityType, user?.tenant_id, user?.id],
     queryFn: () => fieldCatalogService.getAvailableFields(entityType),
     enabled: isOpen,
     staleTime: 5 * 60 * 1000,
@@ -53,8 +55,16 @@ export function AllDataModal({ entityType, title, row, isOpen, onClose }: Props)
       <p className="mb-4 text-sm text-vk-text-muted">
         Todos los datos guardados de este registro, estén o no visibles en la tabla.
       </p>
+      <p className="mb-4 text-xs text-vk-text-muted">
+        La procedencia exacta (archivo, hoja y fila) no está disponible en este detalle.
+      </p>
       {isLoading ? (
         <p className="py-6 text-center text-sm text-vk-text-muted">Cargando…</p>
+      ) : isError ? (
+        <div role="alert" className="py-6 text-center text-sm text-vk-text-muted">
+          <p>No se pudo cargar el catálogo de campos. Los datos del registro no se modificaron.</p>
+          <button type="button" onClick={() => void refetch()} className="mt-2 underline">Reintentar</button>
+        </div>
       ) : rows.length === 0 ? (
         <p className="py-6 text-center text-sm text-vk-text-muted">
           Sin campos declarados para esta sección todavía.
@@ -81,7 +91,12 @@ export function AllDataModal({ entityType, title, row, isOpen, onClose }: Props)
                 )}
               </dt>
               <dd className="max-w-full break-words text-sm text-vk-text-primary sm:text-right">
-                <p>{r.formatted}</p>
+                {r.formatted.length > 400 ? (
+                  <details>
+                    <summary className="cursor-pointer">Ver valor completo</summary>
+                    <p className="whitespace-pre-wrap">{r.formatted}</p>
+                  </details>
+                ) : <p className="whitespace-pre-wrap">{r.formatted}</p>}
                 {r.financialRule && (
                   <p className="text-xs text-vk-text-muted">{r.financialRule}</p>
                 )}

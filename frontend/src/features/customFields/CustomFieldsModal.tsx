@@ -71,6 +71,7 @@ export function CustomFieldsModal({ entityType, entityLabel, onClose, onChanged 
   };
 
   const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["fields-available", entityType] });
     void queryClient.invalidateQueries({ queryKey: ["field-definitions", entityType] });
     void queryClient.invalidateQueries({ queryKey: ["field-definitions"] });
     onChanged();

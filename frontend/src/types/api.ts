@@ -360,7 +360,7 @@ export interface EnumOption {
 
 export interface FieldDefinition {
   field_key: string;
-  entity_type: "sale" | "expense" | "product" | "inventory";
+  entity_type: "sale" | "expense" | "product" | "inventory" | "customer" | "supplier";
   label: string;
   data_type: "text" | "number" | "date" | "enum" | "boolean";
   enum_options: EnumOption[] | null;

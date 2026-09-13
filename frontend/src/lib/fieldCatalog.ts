@@ -49,14 +49,17 @@ export function buildAvailableFieldColumns<T extends object>(
   excludeFieldIds: ReadonlySet<string>,
 ): SmartColumn<T>[] {
   return available
-    .filter((f) => !excludeFieldIds.has(f.field_id) && f.searchable !== false)
+    .filter((f) => !excludeFieldIds.has(f.field_id))
     .map<SmartColumn<T>>((f) => {
       const defaultVisible = f.origin === "canonical" ? f.default_visible : false;
       return {
         key: f.field_id,
+        fieldId: f.field_id,
         header: f.label,
         hideable: true,
         defaultVisible,
+        searchable: f.searchable,
+        exportable: f.exportable,
         render: (_value: unknown, row: T) =>
           formatCustomFieldValue(readByValuePath(row, f.value_path), f.data_type, f.enum_options),
         csvValue: (_value: unknown, row: T) =>

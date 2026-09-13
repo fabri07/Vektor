@@ -15,8 +15,12 @@ import {
 } from "@/lib/columnPreferences";
 
 export interface SmartColumn<T = Record<string, unknown>> extends TableColumn<T> {
+  /** Identidad del catálogo; permite conservar renderizadores y keys existentes. */
+  fieldId?: string;
   hideable?: boolean;
   defaultVisible?: boolean;
+  searchable?: boolean;
+  exportable?: boolean;
   csvValue?: (value: unknown, row: T) => string;
 }
 
@@ -56,7 +60,13 @@ function defaultVisibleKeys<T>(columns: SmartColumn<T>[]): Set<string> {
   return new Set(columns.filter((c) => c.defaultVisible !== false).map((c) => c.key));
 }
 
-export function SmartTable<T extends object>({
+export function SmartTable<T extends object>(props: SmartTableProps<T>) {
+  // Cambiar de cuenta/usuario debe reiniciar preferencias y búsqueda aunque
+  // la página no remonte la tabla explícitamente.
+  return <SmartTableContent key={props.storageKey ?? "memory"} {...props} />;
+}
+
+function SmartTableContent<T extends object>({
   columns,
   data,
   emptyMessage,
@@ -207,7 +217,7 @@ export function SmartTable<T extends object>({
     if (!deferredSearch.trim()) return data;
     return data.filter((row) =>
       matchesRow(
-        columns.map((col) => {
+        columns.filter((col) => col.searchable !== false).map((col) => {
           const raw = (row as Record<string, unknown>)[col.key];
           return col.csvValue ? col.csvValue(raw, row) : raw;
         }),
@@ -215,7 +225,7 @@ export function SmartTable<T extends object>({
       ),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, deferredSearch, columnsSig]);
+  }, [data, deferredSearch, columns]);
 
   // Volver a la primera página cuando cambia la búsqueda.
   useEffect(() => {
@@ -235,9 +245,10 @@ export function SmartTable<T extends object>({
   const exportCSV = useCallback(() => {
     // downloadCSV escapa cada valor (toCSVValue) y le agrega la fecha al filename;
     // acá solo coerción a string preservando null → "" (no "null").
-    const headers = visibleColumns.map((c) => String(c.header ?? ""));
+    const exportColumns = visibleColumns.filter((c) => c.exportable !== false);
+    const headers = exportColumns.map((c) => String(c.header ?? ""));
     const rows = filteredData.map((row) =>
-      visibleColumns.map((col) => {
+      exportColumns.map((col) => {
         const raw = (row as Record<string, unknown>)[col.key];
         const cell = col.csvValue ? col.csvValue(raw, row) : raw;
         return cell == null ? "" : String(cell);

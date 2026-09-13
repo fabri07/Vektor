@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Trash2 } from "lucide-react";
+import { Eye, Pencil, Trash2 } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 import { StatCard } from "@/components/ui/StatCard";
@@ -12,9 +12,11 @@ import { Modal } from "@/components/ui/Modal";
 import { salesService, type SaleEntryResponse } from "@/services/sales.service";
 import { productsService, type ProductResponse } from "@/services/products.service";
 import { customersService, type CustomerResponse } from "@/services/customers.service";
-import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
-import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { AllDataModal } from "@/features/customFields/AllDataModal";
+import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFieldColumns";
+import { useAuthStore } from "@/stores/authStore";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
+import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
@@ -155,6 +157,8 @@ export default function SalesPage() {
     preset: "this_month",
   });
   const [editing, setEditing] = useState<SaleEntryResponse | null>(null);
+  const [viewingAllData, setViewingAllData] = useState<SaleEntryResponse | null>(null);
+  const user = useAuthStore((s) => s.user);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
   const { from, to } = resolvePeriod(period);
@@ -206,12 +210,6 @@ export default function SalesPage() {
     staleTime: 30 * 60 * 1000,
   });
   const catalogLabels = Object.fromEntries(categories.map((c) => [c.code, c.label]));
-
-  const { data: fieldDefs = [] } = useQuery({
-    queryKey: ["field-definitions", "sale"],
-    queryFn: () => fieldDefinitionsService.getAll("sale"),
-    staleTime: 5 * 60 * 1000,
-  });
 
   const { data: prevEntries = [] } = useQuery({
     queryKey: ["sales-entries-prev", prevDates.from, prevDates.to],
@@ -282,10 +280,11 @@ export default function SalesPage() {
     update: (id, custom_fields) => salesService.updateSale(id, { custom_fields }),
   });
 
-  const columns = [
-    ...buildColumns(productById, catalogLabels, customerById),
-    ...buildEditableCustomFieldColumns<SaleEntryResponse>(fieldDefs, saveCustomField),
-  ];
+  const columns = useBusinessFieldColumns<SaleEntryResponse>({
+    entityType: "sale",
+    existingColumns: buildColumns(productById, catalogLabels, customerById),
+    onSaveCustomField: saveCustomField,
+  });
 
   return (
     <PageWrapper title="Ventas" actions={<ManualEntryLauncher />}>
@@ -348,10 +347,25 @@ export default function SalesPage() {
           <SmartTable
             columns={columns}
             data={sorted}
+            storageKey={user ? `${user.tenant_id}:${user.id}:sales` : undefined}
             exportFilename="vektor-ventas"
-            toolbarActions={<AddColumnButton entityType="sale" entityLabel="Ventas" />}
+            toolbarActions={
+              <>
+                <AddColumnButton entityType="sale" entityLabel="Ventas" />
+                <ExportAllFieldsButton entityType="sale" entityLabel="Ventas" />
+              </>
+            }
             renderActions={(row) => (
               <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  title="Ver todos los datos"
+                  aria-label="Ver todos los datos"
+                  onClick={() => setViewingAllData(row)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+                >
+                  <Eye className="h-4 w-4" />
+                </button>
                 <button
                   type="button"
                   title="Editar"
@@ -388,6 +402,15 @@ export default function SalesPage() {
         products={products}
         customers={realCustomers}
       />
+      {viewingAllData && (
+        <AllDataModal
+          entityType="sale"
+          title={viewingAllData.notes || "Venta"}
+          row={entries.find((entry) => entry.id === viewingAllData.id) ?? viewingAllData}
+          isOpen={true}
+          onClose={() => setViewingAllData(null)}
+        />
+      )}
     </PageWrapper>
   );
 }

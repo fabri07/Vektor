@@ -34,8 +34,12 @@ export function formatCustomFieldValue(
   if (value == null || value === "") return "—";
   switch (dataType) {
     case "number": {
+      if ((typeof value !== "string" && typeof value !== "number") ||
+          (typeof value === "string" && (!value.trim() || value.replace(/\D/g, "").length > 15))) {
+        return stringifyRaw(value);
+      }
       const n = Number(value);
-      return Number.isFinite(n) ? n.toLocaleString("es-AR") : stringifyRaw(value);
+      return Number.isFinite(n) ? n.toLocaleString("es-AR", { maximumFractionDigits: 20 }) : stringifyRaw(value);
     }
     case "date": {
       const d = new Date(String(value));

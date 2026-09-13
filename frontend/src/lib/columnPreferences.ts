@@ -18,6 +18,8 @@ export interface ColumnPreferences {
   /** Claves de columnas que el usuario ya vio alguna vez — lo que NO está acá
    * es "nuevo" (recién declarado por una importación, por ejemplo). */
   known: string[];
+  /** Opcional para leer preferencias v1 previas a la incorporación del orden. */
+  order?: string[];
 }
 
 function claveCompleta(storageKey: string): string {
@@ -31,12 +33,15 @@ export function leerPreferenciasDeColumnas(storageKey: string): ColumnPreference
     if (!crudo) return null;
     const parseado: unknown = JSON.parse(crudo);
     if (typeof parseado !== "object" || parseado === null) return null;
-    const { visible, known } = parseado as Record<string, unknown>;
+    const { visible, known, order } = parseado as Record<string, unknown>;
     if (!Array.isArray(visible) || !Array.isArray(known)) return null;
     if (!visible.every((v) => typeof v === "string") || !known.every((k) => typeof k === "string")) {
       return null;
     }
-    return { visible, known };
+    return {
+      visible, known,
+      ...(Array.isArray(order) && order.every((key) => typeof key === "string") ? { order } : {}),
+    };
   } catch {
     return null;
   }

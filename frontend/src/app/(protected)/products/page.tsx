@@ -17,13 +17,10 @@ import {
   type ProductCategoryOption,
   type ProductResponse,
 } from "@/services/products.service";
-import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
-import { fieldCatalogService } from "@/services/fieldCatalog.service";
-import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
-import { buildAvailableFieldColumns } from "@/lib/fieldCatalog";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
+import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFieldColumns";
 import { AllDataModal } from "@/features/customFields/AllDataModal";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
@@ -81,24 +78,6 @@ function stockSort(a: ProductResponse, b: ProductResponse): number {
   };
   return rank(a) - rank(b);
 }
-
-// Cambio 2 (docs/plans/conservacion-y-acceso-datos-negocio.md): field_id del
-// catálogo de lectura (Cambio 1) que YA tiene una columna a mano en `COLUMNS`
-// — la tabla dinámica de abajo no los duplica. `custom_fields.*` porque así
-// arma `field_id_for` para los de evidencia (ver domain/business_field_
-// catalog.py); "acquired_at" tiene su propio fallback a created_at acá.
-const EXCLUDED_FIELD_IDS = new Set([
-  "product:name",
-  "product:sku",
-  "product:category",
-  "product:stock_units",
-  "product:sale_price_ars",
-  "product:unit_cost_ars",
-  "product:list_price_ars",
-  "product:custom_fields.purchase_base_cost",
-  "product:custom_fields.shipping_percentage",
-  "product:acquired_at",
-]);
 
 const STOCK_FILTER_OPTIONS: { value: StockFilter; label: string }[] = [
   { value: "all", label: "Todos" },
@@ -203,6 +182,7 @@ const COLUMNS = [
   },
   {
     key: "_purchase_base_cost",
+    fieldId: "product:custom_fields.purchase_base_cost",
     header: "Precio de compra (costo base, sin envío)",
     hideable: true,
     // Auxiliar del costo (F-H6.d): el archivo lo trae por separado del costo
@@ -220,6 +200,7 @@ const COLUMNS = [
   },
   {
     key: "_shipping_percentage",
+    fieldId: "product:custom_fields.shipping_percentage",
     header: "% de envío sobre el costo base",
     hideable: true,
     // Sparse en la práctica (la mayoría de los archivos no la traen) — oculta
@@ -263,6 +244,7 @@ const COLUMNS = [
   },
   {
     key: "_acquired",
+    fieldId: "product:acquired_at",
     header: "Fecha de alta",
     hideable: true,
     defaultVisible: false,
@@ -322,27 +304,6 @@ export default function ProductsPage() {
   });
   const catalogLabels = Object.fromEntries(categories.map((c) => [c.code, c.label]));
 
-  const { data: fieldDefs = [] } = useQuery({
-    queryKey: ["field-definitions", "product"],
-    queryFn: () => fieldDefinitionsService.getAll("product"),
-    staleTime: 5 * 60 * 1000,
-  });
-
-  // Cambio 1+2: catálogo de LECTURA (canónico + evidencia + adicional, con
-  // identidad estable). Acá solo se usa canónico/evidencia — lo "adicional"
-  // ya lo cubre `buildEditableCustomFieldColumns` (arriba) con edición inline;
-  // sumarlo acá también duplicaría la columna con dos field_id distintos
-  // (`cf_<key>` vs `product:custom_fields.<key>`) para el mismo dato.
-  const { data: availableFields = [] } = useQuery({
-    queryKey: ["fields-available", "product"],
-    queryFn: () => fieldCatalogService.getAvailableFields("product"),
-    staleTime: 5 * 60 * 1000,
-  });
-  const dynamicFieldColumns = buildAvailableFieldColumns<Record<string, unknown>>(
-    availableFields.filter((f) => f.origin !== "additional"),
-    EXCLUDED_FIELD_IDS,
-  );
-
   const categoryColumn = {
     key: "category",
     header: "Categoría",
@@ -357,16 +318,15 @@ export default function ProductsPage() {
     update: (id, custom_fields) => productsService.updateProduct(id, { custom_fields }),
   });
 
-  const columns = [
-    ...COLUMNS.slice(0, 2),
-    categoryColumn,
-    ...COLUMNS.slice(2),
-    ...dynamicFieldColumns,
-    ...buildEditableCustomFieldColumns<Record<string, unknown>>(
-      fieldDefs,
-      saveProductCustomField,
-    ),
-  ];
+  const columns = useBusinessFieldColumns<Record<string, unknown>>({
+    entityType: "product",
+    existingColumns: [
+      ...COLUMNS.slice(0, 2),
+      categoryColumn,
+      ...COLUMNS.slice(2),
+    ],
+    onSaveCustomField: saveProductCustomField,
+  });
 
   const updateMutation = useMutation({
     mutationFn: (payload: ProductResponse) =>
