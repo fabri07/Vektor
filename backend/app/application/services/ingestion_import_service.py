@@ -3148,6 +3148,7 @@ async def _apply_catalog_stock(
     balance_index: dict[uuid.UUID, Any] | None,
     pending_balances: dict[uuid.UUID, _BalancePendiente] | None = None,
     is_purchase: bool = False,
+    supplier_id: uuid.UUID | None = None,
 ) -> None:
     """Aplica el stock de una fila de CATÁLOGO al inventario, según su tratamiento.
 
@@ -3166,6 +3167,14 @@ async def _apply_catalog_stock(
     En ambos casos se registra el ``InventoryMovement`` estampado con origen (A2) para
     traza/dedup/reversa. ``delta > 0`` = ingreso; ``delta < 0`` = baja (siempre ajuste,
     sin COGS); ``delta == 0`` = no-op.
+
+    ``supplier_id``: el ``Supplier.id`` YA resuelto por el caller (Bloque 2, cuando
+    "Tienda" se mapeó a Proveedor) — acá NO se resuelve de nuevo. Sin este campo el
+    movimiento quedaba con ``supplier_id=NULL`` aunque el vínculo Producto↔Proveedor
+    se hubiera declarado en ``product_supplier_links``: son dos tablas distintas, y
+    ``GET /suppliers/{id}/products`` lee ÚNICAMENTE de ``inventory_movements`` (hallazgo
+    ASTERIA 2026-09-13 — la sección de Proveedores aparecía vacía pese a que la
+    vinculación estaba habilitada y los proveedores ya existían).
     """
     if delta == 0:
         return
@@ -3204,6 +3213,7 @@ async def _apply_catalog_stock(
         final_qty,
         balance_index=balance_index,
         pending_balances=pending_balances,
+        supplier_id=supplier_id,
         source_type=SOURCE_CATALOG_INITIAL_STOCK,
         source_upload_id=uploaded_file_id,
         source_row_ref=source_row_ref,
@@ -7954,6 +7964,24 @@ async def _insert_multisheet_data(
                 link_index=_link_index,
             )
             _declared_supplier_pairs.add((target_product_id, _supplier_id))
+
+        async def _supplier_id_for_stock_movement() -> uuid.UUID | None:
+            """El proveedor a estampar en el ``InventoryMovement`` de esta fila.
+
+            Solo cuando "Tienda" se mapeó a Proveedor (Bloque 2) — si no,
+            ``store_name`` es una marca, no un proveedor real, y estampar un
+            ``supplier_id`` igual poblaría `GET /suppliers/{id}/products` con
+            datos que la fila nunca declaró como compra a ese proveedor.
+            Reusa ``_supplier_index`` (mismo find-or-create que
+            ``_declarar_link_proveedor``): la segunda resolución de la misma
+            fila es un lookup en memoria, no una query nueva.
+            """
+            if not (_store_mapped_as_supplier and store_name):
+                return None
+            _sid, _ = await _resolve_or_create_supplier(
+                session, tenant_id, store_name, _supplier_index
+            )
+            return _sid
         # Mejora C: costo unitario narrow-first. Se resuelve ANTES que el precio
         # para poder excluirlo (desambiguar "precio de compra" vs "precio de
         # venta"). Mapeo explícito gana; si no, una columna inequívoca de costo
@@ -8203,6 +8231,7 @@ async def _insert_multisheet_data(
                     balance_index=_balance_index,
                     pending_balances=_pending_balances,
                     is_purchase=stock_is_purchase,
+                    supplier_id=await _supplier_id_for_stock_movement(),
                 )
             if sku:
                 existing.sku = sku
@@ -8493,6 +8522,7 @@ async def _insert_multisheet_data(
                     balance_index=_balance_index,
                     pending_balances=_pending_balances,
                     is_purchase=stock_is_purchase,
+                    supplier_id=await _supplier_id_for_stock_movement(),
                 )
                 await _declarar_link_proveedor(_new_id)
                 # Alta nueva: sin `after` — un producto CREADO por este

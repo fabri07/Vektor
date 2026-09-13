@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.ingestion_import_service import insert_confirmed_data
 from app.config.settings import get_settings
 from app.persistence.models.field_definitions import TenantCustomFieldDefinition
+from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.product_supplier_link import ProductSupplierLink
 from app.persistence.models.supplier import Supplier
@@ -125,6 +126,71 @@ async def test_un_producto_con_dos_proveedores(
     ).scalars().all()
     assert {s.name for s in suppliers} == {"El pasillo", "sublink"}
     assert all(link.source == "catalog_declared" for link in links)
+
+
+async def test_el_link_declarado_tambien_estampa_el_movimiento_de_inventario(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hallazgo ASTERIA 2026-09-13: ``product_supplier_links`` (Bloque 2, este
+    módulo) y ``inventory_movements.supplier_id`` son tablas DISTINTAS —
+    ``GET /suppliers/{id}/products`` lee únicamente de la segunda. Declarar el
+    vínculo sin estampar el movimiento dejaba la sección de Proveedores vacía
+    aunque el link ya existiera y la vinculación estuviera habilitada.
+    """
+    tid = sample_tenant.tenant_id
+    _enable(monkeypatch, tid)
+
+    context_mappings = {
+        "sheet:Catalogo": {
+            "nombre": "name",
+            "tienda": "supplier:name",
+            "precio": "sale_price_ars",
+            "stock": "stock_units",
+        },
+    }
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "has_stock": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Catalogo",
+                "label": "Catalogo",
+                "entity_type": "product",
+                "headers": ["nombre", "tienda", "precio", "stock"],
+                "row_count": 1,
+            },
+        ],
+        "stock_detectado": [
+            {
+                "nombre": "Ganchos para cortina de baño",
+                "tienda": "El pasillo",
+                "precio": "100",
+                "stock": "10",
+                "__context__": "sheet:Catalogo",
+            }
+        ],
+    }
+    await insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"productos": True},
+        context_mappings=context_mappings,
+        context_confirmed={"sheet:Catalogo": True},
+    )
+
+    supplier = (
+        await db_session.execute(select(Supplier).where(Supplier.tenant_id == tid))
+    ).scalar_one()
+    movements = (
+        await db_session.execute(
+            select(InventoryMovement).where(InventoryMovement.tenant_id == tid)
+        )
+    ).scalars().all()
+    assert len(movements) == 1
+    assert movements[0].supplier_id == supplier.id
 
 
 async def test_dos_filas_repetidas_no_duplican_el_vinculo(
