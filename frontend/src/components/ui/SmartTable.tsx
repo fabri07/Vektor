@@ -1,13 +1,18 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useMemo, useDeferredValue } from "react";
-import { Download, SlidersHorizontal, Check, ChevronLeft, ChevronRight } from "lucide-react";
+import { Download, SlidersHorizontal, Check, ChevronLeft, ChevronRight, RotateCcw } from "lucide-react";
 import type { ReactNode } from "react";
 import { Table } from "./Table";
 import type { TableColumn } from "./Table";
 import { TableSearch } from "./TableSearch";
 import { matchesRow } from "@/lib/search";
 import { downloadCSV } from "@/lib/csv";
+import {
+  borrarPreferenciasDeColumnas,
+  guardarPreferenciasDeColumnas,
+  leerPreferenciasDeColumnas,
+} from "@/lib/columnPreferences";
 
 export interface SmartColumn<T = Record<string, unknown>> extends TableColumn<T> {
   hideable?: boolean;
@@ -26,6 +31,14 @@ interface SmartTableProps<T extends object> {
   /** Muestra el buscador en la toolbar (default true). */
   searchable?: boolean;
   searchPlaceholder?: string;
+  /**
+   * Clave para persistir mostrar/ocultar columnas en `localStorage` (Cambio 2
+   * del plan de conservación). El caller arma la clave versionada por
+   * tenant+usuario+sección (ej. `${tenantId}:${userId}:products`) — esta
+   * tabla no conoce identidad, solo persiste bajo la clave que le pasan. Sin
+   * esta prop, el comportamiento es el de siempre (en memoria, sin persistir).
+   */
+  storageKey?: string;
 }
 
 type PageSize = number | "all";
@@ -39,6 +52,10 @@ const PAGE_SIZE_OPTIONS: { value: PageSize; label: string }[] = [
 
 const DEFAULT_PAGE_SIZE: PageSize = 25;
 
+function defaultVisibleKeys<T>(columns: SmartColumn<T>[]): Set<string> {
+  return new Set(columns.filter((c) => c.defaultVisible !== false).map((c) => c.key));
+}
+
 export function SmartTable<T extends object>({
   columns,
   data,
@@ -48,15 +65,31 @@ export function SmartTable<T extends object>({
   toolbarActions,
   searchable = true,
   searchPlaceholder,
+  storageKey,
 }: SmartTableProps<T>) {
-  const [visibleKeys, setVisibleKeys] = useState<Set<string>>(
-    () =>
-      new Set(
-        columns
-          .filter((c) => c.defaultVisible !== false)
-          .map((c) => c.key),
-      ),
-  );
+  // Preferencias guardadas de ESTA clave (si hay) — se leen una sola vez al
+  // montar. Cambiar de storageKey (ej. cambiar de tenant/usuario) remonta el
+  // componente en la práctica porque cambia la key de React del caller; leer
+  // en cada render sería más "correcto" pero también más caro sin necesidad.
+  const preferenciasIniciales = useRef(
+    storageKey ? leerPreferenciasDeColumnas(storageKey) : null,
+  ).current;
+
+  const [visibleKeys, setVisibleKeys] = useState<Set<string>>(() => {
+    if (!preferenciasIniciales) return defaultVisibleKeys(columns);
+    // Una columna GUARDADA visible sigue visible aunque ya no exista en el
+    // array actual — no le hace daño a nadie y evita que un remount pierda la
+    // preferencia por una carrera de timing en las columnas del caller.
+    const visibles = new Set(preferenciasIniciales.visible);
+    // Columnas que el caller declara HOY pero la preferencia nunca vio
+    // (nuevas de verdad, no solo "primera vez que corre esta sesión"):
+    // arrancan según su propio defaultVisible, como si no hubiera storage.
+    const known = new Set(preferenciasIniciales.known);
+    for (const c of columns) {
+      if (!known.has(c.key) && c.defaultVisible !== false) visibles.add(c.key);
+    }
+    return visibles;
+  });
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
@@ -65,20 +98,61 @@ export function SmartTable<T extends object>({
   const deferredSearch = useDeferredValue(search);
 
   // Columnas que ya vimos: las nuevas (ej: una columna personalizada recién
-  // creada con defaultVisible:true) se agregan a visibleKeys sin pisar los
-  // toggles manuales del usuario sobre columnas ya conocidas.
-  const knownKeysRef = useRef<Set<string>>(new Set(columns.map((c) => c.key)));
+  // creada con defaultVisible:true, o un campo que una importación acaba de
+  // declarar) se agregan a visibleKeys sin pisar los toggles manuales del
+  // usuario sobre columnas ya conocidas, y se marcan "Nueva" en el selector
+  // hasta la próxima vez que el usuario interactúe con la tabla.
+  const knownKeysRef = useRef<Set<string>>(
+    new Set([...(preferenciasIniciales?.known ?? []), ...columns.map((c) => c.key)]),
+  );
+  const [nuevas, setNuevas] = useState<Set<string>>(() => {
+    if (!preferenciasIniciales) return new Set();
+    const known = new Set(preferenciasIniciales.known);
+    return new Set(columns.filter((c) => !known.has(c.key)).map((c) => c.key));
+  });
   const columnsSig = columns.map((c) => c.key).join("|");
   useEffect(() => {
     const fresh = columns.filter((c) => !knownKeysRef.current.has(c.key));
     if (fresh.length === 0) return;
     fresh.forEach((c) => knownKeysRef.current.add(c.key));
+    setNuevas((prev) => new Set([...prev, ...fresh.map((c) => c.key)]));
     const toShow = fresh.filter((c) => c.defaultVisible !== false).map((c) => c.key);
     if (toShow.length > 0) {
       setVisibleKeys((prev) => new Set([...prev, ...toShow]));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [columnsSig]);
+
+  // Persistir: cualquier cambio de visibilidad, o cualquier columna nueva que
+  // se suma a "ya vista", se escribe bajo la misma clave. Sin `storageKey` es
+  // un no-op (guardarPreferenciasDeColumnas mira `typeof window` igual, pero
+  // acá ni siquiera se llama). `skipNextPersistRef` evita la carrera de
+  // "Restablecer": ese cambio de estado SÍ dispara este efecto (el Set es una
+  // instancia nueva), y sin la bandera reescribiría en storage el mismo
+  // default que se acaba de borrar — quedaría "reseteado" en memoria pero
+  // persistido igual, así que la próxima carga de página no vería el reset.
+  const skipNextPersistRef = useRef(false);
+  useEffect(() => {
+    if (!storageKey) return;
+    if (skipNextPersistRef.current) {
+      skipNextPersistRef.current = false;
+      return;
+    }
+    guardarPreferenciasDeColumnas(storageKey, {
+      visible: [...visibleKeys],
+      known: [...knownKeysRef.current],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageKey, visibleKeys, columnsSig]);
+
+  const resetToDefaults = useCallback(() => {
+    skipNextPersistRef.current = true;
+    setVisibleKeys(defaultVisibleKeys(columns));
+    knownKeysRef.current = new Set(columns.map((c) => c.key));
+    setNuevas(new Set());
+    if (storageKey) borrarPreferenciasDeColumnas(storageKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columnsSig, storageKey]);
 
   useEffect(() => {
     function handler(e: MouseEvent) {
@@ -98,6 +172,13 @@ export function SmartTable<T extends object>({
       } else {
         next.add(key);
       }
+      return next;
+    });
+    // Tocarla es "verla": deja de mostrarse como Nueva en el selector.
+    setNuevas((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
       return next;
     });
   }, []);
@@ -213,10 +294,24 @@ export function SmartTable<T extends object>({
                           {visibleKeys.has(col.key) && <Check className="h-2.5 w-2.5" />}
                         </span>
                         <span className="text-vk-text-primary">{col.header}</span>
+                        {nuevas.has(col.key) && (
+                          <span className="ml-auto rounded-full bg-vk-info-bg px-1.5 py-0.5 text-[10px] font-medium text-vk-info">
+                            Nueva
+                          </span>
+                        )}
                       </button>
                     </li>
                   ))}
                 </ul>
+                {storageKey && (
+                  <button
+                    onClick={resetToDefaults}
+                    className="flex w-full items-center gap-1.5 border-t border-vk-border-w px-3 py-2 text-left text-xs text-vk-text-secondary hover:bg-vk-bg-light hover:text-vk-text-primary transition-colors"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    Restablecer columnas
+                  </button>
+                )}
               </div>
             )}
           </div>

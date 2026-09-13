@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Trash2, Eye } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 import { StatCard } from "@/components/ui/StatCard";
@@ -18,11 +18,15 @@ import {
   type ProductResponse,
 } from "@/services/products.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
+import { fieldCatalogService } from "@/services/fieldCatalog.service";
 import { buildEditableCustomFieldColumns } from "@/lib/customFieldsEditable";
+import { buildAvailableFieldColumns } from "@/lib/fieldCatalog";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
+import { AllDataModal } from "@/features/customFields/AllDataModal";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
+import { useAuthStore } from "@/stores/authStore";
 
 type StockFilter = "all" | "in_stock" | "low_stock" | "out_of_stock";
 
@@ -76,6 +80,24 @@ function stockSort(a: ProductResponse, b: ProductResponse): number {
   };
   return rank(a) - rank(b);
 }
+
+// Cambio 2 (docs/plans/conservacion-y-acceso-datos-negocio.md): field_id del
+// catálogo de lectura (Cambio 1) que YA tiene una columna a mano en `COLUMNS`
+// — la tabla dinámica de abajo no los duplica. `custom_fields.*` porque así
+// arma `field_id_for` para los de evidencia (ver domain/business_field_
+// catalog.py); "acquired_at" tiene su propio fallback a created_at acá.
+const EXCLUDED_FIELD_IDS = new Set([
+  "product:name",
+  "product:sku",
+  "product:category",
+  "product:stock_units",
+  "product:sale_price_ars",
+  "product:unit_cost_ars",
+  "product:list_price_ars",
+  "product:custom_fields.purchase_base_cost",
+  "product:custom_fields.shipping_percentage",
+  "product:acquired_at",
+]);
 
 const STOCK_FILTER_OPTIONS: { value: StockFilter; label: string }[] = [
   { value: "all", label: "Todos" },
@@ -266,8 +288,11 @@ export default function ProductsPage() {
   // muestra solo productos auto-creados por import sin costo/precio cargado.
   const requiresCompletionOnly = searchParams.get("filter") === "requires_completion";
   const [editing, setEditing] = useState<ProductResponse | null>(null);
+  // Cambio 2: fila para la que se abrió "Todos los datos" (null = cerrado).
+  const [viewingAllData, setViewingAllData] = useState<ProductResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
+  const user = useAuthStore((s) => s.user);
 
   const { data: products = [], isLoading, isError } = useQuery({
     queryKey: ["products-list"],
@@ -301,6 +326,22 @@ export default function ProductsPage() {
     queryFn: () => fieldDefinitionsService.getAll("product"),
     staleTime: 5 * 60 * 1000,
   });
+
+  // Cambio 1+2: catálogo de LECTURA (canónico + evidencia + adicional, con
+  // identidad estable). Acá solo se usa canónico/evidencia — lo "adicional"
+  // ya lo cubre `buildEditableCustomFieldColumns` (arriba) con edición inline;
+  // sumarlo acá también duplicaría la columna con dos field_id distintos
+  // (`cf_<key>` vs `product:custom_fields.<key>`) para el mismo dato.
+  const { data: availableFields = [] } = useQuery({
+    queryKey: ["fields-available", "product"],
+    queryFn: () => fieldCatalogService.getAvailableFields("product"),
+    staleTime: 5 * 60 * 1000,
+  });
+  const dynamicFieldColumns = buildAvailableFieldColumns<Record<string, unknown>>(
+    availableFields.filter((f) => f.origin !== "additional"),
+    EXCLUDED_FIELD_IDS,
+  );
+
   const categoryColumn = {
     key: "category",
     header: "Categoría",
@@ -319,6 +360,7 @@ export default function ProductsPage() {
     ...COLUMNS.slice(0, 2),
     categoryColumn,
     ...COLUMNS.slice(2),
+    ...dynamicFieldColumns,
     ...buildEditableCustomFieldColumns<Record<string, unknown>>(
       fieldDefs,
       saveProductCustomField,
@@ -499,10 +541,23 @@ export default function ProductsPage() {
           data={tableData as Record<string, unknown>[]}
           exportFilename="vektor-productos"
           toolbarActions={<AddColumnButton entityType="product" entityLabel="Productos" />}
+          // Cambio 2: preferencias de columnas versionadas por tenant+usuario+
+          // sección. Sin usuario logueado (no debería pasar en una ruta
+          // protegida) queda sin persistir — mismo comportamiento de siempre.
+          storageKey={user ? `${user.tenant_id}:${user.id}:products` : undefined}
           renderActions={(row) => {
             const product = row as unknown as ProductResponse;
             return (
               <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  title="Ver todos los datos"
+                  aria-label="Ver todos los datos"
+                  onClick={() => setViewingAllData(product)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+                >
+                  <Eye className="h-4 w-4" />
+                </button>
                 <button type="button" title="Editar" aria-label="Editar producto" onClick={() => setEditing(product)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary">
                   <Pencil className="h-4 w-4" />
                 </button>
@@ -530,6 +585,15 @@ export default function ProductsPage() {
         onClose={() => setEditing(null)}
         onSave={(product) => updateMutation.mutate(product)}
       />
+      {viewingAllData && (
+        <AllDataModal
+          entityType="product"
+          title={viewingAllData.name}
+          row={viewingAllData}
+          isOpen={true}
+          onClose={() => setViewingAllData(null)}
+        />
+      )}
     </PageWrapper>
   );
 }
