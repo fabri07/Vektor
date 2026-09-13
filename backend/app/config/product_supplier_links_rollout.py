@@ -1,35 +1,29 @@
-"""Bloque 2 — compuerta de rollout por tenant de los vínculos Producto↔Proveedor
-declarados en catálogo (Tienda → proveedor, ``product_supplier_links``).
+"""Bloque 2 — vínculos Producto↔Proveedor declarados en catálogo (Tienda →
+proveedor, ``product_supplier_links``).
 
-Mismo criterio que ``purchase_cost_rollout.py`` (F-H6.c/d): sin staging propio,
-el rollout por tenant ES el staging. Lista vacía (default) ⇒ nadie habilitado,
-comportamiento idéntico al de hoy — "Tienda" sigue guardándose como
-``custom_fields["marca"]`` y nunca crea un ``Supplier``. Reusa el parseo de
-``purchase_cost_rollout.py`` en vez de duplicarlo: dos parsers de la misma forma
-de variable (csv/JSON array/lista) podrían divergir en un borde y la duda
-siempre tiene que resolver al lado seguro (no habilitar).
+**Graduada (2026-09-13):** esto era una compuerta de rollout por tenant
+(lista vacía ⇒ nadie habilitado). Probada en ASTERIA y decidido por el
+usuario que sea el comportamiento por default para TODOS los tenants,
+existentes y futuros — no una lista que haya que mantener a mano en Railway
+cada vez que se crea una cuenta nueva. `PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS`
+queda sin uso (no se borra el campo de `Settings` ni la migración: borrarlos
+no aporta nada y una var de entorno vieja en Railway no rompe nada al no
+leerse más).
 """
 
 from __future__ import annotations
 
 import uuid
 
-from app.config.purchase_cost_rollout import normalizar_tenant_id
-
 ENV_VAR = "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS"
 
 
-def product_supplier_links_enabled_for(tenant_id: uuid.UUID | str) -> bool:
-    """¿Este tenant tiene habilitado Tienda→proveedor (Bloque 2)?
+def product_supplier_links_enabled_for(tenant_id: uuid.UUID | str) -> bool:  # noqa: ARG001
+    """Siempre ``True`` — ver docstring del módulo (compuerta graduada).
 
-    Lista vacía (el default) ⇒ ``False`` para todos. Un ``tenant_id`` que no es
-    un UUID también da ``False``: no habilitar es el lado seguro de la duda.
+    Se conserva la función (no se inlinea `True` en los call sites) porque
+    sigue siendo el único punto que ``import_capabilities.py`` y
+    ``ingestion_import_service._add_product`` consultan; si el día de mañana
+    hiciera falta volver a gatear esto por tenant, hay un solo lugar que tocar.
     """
-    from app.config.settings import get_settings  # noqa: PLC0415
-
-    normalizado = normalizar_tenant_id(tenant_id)
-    if normalizado is None:
-        return False
-
-    configurados = get_settings().PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS
-    return any(normalizar_tenant_id(entrada) == normalizado for entrada in configurados)
+    return True

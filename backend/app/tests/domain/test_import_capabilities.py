@@ -93,5 +93,12 @@ def test_las_capacidades_efectivas_cubren_las_compuertas_que_cambian_numeros() -
         "CATALOG_FINAL_COST_ROLLOUT_TENANT_IDS",
         "INGESTION_SCHEMA_DECISIONS_ROLLOUT_TENANT_IDS",
     }
-    # Sin nadie habilitado (el default), todas en False: el lado seguro.
-    assert all(v is False for v in caps.values())
+    # PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS se graduó (2026-09-13): siempre
+    # True, para cualquier tenant — ya no es un rollout por lista. Las otras
+    # tres siguen siendo compuertas reales, en False por default (lado seguro).
+    assert caps["PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS"] is True
+    assert all(
+        v is False
+        for k, v in caps.items()
+        if k != "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS"
+    )

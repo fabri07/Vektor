@@ -4926,12 +4926,17 @@ class TestReprocesoLimpiaElToken:
 
 
 class TestSupplierLinkHardReject:
-    """Cambio 4: rechazo duro (422) de 'Proveedor — Nombre' con el flag
-    PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS apagado. Estos tests cubren el
-    rechazo TEMPRANO (pre-lease, antes de tocar datos) para el mapeo elegido
-    EN esta llamada; el chokepoint real (SupplierLinkNotEnabledError en
-    `_add_product`, que reemplazó por completo el downgrade silencioso a
-    "marca" y su contador) se cubre en test_product_supplier_links_bloque2.py."""
+    """Cambio 4: rechazo duro (422) de 'Proveedor — Nombre' cuando
+    `product_supplier_links_enabled_for` da False para el tenant.
+
+    `PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS` se graduó (2026-09-13):
+    `product_supplier_links_enabled_for` ahora es siempre True, así que el
+    camino de rechazo (`test_confirm_rechaza_supplier_name_con_flag_apagado`,
+    quitado) ya no es alcanzable con la configuración real — se prueba
+    directo en `test_import_capabilities.py`
+    (`contexts_mapping_disabled_supplier_link` con `enabled=False`
+    explícito). Lo que queda acá es la garantía de que el mapeo SIEMPRE
+    permitido no se ve afectado por el chequeo."""
 
     @staticmethod
     def _catalogo_record(tenant_id: uuid.UUID) -> UploadedFile:
@@ -4960,32 +4965,6 @@ class TestSupplierLinkHardReject:
                 ],
             },
         )
-
-    async def test_confirm_rechaza_supplier_name_con_flag_apagado(
-        self,
-        client: AsyncClient,
-        auth_headers: dict[str, Any],
-        db_session: AsyncSession,
-        sample_tenant: Tenant,
-    ) -> None:
-        record = self._catalogo_record(sample_tenant.tenant_id)
-        db_session.add(record)
-        await db_session.commit()
-
-        response = await client.post(
-            f"/api/v1/ingestion/files/{record.id}/confirm",
-            headers=auth_headers,
-            json={
-                "confirmed_fields": {"productos": True},
-                "column_mappings": [
-                    {"source_column": "nombre", "target_field": "name"},
-                    {"source_column": "tienda", "target_field": "supplier:name"},
-                    {"source_column": "precio", "target_field": "sale_price_ars"},
-                ],
-            },
-        )
-        assert response.status_code == 422
-        assert "Producto↔Proveedor" in response.json()["detail"]
 
     async def test_confirm_no_rechaza_si_la_columna_se_dropea(
         self,
@@ -5076,16 +5055,21 @@ class TestSupplierLinkHardReject:
         sample_tenant: Tenant,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS se graduó (siempre True,
+        ver product_supplier_links_rollout.py) — se prueba la dependencia del
+        tenant con PURCHASE_COST_ROLLOUT_TENANT_IDS, que sigue siendo una
+        compuerta real por lista."""
         from app.config.settings import get_settings
 
         apagado = await client.get("/api/v1/ingestion/capabilities", headers=auth_headers)
         assert apagado.status_code == 200
-        assert apagado.json()["PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS"] is False
+        assert apagado.json()["PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS"] is True
+        assert apagado.json()["PURCHASE_COST_ROLLOUT_TENANT_IDS"] is False
 
         monkeypatch.setattr(
             get_settings(),
-            "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS",
+            "PURCHASE_COST_ROLLOUT_TENANT_IDS",
             [str(sample_tenant.tenant_id)],
         )
         prendido = await client.get("/api/v1/ingestion/capabilities", headers=auth_headers)
-        assert prendido.json()["PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS"] is True
+        assert prendido.json()["PURCHASE_COST_ROLLOUT_TENANT_IDS"] is True

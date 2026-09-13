@@ -398,52 +398,13 @@ async def test_aislamiento_entre_tenants(
     assert {s.id for s in suppliers_a}.isdisjoint({s.id for s in suppliers_b})
 
 
-async def test_flag_apagado_rechaza_el_import(
+async def test_flag_encendido_no_rechaza_y_crea_el_vinculo(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Cambio 4: sin habilitar el rollout, mapear "Tienda" a `supplier:name`
-    ya NO degrada en silencio a marca — rechaza con `SupplierLinkNotEnabledError`
-    (chokepoint único en `_add_product`, cubre confirm/async/relectura). El
-    dropdown ofrece "Proveedor — Nombre" a todos los tenants por igual, así que
-    sin esto el usuario que la elige no recibía ningún aviso."""
-    from app.application.services.ingestion_import_service import (
-        SupplierLinkNotEnabledError,
-    )
-
+    """`product_supplier_links_enabled_for` está graduada (siempre True,
+    2026-09-13) — el mismo mapeo NO levanta `SupplierLinkNotEnabledError`,
+    para cualquier tenant, sin necesitar habilitar nada."""
     tid = sample_tenant.tenant_id
-    assert get_settings().PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS == []
-
-    summary = _summary([_row("Producto G", "El pasillo")])
-    with pytest.raises(SupplierLinkNotEnabledError, match="El pasillo"):
-        await insert_confirmed_data(
-            db_session,
-            tid,
-            summary,
-            {"productos": True},
-            context_mappings=_CONTEXT_MAPPINGS,
-            context_confirmed={"sheet:Catalogo": True},
-        )
-
-    # Nada quedó a medias: ni el producto, ni un supplier, ni un vínculo.
-    await db_session.rollback()
-    assert await _active_links(db_session, tid) == []
-    suppliers = (
-        await db_session.execute(select(Supplier).where(Supplier.tenant_id == tid))
-    ).scalars().all()
-    assert suppliers == []
-    products = (
-        await db_session.execute(select(Product).where(Product.tenant_id == tid))
-    ).scalars().all()
-    assert products == []
-
-
-async def test_flag_encendido_no_rechaza_y_crea_el_vinculo(
-    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Con el flag prendido, el mismo mapeo NO levanta
-    `SupplierLinkNotEnabledError` — el vínculo se crea normalmente."""
-    tid = sample_tenant.tenant_id
-    _enable(monkeypatch, tid)
 
     summary = _summary([_row("Producto H", "El pasillo")])
     await insert_confirmed_data(
@@ -469,92 +430,6 @@ async def test_flag_encendido_no_rechaza_y_crea_el_vinculo(
         )
     ).scalar_one_or_none()
     assert definicion is not None
-
-
-async def test_reread_race_flag_apagado_entre_preview_y_apply_rechaza(
-    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Cierra el gap de la relectura sin resubmisión (Cambio 4).
-
-    `reread_preview` valida el mapeo con el flag PRENDIDO y deja el borrador
-    persistido en el `DataRepairRun` (draft con `supplier:name`); la relectura
-    aplica en BACKGROUND (Celery), potencialmente mucho después — si alguien
-    apaga el flag en el medio, el rechazo pre-lease de `reread_preview` ya
-    corrió y no protege más. Solo el chokepoint de `_add_product`
-    (`SupplierLinkNotEnabledError`) evita que la relectura reproduzca en
-    silencio el vínculo con el flag ya apagado — antes de este cambio,
-    `_add_product` degradaba a "marca" sin ningún aviso en este camino."""
-    from app.application.services import reread_service
-    from app.application.services.ingestion_import_service import (
-        SupplierLinkNotEnabledError,
-    )
-    from app.application.services.reread_service import REPAIR_TYPE_REREAD
-    from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
-    from app.persistence.models.repair import DataRepairRun
-
-    tid = sample_tenant.tenant_id
-    _enable(monkeypatch, tid)  # el flag estaba prendido cuando el preview corrió
-
-    summary = _summary([_row("Producto Z", "El pasillo")])
-    file = UploadedFile(
-        tenant_id=tid,
-        uploaded_by=None,
-        original_filename="catalogo.xlsx",
-        s3_key=f"tenants/{tid}/catalogo.xlsx",
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        size_bytes=512,
-        purpose="productos",
-        processing_status=PROCESSING_STATUS_DONE,
-        parsed_summary_json={"confirmed_fields": {"productos": True}},
-    )
-    db_session.add(file)
-    await db_session.commit()
-
-    run = DataRepairRun(
-        tenant_id=tid,
-        repair_type=REPAIR_TYPE_REREAD,
-        status="APPLYING",
-        dry_run=False,
-        details_json={
-            "file_id": str(file.id),
-            "draft": {
-                "column_mappings": [
-                    {
-                        "context_id": "sheet:Catalogo",
-                        "source_column": "nombre",
-                        "target_field": "name",
-                    },
-                    {
-                        "context_id": "sheet:Catalogo",
-                        "source_column": "tienda",
-                        "target_field": "supplier:name",
-                    },
-                    {
-                        "context_id": "sheet:Catalogo",
-                        "source_column": "precio",
-                        "target_field": "sale_price_ars",
-                    },
-                ],
-            },
-        },
-    )
-    db_session.add(run)
-    await db_session.commit()
-
-    # El worker toma el run recién ahora — el flag se apagó en el medio.
-    monkeypatch.setattr(get_settings(), "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS", [])
-
-    with pytest.raises(SupplierLinkNotEnabledError, match="El pasillo"):
-        await reread_service.apply_reread(
-            db_session, file.id, tid, run=run, fresh_override=summary
-        )
-
-    # Nada quedó a medias.
-    await db_session.rollback()
-    products = (
-        await db_session.execute(select(Product).where(Product.tenant_id == tid))
-    ).scalars().all()
-    assert products == []
 
 
 async def test_reread_apply_persiste_comprobante_en_el_run(
