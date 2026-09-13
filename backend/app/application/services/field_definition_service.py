@@ -188,6 +188,7 @@ async def create_custom_field(
 ) -> TenantCustomFieldDefinition:
     now = datetime.now(UTC)
     field = TenantCustomFieldDefinition(
+        id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
         tenant_id=tenant_id,
         entity_type=entity_type,
         field_key=field_key,
@@ -205,6 +206,7 @@ async def create_custom_field(
     new_state = _snapshot(field)
     session.add(
         TenantFieldChangeLog(
+            id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
             tenant_id=tenant_id,
             field_key=field_key,
             entity_type=entity_type,
@@ -249,6 +251,7 @@ async def toggle_field(
         )
         base_field = base.scalar_one_or_none()
         field = TenantCustomFieldDefinition(
+            id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
             tenant_id=tenant_id,
             vertical_field_id=base_field.id if base_field else None,
             entity_type=entity_type,
@@ -269,6 +272,7 @@ async def toggle_field(
     await session.flush()
     session.add(
         TenantFieldChangeLog(
+            id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
             tenant_id=tenant_id,
             field_key=field_key,
             entity_type=entity_type,
@@ -331,6 +335,7 @@ async def undo_last_change(
 
     session.add(
         TenantFieldChangeLog(
+            id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
             tenant_id=tenant_id,
             field_key=field_key,
             entity_type=entity_type,
@@ -384,6 +389,7 @@ async def update_custom_field(
         if base is None:
             return None  # field not found anywhere
         field = TenantCustomFieldDefinition(
+            id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
             tenant_id=tenant_id,
             vertical_field_id=base.id,
             entity_type=entity_type,
@@ -401,6 +407,7 @@ async def update_custom_field(
         await session.flush()
         session.add(
             TenantFieldChangeLog(
+                id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
                 tenant_id=tenant_id,
                 field_key=field_key,
                 entity_type=entity_type,
@@ -429,6 +436,7 @@ async def update_custom_field(
 
     session.add(
         TenantFieldChangeLog(
+            id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
             tenant_id=tenant_id,
             field_key=field_key,
             entity_type=entity_type,

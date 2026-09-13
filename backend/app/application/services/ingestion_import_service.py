@@ -26,6 +26,7 @@ from app.application.services._savepoint import (
     unique_violation_classifier,
 )
 from app.application.services.cash_service import normalize_payment_method
+from app.application.services.field_definition_service import ensure_custom_field_exists
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
@@ -6272,6 +6273,14 @@ async def _insert_confirmed_data_impl(
                         cf_product = {**cf_product, "category_label": prod_cat_label}
                     if store_name:
                         cf_product = {**cf_product, "marca": store_name}
+                        # Cambio 1 (docs/plans/conservacion-y-acceso-datos-negocio.md):
+                        # "marca" no pasa por el mapeo de columnas (se arma acá
+                        # mismo, no vía `custom_field:{key}`), así que sin esto
+                        # queda guardada pero invisible en cualquier selector de
+                        # columnas o exportación — nadie declara dónde vive.
+                        await ensure_custom_field_exists(
+                            session, tenant_id, "product", "marca", "Marca"
+                        )
                     new_product = Product(
                         id=new_product_id,
                         tenant_id=tenant_id,
@@ -8339,10 +8348,18 @@ async def _insert_multisheet_data(
                 # se guarda como "marca" (semántica incorrecta) — se conserva
                 # el valor original en un campo propio distinto, sin que nada
                 # (identidad, colapso de marcas) lo confunda con una marca real.
-                cf = {
-                    **cf,
-                    ("tienda_original" if _store_mapped_as_supplier else "marca"): store_name,
-                }
+                _store_field_key = "tienda_original" if _store_mapped_as_supplier else "marca"
+                cf = {**cf, _store_field_key: store_name}
+                # Cambio 1 (docs/plans/conservacion-y-acceso-datos-negocio.md):
+                # ninguna de las dos claves pasa por `custom_field:{key}` del
+                # mapeo — sin esto quedan guardadas pero invisibles.
+                await ensure_custom_field_exists(
+                    session,
+                    tenant_id,
+                    "product",
+                    _store_field_key,
+                    "Marca" if _store_field_key == "marca" else "Tienda (proveedor no vinculado)",
+                )
             _new_id = uuid.uuid4()
             new_product = Product(
                 id=_new_id,

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.ingestion_import_service import insert_confirmed_data
 from app.config.settings import get_settings
+from app.persistence.models.field_definitions import TenantCustomFieldDefinition
 from app.persistence.models.product import Product
 from app.persistence.models.product_supplier_link import ProductSupplierLink
 from app.persistence.models.supplier import Supplier
@@ -430,6 +431,21 @@ async def test_flag_apagado_conserva_el_comportamiento_actual(
     assert "tienda_original" not in product.custom_fields
     assert counts.get("supplier_link_not_enabled") == 1
 
+    # Cambio 1 (docs/plans/conservacion-y-acceso-datos-negocio.md): "marca" se
+    # guarda pero no pasa por el mapeo de columnas — sin la definición, queda
+    # invisible en cualquier selector/exportación aunque el dato esté bien.
+    definicion = (
+        await db_session.execute(
+            select(TenantCustomFieldDefinition).where(
+                TenantCustomFieldDefinition.tenant_id == tid,
+                TenantCustomFieldDefinition.entity_type == "product",
+                TenantCustomFieldDefinition.field_key == "marca",
+            )
+        )
+    ).scalar_one_or_none()
+    assert definicion is not None
+    assert definicion.override_label == "Marca"
+
 
 async def test_flag_encendido_no_incrementa_el_contador(
     db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
@@ -452,3 +468,14 @@ async def test_flag_encendido_no_incrementa_el_contador(
 
     assert not counts.get("supplier_link_not_enabled")
     assert len(await _active_links(db_session, tid)) == 1
+
+    definicion = (
+        await db_session.execute(
+            select(TenantCustomFieldDefinition).where(
+                TenantCustomFieldDefinition.tenant_id == tid,
+                TenantCustomFieldDefinition.entity_type == "product",
+                TenantCustomFieldDefinition.field_key == "tienda_original",
+            )
+        )
+    ).scalar_one_or_none()
+    assert definicion is not None

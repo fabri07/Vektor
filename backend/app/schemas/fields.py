@@ -48,6 +48,26 @@ class ToggleFieldRequest(BaseModel):
     enabled: bool
 
 
+class AvailableFieldResponse(BaseModel):
+    """Cambio 1 (docs/plans/conservacion-y-acceso-datos-negocio.md): catálogo
+    de LECTURA — qué campos de una entidad se pueden mostrar/exportar y dónde
+    vive cada uno. Distinto de `FieldDefinitionResponse` (contrato de edición)."""
+
+    field_id: str
+    entity_type: str
+    field_key: str
+    label: str
+    data_type: str
+    unit: str | None = None
+    origin: str
+    value_path: str
+    editable: bool
+    exportable: bool
+    searchable: bool
+    default_visible: bool
+    financial_rule: str | None = None
+
+
 class FieldChangeLogResponse(BaseModel):
     id: uuid.UUID
     field_key: str

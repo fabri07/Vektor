@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
+from app.persistence.models.field_definitions import TenantCustomFieldDefinition
 from app.persistence.models.product import Product
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
@@ -190,6 +191,20 @@ async def test_catalog_tienda_creates_no_supplier_stores_brand(
     assert by_name["Vela aromática"].custom_fields["marca"] == "Deco Norte"
     assert by_name["Portarretrato"].custom_fields["marca"] == "Bazar Sur"
     assert "proveedor" not in (by_name["Vela aromática"].custom_fields or {})
+
+    # Cambio 1 (docs/plans/conservacion-y-acceso-datos-negocio.md): "marca" no
+    # pasa por el mapeo de columnas (camino tabla suelta) — sin la definición
+    # queda invisible en cualquier selector/exportación.
+    definicion = (
+        await db_session.execute(
+            select(TenantCustomFieldDefinition).where(
+                TenantCustomFieldDefinition.tenant_id == sample_tenant.tenant_id,
+                TenantCustomFieldDefinition.entity_type == "product",
+                TenantCustomFieldDefinition.field_key == "marca",
+            )
+        )
+    ).scalar_one_or_none()
+    assert definicion is not None
 
 
 async def test_catalog_tienda_never_creates_supplier_even_repeated(

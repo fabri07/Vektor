@@ -8,7 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, get_current_user, require_modify_access
+from app.application.services import business_field_catalog_service
 from app.application.services import field_definition_service as svc
+from app.domain.business_field_catalog import AVAILABLE_ENTITY_TYPES
 from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
@@ -16,6 +18,7 @@ from app.persistence.models.field_definitions import VerticalFieldDefinition
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.schemas.fields import (
+    AvailableFieldResponse,
     CreateCustomFieldRequest,
     FieldChangeLogResponse,
     FieldDefinitionResponse,
@@ -93,6 +96,28 @@ async def get_definitions(
         tenant_id=tenant.tenant_id,
         vertical_code=vertical_code,
         entity_type=entity_type,
+    )
+
+
+@router.get(
+    "/available",
+    response_model=list[AvailableFieldResponse],
+    summary="Catálogo de lectura: campos consultables/exportables de una entidad",
+)
+async def get_available_fields(
+    entity_type: str = Query(...),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[dict[str, Any]]:
+    """Cambio 1 del plan de conservación: une campos canónicos/evidencia
+    (estáticos) con los adicionales del vertical/tenant, deduplicados por
+    identidad estable. Distinto del `GET ""` de arriba, que es el contrato de
+    EDICIÓN (ERD/FieldDefinitionsPanel) y no conoce campos canónicos."""
+    if entity_type not in AVAILABLE_ENTITY_TYPES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="entity_type_not_covered")
+    vertical_code = await _get_vertical_code(tenant.tenant_id, session)
+    return await business_field_catalog_service.get_available_fields(
+        session, tenant_id=tenant.tenant_id, vertical_code=vertical_code, entity_type=entity_type
     )
 
 
