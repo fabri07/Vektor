@@ -381,6 +381,53 @@ export interface CrossFieldCatalogEntry {
 
 export type FieldCatalog = Record<string, EntityFieldCatalog>;
 
+/**
+ * Cambio 4 — comprobante de importación, columna por columna. `rows_affected`
+ * en `null` significa "sin desglose acreditado" (nunca inventado desde un
+ * contador global) — distinto de `0`, que es un conteo real.
+ */
+export interface ImportReceiptColumn {
+  context_id: string;
+  context_label: string;
+  source_column: string;
+  target_field: string | null;
+  result: "guardado" | "transformado" | "pendiente" | "excluido" | "mixto";
+  reason: string | null;
+  reason_kind: "user_decision" | "system_rule" | null;
+  rows_affected: number | null;
+}
+
+export interface ImportReceipt {
+  version: number;
+  columns: ImportReceiptColumn[];
+  /** true si el evento/run es anterior a Cambio 4: reconstruido best-effort
+   * desde el mapeo guardado, no desde un comprobante real. */
+  historical_incomplete: boolean;
+}
+
+export interface ImportReceiptExecution {
+  kind: "confirm" | "reread";
+  execution_id: string;
+  receipt: ImportReceipt;
+}
+
+export interface ImportReceiptLastApplied extends ImportReceiptExecution {
+  applied_at: string;
+}
+
+export interface ImportReceiptLastAttempt extends ImportReceiptExecution {
+  status: string;
+  at: string;
+  error: string | null;
+}
+
+export interface FileReceiptResponse {
+  file_id: string;
+  file_reverted: boolean;
+  last_applied: ImportReceiptLastApplied | null;
+  last_attempt: ImportReceiptLastAttempt | null;
+}
+
 export interface ColumnMappingSuggestion {
   source_column: string;
   normalized_column: string;
@@ -750,6 +797,29 @@ export const ingestionService = {
    */
   async getFieldCatalog(): Promise<FieldCatalog> {
     const res = await api.get<FieldCatalog>("/ingestion/field-catalog");
+    return res.data;
+  },
+
+  /**
+   * Cambio 4 — capacidades efectivas de ESTE tenant, ahora mismo. A
+   * diferencia de `getFieldCatalog` (estático por deploy), esto SÍ depende
+   * del tenant: permite deshabilitar en el mapeador un destino que hoy no
+   * tendría efecto (p. ej. "Proveedor — Nombre" con el rollout apagado) en
+   * vez de dejar que el usuario lo elija y se entere recién al confirmar.
+   * Claves = nombres de variable de entorno de cada compuerta.
+   */
+  async getCapabilities(): Promise<Record<string, boolean>> {
+    const res = await api.get<Record<string, boolean>>("/ingestion/capabilities");
+    return res.data;
+  },
+
+  /**
+   * Cambio 4 — comprobante de la última ejecución de este archivo (confirm o
+   * relectura), separando la última aplicación vigente del último intento
+   * (puede haber fallado o haberse revertido después).
+   */
+  async getFileReceipt(fileId: string): Promise<FileReceiptResponse> {
+    const res = await api.get<FileReceiptResponse>(`/ingestion/files/${fileId}/receipt`);
     return res.data;
   },
 

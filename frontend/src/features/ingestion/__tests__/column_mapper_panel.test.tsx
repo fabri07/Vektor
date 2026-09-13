@@ -22,6 +22,7 @@ jest.mock("@/services/ingestion.service", () => ({
     getPreview: jest.fn(),
     getColumnMappings: jest.fn(),
     getFieldCatalog: jest.fn(),
+    getCapabilities: jest.fn(),
     confirmFile: jest.fn(),
     // E6c-3: el panel intenta primero la ruta asíncrona. El default del sistema
     // es la compuerta APAGADA, que el backend responde con 404 — y ése es el
@@ -40,6 +41,7 @@ jest.mock("@/services/ingestion.service", () => ({
 const mockGetPreview = ingestionService.getPreview as jest.Mock;
 const mockGetColumnMappings = ingestionService.getColumnMappings as jest.Mock;
 const mockGetFieldCatalog = ingestionService.getFieldCatalog as jest.Mock;
+const mockGetCapabilities = ingestionService.getCapabilities as jest.Mock;
 const mockConfirmFile = ingestionService.confirmFile as jest.Mock;
 const mockRegistrarImportacion = ingestionService.registrarImportacion as jest.Mock;
 const mockRecomputeColumnRisk = ingestionService.recomputeColumnRisk as jest.Mock;
@@ -195,6 +197,7 @@ describe("ColumnMapperPanel — A3 clarificación inline", () => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     // E6c-3: el seguimiento de importaciones vive en localStorage para poder
     // retomarse al recargar. Entre tests hay que limpiarlo, o una importación
     // dejada abierta por un test hace que el siguiente monte el panel de
@@ -1046,6 +1049,7 @@ describe("ColumnMapperPanel — hojas sin clasificar", () => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     // E6c-3: el seguimiento de importaciones vive en localStorage para poder
     // retomarse al recargar. Entre tests hay que limpiarlo, o una importación
     // dejada abierta por un test hace que el siguiente monte el panel de
@@ -1203,6 +1207,7 @@ describe("ColumnMapperPanel — corregir una hoja mal clasificada", () => {
     jest.clearAllMocks();
     mockGetColumnMappings.mockResolvedValue([]);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     // E6c-3: el seguimiento de importaciones vive en localStorage para poder
     // retomarse al recargar. Entre tests hay que limpiarlo, o una importación
     // dejada abierta por un test hace que el siguiente monte el panel de
@@ -1366,6 +1371,7 @@ describe("ColumnMapperPanel — F-M: columnas ambiguas", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -1523,6 +1529,7 @@ describe("ColumnMapperPanel — tabla única: los costos de compra no se ofrecen
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -1618,6 +1625,7 @@ describe("ColumnMapperPanel — F-H6.c multi-hoja: sólo viaja lo que el usuario
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -1790,6 +1798,7 @@ describe("ColumnMapperPanel — F-H6.d: el envío compartido llega al confirm", 
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue(GRUPOS_REPARTIBLES);
@@ -1930,6 +1939,7 @@ describe("ColumnMapperPanel — F-H6.d: el preview ve la decisión de envío", (
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -2085,6 +2095,7 @@ describe("ColumnMapperPanel — F-C: el banner de faltantes nombra, explica y ll
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -2298,6 +2309,7 @@ describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a m
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -2424,6 +2436,7 @@ describe("ColumnMapperPanel — F-B.1: la procedencia se dice en castellano", ()
     jest.clearAllMocks();
     mockGetPreview.mockResolvedValue(PREVIEW);
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -2568,6 +2581,7 @@ describe("ColumnMapperPanel — B.1: el modal de columnas sin mapear usa el sele
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -2677,6 +2691,7 @@ describe("ColumnMapperPanel — F-A: la etiqueta del campo propio llega al confi
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);
@@ -2815,6 +2830,7 @@ describe("ColumnMapperPanel — los buckets salen de lo detectado", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
     mockRecomputeColumnRisk.mockResolvedValue([]);
     mockInventoryEffects.mockResolvedValue([]);
     mockPurchaseGroups.mockResolvedValue([]);

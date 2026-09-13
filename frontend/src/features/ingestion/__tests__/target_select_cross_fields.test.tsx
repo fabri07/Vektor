@@ -70,6 +70,32 @@ describe("destinos en otra sección", () => {
   });
 });
 
+describe("Cambio 4 — cruzado deshabilitado por capacidad apagada", () => {
+  it("queda visible pero no seleccionable, con el motivo en la etiqueta", () => {
+    renderSelect({
+      crossFields: CRUZADOS,
+      disabledCrossFields: { "supplier:name": "tu cuenta no tiene esta vinculación habilitada" },
+    });
+
+    const opcion = screen.getByRole("option", {
+      name: /Proveedor — Nombre \(no disponible/i,
+    }) as HTMLOptionElement;
+    expect(opcion.disabled).toBe(true);
+  });
+
+  it("sin motivo para ESE valor, sigue habilitado como siempre", () => {
+    renderSelect({
+      crossFields: CRUZADOS,
+      disabledCrossFields: { "otro:target": "no aplica acá" },
+    });
+
+    const opcion = screen.getByRole("option", {
+      name: "Proveedor — Nombre",
+    }) as HTMLOptionElement;
+    expect(opcion.disabled).toBe(false);
+  });
+});
+
 describe("un cruzado elegido a mano sobrevive al cambio de sección", () => {
   // `targetSobreviveALaEntidad` decidía sólo contra `fields`, donde un cruzado
   // nunca está: al reasignar la sección de una hoja y volver a Productos, el

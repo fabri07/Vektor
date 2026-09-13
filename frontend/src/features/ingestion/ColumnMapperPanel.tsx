@@ -49,6 +49,7 @@ import { ImportacionEnCursoPanel } from "./ImportacionEnCursoPanel";
 import { useImportacionAsincronica } from "./useImportacionAsincronica";
 import {
   customFieldCollisions,
+  disabledCrossFieldReasons,
   explainMissing,
   missingRequiredFields,
   scalarCollisions,
@@ -83,6 +84,21 @@ function useFieldCatalog() {
     queryKey: ["ingestion-field-catalog"],
     queryFn: () => ingestionService.getFieldCatalog(),
     staleTime: Infinity,
+  });
+}
+
+/**
+ * Cambio 4 — capacidades efectivas de ESTE tenant. A diferencia del catálogo
+ * de campos (estático por deploy), esto SÍ puede cambiar de una sesión a otra
+ * (alguien activó/desactivó una compuerta), así que no usa `staleTime:
+ * Infinity` — 5 min es suficiente para no pedirlo en cada tecla del mapeador
+ * sin arriesgar mostrar un estado muy viejo.
+ */
+function useIngestionCapabilities() {
+  return useQuery({
+    queryKey: ["ingestion-capabilities"],
+    queryFn: () => ingestionService.getCapabilities(),
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -594,6 +610,11 @@ function SheetMapperSection({
   const { data: catalog, isLoading: loadingCatalog } = useFieldCatalog();
   const fields = catalog?.[entity]?.fields ?? [];
   const crossFields = catalog?.[entity]?.cross_fields ?? [];
+  const { data: capabilities } = useIngestionCapabilities();
+  const disabledCrossFields = disabledCrossFieldReasons(
+    crossFields.map((f) => f.value),
+    capabilities,
+  );
 
   // Inicializar mapeos desde sugerencias, una vez POR SECCIÓN: si el usuario
   // reasigna la hoja (p. ej. de Ventas a Productos), las sugerencias vienen de
@@ -892,6 +913,7 @@ function SheetMapperSection({
                       onChange={(value) => selectTarget(s.source_column, value)}
                       fields={fields}
                       crossFields={crossFields}
+                      disabledCrossFields={disabledCrossFields}
                       dataSheet={context.context_id}
                       dataSuggests={s.target_field ?? ""}
                       disabled={loadingCatalog}
@@ -2197,6 +2219,11 @@ export function ColumnMapperPanel({
   const unmappedCount = getUnmappedColumns().length;
   const fields = catalog?.[entityType]?.fields ?? [];
   const crossFields = catalog?.[entityType]?.cross_fields ?? [];
+  const { data: capabilities } = useIngestionCapabilities();
+  const disabledCrossFields = disabledCrossFieldReasons(
+    crossFields.map((f) => f.value),
+    capabilities,
+  );
   // Mismas dos reglas que en multi-hoja y que en el confirm del backend.
   const faltanRequeridos = missingRequiredFields(
     catalog?.[entityType]?.required ?? [],
@@ -2360,6 +2387,7 @@ export function ColumnMapperPanel({
                         onChange={(value) => setMappingForColumn(s.source_column, value)}
                         fields={fields}
                         crossFields={crossFields}
+                        disabledCrossFields={disabledCrossFields}
                         disabled={loadingCatalog}
                         unknownTarget="catalog-guarded"
                         className="min-w-0 flex-1 rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-[11px] text-vk-text-primary focus:border-vk-blue focus:outline-none disabled:opacity-50"
@@ -2447,6 +2475,7 @@ export function ColumnMapperPanel({
                         onChange={(value) => setMappingForColumn(s.source_column, value)}
                         fields={fields}
                         crossFields={crossFields}
+                        disabledCrossFields={disabledCrossFields}
                         ignoreLabel="— Ignorar columna —"
                         unknownTarget="custom-only"
                         className="w-full rounded border border-vk-border-w bg-vk-bg-light px-2 py-1 text-xs text-vk-text-primary focus:border-vk-blue focus:outline-none"

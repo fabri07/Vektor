@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Trash2, RefreshCw, CheckCircle, History } from "lucide-react";
+import { Trash2, RefreshCw, CheckCircle, History, FileText } from "lucide-react";
 import {
   ingestionService,
   type UploadedFileItem,
@@ -18,6 +18,7 @@ import { matchesRow } from "@/lib/search";
 import { ColumnMapperPanel } from "./ColumnMapperPanel";
 import { DeleteFileModal } from "./DeleteFileModal";
 import { FileInterpretationReview } from "./FileInterpretationReview";
+import { ImportReceiptModal } from "./ImportReceiptModal";
 import { RereadDiff } from "./RereadDiff";
 import { RereadProgress } from "./RereadProgress";
 import { IndeterminateBar } from "./IndeterminateBar";
@@ -120,6 +121,8 @@ export function FileListSection() {
   // `confirm()` del navegador no podía mostrarlos.
   const [fileToDelete, setFileToDelete] = useState<UploadedFileItem | null>(null);
   const [search, setSearch] = useState("");
+  // Cambio 4: comprobante de importación de un archivo (confirm/relectura).
+  const [fileForReceipt, setFileForReceipt] = useState<UploadedFileItem | null>(null);
 
   // Estado del modal de relectura (en memoria de sesión).
   const [reread, setReread] = useState<RereadState | null>(null);
@@ -736,6 +739,21 @@ export function FileListSection() {
                             Volver a leer
                           </button>
                         )}
+                        {/* Cambio 4: comprobante de importación — qué pasó con
+                            cada columna en la última ejecución. Mismo gate que
+                            "Volver a leer": recién tiene sentido si el archivo
+                            ya pasó por al menos un confirm. */}
+                        {(file.processing_status === "DONE" ||
+                          file.processing_status === "NEEDS_COMPLETION") && (
+                          <button
+                            onClick={() => setFileForReceipt(file)}
+                            className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-vk-text-secondary hover:bg-vk-bg-light transition-colors"
+                            title="Ver comprobante de importación"
+                          >
+                            <FileText className="h-3.5 w-3.5" />
+                            Comprobante
+                          </button>
+                        )}
                         {/* Eliminar: oculto mientras el import corre (IMPORTING);
                             el backend además rechaza el DELETE con 409. */}
                         {file.processing_status !== "IMPORTING" && (
@@ -826,6 +844,13 @@ export function FileListSection() {
           if (fileToDelete) deleteMutation.mutate(fileToDelete.id);
         }}
         onCancel={() => setFileToDelete(null)}
+      />
+
+      {/* Cambio 4: comprobante de importación. */}
+      <ImportReceiptModal
+        fileId={fileForReceipt?.id ?? null}
+        filename={fileForReceipt?.original_filename ?? ""}
+        onClose={() => setFileForReceipt(null)}
       />
 
       {/* B: confirmación antes de arrancar la relectura. */}

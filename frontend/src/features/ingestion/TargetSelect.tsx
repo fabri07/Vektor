@@ -56,6 +56,7 @@ export function TargetSelect({
   unknownTarget = "custom-always",
   dataSheet,
   dataSuggests,
+  disabledCrossFields,
 }: {
   /** Target mapeado hoy: `""`, `"ignore"`, un canónico o `custom_field:{key}`. */
   target: string;
@@ -101,6 +102,14 @@ export function TargetSelect({
    */
   dataSheet?: string;
   dataSuggests?: string;
+  /**
+   * Cambio 4 — destinos cruzados que HOY no tendrían efecto para este tenant
+   * (p. ej. "Proveedor — Nombre" con `PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS`
+   * apagado): quedan visibles pero no seleccionables, con el motivo en la
+   * etiqueta — antes el dropdown los ofrecía igual y el confirm los rechazaba
+   * (o, peor, los degradaba en silencio) recién después.
+   */
+  disabledCrossFields?: Record<string, string>;
 }) {
   const isCustom = target.startsWith("custom_field:");
   const fueraDelCatalogo =
@@ -150,11 +159,14 @@ export function TargetSelect({
       ))}
       {crossFields.length > 0 && (
         <optgroup label="Otras secciones">
-          {crossFields.map((f) => (
-            <option key={f.value} value={f.value}>
-              {f.label}
-            </option>
-          ))}
+          {crossFields.map((f) => {
+            const motivo = disabledCrossFields?.[f.value];
+            return (
+              <option key={f.value} value={f.value} disabled={!!motivo}>
+                {motivo ? `${f.label} (no disponible: ${motivo})` : f.label}
+              </option>
+            );
+          })}
         </optgroup>
       )}
       {opcionFueraDelCatalogo}

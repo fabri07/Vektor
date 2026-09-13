@@ -52,6 +52,8 @@ jest.mock("@/services/ingestion.service", () => ({
     getFieldCatalog: jest.fn().mockResolvedValue({}),
     getColumnMappings: jest.fn().mockResolvedValue([]),
     recomputeColumnRisk: jest.fn().mockResolvedValue([]),
+    // Cambio 4: comprobante — el modal lo pide recién al abrirse.
+    getFileReceipt: jest.fn(),
   },
 }));
 
@@ -62,6 +64,7 @@ const mockRereadPreview = ingestionService.rereadPreview as jest.Mock;
 const mockRereadApply = ingestionService.rereadApply as jest.Mock;
 const mockRereadRunStatus = ingestionService.rereadRunStatus as jest.Mock;
 const mockRereadUndo = ingestionService.rereadUndo as jest.Mock;
+const mockGetFileReceipt = ingestionService.getFileReceipt as jest.Mock;
 
 function fileWith(status: string): UploadedFileItem {
   return {
@@ -119,6 +122,65 @@ describe("FileListSection — estado IMPORTING", () => {
     });
     expect(screen.getByTitle("Eliminar archivo")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+});
+
+describe("FileListSection — Cambio 4: comprobante de importación", () => {
+  const user = userEvent.setup();
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("un archivo DONE ofrece 'Comprobante' y abre el detalle por columna", async () => {
+    mockListFiles.mockResolvedValue([fileWith("DONE")]);
+    mockGetFileReceipt.mockResolvedValue({
+      file_id: "file-1",
+      file_reverted: false,
+      last_applied: {
+        kind: "confirm",
+        execution_id: "trace-1",
+        applied_at: "2026-07-19T10:05:00Z",
+        receipt: {
+          version: 1,
+          historical_incomplete: false,
+          columns: [
+            {
+              context_id: "table",
+              context_label: "Archivo",
+              source_column: "tienda",
+              target_field: null,
+              result: "excluido",
+              reason: "No se mapeó a ningún campo.",
+              reason_kind: "system_rule",
+              rows_affected: null,
+            },
+          ],
+        },
+      },
+      last_attempt: null,
+    });
+
+    renderList();
+    await waitFor(() => expect(screen.getByText("Importado")).toBeInTheDocument());
+
+    await user.click(screen.getByTitle("Ver comprobante de importación"));
+
+    await waitFor(() => {
+      expect(mockGetFileReceipt).toHaveBeenCalledWith("file-1");
+    });
+    expect(await screen.findByText("tienda")).toBeInTheDocument();
+    expect(screen.getByText("No se mapeó a ningún campo.")).toBeInTheDocument();
+    expect(screen.getByText("Excluido")).toBeInTheDocument();
+  });
+
+  test("un archivo PENDING todavía no ofrece 'Comprobante' (no hubo ejecución)", async () => {
+    mockListFiles.mockResolvedValue([fileWith("PENDING")]);
+
+    renderList();
+    await waitFor(() => expect(mockListFiles).toHaveBeenCalled());
+
+    expect(screen.queryByTitle("Ver comprobante de importación")).not.toBeInTheDocument();
   });
 });
 

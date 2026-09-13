@@ -39,6 +39,39 @@ export const coversRequired = (target: string): boolean =>
   !!target && target !== "ignore" && !target.startsWith("custom_field:");
 
 /**
+ * Cambio 4 — qué compuerta de rollout (clave de `GET /ingestion/capabilities`)
+ * decide si un target "cruzado" (`TargetSelect.crossFields`) tiene efecto real
+ * para este tenant. Un cruzado sin entrada acá siempre está disponible — hoy
+ * el único que depende de una compuerta es "Proveedor — Nombre".
+ */
+const CROSS_FIELD_CAPABILITY: Record<string, string> = {
+  "supplier:name": "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS",
+};
+
+/**
+ * Motivo (o `undefined` si está disponible) por el que un target cruzado no
+ * tiene efecto para este tenant ahora mismo — para pasarle a
+ * `TargetSelect.disabledCrossFields`. Con `capabilities` todavía sin cargar
+ * (`undefined`), no se deshabilita nada: es preferible dejar elegir y que el
+ * 422 del confirm explique, a bloquear sobre un estado que no se terminó de
+ * conocer.
+ */
+export function disabledCrossFieldReasons(
+  crossFieldValues: string[],
+  capabilities: Record<string, boolean> | undefined,
+): Record<string, string> {
+  if (!capabilities) return {};
+  const disabled: Record<string, string> = {};
+  for (const value of crossFieldValues) {
+    const key = CROSS_FIELD_CAPABILITY[value];
+    if (key && capabilities[key] === false) {
+      disabled[value] = "tu cuenta no tiene esta vinculación habilitada";
+    }
+  }
+  return disabled;
+}
+
+/**
  * Requeridos de la entidad que ninguna columna cubre con un campo canónico.
  *
  * Sin NINGÚN mapeo no se reporta nada, y eso espeja al backend: el confirm solo

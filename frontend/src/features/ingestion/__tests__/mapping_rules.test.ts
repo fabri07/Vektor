@@ -8,6 +8,7 @@
 import {
   coversRequired,
   customFieldCollisions,
+  disabledCrossFieldReasons,
   explainMissing,
   mappingOrigin,
   missingRequiredFields,
@@ -399,5 +400,32 @@ describe("mappingOrigin", () => {
   it("`source: none` con destino igual al sugerido no cuenta procedencia", () => {
     // El backend no reconoció nada; decir «sugerido por X» sería inventar un X.
     expect(mappingOrigin({ source: "none", target_field: "amount" }, "amount")).toBeNull();
+  });
+});
+
+describe("disabledCrossFieldReasons (Cambio 4)", () => {
+  it("deshabilita supplier:name cuando la compuerta está apagada", () => {
+    const motivos = disabledCrossFieldReasons(["supplier:name"], {
+      PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS: false,
+    });
+    expect(motivos["supplier:name"]).toBeDefined();
+  });
+
+  it("no deshabilita nada cuando la compuerta está prendida", () => {
+    const motivos = disabledCrossFieldReasons(["supplier:name"], {
+      PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS: true,
+    });
+    expect(motivos["supplier:name"]).toBeUndefined();
+  });
+
+  it("sin capabilities cargadas todavía, no deshabilita nada (nunca bloquea sobre un estado a medio conocer)", () => {
+    expect(disabledCrossFieldReasons(["supplier:name"], undefined)).toEqual({});
+  });
+
+  it("un cruzado sin compuerta asociada nunca se deshabilita", () => {
+    const motivos = disabledCrossFieldReasons(["algo:sin_flag"], {
+      PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS: false,
+    });
+    expect(motivos).toEqual({});
   });
 });
