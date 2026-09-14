@@ -3132,6 +3132,37 @@ def _add_catalog_initial_stock_cogs(
     session.add(expense)
 
 
+async def _opening_stock_date(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    dates: list[datetime],
+) -> datetime | None:
+    """Momento cero: primer día registrado en el archivo o en los libros vigentes.
+
+    Sólo fechas de negocio de ventas/gastos reales, nunca timestamps de carga.
+    Sin evidencia se devuelve None para conservar el fallback del importador.
+    """
+    from sqlalchemy import func, select, union_all  # noqa: PLC0415
+
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
+    minima = union_all(
+        *(
+            select(func.min(model.transaction_date).label("day")).where(
+                model.tenant_id == tenant_id,
+                model.voided_at.is_(None),
+                model.provenance == "REAL",
+            )
+            for model in (SaleEntry, ExpenseEntry)
+        )
+    ).subquery()
+    previous = (await session.execute(select(func.min(minima.c.day)))).scalar_one_or_none()
+    days = [value.date() for value in dates]
+    if previous is not None:
+        days.append(previous.date())
+    return datetime.combine(min(days), datetime.min.time()) if days else None
+
+
 async def _apply_catalog_stock(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -3149,6 +3180,7 @@ async def _apply_catalog_stock(
     pending_balances: dict[uuid.UUID, _BalancePendiente] | None = None,
     is_purchase: bool = False,
     supplier_id: uuid.UUID | None = None,
+    opening_date: datetime | None = None,
 ) -> None:
     """Aplica el stock de una fila de CATÁLOGO al inventario, según su tratamiento.
 
@@ -3160,7 +3192,9 @@ async def _apply_catalog_stock(
 
     - ``is_purchase=False`` (saldo de apertura, DEFAULT): el stock entra al inventario
       como **ajuste** (``movement_type='adjustment'``), SIN ``ExpenseEntry`` ni salida
-      de caja. No cuenta como "comprado".
+      de caja. Se fecha en ``opening_date`` cuando se conoce (fecha explícita del
+      catálogo o primer día de los registros); sin evidencia se conserva ``tx_date``.
+      No cuenta como "comprado".
     - ``is_purchase=True`` (compra): ``movement_type='purchase'`` + su COGS
       (``ExpenseEntry`` INVENTORY/COGS) cuando hay costo — como un libro de compras.
 
@@ -3179,10 +3213,9 @@ async def _apply_catalog_stock(
     if delta == 0:
         return
     # F6-C3: NO incluir la fecha en el hash de identidad de la fila de catálogo.
-    # ``tx_date`` acá es SIEMPRE ``today`` sintético (el ancla catalog_initial_stock
-    # no tiene fecha de negocio real — por eso inventory_temporal_service la ignora,
-    # ver invariante 2d). Meter un valor sintético en un hash de IDENTIDAD LÓGICA es
-    # incorrecto de principio: hacía que el MISMO catálogo, releído otro día, produjera
+    # La fecha puede venir del momento cero de los libros o del fallback de carga.
+    # Cambiar esa evidencia temporal no cambia la identidad de la fila. Incluir
+    # el fallback de carga hacía que el MISMO catálogo, releído otro día, produjera
     # un ``source_row_hash`` distinto.
     # Alcance real del hash de catálogo (verificado en el review): su ÚNICO consumidor
     # es F3 (product_dedup_service), y ahí SOLO lo lee ``compute_group_fingerprint``
@@ -3218,7 +3251,7 @@ async def _apply_catalog_stock(
         source_upload_id=uploaded_file_id,
         source_row_ref=source_row_ref,
         source_row_hash=_row_hash,
-        occurred_at=tx_date,
+        occurred_at=(opening_date or tx_date) if not is_purchase else tx_date,
     )
     # Solo una COMPRA genera gasto de mercadería + baja de caja. El saldo de apertura
     # es un activo que el negocio ya tenía → no toca caja ni COGS.
@@ -4946,6 +4979,15 @@ async def _insert_confirmed_data_impl(
             and (summary.get("has_producto") or inferred_type == "stock")
             and nombre_col
         )
+        _opening_date = None
+        if wants_productos and not stock_is_purchase:
+            _opening_dates = []
+            if (wants_ventas or wants_gastos) and fecha_col:
+                for row in rows:
+                    _date = _parse_date(row.get(fecha_col))
+                    if _date is not None:
+                        _opening_dates.append(_date)
+            _opening_date = await _opening_stock_date(session, tenant_id, _opening_dates)
 
         # FASE 3: índice de catálogo en memoria para el LINK de ventas/gastos/compras
         # (tiers sku exacto → nombre → tokens, con SKU-que-gana-sobre-nombre). Una
@@ -6157,6 +6199,7 @@ async def _insert_confirmed_data_impl(
                             unit_cost=cost,
                             store_name=store_name,
                             tx_date=today,
+                            opening_date=_acquired or _opening_date,
                             uploaded_file_id=uploaded_file_id,
                             source_row_ref=_prod_row_ref,
                             balance_index=_balance_index,
@@ -6408,6 +6451,7 @@ async def _insert_confirmed_data_impl(
                         unit_cost=cost,
                         store_name=store_name,
                         tx_date=today,
+                        opening_date=_acquired or _opening_date,
                         uploaded_file_id=uploaded_file_id,
                         source_row_ref=_prod_row_ref,
                         balance_index=_balance_index,
@@ -7036,6 +7080,7 @@ async def _insert_multisheet_data(
 
     confirmed_fields = confirmed_fields or {}
     context_mappings = context_mappings or {}
+    _opening_date: datetime | None = None
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
     # F-H6.c: avisos sobre el costo que la persona tiene que ver — celdas de
     # ajuste ilegibles y columnas mapeadas que no movieron ningún número. Viajan
@@ -8226,6 +8271,7 @@ async def _insert_multisheet_data(
                     unit_cost=cost,
                     store_name=store_name,
                     tx_date=today,
+                    opening_date=_acquired or _opening_date,
                     uploaded_file_id=uploaded_file_id,
                     source_row_ref=row_ref,
                     balance_index=_balance_index,
@@ -8496,11 +8542,13 @@ async def _insert_multisheet_data(
                     )
 
             async def _post_alta_de_catalogo(_resolved: Any) -> None:
-                # F-H2: el catálogo declara el producto. Su fecha es la de adquisición
-                # SI la trae; un catálogo sin esa columna —el caso común— declara
-                # identidad sin fecha, que alcanza para vincular una venta pero no
-                # para sostener que el producto ya estaba ese día.
-                _declarar_evidencia(_new_id, _acquired)
+                # La apertura sin fecha explícita declara disponibilidad desde el
+                # momento cero. Sin registros fechados sigue siendo desconocida.
+                # Una compra no hereda la fecha inicial del negocio.
+                _declarar_evidencia(
+                    _new_id,
+                    (_acquired or _opening_date) if not stock_is_purchase else _acquired,
+                )
                 # F-H3.b: producto NUEVO → el saldo previo al archivo es 0, y el
                 # catálogo declara el absoluto (ver el caso análogo en _merge_into_existing).
                 if proyeccion is not None:
@@ -8517,6 +8565,7 @@ async def _insert_multisheet_data(
                     unit_cost=cost,
                     store_name=store_name,
                     tx_date=today,
+                    opening_date=_acquired or _opening_date,
                     uploaded_file_id=uploaded_file_id,
                     source_row_ref=row_ref,
                     balance_index=_balance_index,
@@ -8693,6 +8742,47 @@ async def _insert_multisheet_data(
             if context_confirmed:
                 return bool(context_confirmed.get(str(ctx.get("context_id") or "")))
             return bool(confirmed_fields.get(entity_confirm_key.get(_ent or "", "")))
+
+        if any(
+            _entidad_de(ctx) == "product"
+            and _hoja_incluida(ctx)
+            and not stock_is_purchase_for(ctx.get("context_id"))
+            for ctx in contexts
+        ):
+            _opening_dates = []
+            for ctx in contexts:
+                _entity = _entidad_de(ctx)
+                if (
+                    _entity not in {"sale", "expense"}
+                    or not _hoja_incluida(ctx)
+                    or ctx.get("is_summary_or_derived")
+                ):
+                    continue
+                # Misma preparación que la inserción: columnas ignoradas y convenio
+                # de fechas por columna. No usar preview_rows (puede estar truncado).
+                _cid = ctx.get("context_id")
+                _mapping = context_mappings.get(_cid or "", {})
+                _cols, _, _, _ignored = _resolve_target_cols(_mapping)
+                _rows, _ = preparar_filas_de_hoja(
+                    [
+                        r for r in summary.get(_bucket_key_for_context(ctx), [])
+                        if r.get("__context__") == _cid
+                    ],
+                    _cols,
+                    _ignored,
+                )
+                _date_keys = (
+                    ("transaction_date", "expense_date")
+                    if _entity == "sale"
+                    else ("expense_date", "transaction_date")
+                )
+                for row in _rows:
+                    _date = _parse_date(
+                        _val(row, _cols.get(_date_keys[0]) or _cols.get(_date_keys[1]), _FECHA_COLS)
+                    )
+                    if _date is not None:
+                        _opening_dates.append(_date)
+            _opening_date = await _opening_stock_date(session, tenant_id, _opening_dates)
 
         async def _ventas_sin_stock_que_las_respalde() -> dict[tuple[str, int], UnbackedRow]:
             """F-H3.d.3 — qué filas de venta no se pueden importar por falta de stock.
@@ -9127,6 +9217,18 @@ async def _insert_multisheet_data(
                 for motivo in por_columna.values()
             )
             return filas
+
+        if confirmed_fields.get("productos") and not stock_is_purchase_for(None):
+            _opening_dates = []
+            for _field, _bucket in (
+                ("ventas", "ventas_detectadas"), ("gastos", "gastos_detectados")
+            ):
+                if confirmed_fields.get(_field):
+                    for row in _filas_legacy(_bucket):
+                        _date = _parse_date(_row_val(row, _FECHA_COLS))
+                        if _date is not None:
+                            _opening_dates.append(_date)
+            _opening_date = await _opening_stock_date(session, tenant_id, _opening_dates)
 
         if confirmed_fields.get("ventas"):
             for _i, row in enumerate(_filas_legacy("ventas_detectadas")):
