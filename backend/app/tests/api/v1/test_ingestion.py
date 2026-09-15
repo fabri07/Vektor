@@ -1637,6 +1637,39 @@ async def test_fila_con_fecha_ilegible_va_a_otros_no_inventa_hoy(
     ]
 
 
+async def test_fila_con_fecha_futura_va_a_otros_no_se_importa(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Incidente ASTERIA 2026-09-14: dos celdas de un Libro Diario tipeadas con
+    el año que viene (``26/12/2026`` en vez de ``26/12/2025``) se leían bien
+    —no son ilegibles ni ambiguas— y la venta terminaba fechada en el futuro.
+    Mismo tratamiento que F6-A2: a "Otros" para revisión manual, nunca una
+    venta con una fecha que todavía no pasó.
+    """
+    import app.application.services.ingestion_import_service as importer
+    from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+    await importer.insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        {
+            "file_type": "spreadsheet",
+            "inferred_type": "ventas",
+            "has_venta": True,
+            "ventas_detectadas": [{"fecha": "26/12/2099", "monto": "100"}],
+        },
+        {"ventas": True},
+    )
+
+    sales = (await db_session.execute(select(SaleEntry))).scalars().all()
+    assert sales == []
+    records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert len(records) == 1
+    assert records[0].suggested_entity == "sale"
+    assert records[0].row_data.get("monto") == "100"
+
+
 async def test_hoja_derivada_no_reasignada_no_contamina_otros(
     db_session: AsyncSession,
     sample_tenant: Tenant,

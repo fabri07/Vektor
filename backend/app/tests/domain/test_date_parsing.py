@@ -13,6 +13,7 @@ import pytest
 
 from app.domain.date_parsing import (
     MOTIVO_FECHA_AMBIGUA,
+    MOTIVO_FECHA_FUTURA,
     MOTIVO_FECHA_ILEGIBLE,
     inferir_convenio_de_fecha,
     parse_business_date,
@@ -187,6 +188,56 @@ class TestElOrdenDiaMesLoDecideLaColumna:
     def test_vacio_no_genera_motivo(self) -> None:
         assert parsear_fecha_de_columna("", None).ausente is True
         assert parsear_fecha_de_columna(None, None).ausente is True
+
+
+class TestFechaFutura:
+    """Incidente ASTERIA 2026-09-14: dos celdas de 'LD 2025' tipeadas con año
+    2026 en vez de 2025 llevaron 7 ventas reales a diciembre de un año que
+    todavía no había llegado. Una fecha de negocio nunca es posterior a hoy —
+    se pudo leer, pero no es plausible, así que se trata como una fecha
+    ilegible: a revisión con el original a la vista, nunca importada tal cual.
+    """
+
+    HOY = date(2026, 9, 14)
+
+    def test_fecha_futura_en_string_se_rechaza(self) -> None:
+        futura = parsear_fecha_de_columna("26/12/2026", None, hoy=self.HOY)
+        assert futura.valor is None
+        assert futura.motivo == MOTIVO_FECHA_FUTURA
+        assert futura.original == "26/12/2026"
+
+    def test_fecha_futura_nativa_tambien_se_rechaza(self) -> None:
+        """El caso real: openpyxl ya entrega `datetime` para una celda con
+        formato de fecha — no pasa por ningún parseo de texto."""
+        nativa = datetime(2026, 12, 26)
+        futura = parsear_fecha_de_columna(nativa, None, hoy=self.HOY)
+        assert futura.valor is None
+        assert futura.motivo == MOTIVO_FECHA_FUTURA
+        assert futura.original == nativa
+
+    def test_fecha_futura_por_serial_de_excel_tambien_se_rechaza(self) -> None:
+        # Serial de Excel para 2026-12-26.
+        serial = (datetime(2026, 12, 26) - datetime(1899, 12, 30)).days
+        futura = parsear_fecha_de_columna(str(serial), None, hoy=self.HOY)
+        assert futura.valor is None
+        assert futura.motivo == MOTIVO_FECHA_FUTURA
+
+    def test_hoy_no_es_futuro(self) -> None:
+        assert parsear_fecha_de_columna("14/09/2026", None, hoy=self.HOY).valor == datetime(
+            2026, 9, 14
+        )
+
+    def test_pasado_no_se_toca(self) -> None:
+        assert parsear_fecha_de_columna("26/12/2025", None, hoy=self.HOY).valor == datetime(
+            2025, 12, 26
+        )
+
+    def test_sin_hoy_explicito_usa_el_reloj_real(self) -> None:
+        """Sin inyectar `hoy`, cualquier año muy lejano en el futuro sigue
+        rechazándose contra la fecha real — no contra un `HOY` de test viejo."""
+        futura = parsear_fecha_de_columna("25/12/2099")
+        assert futura.valor is None
+        assert futura.motivo == MOTIVO_FECHA_FUTURA
 
 
 class TestSerialesDeExcel:

@@ -78,6 +78,7 @@ from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
 from app.domain.date_parsing import (
     CAMPOS_DE_FECHA,
+    MOTIVO_FECHA_FUTURA,
     inferir_convenio_de_fecha,
     parse_business_date,
     parse_business_datetime,
@@ -4119,6 +4120,16 @@ def _normalizar_columnas_de_fecha(
                 copia[col] = interpretada.valor
             elif interpretada.motivo is not None:
                 motivos.setdefault(indice, {})[col] = interpretada.motivo
+                if interpretada.motivo == MOTIVO_FECHA_FUTURA:
+                    # A diferencia de ambigua/ilegible (que ya son texto que
+                    # `_parse_date` tampoco puede leer solo), acá el valor SÍ se
+                    # pudo interpretar —nativo de openpyxl incluido— así que
+                    # dejarlo en la fila dejaría que el lector directo de más
+                    # abajo (`_parse_date` sobre un `datetime` nativo no vuelve a
+                    # filtrar nada) la reinserte igual. Se anula la celda para
+                    # que la fila llegue sin fecha, como cualquier otro motivo.
+                    copia.setdefault(ORIGINALES_KEY, {})[col] = copia[col]
+                    copia[col] = None
         normalizadas.append(copia)
     return normalizadas, motivos
 

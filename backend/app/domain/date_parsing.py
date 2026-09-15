@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
+from app.domain.business_time import today_ar
+
 # Orden = prioridad. Con hora primero (una fecha con hora también matchearía el
 # formato de solo fecha si se truncara, y perderíamos la hora).
 BUSINESS_DATE_FORMATS: tuple[str, ...] = (
@@ -123,6 +125,15 @@ CAMPOS_DE_FECHA = frozenset({"transaction_date", "expense_date", "acquired_at"})
 
 MOTIVO_FECHA_AMBIGUA = "convenio_de_fecha_ambiguo"
 MOTIVO_FECHA_ILEGIBLE = "fecha_ilegible"
+#: Una fecha de negocio (venta, gasto, alta de producto) nunca es posterior a
+#: hoy — a diferencia de una fecha ilegible, ACÁ el valor se pudo leer, pero es
+#: implausible: nadie registra una operación real que todavía no pasó. Mismo
+#: tratamiento que una fecha ilegible (a "Otros" con el original a la vista, no
+#: se inventa un ajuste), motivo aparte porque la causa que hay que mostrarle al
+#: usuario es otra (incidente ASTERIA 2026-09-14: dos celdas de "LD 2025"
+#: tipeadas con año 2026 en vez de 2025 llevaron 7 ventas reales a diciembre de
+#: un año que todavía no llegó).
+MOTIVO_FECHA_FUTURA = "fecha_futura"
 
 #: Serial de Excel: días desde el 1899-12-30. La base NO es el 31/12/1899 por el
 #: bug del año bisiesto de 1900 que Excel arrastra por compatibilidad con Lotus.
@@ -238,7 +249,11 @@ def inferir_convenio_de_fecha(valores: Iterable[Any]) -> ConvenioDeFecha | None:
 
 
 def parsear_fecha_de_columna(
-    raw: Any, convenio: ConvenioDeFecha | None = None, *, century_pivot: int | None = None
+    raw: Any,
+    convenio: ConvenioDeFecha | None = None,
+    *,
+    century_pivot: int | None = None,
+    hoy: date | None = None,
 ) -> FechaInterpretada:
     """Interpreta una fecha bajo el convenio de su columna.
 
@@ -246,7 +261,33 @@ def parsear_fecha_de_columna(
     necesita convenio: nativos, seriales y fechas cuyo orden es inequívoco. Una
     fecha ambigua ahí queda con ``MOTIVO_FECHA_AMBIGUA``, con el original a la
     vista: elegir uno de los dos órdenes le erraría a la mitad de las filas.
+
+    Toda salida con ``valor`` pasa por ``_sin_fecha_futura`` antes de volver: un
+    valor que se pudo leer pero cae después de ``hoy`` (default: la fecha real)
+    se degrada a ``MOTIVO_FECHA_FUTURA`` en vez de entrar como si fuera una
+    fecha de negocio válida. ``hoy`` es parámetro sólo para que el test no
+    dependa del reloj real.
     """
+    return _sin_fecha_futura(_parsear_fecha_de_columna_bruta(raw, convenio, century_pivot), hoy)
+
+
+def _sin_fecha_futura(interpretada: FechaInterpretada, hoy: date | None) -> FechaInterpretada:
+    if interpretada.valor is None:
+        return interpretada
+    # `today_ar()`, no un `date.today()` de servidor: Railway corre en UTC, que
+    # cambia de día 3 horas antes que Argentina — comparar contra UTC rechazaría
+    # una venta real de esta tarde-noche cargada con la fecha de hoy en AR.
+    limite = hoy if hoy is not None else today_ar()
+    if interpretada.valor.date() > limite:
+        return FechaInterpretada(
+            original=interpretada.original, valor=None, motivo=MOTIVO_FECHA_FUTURA
+        )
+    return interpretada
+
+
+def _parsear_fecha_de_columna_bruta(
+    raw: Any, convenio: ConvenioDeFecha | None, century_pivot: int | None
+) -> FechaInterpretada:
     if raw is None:
         return FechaInterpretada(original=raw, valor=None)
     if isinstance(raw, datetime | date):
