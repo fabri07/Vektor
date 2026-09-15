@@ -470,6 +470,67 @@ async def _execute_prepare_whatsapp(
     )
 
 
+async def _execute_classify_gmail_message(
+    action: PendingAction,
+    db: AsyncSession,
+    broker: "GoogleToolBroker",
+    payload: dict[str, Any],
+) -> None:
+    """Revisa la bandeja (o un mensaje puntual) con el filtro de preflight.
+
+    Stashea el resultado en ``action.payload["result"]`` (mismo patrón que
+    ``_execute_prepare_whatsapp``) para que el endpoint de confirmación lo
+    devuelva al frontend. Un GMAIL_SKIPPED por mensaje queda auditado —
+    invariante 6: toda decisión va a ``decision_audit_log``.
+    """
+    from app.application.services.gmail_inbox_review_service import (  # noqa: PLC0415
+        review_gmail_inbox,
+    )
+
+    message_id = str(payload.get("message_id") or "").strip() or None
+    query = str(payload.get("query") or "").strip() or None
+
+    # GmailReviewRequestError ya es un ValueError -- se propaga tal cual,
+    # el caller (execute_pending_action) lo captura como falla de ejecución.
+    result = await review_gmail_inbox(
+        broker=broker,
+        db=db,
+        tenant_id=action.tenant_id,
+        query=query,
+        message_id=message_id,
+        max_results=int(payload.get("max_results", 10)),
+    )
+
+    for skipped in result.skipped:
+        db.add(
+            DecisionAuditLog(
+                id=uuid.uuid4(),
+                tenant_id=action.tenant_id,
+                decision_type="GMAIL_SKIPPED",
+                decision_data={
+                    "pending_action_id": str(action.id),
+                    "sender": skipped.get("from"),
+                    "subject": skipped.get("subject"),
+                },
+                triggered_by="agent:gmail_preflight",
+                actor_user_id=action.user_id,
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    action.payload = {**(action.payload or {}), "result": result.to_payload()}
+
+    logger.info(
+        "gmail_inbox_reviewed",
+        action_id=str(action.id),
+        tenant_id=str(action.tenant_id),
+        candidates=result.candidates,
+        authorized=len(result.authorized),
+        skipped=len(result.skipped),
+        failed=result.failed,
+    )
+
+
 async def execute_pending_action(
     action: PendingAction,
     db: AsyncSession,
@@ -887,7 +948,7 @@ async def execute_pending_action(
     elif action.action_type == ActionType.CLASSIFY_GMAIL_MESSAGE:
         if payload.get("mode") == "mcp":
             broker = _make_google_broker(action)
-            await broker.get_gmail_message(message_id=payload.get("message_id", ""))
+            await _execute_classify_gmail_message(action, db, broker, payload)
         action.external_system = determine_external_system(action.action_type, payload)
 
     elif action.action_type == ActionType.SYNC_TO_GOOGLE:

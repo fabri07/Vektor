@@ -10,7 +10,10 @@ Emiten PendingActions con ActionType externo; PendingActionService delega al bro
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.integrations.mcp.google_mcp_service import GmailListPage
 
 
 class GoogleToolBroker:
@@ -30,11 +33,16 @@ class GoogleToolBroker:
 
     # ── Gmail ─────────────────────────────────────────────────────────────────
 
-    async def list_gmail_messages(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
+    async def list_gmail_messages(self, query: str, max_results: int = 10) -> GmailListPage:
         return await self._svc.list_gmail_messages(query=query, max_results=max_results)
 
-    async def get_gmail_message(self, message_id: str) -> dict[str, Any]:
-        return await self._svc.get_gmail_message(message_id=message_id)
+    async def get_gmail_message(
+        self, message_id: str, *, msg_format: str = "full"
+    ) -> dict[str, Any]:
+        return await self._svc.get_gmail_message(message_id=message_id, msg_format=msg_format)
+
+    async def list_gmail_labels(self) -> list[dict[str, Any]]:
+        return await self._svc.list_gmail_labels()
 
     async def create_gmail_draft(
         self,

@@ -158,6 +158,12 @@ class AgentSupplier(BaseAgent):
 
     def _handle_classify_inbox(self, request: AgentRequest) -> AgentResponse:
         mode = "mcp" if self._gateway else "informational"
+        max_results = 10
+        summary = (
+            f"Voy a revisar hasta {max_results} mensajes recibidos en los últimos 14 días "
+            "y filtrar los que sean de proveedores conocidos (por email aprobado o label "
+            "\"Véktor\"). No abro correos de remitentes desconocidos."
+        )
         return AgentResponse(
             request_id=request.request_id,
             agent_name=self.agent_name,
@@ -167,11 +173,12 @@ class AgentSupplier(BaseAgent):
             requires_approval=True,
             result={
                 "action_type": ActionType.CLASSIFY_GMAIL_MESSAGE,
-                "summary": "Revisar mensajes recibidos de proveedores en Gmail.",
+                "summary": summary,
                 "mode": mode,
                 "payload": {
                     "message": request.message,
-                    "message_id": "",
+                    "query": "in:inbox newer_than:14d",
+                    "max_results": max_results,
                     "mode": mode,
                 },
             },

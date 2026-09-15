@@ -30,6 +30,7 @@ logger = get_logger(__name__)
 TOOL_TIMEOUTS: dict[str, float] = {
     "google.gmail.list_messages": 8.0,
     "google.gmail.get_message": 8.0,
+    "google.gmail.list_labels": 8.0,
     "google.gmail.create_draft": 20.0,
     "google.gmail.send_message": 20.0,
     "google.gmail.reply_message": 20.0,

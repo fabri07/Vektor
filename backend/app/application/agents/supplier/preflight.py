@@ -1,69 +1,63 @@
 """Pre-flight check de Gmail para AgentSupplier.
 
-OBLIGATORIO: ejecutar antes de abrir cualquier correo de Gmail.
-Un correo pasa si AL MENOS UNA de las tres condiciones se cumple.
-Si ninguna se cumple → GMAIL_SKIPPED y se registra en audit_log.
+OBLIGATORIO: ejecutar antes de abrir el CUERPO de cualquier correo de Gmail.
+Un correo pasa si AL MENOS UNA de las tres condiciones se cumple:
+  1. El remitente es un proveedor aprobado del tenant.
+  2. El correo tiene la label "Véktor" (o "Vektor" sin tilde).
+  3. El usuario señaló explícitamente ESE mensaje puntual (``user_requested``).
+
+``user_requested`` NO es "el usuario pidió revisar la bandeja" — aprobar una
+revisión general de la bandeja no autoriza indiscriminadamente cualquier
+correo. Solo aplica cuando el payload trae un ``message_id`` puntual que el
+usuario señaló (ver ``gmail_inbox_review_service.review_gmail_inbox``).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from email.utils import parseaddr
+from typing import Any
 
-from app.application.services.supplier_service import get_approved_senders
 
-if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+def normalize_gmail_sender(raw: str) -> str:
+    """Extrae y normaliza la dirección de un header ``From``.
+
+    ``"Empresa S.A. <compras@proveedor.com>"`` → ``"compras@proveedor.com"``.
+    Sin esto, un remitente aprobado por email nunca matchea un ``From`` real
+    de Gmail, que casi siempre trae un nombre para mostrar.
+    """
+    _display_name, address = parseaddr(raw or "")
+    return address.strip().lower()
 
 
 async def gmail_preflight_check(
     metadata: dict[str, Any],
-    business_id: str,
-    db: AsyncSession | None = None,
+    *,
+    approved_senders: frozenset[str],
+    vektor_label_ids: frozenset[str],
     user_requested: bool = False,
 ) -> bool:
     """
     Retorna True solo si el correo está autorizado para ser procesado.
 
-    metadata esperado: {
-      "from": "email@proveedor.com",
+    metadata esperado (de ``get_message`` en modo ``metadata``): {
+      "from": "Proveedor <email@proveedor.com>",
       "subject": "Lista de precios",
-      "labels": ["INBOX", "Véktor"],
-      "snippet": "..."
+      "label_ids": ["INBOX", "Label_170..."],
     }
+
+    ``approved_senders`` y ``vektor_label_ids`` se resuelven UNA vez por
+    ejecución (no por mensaje) — ver ``review_gmail_inbox``.
     """
-    sender = metadata.get("from", "").lower()
-    labels = metadata.get("labels", [])
+    sender = normalize_gmail_sender(metadata.get("from", ""))
+    labels = metadata.get("label_ids") or metadata.get("labels") or []
 
     # Condición 1: sender registrado como proveedor
-    if db:
-        approved_senders = await get_approved_senders(business_id, db)
-        if sender in [s.lower() for s in approved_senders]:
-            return True
-
-    # Condición 2: tiene label "Véktor" (o "Vektor" sin tilde)
-    if "Véktor" in labels or "Vektor" in labels:
+    if sender and sender in approved_senders:
         return True
 
-    # Condición 3: usuario lo solicitó explícitamente
-    return bool(user_requested)  # True → enviar; False → GMAIL_SKIPPED
+    # Condición 2: tiene la label "Véktor"/"Vektor", resuelta a su id opaco
+    if any(label_id in vektor_label_ids for label_id in labels):
+        return True
 
-
-async def preflight_and_log(
-    metadata: dict[str, Any],
-    business_id: str,
-    db: AsyncSession,
-    audit_logger: Any,
-    user_requested: bool = False,
-) -> bool:
-    """Versión con audit logging automático."""
-    result = await gmail_preflight_check(metadata, business_id, db, user_requested)
-    if not result:
-        await audit_logger.log(
-            business_id=business_id,
-            action="GMAIL_SKIPPED",
-            details={
-                "sender": metadata.get("from"),
-                "subject": metadata.get("subject"),
-            },
-        )
-    return result
+    # Condición 3: el usuario señaló explícitamente este mensaje puntual
+    return bool(user_requested)

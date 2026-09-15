@@ -121,8 +121,8 @@ async def test_allowlist_blocks_unauthorized_tool():
 async def test_disabled_flag_skips_gateway():
     """Con ENABLE_GOOGLE_MCP_TOOLS=False, GoogleMcpService no llama al gateway HTTP.
 
-    list_gmail_messages extrae "messages" del dict de disabled → retorna [],
-    pero lo importante es que call_tool nunca se invocó.
+    list_gmail_messages distingue "deshabilitado" de "bandeja vacía": el
+    resultado trae disabled=True, no un [] indistinguible de un 0 real.
     """
     s = _make_settings()
     s.ENABLE_GOOGLE_MCP_TOOLS = False
@@ -137,8 +137,8 @@ async def test_disabled_flag_skips_gateway():
 
     result = await svc.list_gmail_messages(query="test")
 
-    # El wrapper devuelve [] porque el dict de disabled no tiene "messages".
-    assert result == []
+    assert result.disabled is True
+    assert result.message_ids == []
     # El gateway real nunca fue invocado.
     mock_gateway.call_tool.assert_not_called()
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from pydantic import BaseModel, Field
@@ -27,6 +28,7 @@ AGENT_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
         {
             "google.gmail.list_messages",
             "google.gmail.get_message",
+            "google.gmail.list_labels",
             "google.gmail.create_draft",
             "google.gmail.send_message",
             "google.gmail.reply_message",
@@ -75,6 +77,7 @@ AGENT_TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
         {
             "google.gmail.list_messages",
             "google.gmail.get_message",
+            "google.gmail.list_labels",
             "google.gmail.create_draft",
             "google.gmail.send_message",
             "google.gmail.reply_message",
@@ -108,6 +111,7 @@ class _GmailListArgs(BaseModel):
 
 class _GmailGetArgs(BaseModel):
     message_id: str
+    format: str = Field(default="full", pattern="^(full|metadata)$")
 
 
 class _GmailDraftArgs(BaseModel):
@@ -181,6 +185,22 @@ class _DocsAppendArgs(BaseModel):
     content: str = Field(max_length=50_000)
 
 
+@dataclass
+class GmailListPage:
+    """Una página de ``google.gmail.list_messages``.
+
+    El tool del MCP server SIEMPRE devolvió ``message_ids`` (lista de ids
+    desnudos) — nunca ``messages`` con objetos completos, porque la API de
+    Gmail en modo ``list`` no trae remitente/asunto sin una llamada aparte
+    por mensaje. ``disabled`` distingue "MCP deshabilitado" de "bandeja
+    vacía": ambos dan 0 resultados, pero solo el primero no habla con Google.
+    """
+
+    message_ids: list[str] = field(default_factory=list)
+    next_page_token: str | None = None
+    disabled: bool = False
+
+
 # ── Servicio ──────────────────────────────────────────────────────────────────
 
 
@@ -230,14 +250,27 @@ class GoogleMcpService:
 
     # ── Gmail ─────────────────────────────────────────────────────────────────
 
-    async def list_gmail_messages(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
+    async def list_gmail_messages(self, query: str, max_results: int = 10) -> GmailListPage:
         args = _GmailListArgs(query=query, max_results=max_results).model_dump()
         result = await self._call("google.gmail.list_messages", args)
-        return cast("list[dict[str, Any]]", result.get("messages", []))
+        if result.get("mode") == "disabled":
+            return GmailListPage(disabled=True)
+        return GmailListPage(
+            message_ids=cast("list[str]", result.get("message_ids", [])),
+            next_page_token=result.get("next_page_token"),
+        )
 
-    async def get_gmail_message(self, message_id: str) -> dict[str, Any]:
-        args = _GmailGetArgs(message_id=message_id).model_dump()
+    async def get_gmail_message(
+        self, message_id: str, *, msg_format: str = "full"
+    ) -> dict[str, Any]:
+        args = _GmailGetArgs(message_id=message_id, format=msg_format).model_dump()
         return await self._call("google.gmail.get_message", args)
+
+    async def list_gmail_labels(self) -> list[dict[str, Any]]:
+        result = await self._call("google.gmail.list_labels", {})
+        if result.get("mode") == "disabled":
+            return []
+        return cast("list[dict[str, Any]]", result.get("labels", []))
 
     async def create_gmail_draft(
         self,

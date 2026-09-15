@@ -1348,6 +1348,14 @@ async def _confirm_pending_action(
         whatsapp_result = (action.payload or {}).get("result")
         if whatsapp_result:
             response["whatsapp"] = whatsapp_result
+    # Revisión de bandeja Gmail: exponer conteos/mensajes autorizados al frontend.
+    if (
+        action.action_type == ActionType.CLASSIFY_GMAIL_MESSAGE
+        and action.execution_status == "SUCCEEDED"
+    ):
+        gmail_result = (action.payload or {}).get("result")
+        if gmail_result:
+            response["gmail_review"] = gmail_result
     return response
 
 
