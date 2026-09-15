@@ -50,6 +50,7 @@ _ALL_TOOLS = [
     "google.drive.upload_file",
     "google.gmail.list_messages",
     "google.gmail.get_message",
+    "google.gmail.list_labels",
     "google.gmail.create_draft",
     "google.gmail.send_message",
     "google.gmail.reply_message",
@@ -128,7 +129,16 @@ async def call_tool(
             message_id = str(args.get("message_id", "")).strip()
             if not message_id:
                 return _error("validation_error", "message_id es requerido", body.id)
-            result = await gmail.get_message(session=session, ctx=ctx, message_id=message_id)
+            format_ = str(args.get("format") or "full").strip().lower()
+            if format_ not in {"full", "metadata"}:
+                format_ = "full"
+            result = await gmail.get_message(
+                session=session, ctx=ctx, message_id=message_id, format_=format_
+            )
+            return _ok(result, body.id)
+
+        if name == "google.gmail.list_labels":
+            result = await gmail.list_labels(session=session, ctx=ctx)
             return _ok(result, body.id)
 
         if name == "google.gmail.create_draft":

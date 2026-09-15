@@ -81,13 +81,27 @@ async def get_message(
     session: Any,
     ctx: RequestContext,
     message_id: str,
+    format_: str = "full",
 ) -> dict[str, Any]:
+    """Trae un mensaje de Gmail.
+
+    ``format_="metadata"`` pide solo encabezados (From/Subject) + label_ids —
+    NUNCA snippet ni cuerpo. Existe para poder evaluar el preflight de
+    AgentSupplier (¿este correo es de un proveedor aprobado?) sin abrir el
+    contenido del mensaje. ``format_="full"` (default) preserva el contrato
+    existente para los consumidores que ya leen el cuerpo (reply_message).
+    """
     access_token, _ = await get_valid_access_token(session, ctx)
+
+    is_metadata = format_ == "metadata"
+    params: dict[str, Any] = {"format": "metadata" if is_metadata else "full"}
+    if is_metadata:
+        params["metadataHeaders"] = ["From", "Subject"]
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(
             f"{GMAIL_BASE}/messages/{message_id}",
-            params={"format": "full"},
+            params=params,
             headers={"Authorization": f"Bearer {access_token}"},
         )
 
@@ -104,6 +118,15 @@ async def get_message(
     headers_raw = msg.get("payload", {}).get("headers", [])
     headers = {h["name"].lower(): h["value"] for h in headers_raw}
 
+    if is_metadata:
+        return {
+            "id": msg.get("id"),
+            "thread_id": msg.get("threadId"),
+            "subject": headers.get("subject", ""),
+            "from": headers.get("from", ""),
+            "label_ids": msg.get("labelIds", []),
+        }
+
     body = _extract_body(msg.get("payload", {}))
 
     return {
@@ -119,6 +142,39 @@ async def get_message(
         "body_preview": body[:2000],
         "label_ids": msg.get("labelIds", []),
     }
+
+
+async def list_labels(*, session: Any, ctx: RequestContext) -> dict[str, Any]:
+    """Lista las labels de Gmail del usuario: {id, name, type} por label.
+
+    Las labels custom (ej. "Véktor") tienen un ``id`` opaco generado por Gmail
+    — nunca su nombre visible. Este tool existe para resolver nombre→id UNA
+    vez por revisión de bandeja, y así poder comparar contra ``label_ids``
+    (lo único que trae ``get_message``) en vez de contra nombres que nunca
+    van a matchear.
+    """
+    access_token, _ = await get_valid_access_token(session, ctx)
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{GMAIL_BASE}/labels",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    if resp.status_code == 401:
+        raise HTTPException(status_code=401, detail="refresh_failed")
+    if resp.status_code == 403:
+        raise HTTPException(status_code=403, detail="insufficient_scope")
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=400, detail="gmail_labels_failed")
+
+    payload = resp.json()
+    labels = [
+        {"id": lbl.get("id"), "name": lbl.get("name"), "type": lbl.get("type")}
+        for lbl in payload.get("labels", [])
+        if lbl.get("id")
+    ]
+    return {"labels": labels}
 
 
 def _extract_body(payload: dict[str, Any]) -> str:
