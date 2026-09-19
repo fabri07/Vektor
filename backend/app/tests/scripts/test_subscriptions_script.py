@@ -179,7 +179,7 @@ async def test_activate_con_apply_otorga_cupos_y_precio_del_plan(
         await db_session.execute(select(DecisionAuditLog))
     ).scalars().all()
     assert len(auditorias) == 1
-    assert auditorias[0].decision_type == "MANUAL_PLAN_ACTIVATION"
+    assert auditorias[0].decision_type == "SUBSCRIPTION_PAYMENT_APPLIED"
 
 
 async def test_repetir_la_misma_referencia_no_vuelve_a_extender(
@@ -329,3 +329,112 @@ async def test_diagnose_encuentra_un_tenant_sin_suscripcion_y_no_escribe(
 
     assert str(huerfano.tenant_id) in capsys.readouterr().out
     assert await _contar(db_session, Subscription) == antes
+
+
+# ── Bloque D: renew / change-plan / cancel / reparaciones ────────────────────
+
+
+def _sin_zona(valor: datetime | None) -> datetime:
+    """SQLite devuelve naive lo que se guardó con zona (Postgres no)."""
+    assert valor is not None
+    return valor.replace(tzinfo=None)
+
+
+def _args_cobro(comando: str, tenant_id: uuid.UUID, ref: str, *extra: str) -> Any:
+    argv = [comando, str(tenant_id), "--price-usd", "27", "--price-ars", "41500",
+            "--reference", ref, "--apply", *extra]
+    return _load_module().parse_args(argv)
+
+
+async def test_activate_sobre_una_cuenta_ya_activa_manda_a_renew(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription], capsys: Any
+) -> None:
+    tenant, sub = trial
+    assert await mod.cmd_activate(db_session, _args_activate(tenant.tenant_id, apply=True)) == 0
+    await db_session.refresh(sub)
+    fin = sub.current_period_end
+
+    otra = _args_activate(tenant.tenant_id, reference="MP-2", apply=True)
+    assert await mod.cmd_activate(db_session, otra) == 1
+    assert "USE_RENEW" in capsys.readouterr().out
+    await db_session.refresh(sub)
+    assert _sin_zona(sub.current_period_end) == _sin_zona(fin)  # no se pisó
+
+
+async def test_renew_por_el_script_otorga_el_periodo_siguiente(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription]
+) -> None:
+    tenant, sub = trial
+    await mod.cmd_activate(db_session, _args_activate(tenant.tenant_id, apply=True))
+    await db_session.refresh(sub)
+    fin = sub.current_period_end
+
+    assert await mod.cmd_renew(db_session, _args_cobro("renew", tenant.tenant_id, "MP-2")) == 0
+
+    await db_session.refresh(sub)
+    assert _sin_zona(sub.current_period_end) == _sin_zona(fin)
+    assert sub.next_period_end is not None
+    assert _sin_zona(sub.next_period_end) > _sin_zona(fin)
+
+
+async def test_varios_meses_en_un_pago_se_rechaza(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription], capsys: Any
+) -> None:
+    tenant, sub = trial
+    args = _args_cobro("activate", tenant.tenant_id, "MP-9", "--plan", "control", "--months", "3")
+    assert await mod.cmd_activate(db_session, args) == 1
+    assert "un mes por pago" in capsys.readouterr().out
+    await db_session.refresh(sub)
+    assert sub.status == "TRIAL"
+
+
+async def test_set_status_no_reinicia_una_prueba_ni_inventa_un_active(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription]
+) -> None:
+    tenant, sub = trial
+    sin_periodo = mod.parse_args(
+        ["set-status", str(tenant.tenant_id), "--status", "ACTIVE", "--apply"]
+    )
+    assert await mod.cmd_set_status(db_session, sin_periodo) == 1
+
+    await mod.cmd_activate(db_session, _args_activate(tenant.tenant_id, apply=True))
+    a_trial = mod.parse_args(["set-status", str(tenant.tenant_id), "--status", "TRIAL", "--apply"])
+    assert await mod.cmd_set_status(db_session, a_trial) == 1
+    await db_session.refresh(sub)
+    assert sub.status == "ACTIVE"
+
+
+async def test_expire_due_no_manda_a_gracia_a_quien_pago_por_adelantado(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription]
+) -> None:
+    _, sub = trial
+    ahora = datetime.now(UTC)
+    sub.status, sub.plan_code = "ACTIVE", "control"
+    sub.current_period_start = ahora - timedelta(days=32)
+    sub.current_period_end = ahora - timedelta(days=2)
+    sub.next_period_end = ahora + timedelta(days=28)
+    sub.next_granted_ia_queries_per_month = 70
+    await db_session.commit()
+
+    assert await mod.cmd_expire_due(db_session, mod.parse_args(["expire-due", "--apply"])) == 0
+
+    await db_session.refresh(sub)
+    assert sub.status == "ACTIVE"
+    assert sub.next_period_end is None
+    assert _sin_zona(sub.current_period_end) > _sin_zona(ahora)  # el pase quedó escrito
+
+
+async def test_expire_due_cierra_una_cancelacion_cumplida_sin_pasar_por_gracia(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription]
+) -> None:
+    _, sub = trial
+    ahora = datetime.now(UTC)
+    sub.status, sub.plan_code, sub.cancel_at_period_end = "ACTIVE", "control", True
+    sub.current_period_start = ahora - timedelta(days=32)
+    sub.current_period_end = ahora - timedelta(days=2)
+    await db_session.commit()
+
+    assert await mod.cmd_expire_due(db_session, mod.parse_args(["expire-due", "--apply"])) == 0
+
+    await db_session.refresh(sub)
+    assert sub.status == "CANCELLED"

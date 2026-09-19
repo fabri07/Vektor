@@ -49,6 +49,20 @@ def _sync_dsn(dsn: str) -> str:
     return dsn.replace("+asyncpg", "")
 
 
+def _head() -> str:
+    """El head de la cadena según los archivos de `versions/` (sin base)."""
+    salida = subprocess.run(
+        [sys.executable, "-m", "alembic", "heads"],
+        cwd=BACKEND,
+        env={**os.environ, "DATABASE_URL": "sqlite://", "DATABASE_URL_SYNC": "sqlite://"},
+        capture_output=True,
+        text=True,
+    )
+    heads = [linea.split()[0] for linea in salida.stdout.splitlines() if linea.strip()]
+    assert len(heads) == 1, f"la cadena tiene {len(heads)} heads: {heads} {salida.stderr[-500:]}"
+    return heads[0]
+
+
 def _alembic(base: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Alembic con el MISMO intérprete que corre pytest.
 
@@ -119,7 +133,12 @@ def test_la_cadena_se_reaplica_sobre_un_esquema_ya_adelantado(base_limpia: str) 
             c["name"] for c in sa.inspect(conn).get_columns("uploaded_files")
         }
     motor.dispose()
-    assert version == "20260910_0005"
+    # El head REAL de la cadena, no un literal: escrito a mano quedó clavado en
+    # `20260910_0005` y la compuerta se puso roja con la primera migración que se
+    # agregó después — sin que nadie lo viera, porque local se saltea (pide
+    # Postgres) y sólo corre en CI. Que derive del head hace además que cada
+    # migración nueva entre sola al alcance de esta prueba.
+    assert version == _head()
     assert "parse_attempt_id" in columnas
 
 

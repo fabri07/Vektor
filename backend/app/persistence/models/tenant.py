@@ -6,21 +6,24 @@ Column names match the migration schema exactly.
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
+    String,
     Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.persistence.db.base import Base, TimestampMixin
+from app.persistence.db.base import PGJSONB, Base, TimestampMixin
 
 
 class Tenant(TimestampMixin, Base):
@@ -113,6 +116,22 @@ class Subscription(TimestampMixin, Base):
     trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     grace_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # ── Período SIGUIENTE ya pago (pago anticipado / cambio de plan programado) ──
+    # `effective_access` lo hace regir por fecha cuando termina el actual; el
+    # pase a `current_*` (`roll_forward`) es prolijidad, no requisito. Con
+    # `next_period_end` en NULL, `next_plan_code` solo es un cambio PROGRAMADO
+    # que se aplicará en la próxima renovación.
+    next_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_plan_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_seats_included: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    next_granted_ia_queries_per_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    next_granted_imports_per_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    next_granted_photo_pdf_reads_per_month: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    #: Día del mes en que arrancó el ciclo pago. No se pierde en meses cortos
+    #: (31 ene → 28 feb → 31 mar): ver `add_months_anchored`.
+    billing_anchor_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     tenant: Mapped["Tenant"] = relationship(back_populates="subscriptions")
 
@@ -204,4 +223,44 @@ class SubscriptionQuotaReservation(TimestampMixin, Base):
             "state IN ('RESERVED','COMMITTED','RELEASED')", name="ck_quota_reservation_state"
         ),
         CheckConstraint("units > 0", name="ck_quota_reservation_units_positive"),
+    )
+
+
+class SubscriptionPayment(TimestampMixin, Base):
+    """Un pago acreditado y el período que otorgó. Insert-only.
+
+    Es el registro comercial (la auditoría en `decision_audit_log` se conserva
+    aparte): fuente, referencia, importe, operador, período y copia de las
+    condiciones otorgadas. El UNIQUE `(source, reference)` es EL candado de la
+    idempotencia — dos ejecuciones simultáneas de la misma referencia no pueden
+    otorgar dos períodos, cosa que buscar la referencia antes de escribir no
+    garantiza. Lo comparten la transferencia manual y, después, Mercado Pago.
+    """
+
+    __tablename__ = "subscription_payments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    subscription_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("subscriptions.subscription_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(String(30), nullable=False)
+    reference: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    plan_code: Mapped[str] = mapped_column(Text, nullable=False)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False)
+    amount_ars: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    operator: Mapped[str] = mapped_column(String(100), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    granted_json: Mapped[dict[str, Any]] = mapped_column(PGJSONB, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("source", "reference", name="uq_subscription_payments_source_reference"),
+        Index("ix_subscription_payments_tenant", "tenant_id", "period_start"),
     )

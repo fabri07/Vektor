@@ -22,6 +22,7 @@ testeable con fechas fijas y no depender de un reloj propio.
 
 from __future__ import annotations
 
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -153,6 +154,24 @@ TRIAL_DAYS: Final[int] = 14
 
 #: Ventana de gracia tras vencer un período pagado (política B3).
 GRACE_DAYS: Final[int] = 7
+
+
+def add_months_anchored(desde: datetime, *, anchor_day: int, months: int = 1) -> datetime:
+    """`desde` + N meses calendario, en el DÍA ANCLA de la suscripción.
+
+    El ancla es el día del mes en que arrancó el ciclo y no se pierde: un
+    ciclo que empezó un 31 vence el 28/29 de febrero y VUELVE al 31 en marzo
+    (31 ene → 28 feb → 31 mar → 30 abr). Si el ajuste se arrastrara (28 → 28
+    → 28) el cliente perdería días para siempre, y las fechas dejarían de
+    coincidir con las de un débito recurrente, que se comporta así.
+    Conserva hora y zona de `desde`.
+    """
+    if not 1 <= anchor_day <= 31:
+        raise ValueError(f"día ancla inválido: {anchor_day}")
+    indice = desde.year * 12 + (desde.month - 1) + months
+    anio, mes = divmod(indice, 12)
+    mes += 1
+    return desde.replace(year=anio, month=mes, day=min(anchor_day, monthrange(anio, mes)[1]))
 
 
 @dataclass(frozen=True)
@@ -348,6 +367,9 @@ def effective_access(
     current_period_end: datetime | None,
     now: datetime,
     is_legacy_free: bool = False,
+    cancel_at_period_end: bool = False,
+    next_period_end: datetime | None = None,
+    next_quota: PlanQuota | None = None,
 ) -> EffectiveAccess:
     """Resuelve estado + cupos + período de UNA suscripción, en un solo lugar.
 
@@ -429,16 +451,35 @@ def effective_access(
             quota=granted_quota, period_start=periodo[0], period_end=periodo[1],
             blocked_reason="activa_sin_periodo",
         )
-    # Vencido el período, corre la gracia con el MISMO período (y su saldo);
-    # pasada la gracia, bloquea. Ninguno de los dos pasos espera a `expire-due`
-    # — y por eso el motivo es el MISMO que el de un `GRACE` vencido: para el
-    # cliente es una sola situación, y que el nombre dependiera de si corrió
-    # un cron es justo lo que evaluar por fecha vino a eliminar.
-    limite_gracia = current_period_end + timedelta(days=GRACE_DAYS)
+    # Período SIGUIENTE ya pago (pago anticipado, o cambio de plan programado):
+    # terminado el actual rige ese, con SUS condiciones y su propio contador
+    # (`period_start` = fin del anterior). Se resuelve acá, por fecha: que
+    # alguien persista el pase (`roll_forward`) es prolijidad, no requisito.
+    periodo_inicio, periodo_fin, cupo = periodo[0], current_period_end, granted_quota
+    if next_period_end is not None and now >= current_period_end:
+        periodo_inicio, periodo_fin = current_period_end, next_period_end
+        cupo = next_quota or granted_quota
+    if now < periodo_fin:
+        return EffectiveAccess(
+            quota=cupo, period_start=periodo_inicio, period_end=periodo_fin, blocked_reason=None
+        )
+    if cancel_at_period_end:
+        # Avisó que se va: conserva TODO lo que pagó y ahí corta, sin gracia. La
+        # gracia es para quien quiere seguir y se atrasó.
+        return EffectiveAccess(
+            quota=cupo, period_start=periodo_inicio, period_end=periodo_fin,
+            blocked_reason="cancelada_periodo_vencido",
+        )
+    # Vencido lo pago, corre la gracia con el MISMO período (y su saldo); pasada
+    # la gracia, bloquea. Ninguno de los dos pasos espera a `expire-due` — y por
+    # eso el motivo es el MISMO que el de un `GRACE` vencido: para el cliente es
+    # una sola situación, y que el nombre dependiera de si corrió un cron es
+    # justo lo que evaluar por fecha vino a eliminar.
+    limite_gracia = periodo_fin + timedelta(days=GRACE_DAYS)
     return EffectiveAccess(
-        quota=granted_quota,
-        period_start=periodo[0],
-        period_end=periodo[1],
+        quota=cupo,
+        period_start=periodo_inicio,
+        period_end=periodo_fin,
         blocked_reason="gracia_vencida" if now >= limite_gracia else None,
     )
 

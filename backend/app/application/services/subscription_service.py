@@ -106,6 +106,24 @@ def _utc(valor: datetime | None) -> datetime | None:
     return valor
 
 
+def _next_quota(subscription: Subscription) -> PlanQuota | None:
+    """Condiciones del período SIGUIENTE ya pago, o `None` si no hay uno.
+
+    Son una copia tomada al cobrar (igual que `granted_*`), nunca el catálogo
+    en vivo: cambiar `plan_definitions` no altera un período que ya se pagó.
+    """
+    if subscription.next_period_end is None:
+        return None
+    if subscription.next_granted_ia_queries_per_month is None:
+        return None  # pagó el mismo plan: rigen las condiciones vigentes
+    return PlanQuota(
+        seats_included=subscription.next_seats_included or subscription.seats_included,
+        ia_queries_per_month=subscription.next_granted_ia_queries_per_month,
+        imports_per_month=subscription.next_granted_imports_per_month or 0,
+        photo_pdf_reads_per_month=subscription.next_granted_photo_pdf_reads_per_month or 0,
+    )
+
+
 def resolve_access(subscription: Subscription, *, now: datetime | None = None) -> EffectiveAccess:
     """`effective_access()` aplicado a una `Subscription` real — ver el dominio."""
     momento = now or datetime.now(UTC)
@@ -119,6 +137,9 @@ def resolve_access(subscription: Subscription, *, now: datetime | None = None) -
         current_period_end=_utc(subscription.current_period_end),
         now=momento,
         is_legacy_free=subscription.plan_code == LEGACY_FREE_PLAN_CODE,
+        cancel_at_period_end=bool(subscription.cancel_at_period_end),
+        next_period_end=_utc(subscription.next_period_end),
+        next_quota=_next_quota(subscription),
     )
 
 

@@ -65,6 +65,7 @@ from _db import async_engine_config  # noqa: E402
 from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
+from app.application.services import subscription_billing_service as billing  # noqa: E402
 from app.application.services import subscription_reconciliation  # noqa: E402
 from app.application.services.subscription_service import resolve_access  # noqa: E402
 from app.domain.subscription import (  # noqa: E402
@@ -75,8 +76,8 @@ from app.domain.subscription import (  # noqa: E402
 )
 from app.persistence.models.audit import DecisionAuditLog  # noqa: E402
 from app.persistence.models.tenant import (  # noqa: E402
-    PlanDefinition,
     Subscription,
+    SubscriptionPayment,
     SubscriptionQuotaUsage,
     Tenant,
 )
@@ -85,7 +86,6 @@ from app.persistence.repositories.tenant_repository import TenantRepository  # n
 
 VIA_SCRIPT = "script"
 
-DECISION_ACTIVATION = "MANUAL_PLAN_ACTIVATION"
 DECISION_STATUS_CHANGE = "MANUAL_SUBSCRIPTION_STATUS_CHANGE"
 DECISION_EXPIRE_DUE = "SUBSCRIPTION_EXPIRE_DUE"
 
@@ -159,7 +159,16 @@ async def cmd_show(session: AsyncSession, args: argparse.Namespace) -> int:
         return 0
 
     print(f"  {'Plan:':<24}{sub.plan_code}")
-    print(f"  {'Estado:':<24}{sub.status}")
+    # El estado PERSISTIDO puede estar atrasado (lo actualiza `expire-due`); el
+    # que manda es el efectivo, por fecha — es el que ve el cliente.
+    acceso = resolve_access(sub)
+    efectivo = (
+        "habilitada"
+        if acceso.blocked_reason is None
+        else f"BLOQUEADA ({acceso.blocked_reason})"
+    )
+    print(f"  {'Estado persistido:':<24}{sub.status}")
+    print(f"  {'Estado efectivo HOY:':<24}{efectivo}")
     print(f"  {'Asientos incluidos:':<24}{sub.seats_included}")
     print(
         f"  {'Cupos otorgados:':<24}"
@@ -173,6 +182,32 @@ async def cmd_show(session: AsyncSession, args: argparse.Namespace) -> int:
     periodo = f"{sub.current_period_start or '—'} → {sub.current_period_end or '—'}"
     print(f"  {'Período vigente:':<24}{periodo}")
     print(f"  {'Gracia vence:':<24}{sub.grace_ends_at or '—'}")
+    print(f"  {'Día ancla del ciclo:':<24}{sub.billing_anchor_day or '—'}")
+    if sub.next_period_end is not None:
+        print(
+            f"  {'Período siguiente PAGO:':<24}hasta {sub.next_period_end} "
+            f"(plan {sub.next_plan_code or sub.plan_code})"
+        )
+    elif sub.next_plan_code is not None:
+        print(f"  {'Cambio de plan:':<24}{sub.next_plan_code} desde la próxima renovación")
+    if sub.cancel_at_period_end:
+        print(f"  {'Cancelación:':<24}programada — no se renueva, corta al fin de lo pago")
+
+    pagos = (
+        await session.execute(
+            select(SubscriptionPayment)
+            .where(SubscriptionPayment.tenant_id == tenant.tenant_id)
+            .order_by(SubscriptionPayment.created_at.desc())
+            .limit(6)
+        )
+    ).scalars().all()
+    if pagos:
+        print("\n  Pagos acreditados (últimos):")
+        for pago in pagos:
+            print(
+                f"    {pago.reference:<22} {pago.kind:<18} {pago.plan_code:<10} "
+                f"ARS {pago.amount_ars}  {pago.period_start.date()} → {pago.period_end.date()}"
+            )
 
     usos = (
         await session.execute(
@@ -196,105 +231,134 @@ async def cmd_show(session: AsyncSession, args: argparse.Namespace) -> int:
 # ── activate ─────────────────────────────────────────────────────────────────
 
 
-async def cmd_activate(session: AsyncSession, args: argparse.Namespace) -> int:
-    tenant = await resolver_tenant(session, args.referencia)
+async def _suscripcion_o_error(
+    session: AsyncSession, referencia: str
+) -> tuple[Tenant, Subscription] | None:
+    tenant = await resolver_tenant(session, referencia)
     if tenant is None:
-        print(f"No existe ningún tenant con id ni email {args.referencia!r}.")
-        return 1
-
+        print(f"No existe ningún tenant con id ni email {referencia!r}.")
+        return None
     sub = await TenantRepository(session).get_current_subscription(tenant.tenant_id)
     if sub is None:
-        print(f"El tenant {tenant.tenant_id} no tiene ninguna suscripción para activar.")
+        print(f"El tenant {tenant.tenant_id} no tiene ninguna suscripción.")
+        return None
+    return tenant, sub
+
+
+async def _cobrar(session: AsyncSession, args: argparse.Namespace, *, expected: str) -> int:
+    """`activate` y `renew`: la regla vive en `subscription_billing_service`.
+
+    El dry-run EJECUTA la operación y hace rollback (lo hace `main` cuando no
+    hay `--apply`): las fechas que imprime son las que de verdad quedarían, no
+    una cuenta aparte que podría divergir del servicio.
+    """
+    encontrado = await _suscripcion_o_error(session, args.referencia)
+    if encontrado is None:
         return 1
-
-    plan = await session.get(PlanDefinition, args.plan)
-    if plan is None:
-        print(f"ERROR: no existe el plan {args.plan!r} en plan_definitions.")
-        return 1
-
-    precio_usd = _decimal(args.price_usd, "price-usd")
-    precio_ars = _decimal(args.price_ars, "price-ars")
-
-    # Idempotencia por --reference: repetir el mismo comando no vuelve a
-    # extender el período ni a resetear cupos.
-    previa = (
-        await session.execute(
-            select(DecisionAuditLog)
-            .where(
-                DecisionAuditLog.tenant_id == tenant.tenant_id,
-                DecisionAuditLog.decision_type == DECISION_ACTIVATION,
-            )
-            .order_by(DecisionAuditLog.created_at.desc())
+    tenant, sub = encontrado
+    if args.months != 1:
+        print(
+            "ERROR: se cobra un mes por pago. Varios meses en un solo período darían UN cupo "
+            "mensual estirado, no varios ciclos: registrá cada mes con su referencia."
         )
-    ).scalars().all()
-    ya_aplicada = next(
-        (a for a in previa if a.decision_data.get("reference") == args.reference), None
-    )
+        return 1
+    try:
+        resultado = await billing.apply_payment(
+            session,
+            subscription_id=sub.subscription_id,
+            expected=expected,
+            plan_code=args.plan,
+            reference=args.reference,
+            amount_usd=_decimal(args.price_usd, "price-usd"),
+            amount_ars=_decimal(args.price_ars, "price-ars"),
+            operator=f"{VIA_SCRIPT}:subscriptions",
+            notes=args.notes,
+        )
+    except billing.BillingError as exc:
+        print(f"\nRECHAZADO ({exc.codigo}): {exc.mensaje}")
+        return 1
 
     modo = "APPLY" if args.apply else "DRY-RUN"
-    print(f"\n[{modo}] Activar suscripción de {tenant.display_name}\n")
-    print(f"  {'Plan actual:':<22}{sub.plan_code} ({sub.status})")
-    print(f"  {'Plan nuevo:':<22}{plan.plan_code}")
-    print(f"  {'Precio acordado:':<22}USD {precio_usd} / ARS {precio_ars}")
+    print(f"\n[{modo}] {expected} — {tenant.display_name}\n")
+    print(f"  {'Tipo:':<22}{resultado.kind}")
+    print(f"  {'Plan:':<22}{resultado.plan_code}")
+    print(f"  {'Período otorgado:':<22}{resultado.period_start:%Y-%m-%d} → "
+          f"{resultado.period_end:%Y-%m-%d}")
     print(f"  {'Referencia de pago:':<22}{args.reference}")
-    print(
-        f"  {'Cupos a otorgar:':<22}IA {plan.ia_queries_per_month} · "
-        f"Import {plan.imports_per_month} · Lecturas {plan.photo_pdf_reads_per_month} · "
-        f"{plan.seats_included} asientos"
-    )
-
-    if ya_aplicada is not None:
-        print(
-            f"\nSIN CAMBIOS: la referencia {args.reference!r} ya se activó el "
-            f"{ya_aplicada.created_at}. No se vuelve a extender el período."
-        )
+    if resultado.ya_aplicado:
+        print("\nSIN CAMBIOS: esa referencia ya estaba acreditada. No se otorgó nada nuevo.")
         return 0
-
+    if resultado.kind == billing.KIND_RENEWAL_PREPAID:
+        print("  (pago anticipado: el período en curso y su saldo de cupo no se tocan)")
     if not args.apply:
-        print("\nDry-run: no se escribió nada. Repetí con --apply para activar.")
+        await session.rollback()  # explícito: no depender de quien llame
+        print("\nDry-run: no se escribió nada. Repetí con --apply para aplicar.")
         return 0
-
-    ahora = datetime.now(UTC)
-    fin = ahora + timedelta(days=30 * args.months)
-
-    antes = {
-        "plan_code": sub.plan_code,
-        "status": sub.status,
-        "granted_ia_queries_per_month": sub.granted_ia_queries_per_month,
-        "granted_imports_per_month": sub.granted_imports_per_month,
-        "granted_photo_pdf_reads_per_month": sub.granted_photo_pdf_reads_per_month,
-    }
-
-    sub.plan_code = plan.plan_code
-    sub.status = SubscriptionStatus.ACTIVE.value
-    sub.seats_included = plan.seats_included
-    sub.granted_ia_queries_per_month = plan.ia_queries_per_month
-    sub.granted_imports_per_month = plan.imports_per_month
-    sub.granted_photo_pdf_reads_per_month = plan.photo_pdf_reads_per_month
-    sub.plan_price_usd_reference = precio_usd
-    sub.plan_price_ars = precio_ars
-    sub.current_period_start = ahora
-    sub.current_period_end = fin
-    sub.grace_ends_at = None
-    sub.cancel_at_period_end = False
-
-    await _auditar(
-        session,
-        tenant_id=tenant.tenant_id,
-        decision_type=DECISION_ACTIVATION,
-        extra={
-            "reference": args.reference,
-            "before": antes,
-            "plan_code": plan.plan_code,
-            "price_usd": str(precio_usd),
-            "price_ars": str(precio_ars),
-            "period_start": ahora.isoformat(),
-            "period_end": fin.isoformat(),
-            "notes": args.notes,
-        },
-    )
     await session.commit()
-    print(f"\nCOMMIT: suscripción activada hasta {fin.date()}.")
+    print(f"\nCOMMIT: acreditado. Acceso pago hasta {resultado.period_end:%Y-%m-%d}.")
+    return 0
+
+
+async def cmd_activate(session: AsyncSession, args: argparse.Namespace) -> int:
+    return await _cobrar(session, args, expected="activate")
+
+
+async def cmd_renew(session: AsyncSession, args: argparse.Namespace) -> int:
+    return await _cobrar(session, args, expected="renew")
+
+
+async def cmd_change_plan(session: AsyncSession, args: argparse.Namespace) -> int:
+    encontrado = await _suscripcion_o_error(session, args.referencia)
+    if encontrado is None:
+        return 1
+    tenant, sub = encontrado
+    try:
+        plan = await billing.schedule_plan_change(
+            session,
+            subscription_id=sub.subscription_id,
+            plan_code=args.plan,
+            operator=f"{VIA_SCRIPT}:subscriptions",
+        )
+    except billing.BillingError as exc:
+        print(f"\nRECHAZADO ({exc.codigo}): {exc.mensaje}")
+        return 1
+    print(
+        f"\n[{'APPLY' if args.apply else 'DRY-RUN'}] {tenant.display_name}: desde la próxima "
+        f"renovación el plan será {plan}. El período en curso no cambia (sin prorrateo)."
+    )
+    if args.apply:
+        await session.commit()
+    else:
+        await session.rollback()  # explícito: no depender de quien llame
+        print("Dry-run: no se escribió nada. Repetí con --apply para aplicar.")
+    return 0
+
+
+async def cmd_cancel(session: AsyncSession, args: argparse.Namespace) -> int:
+    encontrado = await _suscripcion_o_error(session, args.referencia)
+    if encontrado is None:
+        return 1
+    tenant, sub = encontrado
+    try:
+        hasta = await billing.schedule_cancellation(
+            session,
+            subscription_id=sub.subscription_id,
+            operator=f"{VIA_SCRIPT}:subscriptions",
+            reason=args.notes,
+        )
+    except billing.BillingError as exc:
+        print(f"\nRECHAZADO ({exc.codigo}): {exc.mensaje}")
+        return 1
+    print(
+        f"\n[{'APPLY' if args.apply else 'DRY-RUN'}] {tenant.display_name}: no se renueva. "
+        f"Conserva el acceso pago hasta {hasta:%Y-%m-%d} y ahí corta, sin gracia. "
+        "Un `renew` antes de esa fecha deshace la cancelación."
+    )
+    if args.apply:
+        await session.commit()
+    else:
+        await session.rollback()  # explícito: no depender de quien llame
+        print("Dry-run: no se escribió nada. Repetí con --apply para aplicar.")
     return 0
 
 
@@ -313,6 +377,19 @@ async def cmd_set_status(session: AsyncSession, args: argparse.Namespace) -> int
         return 1
 
     nuevo_estado = SubscriptionStatus(args.status)
+    # Reparación operativa, no vía comercial: no concede períodos ni cupos.
+    if nuevo_estado == SubscriptionStatus.TRIAL and sub.status != SubscriptionStatus.TRIAL.value:
+        print(
+            "RECHAZADO: volver a TRIAL reiniciaría la prueba de una cuenta que ya la usó. "
+            "Si hay que extenderla, es una decisión comercial aparte."
+        )
+        return 1
+    if nuevo_estado == SubscriptionStatus.ACTIVE and sub.current_period_end is None:
+        print(
+            "RECHAZADO: ACTIVE sin período pago no habilita nada (bloquea por "
+            "`activa_sin_periodo`). Un plan pago se otorga con `activate`/`renew`."
+        )
+        return 1
     print(
         f"\n[{'APPLY' if args.apply else 'DRY-RUN'}] {sub.status} → {nuevo_estado.value} "
         f"para {tenant.display_name}\n"
@@ -355,6 +432,30 @@ async def cmd_expire_due(session: AsyncSession, args: argparse.Namespace) -> int
     ahora = datetime.now(UTC)
     cambios = 0
 
+    # 1) Pases de período ya pagos: van PRIMERO, para que una cuenta que pagó
+    #    por adelantado no figure abajo como "período vencido".
+    con_siguiente = (
+        await session.execute(
+            select(Subscription).where(
+                Subscription.next_period_end.is_not(None),
+                Subscription.current_period_end.is_not(None),
+                Subscription.current_period_end <= ahora,
+            )
+        )
+    ).scalars().all()
+    # 2) Cancelaciones programadas cuyo último período pago ya terminó.
+    canceladas_cumplidas = (
+        await session.execute(
+            select(Subscription).where(
+                Subscription.status == SubscriptionStatus.ACTIVE.value,
+                Subscription.cancel_at_period_end.is_(True),
+                Subscription.next_period_end.is_(None),
+                Subscription.current_period_end.is_not(None),
+                Subscription.current_period_end <= ahora,
+            )
+        )
+    ).scalars().all()
+
     trials_vencidas = (
         await session.execute(
             select(Subscription).where(
@@ -371,6 +472,10 @@ async def cmd_expire_due(session: AsyncSession, args: argparse.Namespace) -> int
                 # FREE legado no tiene ciclo comercial (mismo criterio que
                 # `effective_access`): sus fechas nunca fueron un vencimiento.
                 Subscription.plan_code != LEGACY_FREE_PLAN_CODE,
+                # Ni las que pagaron por adelantado ni las que cancelaron: esas
+                # no entran en gracia (ver los dos grupos de arriba).
+                Subscription.next_period_end.is_(None),
+                Subscription.cancel_at_period_end.is_(False),
                 Subscription.current_period_end.is_not(None),
                 Subscription.current_period_end < ahora,
             )
@@ -387,6 +492,8 @@ async def cmd_expire_due(session: AsyncSession, args: argparse.Namespace) -> int
     ).scalars().all()
 
     print(f"\n[{'APPLY' if args.apply else 'DRY-RUN'}] Vencimientos por fecha\n")
+    print(f"  Pases al período siguiente ya pago: {len(con_siguiente)}")
+    print(f"  Cancelaciones cumplidas → CANCELLED: {len(canceladas_cumplidas)}")
     print(f"  Pruebas vencidas → READ_ONLY: {len(trials_vencidas)}")
     print(f"  Períodos pagos vencidos → GRACE: {len(activas_vencidas)}")
     print(f"  Gracias vencidas → READ_ONLY: {len(gracias_vencidas)}")
@@ -395,6 +502,28 @@ async def cmd_expire_due(session: AsyncSession, args: argparse.Namespace) -> int
         print("\nDry-run: no se escribió nada. Repetí con --apply para aplicar.")
         return 0
 
+    for sub in con_siguiente:
+        if billing.roll_forward(sub, now=ahora):
+            await _auditar(
+                session,
+                tenant_id=sub.tenant_id,
+                decision_type=billing.DECISION_ROLL,
+                extra={"period_end": sub.current_period_end.isoformat(), "plan": sub.plan_code},
+            )
+            cambios += 1
+    for sub in canceladas_cumplidas:
+        sub.status = SubscriptionStatus.CANCELLED.value
+        await _auditar(
+            session,
+            tenant_id=sub.tenant_id,
+            decision_type=DECISION_EXPIRE_DUE,
+            extra={
+                "status_before": "ACTIVE",
+                "status_after": "CANCELLED",
+                "reason": "cancelacion_programada_cumplida",
+            },
+        )
+        cambios += 1
     for sub in trials_vencidas:
         sub.status = SubscriptionStatus.READ_ONLY.value
         await _auditar(
@@ -571,20 +700,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p_show.add_argument("referencia", help="tenant_id (uuid) o email de un usuario suyo")
     p_show.set_defaults(handler=cmd_show)
 
-    p_activate = sub.add_parser("activate", help="activar un plan pago (cobro manual)")
-    p_activate.add_argument("referencia", help="tenant_id (uuid) o email de un usuario suyo")
-    p_activate.add_argument("--plan", required=True, choices=[p.value for p in AssignablePlan])
-    p_activate.add_argument("--price-usd", required=True, help="precio acordado en USD")
-    p_activate.add_argument("--price-ars", required=True, help="precio acordado en ARS")
-    p_activate.add_argument(
-        "--reference", required=True, help="referencia del pago verificado (ej. id de MP)"
-    )
-    p_activate.add_argument(
-        "--months", type=int, default=1, help="duración del período (default 1)"
-    )
-    p_activate.add_argument("--notes", default=None, help="nota interna")
-    agregar_apply(p_activate)
-    p_activate.set_defaults(handler=cmd_activate)
+    for nombre, handler, ayuda, plan_obligatorio in (
+        ("activate", cmd_activate, "primer cobro: el ciclo arranca hoy", True),
+        ("renew", cmd_renew, "cobro de una renovación (nunca pisa el período en curso)", False),
+    ):
+        p_cobro = sub.add_parser(nombre, help=ayuda)
+        p_cobro.add_argument("referencia", help="tenant_id (uuid) o email de un usuario suyo")
+        p_cobro.add_argument(
+            "--plan",
+            required=plan_obligatorio,
+            default=None,
+            choices=[p.value for p in AssignablePlan],
+            help=None if plan_obligatorio else "default: el cambio programado, o el plan vigente",
+        )
+        p_cobro.add_argument("--price-usd", required=True, help="precio acordado en USD")
+        p_cobro.add_argument("--price-ars", required=True, help="precio acordado en ARS")
+        p_cobro.add_argument(
+            "--reference", required=True, help="referencia del pago verificado (ej. id de MP)"
+        )
+        p_cobro.add_argument("--months", type=int, default=1, help="sólo se acepta 1")
+        p_cobro.add_argument("--notes", default=None, help="nota interna")
+        agregar_apply(p_cobro)
+        p_cobro.set_defaults(handler=handler)
+
+    p_change = sub.add_parser("change-plan", help="programar el plan de la próxima renovación")
+    p_change.add_argument("referencia", help="tenant_id (uuid) o email de un usuario suyo")
+    p_change.add_argument("--plan", required=True, choices=[p.value for p in AssignablePlan])
+    agregar_apply(p_change)
+    p_change.set_defaults(handler=cmd_change_plan)
+
+    p_cancel = sub.add_parser("cancel", help="cancelar la renovación (conserva lo ya pago)")
+    p_cancel.add_argument("referencia", help="tenant_id (uuid) o email de un usuario suyo")
+    p_cancel.add_argument("--notes", default=None, help="motivo")
+    agregar_apply(p_cancel)
+    p_cancel.set_defaults(handler=cmd_cancel)
 
     p_status = sub.add_parser("set-status", help="cambiar el estado a mano")
     p_status.add_argument("referencia", help="tenant_id (uuid) o email de un usuario suyo")

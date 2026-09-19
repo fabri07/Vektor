@@ -247,6 +247,63 @@ tokens → se confirma; sin rastro y pasado el plazo → se libera). Es el
 comportamiento que A6 pedía; lo que sigue sin existir es un resultado durable
 que el cliente pueda RECUPERAR tras reconectar.
 
+## Bloque D — servicio comercial: activar, renovar, cambiar de plan, cancelar (cerrado)
+
+`subscription_billing_service.py` es la ÚNICA puerta por la que una
+suscripción recibe un período pago. Hoy la usa `scripts/subscriptions.py`
+(transferencia); Mercado Pago entrará por acá, para que un pago manual y uno
+automático otorguen los mismos derechos. Reglas decididas con el dueño:
+
+- **Activar ≠ renovar.** `activate` es para quien NO tiene período pago
+  vigente ni en gracia (el ciclo arranca hoy y fija el día ancla); `renew`,
+  para quien sí. Quien llama dice qué cree estar haciendo y el servicio lo
+  verifica: el comando equivocado se rechaza diciendo cuál corresponde
+  (`USE_RENEW` / `USE_ACTIVATE`). El `activate` viejo pisaba el período en
+  curso con `ahora → ahora + 30 días`.
+- **Pago anticipado** — el caso NORMAL con transferencia — otorga el período
+  SIGUIENTE (`subscriptions.next_*`) sin tocar el actual ni su saldo de cupo
+  (el contador es por `period_start`). Un solo período por adelantado.
+  `effective_access` lo hace regir **por fecha** cuando termina el actual;
+  `roll_forward` (que corre antes de cada operación comercial y en
+  `expire-due`) sólo lo deja escrito — prolijidad, no requisito.
+- **Pago durante la gracia:** el período nuevo corre desde el vencimiento
+  ANTERIOR. Pasada la gracia es una reactivación: arranca al pagar, con ancla
+  nueva.
+- **Meses calendario con día ancla** (`add_months_anchored`,
+  `billing_anchor_day`): 31 ene → 28 feb → 31 mar. El ancla no se pierde en
+  meses cortos — igual que un débito recurrente. **Un mes por pago:**
+  `--months > 1` se rechaza (sería UN cupo estirado, no varios ciclos).
+- **Cambio de plan** (`change-plan`): rige desde la próxima renovación, sin
+  prorrateo y sin resetear el cupo en curso. Un downgrade que deje más
+  usuarios activos que plazas se rechaza diciendo cuántos sobran; no se
+  desactiva a nadie. Con el período siguiente ya pago, no se puede cambiar.
+- **Cancelar** (`cancel`): marca `cancel_at_period_end` — conserva todo lo
+  pago y ahí corta, **sin gracia** (`cancelada_periodo_vencido`). Un `renew`
+  antes de esa fecha la deshace. `expire-due` la pasa a `CANCELLED`.
+- **Idempotencia:** tabla `subscription_payments` con UNIQUE
+  `(source, reference)` + `INSERT ... ON CONFLICT DO NOTHING RETURNING`, bajo
+  `FOR UPDATE` de la suscripción. Buscar la referencia en la auditoría antes
+  de escribir (lo de antes) no resistía dos ejecuciones simultáneas: probado
+  contra Postgres real. La misma referencia con OTROS datos es
+  `REFERENCE_MISMATCH`, nunca un "ya aplicada" callado. La auditoría se
+  conserva además del registro de pago.
+- **`set-status` es reparación, no vía comercial:** no reinicia una prueba ni
+  acepta `ACTIVE` sin período. `show` informa el estado EFECTIVO (el
+  persistido puede estar atrasado), el período siguiente, la cancelación y
+  los últimos pagos. El dry-run de los comandos EJECUTA la operación y hace
+  rollback: las fechas que muestra son las que quedarían.
+- Migración `20260919_0001`, aditiva, idempotente y **sin backfill**:
+  `billing_anchor_day` queda NULL en filas viejas a propósito (el ancla es
+  una condición comercial que se fija al cobrar, no se inventa).
+
+**Hallazgo de paso (era de la Etapa 2, no del D):**
+`test_migraciones_idempotentes_pg.py` tenía el head escrito a mano
+(`20260910_0005`). Local se saltea —pide Postgres— y en CI corre, así que las
+migraciones `20260917`/`20260918` ya commiteadas lo iban a poner rojo al
+pushear. Ahora deriva el head de Alembic, y de paso cada migración nueva
+entra sola al alcance de esa compuerta. **Lección:** antes de pushear, correr
+`pytest -m postgres -n 0` contra `vektor_pgtest`; la suite SQLite no lo ve.
+
 ## Revisión cruzada de los bloques A–C
 
 Corregido: la gracia vencida tenía dos nombres según hubiera corrido

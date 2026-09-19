@@ -18,6 +18,7 @@ import os
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -30,10 +31,13 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from app.application.services import subscription_billing_service as billing
 from app.application.services import subscription_service as svc
 from app.domain.subscription import QuotaExceeded, QuotaResource, SeatLimitExceeded
 from app.persistence.models.tenant import (
+    PlanDefinition,
     Subscription,
+    SubscriptionPayment,
     SubscriptionQuotaReservation,
     SubscriptionQuotaUsage,
     Tenant,
@@ -95,6 +99,9 @@ async def suscripcion(pg_engine: AsyncEngine) -> AsyncGenerator[Subscription, No
                 delete(SubscriptionQuotaUsage).where(
                     SubscriptionQuotaUsage.tenant_id == tenant_id
                 )
+            )
+            await s.execute(
+                delete(SubscriptionPayment).where(SubscriptionPayment.tenant_id == tenant_id)
             )
             await s.execute(delete(User).where(User.tenant_id == tenant_id))
             await s.execute(delete(Subscription).where(Subscription.tenant_id == tenant_id))
@@ -269,3 +276,54 @@ async def test_dos_altas_simultaneas_por_la_ultima_plaza_entra_una_sola(
         _alta_de_usuario(factory, suscripcion.subscription_id, suscripcion.tenant_id),
     )
     assert sorted(resultados) == ["alta", "sin_plaza"]
+
+
+# ── Pagos: la misma referencia, dos veces a la vez ────────────────────────────
+
+
+async def _renovar(
+    factory: async_sessionmaker[AsyncSession], subscription_id: uuid.UUID, referencia: str
+) -> tuple[bool, datetime]:
+    async with factory() as s:
+        r = await billing.apply_payment(
+            s,
+            subscription_id=subscription_id,
+            expected="renew",
+            reference=referencia,
+            amount_usd=Decimal("12"),
+            amount_ars=Decimal("18500"),
+            operator="test-concurrente",
+        )
+        await asyncio.sleep(0.2)  # que la otra llegue mientras esta tiene el lock
+        await s.commit()
+        return r.ya_aplicado, r.period_end
+
+
+async def test_dos_pagos_simultaneos_con_la_misma_referencia_otorgan_un_solo_periodo(
+    pg_engine: AsyncEngine, suscripcion: Subscription
+) -> None:
+    """Buscar la referencia antes de escribir (lo que hacía `activate`) deja
+    pasar a las dos. El candado es el UNIQUE + el lock de la suscripción."""
+    factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with factory() as s:
+        assert await s.get(PlanDefinition, "esencial") is not None  # seed de la migración
+    referencia = f"T-{uuid.uuid4().hex[:12]}"
+
+    resultados = await asyncio.gather(
+        _renovar(factory, suscripcion.subscription_id, referencia),
+        _renovar(factory, suscripcion.subscription_id, referencia),
+    )
+
+    assert sorted(ya for ya, _ in resultados) == [False, True]
+    assert resultados[0][1] == resultados[1][1]  # las dos informan EL MISMO período
+    async with factory() as s:
+        pagos = (
+            await s.execute(
+                select(func.count())
+                .select_from(SubscriptionPayment)
+                .where(SubscriptionPayment.reference == referencia)
+            )
+        ).scalar_one()
+        sub = await s.get(Subscription, suscripcion.subscription_id)
+    assert pagos == 1
+    assert sub is not None and sub.next_period_end is not None  # un período, no dos

@@ -1,6 +1,6 @@
 # Suscripciones: cierre del backend, experiencia de usuario y cobro
 
-Fecha: 2026-09-18. Estado: **bloques A, B y C implementados y probados (sin desplegar); D–G propuestos**.
+Fecha: 2026-09-18. Estado: **bloques A–D implementados y probados (sin desplegar); E–G propuestos**.
 
 Base: `planes-suscripcion-y-cupos.md` y revisión del código local. La suite de
 5085 pruebas aprobadas y las pruebas de concurrencia son resultados reportados
@@ -196,7 +196,12 @@ desconectado; job de reconciliación concurrente con finalización; aislamiento 
 dos empresas. Una operación no debe dejar datos confirmados con consumo perdido
 ni cobrar dos veces por la misma importación.
 
-**D. Renovación manual y piloto por transferencia**
+**D. Renovación manual y piloto por transferencia** — CERRADO
+
+Hecho completo. Las tres reglas que el texto de abajo dejaba como propuesta las
+decidió el dueño: pago en gracia corre desde el vencimiento anterior; el día
+ancla se conserva en meses cortos; cancelar corta al fin de lo pago, sin
+gracia. Detalle en `planes-suscripcion-y-cupos.md` → "Bloque D".
 
 Extraer un servicio comercial común a scripts y futuro gateway: activar,
 registrar renovación, programar cambio de plan, cancelar renovación y reactivar.
