@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.subscription import SubscriptionStatus
@@ -23,21 +23,26 @@ class TenantRepository:
         return tenant
 
     async def get_current_subscription(self, tenant_id: UUID) -> Subscription | None:
-        """La suscripción VIVA del tenant — cualquier estado salvo `CANCELLED`.
+        """La suscripción que rige al tenant: la viva, o si no la última cancelada.
 
         Reemplaza al viejo `get_active_subscription` (que solo reconocía
-        `status == "ACTIVE"` y por eso nunca encontraba una suscripción en
-        `TRIAL`/`GRACE`/`READ_ONLY`). El índice único parcial
+        `status == "ACTIVE"`). El índice único parcial
         `uq_subscriptions_one_live_per_tenant` garantiza que hay como mucho
-        UNA fila así por tenant — `limit(1)` es solo defensivo.
+        UNA fila no cancelada por tenant, y esa gana siempre.
+
+        Una `CANCELLED` NO se excluye: excluirla devolvía `None`, y los
+        controles leían ese `None` como "sin restricción" — cancelar dejaba
+        la cuenta sin gate y sin cupo. `effective_access()` ya sabe qué hacer
+        con ella (vale hasta el fin del período pago, después bloquea).
+        `None` queda para lo único que significa: el tenant no tiene ninguna.
         """
+        es_cancelada = case(
+            (Subscription.status == SubscriptionStatus.CANCELLED.value, 1), else_=0
+        )
         result = await self._session.execute(
             select(Subscription)
-            .where(
-                Subscription.tenant_id == tenant_id,
-                Subscription.status != SubscriptionStatus.CANCELLED.value,
-            )
-            .order_by(Subscription.created_at.desc())
+            .where(Subscription.tenant_id == tenant_id)
+            .order_by(es_cancelada, Subscription.created_at.desc())
             .limit(1)
         )
         return result.scalar_one_or_none()

@@ -43,7 +43,12 @@ from app.application.services.pending_action_service import (
     execute_pending_action,
 )
 from app.config.settings import get_settings
-from app.domain.subscription import QuotaExceeded, QuotaResource, SubscriptionAccessDenied
+from app.domain.subscription import (
+    QuotaExceeded,
+    QuotaResource,
+    ReserveOutcome,
+    SubscriptionAccessDenied,
+)
 from app.integrations.anthropic_client import AnthropicConfigurationError
 from app.integrations.mcp.exceptions import McpToolAuthError
 from app.observability.logger import get_logger
@@ -870,17 +875,23 @@ async def get_conversation(
 async def _reservar_consulta_ia(
     db: AsyncSession, tenant_id: uuid.UUID, operation_id: str
 ) -> None:
-    """Reserva 1 `ia_query` para este turno. Sin `Subscription`, no bloquea
+    """Reserva 1 `ia_query` para este turno, o corta antes de llamar al LLM.
 
-    (dato inconsistente — todo tenant se acuña con una — pero no es motivo
-    para tirarle un 500 al usuario que solo quiere mandar un mensaje).
+    Sin ninguna `Subscription` → 503 (dato roto nuestro, ver
+    `require_active_subscription`): seguir de largo era IA sin cupo. Y solo
+    una reserva NUEVA autoriza a ejecutar — si ese `operation_id` ya se
+    presentó, correr el turno otra vez sería IA sin cupo que lo respalde
+    (liberada/confirmada) o dos ejecuciones con uno solo (en curso).
     """
     subscription = await TenantRepository(db).get_current_subscription(tenant_id)
     if subscription is None:
-        logger.warning("chat_quota_sin_subscription", tenant_id=str(tenant_id))
-        return
+        logger.error("subscription_missing", tenant_id=str(tenant_id), origen="chat_quota")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "SUBSCRIPTION_UNAVAILABLE"},
+        )
     try:
-        await quota_service.reserve(
+        resultado = await quota_service.reserve(
             db,
             subscription=subscription,
             resource=QuotaResource.IA_QUERY,
@@ -901,6 +912,11 @@ async def _reservar_consulta_ia(
                 "renews_at": exc.renews_at.isoformat(),
             },
         ) from exc
+    if resultado is not ReserveOutcome.NEW:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "OPERATION_ALREADY_SUBMITTED", "state": resultado.value},
+        )
 
 
 async def _resolver_consulta_ia(

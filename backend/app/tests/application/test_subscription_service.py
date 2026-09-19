@@ -12,12 +12,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import subscription_service as svc
 from app.domain.subscription import (
     QuotaExceeded,
     QuotaResource,
+    ReservationMismatch,
+    ReserveOutcome,
     SeatLimitExceeded,
     SubscriptionAccessDenied,
 )
@@ -191,21 +194,139 @@ async def test_enforce_active_subscription_bloquea_read_only(
         svc.enforce_active_subscription(sub)
 
 
+def _contar(n: int, orden: list[str] | None = None):
+    async def _count() -> int:
+        if orden is not None:
+            orden.append("count")
+        return n
+
+    return _count
+
+
 async def test_seat_limit_exceeded_cuando_ya_esta_en_el_limite(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     sub = await _suscripcion_activa(db_session, sample_tenant, seats=2)
     with pytest.raises(SeatLimitExceeded):
-        await svc.enforce_seat_limit(
-            db_session, subscription=sub, active_users_excluding_new=2
-        )
+        await svc.enforce_seat_limit(db_session, subscription=sub, count_active_users=_contar(2))
 
 
 async def test_seat_limit_permite_si_hay_lugar(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     sub = await _suscripcion_activa(db_session, sample_tenant, seats=3)
-    await svc.enforce_seat_limit(db_session, subscription=sub, active_users_excluding_new=2)
+    await svc.enforce_seat_limit(db_session, subscription=sub, count_active_users=_contar(2))
+
+
+async def test_seat_limit_cuenta_despues_de_tomar_el_lock(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El contrato es el ORDEN: un conteo anterior al lock es un conteo viejo."""
+    sub = await _suscripcion_activa(db_session, sample_tenant, seats=3)
+    orden: list[str] = []
+    original = db_session.execute
+
+    async def _execute(stmt, *a, **kw):
+        if "FOR UPDATE" in str(stmt.compile(dialect=postgresql.dialect())):
+            orden.append("lock")
+        return await original(stmt, *a, **kw)
+
+    monkeypatch.setattr(db_session, "execute", _execute)
+    await svc.enforce_seat_limit(
+        db_session, subscription=sub, count_active_users=_contar(1, orden)
+    )
+    assert orden == ["lock", "count"]
+
+
+async def test_seat_limit_en_prueba_es_una_sola_plaza_sea_cual_sea_el_plan(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    sub = await _suscripcion_activa(db_session, sample_tenant, seats=3)
+    sub.status = "TRIAL"
+    sub.trial_ends_at = datetime.now(UTC) + timedelta(days=5)
+    await db_session.commit()
+    with pytest.raises(SeatLimitExceeded) as exc:
+        await svc.enforce_seat_limit(db_session, subscription=sub, count_active_users=_contar(1))
+    assert exc.value.seats_included == 1
+
+
+async def test_seat_limit_con_suscripcion_vencida_no_suma_usuarios(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    sub = await _suscripcion_activa(db_session, sample_tenant, seats=3)
+    sub.status = "READ_ONLY"
+    await db_session.commit()
+    with pytest.raises(SubscriptionAccessDenied):
+        await svc.enforce_seat_limit(db_session, subscription=sub, count_active_users=_contar(0))
+
+
+# ── reserve(): el resultado dice en qué estado estaba la operación ────────────
+
+
+async def _reservar(db_session: AsyncSession, sub: Subscription, op: str, units: int = 1):
+    return await svc.reserve(
+        db_session, subscription=sub, resource=QuotaResource.IA_QUERY,
+        operation_id=op, units=units,
+    )
+
+
+async def test_reserve_nueva_devuelve_new_y_repetida_en_curso(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    sub = await _suscripcion_activa(db_session, sample_tenant)
+    assert await _reservar(db_session, sub, "op-1") is ReserveOutcome.NEW
+    assert await _reservar(db_session, sub, "op-1") is ReserveOutcome.IN_PROGRESS
+
+
+async def test_reserve_repetida_ya_confirmada(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    sub = await _suscripcion_activa(db_session, sample_tenant)
+    await _reservar(db_session, sub, "op-1")
+    assert await svc.commit(
+        db_session, tenant_id=sub.tenant_id, resource=QuotaResource.IA_QUERY, operation_id="op-1"
+    )
+    assert await _reservar(db_session, sub, "op-1") is ReserveOutcome.ALREADY_COMMITTED
+
+
+async def test_reserve_repetida_ya_liberada_no_revive_la_reserva(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    sub = await _suscripcion_activa(db_session, sample_tenant)
+    await _reservar(db_session, sub, "op-1")
+    assert await svc.release(
+        db_session, tenant_id=sub.tenant_id, resource=QuotaResource.IA_QUERY, operation_id="op-1"
+    )
+    assert await _reservar(db_session, sub, "op-1") is ReserveOutcome.ALREADY_RELEASED
+    # Y resolver de nuevo no mueve nada: `False` = no fui yo.
+    assert not await svc.commit(
+        db_session, tenant_id=sub.tenant_id, resource=QuotaResource.IA_QUERY, operation_id="op-1"
+    )
+
+
+async def test_reserve_misma_clave_con_otras_unidades_es_conflicto(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    sub = await _suscripcion_activa(db_session, sample_tenant)
+    await _reservar(db_session, sub, "op-1", units=1)
+    with pytest.raises(ReservationMismatch):
+        await _reservar(db_session, sub, "op-1", units=2)
+
+
+async def test_reserve_sin_autocommit_no_publica_lo_pendiente_del_llamador(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Componer el cupo con escrituras propias: si el llamador revierte, se
+    van juntas la reserva y sus datos — `reserve()` no commiteó por él."""
+    sub = await _suscripcion_activa(db_session, sample_tenant)
+    resultado = await svc.reserve(
+        db_session, subscription=sub, resource=QuotaResource.IA_QUERY,
+        operation_id="op-1", autocommit=False,
+    )
+    assert resultado is ReserveOutcome.NEW
+    await db_session.rollback()
+    await db_session.refresh(sub)  # el rollback expira los atributos cargados
+    assert await _reservar(db_session, sub, "op-1") is ReserveOutcome.NEW
 
 
 async def test_subscription_free_legado_sin_granted_no_queda_en_cupo_cero(

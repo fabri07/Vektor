@@ -111,6 +111,48 @@ que este comando haya corrido.
 reemplazó por `get_current_subscription` (cualquier estado no-`CANCELLED`).
 `SubscriptionInMeResponse` expone `trial_ends_at`/`current_period_end`.
 
+## Bloque A — bordes del acceso y de las reservas (cerrado)
+
+Revisión posterior contra el código (`suscripciones-pendientes-y-cobro.md`,
+bloque A). Corrige lo descrito arriba; donde contradiga, vale esto.
+
+- **`ACTIVE` vence por fecha.** Pasado `current_period_end` corre la gracia
+  con el MISMO período (y su saldo) durante `GRACE_DAYS`; después bloquea con
+  `periodo_vencido`, aunque `status` siga diciendo `ACTIVE` y nadie haya
+  corrido `expire-due`. Un plan pago `ACTIVE` sin período bloquea
+  (`activa_sin_periodo`): faltar el dato nunca reabre el acceso. Todos los
+  intervalos son `[inicio, fin)`.
+- **FREE legado no vence** (`is_legacy_free`). El seed de demo lo acuña con
+  período a 30 días; esas fechas nunca fueron un vencimiento. `expire-due`
+  tenía el mismo agujero —pasaba a `GRACE` cualquier `ACTIVE` vencido, FREE
+  incluido— y ahora lo exceptúa igual.
+- **Cancelar ya no saca a la cuenta del control.** `get_current_subscription`
+  excluía `CANCELLED` → `None` → gate y cupo seguían de largo: cancelar daba
+  IA ilimitada, y la rama `CANCELLED` de `effective_access()` era
+  inalcanzable. Ahora devuelve la viva o, si no hay, la última cancelada.
+- **Sin ninguna `Subscription` → 503 `SUBSCRIPTION_UNAVAILABLE`** + error en
+  el log (gate de escritura y chat). Es un dato roto nuestro, no un plan
+  gratis ni una deuda del usuario (por eso no es 402).
+  **Antes de desplegar:** `scripts/subscriptions.py diagnose` (solo lectura)
+  contra producción; lista los tenants sin suscripción y los planes pagos
+  `ACTIVE` sin período. Si devuelve alguno, repararlo primero.
+- **`reserve()` devuelve `ReserveOutcome`** (`NEW` / `IN_PROGRESS` /
+  `ALREADY_COMMITTED` / `ALREADY_RELEASED`). Solo `NEW` autoriza a ejecutar;
+  el chat responde 409 `OPERATION_ALREADY_SUBMITTED` en los otros tres. La
+  misma clave con otra cantidad de unidades tira `ReservationMismatch`.
+  `commit()`/`release()` devuelven si ESA llamada resolvió la reserva.
+- **`autocommit=False`** en `reserve/commit/release`: no publican lo
+  pendiente de una sesión compartida. Es la primitiva que necesita el bloque
+  C (importaciones); el chat sigue con transacción corta propia.
+- **`enforce_seat_limit` recibe CÓMO contar, no un número**: bloquear →
+  contar → crear. Las plazas salen del acceso efectivo (una sola durante la
+  prueba) y una suscripción que no habilita escribir no suma usuarios.
+  Probado con dos altas simultáneas contra Postgres: sin el `FOR UPDATE`
+  entran las dos. **Sigue sin enganchar en `POST /users`** (bloque B).
+
+Diferido: la clave estable para deduplicar reintentos HTTP del chat pasa al
+bloque E — necesita que el cliente la mande.
+
 ## Verificación
 
 - Migración probada con round-trip completo (`upgrade`/`downgrade`/`upgrade`)

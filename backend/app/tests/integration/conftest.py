@@ -27,7 +27,7 @@ from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile, MomentumProfile
 from app.persistence.models.score import HealthScoreSnapshot
-from app.persistence.models.tenant import Tenant
+from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.user import User
 from app.utils.security import create_access_token, hash_password
 
@@ -153,6 +153,18 @@ async def make_tenant(session: AsyncSession, **overrides: Any) -> Tenant:
     defaults.update(overrides)
     tenant = Tenant(**defaults)
     session.add(tenant)
+    await session.flush()
+    # Todo tenant real nace con su `Subscription` (`provision_tenant`); sin
+    # ninguna, los controles de suscripción lo rechazan como dato roto.
+    session.add(
+        Subscription(
+            subscription_id=uuid.uuid4(),
+            tenant_id=tenant.tenant_id,
+            plan_code="FREE",
+            status="ACTIVE",
+            seats_included=1,
+        )
+    )
     await session.commit()
     return tenant
 

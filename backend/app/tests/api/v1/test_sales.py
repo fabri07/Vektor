@@ -630,18 +630,14 @@ class TestSalesSubscriptionGate:
     async def test_read_only_bloquea_una_venta_nueva(
         self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
     ) -> None:
-        import uuid as _uuid  # noqa: PLC0415
+        from sqlalchemy import update  # noqa: PLC0415
 
         from app.persistence.models.tenant import Subscription  # noqa: PLC0415
 
-        db_session.add(
-            Subscription(
-                subscription_id=_uuid.uuid4(),
-                tenant_id=sample_tenant.tenant_id,
-                plan_code="control",
-                status="READ_ONLY",
-                seats_included=3,
-            )
+        await db_session.execute(
+            update(Subscription)
+            .where(Subscription.tenant_id == sample_tenant.tenant_id)
+            .values(plan_code="control", status="READ_ONLY", seats_included=3)
         )
         await db_session.commit()
 
@@ -649,10 +645,27 @@ class TestSalesSubscriptionGate:
         assert resp.status_code == 402, resp.text
         assert resp.json()["detail"]["code"] == "SUBSCRIPTION_READ_ONLY"
 
+    async def test_sin_ninguna_suscripcion_no_es_acceso_libre(
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
+    ) -> None:
+        """Dato roto, no plan gratis: el gate dejaba pasar al recibir `None`."""
+        from sqlalchemy import delete  # noqa: PLC0415
+
+        from app.persistence.models.tenant import Subscription  # noqa: PLC0415
+
+        await db_session.execute(
+            delete(Subscription).where(Subscription.tenant_id == sample_tenant.tenant_id)
+        )
+        await db_session.commit()
+
+        resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["detail"]["code"] == "SUBSCRIPTION_UNAVAILABLE"
+
     async def test_read_only_no_bloquea_corregir_una_venta_existente(
         self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
     ) -> None:
-        import uuid as _uuid  # noqa: PLC0415
+        from sqlalchemy import update  # noqa: PLC0415
 
         from app.persistence.models.tenant import Subscription  # noqa: PLC0415
 
@@ -661,14 +674,10 @@ class TestSalesSubscriptionGate:
         )
         sale_id = create_resp.json()["id"]
 
-        db_session.add(
-            Subscription(
-                subscription_id=_uuid.uuid4(),
-                tenant_id=sample_tenant.tenant_id,
-                plan_code="control",
-                status="READ_ONLY",
-                seats_included=3,
-            )
+        await db_session.execute(
+            update(Subscription)
+            .where(Subscription.tenant_id == sample_tenant.tenant_id)
+            .values(plan_code="control", status="READ_ONLY", seats_included=3)
         )
         await db_session.commit()
 

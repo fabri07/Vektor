@@ -16,6 +16,7 @@ Subcomandos
     set-status <tenant_id|email> --status grace|read_only|cancelled|active
                [--notes "..."] [--apply]
     expire-due [--apply]
+    diagnose                      # solo lectura: qué tenants quedarían bloqueados
 
 Reglas que este archivo sostiene
 --------------------------------
@@ -60,11 +61,12 @@ from decimal import Decimal, InvalidOperation
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _db import async_engine_config  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
 from app.domain.subscription import (  # noqa: E402
     GRACE_DAYS,
+    LEGACY_FREE_PLAN_CODE,
     AssignablePlan,
     SubscriptionStatus,
 )
@@ -363,6 +365,9 @@ async def cmd_expire_due(session: AsyncSession, args: argparse.Namespace) -> int
         await session.execute(
             select(Subscription).where(
                 Subscription.status == SubscriptionStatus.ACTIVE.value,
+                # FREE legado no tiene ciclo comercial (mismo criterio que
+                # `effective_access`): sus fechas nunca fueron un vencimiento.
+                Subscription.plan_code != LEGACY_FREE_PLAN_CODE,
                 Subscription.current_period_end.is_not(None),
                 Subscription.current_period_end < ahora,
             )
@@ -429,6 +434,51 @@ async def cmd_expire_due(session: AsyncSession, args: argparse.Namespace) -> int
     return 0
 
 
+async def cmd_diagnose(session: AsyncSession, args: argparse.Namespace) -> int:
+    """Solo lectura: qué tenants quedarían BLOQUEADOS por los controles.
+
+    Correr contra producción ANTES de desplegar un cambio en las reglas de
+    acceso. Los controles rechazan a un tenant sin ninguna `Subscription`
+    (503) y a un plan pago `ACTIVE` sin período (402): los dos son datos
+    rotos, y si existen hay que repararlos antes, no descubrirlos con el
+    cliente adentro. Devuelve 1 si encontró alguno.
+    """
+    sin_suscripcion = (
+        await session.execute(
+            select(Tenant.tenant_id, Tenant.display_name, Tenant.status)
+            .outerjoin(Subscription, Subscription.tenant_id == Tenant.tenant_id)
+            .where(Subscription.subscription_id.is_(None))
+        )
+    ).all()
+    pagas_sin_periodo = (
+        await session.execute(
+            select(Subscription.tenant_id, Subscription.plan_code).where(
+                Subscription.status == SubscriptionStatus.ACTIVE.value,
+                Subscription.plan_code != LEGACY_FREE_PLAN_CODE,
+                Subscription.current_period_end.is_(None),
+            )
+        )
+    ).all()
+    por_estado = (
+        await session.execute(
+            select(Subscription.plan_code, Subscription.status, func.count())
+            .group_by(Subscription.plan_code, Subscription.status)
+            .order_by(Subscription.plan_code, Subscription.status)
+        )
+    ).all()
+
+    print("\nSuscripciones por plan y estado persistido:")
+    for plan, estado, cantidad in por_estado:
+        print(f"  {plan:<12}{estado:<12}{cantidad}")
+    print(f"\nTenants SIN ninguna suscripción (quedarían en 503): {len(sin_suscripcion)}")
+    for tenant_id, nombre, estado in sin_suscripcion:
+        print(f"  {tenant_id}  {nombre}  [{estado}]")
+    print(f"Planes pagos ACTIVE sin período (quedarían en 402): {len(pagas_sin_periodo)}")
+    for tenant_id, plan in pagas_sin_periodo:
+        print(f"  {tenant_id}  {plan}")
+    return 1 if sin_suscripcion or pagas_sin_periodo else 0
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
@@ -472,6 +522,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     agregar_apply(p_expire)
     p_expire.set_defaults(handler=cmd_expire_due)
+
+    p_diagnose = sub.add_parser(
+        "diagnose", help="solo lectura: tenants que los controles dejarían bloqueados"
+    )
+    p_diagnose.set_defaults(handler=cmd_diagnose)
 
     return parser.parse_args(argv)
 

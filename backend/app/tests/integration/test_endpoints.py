@@ -15,7 +15,7 @@ import anthropic
 import httpx
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
@@ -904,8 +904,14 @@ async def _crear_suscripcion(
         "current_period_end": datetime.now(UTC) + timedelta(days=29),
     }
     base.update(overrides)
-    sub = Subscription(**base)
-    session.add(sub)
+    # El tenant ya nace con su FREE: se MODIFICA esa fila — un tenant tiene
+    # una sola suscripción viva (en Postgres lo exige un índice único).
+    sub = (
+        await session.execute(select(Subscription).where(Subscription.tenant_id == tenant_id))
+    ).scalar_one()
+    for campo, valor in base.items():
+        if campo != "subscription_id":
+            setattr(sub, campo, valor)
     await session.commit()
     return sub
 
@@ -928,6 +934,77 @@ async def test_chat_bloqueado_por_suscripcion_read_only(
 
     assert resp.status_code == 402, resp.text
     assert resp.json()["detail"]["code"] == "SUBSCRIPTION_READ_ONLY"
+
+
+async def _chat_sin_llegar_al_llm(ac, headers):
+    orchestrator = "app.application.services.chat_orchestrator"
+    with patch(f"{orchestrator}.AgentCEO") as mock_ceo:
+        resp = await ac.post(
+            "/api/v1/agent/chat", json={"message": "vendí 500 pesos"}, headers=headers
+        )
+        mock_ceo.return_value.process.assert_not_called()
+    return resp
+
+
+async def test_chat_sin_ninguna_suscripcion_no_es_acceso_libre(
+    auth_client, session: AsyncSession
+) -> None:
+    """Un tenant sin `Subscription` es un dato roto, no un plan gratis: antes
+    seguía de largo y era IA sin cupo."""
+    ac, headers, tenant, _, _ = auth_client
+    await session.execute(delete(Subscription).where(Subscription.tenant_id == tenant.tenant_id))
+    await session.commit()
+
+    resp = await _chat_sin_llegar_al_llm(ac, headers)
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"]["code"] == "SUBSCRIPTION_UNAVAILABLE"
+
+
+async def test_chat_cancelada_con_periodo_pago_sigue_bajo_cupo(
+    auth_client, session: AsyncSession
+) -> None:
+    """Cancelar NO saca a la cuenta del control: la búsqueda excluía las
+    `CANCELLED`, devolvía `None`, y eso era chat sin límite. Con período pago
+    restante sigue habilitada — y por eso mismo sigue contando cupo."""
+    ac, headers, tenant, _, _ = auth_client
+    await _crear_suscripcion(
+        session, tenant.tenant_id, status="CANCELLED", granted_ia_queries_per_month=0
+    )
+    resp = await _chat_sin_llegar_al_llm(ac, headers)
+    assert resp.status_code == 429, resp.text
+    assert resp.json()["detail"]["code"] == "QUOTA_EXCEEDED"
+
+
+async def test_chat_cancelada_con_periodo_vencido_bloquea(
+    auth_client, session: AsyncSession
+) -> None:
+    ac, headers, tenant, _, _ = auth_client
+    await _crear_suscripcion(
+        session,
+        tenant.tenant_id,
+        status="CANCELLED",
+        current_period_start=datetime.now(UTC) - timedelta(days=40),
+        current_period_end=datetime.now(UTC) - timedelta(days=10),
+    )
+    resp = await _chat_sin_llegar_al_llm(ac, headers)
+    assert resp.status_code == 402, resp.text
+    assert resp.json()["detail"]["reason"] == "cancelada_periodo_vencido"
+
+
+async def test_chat_active_vencido_bloquea_sin_que_corra_expire_due(
+    auth_client, session: AsyncSession
+) -> None:
+    """El `status` persistido sigue diciendo ACTIVE: nadie corrió el job."""
+    ac, headers, tenant, _, _ = auth_client
+    await _crear_suscripcion(
+        session,
+        tenant.tenant_id,
+        current_period_start=datetime.now(UTC) - timedelta(days=45),
+        current_period_end=datetime.now(UTC) - timedelta(days=15),
+    )
+    resp = await _chat_sin_llegar_al_llm(ac, headers)
+    assert resp.status_code == 402, resp.text
+    assert resp.json()["detail"]["reason"] == "periodo_vencido"
 
 
 async def test_chat_agota_cupo_de_ia_devuelve_429_sin_llamar_al_llm(

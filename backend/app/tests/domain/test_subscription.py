@@ -64,24 +64,86 @@ def test_active_normal_usa_el_periodo_y_cupo_otorgado() -> None:
     assert (acceso.period_start, acceso.period_end) == (inicio, fin)
 
 
-def test_active_sin_periodo_seteado_cae_al_mes_calendario() -> None:
-    """Activación manual pendiente de un `renew` explícito: no inventa fechas
-    fuera del mes en curso, pero tampoco bloquea — ACTIVE sin período es un
-    estado transitorio válido, no un error."""
-    acceso = effective_access(
+def _active(*, fin: datetime | None, now: datetime = _NOW, legacy: bool = False):
+    return effective_access(
         status=SubscriptionStatus.ACTIVE.value,
         granted_quota=_GRANTED_CONTROL,
-        created_at=_NOW,
+        created_at=_NOW - timedelta(days=90),
         trial_ends_at=None,
+        grace_ends_at=None,
+        current_period_start=None if fin is None else fin - timedelta(days=30),
+        current_period_end=fin,
+        now=now,
+        is_legacy_free=legacy,
+    )
+
+
+def test_free_legado_sin_periodo_cae_al_mes_calendario_y_no_bloquea() -> None:
+    acceso = _active(fin=None, legacy=True)
+    assert acceso.blocked_reason is None
+    assert acceso.period_start.day == 1
+    assert acceso.period_start.month == 9
+    assert acceso.period_end.month == 10  # primer día del mes siguiente
+
+
+def test_free_legado_con_periodo_viejo_no_vence() -> None:
+    """El seed de demo acuña FREE/ACTIVE con `current_period_end = hoy + 30`.
+    Esas fechas nunca significaron un vencimiento: a los 40 días el demo
+    tiene que seguir andando."""
+    acceso = _active(fin=_NOW - timedelta(days=400), legacy=True)
+    assert acceso.blocked_reason is None
+
+
+def test_active_pago_sin_periodo_bloquea() -> None:
+    """Un plan pago ACTIVE sin período no pasó por `activate`: no hay nada
+    pago que respaldar, y faltar el dato nunca reabre el acceso."""
+    assert _active(fin=None).blocked_reason == "activa_sin_periodo"
+
+
+def test_active_vencido_pasa_a_gracia_sin_que_corra_expire_due() -> None:
+    fin = _NOW - timedelta(days=3)
+    acceso = _active(fin=fin)
+    assert acceso.blocked_reason is None
+    # Gracia = el MISMO período (y su saldo), nunca uno nuevo.
+    assert acceso.period_end == fin
+
+
+def test_active_con_gracia_vencida_bloquea_aunque_el_status_diga_active() -> None:
+    assert _active(fin=_NOW - timedelta(days=8)).blocked_reason == "periodo_vencido"
+
+
+def test_active_limite_exacto_de_la_gracia_es_intervalo_semiabierto() -> None:
+    fin = _NOW - timedelta(days=7)  # la gracia termina EXACTAMENTE ahora
+    assert _active(fin=fin).blocked_reason == "periodo_vencido"
+    assert _active(fin=fin, now=_NOW - timedelta(seconds=1)).blocked_reason is None
+
+
+def test_trial_en_el_instante_exacto_del_fin_ya_bloquea() -> None:
+    acceso = effective_access(
+        status=SubscriptionStatus.TRIAL.value,
+        granted_quota=_GRANTED_CONTROL,
+        created_at=_NOW - timedelta(days=14),
+        trial_ends_at=_NOW,
         grace_ends_at=None,
         current_period_start=None,
         current_period_end=None,
         now=_NOW,
     )
-    assert acceso.blocked_reason is None
-    assert acceso.period_start.day == 1
-    assert acceso.period_start.month == 9
-    assert acceso.period_end.month == 10  # primer día del mes siguiente
+    assert acceso.blocked_reason == "prueba_vencida"
+
+
+def test_cancelled_en_el_instante_exacto_del_fin_ya_bloquea() -> None:
+    acceso = effective_access(
+        status=SubscriptionStatus.CANCELLED.value,
+        granted_quota=_GRANTED_CONTROL,
+        created_at=_NOW - timedelta(days=60),
+        trial_ends_at=None,
+        grace_ends_at=None,
+        current_period_start=_NOW - timedelta(days=30),
+        current_period_end=_NOW,
+        now=_NOW,
+    )
+    assert acceso.blocked_reason == "cancelada_periodo_vencido"
 
 
 def test_grace_conserva_el_mismo_periodo_no_acredita_uno_nuevo() -> None:

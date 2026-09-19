@@ -292,9 +292,13 @@ async def require_active_subscription(
     """Gate transversal: bloquea escrituras de negocio con la suscripción vencida.
 
     `READ_ONLY`, `CANCELLED` con período vencido, o `TRIAL`/`GRACE` vencidas
-    (por fecha, no por el string de `status`) → 402. Sin `Subscription` (dato
-    inconsistente — todo tenant se acuña con una) no bloquea: no es motivo
-    para tirarle un 500 a una operación que no tiene nada que ver.
+    (por fecha, no por el string de `status`) → 402.
+
+    Sin ninguna `Subscription` → 503 `SUBSCRIPTION_UNAVAILABLE` y un error en
+    el log. Todo tenant se acuña con una, así que es un dato roto, no un plan
+    gratis: dejar pasar convertía cualquier hueco en acceso sin límite. Es
+    503 y no 402 porque el usuario no debe nada — el problema es nuestro y
+    hay que verlo. Consulta, corrección y exportación no pasan por este gate.
 
     Enganchado hoy en ventas y gastos (los casos que la política nombra
     explícitamente); el resto de las escrituras de negocio —stock, cierres de
@@ -303,7 +307,13 @@ async def require_active_subscription(
     """
     subscription = await TenantRepository(session).get_current_subscription(tenant_id)
     if subscription is None:
-        return
+        get_logger(__name__).error(
+            "subscription_missing", tenant_id=str(tenant_id), origen="write_gate"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "SUBSCRIPTION_UNAVAILABLE"},
+        )
     try:
         quota_service.enforce_active_subscription(subscription)
     except SubscriptionAccessDenied as exc:

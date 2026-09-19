@@ -249,6 +249,41 @@ async def test_expire_due_pasa_trial_vencida_a_read_only(
     assert sub.status == "READ_ONLY"
 
 
+async def test_expire_due_no_toca_un_free_legado_con_periodo_viejo(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription]
+) -> None:
+    """El seed de demo acuña FREE/ACTIVE con período a 30 días. Pasarlo a
+    GRACE terminaba dejando en solo lectura una cuenta sin ciclo comercial."""
+    _, sub = trial
+    sub.plan_code = "FREE"
+    sub.status = "ACTIVE"
+    sub.current_period_start = datetime.now(UTC) - timedelta(days=90)
+    sub.current_period_end = datetime.now(UTC) - timedelta(days=60)
+    await db_session.commit()
+
+    args = mod.parse_args(["expire-due", "--apply"])
+    assert await mod.cmd_expire_due(db_session, args) == 0
+
+    await db_session.refresh(sub)
+    assert sub.status == "ACTIVE"
+
+
+async def test_expire_due_pasa_un_plan_pago_vencido_a_gracia(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription]
+) -> None:
+    _, sub = trial
+    sub.status = "ACTIVE"
+    sub.current_period_start = datetime.now(UTC) - timedelta(days=32)
+    sub.current_period_end = datetime.now(UTC) - timedelta(days=2)
+    await db_session.commit()
+
+    args = mod.parse_args(["expire-due", "--apply"])
+    assert await mod.cmd_expire_due(db_session, args) == 0
+
+    await db_session.refresh(sub)
+    assert sub.status == "GRACE"
+
+
 async def test_expire_due_dry_run_no_toca_nada(
     mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription]
 ) -> None:
@@ -276,3 +311,21 @@ def test_apply_es_false_por_defecto_en_todo_comando_mutante(mod: Any) -> None:
     )
     for argv in invocaciones:
         assert mod.parse_args(argv).apply is False, argv
+
+
+# ── diagnose ─────────────────────────────────────────────────────────────────
+
+
+async def test_diagnose_encuentra_un_tenant_sin_suscripcion_y_no_escribe(
+    mod: Any, db_session: AsyncSession, trial: tuple[Tenant, Subscription],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    huerfano = Tenant(tenant_id=uuid.uuid4(), legal_name="Huérfano", display_name="Huérfano")
+    db_session.add(huerfano)
+    await db_session.commit()
+    antes = await _contar(db_session, Subscription)
+
+    assert await mod.cmd_diagnose(db_session, mod.parse_args(["diagnose"])) == 1
+
+    assert str(huerfano.tenant_id) in capsys.readouterr().out
+    assert await _contar(db_session, Subscription) == antes

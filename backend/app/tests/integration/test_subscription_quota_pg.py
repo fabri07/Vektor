@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -31,13 +31,14 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from app.application.services import subscription_service as svc
-from app.domain.subscription import QuotaExceeded, QuotaResource
+from app.domain.subscription import QuotaExceeded, QuotaResource, SeatLimitExceeded
 from app.persistence.models.tenant import (
     Subscription,
     SubscriptionQuotaReservation,
     SubscriptionQuotaUsage,
     Tenant,
 )
+from app.persistence.models.user import User
 
 TEST_PG_DSN = os.environ.get("TEST_PG_DSN")
 
@@ -95,6 +96,7 @@ async def suscripcion(pg_engine: AsyncEngine) -> AsyncGenerator[Subscription, No
                     SubscriptionQuotaUsage.tenant_id == tenant_id
                 )
             )
+            await s.execute(delete(User).where(User.tenant_id == tenant_id))
             await s.execute(delete(Subscription).where(Subscription.tenant_id == tenant_id))
             await s.execute(delete(Tenant).where(Tenant.tenant_id == tenant_id))
             await s.commit()
@@ -211,3 +213,59 @@ async def test_reintentar_la_misma_operacion_durante_la_concurrencia_no_duplica(
             )
         ).scalar_one()
         assert fila.reserved == 1, "el mismo operation_id nunca reserva dos unidades"
+
+
+# ── Plazas: bloquear → contar → crear ─────────────────────────────────────────
+
+
+async def _alta_de_usuario(
+    factory: async_sessionmaker[AsyncSession], subscription_id: uuid.UUID, tenant_id: uuid.UUID
+) -> str:
+    """Un alta completa en SU transacción: límite, insert y commit juntos —
+    el lock de `enforce_seat_limit` vive hasta ese commit."""
+    async with factory() as s:
+        sub = await s.get(Subscription, subscription_id)
+        assert sub is not None
+
+        async def _activos() -> int:
+            return (
+                await s.execute(
+                    select(func.count())
+                    .select_from(User)
+                    .where(User.tenant_id == tenant_id, User.is_active.is_(True))
+                )
+            ).scalar_one()
+
+        try:
+            await svc.enforce_seat_limit(s, subscription=sub, count_active_users=_activos)
+        except SeatLimitExceeded:
+            await s.rollback()
+            return "sin_plaza"
+        # Ventana para que la otra alta llegue al lock mientras esta lo tiene.
+        await asyncio.sleep(0.2)
+        s.add(
+            User(
+                user_id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                email=f"u+{uuid.uuid4().hex[:10]}@test.com",
+                full_name="Alta concurrente",
+                password_hash="x",
+                role_code="VIEWER",
+                is_active=True,
+            )
+        )
+        await s.commit()
+        return "alta"
+
+
+async def test_dos_altas_simultaneas_por_la_ultima_plaza_entra_una_sola(
+    pg_engine: AsyncEngine, suscripcion: Subscription
+) -> None:
+    """`seats_included=1`, cero usuarios: con el conteo hecho ANTES del lock
+    las dos leían 0 y entraban las dos."""
+    factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    resultados = await asyncio.gather(
+        _alta_de_usuario(factory, suscripcion.subscription_id, suscripcion.tenant_id),
+        _alta_de_usuario(factory, suscripcion.subscription_id, suscripcion.tenant_id),
+    )
+    assert sorted(resultados) == ["alta", "sin_plaza"]

@@ -17,14 +17,17 @@ unidad de más — es la corrección directa del rate-limit de chat actual
 (`agent.py`), que hace el chequeo y el incremento en pasos separados, con
 toda la llamada al LLM en el medio.
 
-Transacciones cortas a propósito: `reserve()` y `commit()`/`release()` cada
+Transacciones cortas por default: `reserve()` y `commit()`/`release()` cada
 uno hace SU PROPIO commit — nunca se mantiene un lock de fila mientras corre
-una llamada a IA o un import largo.
+una llamada a IA. Ese commit publica TODO lo pendiente en la sesión, así que
+quien necesite componer el cupo con sus propias escrituras (que el consumo
+entre o no entre junto con los datos) pasa `autocommit=False` y commitea él.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
@@ -37,6 +40,8 @@ from app.domain.subscription import (
     PlanQuota,
     QuotaExceeded,
     QuotaResource,
+    ReservationMismatch,
+    ReserveOutcome,
     SeatLimitExceeded,
     SubscriptionAccessDenied,
     effective_access,
@@ -82,18 +87,28 @@ def _granted_quota(subscription: Subscription) -> PlanQuota:
     )
 
 
+def _utc(valor: datetime | None) -> datetime | None:
+    """SQLite devuelve naive lo que se guardó con zona (Postgres no). Todo lo
+    que esta tabla persiste es UTC, así que se le repone — el dominio sigue
+    rechazando comparar naive contra aware, que es lo que lo hace confiable."""
+    if valor is not None and valor.tzinfo is None:
+        return valor.replace(tzinfo=UTC)
+    return valor
+
+
 def resolve_access(subscription: Subscription, *, now: datetime | None = None) -> EffectiveAccess:
     """`effective_access()` aplicado a una `Subscription` real — ver el dominio."""
     momento = now or datetime.now(UTC)
     return effective_access(
         status=subscription.status,
         granted_quota=_granted_quota(subscription),
-        created_at=subscription.created_at,
-        trial_ends_at=subscription.trial_ends_at,
-        grace_ends_at=subscription.grace_ends_at,
-        current_period_start=subscription.current_period_start,
-        current_period_end=subscription.current_period_end,
+        created_at=_utc(subscription.created_at) or momento,
+        trial_ends_at=_utc(subscription.trial_ends_at),
+        grace_ends_at=_utc(subscription.grace_ends_at),
+        current_period_start=_utc(subscription.current_period_start),
+        current_period_end=_utc(subscription.current_period_end),
         now=momento,
+        is_legacy_free=subscription.plan_code == LEGACY_FREE_PLAN_CODE,
     )
 
 
@@ -118,15 +133,16 @@ async def reserve(
     operation_id: str,
     units: int = 1,
     now: datetime | None = None,
-) -> None:
+    autocommit: bool = True,
+) -> ReserveOutcome:
     """Reserva `units` de `resource` para `operation_id`, o tira si no hay cupo.
 
-    Idempotente: si `operation_id` ya tiene una reserva (`RESERVED` o
-    `COMMITTED`), esta llamada es un no-op silencioso — un reintento de la
-    MISMA operación nunca reserva una unidad de más. Si ya estaba
-    `RELEASED`, también es un no-op: esa operación ya se dio por perdida: no
-    se le "revive" la reserva, quien reintenta genuino usa un `operation_id`
-    nuevo.
+    Idempotente: si `operation_id` ya tiene una reserva, no se toca el cupo
+    de nuevo — pero el resultado DICE en qué estado estaba (`ReserveOutcome`).
+    Solo `NEW` autoriza a ejecutar: seguir adelante con una reserva
+    `RELEASED` o `COMMITTED` sería correr la operación sin cupo que la
+    respalde, y con una `RESERVED` ajena, correrla dos veces. Pedir otra
+    cantidad de unidades con la misma clave tira `ReservationMismatch`.
 
     Levanta `SubscriptionAccessDenied` si el estado no habilita el recurso, o
     `QuotaExceeded` si no queda cupo en el período vigente. Ninguna de las
@@ -190,9 +206,27 @@ async def reserve(
     ganó = (await session.execute(insertar)).scalar_one_or_none() is not None
     if not ganó:
         # Ya existía una reserva para este operation_id: no se toca el cupo
-        # de nuevo, sea cual sea su estado (RESERVED/COMMITTED/RELEASED).
-        await session.commit()
-        return
+        # de nuevo, pero se informa su estado — no son casos equivalentes.
+        previa = (
+            await session.execute(
+                sa.select(
+                    SubscriptionQuotaReservation.state, SubscriptionQuotaReservation.units
+                ).where(
+                    SubscriptionQuotaReservation.tenant_id == subscription.tenant_id,
+                    SubscriptionQuotaReservation.resource == resource.value,
+                    SubscriptionQuotaReservation.operation_id == operation_id,
+                )
+            )
+        ).one()
+        if autocommit:
+            await session.commit()
+        if previa.units != units:
+            raise ReservationMismatch(operation_id, previa.units, units)
+        return {
+            "RESERVED": ReserveOutcome.IN_PROGRESS,
+            "COMMITTED": ReserveOutcome.ALREADY_COMMITTED,
+            "RELEASED": ReserveOutcome.ALREADY_RELEASED,
+        }[previa.state]
 
     # Core insert tipado por dialecto (no SQL crudo con `str(uuid)`): un UUID
     # pasado como texto literal en `text()` no pasa por el bind processor de la
@@ -255,111 +289,126 @@ async def reserve(
                 SubscriptionQuotaReservation.id == reservation_id
             )
         )
-        await session.commit()
+        if autocommit:
+            await session.commit()
         raise QuotaExceeded(subscription.tenant_id, resource, limite, acceso.period_end)
 
-    await session.commit()
+    if autocommit:
+        await session.commit()
+    return ReserveOutcome.NEW
+
+
+async def _resolver(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    resource: QuotaResource,
+    operation_id: str,
+    confirmar: bool,
+    autocommit: bool,
+) -> bool:
+    """Saca una reserva de `RESERVED` y ajusta el contador. El `WHERE state =
+    'RESERVED'` es el CAS: solo un llamador gana, y `True` es "fui yo"."""
+    resultado = await session.execute(
+        sa.update(SubscriptionQuotaReservation)
+        .where(
+            SubscriptionQuotaReservation.tenant_id == tenant_id,
+            SubscriptionQuotaReservation.resource == resource.value,
+            SubscriptionQuotaReservation.operation_id == operation_id,
+            SubscriptionQuotaReservation.state == "RESERVED",
+        )
+        .values(state="COMMITTED" if confirmar else "RELEASED")
+        .returning(
+            SubscriptionQuotaReservation.period_start, SubscriptionQuotaReservation.units
+        )
+    )
+    fila = resultado.first()
+    if fila is not None:
+        period_start, units = fila
+        valores = {"reserved": SubscriptionQuotaUsage.reserved - units}
+        if confirmar:
+            valores["used"] = SubscriptionQuotaUsage.used + units
+        await session.execute(
+            sa.update(SubscriptionQuotaUsage)
+            .where(
+                SubscriptionQuotaUsage.tenant_id == tenant_id,
+                SubscriptionQuotaUsage.resource == resource.value,
+                SubscriptionQuotaUsage.period_start == period_start,
+            )
+            .values(**valores)
+        )
+    if autocommit:
+        await session.commit()
+    return fila is not None
 
 
 async def commit(
-    session: AsyncSession, *, tenant_id: uuid.UUID, resource: QuotaResource, operation_id: str
-) -> None:
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    resource: QuotaResource,
+    operation_id: str,
+    autocommit: bool = True,
+) -> bool:
     """Confirma una reserva: `used += units`, `reserved -= units`.
 
-    No-op idempotente si la reserva ya no está en `RESERVED` (ya confirmada,
-    liberada, o nunca existió) — el `WHERE state = 'RESERVED'` es el CAS.
+    Devuelve si ESTA llamada la confirmó. `False` = ya no estaba en
+    `RESERVED` (confirmada, liberada, o nunca existió): no-op idempotente.
     """
-    resultado = await session.execute(
-        sa.update(SubscriptionQuotaReservation)
-        .where(
-            SubscriptionQuotaReservation.tenant_id == tenant_id,
-            SubscriptionQuotaReservation.resource == resource.value,
-            SubscriptionQuotaReservation.operation_id == operation_id,
-            SubscriptionQuotaReservation.state == "RESERVED",
-        )
-        .values(state="COMMITTED")
-        .returning(
-            SubscriptionQuotaReservation.period_start, SubscriptionQuotaReservation.units
-        )
+    return await _resolver(
+        session, tenant_id=tenant_id, resource=resource, operation_id=operation_id,
+        confirmar=True, autocommit=autocommit,
     )
-    fila = resultado.first()
-    if fila is None:
-        await session.commit()
-        return
-    period_start, units = fila
-    await session.execute(
-        sa.update(SubscriptionQuotaUsage)
-        .where(
-            SubscriptionQuotaUsage.tenant_id == tenant_id,
-            SubscriptionQuotaUsage.resource == resource.value,
-            SubscriptionQuotaUsage.period_start == period_start,
-        )
-        .values(
-            used=SubscriptionQuotaUsage.used + units,
-            reserved=SubscriptionQuotaUsage.reserved - units,
-        )
-    )
-    await session.commit()
 
 
 async def release(
-    session: AsyncSession, *, tenant_id: uuid.UUID, resource: QuotaResource, operation_id: str
-) -> None:
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    resource: QuotaResource,
+    operation_id: str,
+    autocommit: bool = True,
+) -> bool:
     """Libera una reserva sin confirmarla: `reserved -= units`, `used` intacto.
 
     Un error técnico o una ejecución fallida no consume unidad comercial —
-    política §4. No-op idempotente igual que `commit()`.
+    política §4. Mismo contrato de retorno e idempotencia que `commit()`.
     """
-    resultado = await session.execute(
-        sa.update(SubscriptionQuotaReservation)
-        .where(
-            SubscriptionQuotaReservation.tenant_id == tenant_id,
-            SubscriptionQuotaReservation.resource == resource.value,
-            SubscriptionQuotaReservation.operation_id == operation_id,
-            SubscriptionQuotaReservation.state == "RESERVED",
-        )
-        .values(state="RELEASED")
-        .returning(
-            SubscriptionQuotaReservation.period_start, SubscriptionQuotaReservation.units
-        )
+    return await _resolver(
+        session, tenant_id=tenant_id, resource=resource, operation_id=operation_id,
+        confirmar=False, autocommit=autocommit,
     )
-    fila = resultado.first()
-    if fila is None:
-        await session.commit()
-        return
-    period_start, units = fila
-    await session.execute(
-        sa.update(SubscriptionQuotaUsage)
-        .where(
-            SubscriptionQuotaUsage.tenant_id == tenant_id,
-            SubscriptionQuotaUsage.resource == resource.value,
-            SubscriptionQuotaUsage.period_start == period_start,
-        )
-        .values(reserved=SubscriptionQuotaUsage.reserved - units)
-    )
-    await session.commit()
 
 
 async def enforce_seat_limit(
-    session: AsyncSession, *, subscription: Subscription, active_users_excluding_new: int
+    session: AsyncSession,
+    *,
+    subscription: Subscription,
+    count_active_users: Callable[[], Awaitable[int]],
+    now: datetime | None = None,
 ) -> None:
-    """¿Un usuario activo más entra en `seats_included`?
+    """¿Un usuario activo más entra en las plazas del acceso efectivo?
 
-    Toma un `SELECT ... FOR UPDATE` sobre la fila de la suscripción antes de
-    contar: dos altas simultáneas no pueden pasar la cuenta a la vez y
-    terminar las dos por encima del cupo — la segunda espera el lock de la
-    primera y cuenta con el número ya actualizado.
+    El orden es el contrato: **bloquear → contar → (el llamador) crear**.
+    Por eso recibe CÓMO contar y no un número: un entero ya calculado se
+    calculó antes del lock, y dos altas simultáneas leerían el mismo conteo
+    viejo y entrarían las dos. Acá la segunda espera el `FOR UPDATE` de la
+    primera y cuenta con esa alta ya visible — siempre que el llamador
+    inserte y commitee en ESTA misma transacción, que es la que sostiene el
+    lock.
 
-    `active_users_excluding_new` lo cuenta el llamador (dentro de la MISMA
-    transacción, después de este lock) para no acoplar este servicio al
-    repositorio de usuarios.
+    Las plazas salen del acceso efectivo, no de la columna: durante la
+    prueba es una sola, sea cual sea el plan asignado. Una suscripción que
+    no habilita escribir tampoco habilita sumar usuarios.
     """
     await session.execute(
         sa.select(Subscription.subscription_id)
         .where(Subscription.subscription_id == subscription.subscription_id)
         .with_for_update()
     )
-    if active_users_excluding_new + 1 > subscription.seats_included:
-        raise SeatLimitExceeded(
-            subscription.tenant_id, subscription.seats_included, active_users_excluding_new
-        )
+    acceso = resolve_access(subscription, now=now)
+    if acceso.blocked_reason is not None:
+        raise SubscriptionAccessDenied(subscription.tenant_id, acceso.blocked_reason)
+    activos = await count_active_users()
+    if activos + 1 > acceso.quota.seats_included:
+        raise SeatLimitExceeded(subscription.tenant_id, acceso.quota.seats_included, activos)

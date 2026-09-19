@@ -336,18 +336,14 @@ class TestExpensesSubscriptionGate:
     async def test_read_only_bloquea_un_gasto_nuevo(
         self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
     ) -> None:
-        import uuid as _uuid  # noqa: PLC0415
+        from sqlalchemy import update  # noqa: PLC0415
 
         from app.persistence.models.tenant import Subscription  # noqa: PLC0415
 
-        db_session.add(
-            Subscription(
-                subscription_id=_uuid.uuid4(),
-                tenant_id=sample_tenant.tenant_id,
-                plan_code="control",
-                status="READ_ONLY",
-                seats_included=3,
-            )
+        await db_session.execute(
+            update(Subscription)
+            .where(Subscription.tenant_id == sample_tenant.tenant_id)
+            .values(plan_code="control", status="READ_ONLY", seats_included=3)
         )
         await db_session.commit()
 
@@ -358,7 +354,7 @@ class TestExpensesSubscriptionGate:
     async def test_read_only_no_bloquea_corregir_un_gasto_existente(
         self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
     ) -> None:
-        import uuid as _uuid  # noqa: PLC0415
+        from sqlalchemy import update  # noqa: PLC0415
 
         from app.persistence.models.tenant import Subscription  # noqa: PLC0415
 
@@ -367,14 +363,10 @@ class TestExpensesSubscriptionGate:
         )
         expense_id = create_resp.json()["id"]
 
-        db_session.add(
-            Subscription(
-                subscription_id=_uuid.uuid4(),
-                tenant_id=sample_tenant.tenant_id,
-                plan_code="control",
-                status="READ_ONLY",
-                seats_included=3,
-            )
+        await db_session.execute(
+            update(Subscription)
+            .where(Subscription.tenant_id == sample_tenant.tenant_id)
+            .values(plan_code="control", status="READ_ONLY", seats_included=3)
         )
         await db_session.commit()
 

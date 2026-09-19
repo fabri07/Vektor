@@ -26,7 +26,7 @@ from app.main import create_app
 from app.persistence.db.base import Base
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import BusinessProfile
-from app.persistence.models.tenant import Tenant
+from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.user import User
 from app.utils.security import create_access_token, hash_password
 
@@ -272,6 +272,23 @@ async def add_business_profile(
     return profile
 
 
+def _suscripcion_free_legado(tenant_id: uuid.UUID) -> Subscription:
+    """La `Subscription` con la que nace todo tenant real (`provision_tenant`).
+
+    Un tenant sin ninguna es un dato roto y los controles de suscripción lo
+    rechazan (503), así que los tenants de prueba la llevan igual que en
+    producción. Los tests que necesitan otro estado MODIFICAN esta fila — un
+    tenant tiene una sola suscripción viva.
+    """
+    return Subscription(
+        subscription_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        plan_code="FREE",
+        status="ACTIVE",
+        seats_included=1,
+    )
+
+
 @pytest_asyncio.fixture
 async def sample_tenant(db_session: AsyncSession) -> Tenant:
     """Tenant de prueba CON su `BusinessProfile` (vertical kiosco).
@@ -303,6 +320,7 @@ async def sample_tenant(db_session: AsyncSession) -> Tenant:
             onboarding_completed=False,
         )
     )
+    db_session.add(_suscripcion_free_legado(tenant.tenant_id))
     await db_session.commit()
     return tenant
 
@@ -383,6 +401,7 @@ async def second_tenant(db_session: AsyncSession) -> Tenant:
             onboarding_completed=False,
         )
     )
+    db_session.add(_suscripcion_free_legado(tenant.tenant_id))
     await db_session.commit()
     return tenant
 

@@ -103,6 +103,26 @@ class ReservationState(StrEnum):
     RELEASED = "RELEASED"
 
 
+class ReserveOutcome(StrEnum):
+    """Qué encontró `reserve()` — quien llama decide con esto si ejecuta.
+
+    Solo ``NEW`` autoriza a ejecutar la operación. Las otras tres significan
+    que ese `operation_id` ya se había presentado, y NO son equivalentes:
+
+    ``IN_PROGRESS``       → otro ejecutor la tiene reservada: ejecutar de
+                             nuevo serían dos ejecuciones con un solo cupo.
+    ``ALREADY_COMMITTED`` → ya terminó bien y ya consumió: corresponde
+                             devolver el resultado guardado, no recalcular.
+    ``ALREADY_RELEASED``  → ya se dio por perdida: ejecutar acá sería IA sin
+                             cupo. Un reintento genuino usa un id nuevo.
+    """
+
+    NEW = "NEW"
+    IN_PROGRESS = "IN_PROGRESS"
+    ALREADY_COMMITTED = "ALREADY_COMMITTED"
+    ALREADY_RELEASED = "ALREADY_RELEASED"
+
+
 #: Días de prueba desde la aprobación (política A6). Arranca en el momento en
 #: que se aprueba la solicitud — no en el primer ingreso — y no se reinicia
 #: si la solicitud se re-aprueba o se reenvía la invitación: es un recorte
@@ -200,6 +220,22 @@ class QuotaExceeded(Exception):  # noqa: N818
         )
 
 
+class ReservationMismatch(Exception):  # noqa: N818
+    """El mismo `operation_id` se presentó pidiendo otra cantidad de unidades.
+
+    No es un reintento: es otra operación usando una clave ajena. Se rechaza
+    en vez de elegir en silencio cuál de las dos cantidades vale.
+    """
+
+    def __init__(self, operation_id: str, units_reserved: int, units_requested: int) -> None:
+        self.operation_id = operation_id
+        self.units_reserved = units_reserved
+        self.units_requested = units_requested
+        super().__init__(
+            f"operación {operation_id}: reservó {units_reserved} y ahora pide {units_requested}"
+        )
+
+
 class SeatLimitExceeded(Exception):  # noqa: N818
     """El plan no incluye más usuarios activos de los que ya tiene el tenant."""
 
@@ -238,6 +274,7 @@ def effective_access(
     current_period_start: datetime | None,
     current_period_end: datetime | None,
     now: datetime,
+    is_legacy_free: bool = False,
 ) -> EffectiveAccess:
     """Resuelve estado + cupos + período de UNA suscripción, en un solo lugar.
 
@@ -246,6 +283,15 @@ def effective_access(
     exacto (`scripts/subscriptions.py expire-due` las persiste cuando corre,
     pero el enforcement de acá NUNCA depende de que haya corrido — evaluarlo
     en caliente es lo que hace que el bloqueo sea correcto igual).
+
+    Lo mismo vale para `ACTIVE`: un período pago vencido pasa SOLO a gracia y
+    después a restringido, aunque el `status` persistido siga diciendo
+    `ACTIVE`. Única excepción, `is_legacy_free`: el `FREE` histórico no tiene
+    ciclo comercial y sus fechas de período (el seed de demo las pone a 30
+    días) nunca significaron un vencimiento.
+
+    Los intervalos son `[inicio, fin)`: en el instante exacto del fin ya no
+    hay acceso.
 
     Todas las fechas deben venir con timezone (UTC) — comparar naive contra
     aware tira `TypeError`, a propósito: es mejor romper temprano que comparar
@@ -257,7 +303,7 @@ def effective_access(
             quota=TRIAL_LIMITS,
             period_start=created_at,
             period_end=fin,
-            blocked_reason="prueba_vencida" if now > fin else None,
+            blocked_reason="prueba_vencida" if now >= fin else None,
         )
 
     if status == SubscriptionStatus.GRACE.value:
@@ -276,7 +322,7 @@ def effective_access(
             quota=granted_quota,
             period_start=current_period_start,
             period_end=current_period_end,
-            blocked_reason="gracia_vencida" if now > limite_gracia else None,
+            blocked_reason="gracia_vencida" if now >= limite_gracia else None,
         )
 
     if status == SubscriptionStatus.READ_ONLY.value:
@@ -288,7 +334,7 @@ def effective_access(
 
     if status == SubscriptionStatus.CANCELLED.value:
         periodo = _periodo_vigente(current_period_start, current_period_end, now)
-        vencida = current_period_end is None or now > current_period_end
+        vencida = current_period_end is None or now >= current_period_end
         return EffectiveAccess(
             quota=granted_quota,
             period_start=periodo[0],
@@ -298,8 +344,26 @@ def effective_access(
 
     # ACTIVE: único estado no cubierto arriba (el enum es cerrado).
     periodo = _periodo_vigente(current_period_start, current_period_end, now)
+    if is_legacy_free:
+        return EffectiveAccess(
+            quota=granted_quota, period_start=periodo[0], period_end=periodo[1],
+            blocked_reason=None,
+        )
+    if current_period_end is None:
+        # Un plan pago `ACTIVE` sin período no pasó por `activate`: no hay
+        # nada pago que respaldar. Faltar el dato nunca reabre el acceso.
+        return EffectiveAccess(
+            quota=granted_quota, period_start=periodo[0], period_end=periodo[1],
+            blocked_reason="activa_sin_periodo",
+        )
+    # Vencido el período, corre la gracia con el MISMO período (y su saldo);
+    # pasada la gracia, bloquea. Ninguno de los dos pasos espera a `expire-due`.
+    limite_gracia = current_period_end + timedelta(days=GRACE_DAYS)
     return EffectiveAccess(
-        quota=granted_quota, period_start=periodo[0], period_end=periodo[1], blocked_reason=None
+        quota=granted_quota,
+        period_start=periodo[0],
+        period_end=periodo[1],
+        blocked_reason="periodo_vencido" if now >= limite_gracia else None,
     )
 
 

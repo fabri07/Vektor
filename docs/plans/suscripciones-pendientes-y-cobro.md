@@ -1,6 +1,6 @@
 # Suscripciones: cierre del backend, experiencia de usuario y cobro
 
-Fecha: 2026-09-18. Estado: **plan propuesto, no implementado**.
+Fecha: 2026-09-18. Estado: **bloque A implementado y probado (sin desplegar); B–G propuestos**.
 
 Base: `planes-suscripcion-y-cupos.md` y revisión del código local. La suite de
 5085 pruebas aprobadas y las pruebas de concurrencia son resultados reportados
@@ -33,7 +33,15 @@ autorizado para corregir registros existentes.
 | F | Mercado Pago | Servicio comercial de D; E para flujo público | Cobro recurrente y conciliación completos |
 | G | Despliegue gradual y verificación integral | D/E para piloto; F para débito automático | Evidencia operativa y procedimiento de recuperación |
 
-**A. Cerrar inconsistencias antes de extender el mecanismo**
+**A. Cerrar inconsistencias antes de extender el mecanismo** — CERRADO
+
+Hecho: puntos 1, 2, 3 y 5 (como primitivas `autocommit=False`), más un
+agujero que el plan no listaba: `expire-due` pasaba a `GRACE` los FREE legado
+con período viejo. Detalle en `planes-suscripcion-y-cupos.md` → "Bloque A".
+**Precondición de despliegue:** `scripts/subscriptions.py diagnose` contra
+producción. Diferidos: el punto 4 (clave estable del chat) pasa al bloque E
+porque exige cambio del cliente; el punto 6 (éxito unificado chat/SSE y
+resultado durable) queda con el bloque C, que introduce el resultado durable.
 
 Archivos principales: `app/domain/subscription.py`,
 `app/application/services/subscription_service.py`,
