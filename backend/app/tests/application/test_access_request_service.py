@@ -2,7 +2,8 @@
 
 Cubre los cinco puntos que el flujo no puede aflojar: neutralidad a enumeración
 de cuentas, claim atómico del token, idempotencia de `approve()` (nunca dos
-tenants), `plan_code` siempre FREE pese a `requested_plan="premium"` y
+tenants), `plan_code` sale de `assigned_plan_code` (nunca de `requested_plan`,
+ni siquiera cuando coinciden) con la suscripción naciendo en TRIAL, y
 `onboarding_completed=False` al aprobar. Más el orden de la cola y los armadores
 de email.
 
@@ -48,6 +49,7 @@ from app.domain.access_request import (
     RequestedPlan,
 )
 from app.domain.contact_lead import DEDUP_WINDOW_SECONDS, EmailNotificationStatus
+from app.domain.subscription import AssignablePlan
 from app.domain.verticals import Vertical
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
 from app.persistence.models.audit import DecisionAuditLog
@@ -534,9 +536,12 @@ async def test_get_devuelve_none_si_no_existe(service: AccessRequestService):
 # ── approve() ────────────────────────────────────────────────────────────────
 
 
-async def test_approve_acuna_la_cuenta_con_plan_free_pese_a_pedir_premium(
+async def test_approve_acuna_trial_sobre_el_plan_asignado_no_el_pedido(
     service: AccessRequestService, db_session: AsyncSession, encolados: list[tuple]
 ):
+    """`requested_plan` (incluido el histórico `premium`) nunca se copia solo:
+    el dueño confirma `assigned_plan_code` en cada aprobación, y la cuenta
+    nace en TRIAL sobre ESE plan — nunca `ACTIVE`, nunca el pedido sin mirar."""
     solicitud = await _crear_verificada(
         service,
         db_session,
@@ -548,6 +553,7 @@ async def test_approve_acuna_la_cuenta_con_plan_free_pese_a_pedir_premium(
     resultado = await service.approve(
         solicitud.id,
         vertical=Vertical.LIMPIEZA,  # el dueño corrige el rubro declarado
+        assigned_plan_code=AssignablePlan.CONTROL,  # y asigna un plan distinto del pedido
         reviewer_user_id=None,
         via="script",
         notes="compatible",
@@ -558,7 +564,9 @@ async def test_approve_acuna_la_cuenta_con_plan_free_pese_a_pedir_premium(
     assert await _contar(db_session, MomentumProfile) == 1
 
     suscripcion = (await db_session.execute(select(Subscription))).scalars().one()
-    assert suscripcion.plan_code == "FREE"  # la intención Premium NO se copia
+    assert suscripcion.plan_code == "control"  # lo asignado, no "premium" ni "FREE"
+    assert suscripcion.status == "TRIAL"
+    assert suscripcion.trial_ends_at is not None
 
     usuario = (await db_session.execute(select(User))).scalars().one()
     assert usuario.role_code == "OWNER"
@@ -600,6 +608,7 @@ async def test_approve_dos_veces_no_acuna_un_segundo_tenant(
     primera = await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="script",
         notes=None,
@@ -609,6 +618,7 @@ async def test_approve_dos_veces_no_acuna_un_segundo_tenant(
     segunda = await service.approve(
         solicitud.id,
         vertical=Vertical.LIMPIEZA,  # aunque cambie el vertical, no re-acuña
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="api",
         notes="otra vez",
@@ -637,6 +647,7 @@ async def test_approve_desde_waitlist_funciona(
     resultado = await service.approve(
         solicitud.id,
         vertical=Vertical.DECORACION_HOGAR,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="script",
         notes=None,
@@ -669,6 +680,7 @@ async def test_approve_de_un_estado_no_aprobable_levanta(
         await service.approve(
             solicitud.id,
             vertical=Vertical.KIOSCO_ALMACEN,
+            assigned_plan_code=AssignablePlan.ESENCIAL,
             reviewer_user_id=None,
             via="api",
             notes=None,
@@ -699,6 +711,7 @@ async def test_approve_con_email_tomado_en_el_medio_no_acuna(
         await service.approve(
             solicitud.id,
             vertical=Vertical.KIOSCO_ALMACEN,
+            assigned_plan_code=AssignablePlan.ESENCIAL,
             reviewer_user_id=None,
             via="api",
             notes=None,
@@ -787,6 +800,7 @@ async def test_la_guardia_de_approve_no_depende_de_la_de_waitlist(
         await service.approve(
             solicitud.id,
             vertical=Vertical.KIOSCO_ALMACEN,
+            assigned_plan_code=AssignablePlan.ESENCIAL,
             reviewer_user_id=None,
             via="api",
             notes=None,
@@ -835,6 +849,7 @@ async def test_verificar_despues_de_rechazar_sella_el_email_y_permite_rescatarla
     resultado = await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="api",
         notes=None,
@@ -888,6 +903,7 @@ async def test_approve_de_una_solicitud_inexistente(service: AccessRequestServic
         await service.approve(
             uuid.uuid4(),
             vertical=Vertical.KIOSCO_ALMACEN,
+            assigned_plan_code=AssignablePlan.ESENCIAL,
             reviewer_user_id=None,
             via="api",
             notes=None,
@@ -962,6 +978,7 @@ async def test_no_se_puede_rechazar_ni_postergar_una_aprobada(
     await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="script",
         notes=None,
@@ -1039,6 +1056,7 @@ async def test_approve_se_audita_con_el_tenant_recien_acunado(
     resultado = await service.approve(
         solicitud.id,
         vertical=Vertical.LIMPIEZA,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=sample_user.user_id,
         via="api",
         notes="ok",
@@ -1101,6 +1119,7 @@ async def test_las_decisiones_idempotentes_no_duplican_la_auditoria(
         await service.approve(
             solicitud.id,
             vertical=Vertical.KIOSCO_ALMACEN,
+            assigned_plan_code=AssignablePlan.ESENCIAL,
             reviewer_user_id=None,
             via="script",
             notes=None,
@@ -1132,6 +1151,7 @@ async def _aprobada(
     aprobacion = await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="script",
         notes=None,
@@ -1397,15 +1417,26 @@ def test_build_owner_notification_escapa_lo_que_escribio_el_visitante():
 
 def test_build_owner_notification_marca_la_prioridad_premium():
     premium = _solicitud_falsa(requested_plan=RequestedPlan.PREMIUM.value)
+    control = _solicitud_falsa(requested_plan=RequestedPlan.CONTROL.value)
+    direccion = _solicitud_falsa(requested_plan=RequestedPlan.DIRECCION.value)
+    esencial = _solicitud_falsa(requested_plan=RequestedPlan.ESENCIAL.value)
     gratuita = _solicitud_falsa()
 
     subject_premium, html_premium, _ = build_owner_notification_email(premium)
+    subject_control, html_control, _ = build_owner_notification_email(control)
+    subject_direccion, _, _ = build_owner_notification_email(direccion)
+    subject_esencial, html_esencial, _ = build_owner_notification_email(esencial)
     subject_free, html_free, _ = build_owner_notification_email(gratuita)
 
-    assert subject_premium.startswith("[PRIORIDAD PREMIUM] ")
+    assert subject_premium.startswith("[PRIORIDAD] ")
     assert "Cuenta Premium" in html_premium
+    assert subject_control.startswith("[PRIORIDAD] ")
+    assert "Plan Control" in html_control
+    assert subject_direccion.startswith("[PRIORIDAD] ")
+    assert subject_esencial.startswith("Nueva solicitud de acceso")
+    assert "Plan Esencial" in html_esencial
     assert subject_free.startswith("Nueva solicitud de acceso")
-    assert "Cuenta gratuita" in html_free
+    assert "Quiere probarlo primero" in html_free
 
 
 def test_build_decision_email_aprobado_lleva_el_link_de_invitacion():

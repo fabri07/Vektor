@@ -161,7 +161,7 @@ async def get_me(
 ) -> MeResponse:
     # Subscription
     tenant_repo = TenantRepository(session)
-    subscription = await tenant_repo.get_active_subscription(current_user.tenant_id)
+    subscription = await tenant_repo.get_current_subscription(current_user.tenant_id)
 
     # BusinessProfile — onboarding_completed flag
     result = await session.execute(
@@ -180,6 +180,8 @@ async def get_me(
             SubscriptionInMeResponse(
                 plan_code=subscription.plan_code,
                 status=subscription.status,
+                trial_ends_at=subscription.trial_ends_at,
+                current_period_end=subscription.current_period_end,
             )
             if subscription
             else None

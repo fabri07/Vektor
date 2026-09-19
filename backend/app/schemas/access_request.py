@@ -41,6 +41,7 @@ from pydantic import (
 )
 
 from app.domain.access_request import (
+    HIGH_PRIORITY_PLANS,
     AccessRequestStatus,
     CanShareFiles,
     HistoryDepth,
@@ -51,6 +52,7 @@ from app.domain.access_request import (
     YearsOperating,
 )
 from app.domain.contact_lead import normalize_email
+from app.domain.subscription import AssignablePlan
 from app.domain.verticals import RequestedVertical, Vertical
 from app.schemas.onboarding import MAIN_CONCERN_PATTERN
 
@@ -308,21 +310,29 @@ class AccessRequestAdminItem(BaseModel):
         No existe `is_priority` en la tabla a propósito: un booleano redundante
         solo habilitaría estados incoherentes (`requested_plan='free'` con
         `is_priority=true`). Se calcula acá y en el `ORDER BY` del servicio,
-        desde el mismo dato.
+        desde el mismo dato — `HIGH_PRIORITY_PLANS` es la fuente única para
+        no desincronizar los dos lugares.
         """
-        return "high" if self.requested_plan is RequestedPlan.PREMIUM else "normal"
+        return "high" if self.requested_plan in HIGH_PRIORITY_PLANS else "normal"
 
 
 class ApproveAccessRequest(BaseModel):
-    """Decisión de aprobar: el dueño ASIGNA el vertical operativo.
+    """Decisión de aprobar: el dueño ASIGNA el vertical Y el plan operativos.
 
     `assigned_vertical` es `Vertical` (los 3 reales) y no `RequestedVertical`:
     `"otros"` tiene que morir en un 422 acá, antes de llegar al servicio. Es el
     rubro que el DUEÑO decide, no el que declaró el solicitante — esa corrección
     es todo el punto de la revisión manual.
+
+    `assigned_plan_code` es `AssignablePlan`, REQUERIDO y sin default: mismo
+    criterio que el vertical. `requested_plan` (incluidos los históricos
+    `free`/`premium`) es una intención declarada, nunca una equivalencia — el
+    dueño confirma con qué plan arranca la prueba en cada aprobación, no se
+    infiere.
     """
 
     assigned_vertical: Vertical
+    assigned_plan_code: AssignablePlan
     notes: str | None = Field(default=None, max_length=2000)
 
 

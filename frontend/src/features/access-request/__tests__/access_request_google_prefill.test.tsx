@@ -153,7 +153,7 @@ describe("AccessRequestForm — prefill de Google", () => {
   });
 
   test("el prefill NO borra el plan que venía por query param", async () => {
-    searchParams = new URLSearchParams(`prefill=${TOKEN}&plan=premium`);
+    searchParams = new URLSearchParams(`prefill=${TOKEN}&plan=control`);
     mockGet.mockResolvedValueOnce({
       data: { email: EMAIL, full_name: "Ana Pérez", provider: "google" },
     } as never);
@@ -161,7 +161,7 @@ describe("AccessRequestForm — prefill de Google", () => {
 
     await waitFor(() => expect(emailInput()).toHaveValue(EMAIL));
     // El merge es parcial: toca email y nombre, y nada más.
-    expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "premium"), { exact: false })).toBeChecked();
+    expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "control"), { exact: false })).toBeChecked();
   });
 
   test("el token viaja en el POST para que la solicitud quede ligada a Google", async () => {

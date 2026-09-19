@@ -67,6 +67,7 @@ from app.config.settings import get_settings
 from app.domain.access_request import (
     ACCESS_REQUEST_TOKEN_TTL_HOURS,
     CONSENT_VERSION,
+    HIGH_PRIORITY_PLANS,
     OPEN_ACCESS_REQUEST_STATUSES,
     AccessRequestStatus,
     RequestedPlan,
@@ -78,6 +79,7 @@ from app.domain.contact_lead import (
     normalize_ar_phone,
     normalize_email,
 )
+from app.domain.subscription import AssignablePlan
 from app.domain.verticals import Vertical
 from app.integrations.email_templates import render_action_email
 from app.observability.logger import get_logger
@@ -129,11 +131,24 @@ ESTADOS_DE_LA_COLA: tuple[str, ...] = (
 #: opt-in acuñaría una cuenta contra un email que nadie confirmó.
 ESTADOS_APROBABLES: tuple[str, ...] = ESTADOS_DE_LA_COLA
 
-#: Premium primero (0), el resto después (1). Es orden DERIVADO de
-#: ``requested_plan``; no existe columna ``is_priority`` a propósito.
+#: Planes de alta prioridad primero (0), el resto después (1). Es orden
+#: DERIVADO de ``requested_plan`` vía ``HIGH_PRIORITY_PLANS`` (misma fuente que
+#: ``review_priority`` en el schema, para no desincronizar los dos lugares); no
+#: existe columna ``is_priority`` a propósito.
 _PRIORIDAD_PREMIUM = case(
-    (AccessRequest.requested_plan == RequestedPlan.PREMIUM.value, 0), else_=1
+    (AccessRequest.requested_plan.in_(HIGH_PRIORITY_PLANS), 0), else_=1
 )
+
+#: Etiqueta legible por plan para el mail interno al dueño. ``PREMIUM`` queda
+#: por compatibilidad con solicitudes históricas (ver el docstring de
+#: ``RequestedPlan``); la página de precios ya no lo ofrece.
+_ETIQUETA_PLAN: dict[str, str] = {
+    RequestedPlan.FREE.value: "Quiere probarlo primero",
+    RequestedPlan.PREMIUM.value: "Cuenta Premium (histórico)",
+    RequestedPlan.ESENCIAL.value: "Plan Esencial",
+    RequestedPlan.CONTROL.value: "Plan Control",
+    RequestedPlan.DIRECCION.value: "Plan Dirección",
+}
 
 #: El índice único parcial "un solo trámite abierto por email" solo existe en
 #: PostgreSQL (ver el docstring del modelo). Cuando dos envíos simultáneos lo
@@ -665,6 +680,7 @@ class AccessRequestService:
         request_id: uuid.UUID,
         *,
         vertical: Vertical,
+        assigned_plan_code: AssignablePlan,
         reviewer_user_id: uuid.UUID | None,
         via: str,
         notes: str | None,
@@ -676,8 +692,10 @@ class AccessRequestService:
         aprobación va a pasar de verdad, porque el dueño puede aprobar desde el
         script de consola y desde la API.
 
-        El ``vertical`` es el que asigna el DUEÑO, no el que declaró el
-        solicitante: ese es todo el punto de la revisión manual.
+        El ``vertical`` y el ``assigned_plan_code`` son los que asigna el
+        DUEÑO, no lo que declaró el solicitante: ese es todo el punto de la
+        revisión manual. La cuenta nace en `TRIAL` sobre ese plan — nunca
+        `ACTIVE` acá (ver el docstring de `provision_tenant`).
         """
         solicitud = await self._lock(request_id)
 
@@ -723,8 +741,17 @@ class AccessRequestService:
                 requested_vertical=solicitud.requested_vertical,
                 assigned_vertical=vertical.value,
             )
+        if solicitud.requested_plan != assigned_plan_code.value:
+            # Tampoco es un error acá: `free`/`premium` NUNCA calzan solo, y
+            # el dueño puede asignar un plan distinto del pedido igual.
+            logger.info(
+                "access_request.plan_reassigned",
+                request_id=str(request_id),
+                requested_plan=solicitud.requested_plan,
+                assigned_plan_code=assigned_plan_code.value,
+            )
 
-        tenant, user = await self._provision(solicitud, vertical)
+        tenant, user = await self._provision(solicitud, vertical, assigned_plan_code)
         await self._sellar_screening_en_el_perfil(solicitud, tenant)
         await self._vincular_identidad_google(solicitud, tenant, user)
 
@@ -756,6 +783,7 @@ class AccessRequestService:
             actor_user_id=reviewer_user_id,
             extra={
                 "assigned_vertical_code": vertical.value,
+                "assigned_plan_code": assigned_plan_code.value,
                 "approved_tenant_id": str(tenant.tenant_id),
                 "approved_user_id": str(user.user_id),
                 "review_notes": notes,
@@ -1370,7 +1398,7 @@ class AccessRequestService:
         solicitud.review_notes = notes
 
     async def _provision(
-        self, solicitud: AccessRequest, vertical: Vertical
+        self, solicitud: AccessRequest, vertical: Vertical, assigned_plan_code: AssignablePlan
     ) -> tuple[Tenant, User]:
         """Acuña la cuenta reusando ``provision_tenant`` (único lugar que crea las 5 filas).
 
@@ -1378,8 +1406,8 @@ class AccessRequestService:
         invitación. ``is_active=True`` porque el doble opt-in del email ya se hizo
         al verificar la solicitud.
 
-        ``requested_plan`` NO viaja acá: la suscripción se crea FREE siempre (ver
-        el docstring de ``provision_tenant``).
+        ``requested_plan`` NO viaja acá — el que manda es ``assigned_plan_code``,
+        confirmado por el dueño al aprobar (ver el docstring de ``approve``).
         """
         return await provision_tenant(
             self._session,
@@ -1390,6 +1418,7 @@ class AccessRequestService:
             vertical=vertical,
             password_hash=None,
             is_active=True,
+            plan_code=assigned_plan_code.value,
         )
 
     async def google_identity_taken(self, provider_subject: str) -> bool:
@@ -1510,13 +1539,13 @@ def build_owner_notification_email(req: AccessRequest) -> tuple[str, str, str]:
     herramientas reales de operación: por eso lleva TODO el screening, no un
     resumen. El asunto marca la prioridad para que se vea en la bandeja.
     """
-    es_premium = req.requested_plan == RequestedPlan.PREMIUM.value
-    prefijo = "[PRIORIDAD PREMIUM] " if es_premium else ""
+    es_prioritario = req.requested_plan in HIGH_PRIORITY_PLANS
+    prefijo = "[PRIORIDAD] " if es_prioritario else ""
     subject = f"{prefijo}Nueva solicitud de acceso — {req.business_name}"
 
     filas: list[tuple[str, str]] = [
-        ("Intención", "Cuenta Premium" if es_premium else "Cuenta gratuita"),
-        ("Prioridad de revisión", "Alta" if es_premium else "Normal"),
+        ("Intención", _ETIQUETA_PLAN.get(req.requested_plan, req.requested_plan)),
+        ("Prioridad de revisión", "Alta" if es_prioritario else "Normal"),
         ("Negocio", req.business_name),
         ("Rubro declarado", req.requested_vertical),
         ("Detalle del rubro", req.vertical_other_text or "—"),

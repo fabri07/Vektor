@@ -25,6 +25,7 @@ from app.main import create_app
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.pending_action import PendingAction
+from app.persistence.models.tenant import Subscription, SubscriptionQuotaUsage
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.tests.conftest import add_business_profile
 
@@ -882,3 +883,115 @@ async def test_confirm_group_not_found_404(auth_client):
     ac, headers, _, _, _ = auth_client
     resp = await ac.post(f"/api/v1/agent/confirm/group/{uuid.uuid4()}", headers=headers)
     assert resp.status_code == 404
+
+
+# ── Cupo de IA por suscripción (Etapa 2) ───────────────────────────────────────
+
+
+async def _crear_suscripcion(
+    session: AsyncSession, tenant_id: uuid.UUID, **overrides: Any
+) -> Subscription:
+    base = {
+        "subscription_id": uuid.uuid4(),
+        "tenant_id": tenant_id,
+        "plan_code": "control",
+        "status": "ACTIVE",
+        "seats_included": 3,
+        "granted_ia_queries_per_month": 70,
+        "granted_imports_per_month": 25,
+        "granted_photo_pdf_reads_per_month": 7,
+        "current_period_start": datetime.now(UTC) - timedelta(days=1),
+        "current_period_end": datetime.now(UTC) + timedelta(days=29),
+    }
+    base.update(overrides)
+    sub = Subscription(**base)
+    session.add(sub)
+    await session.commit()
+    return sub
+
+
+async def test_chat_bloqueado_por_suscripcion_read_only(
+    auth_client, session: AsyncSession
+) -> None:
+    """`READ_ONLY` corta ANTES del orquestador — nunca llega a gastar un LLM call."""
+    ac, headers, tenant, _, _ = auth_client
+    await _crear_suscripcion(session, tenant.tenant_id, status="READ_ONLY")
+
+    orchestrator = "app.application.services.chat_orchestrator"
+    with patch(f"{orchestrator}.AgentCEO") as mock_ceo:
+        resp = await ac.post(
+            "/api/v1/agent/chat",
+            json={"message": "vendí 500 pesos"},
+            headers=headers,
+        )
+        mock_ceo.return_value.process.assert_not_called()
+
+    assert resp.status_code == 402, resp.text
+    assert resp.json()["detail"]["code"] == "SUBSCRIPTION_READ_ONLY"
+
+
+async def test_chat_agota_cupo_de_ia_devuelve_429_sin_llamar_al_llm(
+    auth_client, session: AsyncSession
+) -> None:
+    """Cupo de IA en 0: el chat corta antes del LLM con 429 QUOTA_EXCEEDED."""
+    ac, headers, tenant, _, _ = auth_client
+    await _crear_suscripcion(session, tenant.tenant_id, granted_ia_queries_per_month=0)
+
+    orchestrator = "app.application.services.chat_orchestrator"
+    with patch(f"{orchestrator}.AgentCEO") as mock_ceo:
+        resp = await ac.post(
+            "/api/v1/agent/chat",
+            json={"message": "vendí 500 pesos"},
+            headers=headers,
+        )
+        mock_ceo.return_value.process.assert_not_called()
+
+    assert resp.status_code == 429, resp.text
+    cuerpo = resp.json()["detail"]
+    assert cuerpo["code"] == "QUOTA_EXCEEDED"
+    assert cuerpo["resource"] == "ia_query"
+
+
+async def test_chat_exitoso_confirma_la_reserva_de_ia(
+    auth_client, session: AsyncSession
+) -> None:
+    """Un turno exitoso deja `used=1, reserved=0` — no una reserva colgada."""
+    ac, headers, tenant, _, _ = auth_client
+    await _crear_suscripcion(session, tenant.tenant_id, granted_ia_queries_per_month=5)
+
+    sub_mock = AsyncMock()
+    sub_mock.process = AsyncMock(
+        side_effect=lambda req, **_: _mock_requires_approval_response(req.request_id)
+    )
+    orchestrator = "app.application.services.chat_orchestrator"
+    with (
+        patch(f"{orchestrator}.AgentCEO") as mock_ceo,
+        patch(f"{TEAM_EXECUTOR}.get_sub_agent", return_value=sub_mock),
+        patch(f"{orchestrator}.ConversationService") as mock_conv,
+        patch(f"{orchestrator}.get_anthropic_async_client"),
+    ):
+        mock_ceo.return_value.process = AsyncMock(
+            side_effect=lambda req: _make_ceo_plan_response(
+                req.request_id, "ingresar_venta", "agent_income", "REGISTER_SALE", {"amount": 500}
+            )
+        )
+        mock_conv.return_value.get_context = AsyncMock(return_value={"turns": [], "summary": None})
+        mock_conv.return_value.add_turn = AsyncMock()
+        mock_conv.return_value.persist = AsyncMock()
+
+        resp = await ac.post(
+            "/api/v1/agent/chat",
+            json={"message": "vendí 500 pesos"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 200, resp.text
+
+    fila = (
+        await session.execute(
+            select(SubscriptionQuotaUsage).where(
+                SubscriptionQuotaUsage.tenant_id == tenant.tenant_id
+            )
+        )
+    ).scalar_one()
+    assert (fila.used, fila.reserved) == (1, 0)

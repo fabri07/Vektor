@@ -26,6 +26,19 @@ type Fase = "verificando" | "ok" | "error";
 /** Compromiso de respuesta que se le declara al solicitante. */
 const TIEMPO_DE_RESPUESTA = "dentro de los próximos 3 días hábiles";
 
+/**
+ * Copy del plan pago para el mensaje de confirmación. `free` (probarlo
+ * primero) usa el texto genérico de abajo, no entra acá. `Partial<Record<...>>`
+ * porque `plan` puede llegar `null` (sin token) o, en teoría, un valor
+ * histórico (`"premium"`) que el catálogo del frontend ya no conoce — un
+ * plan sin entrada cae al mensaje genérico en vez de romper.
+ */
+const PLAN_CONFIRMADO_COPY: Partial<Record<RequestedPlan, string>> = {
+  esencial: "Esencial",
+  control: "Control",
+  direccion: "Dirección",
+};
+
 export function SolicitudVerificada() {
   const searchParams = useSearchParams();
   const token = searchParams.get("token") ?? "";
@@ -120,10 +133,10 @@ export function SolicitudVerificada() {
 
       <div>
         <h1 className="text-2xl font-bold text-vk-text-primary">Correo confirmado</h1>
-        {plan === "premium" ? (
+        {plan && PLAN_CONFIRMADO_COPY[plan] ? (
           <p className="mt-2 text-[15px] text-vk-text-muted">
-            Recibimos tu solicitud Premium. Vamos a revisar los datos y la compatibilidad
-            de tu negocio antes de habilitar la cuenta.
+            Recibimos tu solicitud del plan {PLAN_CONFIRMADO_COPY[plan]}. Vamos a revisar
+            los datos y la compatibilidad de tu negocio antes de habilitar la cuenta.
           </p>
         ) : (
           <p className="mt-2 text-[15px] text-vk-text-muted">

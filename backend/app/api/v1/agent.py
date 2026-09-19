@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user, require_role
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse
+from app.application.services import subscription_service as quota_service
 from app.application.services.automation_service import (
     AUTOMATION_PAYLOAD_AGENT_KEY,
     automation_offer_for_action,
@@ -42,6 +43,7 @@ from app.application.services.pending_action_service import (
     execute_pending_action,
 )
 from app.config.settings import get_settings
+from app.domain.subscription import QuotaExceeded, QuotaResource, SubscriptionAccessDenied
 from app.integrations.anthropic_client import AnthropicConfigurationError
 from app.integrations.mcp.exceptions import McpToolAuthError
 from app.observability.logger import get_logger
@@ -51,6 +53,7 @@ from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.user import User
+from app.persistence.repositories.tenant_repository import TenantRepository
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -854,6 +857,66 @@ async def get_conversation(
     )
 
 
+# ── Cupo de consultas de IA por suscripción ────────────────────────────────────
+#
+# Reemplaza el chequeo de cupo mensual real (el límite diario de 50 msj/día de
+# más abajo sigue vigente, sin cambios — es un anti-abuso aparte, no el cupo
+# comercial del plan). A diferencia de ese límite, acá SÍ importa la carrera:
+# `subscription_service.reserve` es atómico (reserva antes de llamar al LLM,
+# nunca chequeo-y-luego-incrementa), y confirma/libera según cómo termine el
+# turno — un error técnico no gasta cupo.
+
+
+async def _reservar_consulta_ia(
+    db: AsyncSession, tenant_id: uuid.UUID, operation_id: str
+) -> None:
+    """Reserva 1 `ia_query` para este turno. Sin `Subscription`, no bloquea
+
+    (dato inconsistente — todo tenant se acuña con una — pero no es motivo
+    para tirarle un 500 al usuario que solo quiere mandar un mensaje).
+    """
+    subscription = await TenantRepository(db).get_current_subscription(tenant_id)
+    if subscription is None:
+        logger.warning("chat_quota_sin_subscription", tenant_id=str(tenant_id))
+        return
+    try:
+        await quota_service.reserve(
+            db,
+            subscription=subscription,
+            resource=QuotaResource.IA_QUERY,
+            operation_id=operation_id,
+        )
+    except SubscriptionAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": "SUBSCRIPTION_READ_ONLY", "reason": exc.reason},
+        ) from exc
+    except QuotaExceeded as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "QUOTA_EXCEEDED",
+                "resource": exc.resource.value,
+                "limit": exc.limit,
+                "renews_at": exc.renews_at.isoformat(),
+            },
+        ) from exc
+
+
+async def _resolver_consulta_ia(
+    db: AsyncSession, tenant_id: uuid.UUID, operation_id: str, *, exito: bool
+) -> None:
+    """Confirma o libera la reserva de IA según cómo terminó el turno."""
+    if exito:
+        await quota_service.commit(
+            db, tenant_id=tenant_id, resource=QuotaResource.IA_QUERY, operation_id=operation_id
+        )
+    else:
+        await quota_service.release(
+            db, tenant_id=tenant_id, resource=QuotaResource.IA_QUERY, operation_id=operation_id
+        )
+
+
 # ── POST /chat ────────────────────────────────────────────────────────────────
 
 
@@ -895,6 +958,11 @@ async def chat(
         _attach_conversation_id(nl_resp, body.conversation_id)
         return nl_resp
 
+    # ── Cupo de IA por suscripción: reserva ANTES de llamar al LLM ────────────
+    # Tira 402/429 acá si corresponde — nada de lo de abajo corre sin cupo.
+    operation_id = str(uuid.uuid4())
+    await _reservar_consulta_ia(db, tenant_id, operation_id)
+
     # ── ChatOrchestrator: CEO + sub-agente + LLM conversacional ─────────────
     request = AgentRequest(
         user_id=str(user_id),
@@ -911,17 +979,20 @@ async def chat(
             timeout=45.0,
         )
     except TimeoutError:
+        await _resolver_consulta_ia(db, tenant_id, operation_id, exito=False)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="El procesamiento tardó demasiado. Por favor intentá de nuevo.",
         ) from None
     except AnthropicConfigurationError as exc:
+        await _resolver_consulta_ia(db, tenant_id, operation_id, exito=False)
         logger.error("agent_anthropic_not_configured", tenant_id=str(tenant_id))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="El servicio de IA no está configurado. Falta ANTHROPIC_API_KEY.",
         ) from exc
     except Exception as exc:
+        await _resolver_consulta_ia(db, tenant_id, operation_id, exito=False)
         anthropic_error = _anthropic_error_response(exc)
         if anthropic_error is not None:
             http_status, message = anthropic_error
@@ -942,6 +1013,9 @@ async def chat(
             status_code=500, detail=f"Orchestrator error: {type(exc).__name__}: {exc}"
         ) from exc
 
+    await _resolver_consulta_ia(
+        db, tenant_id, operation_id, exito=agent_response.status != "error"
+    )
     _attach_conversation_id(agent_response, body.conversation_id)
     action_meta = await _process_agent_action(
         agent_response=agent_response,
@@ -1081,6 +1155,12 @@ async def chat_stream(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    # ── Cupo de IA por suscripción: reserva ANTES de abrir el stream ──────────
+    # Corre acá (no dentro del generator) para que un 402/429 sea una respuesta
+    # HTTP normal, no un evento de error dentro de un stream ya iniciado.
+    operation_id = str(uuid.uuid4())
+    await _reservar_consulta_ia(db, tenant_id, operation_id)
+
     request_obj = AgentRequest(
         user_id=str(user_id),
         business_id=str(tenant_id),
@@ -1109,6 +1189,7 @@ async def chat_stream(
                     timeout=45.0,
                 )
             except TimeoutError:
+                await _resolver_consulta_ia(db, tenant_id, operation_id, exito=False)
                 error_event = {
                     "type": "error",
                     "message": "El procesamiento tardó demasiado. Por favor intentá de nuevo.",
@@ -1174,6 +1255,10 @@ async def chat_stream(
             db.add(audit)
             await db.commit()
 
+            await _resolver_consulta_ia(
+                db, tenant_id, operation_id, exito=agent_response.status != "error"
+            )
+
             # Incrementar rate limit solo si el turno terminó sin error controlado
             if agent_response.status != "error":
                 try:
@@ -1196,6 +1281,7 @@ async def chat_stream(
             yield f"data: {json_module.dumps(response_event, ensure_ascii=False)}\n\n"
 
         except AnthropicConfigurationError:
+            await _resolver_consulta_ia(db, tenant_id, operation_id, exito=False)
             error_event = {
                 "type": "error",
                 "message": "El servicio de IA no está configurado. Falta ANTHROPIC_API_KEY.",
@@ -1204,6 +1290,7 @@ async def chat_stream(
             yield f"data: {json_module.dumps(error_event, ensure_ascii=False)}\n\n"
 
         except Exception as exc:
+            await _resolver_consulta_ia(db, tenant_id, operation_id, exito=False)
             anthropic_error = _anthropic_error_response(exc)
             if anthropic_error is not None:
                 http_status, message = anthropic_error

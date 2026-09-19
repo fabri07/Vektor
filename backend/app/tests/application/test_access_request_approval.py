@@ -13,12 +13,12 @@ dentro de otro:
    formulario NO acuña nada: cero ``Tenant``, ``User``, ``Subscription``,
    ``BusinessProfile`` y ``MomentumProfile``. Es la premisa entera del PR: si esto
    afloja, el registro abierto volvió por la ventana.
-2. ``test_la_suscripcion_es_free_pese_a_la_intencion_premium`` — la solicitud pide
-   ``requested_plan="premium"`` y la cuenta acuñada igual tiene una
-   ``Subscription`` con ``plan_code == "FREE"``. La intención Premium es prioridad
-   de revisión y trazabilidad comercial, nunca una suscripción paga: no hay
-   circuito de cobro ni límites configurados. Esta aserción es lo que impide que
-   alguien "arregle" eso después y termine regalando el plan pago.
+2. ``test_la_suscripcion_nace_en_trial_sobre_el_plan_asignado`` — la solicitud
+   pide ``requested_plan="premium"`` (histórico) y la cuenta acuñada tiene una
+   ``Subscription`` en ``TRIAL`` sobre el plan que el DUEÑO asignó al aprobar
+   (``assigned_plan_code``), nunca sobre "premium" ni "FREE": la intención
+   declarada nunca se copia sola. `TRIAL` (no `ACTIVE`) es lo que impide que
+   alguien "arregle" esto después y termine regalando el plan pago sin cobrar.
 
 Celery se intercepta en el ``.delay`` de cada tarea real (mismo patrón que
 ``app/tests/api/v1/test_contact.py``): así se asierta QUÉ se encoló sin que el
@@ -47,6 +47,7 @@ from app.application.services.access_request_service import (
     ApprovalResult,
 )
 from app.domain.access_request import AccessRequestStatus, RequestedPlan
+from app.domain.subscription import AssignablePlan
 from app.domain.verticals import Vertical
 from app.jobs import access_request_worker, score_worker
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
@@ -71,6 +72,10 @@ VERTICAL_DECLARADO = Vertical.KIOSCO_ALMACEN
 #: …y el que le asigna el dueño al aprobar. Que sean distintos es el punto de la
 #: revisión manual: manda el asignado, no el declarado.
 VERTICAL_ASIGNADO = Vertical.LIMPIEZA
+
+#: Plan que le asigna el dueño al aprobar — distinto del `requested_plan`
+#: (`"premium"`, histórico) de la solicitud, por el mismo motivo que el vertical.
+PLAN_ASIGNADO = AssignablePlan.CONTROL
 
 #: Contraseña que define el usuario con el link de invitación.
 PASSWORD_NUEVA = "Secure123"
@@ -258,6 +263,7 @@ async def aprobada(
     return await AccessRequestService(db_session).approve(
         verificada.id,
         vertical=VERTICAL_ASIGNADO,
+        assigned_plan_code=PLAN_ASIGNADO,
         reviewer_user_id=None,
         via="script",
         notes="rubro corregido a limpieza",
@@ -295,23 +301,24 @@ async def test_aprobar_acuna_exactamente_una_cuenta(
     assert perfil.custom_fields["main_concern"] == _SOLICITUD["main_concern"]
 
 
-async def test_la_suscripcion_es_free_pese_a_la_intencion_premium(
+async def test_la_suscripcion_nace_en_trial_sobre_el_plan_asignado(
     aprobada: ApprovalResult, db_session: AsyncSession
 ) -> None:
-    """La intención Premium NO se copia a ``Subscription.plan_code``.
+    """La intención Premium (histórica) NO se copia a ``Subscription.plan_code``.
 
-    El formulario pregunta si el visitante quiere cuenta gratuita o Premium, pero
-    hoy no existe un Premium operativo: no hay cobro, no hay límites configurados
-    ni features detrás de un flag. La intención se conserva en la solicitud para
-    trazabilidad comercial y para priorizar la revisión; la suscripción que se
-    acuña es FREE siempre. Copiar ``requested_plan`` a ``plan_code`` sería regalar
-    un plan pago sin contrato detrás.
+    El dueño confirma un ``assigned_plan_code`` en cada aprobación — acá
+    ``PLAN_ASIGNADO``, distinto del ``requested_plan`` de la solicitud. La
+    cuenta nace en ``TRIAL`` sobre ese plan, nunca ``ACTIVE``: no hay cobro
+    todavía, activar el plan pago es una acción manual aparte
+    (``scripts/subscriptions.py activate``).
     """
     solicitud = await _la_solicitud(db_session)
     assert solicitud.requested_plan == RequestedPlan.PREMIUM.value
 
     suscripcion = (await db_session.execute(select(Subscription))).scalars().one()
-    assert suscripcion.plan_code == "FREE"
+    assert suscripcion.plan_code == PLAN_ASIGNADO.value
+    assert suscripcion.status == "TRIAL"
+    assert suscripcion.trial_ends_at is not None
 
 
 async def test_aprobar_encola_la_decision_con_el_link_de_invitacion(
@@ -379,7 +386,8 @@ async def test_la_invitacion_deja_definir_password_y_entrar(
     cuerpo = me.json()
     assert cuerpo["email"] == _SOLICITUD["email"]
     assert cuerpo["role_code"] == "OWNER"
-    assert cuerpo["subscription"]["plan_code"] == "FREE"
+    assert cuerpo["subscription"]["plan_code"] == PLAN_ASIGNADO.value
+    assert cuerpo["subscription"]["status"] == "TRIAL"
     # Todavía no cargó los números: el onboarding es el paso siguiente.
     assert cuerpo["onboarding_completed"] is False
 
@@ -474,8 +482,9 @@ async def test_aprobar_de_nuevo_no_acuna_un_segundo_tenant(
 
     segunda = await AccessRequestService(db_session).approve(
         (await _la_solicitud(db_session)).id,
-        # Incluso cambiando el rubro: la cuenta ya está acuñada.
+        # Incluso cambiando el rubro y el plan: la cuenta ya está acuñada.
         vertical=VERTICAL_DECLARADO,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="api",
         notes="otra vez",
@@ -507,6 +516,7 @@ async def test_aprobar_una_solicitud_inexistente_no_acuna_nada(
         await AccessRequestService(db_session).approve(
             uuid.uuid4(),
             vertical=VERTICAL_ASIGNADO,
+            assigned_plan_code=PLAN_ASIGNADO,
             reviewer_user_id=None,
             via="script",
             notes=None,

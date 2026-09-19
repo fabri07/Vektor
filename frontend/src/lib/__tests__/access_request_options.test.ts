@@ -104,7 +104,12 @@ const CATALOGOS: ReadonlyArray<
   [
     "REQUESTED_PLAN_OPTIONS",
     REQUESTED_PLAN_OPTIONS,
-    { free: "Plan Gratuito", premium: "Premium" },
+    {
+      free: "Quiero probarlo primero",
+      esencial: "Esencial",
+      control: "Control",
+      direccion: "Dirección",
+    },
   ],
 ];
 
@@ -135,7 +140,7 @@ describe("catálogos del screening — contrato de rótulos visibles", () => {
 describe("labelOf", () => {
   test("devuelve el rótulo de la opción pedida", () => {
     expect(labelOf(MAIN_CONCERN_OPTIONS, "CASH")).toBe("Caja");
-    expect(labelOf(REQUESTED_PLAN_OPTIONS, "free")).toBe("Plan Gratuito");
+    expect(labelOf(REQUESTED_PLAN_OPTIONS, "control")).toBe("Control");
   });
 
   test("tira si el value no existe, en vez de devolver undefined", () => {

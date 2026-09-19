@@ -11,19 +11,24 @@ import PreciosPage from "../page";
  * verifica `features/access-request/__tests__/access_request_form.test.tsx`.
  */
 describe("/precios — CTAs de solicitud", () => {
-  test("el card Gratuito lleva al formulario con plan=free", () => {
+  test.each([
+    ["Esencial", "esencial"],
+    ["Control", "control"],
+    ["Dirección", "direccion"],
+  ])("el card %s lleva al formulario con plan=%s", (nombre, codigo) => {
     render(<PreciosPage />);
-    const cta = screen.getByRole("link", { name: /Quiero pedir mi acceso gratuito/i });
-    expect(cta).toHaveAttribute("href", "/solicitar-acceso?plan=free&src=precios_free");
-  });
-
-  test("el card Premium lleva al formulario con plan=premium", () => {
-    render(<PreciosPage />);
-    const cta = screen.getByRole("link", { name: /Quiero recibir novedades de Premium/i });
+    const cta = screen.getByRole("link", {
+      name: new RegExp(`Quiero pedir el plan ${nombre}`, "i"),
+    });
     expect(cta).toHaveAttribute(
       "href",
-      "/solicitar-acceso?plan=premium&src=precios_premium",
+      `/solicitar-acceso?plan=${codigo}&src=precios_${codigo}`,
     );
+  });
+
+  test("el card Control lleva la marca de recomendado", () => {
+    render(<PreciosPage />);
+    expect(screen.getByText(/Recomendado/i)).toBeInTheDocument();
   });
 
   test("ningún CTA promete un alta inmediata ni apunta a /register", () => {

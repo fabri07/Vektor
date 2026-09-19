@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
+    require_active_subscription,
     require_modify_access,
     require_role,
 )
@@ -178,6 +179,7 @@ async def create_expense(
     # products/others/suppliers (ver create_product).
     _: User = Depends(require_role("OWNER", "ADMIN")),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+    _sub_guard: None = Depends(require_active_subscription),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ExpenseEntry:

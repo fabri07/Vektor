@@ -36,6 +36,7 @@ from app.application.services.access_request_service import (
 )
 from app.application.services.tenant_provisioning import provision_tenant
 from app.domain.access_request import RequestedPlan
+from app.domain.subscription import AssignablePlan
 from app.domain.verticals import Vertical
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
 from app.persistence.models.audit import DecisionAuditLog
@@ -174,6 +175,7 @@ async def test_approve_vincula_la_identidad_de_google(
     resultado = await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="script",
         notes=None,
@@ -202,6 +204,7 @@ async def test_approve_sin_google_subject_no_crea_identidad(
     await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="script",
         notes=None,
@@ -217,6 +220,7 @@ async def test_approve_audita_si_hubo_linkeo(
     await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="script",
         notes=None,
@@ -303,6 +307,7 @@ async def test_la_identidad_adoptada_se_vincula_al_aprobar(
     await service.approve(
         solicitud.id,
         vertical=Vertical.KIOSCO_ALMACEN,
+        assigned_plan_code=AssignablePlan.ESENCIAL,
         reviewer_user_id=None,
         via="script",
         notes=None,
@@ -431,6 +436,7 @@ async def test_identidad_ya_vinculada_a_otro_usuario_es_conflicto(
         await service.approve(
             solicitud.id,
             vertical=Vertical.KIOSCO_ALMACEN,
+            assigned_plan_code=AssignablePlan.ESENCIAL,
             reviewer_user_id=None,
             via="script",
             notes=None,

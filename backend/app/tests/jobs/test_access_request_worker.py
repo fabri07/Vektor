@@ -228,19 +228,29 @@ def test_asunto_premium_lleva_la_marca_de_prioridad() -> None:
     subject, cuerpo_html, texto = build_owner_notification_email(
         _solicitud(requested_plan=RequestedPlan.PREMIUM.value)
     )
-    assert subject == "[PRIORIDAD PREMIUM] Nueva solicitud de acceso — Kiosco La Esquina"
+    assert subject == "[PRIORIDAD] Nueva solicitud de acceso — Kiosco La Esquina"
     assert "Cuenta Premium" in cuerpo_html
     assert "Intención: Cuenta Premium" in texto
     assert "Prioridad de revisión: Alta" in texto
 
 
-def test_asunto_free_no_lleva_la_marca() -> None:
-    subject, _, texto = build_owner_notification_email(
-        _solicitud(requested_plan=RequestedPlan.FREE.value)
-    )
-    assert subject == "Nueva solicitud de acceso — Kiosco La Esquina"
-    assert "PRIORIDAD PREMIUM" not in subject
-    assert "Prioridad de revisión: Normal" in texto
+def test_asunto_control_y_direccion_llevan_la_marca_de_prioridad() -> None:
+    for plan in (RequestedPlan.CONTROL, RequestedPlan.DIRECCION):
+        subject, _, texto = build_owner_notification_email(
+            _solicitud(requested_plan=plan.value)
+        )
+        assert subject == "[PRIORIDAD] Nueva solicitud de acceso — Kiosco La Esquina"
+        assert "Prioridad de revisión: Alta" in texto
+
+
+def test_asunto_free_y_esencial_no_llevan_la_marca() -> None:
+    for plan in (RequestedPlan.FREE, RequestedPlan.ESENCIAL):
+        subject, _, texto = build_owner_notification_email(
+            _solicitud(requested_plan=plan.value)
+        )
+        assert subject == "Nueva solicitud de acceso — Kiosco La Esquina"
+        assert "[PRIORIDAD]" not in subject
+        assert "Prioridad de revisión: Normal" in texto
 
 
 # ── Aviso al dueño ───────────────────────────────────────────────────────────
@@ -259,7 +269,7 @@ def test_aviso_al_duenio_va_a_la_casilla_de_leads(
 
     (destinatario, subject, _), = smtp.enviados
     assert destinatario == "hola@vektor.app"
-    assert subject.startswith("[PRIORIDAD PREMIUM] ")
+    assert subject.startswith("[PRIORIDAD] ")
     assert marcados == [
         (str(solicitud.id), "owner_notification_status", EmailNotificationStatus.SENT.value)
     ]

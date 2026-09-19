@@ -380,6 +380,7 @@ async def approve_access_request(
         resultado = await servicio.approve(
             request_id,
             vertical=body.assigned_vertical,
+            assigned_plan_code=body.assigned_plan_code,
             reviewer_user_id=reviewer.user_id,
             via=_VIA_API,
             notes=body.notes,

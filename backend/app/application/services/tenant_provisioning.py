@@ -13,11 +13,17 @@ la aprobación manual — que es la única que conoce el `Vertical` asignado.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.subscription import (
+    LEGACY_FREE_LIMITS,
+    LEGACY_FREE_PLAN_CODE,
+    TRIAL_DAYS,
+    SubscriptionStatus,
+)
 from app.domain.verticals import Vertical
 from app.persistence.models.business import BusinessProfile, MomentumProfile
 from app.persistence.models.tenant import Subscription, Tenant
@@ -37,6 +43,7 @@ async def provision_tenant(
     vertical: Vertical,
     password_hash: str | None,
     is_active: bool = True,
+    plan_code: str | None = None,
 ) -> tuple[Tenant, User]:
     """Crea Tenant + User + Subscription + BusinessProfile + MomentumProfile.
 
@@ -44,15 +51,20 @@ async def provision_tenant(
     (`hash_password(str(uuid4()))`) para cuentas cuyo usuario todavía no definió
     su contraseña: la define con el link de invitación del mail de aprobación.
 
-    **`Subscription.plan_code` es siempre `"FREE"`, por decisión de producto,
-    no por omisión.** La solicitud de acceso le pregunta al visitante si
-    quiere una cuenta gratuita o Premium (`requested_plan`), pero hoy no
-    existe un plan Premium operativo: no hay cobro, no hay límites
-    configurados, no hay features detrás de un flag. La intención del
-    visitante se guarda en la solicitud para trazabilidad comercial, pero la
-    suscripción que se acuña acá es FREE siempre. No copiar `requested_plan`
-    a `plan_code` sin construir antes el circuito comercial completo (cobro +
-    límites + features) — eso sería regalar un plan pago sin contrato detrás.
+    **`plan_code=None` (el default) sigue acuñando `FREE`/`ACTIVE`, sin cambio
+    de comportamiento** — es el camino de `AuthService.register` (demo/altas
+    fuera del circuito comercial), que nunca pasa por aprobación manual y no
+    tiene un plan asignado que copiar.
+
+    **Con `plan_code` explícito** (el camino de `AccessRequestService.approve`,
+    que confirma un `assigned_plan_code` — nunca infiere de `requested_plan`),
+    la suscripción nace en `TRIAL`, no en el plan asignado: la política de
+    planes exige cupos de prueba fijos e iguales para todos
+    (`app.domain.subscription.TRIAL_LIMITS`), nunca los del plan que la
+    prueba apunta a convertirse — regalar el plan pago antes de cobrar sería
+    justo lo que la versión anterior de este docstring advertía evitar. El
+    dueño la activa a mano con `scripts/subscriptions.py activate` cuando
+    corresponde cobrar — ver la política de planes en `docs/plans/`.
     """
     # 1. Crear Tenant (status ACTIVE)
     tenant = Tenant(
@@ -79,14 +91,29 @@ async def provision_tenant(
     )
     await UserRepository(session).save(user)
 
-    # 3. Crear Subscription (plan FREE)
-    subscription = Subscription(
-        tenant_id=tenant.tenant_id,
-        plan_code="FREE",
-        billing_index_reference="MEP",
-        seats_included=1,
-        status="ACTIVE",
-    )
+    # 3. Crear Subscription — FREE/ACTIVE (legado) o TRIAL con el plan
+    # asignado, según haya o no `plan_code`.
+    if plan_code is None:
+        subscription = Subscription(
+            tenant_id=tenant.tenant_id,
+            plan_code=LEGACY_FREE_PLAN_CODE,
+            billing_index_reference="MEP",
+            seats_included=LEGACY_FREE_LIMITS.seats_included,
+            status=SubscriptionStatus.ACTIVE.value,
+            granted_ia_queries_per_month=LEGACY_FREE_LIMITS.ia_queries_per_month,
+            granted_imports_per_month=LEGACY_FREE_LIMITS.imports_per_month,
+            granted_photo_pdf_reads_per_month=LEGACY_FREE_LIMITS.photo_pdf_reads_per_month,
+        )
+    else:
+        ahora = datetime.now(UTC)
+        subscription = Subscription(
+            tenant_id=tenant.tenant_id,
+            plan_code=plan_code,
+            billing_index_reference="MEP",
+            seats_included=1,
+            status=SubscriptionStatus.TRIAL.value,
+            trial_ends_at=ahora + timedelta(days=TRIAL_DAYS),
+        )
     session.add(subscription)
     await session.flush()
 

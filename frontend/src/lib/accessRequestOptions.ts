@@ -99,20 +99,36 @@ export const CAN_SHARE_FILES_OPTIONS: readonly Choice<CanShareFiles>[] = [
 ] as const;
 
 // ── Cómo querés usar Véktor ───────────────────────────────────────────────────
+//
+// Espeja `RequestedPlan` de `backend/app/domain/access_request.py`, salvo
+// `"premium"`: sigue siendo válido en el backend por compatibilidad con
+// solicitudes históricas, pero acá no hay panel de administración que
+// necesite volver a mostrarlo — el formulario público nunca lo ofrece, así
+// que no tiene sentido en este catálogo. Ver la política de planes en
+// `docs/plans/` para los precios y unidades de cada uno.
 
-export type RequestedPlan = "free" | "premium";
+export type RequestedPlan = "free" | "esencial" | "control" | "direccion";
 
 export const REQUESTED_PLAN_OPTIONS: readonly Choice<RequestedPlan>[] = [
   {
     value: "free",
-    label: "Plan Gratuito",
-    detail: "Quiero probar las funciones disponibles sin costo.",
+    label: "Quiero probarlo primero",
+    detail: "Prueba de 14 días, sin tarjeta.",
   },
   {
-    value: "premium",
-    label: "Premium",
-    detail:
-      "Quiero recibir novedades y evaluar las funciones avanzadas cuando estén disponibles.",
+    value: "esencial",
+    label: "Esencial",
+    detail: "USD 12/mes — empezar a ordenar el negocio.",
+  },
+  {
+    value: "control",
+    label: "Control",
+    detail: "USD 27/mes — recomendado: pronóstico de caja y automatizaciones.",
+  },
+  {
+    value: "direccion",
+    label: "Dirección",
+    detail: "USD 59/mes — equipo completo e integraciones.",
   },
 ] as const;
 

@@ -701,18 +701,32 @@ describe("AccessRequestForm", () => {
     );
   }, TIMEOUT_FORMULARIO_COMPLETO);
 
-  test("?plan=premium precarga el plan y lo deja editable", async () => {
-    searchParams = new URLSearchParams("plan=premium");
+  test("?plan=control precarga el plan y lo deja editable", async () => {
+    searchParams = new URLSearchParams("plan=control");
     const user = userEvent.setup({ delay: null });
     renderForm();
 
     await waitFor(() =>
-      expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "premium"), { exact: false })).toBeChecked(),
+      expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "control"), { exact: false })).toBeChecked(),
     );
 
     await user.click(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "free"), { exact: false }));
     expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "free"), { exact: false })).toBeChecked();
-    expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "premium"), { exact: false })).not.toBeChecked();
+    expect(screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, "control"), { exact: false })).not.toBeChecked();
+  });
+
+  test("?plan=esencial-y-mas ignora un plan fuera del catálogo y no precarga nada", async () => {
+    searchParams = new URLSearchParams("plan=premium");
+    renderForm();
+
+    // "premium" ya no está en el catálogo visible (queda solo en el backend
+    // por compatibilidad histórica): un valor fuera de REQUESTED_PLAN_OPTIONS
+    // no debe precargar ningún radio.
+    for (const codigo of ["free", "esencial", "control", "direccion"] as const) {
+      expect(
+        screen.getByLabelText(labelOf(REQUESTED_PLAN_OPTIONS, codigo), { exact: false }),
+      ).not.toBeChecked();
+    }
   });
 
   test("un error del backend muestra el mensaje y no navega", async () => {

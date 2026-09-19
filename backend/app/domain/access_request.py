@@ -53,11 +53,19 @@ class RequestedPlan(StrEnum):
 
     Es intención declarada, no una suscripción: sirve para priorizar la cola de
     revisión y para medir demanda. La suscripción creada al aprobar es siempre
-    ``FREE``.
+    ``FREE`` — ver ``docs/plans/`` para la política de planes y su hoja de ruta
+    de implementación.
+
+    ``PREMIUM`` queda solo por compatibilidad con solicitudes históricas: la
+    página de precios ya no lo ofrece como opción, reemplazado por los tres
+    planes reales (``ESENCIAL`` / ``CONTROL`` / ``DIRECCION``).
     """
 
     FREE = "free"
     PREMIUM = "premium"
+    ESENCIAL = "esencial"
+    CONTROL = "control"
+    DIRECCION = "direccion"
 
 
 class YearsOperating(StrEnum):
@@ -119,6 +127,18 @@ class CanShareFiles(StrEnum):
     SI_DESPROLIJOS = "si_desprolijos"
     NO = "no"
 
+
+#: Planes cuya solicitud se prioriza en la cola de revisión (`review_priority`
+#: en el schema + el `ORDER BY` del servicio comparten esta fuente única).
+#: `PREMIUM` queda por compatibilidad con solicitudes históricas; entre los
+#: planes reales, Control y Dirección son los de mayor intención de pago.
+HIGH_PRIORITY_PLANS: Final[frozenset[str]] = frozenset(
+    {
+        RequestedPlan.PREMIUM.value,
+        RequestedPlan.CONTROL.value,
+        RequestedPlan.DIRECCION.value,
+    }
+)
 
 #: Estados en los que una solicitud sigue "abierta": ocupa el lugar del email en
 #: la cola y bloquea una segunda solicitud del mismo correo. Es el predicado del

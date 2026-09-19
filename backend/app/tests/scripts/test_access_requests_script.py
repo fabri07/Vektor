@@ -171,7 +171,7 @@ async def test_dry_run_de_approve_no_acuna_nada(
     auditoria_antes = await _contar(db_session, DecisionAuditLog)
 
     args = mod.parse_args(
-        ["approve", str(premium.id), "--vertical", "kiosco_almacen"]
+        ["approve", str(premium.id), "--vertical", "kiosco_almacen", "--plan", "control"]
     )
     assert args.apply is False
     assert await mod.cmd_approve(db_session, args) == 0
@@ -291,12 +291,12 @@ async def test_expire_stale_con_apply_expira(
 # ── approve --apply pasa por el servicio ─────────────────────────────────────
 
 
-async def test_approve_con_apply_acuna_la_cuenta_con_suscripcion_free(
+async def test_approve_con_apply_acuna_la_cuenta_con_trial_sobre_el_plan_asignado(
     mod: Any, db_session: AsyncSession, premium: AccessRequest, capsys: Any
 ) -> None:
-    """La intención Premium NO se convierte en una suscripción Premium."""
+    """La intención Premium (histórica) NO se convierte sola en la suscripción."""
     args = mod.parse_args(
-        ["approve", str(premium.id), "--vertical", "kiosco_almacen", "--apply"]
+        ["approve", str(premium.id), "--vertical", "kiosco_almacen", "--plan", "control", "--apply"]
     )
     assert await mod.cmd_approve(db_session, args) == 0
 
@@ -305,7 +305,8 @@ async def test_approve_con_apply_acuna_la_cuenta_con_suscripcion_free(
         (await db_session.execute(select(Subscription))).scalars().all()
     )
     assert len(suscripciones) == 1
-    assert suscripciones[0].plan_code == "FREE"
+    assert suscripciones[0].plan_code == "control"  # lo asignado con --plan
+    assert suscripciones[0].status == "TRIAL"
 
     solicitud = (
         await db_session.execute(
@@ -335,7 +336,10 @@ async def test_approve_de_una_no_verificada_falla_y_no_acuna(
     await db_session.flush()
 
     args = mod.parse_args(
-        ["approve", str(sin_verificar.id), "--vertical", "limpieza", "--apply"]
+        [
+            "approve", str(sin_verificar.id),
+            "--vertical", "limpieza", "--plan", "esencial", "--apply",
+        ]
     )
     assert await mod.cmd_approve(db_session, args) == 1
     assert await _contar(db_session, Tenant) == 0
@@ -349,14 +353,16 @@ async def test_el_dry_run_separa_plan_solicitado_de_suscripcion(
     mod: Any, db_session: AsyncSession, premium: AccessRequest, capsys: Any
 ) -> None:
     args = mod.parse_args(
-        ["approve", str(premium.id), "--vertical", "kiosco_almacen"]
+        ["approve", str(premium.id), "--vertical", "kiosco_almacen", "--plan", "control"]
     )
     await mod.cmd_approve(db_session, args)
     salida = capsys.readouterr().out
     assert "Plan solicitado:" in salida
     assert "PREMIUM" in salida
+    assert "Plan a asignar:" in salida
+    assert "control" in salida
     assert "Suscripción a crear:" in salida
-    assert "FREE" in salida
+    assert "TRIAL sobre control" in salida
 
 
 async def test_show_separa_plan_solicitado_de_suscripcion(
@@ -615,7 +621,7 @@ def test_otros_es_indecible_como_vertical_en_la_cli(mod: Any) -> None:
 def test_los_tres_verticales_reales_si_son_decibles(mod: Any) -> None:
     for codigo in ("kiosco_almacen", "decoracion_hogar", "limpieza"):
         args = mod.parse_args(
-            ["approve", str(uuid.uuid4()), "--vertical", codigo]
+            ["approve", str(uuid.uuid4()), "--vertical", codigo, "--plan", "esencial"]
         )
         assert args.vertical == codigo
 
@@ -623,7 +629,7 @@ def test_los_tres_verticales_reales_si_son_decibles(mod: Any) -> None:
 def test_apply_es_false_por_defecto_en_todo_comando_mutante(mod: Any) -> None:
     identificador = str(uuid.uuid4())
     invocaciones = (
-        ["approve", identificador, "--vertical", "limpieza"],
+        ["approve", identificador, "--vertical", "limpieza", "--plan", "esencial"],
         ["reject", identificador, "--reason", "spam"],
         ["waitlist", identificador],
         ["resend-invite", identificador],

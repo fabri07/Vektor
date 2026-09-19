@@ -17,8 +17,10 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service
+from app.application.services import subscription_service as quota_service
 from app.application.services.pin_service import PinService
 from app.config.settings import get_settings
+from app.domain.subscription import SubscriptionAccessDenied
 from app.observability.logger import bind_request_context, get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -278,6 +280,37 @@ async def require_owner_stepup(
         )
     await _require_pin_window(current_user, redis)
     return current_user
+
+
+# ── Suscripción (Etapa 2 — política de planes) ──────────────────────────────────
+
+
+async def require_active_subscription(
+    tenant_id: UUID = Depends(get_current_tenant_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Gate transversal: bloquea escrituras de negocio con la suscripción vencida.
+
+    `READ_ONLY`, `CANCELLED` con período vencido, o `TRIAL`/`GRACE` vencidas
+    (por fecha, no por el string de `status`) → 402. Sin `Subscription` (dato
+    inconsistente — todo tenant se acuña con una) no bloquea: no es motivo
+    para tirarle un 500 a una operación que no tiene nada que ver.
+
+    Enganchado hoy en ventas y gastos (los casos que la política nombra
+    explícitamente); el resto de las escrituras de negocio —stock, cierres de
+    caja, proveedores, clientes, automatizaciones— quedan pendientes de
+    enganchar con el mismo gate.
+    """
+    subscription = await TenantRepository(session).get_current_subscription(tenant_id)
+    if subscription is None:
+        return
+    try:
+        quota_service.enforce_active_subscription(subscription)
+    except SubscriptionAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": "SUBSCRIPTION_READ_ONLY", "reason": exc.reason},
+        ) from exc
 
 
 # ── Mantenimiento (F3-T3 — dedup de productos) ──────────────────────────────────

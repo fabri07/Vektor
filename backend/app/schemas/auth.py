@@ -1,5 +1,6 @@
 """Pydantic schemas for authentication endpoints."""
 
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -76,6 +77,8 @@ class AuthResponse(BaseModel):
 class SubscriptionInMeResponse(BaseModel):
     plan_code: str
     status: str
+    trial_ends_at: datetime | None = None
+    current_period_end: datetime | None = None
 
 
 class MeResponse(BaseModel):

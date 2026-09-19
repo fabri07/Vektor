@@ -324,3 +324,63 @@ class TestExpenseCategoryLabel:
         )
         assert upd.status_code == 200
         assert upd.json()["category_label"] is None
+
+
+class TestExpensesSubscriptionGate:
+    """`READ_ONLY` bloquea cargar gastos nuevos — nunca corregir los que ya existen."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_read_only_bloquea_un_gasto_nuevo(
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
+    ) -> None:
+        import uuid as _uuid  # noqa: PLC0415
+
+        from app.persistence.models.tenant import Subscription  # noqa: PLC0415
+
+        db_session.add(
+            Subscription(
+                subscription_id=_uuid.uuid4(),
+                tenant_id=sample_tenant.tenant_id,
+                plan_code="control",
+                status="READ_ONLY",
+                seats_included=3,
+            )
+        )
+        await db_session.commit()
+
+        resp = await client.post("/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers)
+        assert resp.status_code == 402, resp.text
+        assert resp.json()["detail"]["code"] == "SUBSCRIPTION_READ_ONLY"
+
+    async def test_read_only_no_bloquea_corregir_un_gasto_existente(
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
+    ) -> None:
+        import uuid as _uuid  # noqa: PLC0415
+
+        from app.persistence.models.tenant import Subscription  # noqa: PLC0415
+
+        create_resp = await client.post(
+            "/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers
+        )
+        expense_id = create_resp.json()["id"]
+
+        db_session.add(
+            Subscription(
+                subscription_id=_uuid.uuid4(),
+                tenant_id=sample_tenant.tenant_id,
+                plan_code="control",
+                status="READ_ONLY",
+                seats_included=3,
+            )
+        )
+        await db_session.commit()
+
+        resp = await client.patch(
+            f"/api/v1/expenses/{expense_id}",
+            json={"notes": "corregido"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text  # corregir NUNCA se bloquea

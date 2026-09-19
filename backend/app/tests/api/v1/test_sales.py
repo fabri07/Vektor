@@ -618,3 +618,61 @@ class TestLiveSaleStockDecrement:
         )
         assert resp.status_code == 200, resp.text
         assert await self._stock(client, auth_headers, pid) == 10  # intacto
+
+
+class TestSalesSubscriptionGate:
+    """`READ_ONLY` bloquea cargar ventas nuevas — nunca corregir las que ya existen."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    async def test_read_only_bloquea_una_venta_nueva(
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
+    ) -> None:
+        import uuid as _uuid  # noqa: PLC0415
+
+        from app.persistence.models.tenant import Subscription  # noqa: PLC0415
+
+        db_session.add(
+            Subscription(
+                subscription_id=_uuid.uuid4(),
+                tenant_id=sample_tenant.tenant_id,
+                plan_code="control",
+                status="READ_ONLY",
+                seats_included=3,
+            )
+        )
+        await db_session.commit()
+
+        resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        assert resp.status_code == 402, resp.text
+        assert resp.json()["detail"]["code"] == "SUBSCRIPTION_READ_ONLY"
+
+    async def test_read_only_no_bloquea_corregir_una_venta_existente(
+        self, client: AsyncClient, auth_headers: dict[str, Any], sample_tenant, db_session
+    ) -> None:
+        import uuid as _uuid  # noqa: PLC0415
+
+        from app.persistence.models.tenant import Subscription  # noqa: PLC0415
+
+        create_resp = await client.post(
+            "/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers
+        )
+        sale_id = create_resp.json()["id"]
+
+        db_session.add(
+            Subscription(
+                subscription_id=_uuid.uuid4(),
+                tenant_id=sample_tenant.tenant_id,
+                plan_code="control",
+                status="READ_ONLY",
+                seats_included=3,
+            )
+        )
+        await db_session.commit()
+
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"notes": "corregido"}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text  # corregir NUNCA se bloquea

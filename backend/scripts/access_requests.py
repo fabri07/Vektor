@@ -9,9 +9,10 @@ Subcomandos
 -----------
 ::
 
-    list [--status ...] [--plan free|premium|all] [--limit 50] [--email-failed]
+    list [--status ...] [--plan free|premium|esencial|control|direccion|all]
+         [--limit 50] [--email-failed]
     show <request_id|email>
-    approve <request_id> --vertical kiosco_almacen [--notes "..."] [--apply]
+    approve <request_id> --vertical kiosco_almacen --plan esencial [--notes "..."] [--apply]
     reject  <request_id> --reason "..." [--no-email] [--apply]
     waitlist <request_id> [--notes "..."] [--apply]
     otros
@@ -33,14 +34,16 @@ Reglas que este archivo sostiene
    (``--email-failed`` y ``otros``), que no transicionan nada.
 4. **``--vertical`` sale de ``Vertical``**, así que ``otros`` es *indecible* en
    la CLI: es una opción del formulario público, nunca un vertical operativo.
+   **``--plan`` sale de ``AssignablePlan``** por el mismo motivo: `free`/
+   `premium` (histórico) son intención declarada, nunca lo que se asigna.
 5. No importa ``app.main`` (arrastraría el limiter y la app FastAPI entera):
    importa el servicio directo.
 
 Usage::
 
     DATABASE_URL='postgresql://...' .venv/bin/python scripts/access_requests.py list
-    ... scripts/access_requests.py approve <uuid> --vertical kiosco_almacen        # dry-run
-    ... scripts/access_requests.py approve <uuid> --vertical kiosco_almacen --apply
+    ... scripts/access_requests.py approve <uuid> --vertical kiosco_almacen --plan esencial
+    ... scripts/access_requests.py approve <uuid> --vertical kiosco_almacen --plan esencial --apply
 
 Todas las fechas se imprimen en **UTC**. Correr desde ``backend/``.
 """
@@ -71,6 +74,7 @@ from app.application.services.access_request_service import (  # noqa: E402
     ResendKind,
 )
 from app.domain.access_request import (  # noqa: E402
+    HIGH_PRIORITY_PLANS,
     AccessRequestStatus,
     CanShareFiles,
     HistoryDepth,
@@ -81,6 +85,7 @@ from app.domain.access_request import (  # noqa: E402
     YearsOperating,
 )
 from app.domain.contact_lead import EmailNotificationStatus, normalize_email  # noqa: E402
+from app.domain.subscription import AssignablePlan  # noqa: E402
 from app.domain.verticals import RequestedVertical, Vertical, parse_vertical  # noqa: E402
 from app.persistence.models.access_request import AccessRequest  # noqa: E402
 from app.persistence.repositories.user_repository import UserRepository  # noqa: E402
@@ -175,12 +180,11 @@ def con_glosa(codigo: str) -> str:
 
 
 def prioridad(solicitud: AccessRequest) -> str:
-    """``ALTA``/``NORMAL`` — DERIVADO de ``requested_plan``, no hay columna propia."""
-    return (
-        "ALTA"
-        if solicitud.requested_plan == RequestedPlan.PREMIUM.value
-        else "NORMAL"
-    )
+    """``ALTA``/``NORMAL`` — DERIVADO de ``requested_plan`` vía ``HIGH_PRIORITY_PLANS``,
+    misma fuente que ``review_priority`` del schema y el ``ORDER BY`` del
+    servicio; no hay columna propia.
+    """
+    return "ALTA" if solicitud.requested_plan in HIGH_PRIORITY_PLANS else "NORMAL"
 
 
 def rubro(solicitud: AccessRequest) -> str:
@@ -592,7 +596,7 @@ async def bloqueos_para_aprobar(
 
 
 def imprimir_plan_de_aprobacion(
-    solicitud: AccessRequest, vertical: Vertical, notas: str | None
+    solicitud: AccessRequest, vertical: Vertical, plan: AssignablePlan, notas: str | None
 ) -> None:
     """Qué se crearía exactamente al aprobar: las 5 filas, con sus valores reales."""
     print(f"  {'Negocio:':<22}{solicitud.business_name}")
@@ -611,7 +615,12 @@ def imprimir_plan_de_aprobacion(
     # Las dos líneas separadas, otra vez: es el punto donde más caro sale
     # confundir la intención con la suscripción.
     print(f"  {'Plan solicitado:':<22}{solicitud.requested_plan.upper()}")
-    print(f"  {'Suscripción a crear:':<22}FREE")
+    print(f"  {'Plan a asignar:':<22}{plan.value}")
+    if solicitud.requested_plan != plan.value:
+        print(
+            f"  {'':<22}(distinto del pedido — es la decisión del dueño, no un error)"
+        )
+    print(f"  {'Suscripción a crear:':<22}TRIAL sobre {plan.value} (14 días)")
     print(recortar(f"  {'Notas de revisión:':<22}{opcional(notas)}", ancho_terminal()))
 
     print("\n  Se crearían estas 5 filas (vía provision_tenant):")
@@ -643,6 +652,7 @@ async def cmd_approve(session: AsyncSession, args: argparse.Namespace) -> int:
     # `choices` de argparse ya restringe el valor; `parse_vertical` es la
     # validación canónica y falla ruidoso si alguien la evade.
     vertical = parse_vertical(args.vertical)
+    plan = AssignablePlan(args.plan)
 
     servicio = AccessRequestService(session)
     solicitud = await servicio.get(request_id)
@@ -651,7 +661,7 @@ async def cmd_approve(session: AsyncSession, args: argparse.Namespace) -> int:
         return 1
 
     print(f"\n[{'APPLY' if args.apply else 'DRY-RUN'}] Aprobar solicitud {request_id}\n")
-    imprimir_plan_de_aprobacion(solicitud, vertical, args.notes)
+    imprimir_plan_de_aprobacion(solicitud, vertical, plan, args.notes)
 
     bloqueos = await bloqueos_para_aprobar(session, solicitud)
     if bloqueos:
@@ -667,6 +677,7 @@ async def cmd_approve(session: AsyncSession, args: argparse.Namespace) -> int:
         resultado = await servicio.approve(
             request_id,
             vertical=vertical,
+            assigned_plan_code=plan,
             reviewer_user_id=None,
             via=VIA_SCRIPT,
             notes=args.notes,
@@ -1076,6 +1087,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # operativo — no tiene heurísticas, categorías ni benchmarks.
         choices=[v.value for v in Vertical],
         help="rubro que asigna el DUEÑO (puede corregir el declarado)",
+    )
+    p_approve.add_argument(
+        "--plan",
+        required=True,
+        # `AssignablePlan`, no `RequestedPlan`: `free`/`premium` (histórico)
+        # son INDECIBLES acá a propósito — el dueño confirma un plan pago
+        # real, nunca hereda la intención declarada sin mirarla.
+        choices=[p.value for p in AssignablePlan],
+        help="plan que asigna el DUEÑO para la prueba (puede diferir del pedido)",
     )
     p_approve.add_argument("--notes", default=None, help="nota interna de revisión")
     agregar_apply(p_approve)

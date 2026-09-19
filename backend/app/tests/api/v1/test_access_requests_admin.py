@@ -162,7 +162,7 @@ async def test_ningun_rol_de_negocio_aprueba(
     )
     res = await client.post(
         f"{BASE}/{solicitud.id}/approve",
-        json={"assigned_vertical": Vertical.LIMPIEZA.value},
+        json={"assigned_vertical": Vertical.LIMPIEZA.value, "assigned_plan_code": "esencial"},
         headers=headers,
     )
     assert res.status_code == 403, res.text
@@ -260,7 +260,11 @@ async def test_approve_acuna_la_cuenta(
 
     res = await client.post(
         f"{BASE}/{solicitud.id}/approve",
-        json={"assigned_vertical": Vertical.LIMPIEZA.value, "notes": "Encaja."},
+        json={
+            "assigned_vertical": Vertical.LIMPIEZA.value,
+            "assigned_plan_code": "esencial",
+            "notes": "Encaja.",
+        },
         headers=superadmin_headers,
     )
     assert res.status_code == 200, res.text
@@ -294,7 +298,7 @@ async def test_approve_es_idempotente(
 ) -> None:
     """La doble aprobación pasa de verdad (API + script) y no puede acuñar dos tenants."""
     solicitud = await _sembrar(db_session)
-    payload = {"assigned_vertical": Vertical.KIOSCO_ALMACEN.value}
+    payload = {"assigned_vertical": Vertical.KIOSCO_ALMACEN.value, "assigned_plan_code": "esencial"}
 
     primera = await client.post(
         f"{BASE}/{solicitud.id}/approve", json=payload, headers=superadmin_headers
@@ -365,7 +369,7 @@ async def test_approve_de_un_estado_no_aprobable_es_409(
     solicitud = await _sembrar(db_session, status=estado)
     res = await client.post(
         f"{BASE}/{solicitud.id}/approve",
-        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value},
+        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value, "assigned_plan_code": "esencial"},
         headers=superadmin_headers,
     )
     assert res.status_code == 409, res.text
@@ -383,7 +387,7 @@ async def test_approve_con_el_email_ya_tomado_es_409(
     solicitud = await _sembrar(db_session, email=sample_user.email)
     res = await client.post(
         f"{BASE}/{solicitud.id}/approve",
-        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value},
+        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value, "assigned_plan_code": "esencial"},
         headers=superadmin_headers,
     )
     assert res.status_code == 409, res.text
@@ -394,7 +398,7 @@ async def test_approve_inexistente_es_404(
 ) -> None:
     res = await client.post(
         f"{BASE}/{uuid.uuid4()}/approve",
-        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value},
+        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value, "assigned_plan_code": "esencial"},
         headers=superadmin_headers,
     )
     assert res.status_code == 404
@@ -470,7 +474,7 @@ async def test_waitlist_y_después_aprobar(
 
     aprobada = await client.post(
         f"{BASE}/{solicitud.id}/approve",
-        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value},
+        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value, "assigned_plan_code": "esencial"},
         headers=superadmin_headers,
     )
     assert aprobada.status_code == 200, aprobada.text
@@ -486,7 +490,7 @@ async def test_no_se_puede_rechazar_ni_postergar_una_aprobada(
     solicitud = await _sembrar(db_session)
     await client.post(
         f"{BASE}/{solicitud.id}/approve",
-        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value},
+        json={"assigned_vertical": Vertical.KIOSCO_ALMACEN.value, "assigned_plan_code": "esencial"},
         headers=superadmin_headers,
     )
 
