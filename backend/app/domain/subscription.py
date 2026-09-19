@@ -55,8 +55,9 @@ class SubscriptionStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
-#: Estados que NO son "una suscripción viva" — el único que libera el índice
-#: único parcial `uq_subscriptions_one_live_per_tenant` (ver la migración).
+#: Estados que NO son "una suscripción viva": los que el índice único parcial
+#: `uq_subscriptions_one_live_per_tenant` deja convivir con una viva, y los
+#: que `get_current_subscription` sólo devuelve si no hay ninguna viva.
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({SubscriptionStatus.CANCELLED.value})
 
 
@@ -121,6 +122,27 @@ class ReserveOutcome(StrEnum):
     IN_PROGRESS = "IN_PROGRESS"
     ALREADY_COMMITTED = "ALREADY_COMMITTED"
     ALREADY_RELEASED = "ALREADY_RELEASED"
+
+
+#: Prefijo de la clave de reserva de una importación en segundo plano. La
+#: clave es por INTENTO, no por archivo: un reintento técnico del mismo
+#: intento reusa su reserva (no cobra de nuevo), y un intento que fracasa
+#: libera la suya sin dejarle al archivo una clave quemada.
+IMPORT_ATTEMPT_OPERATION_PREFIX: Final[str] = "import-attempt:"
+
+
+#: Prefijo de la clave de un turno de chat: `chat:{trace_id}`. El `trace_id`
+#: es el que `decision_audit_log` guarda solo en cada fila, así que un turno
+#: que llegó a auditarse (con sus tokens) deja evidencia durable de que corrió
+#: — es lo que usa la conciliación para decidir confirmar en vez de liberar.
+CHAT_OPERATION_PREFIX: Final[str] = "chat:"
+
+#: Prefijo de la clave de una lectura de foto/PDF con IA.
+READ_OPERATION_PREFIX: Final[str] = "read:"
+
+
+def import_attempt_operation_id(attempt_id: object) -> str:
+    return f"{IMPORT_ATTEMPT_OPERATION_PREFIX}{attempt_id}"
 
 
 #: Días de prueba desde la aprobación (política A6). Arranca en el momento en
@@ -261,6 +283,20 @@ class ReservationMismatch(Exception):  # noqa: N818
         )
 
 
+class ReservationNotUsable(Exception):  # noqa: N818
+    """La operación trae una reserva que ya se liberó: no respalda ejecutar.
+
+    Pasa si algo dio por perdida la operación (cierre con error, conciliación)
+    y después alguien la ejecuta igual. Consumir de nuevo por las dudas sería
+    cobrar dos veces; seguir sin consumir, regalarla. Se corta.
+    """
+
+    def __init__(self, operation_id: str, outcome: str) -> None:
+        self.operation_id = operation_id
+        self.outcome = outcome
+        super().__init__(f"operación {operation_id}: reserva no utilizable ({outcome})")
+
+
 class SeatLimitExceeded(Exception):  # noqa: N818
     """El plan no incluye más usuarios activos de los que ya tiene el tenant."""
 
@@ -271,6 +307,18 @@ class SeatLimitExceeded(Exception):  # noqa: N818
         super().__init__(
             f"tenant {tenant_id}: {active_users} usuarios activos, plan incluye {seats_included}"
         )
+
+
+#: Todos los rechazos de suscripción/cupo. Vive en el dominio porque lo usan
+#: la capa HTTP (para traducirlos) y los workers (para clasificarlos).
+SUBSCRIPTION_ERRORS: Final = (
+    SubscriptionMissing,
+    SubscriptionAccessDenied,
+    QuotaExceeded,
+    SeatLimitExceeded,
+    ReservationNotUsable,
+    ReservationMismatch,
+)
 
 
 @dataclass(frozen=True)
@@ -382,13 +430,16 @@ def effective_access(
             blocked_reason="activa_sin_periodo",
         )
     # Vencido el período, corre la gracia con el MISMO período (y su saldo);
-    # pasada la gracia, bloquea. Ninguno de los dos pasos espera a `expire-due`.
+    # pasada la gracia, bloquea. Ninguno de los dos pasos espera a `expire-due`
+    # — y por eso el motivo es el MISMO que el de un `GRACE` vencido: para el
+    # cliente es una sola situación, y que el nombre dependiera de si corrió
+    # un cron es justo lo que evaluar por fecha vino a eliminar.
     limite_gracia = current_period_end + timedelta(days=GRACE_DAYS)
     return EffectiveAccess(
         quota=granted_quota,
         period_start=periodo[0],
         period_end=periodo[1],
-        blocked_reason="periodo_vencido" if now >= limite_gracia else None,
+        blocked_reason="gracia_vencida" if now >= limite_gracia else None,
     )
 
 

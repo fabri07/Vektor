@@ -55,6 +55,11 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
         ("POST", f"{P}/others/{{record_id}}/reclassify"),
         ("POST", f"{P}/others/{{record_id}}/resolve-purchase"),
         ("POST", f"{P}/others/bulk-import"),
+        # Ingesta (bloque C): subir dispara parseo con IA; confirmar e importar
+        # en segundo plano además consumen cupo. La relectura es corrección.
+        ("POST", f"{P}/ingestion/upload"),
+        ("POST", f"{P}/ingestion/files/{{file_id}}/confirm"),
+        ("POST", f"{P}/ingestion/files/{{file_id}}/imports"),
     }
 )
 
@@ -105,7 +110,7 @@ async def test_en_solo_lectura_cada_alta_devuelve_402(
     """El gate corta ANTES de validar el cuerpo: un body vacío alcanza."""
     await _solo_lectura(db_session, sample_tenant)
     _, ruta = metodo_ruta
-    for nombre in ("supplier_id", "pending_id", "record_id"):
+    for nombre in ("supplier_id", "pending_id", "record_id", "file_id"):
         ruta = ruta.replace(f"{{{nombre}}}", str(uuid.uuid4()))
 
     resp = await client.post(ruta, json={}, headers=auth_headers)

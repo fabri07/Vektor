@@ -36,12 +36,15 @@ from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
     get_current_user,
+    require_active_subscription,
     require_modify_access,
     require_role,
+    subscription_http_error,
 )
 from app.application.services import (
     customer_import_service,
     pipeline_event_service,
+    subscription_service,
     supplier_import_service,
 )
 from app.application.services import ingestion_import_service as _iis
@@ -169,6 +172,7 @@ from app.domain.purchase_group import (
     MOTIVO_SIN_IDENTIDAD,
 )
 from app.domain.stage_timing import StageTimings
+from app.domain.subscription import SUBSCRIPTION_ERRORS, QuotaResource, import_attempt_operation_id
 from app.integrations.s3 import S3Client
 from app.jobs.celery_app import celery_app
 from app.jobs.ingestion_worker import (
@@ -414,6 +418,9 @@ async def _process_file_sync(
 
 @router.post(
     "/upload",
+    # Subir dispara el parseo (que puede usar IA para mapear columnas): con la
+    # suscripción vencida no tiene sentido — el archivo no se podría confirmar.
+    dependencies=[Depends(require_active_subscription)],
     response_model=UploadResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Upload a file and enqueue ingestion job",
@@ -2044,11 +2051,26 @@ async def _exigir_revision_confirmada(
     )
 
 
+def _sin_reserva_previa() -> None:
+    """`quota_operation_id` de `confirm_file` por HTTP: siempre `None`.
+
+    Es una dependency y no un parámetro común A PROPÓSITO: un `str | None`
+    suelto FastAPI lo expone como query param, y un cliente que mandara la
+    clave de una importación ya cobrada importaría gratis. Sólo el ejecutor
+    en segundo plano, que llama a la función en Python, puede pasar la clave
+    de la reserva que tomó al registrar el intento.
+    """
+    return None
+
+
 @router.post(
     "/files/{file_id}/confirm",
     response_model=ConfirmIngestionResponse,
     summary="Confirm ingestion of parsed data",
-    dependencies=[Depends(ensure_tenant_not_under_maintenance)],
+    dependencies=[
+        Depends(ensure_tenant_not_under_maintenance),
+        Depends(require_active_subscription),
+    ],
 )
 async def confirm_file(
     file_id: uuid.UUID,
@@ -2056,6 +2078,7 @@ async def confirm_file(
     background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
+    quota_operation_id: str | None = Depends(_sin_reserva_previa),
 ) -> ConfirmIngestionResponse:
     # F-T: el reloj arranca acá, no en el import. `latency_ms` medía sólo
     # `insert_confirmed_data`, así que un confirm que tarda 30 s en validar y 1 s
@@ -2962,6 +2985,21 @@ async def confirm_file(
     # rowcount==0 → otro intento tiene el lease vivo → 409. Se toma DESPUÉS de las
     # validaciones puras (una request que va a rebotar por 422 nunca lo toma) y
     # ANTES de la creación de custom fields (primera escritura).
+    # Cupo de importaciones — chequeo temprano y NO vinculante, para contestar
+    # 429 antes del lease y de todo el trabajo. El consumo real va al final,
+    # junto con los datos. Con reserva previa (ejecutor en segundo plano) no
+    # se pregunta: eso ya se autorizó al registrar el intento.
+    if quota_operation_id is None:
+        try:
+            _sub = await subscription_service.assert_tenant_can_write(
+                session, tenant.tenant_id, origen="import_confirm"
+            )
+            await subscription_service.assert_quota_available(
+                session, subscription=_sub, resource=QuotaResource.IMPORT
+            )
+        except SUBSCRIPTION_ERRORS as exc:
+            raise subscription_http_error(exc) from exc
+
     _timings.mark("validaciones_pre_lease")
     _import_token = uuid.uuid4()
     if not await acquire_import_lease(session, tenant.tenant_id, file_id, _import_token):
@@ -3501,6 +3539,21 @@ async def confirm_file(
             for _ent, _confirmed in _learn.items():
                 await mapping_svc.save_mappings(tenant.tenant_id, _ent, _confirmed)
         _timings.mark("aprendizaje_mapeos")
+
+        # Cupo: UNA importación, consumida en la MISMA transacción que los datos
+        # (sin commit propio). Llegar acá significa que hubo resultado útil —el
+        # import vacío ya tiró su 422 más arriba—, y si algo falla de acá en
+        # adelante el rollback se lleva consumo y datos juntos: no hay reserva
+        # que conciliar. Va al final para no retener la fila del contador
+        # durante todo el import. Sin cupo (otra importación se llevó la última
+        # unidad) → excepción → rollback + lease compensado, como cualquier fallo.
+        await subscription_service.consume_with_data(
+            session,
+            tenant_id=tenant.tenant_id,
+            resource=QuotaResource.IMPORT,
+            operation_id=quota_operation_id or f"import:{file_id}:{_import_token}",
+        )
+        _timings.mark("cupo")
 
         # Transición final IMPORTING→DONE, token-checked, en la MISMA transacción
         # que los inserts. Si un takeover nos robó el lease → ImportLeaseLostError
@@ -4729,6 +4782,7 @@ async def inventory_replay(
     response_model=ImportacionResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Registrar una importación y devolver su id consultable",
+    dependencies=[Depends(require_active_subscription)],
 )
 async def registrar_importacion(
     file_id: uuid.UUID,
@@ -4809,6 +4863,32 @@ async def registrar_importacion(
                 "attempt_id": str(conflicto.intento_existente.id),
             },
         ) from conflicto
+
+    # Cupo: se autoriza y RESERVA acá, en la misma transacción que el intento y
+    # su orden — el commit de abajo decide las tres cosas juntas. Así el 402/429
+    # sale ahora y no como un intento fallado más tarde, y lo ya autorizado puede
+    # terminar aunque la suscripción venza antes de que corra. El ejecutor
+    # confirma ESTA reserva (no cobra otra). Una petición repetida
+    # (`creado=False`) no reserva: devuelve el intento que ya tiene la suya.
+    if registro.creado:
+        try:
+            _sub = await subscription_service.assert_tenant_can_write(
+                session, tenant.tenant_id, origen="import_register"
+            )
+            await subscription_service.reserve(
+                session,
+                subscription=_sub,
+                resource=QuotaResource.IMPORT,
+                operation_id=import_attempt_operation_id(registro.intento.id),
+                autocommit=False,
+            )
+        except SUBSCRIPTION_ERRORS as exc:
+            # El intento y su orden ya están escritos en esta transacción: se
+            # revierten ACÁ, explícito. No alcanza con confiar en el rollback de
+            # `get_db_session` — un intento registrado sin cupo que lo respalde
+            # es justo lo que este bloque existe para impedir.
+            await session.rollback()
+            raise subscription_http_error(exc) from exc
 
     await session.commit()
 

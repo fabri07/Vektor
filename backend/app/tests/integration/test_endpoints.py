@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import anthropic
 import httpx
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
@@ -1004,7 +1005,29 @@ async def test_chat_active_vencido_bloquea_sin_que_corra_expire_due(
     )
     resp = await _chat_sin_llegar_al_llm(ac, headers)
     assert resp.status_code == 402, resp.text
-    assert resp.json()["detail"]["reason"] == "periodo_vencido"
+    assert resp.json()["detail"]["reason"] == "gracia_vencida"
+
+
+async def test_chat_con_una_clave_ya_presentada_responde_409_con_su_estado(
+    auth_client, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sólo una reserva NUEVA autoriza a ejecutar el turno. El 409 sale por el
+    mismo traductor que el resto de los rechazos, con el estado de la reserva."""
+    from app.api.v1 import agent as agent_api
+    from app.application.services import subscription_service as svc
+    from app.domain.subscription import QuotaResource
+
+    ac, headers, tenant, _, _ = auth_client
+    sub = await _crear_suscripcion(session, tenant.tenant_id)
+    await svc.reserve(
+        session, subscription=sub, resource=QuotaResource.IA_QUERY, operation_id="chat:repetida"
+    )
+    monkeypatch.setattr(agent_api, "_chat_operation_id", lambda: "chat:repetida")
+
+    resp = await _chat_sin_llegar_al_llm(ac, headers)
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == {"code": "OPERATION_ALREADY_SUBMITTED", "state": "IN_PROGRESS"}
 
 
 async def test_chat_agota_cupo_de_ia_devuelve_429_sin_llamar_al_llm(

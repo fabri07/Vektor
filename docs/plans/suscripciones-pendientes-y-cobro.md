@@ -1,6 +1,6 @@
 # Suscripciones: cierre del backend, experiencia de usuario y cobro
 
-Fecha: 2026-09-18. Estado: **bloques A y B implementados y probados (sin desplegar); C–G propuestos**.
+Fecha: 2026-09-18. Estado: **bloques A, B y C implementados y probados (sin desplegar); D–G propuestos**.
 
 Base: `planes-suscripcion-y-cupos.md` y revisión del código local. La suite de
 5085 pruebas aprobadas y las pruebas de concurrencia son resultados reportados
@@ -120,7 +120,14 @@ Criterios: cuenta vencida bloqueada por API, agente y worker; correcciones y
 exportación funcionan; dos altas concurrentes disputando la última plaza producen
 exactamente un alta. FREE existente no pierde usuarios al desplegar.
 
-**C. Conectar consumos y reconciliar reservas**
+**C. Conectar consumos y reconciliar reservas** — CERRADO
+
+Hecho C1, C2 y C3. Diferencia con lo escrito abajo: en el recorrido síncrono
+no hay reserva previa que coordinar con el lease — se consume al final, en la
+transacción de los datos, y un chequeo temprano no vinculante da el 429
+rápido. Pendientes declarados: topes de páginas/MB, parseo de imágenes del
+pipeline de ingesta, y el punto A6. Detalle en
+`planes-suscripcion-y-cupos.md` → "Bloque C".
 
 **C1. Importaciones.** El punto real `confirm_file` está en
 `app/api/v1/ingestion.py`; el ejecutor asíncrono lo llama desde

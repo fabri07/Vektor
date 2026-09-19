@@ -58,6 +58,11 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
+from app.domain.subscription import (
+    SUBSCRIPTION_ERRORS,
+    QuotaResource,
+    import_attempt_operation_id,
+)
 from app.jobs.celery_app import celery_app
 from app.observability.logger import get_logger
 
@@ -253,6 +258,9 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
                 background_tasks=BackgroundTasks(),
                 tenant=tenant,
                 session=session,
+                # La reserva se tomó al registrar el intento: el confirm
+                # confirma ESA (no cobra otra unidad ni re-mira la suscripción).
+                quota_operation_id=import_attempt_operation_id(attempt_id),
             )
             # E7-review #3: el cierre del intento va en la MISMA transacción que
             # los efectos, ANTES del commit.
@@ -347,10 +355,19 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
         ERROR_IMPORT_VACIO,
         ERROR_LEASE_PERDIDO,
         ERROR_REVISION,
+        ERROR_SUSCRIPCION,
         ERROR_TRANSITORIO,
         ERROR_VALIDACION,
     )
+    from app.domain.subscription import SubscriptionAccessDenied  # noqa: PLC0415
 
+    if isinstance(exc, SUBSCRIPTION_ERRORS):
+        return ERROR_SUSCRIPCION, (
+            SubscriptionAccessDenied.user_message
+            if isinstance(exc, SubscriptionAccessDenied)
+            else "No quedó cupo de importaciones para este período, o la reserva de "
+            "esta importación ya no es válida. Revisá tu plan y volvé a confirmar."
+        )
     if isinstance(exc, ImportLeaseLostError):
         return ERROR_LEASE_PERDIDO, (
             "Otra importación del mismo archivo tomó el control. Consultá el "
@@ -426,7 +443,7 @@ async def _cerrar_con_error(
     from app.domain.import_attempt import FALLADO  # noqa: PLC0415
 
     async with factory() as session:
-        await cerrar_intento(
+        cerrado = await cerrar_intento(
             session,
             attempt_id,
             token,
@@ -434,8 +451,31 @@ async def _cerrar_con_error(
             error_code=codigo,
             error_detail=detalle,
         )
+        if cerrado:
+            # FALLADO es terminal: el intento no vuelve a correr, así que su
+            # reserva de cupo se libera en ESTA transacción (un fracaso no
+            # consume). Sólo si el cierre fue nuestro: si perdimos el lease,
+            # otro ejecutor está corriendo con esa misma reserva y soltarla lo
+            # dejaría importando sin cupo que lo respalde.
+            await _liberar_reserva_del_intento(session, attempt_id)
         await session.commit()
     return "fallado"
+
+
+async def _liberar_reserva_del_intento(session: Any, attempt_id: _uuid.UUID) -> None:
+    from app.application.services import subscription_service  # noqa: PLC0415
+    from app.persistence.models.import_attempt import ImportAttempt  # noqa: PLC0415
+
+    intento = await session.get(ImportAttempt, attempt_id)
+    if intento is None:
+        return
+    await subscription_service.release(
+        session,
+        tenant_id=intento.tenant_id,
+        resource=QuotaResource.IMPORT,
+        operation_id=import_attempt_operation_id(attempt_id),
+        autocommit=False,
+    )
 
 
 @celery_app.task(name="jobs.execute_import", queue=_QUEUE, max_retries=0)  # type: ignore[misc]

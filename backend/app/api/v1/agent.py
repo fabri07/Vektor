@@ -27,7 +27,11 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user, require_role
+from app.api.v1.deps import (
+    get_current_user,
+    require_role,
+    subscription_http_error,
+)
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse
 from app.application.services import subscription_service as quota_service
 from app.application.services.automation_service import (
@@ -44,21 +48,22 @@ from app.application.services.pending_action_service import (
 )
 from app.config.settings import get_settings
 from app.domain.subscription import (
-    QuotaExceeded,
+    CHAT_OPERATION_PREFIX,
+    SUBSCRIPTION_ERRORS,
     QuotaResource,
+    ReservationNotUsable,
     ReserveOutcome,
-    SubscriptionAccessDenied,
 )
 from app.integrations.anthropic_client import AnthropicConfigurationError
 from app.integrations.mcp.exceptions import McpToolAuthError
 from app.observability.logger import get_logger
+from app.observability.trace import get_trace_id
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.user import User
-from app.persistence.repositories.tenant_repository import TenantRepository
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -872,6 +877,17 @@ async def get_conversation(
 # turno — un error técnico no gasta cupo.
 
 
+def _chat_operation_id() -> str:
+    """`chat:{trace_id}` — el mismo id que `decision_audit_log` guarda solo.
+
+    Así un turno que llegó a auditarse deja evidencia durable de que corrió, y
+    la conciliación puede confirmar su reserva si el proceso murió antes de
+    resolverla (en vez de adivinar por antigüedad). Un request = un turno, así
+    que la clave sigue siendo única por operación.
+    """
+    return f"{CHAT_OPERATION_PREFIX}{get_trace_id() or uuid.uuid4()}"
+
+
 async def _reservar_consulta_ia(
     db: AsyncSession, tenant_id: uuid.UUID, operation_id: str
 ) -> None:
@@ -883,40 +899,20 @@ async def _reservar_consulta_ia(
     presentó, correr el turno otra vez sería IA sin cupo que lo respalde
     (liberada/confirmada) o dos ejecuciones con uno solo (en curso).
     """
-    subscription = await TenantRepository(db).get_current_subscription(tenant_id)
-    if subscription is None:
-        logger.error("subscription_missing", tenant_id=str(tenant_id), origen="chat_quota")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "SUBSCRIPTION_UNAVAILABLE"},
-        )
     try:
+        subscription = await quota_service.assert_tenant_can_write(
+            db, tenant_id, origen="chat_quota"
+        )
         resultado = await quota_service.reserve(
             db,
             subscription=subscription,
             resource=QuotaResource.IA_QUERY,
             operation_id=operation_id,
         )
-    except SubscriptionAccessDenied as exc:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail={"code": "SUBSCRIPTION_READ_ONLY", "reason": exc.reason},
-        ) from exc
-    except QuotaExceeded as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "code": "QUOTA_EXCEEDED",
-                "resource": exc.resource.value,
-                "limit": exc.limit,
-                "renews_at": exc.renews_at.isoformat(),
-            },
-        ) from exc
-    if resultado is not ReserveOutcome.NEW:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "OPERATION_ALREADY_SUBMITTED", "state": resultado.value},
-        )
+        if resultado is not ReserveOutcome.NEW:
+            raise ReservationNotUsable(operation_id, resultado.value)
+    except SUBSCRIPTION_ERRORS as exc:
+        raise subscription_http_error(exc) from exc
 
 
 async def _resolver_consulta_ia(
@@ -976,7 +972,7 @@ async def chat(
 
     # ── Cupo de IA por suscripción: reserva ANTES de llamar al LLM ────────────
     # Tira 402/429 acá si corresponde — nada de lo de abajo corre sin cupo.
-    operation_id = str(uuid.uuid4())
+    operation_id = _chat_operation_id()
     await _reservar_consulta_ia(db, tenant_id, operation_id)
 
     # ── ChatOrchestrator: CEO + sub-agente + LLM conversacional ─────────────
@@ -1174,7 +1170,7 @@ async def chat_stream(
     # ── Cupo de IA por suscripción: reserva ANTES de abrir el stream ──────────
     # Corre acá (no dentro del generator) para que un 402/429 sea una respuesta
     # HTTP normal, no un evento de error dentro de un stream ya iniciado.
-    operation_id = str(uuid.uuid4())
+    operation_id = _chat_operation_id()
     await _reservar_consulta_ia(db, tenant_id, operation_id)
 
     request_obj = AgentRequest(

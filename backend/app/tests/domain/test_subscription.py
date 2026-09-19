@@ -109,12 +109,34 @@ def test_active_vencido_pasa_a_gracia_sin_que_corra_expire_due() -> None:
 
 
 def test_active_con_gracia_vencida_bloquea_aunque_el_status_diga_active() -> None:
-    assert _active(fin=_NOW - timedelta(days=8)).blocked_reason == "periodo_vencido"
+    assert _active(fin=_NOW - timedelta(days=8)).blocked_reason == "gracia_vencida"
+
+
+def test_la_gracia_vencida_se_llama_igual_haya_corrido_expire_due_o_no() -> None:
+    """Misma situación para el cliente ⇒ mismo motivo. Si dependiera del
+    `status` persistido, dependería de si corrió un cron."""
+    fin = _NOW - timedelta(days=8)
+    sin_cron = _active(fin=fin)
+    con_cron = effective_access(
+        status=SubscriptionStatus.GRACE.value,
+        granted_quota=_GRANTED_CONTROL,
+        created_at=_NOW - timedelta(days=90),
+        trial_ends_at=None,
+        grace_ends_at=None,
+        current_period_start=fin - timedelta(days=30),
+        current_period_end=fin,
+        now=_NOW,
+    )
+    assert sin_cron.blocked_reason == con_cron.blocked_reason == "gracia_vencida"
+    assert (sin_cron.period_start, sin_cron.period_end) == (
+        con_cron.period_start,
+        con_cron.period_end,
+    )
 
 
 def test_active_limite_exacto_de_la_gracia_es_intervalo_semiabierto() -> None:
     fin = _NOW - timedelta(days=7)  # la gracia termina EXACTAMENTE ahora
-    assert _active(fin=fin).blocked_reason == "periodo_vencido"
+    assert _active(fin=fin).blocked_reason == "gracia_vencida"
     assert _active(fin=fin, now=_NOW - timedelta(seconds=1)).blocked_reason is None
 
 

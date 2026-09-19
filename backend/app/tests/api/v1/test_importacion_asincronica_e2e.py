@@ -780,6 +780,30 @@ async def test_una_caida_entre_los_efectos_y_el_cierre_no_existe(
             lease_expires_at=datetime.now(UTC) - timedelta(hours=1),
         )
     )
+    # Un ejecutor que MURIÓ tampoco llegó a liberar su reserva de cupo: sigue en
+    # RESERVED. Arriba el intento cerró como FALLADO (terminal) y eso la liberó,
+    # así que resucitarlo a mano exige reponerla — si no, se estaría simulando un
+    # estado imposible (un intento vivo sin reserva), que el ejecutor rechaza con
+    # razón: sería importar sin cupo que lo respalde.
+    from app.domain.subscription import import_attempt_operation_id
+    from app.persistence.models.tenant import (
+        SubscriptionQuotaReservation,
+        SubscriptionQuotaUsage,
+    )
+
+    await db_session.execute(
+        update(SubscriptionQuotaReservation)
+        .where(
+            SubscriptionQuotaReservation.operation_id
+            == import_attempt_operation_id(attempt_id)
+        )
+        .values(state="RESERVED")
+    )
+    await db_session.execute(
+        update(SubscriptionQuotaUsage)
+        .where(SubscriptionQuotaUsage.tenant_id == _tid)
+        .values(reserved=SubscriptionQuotaUsage.reserved + 1)
+    )
     await db_session.commit()
     await svc.liberar_huerfanos(db_session)
     await db_session.commit()

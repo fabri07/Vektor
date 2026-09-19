@@ -2054,3 +2054,19 @@ def _preview_from_detected_rows(detected: dict[str, Any]) -> list[dict[str, Any]
         if preview:
             break
     return preview
+
+
+def reads_with_ai(content: bytes, filename: str) -> bool:
+    """¿Leer este archivo como ficha/remito va a llamar al modelo?
+
+    Foto y PDF van a Claude; las planillas se parsean determinísticamente y
+    cualquier otro formato no llama a nadie (el servicio devuelve un aviso). Es
+    el mismo criterio de despacho que usan `extract_customer`/`extract_remito`
+    — si divergiera, se reservaría cupo por lecturas que no cuestan, o no se
+    reservaría por las que sí.
+    """
+    try:
+        mime = detect_supported_mime(content, filename)
+    except ValueError:
+        return False
+    return mime == "application/pdf" or mime in IMAGE_MIMES

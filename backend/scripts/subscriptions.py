@@ -16,6 +16,7 @@ Subcomandos
     set-status <tenant_id|email> --status grace|read_only|cancelled|active
                [--notes "..."] [--apply]
     expire-due [--apply]
+    reconcile-reservations [--apply] [--reservation ID --action confirmar|liberar --reason "..."]
     diagnose                      # solo lectura: qué tenants quedarían bloqueados
 
 Reglas que este archivo sostiene
@@ -64,6 +65,7 @@ from _db import async_engine_config  # noqa: E402
 from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
+from app.application.services import subscription_reconciliation  # noqa: E402
 from app.application.services.subscription_service import resolve_access  # noqa: E402
 from app.domain.subscription import (  # noqa: E402
     GRACE_DAYS,
@@ -153,7 +155,7 @@ async def cmd_show(session: AsyncSession, args: argparse.Namespace) -> int:
     sub = await TenantRepository(session).get_current_subscription(tenant.tenant_id)
     print(f"\n  {'Tenant:':<24}{tenant.display_name} ({tenant.tenant_id})")
     if sub is None:
-        print("  Sin ninguna suscripción viva (todas canceladas, o ninguna todavía).")
+        print("  Sin ninguna suscripción (dato roto: todo tenant se acuña con una).")
         return 0
 
     print(f"  {'Plan:':<24}{sub.plan_code}")
@@ -202,7 +204,7 @@ async def cmd_activate(session: AsyncSession, args: argparse.Namespace) -> int:
 
     sub = await TenantRepository(session).get_current_subscription(tenant.tenant_id)
     if sub is None:
-        print(f"El tenant {tenant.tenant_id} no tiene ninguna suscripción viva para activar.")
+        print(f"El tenant {tenant.tenant_id} no tiene ninguna suscripción para activar.")
         return 1
 
     plan = await session.get(PlanDefinition, args.plan)
@@ -307,7 +309,7 @@ async def cmd_set_status(session: AsyncSession, args: argparse.Namespace) -> int
 
     sub = await TenantRepository(session).get_current_subscription(tenant.tenant_id)
     if sub is None:
-        print(f"El tenant {tenant.tenant_id} no tiene ninguna suscripción viva.")
+        print(f"El tenant {tenant.tenant_id} no tiene ninguna suscripción.")
         return 1
 
     nuevo_estado = SubscriptionStatus(args.status)
@@ -505,6 +507,54 @@ async def cmd_diagnose(session: AsyncSession, args: argparse.Namespace) -> int:
     return 1 if sin_suscripcion or pagas_sin_periodo else 0
 
 
+async def cmd_reconcile(session: AsyncSession, args: argparse.Namespace) -> int:
+    """Cierra reservas de cupo colgadas en `RESERVED` — con evidencia, nunca
+    sólo por antigüedad (ver `subscription_reconciliation`). Dry-run sin --apply.
+
+    Con `--reservation` resuelve UNA a mano (las ambiguas): exige `--action` y
+    `--reason`, y queda auditada con el operador.
+    """
+    if args.reservation:
+        if not (args.action and args.reason):
+            print("Resolver a mano exige --action y --reason.")
+            return 1
+        if not args.apply:
+            print(f"[DRY-RUN] {args.action} la reserva {args.reservation}. Repetí con --apply.")
+            return 0
+        hecho = await subscription_reconciliation.resolver_manual(
+            session,
+            reservation_id=uuid.UUID(args.reservation),
+            accion=args.action,
+            motivo=args.reason,
+            operador=f"{VIA_SCRIPT}:subscriptions",
+        )
+        if not hecho:
+            print("No existe, o ya no está en RESERVED: no se tocó nada.")
+            return 1
+        await session.commit()
+        print("Reserva resuelta y auditada.")
+        return 0
+
+    resultado = await subscription_reconciliation.reconcile(session, apply=args.apply)
+    print(f"\n[{'APPLY' if args.apply else 'DRY-RUN'}] Reservas en RESERVED\n")
+    for accion in (
+        subscription_reconciliation.CONFIRMAR,
+        subscription_reconciliation.LIBERAR,
+        subscription_reconciliation.NO_TOCAR,
+        subscription_reconciliation.AMBIGUA,
+    ):
+        print(f"  {accion:<10}{resultado.contar(accion)}")
+    for v in resultado.veredictos:
+        if v.accion != subscription_reconciliation.NO_TOCAR:
+            print(f"    {v.accion:<10}{v.reservation_id}  {v.operation_id}  ({v.motivo})")
+    if args.apply:
+        await session.commit()
+        print(f"\nAplicadas: {resultado.aplicadas}")
+    else:
+        print("\nDry-run: no se escribió nada. Repetí con --apply para aplicar.")
+    return 0
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
@@ -548,6 +598,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     agregar_apply(p_expire)
     p_expire.set_defaults(handler=cmd_expire_due)
+
+    p_reconcile = sub.add_parser(
+        "reconcile-reservations", help="cerrar reservas de cupo colgadas (con evidencia)"
+    )
+    p_reconcile.add_argument("--reservation", default=None, help="resolver UNA a mano (uuid)")
+    p_reconcile.add_argument("--action", choices=["confirmar", "liberar"], default=None)
+    p_reconcile.add_argument("--reason", default=None, help="motivo (queda en la auditoría)")
+    agregar_apply(p_reconcile)
+    p_reconcile.set_defaults(handler=cmd_reconcile)
 
     p_diagnose = sub.add_parser(
         "diagnose", help="solo lectura: tenants que los controles dejarían bloqueados"

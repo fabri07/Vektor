@@ -20,7 +20,15 @@ from app.application.services import maintenance_lock_service
 from app.application.services import subscription_service as quota_service
 from app.application.services.pin_service import PinService
 from app.config.settings import get_settings
-from app.domain.subscription import SubscriptionAccessDenied, SubscriptionMissing
+from app.domain.subscription import (
+    SUBSCRIPTION_ERRORS,
+    QuotaExceeded,
+    ReservationMismatch,
+    ReservationNotUsable,
+    SeatLimitExceeded,
+    SubscriptionAccessDenied,
+    SubscriptionMissing,
+)
 from app.observability.logger import bind_request_context, get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -285,6 +293,55 @@ async def require_owner_stepup(
 # ── Suscripción (Etapa 2 — política de planes) ──────────────────────────────────
 
 
+def subscription_http_error(exc: Exception) -> HTTPException:
+    """LA traducción de un rechazo de suscripción/cupo a HTTP — una sola.
+
+    402 la suscripción no habilita · 429 sin cupo · 409 plazas o clave de
+    operación ya presentada · 503 dato roto nuestro (sin suscripción). Todos
+    con `detail.code` estable, que es lo que lee el frontend.
+    """
+    if isinstance(exc, SubscriptionMissing):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "SUBSCRIPTION_UNAVAILABLE"},
+        )
+    if isinstance(exc, SubscriptionAccessDenied):
+        return HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": "SUBSCRIPTION_READ_ONLY", "reason": exc.reason},
+        )
+    if isinstance(exc, QuotaExceeded):
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "QUOTA_EXCEEDED",
+                "resource": exc.resource.value,
+                "limit": exc.limit,
+                "renews_at": exc.renews_at.isoformat(),
+            },
+        )
+    if isinstance(exc, SeatLimitExceeded):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SEAT_LIMIT_EXCEEDED",
+                "seats_included": exc.seats_included,
+                "active_users": exc.active_users,
+            },
+        )
+    if isinstance(exc, ReservationNotUsable):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "OPERATION_ALREADY_SUBMITTED", "state": exc.outcome},
+        )
+    if isinstance(exc, ReservationMismatch):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "OPERATION_ALREADY_SUBMITTED", "state": "MISMATCH"},
+        )
+    raise TypeError(f"no es un rechazo de suscripción: {type(exc).__name__}") from exc
+
+
 async def require_active_subscription(
     tenant_id: UUID = Depends(get_current_tenant_id),
     session: AsyncSession = Depends(get_db_session),
@@ -300,23 +357,16 @@ async def require_active_subscription(
     503 y no 402 porque el usuario no debe nada — el problema es nuestro y
     hay que verlo. Consulta, corrección y exportación no pasan por este gate.
 
-    Enganchado hoy en ventas y gastos (los casos que la política nombra
-    explícitamente); el resto de las escrituras de negocio —stock, cierres de
-    caja, proveedores, clientes, automatizaciones— quedan pendientes de
-    enganchar con el mismo gate.
+    Qué rutas lo llevan se decide por EFECTO, no por verbo HTTP: las altas de
+    negocio y lo que gasta IA sí; corregir, dar de baja y consultar nunca. La
+    lista exacta la fija `test_las_rutas_con_gate_son_exactamente_estas`. Lo
+    que no entra por HTTP (agente, workers) llama a
+    `subscription_service.assert_tenant_can_write`, que es lo que esto traduce.
     """
     try:
         await quota_service.assert_tenant_can_write(session, tenant_id, origen="write_gate")
-    except SubscriptionMissing as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "SUBSCRIPTION_UNAVAILABLE"},
-        ) from exc
-    except SubscriptionAccessDenied as exc:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail={"code": "SUBSCRIPTION_READ_ONLY", "reason": exc.reason},
-        ) from exc
+    except SUBSCRIPTION_ERRORS as exc:
+        raise subscription_http_error(exc) from exc
 
 
 # ── Mantenimiento (F3-T3 — dedup de productos) ──────────────────────────────────

@@ -118,7 +118,7 @@ bloque A). Corrige lo descrito arriba; donde contradiga, vale esto.
 
 - **`ACTIVE` vence por fecha.** Pasado `current_period_end` corre la gracia
   con el MISMO período (y su saldo) durante `GRACE_DAYS`; después bloquea con
-  `periodo_vencido`, aunque `status` siga diciendo `ACTIVE` y nadie haya
+  `gracia_vencida`, aunque `status` siga diciendo `ACTIVE` y nadie haya
   corrido `expire-due`. Un plan pago `ACTIVE` sin período bloquea
   (`activa_sin_periodo`): faltar el dato nunca reabre el acceso. Todos los
   intervalos son `[inicio, fin)`.
@@ -191,6 +191,74 @@ bloque E — necesita que el cliente la mande.
   con más usuarios activos que plazas: conservan los que tienen.
 - No hay workers que creen datos de negocio fuera de la ingesta (bloque C).
 
+## Bloque C — consumos conectados y reservas conciliables (cerrado)
+
+- **Importaciones: un solo punto de consumo.** El ejecutor en segundo plano
+  llama al mismo `confirm_file` que la ruta síncrona, así que el cupo se
+  consume ADENTRO de `confirm_file`, justo antes de `finalize_import_lease`,
+  con `consume_with_data()` (sin commit propio): el consumo entra o se
+  revierte JUNTO con los datos. Va al final para no retener la fila del
+  contador durante todo el import; el 429 rápido lo da un chequeo temprano y
+  NO vinculante (`assert_quota_available`) antes del lease. Perder la última
+  unidad contra otra importación → rollback total + lease compensado + 429
+  (handler global en `main.py`: la excepción tiene que llegar cruda al
+  `except` que compensa, no se puede traducir en el lugar).
+- **En segundo plano:** `POST /files/{id}/imports` autoriza y RESERVA en la
+  misma transacción que el intento y su orden (clave
+  `import-attempt:{attempt_id}`; rechazo → rollback explícito, no queda
+  intento). El ejecutor confirma ESA reserva — no cobra otra ni re-mira la
+  suscripción: lo ya autorizado termina aunque venza después. Un intento que
+  cierra `FALLADO` libera su reserva en la transacción del cierre, **sólo si
+  el cierre fue suyo** (si perdió el lease, otro ejecutor corre con ella).
+  La clave viaja por `quota_operation_id`, que es una *dependency* y no un
+  parámetro común a propósito: un `str | None` suelto sería query param, y
+  mandar la clave de una importación ya cobrada haría gratis las siguientes.
+- **No consumen:** el 422 previo al lease, el import vacío, el fallo técnico
+  (rollback) y la **relectura** (pasa por `insert_confirmed_data`, no por
+  `confirm_file`: es corrección). Un import con filas a «Otros» sí consume.
+- **Lecturas foto/PDF** (`photo_pdf_read`, context manager): reserva sólo si
+  el archivo va al modelo (`file_parsing.reads_with_ai`, mismo despacho que
+  los extractores — una planilla no cuesta), confirma sólo si la lectura
+  devolvió datos, libera si falló o vino vacía.
+- **Gate también en** `POST /ingestion/upload`, `/confirm` e `/imports`.
+- **Conciliación** (`subscription_reconciliation.py`,
+  `scripts/subscriptions.py reconcile-reservations [--apply]`, job
+  `jobs.reconcile_subscription_reservations` cada 30 min — Beat todavía no
+  está desplegado, así que hoy es manual). **Nunca libera sólo por
+  antigüedad**: import → manda el estado del intento (vivo = no tocar, tenga
+  la edad que tenga); chat → la clave pasó a ser `chat:{trace_id}`, el mismo
+  id que `decision_audit_log` guarda solo: fila con tokens = confirmar, sin
+  fila y pasado el plazo = liberar (un request HTTP no tiene lease ni
+  reintento: pasado el plazo no puede seguir vivo); lectura → mismo
+  argumento; clave desconocida → ambigua, se conserva, se reporta y se
+  resuelve a mano con `--reservation --action --reason`, auditado. Todo por
+  el CAS de `RESERVED`, así que competir con el dueño real es no-op.
+- Las importaciones síncronas no pueden colgarse: reservan y confirman en la
+  transacción de los datos.
+
+Fuera de este bloque: topes de páginas/MB por lectura (política pendiente), el
+parseo de imágenes dentro del pipeline de ingesta (corre en el worker de
+parseo, necesita su propio análisis), `reprocess` sin gate.
+
+Sobre A6 (desconexión SSE): si el cliente corta, `CancelledError` no entra en
+el `except Exception` del generador, así que la reserva NO se libera: queda en
+`RESERVED` y la decide la conciliación con la auditoría (turno auditado con
+tokens → se confirma; sin rastro y pasado el plazo → se libera). Es el
+comportamiento que A6 pedía; lo que sigue sin existir es un resultado durable
+que el cliente pueda RECUPERAR tras reconectar.
+
+## Revisión cruzada de los bloques A–C
+
+Corregido: la gracia vencida tenía dos nombres según hubiera corrido
+`expire-due` (`periodo_vencido` vs `gracia_vencida`) — ahora uno solo,
+`gracia_vencida`; el 409 del chat se armaba a mano fuera del traductor único
+(`subscription_http_error`, que ahora lleva el `state`); `TERMINAL_STATUSES`
+estaba definido y sin uso mientras el repositorio repetía el literal; textos
+del script y docstrings que describían el estado anterior. Quedan anotados
+para sus bloques: `cancel_at_period_end` existe pero nadie lo setea ni lo lee
+(D), y `/auth/me` expone el `status` PERSISTIDO, no el efectivo — un `ACTIVE`
+vencido se vería "activo" en pantalla (contrato `GET /subscription`, E).
+
 ## Verificación
 
 - Migración probada con round-trip completo (`upgrade`/`downgrade`/`upgrade`)
@@ -208,14 +276,8 @@ bloque E — necesita que el cliente la mande.
 - ~~Cobertura del gate transversal~~ y ~~`enforce_seat_limit` sin
   enganchar~~: cerrados en el Bloque B (ver arriba). Sigue sin gate la
   ingesta (upload/confirm/relectura): va con su cupo, en el bloque C.
-- **Cupos de importación y lectura de foto/PDF sin enganchar**: el mecanismo
-  de reserva es genérico (`QuotaResource.IMPORT`/`PHOTO_PDF_READ`), pero
-  todavía no está conectado a `ingestion_import_service.confirm_file` (hay que
-  coordinarlo con el lease existente, que hace su propio commit) ni a
-  `remito_extraction_service.py`/`customer_extraction_service.py`.
-- **Reconciliación de reservas huérfanas** (`reconcile-reservations`): no
-  implementado — si un proceso muere con una reserva en `RESERVED`, hoy queda
-  colgada hasta que alguien la resuelva a mano.
+- ~~Cupos de importación y foto/PDF~~ y ~~reconciliación de reservas~~:
+  cerrados en el Bloque C (ver arriba).
 - **Frontend**: nada de UI todavía (pantalla de facturación, aviso de
   prueba/gracia/solo lectura).
 - Límites de página/MB por archivo, prorrateo de upgrades, descuentos: siguen

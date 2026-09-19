@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.subscription import SubscriptionStatus
+from app.domain.subscription import TERMINAL_STATUSES
 from app.persistence.models.tenant import Subscription, Tenant
 
 
@@ -36,9 +36,7 @@ class TenantRepository:
         con ella (vale hasta el fin del período pago, después bloquea).
         `None` queda para lo único que significa: el tenant no tiene ninguna.
         """
-        es_cancelada = case(
-            (Subscription.status == SubscriptionStatus.CANCELLED.value, 1), else_=0
-        )
+        es_cancelada = case((Subscription.status.in_(TERMINAL_STATUSES), 1), else_=0)
         result = await self._session.execute(
             select(Subscription)
             .where(Subscription.tenant_id == tenant_id)

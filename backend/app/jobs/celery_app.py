@@ -37,6 +37,7 @@ celery_app = Celery(
         "app.jobs.reread_worker",
         "app.jobs.import_executor_worker",
         "app.jobs.reread_sweep_worker",
+        "app.jobs.subscription_reconcile_worker",
         "app.jobs.update_momentum",
         "app.jobs.send_weekly_email",
         "app.application.services.score_trigger_service",
@@ -94,6 +95,7 @@ celery_app.conf.update(
         # cola `ingestion`, así que no puede vivir en ella. Si la cola de
         # ingestión se traba, el que la destraba tiene que estar afuera.
         "jobs.recover_import_attempts": {"queue": "scores"},
+        "jobs.reconcile_subscription_reservations": {"queue": "scores"},
         "jobs.inventory_integrity_check": {"queue": "scores"},
         "jobs.inventory_integrity_check_all_tenants": {"queue": "scores"},
     },
@@ -145,6 +147,14 @@ celery_app.conf.beat_schedule = {
         # Intentos cuyo ejecutor murió. Sin esto quedan en EJECUTANDO para
         # siempre y el usuario ve "importando" sin que nadie esté importando.
         "schedule": 5 * 60,
+        "options": {"queue": "scores"},
+    },
+    "reconcile-subscription-reservations": {
+        "task": "jobs.reconcile_subscription_reservations",
+        # Cierra reservas de cupo colgadas, con evidencia (nunca por antigüedad
+        # sola). Cada 30 min alcanza: una reserva colgada sólo le resta cupo a su
+        # cliente, y el plazo mínimo para liberar un request muerto es de 2 h.
+        "schedule": 60 * 30,
         "options": {"queue": "scores"},
     },
     "sweep-stale-reread-runs": {

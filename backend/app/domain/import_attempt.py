@@ -129,6 +129,10 @@ ERROR_CAPACIDADES: Final = "capacidades_cambiaron"
 #: la interpretación nueva no se va a deshacer sola, y el archivo está perfecto —
 #: decirle "volvé a subirlo" mandaría a arreglar lo que no está roto.
 ERROR_REVISION: Final = "revision_cambiada"
+#: La suscripción o el cupo no respaldan la importación al momento de ejecutar
+#: (la reserva del intento ya no sirve). No se reintenta solo: depende del
+#: usuario regularizar o esperar la renovación.
+ERROR_SUSCRIPCION: Final = "suscripcion"
 ERROR_TRANSITORIO: Final = "transitorio"
 ERROR_DESCONOCIDO: Final = "desconocido"
 

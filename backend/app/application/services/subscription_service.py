@@ -11,9 +11,11 @@ Este módulo resuelve las dos últimas. Las dos primeras ya existen
 Patrón de cupos: reservar (`reserve`) ANTES de ejecutar, confirmar
 (`commit`) al terminar bien, liberar (`release`) si termina mal — nunca al
 revés. Cada reserva queda identificada por `operation_id` (elegido por quien
-llama: el `request_id` del chat, el `attempt_id` del import, un id propio de
-la extracción), así que reintentar la MISMA operación nunca reserva una
-unidad de más — es la corrección directa del rate-limit de chat actual
+llama: `chat:{trace_id}` en el chat, `import-attempt:{id}` en la importación
+en segundo plano, `read:{uuid}` en una lectura — los prefijos viven en el
+dominio porque la conciliación decide según ellos), así que reintentar la
+MISMA operación nunca reserva una unidad de más — es la corrección directa
+del rate-limit de chat actual
 (`agent.py`), que hace el chequeo y el incremento en pasos separados, con
 toda la llamada al LLM en el medio.
 
@@ -27,7 +29,8 @@ entre o no entre junto con los datos) pasa `autocommit=False` y commitea él.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
@@ -36,11 +39,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.subscription import (
     LEGACY_FREE_LIMITS,
     LEGACY_FREE_PLAN_CODE,
+    READ_OPERATION_PREFIX,
     EffectiveAccess,
     PlanQuota,
     QuotaExceeded,
     QuotaResource,
     ReservationMismatch,
+    ReservationNotUsable,
     ReserveOutcome,
     SeatLimitExceeded,
     SubscriptionAccessDenied,
@@ -405,6 +410,131 @@ async def release(
         session, tenant_id=tenant_id, resource=resource, operation_id=operation_id,
         confirmar=False, autocommit=autocommit,
     )
+
+
+async def assert_quota_available(
+    session: AsyncSession,
+    *,
+    subscription: Subscription,
+    resource: QuotaResource,
+    units: int = 1,
+    now: datetime | None = None,
+) -> None:
+    """Chequeo temprano y NO vinculante: ¿quedaría cupo para esta operación?
+
+    Sirve para contestar 402/429 antes de hacer un trabajo largo. No reserva
+    ni bloquea nada, así que no garantiza el cupo: quien decide es el consumo
+    real (`consume_with_data`), que puede perder la última unidad contra otra
+    operación y revertir. Se hace así a propósito — reservar al empezar
+    retendría la fila del contador durante toda una importación.
+    """
+    acceso = resolve_access(subscription, now=now)
+    if acceso.blocked_reason is not None:
+        raise SubscriptionAccessDenied(subscription.tenant_id, acceso.blocked_reason)
+    limite = acceso.quota.limit_for(resource)
+    fila = (
+        await session.execute(
+            sa.select(SubscriptionQuotaUsage.used, SubscriptionQuotaUsage.reserved).where(
+                SubscriptionQuotaUsage.tenant_id == subscription.tenant_id,
+                SubscriptionQuotaUsage.resource == resource.value,
+                SubscriptionQuotaUsage.period_start == acceso.period_start,
+            )
+        )
+    ).first()
+    ocupado = 0 if fila is None else fila.used + fila.reserved
+    if ocupado + units > limite:
+        raise QuotaExceeded(subscription.tenant_id, resource, limite, acceso.period_end)
+
+
+async def consume_with_data(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    resource: QuotaResource,
+    operation_id: str,
+    now: datetime | None = None,
+) -> None:
+    """Consume UNA unidad en la transacción de quien llama — sin commit.
+
+    Para operaciones cuyo resultado se persiste: el consumo entra o se
+    revierte JUNTO con los datos, así que no puede quedar ni dato sin consumo
+    ni consumo sin dato, y no deja reservas colgadas que conciliar.
+
+    Si la operación ya traía una reserva (se autorizó al registrarse, p. ej.
+    una importación en segundo plano), se confirma ESA y no se vuelve a mirar
+    la suscripción: lo ya autorizado puede terminar aunque haya vencido
+    después. Si no, se autoriza, reserva y confirma acá. Llamarlo dos veces
+    con la misma clave consume una sola vez.
+    """
+    if await commit(
+        session, tenant_id=tenant_id, resource=resource, operation_id=operation_id,
+        autocommit=False,
+    ):
+        return
+    subscription = await assert_tenant_can_write(
+        session, tenant_id, origen=f"consume:{resource.value}", now=now
+    )
+    resultado = await reserve(
+        session, subscription=subscription, resource=resource,
+        operation_id=operation_id, now=now, autocommit=False,
+    )
+    if resultado is ReserveOutcome.NEW:
+        await commit(
+            session, tenant_id=tenant_id, resource=resource, operation_id=operation_id,
+            autocommit=False,
+        )
+    elif resultado is not ReserveOutcome.ALREADY_COMMITTED:
+        raise ReservationNotUsable(operation_id, resultado.value)
+
+
+class LecturaConIA:
+    """Lo que el llamador le cuenta a `photo_pdf_read` sobre cómo salió."""
+
+    #: Sólo una lectura que devolvió datos consume. El llamador la marca.
+    exitosa: bool = False
+
+
+@asynccontextmanager
+async def photo_pdf_read(
+    session: AsyncSession, tenant_id: uuid.UUID, *, usa_ia: bool
+) -> AsyncIterator[LecturaConIA]:
+    """Cupo de UNA lectura de foto/PDF alrededor de la llamada al modelo.
+
+    `usa_ia=False` (planilla: parseo determinístico, no cuesta) no toca nada.
+    Si usa IA: autoriza y reserva ANTES de llamar al proveedor (transacción
+    corta propia — no se retiene un lock mientras corre el LLM), y al salir
+    confirma si `lectura.exitosa`, o libera: un error técnico o una lectura
+    que no devolvió nada no consume. Los reintentos internos del servicio de
+    extracción son la misma lectura, no unidades nuevas.
+    """
+    lectura = LecturaConIA()
+    if not usa_ia:
+        yield lectura
+        return
+    subscription = await assert_tenant_can_write(session, tenant_id, origen="photo_pdf_read")
+    operation_id = f"{READ_OPERATION_PREFIX}{uuid.uuid4()}"
+    await reserve(
+        session,
+        subscription=subscription,
+        resource=QuotaResource.PHOTO_PDF_READ,
+        operation_id=operation_id,
+    )
+    try:
+        yield lectura
+    except BaseException:
+        lectura.exitosa = False
+        raise
+    finally:
+        try:
+            await (commit if lectura.exitosa else release)(
+                session,
+                tenant_id=tenant_id,
+                resource=QuotaResource.PHOTO_PDF_READ,
+                operation_id=operation_id,
+            )
+        except Exception:  # noqa: BLE001 — nunca tapar el resultado de la lectura
+            # Queda RESERVED: la conciliación la resuelve (no se pierde ni se cobra).
+            logger.warning("photo_pdf_read.resolve_failed", operation_id=operation_id)
 
 
 async def enforce_seat_limit(

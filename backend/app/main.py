@@ -21,7 +21,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api.v1.deps import rate_limit_key
+from app.api.v1.deps import rate_limit_key, subscription_http_error
 from app.application.middleware.tenant import TenantMiddleware
 from app.application.services.stock_service import (
     InsufficientStockError,
@@ -29,6 +29,7 @@ from app.application.services.stock_service import (
 )
 from app.bootstrap import shutdown, startup
 from app.config.settings import get_settings
+from app.domain.subscription import SUBSCRIPTION_ERRORS
 from app.observability.logger import get_logger
 from app.observability.sentry import init_sentry
 
@@ -201,6 +202,24 @@ def create_app() -> FastAPI:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={"detail": jsonable_encoder(exc.errors())},
         )
+
+    async def subscription_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Red para los rechazos de suscripción/cupo que salen como excepción de
+        # dominio y no como HTTPException — típicamente el consumo que va junto
+        # con los datos (`consume_with_data`): ahí no se puede traducir en el
+        # lugar, porque la excepción tiene que llegar cruda al `except` que
+        # revierte el import y compensa el lease. Misma traducción que el resto.
+        traducido = subscription_http_error(exc)
+        logger.info(
+            "subscription.rejected",
+            path=str(request.url.path),
+            error_type=type(exc).__name__,
+            status_code=traducido.status_code,
+        )
+        return JSONResponse(status_code=traducido.status_code, content={"detail": traducido.detail})
+
+    for _tipo in SUBSCRIPTION_ERRORS:
+        app.add_exception_handler(_tipo, subscription_error_handler)
 
     @app.exception_handler(InsufficientStockError)
     async def insufficient_stock_handler(

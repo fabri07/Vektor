@@ -24,6 +24,7 @@ from app.api.v1.deps import (
     require_role,
 )
 from app.application.agents.shared.schemas import LLMCall
+from app.application.services import subscription_service
 from app.application.services.customer_extraction_service import (
     extract_customer,
     parse_customer_records,
@@ -36,6 +37,7 @@ from app.application.services.file_parsing import (
     MAX_FILE_SIZE_BYTES,
     SPREADSHEET_MIMES,
     detect_supported_mime,
+    reads_with_ai,
     sanitize_filename,
 )
 from app.application.services.idempotency import claim_idempotency_key
@@ -277,12 +279,18 @@ async def extract_customer_card(
     """
     content, filename = await _read_upload_or_413(file, "cliente")
 
-    extraction, usage = await extract_customer(
-        content,
-        filename,
-        content_type=file.content_type,
-        user_hint=user_hint,
-    )
+    # Cupo de lecturas: sólo si el archivo va al modelo (una planilla no cuesta),
+    # y sólo consume si la lectura devolvió algo.
+    async with subscription_service.photo_pdf_read(
+        session, tenant.tenant_id, usa_ia=reads_with_ai(content, filename)
+    ) as lectura:
+        extraction, usage = await extract_customer(
+            content,
+            filename,
+            content_type=file.content_type,
+            user_hint=user_hint,
+        )
+        lectura.exitosa = usage is not None and bool(extraction.fields)
 
     if usage is not None:
         llm_call = LLMCall(
