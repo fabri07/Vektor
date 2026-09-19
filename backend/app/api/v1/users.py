@@ -11,9 +11,12 @@ from app.api.v1.deps import (
     require_owner_stepup,
     require_role,
 )
+from app.application.services import subscription_service
+from app.domain.subscription import SeatLimitExceeded, SubscriptionAccessDenied
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
+from app.persistence.repositories.tenant_repository import TenantRepository
 from app.persistence.repositories.user_repository import UserRepository
 from app.schemas.common import MessageResponse
 from app.schemas.user import (
@@ -83,6 +86,36 @@ async def create_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="A user with that email already exists in this tenant.",
         )
+    # Plazas del plan: bloquear → contar → crear, todo en ESTA transacción
+    # (`repo.save` solo hace flush; el commit es el del request, y hasta ahí
+    # vive el lock). Contar antes del lock dejaría entrar dos altas simultáneas.
+    subscription = await TenantRepository(session).get_current_subscription(tenant.tenant_id)
+    if subscription is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "SUBSCRIPTION_UNAVAILABLE"},
+        )
+    try:
+        await subscription_service.enforce_seat_limit(
+            session,
+            subscription=subscription,
+            count_active_users=lambda: repo.count_active(tenant.tenant_id),
+        )
+    except SubscriptionAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": "SUBSCRIPTION_READ_ONLY", "reason": exc.reason},
+        ) from exc
+    except SeatLimitExceeded as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SEAT_LIMIT_EXCEEDED",
+                "seats_included": exc.seats_included,
+                "active_users": exc.active_users,
+            },
+        ) from exc
+
     user = User(
         tenant_id=tenant.tenant_id,
         email=body.email.lower(),

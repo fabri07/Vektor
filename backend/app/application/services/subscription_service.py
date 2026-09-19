@@ -44,13 +44,18 @@ from app.domain.subscription import (
     ReserveOutcome,
     SeatLimitExceeded,
     SubscriptionAccessDenied,
+    SubscriptionMissing,
     effective_access,
 )
+from app.observability.logger import get_logger
 from app.persistence.models.tenant import (
     Subscription,
     SubscriptionQuotaReservation,
     SubscriptionQuotaUsage,
 )
+from app.persistence.repositories.tenant_repository import TenantRepository
+
+logger = get_logger(__name__)
 
 
 def _granted_quota(subscription: Subscription) -> PlanQuota:
@@ -123,6 +128,28 @@ def enforce_active_subscription(subscription: Subscription, *, now: datetime | N
     acceso = resolve_access(subscription, now=now)
     if acceso.blocked_reason is not None:
         raise SubscriptionAccessDenied(subscription.tenant_id, acceso.blocked_reason)
+
+
+async def assert_tenant_can_write(
+    session: AsyncSession, tenant_id: uuid.UUID, *, origen: str, now: datetime | None = None
+) -> Subscription:
+    """LA autorización de un alta de negocio — la misma por API, agente y worker.
+
+    Vive acá y no en una dependency de FastAPI porque una dependency no corre
+    cuando un worker o el agente llaman a una función Python: cada ejecutor
+    interno que crea datos de negocio llama a esto, igual que el gate HTTP
+    (`deps.require_active_subscription`, que es solo su traducción a 402/503).
+
+    Levanta `SubscriptionMissing` o `SubscriptionAccessDenied`. Una vez por
+    operación: los subpasos de algo ya autorizado (el movimiento de stock de
+    una venta, el compensatorio de una corrección) NO vuelven a preguntar.
+    """
+    subscription = await TenantRepository(session).get_current_subscription(tenant_id)
+    if subscription is None:
+        logger.error("subscription_missing", tenant_id=str(tenant_id), origen=origen)
+        raise SubscriptionMissing(tenant_id)
+    enforce_active_subscription(subscription, now=now)
+    return subscription
 
 
 async def reserve(
@@ -400,7 +427,14 @@ async def enforce_seat_limit(
     Las plazas salen del acceso efectivo, no de la columna: durante la
     prueba es una sola, sea cual sea el plan asignado. Una suscripción que
     no habilita escribir tampoco habilita sumar usuarios.
+
+    FREE legado no tiene tope: nunca lo tuvo (su `seats_included=1` es un
+    default de columna, no una condición comercial), y el criterio para esas
+    cuentas es preservar lo que ya podían hacer hasta que tengan su propio
+    plan de migración.
     """
+    if subscription.plan_code == LEGACY_FREE_PLAN_CODE:
+        return
     await session.execute(
         sa.select(Subscription.subscription_id)
         .where(Subscription.subscription_id == subscription.subscription_id)

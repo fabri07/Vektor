@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
+    require_active_subscription,
     require_modify_access,
     require_role,
 )
@@ -318,6 +319,7 @@ class CreateProductCategoryRequest(BaseModel):
 
 @router.post(
     "/custom-categories",
+    dependencies=[Depends(require_active_subscription)],
     status_code=status.HTTP_201_CREATED,
     summary="Crear una categoría de producto personalizada del tenant",
 )
@@ -348,6 +350,7 @@ async def create_product_category(
 
 @router.post(
     "",
+    dependencies=[Depends(require_active_subscription)],
     response_model=ProductResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a product",

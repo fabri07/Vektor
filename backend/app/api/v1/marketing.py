@@ -6,7 +6,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_modify_access, require_role
+from app.api.v1.deps import (
+    get_current_tenant,
+    require_active_subscription,
+    require_modify_access,
+    require_role,
+)
 from app.application.services.marketing_service import MarketingService
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
@@ -54,6 +59,7 @@ def _audit_metric_change(
 
 @router.post(
     "/metrics",
+    dependencies=[Depends(require_active_subscription)],
     response_model=SocialMetricResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Cargar una métrica de red social",
@@ -80,6 +86,7 @@ async def create_metric(
 
 @router.post(
     "/metrics/bulk",
+    dependencies=[Depends(require_active_subscription)],
     response_model=list[SocialMetricResponse],
     status_code=status.HTTP_201_CREATED,
     summary="Cargar varias métricas de red social",

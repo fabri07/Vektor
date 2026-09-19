@@ -153,6 +153,44 @@ bloque A). Corrige lo descrito arriba; donde contradiga, vale esto.
 Diferido: la clave estable para deduplicar reintentos HTTP del chat pasa al
 bloque E — necesita que el cliente la mande.
 
+## Bloque B — la misma política por API, agente y usuarios (cerrado)
+
+- **Una sola autorización, usable fuera de FastAPI:**
+  `subscription_service.assert_tenant_can_write(session, tenant_id, origen=)`.
+  Una dependency no corre cuando el agente o un worker llaman a una función
+  Python; `deps.require_active_subscription` quedó como su traducción a
+  402/503 y nada más. Se llama UNA vez por operación: los subpasos de algo ya
+  autorizado no vuelven a preguntar.
+- **Clasificación por efecto, no por verbo HTTP.** Llevan gate las 20 rutas
+  de ALTA (ventas, gastos, productos y categorías, cierres de caja,
+  clientes/proveedores y su import, remitos, campos, automatizaciones,
+  métricas de marketing) y las dos extracciones por foto/PDF — que llaman a
+  Claude: en solo lectura eran gasto de IA sin respaldo (acá solo el estado;
+  el CUPO de lectura es del bloque C). `PATCH`/`DELETE`, reactivar,
+  toggle/undo de campos y `dismiss` de «Otros» quedan siempre abiertos.
+  **Decisión de producto:** clasificar filas de «Otros» (`reclassify`,
+  `resolve-purchase`, `bulk-import`) SÍ se bloquea — crea ventas/gastos
+  nuevos aunque el archivo ya estuviera importado.
+  Compuerta: `test_las_rutas_con_gate_son_exactamente_estas` compara el
+  conjunto REAL de rutas con gate contra la lista esperada.
+- **Agente: un solo embudo.** `execute_pending_action` verifica la
+  suscripción — cubre botón, confirmación por texto (que corre antes de
+  reservar IA y no pasa por ningún gate HTTP), grupo, auto-ejecución,
+  automatizaciones y retry. Lista cerrada `WRITE_EXEMPT_ACTION_TYPES`
+  (correcciones `UPDATE_PRODUCT`/`RECLASSIFY_EXPENSE`, los analíticos, el
+  link de WhatsApp): **todo `ActionType` que no esté ahí nace bloqueado**, y
+  `test_todo_action_type_esta_clasificado` obliga a decidir los nuevos. El
+  rechazo llega al chat por `user_message`, como `InsufficientStockError`.
+- **Plazas en `POST /users`:** bloquear → contar → crear en la transacción
+  del request (`repo.save` hace flush; el commit es el del request). 409
+  `SEAT_LIMIT_EXCEEDED` con `seats_included`/`active_users`; 402 si la
+  suscripción no habilita. Las bajas siguen libres. No existe reactivación
+  de usuarios, así que es el único camino de alta fuera del provisioning.
+  **FREE legado no tiene tope** (su `seats_included=1` es un default de
+  columna, no una condición comercial). `diagnose` lista los tenants pagos
+  con más usuarios activos que plazas: conservan los que tienen.
+- No hay workers que creen datos de negocio fuera de la ingesta (bloque C).
+
 ## Verificación
 
 - Migración probada con round-trip completo (`upgrade`/`downgrade`/`upgrade`)
@@ -167,13 +205,9 @@ bloque E — necesita que el cliente la mande.
 - **Mercado Pago** (Etapa 3) — la activación sigue siendo manual.
 - **Job periódico de vencimiento**: `expire-due` es manual/cron, no un Celery
   beat nuevo. El enforcement en caliente no depende de esto.
-- **Cobertura exhaustiva del gate transversal**: `require_active_subscription`
-  solo está en ventas y gastos (creación). Todavía faltan: stock/movimientos
-  de inventario, cierres de caja, altas de proveedores/clientes, remitos,
-  automatizaciones, custom fields. Mismo patrón, mismo import — es trabajo
-  mecánico pendiente, no una decisión de diseño abierta.
-- **`enforce_seat_limit` sin enganchar**: existe y está probado, pero
-  `POST /users` todavía no lo llama.
+- ~~Cobertura del gate transversal~~ y ~~`enforce_seat_limit` sin
+  enganchar~~: cerrados en el Bloque B (ver arriba). Sigue sin gate la
+  ingesta (upload/confirm/relectura): va con su cupo, en el bloque C.
 - **Cupos de importación y lectura de foto/PDF sin enganchar**: el mecanismo
   de reserva es genérico (`QuotaResource.IMPORT`/`PHOTO_PDF_READ`), pero
   todavía no está conectado a `ingestion_import_service.confirm_file` (hay que

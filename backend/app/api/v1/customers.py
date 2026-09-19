@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
     get_current_tenant,
+    require_active_subscription,
     require_modify_access,
     require_owner_stepup,
     require_role,
@@ -146,6 +147,7 @@ async def list_customers(
 
 @router.post(
     "",
+    dependencies=[Depends(require_active_subscription)],
     response_model=CustomerResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a customer",
@@ -256,6 +258,7 @@ async def _read_upload_or_413(file: UploadFile, default_name: str) -> tuple[byte
 
 @router.post(
     "/extract",
+    dependencies=[Depends(require_active_subscription)],
     response_model=CustomerExtractionResponse,
     summary="Extract a single customer card from an uploaded file (foto/PDF/planilla)",
 )
@@ -399,6 +402,7 @@ async def import_customers_preview(
 
 @router.post(
     "/import/confirm",
+    dependencies=[Depends(require_active_subscription)],
     response_model=CustomerImportConfirmResponse,
     summary="Confirm a bulk customer import (upsert idempotente)",
 )

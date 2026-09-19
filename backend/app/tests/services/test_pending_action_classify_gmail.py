@@ -12,12 +12,27 @@ import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from app.application.agents.shared.schemas import ActionType
 from app.application.services.pending_action_service import execute_pending_action
 from app.integrations.mcp.google_mcp_service import GmailListPage
 
 _PATCH_BROKER = "app.application.services.pending_action_service._make_google_broker"
 _PATCH_SENDERS = "app.application.services.gmail_inbox_review_service.get_approved_senders"
+
+
+@pytest.fixture(autouse=True)
+def _suscripcion_habilitada(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Estos tests pasan un `db` de mentira y prueban el broker, no la
+    suscripción: el control del embudo (`execute_pending_action`) consulta la
+    base de verdad, y está probado en `test_subscription_write_gate.py`."""
+    monkeypatch.setattr(
+        "app.application.services.pending_action_service."
+        "subscription_service.assert_tenant_can_write",
+        AsyncMock(),
+    )
+
 
 
 def _make_action(payload: dict[str, Any]):

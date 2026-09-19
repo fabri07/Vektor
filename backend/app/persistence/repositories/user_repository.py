@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.user import User
@@ -49,6 +49,15 @@ class UserRepository:
     async def list_by_tenant(self, tenant_id: UUID) -> list[User]:
         result = await self._session.execute(select(User).where(User.tenant_id == tenant_id))
         return list(result.scalars().all())
+
+    async def count_active(self, tenant_id: UUID) -> int:
+        """Usuarios que ocupan plaza: los activos (el dueño incluido)."""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(User)
+            .where(User.tenant_id == tenant_id, User.is_active.is_(True))
+        )
+        return result.scalar_one()
 
     async def save(self, user: User) -> User:
         self._session.add(user)

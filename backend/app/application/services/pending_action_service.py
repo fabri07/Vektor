@@ -26,6 +26,7 @@ import app.application.services.cash_service as cash_service
 import app.application.services.stock_service as stock_service
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.schemas import ActionType
+from app.application.services import subscription_service
 from app.application.services.automation_service import determine_external_system
 from app.application.services.chat_memory_service import ChatMemoryService
 from app.application.services.ingestion_import_service import (
@@ -531,6 +532,34 @@ async def _execute_classify_gmail_message(
     )
 
 
+#: Acciones que NO piden suscripción habilitada para ejecutarse: corrigen un
+#: dato que ya existe, o solo leen/narran. Es la lista corta a propósito — todo
+#: `ActionType` que no esté acá se bloquea con la suscripción vencida, así que
+#: uno nuevo nace bloqueado hasta que alguien decida lo contrario
+#: (`test_todo_action_type_esta_clasificado` obliga a decidirlo).
+WRITE_EXEMPT_ACTION_TYPES: frozenset[ActionType] = frozenset(
+    {
+        # Correcciones sobre datos ya cargados — siempre disponibles.
+        ActionType.UPDATE_PRODUCT,
+        ActionType.RECLASSIFY_EXPENSE,
+        # Lectura / narrativa: no crean datos de negocio.
+        ActionType.GENERATE_HEALTH_REPORT,
+        ActionType.ANSWER_HELP_REQUEST,
+        ActionType.ANSWER_DATA_QUERY,
+        ActionType.ANALYZE_FILE,
+        ActionType.ANALYZE_PRICES,
+        ActionType.ANALYZE_STOCK_DATA,
+        ActionType.ANALYZE_SALES_DATA,
+        ActionType.ANALYZE_EXPENSE_DATA,
+        ActionType.ANALYZE_SUPPLIER_DATA,
+        ActionType.ANALYZE_MARKETING_DATA,
+        ActionType.SIMULATE_SCENARIO,
+        # Arma un link wa.me: no escribe nada del negocio ni gasta IA.
+        ActionType.PREPARE_WHATSAPP_MESSAGE,
+    }
+)
+
+
 async def execute_pending_action(
     action: PendingAction,
     db: AsyncSession,
@@ -538,7 +567,17 @@ async def execute_pending_action(
 ) -> None:
     """
     Ejecuta la acción de negocio y registra en audit_log.
+
+    Es el ÚNICO embudo de las escrituras del agente (botón, confirmación por
+    texto, grupo, auto-ejecución, retry), así que la suscripción se verifica
+    acá y no en cada endpoint: la confirmación por texto corre antes de
+    reservar IA y no pasa por ningún gate HTTP.
     """
+    if action.action_type not in WRITE_EXEMPT_ACTION_TYPES:
+        await subscription_service.assert_tenant_can_write(
+            db, action.tenant_id, origen="agent_action"
+        )
+
     payload = action.payload or {}
     conversation_id = str(payload.get("conversation_id") or "direct")
     mem = ChatMemoryService()

@@ -20,7 +20,7 @@ from app.application.services import maintenance_lock_service
 from app.application.services import subscription_service as quota_service
 from app.application.services.pin_service import PinService
 from app.config.settings import get_settings
-from app.domain.subscription import SubscriptionAccessDenied
+from app.domain.subscription import SubscriptionAccessDenied, SubscriptionMissing
 from app.observability.logger import bind_request_context, get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -305,17 +305,13 @@ async def require_active_subscription(
     caja, proveedores, clientes, automatizaciones— quedan pendientes de
     enganchar con el mismo gate.
     """
-    subscription = await TenantRepository(session).get_current_subscription(tenant_id)
-    if subscription is None:
-        get_logger(__name__).error(
-            "subscription_missing", tenant_id=str(tenant_id), origen="write_gate"
-        )
+    try:
+        await quota_service.assert_tenant_can_write(session, tenant_id, origen="write_gate")
+    except SubscriptionMissing as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "SUBSCRIPTION_UNAVAILABLE"},
-        )
-    try:
-        quota_service.enforce_active_subscription(subscription)
+        ) from exc
     except SubscriptionAccessDenied as exc:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,

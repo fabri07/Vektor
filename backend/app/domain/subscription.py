@@ -192,10 +192,35 @@ class SubscriptionAccessDenied(Exception):  # noqa: N818
     `SUBSCRIPTION_READ_ONLY`, nunca a un 429 de cupo.
     """
 
+    #: Lo que ve el usuario cuando el rechazo sale por el chat (el agente
+    #: muestra `user_message` tal cual; ver `_execute_local_action`).
+    user_message = (
+        "Tu suscripción no está activa, así que no puedo registrar datos nuevos. "
+        "Podés seguir consultando, corrigiendo y exportando lo que ya cargaste."
+    )
+
     def __init__(self, tenant_id: object, reason: str) -> None:
         self.tenant_id = tenant_id
         self.reason = reason
         super().__init__(f"tenant {tenant_id}: acceso denegado ({reason})")
+
+
+class SubscriptionMissing(Exception):  # noqa: N818
+    """El tenant no tiene NINGUNA `Subscription` — dato roto, no plan gratis.
+
+    Todo tenant se acuña con una. El llamador HTTP lo traduce a 503
+    (`SUBSCRIPTION_UNAVAILABLE`): el usuario no debe nada, el problema es
+    nuestro y hay que verlo — nunca se resuelve dejando pasar.
+    """
+
+    user_message = (
+        "No pudimos verificar tu suscripción en este momento. Ya quedó avisado; "
+        "probá de nuevo en unos minutos."
+    )
+
+    def __init__(self, tenant_id: object) -> None:
+        self.tenant_id = tenant_id
+        super().__init__(f"tenant {tenant_id}: sin ninguna suscripción")
 
 
 class QuotaExceeded(Exception):  # noqa: N818

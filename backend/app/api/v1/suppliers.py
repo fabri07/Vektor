@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
+    require_active_subscription,
     require_modify_access,
     require_owner_stepup,
     require_role,
@@ -150,6 +151,7 @@ async def list_suppliers(
 
 @router.post(
     "",
+    dependencies=[Depends(require_active_subscription)],
     response_model=SupplierResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a supplier",
@@ -248,6 +250,7 @@ async def list_supplier_products(
 
 @router.post(
     "/{supplier_id}/receipts",
+    dependencies=[Depends(require_active_subscription)],
     response_model=ReceiptResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Import a supplier receipt (remito)",
@@ -372,6 +375,7 @@ async def _persist_remito_upload(
 
 @router.post(
     "/{supplier_id}/receipts/extract",
+    dependencies=[Depends(require_active_subscription)],
     response_model=ReceiptExtractionResponse,
     summary="Extract receipt lines from an uploaded file (foto/PDF/planilla)",
 )

@@ -1,6 +1,6 @@
 # Suscripciones: cierre del backend, experiencia de usuario y cobro
 
-Fecha: 2026-09-18. Estado: **bloque A implementado y probado (sin desplegar); B–G propuestos**.
+Fecha: 2026-09-18. Estado: **bloques A y B implementados y probados (sin desplegar); C–G propuestos**.
 
 Base: `planes-suscripcion-y-cupos.md` y revisión del código local. La suite de
 5085 pruebas aprobadas y las pruebas de concurrencia son resultados reportados
@@ -84,7 +84,12 @@ Criterios: ACTIVE vencido sin cron, límites temporales exactos, CANCELLED con y
 sin período restante, tenant sin suscripción, operación repetida en los tres
 estados de reserva y fallo de la sesión de DB. No reabrir acceso al faltar datos.
 
-**B. Completar el control de operaciones y usuarios**
+**B. Completar el control de operaciones y usuarios** — CERRADO
+
+Hecho todo lo de abajo salvo el rechazo de downgrade con plazas excedidas,
+que no tiene dónde vivir hasta que exista el cambio de plan (bloque D).
+«Otros» se bloquea (decisión de producto). Detalle en
+`planes-suscripcion-y-cupos.md` → "Bloque B".
 
 Inventariar operación, endpoint, servicio ejecutor, worker y clasificación:
 creación, corrección, consulta, seguridad o cancelación. Clasificar por efecto,

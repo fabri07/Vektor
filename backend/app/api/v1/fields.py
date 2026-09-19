@@ -7,7 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1._tenant_vertical import get_vertical_code as _get_vertical_code
-from app.api.v1.deps import get_current_tenant, get_current_user, require_modify_access
+from app.api.v1.deps import (
+    get_current_tenant,
+    get_current_user,
+    require_active_subscription,
+    require_modify_access,
+)
 from app.application.services import business_field_catalog_service
 from app.application.services import field_definition_service as svc
 from app.domain.business_field_catalog import AVAILABLE_ENTITY_TYPES
@@ -86,7 +91,12 @@ async def get_available_fields(
     )
 
 
-@router.post("", response_model=FieldDefinitionResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    dependencies=[Depends(require_active_subscription)],
+    response_model=FieldDefinitionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_field(
     body: CreateCustomFieldRequest,
     tenant: Tenant = Depends(get_current_tenant),

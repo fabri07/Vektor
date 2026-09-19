@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_user, require_modify_access
+from app.api.v1.deps import (
+    get_current_user,
+    require_active_subscription,
+    require_modify_access,
+)
 from app.application.services.automation_service import (
     create_rule_from_action,
     serialize_rule,
@@ -49,6 +53,7 @@ async def list_automations(
 
 @router.post(
     "/from-pending-action/{pending_id}",
+    dependencies=[Depends(require_active_subscription)],
     response_model=AutomationRuleCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )

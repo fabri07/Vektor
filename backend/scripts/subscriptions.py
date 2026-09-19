@@ -64,6 +64,7 @@ from _db import async_engine_config  # noqa: E402
 from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
+from app.application.services.subscription_service import resolve_access  # noqa: E402
 from app.domain.subscription import (  # noqa: E402
     GRACE_DAYS,
     LEGACY_FREE_PLAN_CODE,
@@ -467,6 +468,27 @@ async def cmd_diagnose(session: AsyncSession, args: argparse.Namespace) -> int:
         )
     ).all()
 
+    activos = (
+        select(User.tenant_id, func.count().label("n"))
+        .where(User.is_active.is_(True))
+        .group_by(User.tenant_id)
+        .subquery()
+    )
+    excedidos = [
+        (sub, n)
+        for sub, n in (
+            await session.execute(
+                select(Subscription, activos.c.n)
+                .join(activos, activos.c.tenant_id == Subscription.tenant_id)
+                .where(
+                    Subscription.plan_code != LEGACY_FREE_PLAN_CODE,
+                    Subscription.status != SubscriptionStatus.CANCELLED.value,
+                )
+            )
+        ).all()
+        if n > resolve_access(sub).quota.seats_included
+    ]
+
     print("\nSuscripciones por plan y estado persistido:")
     for plan, estado, cantidad in por_estado:
         print(f"  {plan:<12}{estado:<12}{cantidad}")
@@ -476,6 +498,10 @@ async def cmd_diagnose(session: AsyncSession, args: argparse.Namespace) -> int:
     print(f"Planes pagos ACTIVE sin período (quedarían en 402): {len(pagas_sin_periodo)}")
     for tenant_id, plan in pagas_sin_periodo:
         print(f"  {tenant_id}  {plan}")
+    # Informativo (no cuenta como roto): conservan sus usuarios, solo no suman.
+    print(f"Tenants con más usuarios activos que plazas: {len(excedidos)}")
+    for sub, n in excedidos:
+        print(f"  {sub.tenant_id}  {sub.plan_code}  {n} activos")
     return 1 if sin_suscripcion or pagas_sin_periodo else 0
 
 
