@@ -49,6 +49,21 @@ interface Props {
   products: ProductResponse[];
   scoreHistory?: HealthScoreV2Response[];
   loading?: boolean;
+  /** Rango resuelto del `PeriodFilter` de la página — gobierna el eje del gráfico de línea. */
+  from: string;
+  to: string;
+  /** `getAllEntries` corta en 5000 filas: avisar si el rango elegido lo truncó. */
+  entriesTruncated?: boolean;
+  /** Error de red/servidor al traer ventas o gastos — distinto de "sin movimientos". */
+  error?: boolean;
+  /** false = el tenant nunca cargó ventas ni gastos (ningún período tendría datos). */
+  hasAnyDataEver?: boolean;
+  /**
+   * true mientras cualquier fuente que decide el banner de estado (ventas,
+   * gastos o el rango disponible) todavía está cargando — evita mostrar
+   * "sin movimientos" o "cargá un archivo" antes de tener el dato real.
+   */
+  statusLoading?: boolean;
 }
 
 const CHART_COLORS = [
@@ -77,7 +92,10 @@ function InsightBlock() {
 
   return (
     <div className="mt-4 rounded-xl border border-vektor-border bg-vektor-surface p-4">
-      <p className="text-sm leading-7 text-vektor-body">{text}</p>
+      <p className="text-xs font-medium uppercase tracking-wide text-vektor-muted">
+        Situación actual
+      </p>
+      <p className="mt-1 text-sm leading-7 text-vektor-body">{text}</p>
     </div>
   );
 }
@@ -118,8 +136,21 @@ function ChartSkeleton() {
   return <div className="h-[320px] animate-pulse rounded-2xl bg-vektor-surface" />;
 }
 
-export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistory, loading }: Props) {
+export function DashboardAnalysisScreen({
+  sales,
+  expenses,
+  products,
+  scoreHistory,
+  loading,
+  from,
+  to,
+  entriesTruncated,
+  error,
+  hasAnyDataEver = true,
+  statusLoading = false,
+}: Props) {
   const hasTransactionData = sales.length > 0 || expenses.length > 0;
+  const isSingleDay = from === to;
 
   const [lineMetric, setLineMetric] = useState("caja");
   const [granularity, setGranularity] = useState<"hourly" | "daily" | "weekly" | "monthly">(
@@ -128,9 +159,16 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
   const [compareBy, setCompareBy] = useState("categoria");
   const [distribution, setDistribution] = useState("ventasCategoria");
 
+  // "Por hora" sólo tiene sentido para un único día. En vez de corregir el
+  // estado con un efecto (que dejaría un render de por medio armando 24
+  // buckets horarios con un rango multi-día), se deriva sincrónicamente en
+  // el mismo render — el toggle igual deja de ofrecer la opción apenas
+  // `isSingleDay` es false.
+  const effectiveGranularity = granularity === "hourly" && !isSingleDay ? "daily" : granularity;
+
   const lineData = useMemo(
-    () => buildLineSeries(lineMetric as "caja" | "ventas" | "margen" | "stock", sales, expenses, products, granularity, scoreHistory),
-    [lineMetric, sales, expenses, products, granularity, scoreHistory],
+    () => buildLineSeries(lineMetric as "caja" | "ventas" | "margen" | "stock", sales, expenses, effectiveGranularity, { from, to }, scoreHistory),
+    [lineMetric, sales, expenses, effectiveGranularity, from, to, scoreHistory],
   );
   const comparisonData = useMemo(
     () => buildComparisonSeries(compareBy as "categoria" | "proveedor" | "metodo" | "dia", sales, expenses, products),
@@ -149,12 +187,25 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
 
   return (
     <div className="space-y-6">
-      {!hasTransactionData && (
+      {statusLoading ? null : error ? (
+        <div className="rounded-xl border border-vk-danger/40 bg-vk-danger/10 px-5 py-4 text-sm text-vektor-body">
+          No se pudieron cargar los datos. Probá de nuevo en unos minutos.
+        </div>
+      ) : !hasAnyDataEver ? (
         <div className="rounded-xl border border-vektor-border bg-vektor-surface px-5 py-4 text-sm text-vektor-body">
           Los gráficos estarán disponibles cuando cargues ventas o gastos.{" "}
           <Link href="/ingestion" className="font-medium text-vektor-white underline-offset-2 hover:underline">
             Cargar archivo →
           </Link>
+        </div>
+      ) : !hasTransactionData ? (
+        <div className="rounded-xl border border-vektor-border bg-vektor-surface px-5 py-4 text-sm text-vektor-body">
+          No hay movimientos en el período seleccionado. Probá otro rango.
+        </div>
+      ) : null}
+      {entriesTruncated && (
+        <div className="rounded-xl border border-vektor-amber/40 bg-vektor-amber/10 px-5 py-3 text-sm text-vektor-body">
+          Este período tiene más de 5.000 movimientos: los gráficos muestran una muestra parcial. Achicá el rango para ver el total exacto.
         </div>
       )}
       {/* Gráficos principales: apilados a ancho completo para mejor legibilidad */}
@@ -172,7 +223,8 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
             />
             <div className="inline-flex rounded-full border border-vektor-border bg-vektor-surface p-1">
               {[
-                { value: "hourly", label: "Hoy (horas)" },
+                // "Por hora" sólo aplica a un único día seleccionado (puede ser histórico).
+                ...(isSingleDay ? [{ value: "hourly", label: "Por hora" }] : []),
                 { value: "daily", label: "Diario" },
                 { value: "weekly", label: "Semanal" },
                 { value: "monthly", label: "Mensual" },
@@ -185,7 +237,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
                   }
                   className={[
                     "rounded-full px-3 py-1.5 text-xs font-medium",
-                    granularity === option.value
+                    effectiveGranularity === option.value
                       ? "bg-vektor-blue text-vektor-white"
                       : "text-vektor-body",
                   ].join(" ")}
@@ -233,7 +285,7 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
             </div>
             {lineMetric === "stock" && (
               <p className="mt-2 text-xs text-vektor-muted">
-                Escala 0–100 · score de salud del inventario calculado por el motor financiero.
+                Escala 0–100 · score de salud del inventario calculado por el motor financiero, según el historial de scores disponible (no cambia con el filtro de arriba).
               </p>
             )}
             {hasTransactionData && <InsightBlock />}
@@ -342,6 +394,11 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
                 })}
               </div>
             </div>
+            {distribution === "stockEstado" && (
+              <p className="mt-2 text-xs text-vektor-muted">
+                Refleja el stock actual, no el período elegido arriba.
+              </p>
+            )}
             {hasTransactionData && <InsightBlock />}
           </>
         )}
@@ -349,6 +406,9 @@ export function DashboardAnalysisScreen({ sales, expenses, products, scoreHistor
       </div>
 
       {/* Desgloses por categoría, proveedores y stock: dos columnas */}
+      <p className="text-xs text-vektor-muted">
+        Estos paneles usan siempre los últimos 30 días, el stock actual o el histórico completo de compras — no cambian con el filtro de arriba.
+      </p>
       <div className="grid gap-4 xl:grid-cols-2">
         <BreakdownPanels />
       </div>

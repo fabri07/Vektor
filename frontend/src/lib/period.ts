@@ -29,25 +29,25 @@ export function fmt(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function parseLocal(iso: string): Date {
+export function parseLocal(iso: string): Date {
   const [y, m, d] = iso.split("-").map(Number);
   return new Date(y ?? 1970, (m ?? 1) - 1, d ?? 1);
 }
 
 /** Lunes de la semana que contiene `d` (semana lunes-domingo). */
-function mondayOf(d: Date): Date {
+export function mondayOf(d: Date): Date {
   const day = d.getDay(); // 0=domingo … 6=sábado
   const diff = day === 0 ? -6 : 1 - day;
   const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() + diff);
   return monday;
 }
 
-function addDays(d: Date, n: number): Date {
+export function addDays(d: Date, n: number): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
 }
 
 /** Último día del mes (month: 1-12). */
-function endOfMonth(year: number, month: number): Date {
+export function endOfMonth(year: number, month: number): Date {
   return new Date(year, month, 0); // día 0 del mes siguiente = último del actual
 }
 

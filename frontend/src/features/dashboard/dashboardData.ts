@@ -4,6 +4,7 @@ import type { ProductResponse } from "@/services/products.service";
 import type { SaleEntryResponse } from "@/services/sales.service";
 import type { SupplierResponse } from "@/services/suppliers.service";
 import type { HealthScoreV2Response } from "@/types/api";
+import { addDays, type DateRangeStrings, endOfMonth, mondayOf, parseLocal } from "@/lib/period";
 
 // Compras sin proveedor (supplier_id NULL) y el proveedor sentinela se unifican en
 // una sola etiqueta "No identificado" — coincide con el nombre del sentinela para que
@@ -417,87 +418,146 @@ export function buildCustomerBreakdown(
   return finalizeVolume(acc);
 }
 
-function dateRange(points: number): Date[] {
-  const today = new Date();
-  return Array.from({ length: points }, (_, index) => {
-    const value = new Date(today);
-    value.setDate(today.getDate() - (points - 1 - index));
-    return value;
-  });
+interface LineBucket {
+  start: Date;
+  end: Date; // inclusive, fin del día/semana/mes/hora
+  label: string;
 }
 
-function sameDay(date: string, target: Date): boolean {
-  const parsed = new Date(date);
-  return parsed.toDateString() === target.toDateString();
+function endOfDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
 }
 
-// Vista intradía: 24 buckets horarios del día de hoy.
-function hourlyRange(): Date[] {
-  const base = new Date();
+/** Un bucket por día calendario entre `from` y `to` (inclusive). */
+function buildDailyBuckets(from: Date, to: Date): LineBucket[] {
+  const buckets: LineBucket[] = [];
+  let cursor = from;
+  while (cursor <= to) {
+    buckets.push({
+      start: cursor,
+      end: endOfDay(cursor),
+      label: cursor.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" }),
+    });
+    cursor = addDays(cursor, 1);
+  }
+  return buckets;
+}
+
+/** Buckets lunes–domingo reales que cubren el rango — agrega de verdad, no repite días. */
+function buildWeeklyBuckets(from: Date, to: Date): LineBucket[] {
+  const buckets: LineBucket[] = [];
+  let cursor = mondayOf(from);
+  const lastMonday = mondayOf(to);
+  while (cursor <= lastMonday) {
+    const end = addDays(cursor, 6);
+    buckets.push({
+      start: cursor,
+      end: endOfDay(end),
+      label: `Sem ${cursor.getDate()}/${String(cursor.getMonth() + 1).padStart(2, "0")}`,
+    });
+    cursor = addDays(cursor, 7);
+  }
+  return buckets;
+}
+
+/** Buckets por mes calendario que cubren el rango. */
+function buildMonthlyBuckets(from: Date, to: Date): LineBucket[] {
+  const buckets: LineBucket[] = [];
+  let year = from.getFullYear();
+  let month = from.getMonth();
+  const endYear = to.getFullYear();
+  const endMonth = to.getMonth();
+  while (year < endYear || (year === endYear && month <= endMonth)) {
+    const start = new Date(year, month, 1);
+    // `endOfMonth` de lib/period.ts espera mes 1-indexado; `month` acá es 0-indexado (Date nativo).
+    const end = endOfMonth(year, month + 1);
+    buckets.push({
+      start,
+      end: endOfDay(end),
+      label: start.toLocaleDateString("es-AR", { month: "short" }),
+    });
+    month += 1;
+    if (month > 11) {
+      month = 0;
+      year += 1;
+    }
+  }
+  return buckets;
+}
+
+/** 24 buckets horarios de un día puntual (histórico o no, nunca "hoy" a secas). */
+function buildHourlyBuckets(day: Date): LineBucket[] {
   return Array.from({ length: 24 }, (_, hour) => {
-    const value = new Date(base);
-    value.setHours(hour, 0, 0, 0);
-    return value;
+    const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, 0, 0, 0);
+    const end = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, 59, 59, 999);
+    return { start, end, label: `${String(hour).padStart(2, "0")}:00` };
   });
 }
 
-function sameHour(date: string, target: Date): boolean {
-  const parsed = new Date(date);
-  return parsed.toDateString() === target.toDateString() && parsed.getHours() === target.getHours();
+function inBucket(dateStr: string, bucket: LineBucket): boolean {
+  const parsed = new Date(dateStr);
+  return parsed >= bucket.start && parsed <= bucket.end;
 }
 
 export function buildLineSeries(
   metric: LineMetricOption["value"],
   sales: SaleEntryResponse[],
   expenses: ExpenseEntryResponse[],
-  products: ProductResponse[],
   granularity: "hourly" | "daily" | "weekly" | "monthly",
+  range: DateRangeStrings,
   scoreHistory?: HealthScoreV2Response[],
 ): Array<{ label: string; value: number | null; change: number }> {
-  const isHourly = granularity === "hourly";
-  const dates = isHourly
-    ? hourlyRange()
-    : dateRange(granularity === "daily" ? 14 : granularity === "weekly" ? 10 : 6);
-  const match = isHourly ? sameHour : sameDay;
-  const totalStock = products.reduce((sum, product) => sum + product.stock_units, 0);
+  const fromDate = parseLocal(range.from);
+  const toDate = parseLocal(range.to);
+
+  const buckets =
+    granularity === "hourly"
+      ? buildHourlyBuckets(fromDate)
+      : granularity === "weekly"
+        ? buildWeeklyBuckets(fromDate, toDate)
+        : granularity === "monthly"
+          ? buildMonthlyBuckets(fromDate, toDate)
+          : buildDailyBuckets(fromDate, toDate);
 
   let previous = 0;
 
-  return dates.map((date, index) => {
+  return buckets.map((bucket) => {
     let value: number | null = null;
 
     if (metric === "ventas") {
       value = sales
-        .filter((entry) => match(entry.transaction_date, date))
+        .filter((entry) => inBucket(entry.transaction_date, bucket))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
     } else if (metric === "caja") {
       const salesTotal = sales
-        .filter((entry) => match(entry.transaction_date, date))
+        .filter((entry) => inBucket(entry.transaction_date, bucket))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
       const expensesTotal = expenses
-        .filter((entry) => match(entry.transaction_date, date))
+        .filter((entry) => inBucket(entry.transaction_date, bucket))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
       value = previous + salesTotal - expensesTotal;
     } else if (metric === "margen") {
-      const dayRevenue = sales
-        .filter((entry) => match(entry.transaction_date, date))
+      const periodRevenue = sales
+        .filter((entry) => inBucket(entry.transaction_date, bucket))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
-      const dayCost = expenses
-        .filter((entry) => match(entry.transaction_date, date))
+      const periodCost = expenses
+        .filter((entry) => inBucket(entry.transaction_date, bucket))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
       // null cuando no hay ventas: el chart muestra un gap real en vez de interpolar
-      value = dayRevenue > 0 ? ((dayRevenue - dayCost) / dayRevenue) * 100 : null;
+      value = periodRevenue > 0 ? ((periodRevenue - periodCost) / periodRevenue) * 100 : null;
     } else {
-      // stock: usa score_stock del historial real; fallback a coseno si aún no hay historial
+      // stock: usa score_stock del historial real más cercano al bucket. Sin
+      // historial no se fabrica un valor (no-invention) — el punto queda vacío.
       if (scoreHistory && scoreHistory.length > 0) {
+        const reference = bucket.end.getTime();
         const nearest = scoreHistory.reduce((best, s) => {
-          const d = Math.abs(new Date(s.created_at).getTime() - date.getTime());
-          const bd = Math.abs(new Date(best.created_at).getTime() - date.getTime());
+          const d = Math.abs(new Date(s.created_at).getTime() - reference);
+          const bd = Math.abs(new Date(best.created_at).getTime() - reference);
           return d < bd ? s : best;
         });
         value = nearest.score_stock;
       } else {
-        value = totalStock + Math.cos(index / 2.3) * 18;
+        value = null;
       }
     }
 
@@ -506,15 +566,7 @@ export function buildLineSeries(
       : 0;
     previous = value ?? previous;
 
-    return {
-      label: isHourly
-        ? `${String(date.getHours()).padStart(2, "0")}:00`
-        : granularity === "monthly"
-          ? date.toLocaleDateString("es-AR", { month: "short" })
-          : date.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" }),
-      value,
-      change,
-    };
+    return { label: bucket.label, value, change };
   });
 }
 

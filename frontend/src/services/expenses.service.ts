@@ -137,4 +137,14 @@ export const expensesService = {
 
     return items;
   },
+
+  /**
+   * Total real (sin `limit`/`offset`) — mismo patrón que `salesService.countEntries`.
+   * `getAllEntries` corta en `MAX_PAGES * PAGE_SIZE` (5000): con esto la pantalla
+   * puede avisar cuando ese tope truncó el resultado en silencio.
+   */
+  async countEntries(params?: Omit<ExpensesListParams, "limit" | "offset">): Promise<number> {
+    const res = await api.get<{ total: number }>("/expenses/count", { params });
+    return res.data.total;
+  },
 };
