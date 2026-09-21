@@ -155,6 +155,45 @@ describe("useOfflineSubmit.flush poison-item handling", () => {
     expect(useOfflineQueueStore.getState().items).toHaveLength(1);
   });
 
+  it("a network error does NOT consume the retry budget", async () => {
+    // `navigator.onLine` da true con un router sin internet, y flush corre una vez
+    // por navegación de página: si la red contara, unos clics durante un corte
+    // agotaban el tope y el primer 503 real mandaba la venta a FAILED sin haberla
+    // reintentado nunca.
+    seed(0);
+    mockCreateSale.mockRejectedValue(axiosErr(undefined));
+    const { result } = renderHook(() => useOfflineSubmit(), { wrapper });
+    for (let i = 0; i < 6; i++) {
+      await act(async () => {
+        await result.current.flush();
+      });
+    }
+    const items = useOfflineQueueStore.getState().items;
+    expect(items).toHaveLength(1);
+    expect(items[0]?.attempts).toBe(0);
+    expect(items[0]?.status).toBeUndefined();
+    expect(items[0]?.lastError).toBe("Sin conexión al sincronizar");
+  });
+
+  it("a real 503 after a long outage still gets its full retry budget", async () => {
+    // El caso compuesto del hallazgo: corte largo y después un error transitorio.
+    seed(0);
+    mockCreateSale.mockRejectedValue(axiosErr(undefined));
+    const { result } = renderHook(() => useOfflineSubmit(), { wrapper });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await result.current.flush();
+      });
+    }
+    mockCreateSale.mockRejectedValue(axiosErr(503));
+    await act(async () => {
+      await result.current.flush();
+    });
+    const items = useOfflineQueueStore.getState().items;
+    expect(items[0]?.attempts).toBe(1);
+    expect(items[0]?.status).toBeUndefined(); // sigue pendiente, no terminal
+  });
+
   it("removes an item on successful sync", async () => {
     seed();
     mockCreateSale.mockResolvedValue({ id: "ok" });

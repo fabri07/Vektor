@@ -777,3 +777,77 @@ class TestB0DeudaPrevia:
         assert body["requested"] == 4
         assert body["product_id"] == pid
         assert "Fernet" in body["detail"]
+
+    # ── unit_price en la corrección: se asigna, o se limpia si quedó mintiendo ──
+
+    async def test_patch_asigna_unit_price_cuando_lo_informan(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """UpdateSaleRequest lo declaraba y update_sale nunca lo tocaba: 200 sin efecto."""
+        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sid}",
+            json={"amount": "800.00", "quantity": 2, "unit_price": "400.00"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert float(resp.json()["unit_price"]) == 400.00
+
+    async def test_patch_de_amount_sin_unit_price_lo_limpia(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Conservarlo dejaría 500 junto a amount=800 y quantity=2: el campo mentiría.
+
+        No se recalcula como amount/quantity — eso sería inventarlo, la misma división
+        que la política prohíbe en el resto del código. None es "no informado", que es
+        exactamente lo que se sabe después de la corrección.
+        """
+        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sid}", json={"amount": "800.00"}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["unit_price"] is None
+
+    async def test_patch_que_no_toca_monto_ni_cantidad_conserva_unit_price(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Cambiar la nota no invalida el precio al que se vendió."""
+        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sid}", json={"notes": "corregido"}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert float(resp.json()["unit_price"]) == 500.00
+
+    async def test_la_auditoria_registra_unit_price(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session
+    ) -> None:
+        """El campo existe para trazar el precio por línea; sin esto no deja rastro."""
+        from sqlalchemy import select
+
+        from app.persistence.models.audit import DecisionAuditLog
+
+        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
+        await client.patch(
+            f"/api/v1/sales/{sid}", json={"unit_price": "450.00"}, headers=auth_headers
+        )
+        filas = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "DATA_RECORD_UPDATED"
+                )
+            )
+        ).scalars().all()
+        datos = [
+            f.decision_data
+            for f in filas
+            if f.decision_data.get("after", {}).get("id") == sid
+        ]
+        assert datos, "no se auditó el update"
+        assert datos[-1]["before"]["unit_price"] == "500.00"
+        assert datos[-1]["after"]["unit_price"] == "450.00"

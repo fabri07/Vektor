@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
+
+from app.domain.business_time import today_ar
 
 _MAX_AMOUNT = Decimal("999999999")
 _PAYMENT_PATTERN = r"^(cash|debit_card|credit_card|transfer|qr|account|other)$"
@@ -54,7 +56,7 @@ class ManualPurchaseRequest(BaseModel):
     @field_validator("transaction_date")
     @classmethod
     def _not_future(cls, v: datetime) -> datetime:
-        if v.date() > date.today():
+        if v.date() > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
         return v
 

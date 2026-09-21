@@ -10,7 +10,9 @@ import { customersService } from "@/services/customers.service";
 import { suppliersService } from "@/services/suppliers.service";
 import { expensesService } from "@/services/expenses.service";
 import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
+import { FailedQueuePanel } from "./FailedQueuePanel";
 import {
+  useOfflineFailedCount,
   useOfflineQueueCount,
   useOfflineSubmit,
   useOnlineStatus,
@@ -1396,6 +1398,10 @@ export function ManualEntrySection({
   const [dirty, setDirty] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useOfflineQueueCount();
+  const failed = useOfflineFailedCount();
+  // Las rechazadas se listan aparte (FailedQueuePanel): contarlas como
+  // "pendientes de sincronizar" sería mentir, el flush ya no las toca.
+  const sincronizables = pending - failed;
   const online = useOnlineStatus();
 
   useEffect(() => {
@@ -1430,7 +1436,8 @@ export function ManualEntrySection({
 
   return (
     <div>
-      {(!online || pending > 0) && (
+      <FailedQueuePanel />
+      {(!online || sincronizables > 0) && (
         <div
           className={[
             "mb-4 rounded-lg border px-3 py-2 text-xs",
@@ -1440,7 +1447,7 @@ export function ManualEntrySection({
           ].join(" ")}
         >
           {!online && "Sin conexión — las cargas se guardan y se sincronizan al volver online. "}
-          {pending > 0 && `${pending} carga(s) pendientes de sincronizar.`}
+          {sincronizables > 0 && `${sincronizables} carga(s) pendientes de sincronizar.`}
         </div>
       )}
 

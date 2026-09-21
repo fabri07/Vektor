@@ -94,11 +94,31 @@ function isClientError(e: unknown): boolean {
 // Tope de reintentos para errores transitorios (5xx) — evita loops infinitos en la cola.
 const MAX_FLUSH_ATTEMPTS = 5;
 
+/**
+ * Código de error estructurado del backend, venga en la forma que venga.
+ *
+ * Hay dos: `HTTPException(detail={"code": ...})` deja el código ANIDADO bajo
+ * `detail`, mientras que los handlers globales que tienen que conservar `detail`
+ * como texto legible (el de stock insuficiente) lo ponen al LADO. Leer las dos
+ * en un solo lugar evita que cada call site tenga que saber cuál le toca.
+ */
+export function errorCode(e: unknown): string | null {
+  if (!axios.isAxiosError(e) || !e.response) return null;
+  const data = e.response.data as
+    | { code?: string; detail?: { code?: string } | string }
+    | undefined;
+  if (typeof data?.code === "string") return data.code;
+  const detail = data?.detail;
+  if (detail && typeof detail !== "string" && typeof detail.code === "string") {
+    return detail.code;
+  }
+  return null;
+}
+
 // Replay idempotente: el backend ya tiene el registro → 409 con el código del contrato.
 function isDuplicate(e: unknown): boolean {
   if (!axios.isAxiosError(e) || e.response?.status !== 409) return false;
-  const detail = (e.response.data as { detail?: { code?: string } } | undefined)?.detail;
-  return detail?.code === "DUPLICATE_IDEMPOTENT";
+  return errorCode(e) === "DUPLICATE_IDEMPOTENT";
 }
 
 // Mensaje legible del error para guardarlo en el item de la cola (`lastError`).
@@ -183,8 +203,14 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
             useOfflineQueueStore.getState().remove(item.id);
             invalidate(queryClient, item.kind);
           } else if (isNetworkError(e)) {
-            // Sigue offline: registrar el intento y cortar; se reintenta en el próximo flush.
-            useOfflineQueueStore.getState().markFailed(item.id, "Sin conexión al sincronizar");
+            // Sigue offline: dejar constancia y cortar; se reintenta en el próximo flush.
+            // NO consume presupuesto de reintentos — `navigator.onLine` da true con un
+            // router sin internet, y `flush` corre una vez por navegación de página, así
+            // que unos clics durante un corte agotaban el tope y el primer 503 real
+            // mandaba la operación a FAILED sin haberla reintentado nunca.
+            useOfflineQueueStore
+              .getState()
+              .markNetworkFailure(item.id, "Sin conexión al sincronizar");
             break;
           } else if (isClientError(e)) {
             // 4xx permanente (payload inválido, stock insuficiente al sincronizar,

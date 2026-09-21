@@ -34,8 +34,16 @@ interface OfflineQueueState {
   enqueue: (item: QueuedItem) => void;
   /** Sincronizada con éxito, o descartada por una acción explícita del usuario. */
   remove: (id: string) => void;
-  /** Fallo reintentable: suma un intento y deja el item pendiente. */
+  /** Fallo reintentable del SERVIDOR: suma un intento y deja el item pendiente. */
   markFailed: (id: string, error: string) => void;
+  /**
+   * Fallo de RED: deja constancia del error pero **no** consume el presupuesto de
+   * reintentos. Un corte no es evidencia de que la operación sea inválida, y
+   * `flush` corre una vez por navegación de página: sin esta distinción, cuatro
+   * clics durante un corte agotaban el presupuesto y el primer 503 real después
+   * mandaba la venta a FAILED sin haberla reintentado nunca de verdad.
+   */
+  markNetworkFailure: (id: string, error: string) => void;
   /** Fallo terminal: deja de reintentarse pero el item NO se borra. */
   markPermanentlyFailed: (id: string, error: string) => void;
   /** Vuelve a habilitar un item terminal (acción explícita del usuario). */
@@ -65,6 +73,10 @@ export const useOfflineQueueStore = create<OfflineQueueState>()(
           items: s.items.map((i) =>
             i.id === id ? { ...i, attempts: i.attempts + 1, lastError: error } : i,
           ),
+        })),
+      markNetworkFailure: (id, error) =>
+        set((s) => ({
+          items: s.items.map((i) => (i.id === id ? { ...i, lastError: error } : i)),
         })),
       markPermanentlyFailed: (id, error) =>
         set((s) => ({

@@ -4,7 +4,11 @@ import { useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ManualEntrySection } from "./ManualEntrySection";
-import { useOfflineQueueCount, useOfflineSubmit } from "./useOfflineSubmit";
+import {
+  useOfflineFailedCount,
+  useOfflineQueueCount,
+  useOfflineSubmit,
+} from "./useOfflineSubmit";
 
 interface ManualEntryLauncherProps {
   variant?: "primary" | "secondary";
@@ -26,6 +30,14 @@ export function ManualEntryLauncher({
   const dirtyRef = useRef(false);
   useOfflineSubmit({ autoSync: true });
   const pending = useOfflineQueueCount();
+  const failed = useOfflineFailedCount();
+  // El badge cuenta TODO lo que sigue en la cola, pero el título no puede decir
+  // "pendientes de sincronizar" de algo que el flush ya no va a tocar: se resuelve
+  // a mano en el panel de adentro del modal.
+  const badgeTitle =
+    failed > 0
+      ? `${failed} carga(s) rechazada(s) — abrí la carga manual para resolverlas`
+      : `${pending} carga(s) pendientes de sincronizar`;
 
   // Cierre (botón / Escape / overlay → todos pasan por onClose): si hay datos sin
   // guardar, confirmar antes de descartar.
@@ -52,7 +64,7 @@ export function ManualEntryLauncher({
           {pending > 0 && (
             <span
               className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-white/25 px-1.5 text-[11px] font-semibold text-vektor-white"
-              title={`${pending} carga(s) pendientes de sincronizar`}
+              title={badgeTitle}
             >
               {pending}
             </span>
@@ -64,7 +76,7 @@ export function ManualEntryLauncher({
           {pending > 0 && (
             <span
               className="ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-vk-blue px-1.5 text-[11px] font-semibold text-vektor-white"
-              title={`${pending} carga(s) pendientes de sincronizar`}
+              title={badgeTitle}
             >
               {pending}
             </span>

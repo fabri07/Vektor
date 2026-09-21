@@ -58,6 +58,9 @@ def _sale_snapshot(entry: SaleEntry) -> dict[str, object]:
         "id": str(entry.id),
         "amount": str(entry.amount),
         "quantity": entry.quantity,
+        # Sin esto, el campo que existe para trazar el precio por línea es invisible
+        # en el before/after de la auditoría: un cambio de precio no dejaría rastro.
+        "unit_price": str(entry.unit_price) if entry.unit_price is not None else None,
         "transaction_date": str(entry.transaction_date),
         "payment_method": entry.payment_method,
         "product_id": str(entry.product_id) if entry.product_id else None,
@@ -523,6 +526,16 @@ async def update_sale(
         entry.amount = body.amount
     if body.quantity is not None:
         entry.quantity = body.quantity
+    # `unit_price` se aceptaba en el request y se descartaba. Ahora que el alta lo
+    # persiste, dejarlo intacto al corregir `amount`/`quantity` deja un número que
+    # CONTRADICE la fila en el campo cuya razón de ser es decir a qué precio se
+    # vendió. Si no lo informan y cambió alguno de los dos, se limpia: "no informado"
+    # es la verdad; recalcularlo como amount/quantity sería inventarlo (misma política
+    # que prohíbe esa división en el resto del código).
+    if body.unit_price is not None:
+        entry.unit_price = body.unit_price
+    elif body.amount is not None or body.quantity is not None:
+        entry.unit_price = None
     if body.transaction_date is not None:
         entry.transaction_date = body.transaction_date
     if body.payment_method is not None:
