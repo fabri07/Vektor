@@ -8,6 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
+from app.domain.business_time import today_ar
 from app.domain.expense_categories import EXPENSE_CATEGORIES_PATTERN
 
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
@@ -84,7 +85,7 @@ class CreateSaleRequest(BaseModel):
     @classmethod
     def transaction_date_not_future(cls, v: datetime) -> datetime:
         # Compara solo la fecha: se permite registrar hoy a cualquier hora.
-        if v.date() > date.today():
+        if v.date() > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
         return v
 
@@ -106,7 +107,7 @@ class UpdateSaleRequest(BaseModel):
     @field_validator("transaction_date")
     @classmethod
     def transaction_date_not_future(cls, v: datetime | None) -> datetime | None:
-        if v is not None and v.date() > date.today():
+        if v is not None and v.date() > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
         return v
 
@@ -126,7 +127,7 @@ class BulkSaleRequest(BaseModel):
     @field_validator("period_date")
     @classmethod
     def period_date_not_future(cls, v: date) -> date:
-        if v > date.today():
+        if v > today_ar():
             raise ValueError("period_date cannot be in the future.")
         return v
 
@@ -158,7 +159,7 @@ class ManualBatchSaleRequest(BaseModel):
     @field_validator("transaction_date")
     @classmethod
     def transaction_date_not_future(cls, v: datetime) -> datetime:
-        if v.date() > date.today():
+        if v.date() > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
         return v
 
@@ -257,7 +258,7 @@ class CreateExpenseRequest(BaseModel):
     @field_validator("expense_date")
     @classmethod
     def expense_date_not_future(cls, v: datetime) -> datetime:
-        if v.date() > date.today():
+        if v.date() > today_ar():
             raise ValueError("expense_date cannot be in the future.")
         return v
 
@@ -281,7 +282,7 @@ class ProfitWithdrawalRequest(BaseModel):
     @field_validator("withdrawal_date")
     @classmethod
     def withdrawal_date_not_future(cls, v: datetime) -> datetime:
-        if v.date() > date.today():
+        if v.date() > today_ar():
             raise ValueError("withdrawal_date cannot be in the future.")
         return v
 
@@ -302,7 +303,7 @@ class UpdateExpenseRequest(BaseModel):
     @field_validator("expense_date")
     @classmethod
     def expense_date_not_future(cls, v: datetime | None) -> datetime | None:
-        if v is not None and v.date() > date.today():
+        if v is not None and v.date() > today_ar():
             raise ValueError("expense_date cannot be in the future.")
         return v
 

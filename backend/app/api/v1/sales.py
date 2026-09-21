@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +21,9 @@ from app.application.services.customer_sentinel import (
     resolve_or_create_local_sentinel,
 )
 from app.application.services.idempotency import claim_idempotency_key
-from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation_after_commit,
+)
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.product import Product
@@ -208,6 +210,7 @@ async def count_sales(
 )
 async def bulk_create_sales(
     body: BulkSaleRequest,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
     # products/others/suppliers (ver create_product).
@@ -270,7 +273,9 @@ async def bulk_create_sales(
     # product_id no-opean. Ya validado arriba: el descuento no puede dejar stock negativo.
     for e in saved:
         await stock_service.decrement_for_sale(e, session)
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sales_bulk_created")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sales_bulk_created", background
+    )
     return saved
 
 
@@ -282,6 +287,7 @@ async def bulk_create_sales(
 )
 async def create_manual_batch_sale(
     body: ManualBatchSaleRequest,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
     # products/others/suppliers (ver create_product).
@@ -349,14 +355,12 @@ async def create_manual_batch_sale(
             raise HTTPException(
                 status_code=400, detail=f"Producto {item.product_id} no encontrado."
             )
-        # stock_units es NOT NULL (default 0): validar siempre.
+        # stock_units es NOT NULL (default 0): validar siempre. Se levanta la excepción
+        # de dominio (y no un HTTPException suelto) para que este rechazo salga por el
+        # mismo handler que el resto: mismo `code` estructurado, mismo shape de cuerpo.
         if product.stock_units < item.quantity:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Stock insuficiente para «{product.name}»: "
-                    f"disponible {product.stock_units}, pedís {item.quantity}."
-                ),
+            raise stock_service.InsufficientStockError(
+                item.product_id, product.stock_units, item.quantity, product.name
             )
 
     repo = SaleRepository(session)
@@ -370,6 +374,10 @@ async def create_manual_batch_sale(
                 tenant_id=tenant.tenant_id,
                 amount=amount,
                 quantity=item.quantity,
+                # El precio REALMENTE vendido de esta línea. Se recibía y se descartaba:
+                # sin él, `amount / quantity` no lo recupera (la política prohíbe esa
+                # división) y un descuento por línea queda irrecuperable.
+                unit_price=item.unit_price,
                 transaction_date=body.transaction_date,
                 payment_method=body.payment_method,
                 product_id=item.product_id,
@@ -395,7 +403,9 @@ async def create_manual_batch_sale(
         saved.append(entry)
         total += amount
 
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_batch_created")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sale_batch_created", background
+    )
     return ManualBatchSaleResponse(
         sale_group_id=group_id,
         sales=[SaleEntryResponse.model_validate(s) for s in saved],
@@ -411,6 +421,7 @@ async def create_manual_batch_sale(
 )
 async def create_sale(
     body: CreateSaleRequest,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     _: User = Depends(require_role("OWNER", "ADMIN")),
     _sub_guard: None = Depends(require_active_subscription),
@@ -435,6 +446,9 @@ async def create_sale(
         tenant_id=tenant.tenant_id,
         amount=body.amount,
         quantity=body.quantity,
+        # Se aceptaba en el request y nunca se seteaba. Nullable: si el cliente no lo
+        # informa queda None, que es la verdad (nunca se deriva de amount/quantity).
+        unit_price=body.unit_price,
         transaction_date=body.transaction_date,
         payment_method=body.payment_method,
         product_id=body.product_id,
@@ -453,7 +467,9 @@ async def create_sale(
     # que no puede dejar stock negativo. Sin product_id → no-op. El import histórico NO
     # pasa por acá.
     await stock_service.decrement_for_sale(saved, session)
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_created")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sale_entry_created", background
+    )
     return saved
 
 
@@ -474,6 +490,7 @@ async def get_sale(
 async def update_sale(
     sale_id: UUID,
     body: UpdateSaleRequest,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
@@ -566,13 +583,16 @@ async def update_sale(
         before=before,
         after=_sale_snapshot(saved),
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_updated")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sale_entry_updated", background
+    )
     return saved
 
 
 @router.delete("/{sale_id}", response_model=MessageResponse, summary="Delete a sale entry")
 async def delete_sale(
     sale_id: UUID,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
@@ -597,5 +617,7 @@ async def delete_sale(
         before=before,
         after=_sale_snapshot(entry),
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_deleted")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sale_entry_deleted", background
+    )
     return MessageResponse(message="Sale entry voided.")

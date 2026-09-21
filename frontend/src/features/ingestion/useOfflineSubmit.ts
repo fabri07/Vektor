@@ -12,7 +12,9 @@ import { expensesService, type CreateExpensePayload } from "@/services/expenses.
 import { productsService, type CreateProductPayload } from "@/services/products.service";
 import { purchasesService, type ManualPurchasePayload } from "@/services/purchases.service";
 import {
+  isFailed,
   useOfflineQueueStore,
+  type QueuedItem,
   type QueuedKind,
 } from "@/stores/offlineQueueStore";
 
@@ -108,9 +110,18 @@ function errorMessage(e: unknown): string {
   return "Error desconocido";
 }
 
-/** Cantidad de cargas pendientes de sincronizar (para el badge del launcher). */
+/** Cantidad de cargas en la cola — pendientes y fallidas (para el badge del launcher). */
 export function useOfflineQueueCount(): number {
   return useOfflineQueueStore((s) => s.items.length);
+}
+
+/**
+ * Cargas que agotaron los reintentos y esperan una decisión humana. Se cuentan
+ * aparte porque no son "está tardando": son operaciones que el usuario dio por
+ * guardadas y el servidor rechazó.
+ */
+export function useOfflineFailedCount(): number {
+  return useOfflineQueueStore((s) => s.items.filter(isFailed).length);
 }
 
 /** Estado de conexión reactivo (SSR-safe: arranca online y se corrige al montar). */
@@ -140,6 +151,18 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
   const queryClient = useQueryClient();
   const flushingRef = useRef(false);
 
+  // Tope de reintentos SIN pérdida: al alcanzarlo el item pasa a FAILED y deja de
+  // reintentarse, pero sigue en la cola. Borrarlo acá era perder una operación que el
+  // usuario ya dio por guardada.
+  const markWithCap = useCallback((item: QueuedItem, e: unknown) => {
+    const store = useOfflineQueueStore.getState();
+    if (item.attempts + 1 >= MAX_FLUSH_ATTEMPTS) {
+      store.markPermanentlyFailed(item.id, errorMessage(e));
+    } else {
+      store.markFailed(item.id, errorMessage(e));
+    }
+  }, []);
+
   const flush = useCallback(async () => {
     if (flushingRef.current) return;
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
@@ -148,6 +171,9 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
     flushingRef.current = true;
     try {
       for (const item of [...items]) {
+        // Un item en estado terminal dejó de reintentarse, pero sigue en la cola:
+        // saltearlo es lo que evita el loop infinito sin perder la operación.
+        if (isFailed(item)) continue;
         try {
           await postByKind(item.kind, item.payload, item.id);
           useOfflineQueueStore.getState().remove(item.id);
@@ -163,30 +189,23 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
           } else if (isClientError(e)) {
             // 4xx permanente (payload inválido, stock insuficiente al sincronizar,
             // proveedor borrado, etc.): reintentar el mismo payload no lo arregla.
-            // NO borrar en silencio — las operaciones transaccionales (sale_batch /
-            // purchase) pueden 400 legítimamente y el usuario creyó que estaban
-            // guardadas. Marcar como fallida (queda visible en el badge con su
-            // lastError) y recién descartarla tras MAX_FLUSH_ATTEMPTS.
-            if (item.attempts + 1 >= MAX_FLUSH_ATTEMPTS) {
-              useOfflineQueueStore.getState().remove(item.id);
-            } else {
-              useOfflineQueueStore.getState().markFailed(item.id, errorMessage(e));
-            }
+            // NUNCA se borra — las operaciones transaccionales (sale_batch / purchase)
+            // pueden 400 legítimamente y el usuario creyó que estaban guardadas. Queda
+            // visible con su lastError y, al llegar al tope, en estado terminal FAILED
+            // esperando una decisión humana (reintentar o descartar).
+            markWithCap(item, e);
           } else {
             // 5xx u otro error transitorio del servidor: reintentar con tope. Al alcanzar
-            // MAX_FLUSH_ATTEMPTS se descarta (evita el poison-item que se reintenta para siempre).
-            if (item.attempts + 1 >= MAX_FLUSH_ATTEMPTS) {
-              useOfflineQueueStore.getState().remove(item.id);
-            } else {
-              useOfflineQueueStore.getState().markFailed(item.id, errorMessage(e));
-            }
+            // MAX_FLUSH_ATTEMPTS frena en FAILED (evita el poison-item que se reintenta
+            // para siempre) pero NO se borra.
+            markWithCap(item, e);
           }
         }
       }
     } finally {
       flushingRef.current = false;
     }
-  }, [queryClient]);
+  }, [queryClient, markWithCap]);
 
   const submit = useCallback(
     async <K extends QueuedKind>(

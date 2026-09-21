@@ -235,9 +235,19 @@ def create_app() -> FastAPI:
             available=exc.available,
             requested=exc.requested,
         )
+        # `detail` sigue siendo el texto de siempre (lo leen clientes que ya existen);
+        # `code` es el agregado. El flush de la cola offline necesita distinguir ESTE
+        # 400 de cualquier otro para decidir si reintenta capturando la discrepancia,
+        # y hacerlo por el texto del mensaje se rompería con cualquier cambio de copy.
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content={"detail": exc.user_message},
+            content={
+                "detail": exc.user_message,
+                "code": exc.CODE,
+                "product_id": str(exc.product_id),
+                "available": exc.available,
+                "requested": exc.requested,
+            },
         )
 
     @app.exception_handler(SaleProductNotFoundError)
