@@ -29,6 +29,7 @@ from app.persistence.models.field_definitions import (
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.google_mcp_connection import GoogleMcpConnection
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
+from app.persistence.models.idempotency import IdempotencyRecord
 from app.persistence.models.import_attempt import ImportAttempt, ImportOutbox
 from app.persistence.models.ingestion_schema_decision import IngestionSchemaDecision
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
@@ -94,6 +95,7 @@ __all__ = [
     "BusinessHeuristicOverride",
     "AgentConversationContext",
     "PendingAction",
+    "IdempotencyRecord",
     "ImportAttempt",
     "ImportOutbox",
     "OperationFingerprint",

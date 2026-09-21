@@ -5,7 +5,16 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +29,13 @@ from app.application.services import maintenance_lock_service, stock_service
 from app.application.services.customer_sentinel import (
     resolve_or_create_local_sentinel,
 )
-from app.application.services.idempotency import claim_idempotency_key
+from app.application.services.idempotency import (
+    ClaveReusada,
+    Repeticion,
+    claim_idempotency_key,
+    claim_idempotent_request,
+    record_idempotent_response,
+)
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
@@ -291,6 +306,7 @@ async def bulk_create_sales(
 async def create_manual_batch_sale(
     body: ManualBatchSaleRequest,
     background: BackgroundTasks,
+    response: Response,
     tenant: Tenant = Depends(get_current_tenant),
     # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
     # products/others/suppliers (ver create_product).
@@ -311,10 +327,35 @@ async def create_manual_batch_sale(
     orden estable (por id) para evitar deadlocks y sobreventa entre requests
     simultáneos. Rechaza productos duplicados en el mismo carrito.
     """
-    if idempotency_key is not None and not await claim_idempotency_key(
-        session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE_BATCH"
-    ):
-        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    # Idempotencia RECUPERABLE (B2): a diferencia del resto de las rutas, un reintento
+    # con la misma clave y el mismo contenido devuelve el ticket ORIGINAL en vez de un
+    # 409 vacío. Es lo que resuelve "el servidor guardó la venta y nunca recibí la
+    # respuesta": sin esto el cajero no sabe si cobró, y reimprimir obligaría a volver
+    # a vender. Una clave reusada con OTRO contenido no es un reintento y se rechaza
+    # explícitamente, en vez de tragarse la segunda venta en silencio.
+    if idempotency_key is not None:
+        reclamo = await claim_idempotent_request(
+            session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE_BATCH", body
+        )
+        if isinstance(reclamo, ClaveReusada):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IDEMPOTENCY_KEY_REUSED",
+                    "message": (
+                        "Esa clave de idempotencia ya se usó para otra operación. "
+                        "Un reintento tiene que mandar exactamente el mismo contenido."
+                    ),
+                },
+            )
+        if isinstance(reclamo, Repeticion):
+            if reclamo.respuesta is None:
+                # La ejecución original no dejó snapshot: no se puede devolver el
+                # ticket, y fabricarlo sería peor que decir que ya existe.
+                raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+            # 200 y no 201: el recurso ya existía, esta petición no creó nada.
+            response.status_code = status.HTTP_200_OK
+            return ManualBatchSaleResponse.model_validate(reclamo.respuesta)
 
     # F3 review final: el advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila
     # (acá abajo) — si no, deadlockea AB-BA contra el exclusive del script de dedup. Antes
@@ -409,11 +450,19 @@ async def create_manual_batch_sale(
     trigger_score_recalculation_after_commit(
         session, str(tenant.tenant_id), "sale_batch_created", background
     )
-    return ManualBatchSaleResponse(
+    resultado = ManualBatchSaleResponse(
         sale_group_id=group_id,
         sales=[SaleEntryResponse.model_validate(s) for s in saved],
         total=float(total),
     )
+    # En la MISMA transacción que las ventas: si se guardara después, una caída en el
+    # medio dejaría un ticket persistido cuyo reintento no puede recuperar nada — el
+    # mismo agujero, corrido un paso.
+    if idempotency_key is not None:
+        await record_idempotent_response(
+            session, tenant.tenant_id, idempotency_key, resultado, status.HTTP_201_CREATED
+        )
+    return resultado
 
 
 @router.post(
