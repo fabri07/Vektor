@@ -10,13 +10,43 @@ blanco, y que el detector de ráfaga del lector se dispara a los ~30 ms.
 
 ---
 
-## Prerrequisito — el andamio (no es del usuario)
+## La URL
 
-No existe nada de esto todavía: `frontend/public/` sólo tiene `doodles` y
-`screenshots`, no hay `manifest.json`, ni `sw.js`, ni ruta `/pos`, ni CSS de
-impresión.
+**https://vektor-git-spike-pos-b1-fabri07s-projects.vercel.app/pos-spike/index.html**
 
-El andamio mínimo para que las mediciones sean válidas:
+Es la *alias de rama*, no la del deployment: sobrevive a un push nuevo, así
+que el ícono de la app instalada no queda apuntando a un deployment muerto.
+Usar siempre `/pos-spike/index.html`, nunca `/pos-spike/`.
+
+⚠️ **El preview pide login de Vercel.** El proyecto tiene `ssoProtection` en
+`all_except_custom_domains`, verificado: la URL contesta 302 a
+`vercel.com/sso-api`. Consecuencias:
+
+- La primera vez hay que entrar con la cuenta de Vercel. Es la del dueño, así
+  que no es un bloqueo, es un paso más.
+- **No rompe la prueba del paso 1.** Una vez cacheada la página, la navegación
+  la contesta el service worker sin salir a la red, y el SSO no interviene con
+  la PC reiniciada y sin conexión.
+- El único punto donde sí puede molestar es la instalación del service worker.
+  Por eso el install exige sólo `index.html` y tolera que fallen los íconos, y
+  si aun así falla la página lo dice con todas las letras en vez de mostrar
+  `redundant`.
+
+**Antes de cortar la red, confirmar en pantalla las dos líneas que importan:**
+`Service worker: activated` y `¿Controla esta página?: sí`. Si el service
+worker no llegó a `activated`, cortar la red no mide nada.
+
+⚠️ **No se debe pushear más a `spike/pos-b1` una vez instalada la app.** El
+service worker es cache-first: un cambio en la página con `sw.js` byte a byte
+igual no se detecta como actualización y el cache sigue sirviendo lo viejo.
+La constante `CACHE` del service worker lleva el aviso.
+
+---
+
+## Prerrequisito — el andamio (ya está hecho)
+
+Vive en la rama `spike/pos-b1` (salida de `main`, para no arrastrar B0 ni B2),
+bajo `frontend/public/pos-spike/`. Contiene:
 
 - `/pos-spike` estática (HTML a mano, sin RSC — el bypass de RSC es de B7).
 - `manifest.json` + `sw.js` escrito a mano (cache-first de sus propios
