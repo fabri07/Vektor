@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="es-AR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spike B1 — Véktor POS</title>
+<link rel="manifest" href="/pos-spike/manifest.json">
+<link rel="icon" href="/pos-spike/icon-192.png">
+<meta name="theme-color" content="#0a0e14">
+<style>
+  :root { --fondo:#0a0e14; --panel:#131a24; --borde:#243040; --texto:#e2e8f0; --tenue:#8da0b8; --ok:#4ade80; --mal:#f87171; --duda:#fbbf24; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--fondo); color:var(--texto);
+         font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0 0 10px; color:var(--tenue); text-transform:uppercase; letter-spacing:.06em; }
+  .sub { color:var(--tenue); font-size:13px; margin:0 0 16px; word-break:break-all; }
+  section { background:var(--panel); border:1px solid var(--borde); border-radius:10px; padding:14px; margin-bottom:12px; }
+  .fila { display:flex; justify-content:space-between; gap:12px; padding:5px 0; border-bottom:1px solid #1b2430; }
+  .fila:last-child { border-bottom:0; }
+  .fila b { font-weight:600; }
+  .val { font-family:ui-monospace,"SF Mono",Menlo,monospace; text-align:right; word-break:break-all; }
+  .ok{color:var(--ok)} .mal{color:var(--mal)} .duda{color:var(--duda)}
+  button { background:#1d5cff; color:#fff; border:0; border-radius:8px; padding:11px 15px;
+           font-size:15px; font-weight:600; cursor:pointer; margin:4px 4px 0 0; }
+  button.sec { background:#243040; }
+  button:active { transform:translateY(1px); }
+  table { width:100%; border-collapse:collapse; font-family:ui-monospace,Menlo,monospace; font-size:13px; }
+  th,td { text-align:left; padding:5px 6px; border-bottom:1px solid #1b2430; }
+  th { color:var(--tenue); font-weight:600; }
+  .vacio { color:var(--tenue); font-style:italic; padding:8px 0; }
+  .aviso { font-size:13px; color:var(--tenue); margin-top:10px; }
+  #zona-scan { border:2px dashed var(--borde); border-radius:8px; padding:18px; text-align:center;
+               color:var(--tenue); margin-bottom:10px; }
+  #zona-scan.activa { border-color:var(--ok); color:var(--ok); }
+
+  /* El ticket sólo existe en el papel. */
+  #ticket { display:none; }
+  @media print {
+    body > *:not(#ticket) { display:none !important; }
+    #ticket { display:block !important; }
+    html, body { background:#fff; color:#000; margin:0; padding:0; }
+    #ticket pre { font-family:"Courier New",Courier,monospace; color:#000; margin:0;
+                  white-space:pre; page-break-inside:avoid; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Spike B1 — arranque sin red</h1>
+<p class="sub">Andamio descartable. Origen: <span id="origen"></span></p>
+
+<section>
+  <h2>1 · Arranque</h2>
+  <div class="fila"><b>Service worker</b><span class="val" id="sw-estado">…</span></div>
+  <div class="fila"><b>¿Controla esta página?</b><span class="val" id="sw-controla">…</span></div>
+  <div class="fila"><b>¿Se sirvió sin tocar la red?</b><span class="val" id="desde-cache">…</span></div>
+  <div class="fila"><b>Carga de la página</b><span class="val" id="arranque-ms">…</span></div>
+  <div class="fila"><b>Visita número</b><span class="val" id="visitas">…</span></div>
+  <div class="fila"><b>¿Hay red de verdad?</b><span class="val" id="sonda-red">sin probar</span></div>
+  <button class="sec" id="btn-sonda">Probar la red</button>
+  <p class="aviso">La carga de la página no incluye el arranque de Chrome. El número que
+    importa para un cajero es el del cronómetro: del doble clic al primer escaneo.</p>
+</section>
+
+<section>
+  <h2>2 · Persistencia</h2>
+  <div class="fila"><b>storage.persisted()</b><span class="val" id="persist-estado">…</span></div>
+  <div class="fila"><b>Uso / cuota</b><span class="val" id="persist-cuota">…</span></div>
+  <button id="btn-persistir">Pedir persistencia</button>
+  <p class="aviso">Chrome la concede por heurística: app instalada, favorito, uso alto.
+    Si queda en <b>false</b> aun instalada, el navegador puede evacuar ventas ya cobradas.</p>
+</section>
+
+<section>
+  <h2>3 · Datos guardados <span id="ventas-total"></span></h2>
+  <div id="ventas-lista"></div>
+  <button id="btn-venta">Guardar venta falsa</button>
+  <p class="aviso">Anotá un id antes de reiniciar. Si después del reinicio sin red
+    esta lista está vacía, IndexedDB no sobrevivió y eso cambia B7.</p>
+</section>
+
+<section>
+  <h2>4 · Impresión</h2>
+  <p class="aviso" style="margin-top:0">Cada variante imprime su nombre en el papel: sin eso
+    quedan tres tickets iguales y ninguno dice cuál fue.</p>
+  <button data-variante="a">A · 80mm × 297mm</button>
+  <button data-variante="b">B · 72mm × 200mm</button>
+  <button data-variante="c">C · sin size</button>
+  <p class="aviso">Por cada una: ¿entra a lo ancho?, ¿sale una hoja en blanco de más?,
+    ¿el margen izquierdo quedó corrido?, ¿cortó el papel?, ¿abrió el cajón?
+    Repetir con el papel del driver en «rollo/continuo» y en «80 × 297».</p>
+</section>
+
+<section>
+  <h2>5 · Lector</h2>
+  <div id="zona-scan">Hacé clic acá y escaneá un producto</div>
+  <div class="fila"><b>Sufijo detectado</b><span class="val" id="scan-sufijo">—</span></div>
+  <div class="fila"><b>ms entre teclas (mín / mediana / máx)</b><span class="val" id="scan-ms">—</span></div>
+  <div id="scan-log"></div>
+  <p class="aviso">La mediana es el número que parametriza el detector de ráfaga de B13.
+    Hoy el plan supone ~30 ms.</p>
+</section>
+
+<style id="regla-de-pagina"></style>
+<div id="ticket"><pre id="ticket-cuerpo"></pre></div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const pintar = (el, texto, clase) => { el.textContent = texto; el.className = "val" + (clase ? " " + clase : ""); };
+
+  $("origen").textContent = location.href;
+
+  /* ---------- IndexedDB ---------- */
+  const DB = "pos-spike", VENTAS = "ventas", META = "meta";
+  function abrirDb() {
+    return new Promise((ok, mal) => {
+      const req = indexedDB.open(DB, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(VENTAS)) db.createObjectStore(VENTAS, { keyPath: "id" });
+        if (!db.objectStoreNames.contains(META)) db.createObjectStore(META);
+      };
+      req.onsuccess = () => ok(req.result);
+      req.onerror = () => mal(req.error);
+    });
+  }
+  function conStore(store, modo, fn) {
+    return abrirDb().then((db) => new Promise((ok, mal) => {
+      const tx = db.transaction(store, modo);
+      const pedido = fn(tx.objectStore(store));
+      tx.oncomplete = () => ok(pedido && pedido.result);
+      tx.onerror = () => mal(tx.error);
+    }));
+  }
+
+  function renderVentas(filas) {
+    const cont = $("ventas-lista");
+    $("ventas-total").textContent = filas.length ? "(" + filas.length + ")" : "";
+    if (!filas.length) {
+      cont.innerHTML = '<p class="vacio">Nada guardado todavía.</p>';
+      return;
+    }
+    filas.sort((a, b) => b.creadaEn.localeCompare(a.creadaEn));
+    cont.innerHTML =
+      "<table><tr><th>id</th><th>guardada</th><th>total</th></tr>" +
+      filas.map((f) => "<tr><td>" + f.id + "</td><td>" +
+        f.creadaEn.replace("T", " ").slice(0, 19) + "</td><td>$" + f.total + "</td></tr>").join("") +
+      "</table>";
+  }
+
+  conStore(VENTAS, "readonly", (s) => s.getAll())
+    .then(renderVentas)
+    .catch((e) => { $("ventas-lista").innerHTML = '<p class="vacio mal">IndexedDB falló: ' + e + "</p>"; });
+
+  $("btn-venta").addEventListener("click", () => {
+    const venta = {
+      id: "V-" + Math.random().toString(36).slice(2, 7).toUpperCase(),
+      creadaEn: new Date().toISOString(),
+      total: (Math.floor(Math.random() * 9000) + 1000).toString(),
+    };
+    conStore(VENTAS, "readwrite", (s) => s.put(venta))
+      .then(() => conStore(VENTAS, "readonly", (s) => s.getAll()))
+      .then(renderVentas);
+  });
+
+  /* Contador de visitas: confirma que es el mismo perfil de Chrome, no uno nuevo. */
+  conStore(META, "readwrite", (s) => {
+    const req = s.get("visitas");
+    req.onsuccess = () => s.put((req.result || 0) + 1, "visitas");
+    return req;
+  })
+    .then(() => conStore(META, "readonly", (s) => s.get("visitas")))
+    .then((n) => pintar($("visitas"), String(n)))
+    .catch(() => pintar($("visitas"), "—"));
+
+  /* ---------- Service worker ---------- */
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/pos-spike/sw.js", { scope: "/pos-spike/" })
+      .then((reg) => {
+        const leer = () => {
+          const sw = reg.active || reg.waiting || reg.installing;
+          const estado = sw ? sw.state : "sin worker";
+          pintar($("sw-estado"), estado, estado === "activated" ? "ok" : "duda");
+        };
+        leer();
+        reg.addEventListener("updatefound", () => {
+          const nuevo = reg.installing;
+          if (nuevo) nuevo.addEventListener("statechange", leer);
+        });
+      })
+      .catch((e) => pintar($("sw-estado"), "falló: " + e.message, "mal"));
+
+    const ctrl = navigator.serviceWorker.controller;
+    pintar($("sw-controla"), ctrl ? "sí" : "no (recargá una vez)", ctrl ? "ok" : "duda");
+  } else {
+    pintar($("sw-estado"), "no soportado", "mal");
+  }
+
+  /* `duration` es loadEventEnd - startTime, y este script corre DURANTE el
+     parseo: ahí loadEventEnd todavía vale 0 y la resta da 0 ms. Hay que
+     esperar a `load` o el spike reporta un arranque instantáneo que no
+     existe. `transferSize` sí está disponible desde el principio. */
+  function medirCarga() {
+    const nav = performance.getEntriesByType("navigation")[0];
+    if (!nav) return;
+    pintar($("arranque-ms"), Math.round(nav.duration) + " ms");
+    // transferSize 0 = no viajó nada por la red: lo sirvió el cache del SW.
+    const sinRed = nav.transferSize === 0;
+    pintar($("desde-cache"), sinRed ? "sí — transferSize 0" : "no — " + nav.transferSize + " bytes",
+           sinRed ? "ok" : "duda");
+  }
+  if (document.readyState === "complete") medirCarga();
+  else window.addEventListener("load", () => setTimeout(medirCarga, 0));
+
+  /* Sonda de red REAL: va a una ruta fuera del scope del SW, así que no la
+     puede contestar el cache. `navigator.onLine` da true con un router sin
+     internet, por eso no se usa. */
+  $("btn-sonda").addEventListener("click", () => {
+    pintar($("sonda-red"), "probando…");
+    fetch(location.origin + "/?sonda=" + Date.now(), { cache: "no-store" })
+      .then((r) => pintar($("sonda-red"), "HAY RED (" + r.status + ")", "mal"))
+      .catch(() => pintar($("sonda-red"), "SIN RED — correcto para el paso 1", "ok"));
+  });
+
+  /* ---------- Persistencia ---------- */
+  function leerPersistencia() {
+    if (!navigator.storage || !navigator.storage.persisted) {
+      pintar($("persist-estado"), "API no soportada", "mal");
+      return;
+    }
+    navigator.storage.persisted().then((v) =>
+      pintar($("persist-estado"), String(v), v ? "ok" : "mal"));
+    if (navigator.storage.estimate) {
+      navigator.storage.estimate().then((e) => {
+        const mb = (n) => (n / 1048576).toFixed(1) + " MB";
+        pintar($("persist-cuota"), mb(e.usage || 0) + " / " + mb(e.quota || 0));
+      });
+    }
+  }
+  leerPersistencia();
+  $("btn-persistir").addEventListener("click", () => {
+    if (!navigator.storage || !navigator.storage.persist) return;
+    navigator.storage.persist().then(leerPersistencia);
+  });
+
+  /* ---------- Impresión ---------- */
+  function regla(n) {
+    const arriba = [], abajo = new Array(n).fill(" ");
+    for (let i = 1; i <= n; i++) arriba.push(i % 10 === 0 ? "|" : String(i % 10));
+    for (let i = 10; i <= n; i += 10) {
+      const s = String(i);
+      for (let k = 0; k < s.length; k++) abajo[i - s.length + k] = s[k];
+    }
+    return arriba.join("") + "\n" + abajo.join("");
+  }
+
+  const VARIANTES = {
+    a: { nombre: "A · size: 80mm 297mm", css: "@page { size: 80mm 297mm; margin: 0; }" },
+    b: { nombre: "B · size: 72mm 200mm", css: "@page { size: 72mm 200mm; margin: 0; }" },
+    c: { nombre: "C · sin size (manda el driver)", css: "@page { margin: 0; }" },
+  };
+
+  function cuerpoTicket(nombreVariante) {
+    const sep = "".padEnd(48, "-");
+    const linea = (izq, der) => izq.padEnd(48 - der.length, " ") + der;
+    return [
+      "[" + nombreVariante + "]",
+      "|<- columna 0 (si esta barra no toca el borde,",
+      "    el driver impone su propio margen)",
+      "",
+      sep,
+      "   VEKTOR - COMPROBANTE NO FISCAL",
+      sep,
+      "",
+      "REGLA DE ANCHO - contá hasta donde entra:",
+      regla(48),
+      "",
+      sep,
+      linea("ARTICULO", "CANT   IMPORTE"),
+      linea("Coca 500ml", "2   2400.00"),
+      linea("Alfajor jorgito", "3    900.00"),
+      linea("Yerba 1kg", "1   3200.00"),
+      sep,
+      linea("SUBTOTAL", "6500.00"),
+      linea("DESCUENTO", "-1.00"),
+      linea("TOTAL", "6499.00"),
+      sep,
+      linea("Efectivo", "5000.00"),
+      linea("Debito", "1499.00"),
+      sep,
+      linea("Recibido", "10000.00"),
+      linea("Vuelto", "3501.00"),
+      "",
+      "Cajero: spike",
+      new Date().toLocaleString("es-AR"),
+      "",
+      sep,
+      "-- fin del ticket --",
+      "si no ves esta linea, el corte se",
+      "comio el final: hace falta margen",
+      "inferior.",
+      "",
+      "",
+    ].join("\n");
+  }
+
+  document.querySelectorAll("button[data-variante]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const v = VARIANTES[btn.dataset.variante];
+      $("regla-de-pagina").textContent = v.css;
+      $("ticket-cuerpo").textContent = cuerpoTicket(v.nombre);
+      // Lectura que fuerza el recálculo de estilo y layout ANTES del diálogo.
+      // Con requestAnimationFrame esto dependía de que la pestaña estuviera
+      // visible — rAF no corre en segundo plano y la impresión no salía.
+      void $("ticket").offsetHeight;
+      window.print();
+    });
+  });
+
+  /* ---------- Lector ---------- */
+  const zona = $("zona-scan");
+  let capturando = false, rafaga = [], ultimo = 0, reloj = null;
+  const historial = [];
+
+  zona.addEventListener("click", () => {
+    capturando = !capturando;
+    zona.classList.toggle("activa", capturando);
+    zona.textContent = capturando
+      ? "Capturando — escaneá ahora (clic para parar)"
+      : "Hacé clic acá y escaneá un producto";
+  });
+
+  function cerrarRafaga() {
+    if (rafaga.length < 2) { rafaga = []; return; }
+    const deltas = rafaga.slice(1).map((r) => r.delta).sort((a, b) => a - b);
+    const med = deltas[Math.floor(deltas.length / 2)];
+    const ultimaTecla = rafaga[rafaga.length - 1].key;
+    const sufijo = ultimaTecla === "Enter" ? "Enter" : ultimaTecla === "Tab" ? "Tab" : "ninguno";
+    const texto = rafaga.filter((r) => r.key.length === 1).map((r) => r.key).join("");
+
+    pintar($("scan-sufijo"), sufijo, sufijo === "ninguno" ? "duda" : "ok");
+    pintar($("scan-ms"), deltas[0] + " / " + med + " / " + deltas[deltas.length - 1]);
+
+    historial.unshift({ texto: texto, teclas: rafaga.length, sufijo: sufijo, med: med });
+    historial.splice(5);
+    $("scan-log").innerHTML =
+      "<table><tr><th>leído</th><th>teclas</th><th>sufijo</th><th>mediana</th></tr>" +
+      historial.map((h) => "<tr><td>" + (h.texto || "—") + "</td><td>" + h.teclas +
+        "</td><td>" + h.sufijo + "</td><td>" + h.med + " ms</td></tr>").join("") +
+      "</table>";
+    rafaga = [];
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (!capturando) return;
+    const a = document.activeElement;
+    if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) return;
+    if (e.key === "Tab") e.preventDefault();
+    const t = performance.now();
+    rafaga.push({ key: e.key, delta: ultimo ? Math.round((t - ultimo) * 10) / 10 : 0 });
+    ultimo = t;
+    clearTimeout(reloj);
+    reloj = setTimeout(cerrarRafaga, 300);
+  });
+})();
+</script>
+</body>
+</html>
