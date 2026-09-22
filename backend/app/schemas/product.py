@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, computed_field, field_validator
 
 from app.domain.business_time import now_ar_naive
 from app.domain.product import effective_threshold
+from app.domain.sale_unit import formatear_cantidad
 
 # F6-B4: umbral "próximo a vencer" (días). Documentado y único.
 EXPIRY_WARNING_DAYS = 30
@@ -37,6 +38,10 @@ class ProductResponse(BaseModel):
     list_price_ars: Decimal | None = None
     unit_cost_ars: Decimal | None
     stock_units: int
+    # `stock_units` cuenta UNIDADES BASE (gramos, mililitros, unidades). Estos
+    # dos dicen cómo leerlo; con el default unit/1 nada del histórico cambia.
+    sale_unit: str = "unit"
+    base_units_per_sale_unit: int = 1
     # NULL = no configurado (usa DEFAULT_LOW_STOCK_THRESHOLD_UNITS); 0 = umbral explícito
     low_stock_threshold_units: int | None
     is_active: bool
@@ -63,6 +68,18 @@ class ProductResponse(BaseModel):
         if self.unit_cost_ars is None or self.sale_price_ars == 0:
             return None
         return float((self.sale_price_ars - self.unit_cost_ars) / self.sale_price_ars * 100)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def stock_display(self) -> str:
+        """El stock como lo lee un humano: '0,750 kg', no '750'.
+
+        Existe porque `stock_units` en unidades base es correcto para la
+        aritmética y peligroso en una pantalla: 5 kg se guardan como 5000 y
+        alguien los lee como cinco mil kilos. Toda superficie que MUESTRE stock
+        tiene que usar esto en vez del entero crudo.
+        """
+        return formatear_cantidad(self.stock_units, self.sale_unit, self.base_units_per_sale_unit)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

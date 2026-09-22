@@ -43,6 +43,11 @@ from app.persistence.models.operation_identity import (
 )
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.pipeline_event import PipelineEvent
+from app.persistence.models.pos_operation import (
+    PosOperation,
+    PosOperationLine,
+    PosTender,
+)
 from app.persistence.models.product import Product
 from app.persistence.models.product_supplier_link import ProductSupplierLink
 from app.persistence.models.purchase_order import PurchaseOrder
@@ -96,6 +101,9 @@ __all__ = [
     "AgentConversationContext",
     "PendingAction",
     "IdempotencyRecord",
+    "PosOperation",
+    "PosOperationLine",
+    "PosTender",
     "ImportAttempt",
     "ImportOutbox",
     "OperationFingerprint",

@@ -29,6 +29,7 @@ from app.api.v1 import (
     oauth,
     onboarding,
     others,
+    pos,
     products,
     purchases,
     sales,
@@ -60,6 +61,7 @@ api_router.include_router(
     business_profiles.router, prefix="/business-profiles", tags=["Business Profiles"]
 )
 api_router.include_router(sales.router, prefix="/sales", tags=["Sales"])
+api_router.include_router(pos.router, prefix="/pos", tags=["POS"])
 api_router.include_router(expenses.router, prefix="/expenses", tags=["Expenses"])
 api_router.include_router(cash_closes.router, prefix="/cash-closes", tags=["Cash Closes"])
 api_router.include_router(products.router, prefix="/products", tags=["Products"])

@@ -81,6 +81,23 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     list_price_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     unit_cost_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # `stock_units` y `quantity` cuentan UNIDADES BASE. Con el default
+    # `unit`/1 ningún número del histórico cambia y no hay migración de tipo
+    # sobre dos columnas que atraviesan el motor de inventario, el chequeo de
+    # integridad y la reconciliación temporal — que sería el mayor riesgo de
+    # regresión del programa.
+    #
+    # Riesgo declarado: un producto en gramos tendrá `stock_units = 5000` para
+    # 5 kg. Toda superficie que MUESTRE stock a un humano tiene que leer
+    # `sale_unit`; lo que hace aritmética no cambia, porque todo es consistente
+    # en unidad base.
+    sale_unit: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="unit", default="unit"
+    )
+    #: Cuántas unidades base entran en una unidad de venta (1000 g = 1 kg).
+    base_units_per_sale_unit: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1", default=1
+    )
     stock_units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     low_stock_threshold_units: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None
@@ -109,6 +126,12 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_products_provenance"),
+        CheckConstraint(
+            "sale_unit IN ('unit','gram','milliliter')", name="ck_products_sale_unit"
+        ),
+        CheckConstraint(
+            "base_units_per_sale_unit > 0", name="ck_products_base_units_positivo"
+        ),
         CheckConstraint(
             "deactivation_reason IS NULL OR deactivation_reason IN ("
             "'USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID','REREAD_UNDO')",

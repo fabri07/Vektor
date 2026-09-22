@@ -38,6 +38,11 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
         ("POST", f"{P}/sales"),
         ("POST", f"{P}/sales/bulk"),
         ("POST", f"{P}/sales/manual-batch"),
+        # B3. Es un alta, así que entra bajo la misma política que el resto.
+        # **B14 la va a SACAR de acá**: la decisión de producto es que la caja
+        # siempre vende y lo que se bloquea por suscripción vencida es el
+        # análisis. Hasta entonces sigue la regla vigente, no la futura.
+        ("POST", f"{P}/pos/operations"),
         ("POST", f"{P}/expenses"),
         ("POST", f"{P}/products"),
         ("POST", f"{P}/products/custom-categories"),

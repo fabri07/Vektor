@@ -52,6 +52,13 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
         index=True,
     )
+    # Quién cobró. NULL en todo lo histórico y en lo importado, a propósito:
+    # no se puede saber, y rellenarlo con el dueño convertiría "no consta" en
+    # una afirmación falsa sobre quién estaba en la caja. SET NULL porque dar de
+    # baja a un empleado no puede borrar sus ventas.
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
+    )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # Precio REALMENTE vendido en esta transacción (NULL = no informado). No es
