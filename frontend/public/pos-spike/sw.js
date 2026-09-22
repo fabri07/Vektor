@@ -8,14 +8,18 @@
 // re-chequea sw.js en cada navegación, pero si sólo cambia la página y este
 // archivo queda byte a byte igual, no hay actualización y el cache sigue
 // sirviendo la versión vieja para siempre.
-const CACHE = "pos-spike-v3";
+const CACHE = "pos-spike-v4";
 
 // `/pos-spike/` (sin index.html) NO se cachea a propósito: Next sirve los
 // archivos de `public/` por su nombre exacto, así que esa ruta no existe y
 // pedirla metería un 404 en el cache que después se sirve como si fuera la
 // página. La URL canónica es siempre /pos-spike/index.html.
-const RECURSOS = [
-  "/pos-spike/index.html",
+// Se separan porque `addAll` es todo-o-nada: un ícono que falla tumbaba la
+// instalación entera y dejaba el spike muerto. Importa acá y no en
+// producción porque el preview está detrás del SSO de Vercel, y cualquier
+// recurso que conteste un 302 al login en vez de un 200 rompería el install.
+const ESENCIALES = ["/pos-spike/index.html"];
+const OPCIONALES = [
   "/pos-spike/manifest.json",
   "/pos-spike/icon-192.png",
   "/pos-spike/icon-512.png",
@@ -25,7 +29,12 @@ self.addEventListener("install", (evento) => {
   evento.waitUntil(
     caches
       .open(CACHE)
-      .then((cache) => cache.addAll(RECURSOS))
+      .then(async (cache) => {
+        // Sin la página no hay nada que medir: si esto falla, que falle.
+        await cache.addAll(ESENCIALES);
+        // Los íconos y el manifest sólo afectan la instalación como app.
+        await Promise.allSettled(OPCIONALES.map((u) => cache.add(u)));
+      })
       .then(() => self.skipWaiting())
   );
 });

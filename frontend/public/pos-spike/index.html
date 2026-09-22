@@ -183,7 +183,13 @@
         const leer = () => {
           const sw = reg.active || reg.waiting || reg.installing;
           const estado = sw ? sw.state : "sin worker";
-          pintar($("sw-estado"), estado, estado === "activated" ? "ok" : "duda");
+          if (estado === "redundant") {
+            // Pasa cuando el install falló. Detrás del SSO de Vercel la causa
+            // típica es que un recurso contestó el 302 al login en vez del 200.
+            pintar($("sw-estado"), "redundant — el install falló (¿SSO?)", "mal");
+          } else {
+            pintar($("sw-estado"), estado, estado === "activated" ? "ok" : "duda");
+          }
         };
         leer();
         reg.addEventListener("updatefound", () => {
