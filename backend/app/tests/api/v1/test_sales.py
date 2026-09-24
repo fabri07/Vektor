@@ -479,7 +479,16 @@ class TestLiveSaleStockDecrement:
         payload = {**_SINGLE_PAYLOAD, "quantity": 5, "product_id": pid}
         resp = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
         assert resp.status_code == 400, resp.text
-        assert "stock suficiente" in resp.json()["detail"].lower()
+        body = resp.json()
+        # El código estructurado es el contrato: el flush de la cola offline tiene que
+        # distinguir ESTE 400 de cualquier otro sin leer el texto del mensaje.
+        assert body["code"] == "INSUFFICIENT_STOCK"
+        assert body["available"] == 2
+        assert body["requested"] == 5
+        assert body["product_id"] == pid
+        # El mensaje nombra el producto y conserva la frase accionable.
+        assert "Vino" in body["detail"]
+        assert "Cargá primero" in body["detail"]
         assert await self._stock(client, auth_headers, pid) == 2  # intacto
         # No quedó ninguna venta de ese producto.
         sales = (await client.get("/api/v1/sales", headers=auth_headers)).json()
@@ -685,3 +694,191 @@ class TestSalesSubscriptionGate:
             f"/api/v1/sales/{sale_id}", json={"notes": "corregido"}, headers=auth_headers
         )
         assert resp.status_code == 200, resp.text  # corregir NUNCA se bloquea
+
+
+class TestB0DeudaPrevia:
+    """Arreglos que el POS necesita antes de poder cobrar nada.
+
+    Los cuatro tienen el mismo origen: comportamientos que para una carga manual
+    de a una eran tolerables y para una caja son pérdida de plata o de trazabilidad.
+    """
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    # ── unit_price se persiste ────────────────────────────────────────────────
+
+    async def test_create_sale_persiste_unit_price(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Se aceptaba en el request y se descartaba al construir la entidad.
+
+        Sin él un descuento es irrecuperable: `amount / quantity` no lo reconstruye
+        (la política prohíbe esa división, porque en una fila histórica no se sabe si
+        el monto es unitario o total).
+        """
+        payload = {**_SINGLE_PAYLOAD, "amount": "1500.00", "quantity": 3, "unit_price": "500.00"}
+        resp = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        assert float(resp.json()["unit_price"]) == 500.00
+
+    async def test_editar_solo_las_notas_no_borra_unit_price(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """El formulario de /sales manda SIEMPRE amount y quantity, aunque no cambien.
+
+        Comparar por presencia en el cuerpo borraba el unitario en la primera edición
+        de cualquier otro campo.
+        """
+        payload = {**_SINGLE_PAYLOAD, "amount": "1500.00", "quantity": 3, "unit_price": "500.00"}
+        creada = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        sale_id = creada.json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}",
+            json={"amount": 1500, "quantity": 3, "notes": "cliente habitual"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert float(resp.json()["unit_price"]) == 500.00
+
+    async def test_cambiar_el_monto_sin_unitario_si_lo_borra(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        payload = {**_SINGLE_PAYLOAD, "amount": "1500.00", "quantity": 3, "unit_price": "500.00"}
+        creada = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        sale_id = creada.json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"amount": 1200, "quantity": 3}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["unit_price"] is None
+
+    async def test_create_sale_sin_unit_price_lo_deja_en_none(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """No informado es None, nunca un valor derivado: eso sería inventar el dato."""
+        resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["unit_price"] is None
+
+    async def test_manual_batch_persiste_unit_price_por_linea(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """manual-batch calculaba amount = unit_price * quantity y tiraba el unitario."""
+        pid = await _create_product(client, auth_headers, "Gaseosa", stock=10, price="700.00")
+        payload = {
+            "payment_method": "cash",
+            "transaction_date": _TODAY,
+            "items": [{"product_id": pid, "quantity": 2, "unit_price": "650.00"}],
+        }
+        resp = await client.post(
+            "/api/v1/sales/manual-batch", json=payload, headers=auth_headers
+        )
+        assert resp.status_code == 201, resp.text
+        linea = resp.json()["sales"][0]
+        # El unitario REALMENTE vendido (650) sobrevive aunque difiera del de lista (700).
+        assert float(linea["unit_price"]) == 650.00
+        assert float(linea["amount"]) == 1300.00
+
+    # ── el rechazo por stock lleva código estructurado en los dos caminos ─────
+
+    async def test_manual_batch_stock_insuficiente_trae_codigo_estructurado(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """manual-batch levantaba un HTTPException suelto: distinto shape que /sales.
+
+        El flush de la cola offline necesita reconocer ESTE 400 venga del camino que
+        venga, y no puede hacerlo leyendo el texto del mensaje.
+        """
+        pid = await _create_product(client, auth_headers, "Fernet", stock=1, price="9000.00")
+        payload = {
+            "payment_method": "cash",
+            "transaction_date": _TODAY,
+            "items": [{"product_id": pid, "quantity": 4, "unit_price": "9000.00"}],
+        }
+        resp = await client.post(
+            "/api/v1/sales/manual-batch", json=payload, headers=auth_headers
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["code"] == "INSUFFICIENT_STOCK"
+        assert body["available"] == 1
+        assert body["requested"] == 4
+        assert body["product_id"] == pid
+        assert "Fernet" in body["detail"]
+
+    # ── unit_price en la corrección: se asigna, o se limpia si quedó mintiendo ──
+
+    async def test_patch_asigna_unit_price_cuando_lo_informan(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """UpdateSaleRequest lo declaraba y update_sale nunca lo tocaba: 200 sin efecto."""
+        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sid}",
+            json={"amount": "800.00", "quantity": 2, "unit_price": "400.00"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert float(resp.json()["unit_price"]) == 400.00
+
+    async def test_patch_de_amount_sin_unit_price_lo_limpia(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Conservarlo dejaría 500 junto a amount=800 y quantity=2: el campo mentiría.
+
+        No se recalcula como amount/quantity — eso sería inventarlo, la misma división
+        que la política prohíbe en el resto del código. None es "no informado", que es
+        exactamente lo que se sabe después de la corrección.
+        """
+        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sid}", json={"amount": "800.00"}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["unit_price"] is None
+
+    async def test_patch_que_no_toca_monto_ni_cantidad_conserva_unit_price(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Cambiar la nota no invalida el precio al que se vendió."""
+        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sid}", json={"notes": "corregido"}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert float(resp.json()["unit_price"]) == 500.00
+
+    async def test_la_auditoria_registra_unit_price(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session
+    ) -> None:
+        """El campo existe para trazar el precio por línea; sin esto no deja rastro."""
+        from sqlalchemy import select
+
+        from app.persistence.models.audit import DecisionAuditLog
+
+        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
+        await client.patch(
+            f"/api/v1/sales/{sid}", json={"unit_price": "450.00"}, headers=auth_headers
+        )
+        filas = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "DATA_RECORD_UPDATED"
+                )
+            )
+        ).scalars().all()
+        datos = [
+            f.decision_data
+            for f in filas
+            if f.decision_data.get("after", {}).get("id") == sid
+        ]
+        assert datos, "no se auditó el update"
+        assert datos[-1]["before"]["unit_price"] == "500.00"
+        assert datos[-1]["after"]["unit_price"] == "450.00"

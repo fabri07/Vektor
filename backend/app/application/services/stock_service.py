@@ -55,9 +55,11 @@ LIVE_SALE_EVENT_CONFLICT = unique_violation_classifier(
 
 # Mensaje canónico de rechazo por stock insuficiente en una venta EN VIVO. Se muestra
 # TAL CUAL al usuario (chat vía user_message; endpoints REST vía handler global → 400).
+# La parte ACCIONABLE del mensaje: qué tiene que hacer el usuario. Va en todas las
+# variantes — decirle "no hay stock" sin decirle cómo arreglarlo no le sirve.
+INSUFFICIENT_STOCK_ACTION = "Cargá primero la compra o stock inicial de mercadería."
 INSUFFICIENT_STOCK_MESSAGE = (
-    "No hay stock suficiente para registrar esta venta. "
-    "Cargá primero la compra o stock inicial de mercadería."
+    f"No hay stock suficiente para registrar esta venta. {INSUFFICIENT_STOCK_ACTION}"
 )
 
 
@@ -72,11 +74,32 @@ class InsufficientStockError(Exception):
     persiste (el rollback de la transacción del request deshace cualquier SaleEntry).
     """
 
-    def __init__(self, product_id: uuid.UUID, available: int, requested: int) -> None:
+    #: Código estable del contrato HTTP. El flush de la cola offline necesita
+    #: distinguir ESTE 400 de cualquier otro (payload inválido, proveedor borrado)
+    #: para decidir si reintenta capturando la discrepancia; leer el texto del
+    #: mensaje para eso sería frágil y se rompería con cualquier cambio de copy.
+    CODE = "INSUFFICIENT_STOCK"
+
+    def __init__(
+        self,
+        product_id: uuid.UUID,
+        available: int,
+        requested: int,
+        product_name: str | None = None,
+    ) -> None:
         self.product_id = product_id
         self.available = available
         self.requested = requested
-        self.user_message = INSUFFICIENT_STOCK_MESSAGE
+        self.product_name = product_name
+        # Con el nombre a mano el mensaje dice de QUÉ producto se trata; sin él
+        # (caminos que no cargaron el producto) queda el genérico. La frase
+        # accionable va en los dos casos.
+        self.user_message = (
+            f"Stock insuficiente para «{product_name}»: disponible {available}, "
+            f"pedís {requested}. {INSUFFICIENT_STOCK_ACTION}"
+            if product_name
+            else INSUFFICIENT_STOCK_MESSAGE
+        )
         super().__init__(
             f"Stock insuficiente para {product_id}: disponible {available}, pedís {requested}."
         )
@@ -127,7 +150,7 @@ async def check_stock_available(
     if product is None:
         raise SaleProductNotFoundError(product_id)
     if product.stock_units < qty:
-        raise InsufficientStockError(product_id, product.stock_units, qty)
+        raise InsufficientStockError(product_id, product.stock_units, qty, product.name)
     return product
 
 

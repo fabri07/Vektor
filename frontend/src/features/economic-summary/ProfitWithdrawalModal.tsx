@@ -19,8 +19,13 @@ const PAYMENT_METHODS = ["cash", "transfer", "debit_card", "credit_card", "qr", 
   }),
 );
 
+// Fecha LOCAL, no `toISOString()`: esa es la fecha UTC, que entre las 21:00 y
+// la medianoche de Argentina ya es mañana — y el backend la rechaza por futura.
 function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
 /**

@@ -31,3 +31,17 @@ def now_ar_naive() -> datetime:
 
 def today_ar() -> date:
     return datetime.now(AR_TZ).date()
+
+
+def fecha_de_negocio(momento: datetime) -> date:
+    """El día de negocio (Argentina) de un instante que llega de un cliente.
+
+    Un datetime SIN zona es hora local tal como la tipeó el usuario: su fecha es
+    la que dice. Uno CON zona (p. ej. `...T00:30:00Z`) es un instante absoluto, y
+    su `.date()` en crudo es el día UTC: a las 21:30 de Argentina ya es mañana,
+    y el validador anti-futuro rechazaba una venta hecha hoy. Se lleva a hora
+    argentina antes de tomar la fecha.
+    """
+    if momento.tzinfo is None:
+        return momento.date()
+    return momento.astimezone(AR_TZ).date()

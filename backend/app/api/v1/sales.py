@@ -5,7 +5,16 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,10 +29,20 @@ from app.application.services import maintenance_lock_service, stock_service
 from app.application.services.customer_sentinel import (
     resolve_or_create_local_sentinel,
 )
-from app.application.services.idempotency import claim_idempotency_key
-from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.application.services.idempotency import (
+    ClaveReusada,
+    Repeticion,
+    claim_idempotency_key,
+    claim_idempotent_request,
+    legacy_idempotency_key_claimed,
+    record_idempotent_response,
+)
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation_after_commit,
+)
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.pos_operation import PosOperationLine
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
@@ -56,6 +75,9 @@ def _sale_snapshot(entry: SaleEntry) -> dict[str, object]:
         "id": str(entry.id),
         "amount": str(entry.amount),
         "quantity": entry.quantity,
+        # Sin esto, el campo que existe para trazar el precio por línea es invisible
+        # en el before/after de la auditoría: un cambio de precio no dejaría rastro.
+        "unit_price": str(entry.unit_price) if entry.unit_price is not None else None,
         "transaction_date": str(entry.transaction_date),
         "payment_method": entry.payment_method,
         "product_id": str(entry.product_id) if entry.product_id else None,
@@ -93,6 +115,39 @@ def _audit_data_change(
             created_at=datetime.now(UTC),
         )
     )
+
+
+async def _reject_if_belongs_to_pos_operation(
+    session: AsyncSession, tenant_id: UUID, sale_id: UUID
+) -> None:
+    """409 si la venta es una línea de una operación de caja.
+
+    Una línea de caja no se corrige ni se anula suelta: la operación tiene
+    pagos, vuelto y un reparto de descuento que suman sobre TODAS sus líneas.
+    Anular una sola dejaría un ticket a medio anular con sus pagos intactos,
+    que ningún arqueo cierra. Se anula la operación entera, por
+    ``POST /pos/operations/{id}/void``.
+    """
+    operation_id = (
+        await session.execute(
+            select(PosOperationLine.operation_id).where(
+                PosOperationLine.tenant_id == tenant_id,
+                PosOperationLine.sale_entry_id == sale_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if operation_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "BELONGS_TO_POS_OPERATION",
+                "operation_id": str(operation_id),
+                "message": (
+                    "Esta venta es parte de un ticket de caja. "
+                    "Para anularla hay que anular el ticket completo."
+                ),
+            },
+        )
 
 
 async def _resolve_sale_customer(
@@ -208,6 +263,7 @@ async def count_sales(
 )
 async def bulk_create_sales(
     body: BulkSaleRequest,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
     # products/others/suppliers (ver create_product).
@@ -270,7 +326,9 @@ async def bulk_create_sales(
     # product_id no-opean. Ya validado arriba: el descuento no puede dejar stock negativo.
     for e in saved:
         await stock_service.decrement_for_sale(e, session)
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sales_bulk_created")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sales_bulk_created", background
+    )
     return saved
 
 
@@ -282,6 +340,8 @@ async def bulk_create_sales(
 )
 async def create_manual_batch_sale(
     body: ManualBatchSaleRequest,
+    background: BackgroundTasks,
+    response: Response,
     tenant: Tenant = Depends(get_current_tenant),
     # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
     # products/others/suppliers (ver create_product).
@@ -302,10 +362,40 @@ async def create_manual_batch_sale(
     orden estable (por id) para evitar deadlocks y sobreventa entre requests
     simultáneos. Rechaza productos duplicados en el mismo carrito.
     """
-    if idempotency_key is not None and not await claim_idempotency_key(
-        session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE_BATCH"
-    ):
-        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    # Idempotencia RECUPERABLE (B2): a diferencia del resto de las rutas, un reintento
+    # con la misma clave y el mismo contenido devuelve el ticket ORIGINAL en vez de un
+    # 409 vacío. Es lo que resuelve "el servidor guardó la venta y nunca recibí la
+    # respuesta": sin esto el cajero no sabe si cobró, y reimprimir obligaría a volver
+    # a vender. Una clave reusada con OTRO contenido no es un reintento y se rechaza
+    # explícitamente, en vez de tragarse la segunda venta en silencio.
+    if idempotency_key is not None:
+        # Una venta encolada ANTES del deploy de B2 reclamó su clave en la tabla
+        # vieja. Si su reintento llega ahora, la tabla nueva no la conoce: sin esto
+        # se crearía de nuevo. Se contesta lo mismo que antes del deploy.
+        if await legacy_idempotency_key_claimed(session, tenant.tenant_id, idempotency_key):
+            raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+        reclamo = await claim_idempotent_request(
+            session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE_BATCH", body
+        )
+        if isinstance(reclamo, ClaveReusada):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IDEMPOTENCY_KEY_REUSED",
+                    "message": (
+                        "Esa clave de idempotencia ya se usó para otra operación. "
+                        "Un reintento tiene que mandar exactamente el mismo contenido."
+                    ),
+                },
+            )
+        if isinstance(reclamo, Repeticion):
+            if reclamo.respuesta is None:
+                # La ejecución original no dejó snapshot: no se puede devolver el
+                # ticket, y fabricarlo sería peor que decir que ya existe.
+                raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+            # 200 y no 201: el recurso ya existía, esta petición no creó nada.
+            response.status_code = status.HTTP_200_OK
+            return ManualBatchSaleResponse.model_validate(reclamo.respuesta)
 
     # F3 review final: el advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila
     # (acá abajo) — si no, deadlockea AB-BA contra el exclusive del script de dedup. Antes
@@ -349,14 +439,12 @@ async def create_manual_batch_sale(
             raise HTTPException(
                 status_code=400, detail=f"Producto {item.product_id} no encontrado."
             )
-        # stock_units es NOT NULL (default 0): validar siempre.
+        # stock_units es NOT NULL (default 0): validar siempre. Se levanta la excepción
+        # de dominio (y no un HTTPException suelto) para que este rechazo salga por el
+        # mismo handler que el resto: mismo `code` estructurado, mismo shape de cuerpo.
         if product.stock_units < item.quantity:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Stock insuficiente para «{product.name}»: "
-                    f"disponible {product.stock_units}, pedís {item.quantity}."
-                ),
+            raise stock_service.InsufficientStockError(
+                item.product_id, product.stock_units, item.quantity, product.name
             )
 
     repo = SaleRepository(session)
@@ -370,6 +458,10 @@ async def create_manual_batch_sale(
                 tenant_id=tenant.tenant_id,
                 amount=amount,
                 quantity=item.quantity,
+                # El precio REALMENTE vendido de esta línea. Se recibía y se descartaba:
+                # sin él, `amount / quantity` no lo recupera (la política prohíbe esa
+                # división) y un descuento por línea queda irrecuperable.
+                unit_price=item.unit_price,
                 transaction_date=body.transaction_date,
                 payment_method=body.payment_method,
                 product_id=item.product_id,
@@ -395,12 +487,22 @@ async def create_manual_batch_sale(
         saved.append(entry)
         total += amount
 
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_batch_created")
-    return ManualBatchSaleResponse(
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sale_batch_created", background
+    )
+    resultado = ManualBatchSaleResponse(
         sale_group_id=group_id,
         sales=[SaleEntryResponse.model_validate(s) for s in saved],
         total=float(total),
     )
+    # En la MISMA transacción que las ventas: si se guardara después, una caída en el
+    # medio dejaría un ticket persistido cuyo reintento no puede recuperar nada — el
+    # mismo agujero, corrido un paso.
+    if idempotency_key is not None:
+        await record_idempotent_response(
+            session, tenant.tenant_id, idempotency_key, resultado, status.HTTP_201_CREATED
+        )
+    return resultado
 
 
 @router.post(
@@ -411,6 +513,7 @@ async def create_manual_batch_sale(
 )
 async def create_sale(
     body: CreateSaleRequest,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     _: User = Depends(require_role("OWNER", "ADMIN")),
     _sub_guard: None = Depends(require_active_subscription),
@@ -435,6 +538,9 @@ async def create_sale(
         tenant_id=tenant.tenant_id,
         amount=body.amount,
         quantity=body.quantity,
+        # Se aceptaba en el request y nunca se seteaba. Nullable: si el cliente no lo
+        # informa queda None, que es la verdad (nunca se deriva de amount/quantity).
+        unit_price=body.unit_price,
         transaction_date=body.transaction_date,
         payment_method=body.payment_method,
         product_id=body.product_id,
@@ -453,7 +559,9 @@ async def create_sale(
     # que no puede dejar stock negativo. Sin product_id → no-op. El import histórico NO
     # pasa por acá.
     await stock_service.decrement_for_sale(saved, session)
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_created")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sale_entry_created", background
+    )
     return saved
 
 
@@ -474,6 +582,7 @@ async def get_sale(
 async def update_sale(
     sale_id: UUID,
     body: UpdateSaleRequest,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
@@ -482,6 +591,7 @@ async def update_sale(
     entry = await repo.get_by_id(sale_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found.")
+    await _reject_if_belongs_to_pos_operation(session, tenant.tenant_id, entry.id)
     before = _sale_snapshot(entry)
     _prev_product_id = entry.product_id
     _prev_quantity = entry.quantity
@@ -502,10 +612,25 @@ async def update_sale(
             _new_quantity,
             session,
         )
+    # Qué cambia DE VERDAD, no qué vino en el cuerpo: el formulario de /sales
+    # manda siempre `amount` y `quantity`, y comparar por presencia borraba el
+    # `unit_price` al editar sólo las notas o el medio de pago.
+    _amount_changed = body.amount is not None and body.amount != entry.amount
+    _quantity_changed = body.quantity is not None and body.quantity != entry.quantity
     if body.amount is not None:
         entry.amount = body.amount
     if body.quantity is not None:
         entry.quantity = body.quantity
+    # `unit_price` se aceptaba en el request y se descartaba. Ahora que el alta lo
+    # persiste, dejarlo intacto al corregir `amount`/`quantity` deja un número que
+    # CONTRADICE la fila en el campo cuya razón de ser es decir a qué precio se
+    # vendió. Si no lo informan y cambió alguno de los dos, se limpia: "no informado"
+    # es la verdad; recalcularlo como amount/quantity sería inventarlo (misma política
+    # que prohíbe esa división en el resto del código).
+    if body.unit_price is not None:
+        entry.unit_price = body.unit_price
+    elif _amount_changed or _quantity_changed:
+        entry.unit_price = None
     if body.transaction_date is not None:
         entry.transaction_date = body.transaction_date
     if body.payment_method is not None:
@@ -566,13 +691,16 @@ async def update_sale(
         before=before,
         after=_sale_snapshot(saved),
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_updated")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sale_entry_updated", background
+    )
     return saved
 
 
 @router.delete("/{sale_id}", response_model=MessageResponse, summary="Delete a sale entry")
 async def delete_sale(
     sale_id: UUID,
+    background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
@@ -581,6 +709,7 @@ async def delete_sale(
     entry = await repo.get_by_id(sale_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found.")
+    await _reject_if_belongs_to_pos_operation(session, tenant.tenant_id, entry.id)
     before = _sale_snapshot(entry)
     entry.voided_at = datetime.now(UTC)
     entry.void_reason = VOID_REASON_MANUAL
@@ -597,5 +726,7 @@ async def delete_sale(
         before=before,
         after=_sale_snapshot(entry),
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "sale_entry_deleted")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "sale_entry_deleted", background
+    )
     return MessageResponse(message="Sale entry voided.")

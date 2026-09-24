@@ -239,7 +239,7 @@ async def test_chat_register_sale_insufficient_stock_raises_and_creates_nothing(
         execute_pending_action,
     )
     from app.application.services.stock_service import (  # noqa: PLC0415
-        INSUFFICIENT_STOCK_MESSAGE,
+        INSUFFICIENT_STOCK_ACTION,
     )
     from app.persistence.models.pending_action import PendingAction  # noqa: PLC0415
 
@@ -266,7 +266,12 @@ async def test_chat_register_sale_insufficient_stock_raises_and_creates_nothing(
     with pytest.raises(InsufficientStockError) as exc:
         async with db_session.begin_nested():
             await execute_pending_action(action, db_session)
-    assert exc.value.user_message == INSUFFICIENT_STOCK_MESSAGE
+    # El mensaje del chat nombra el producto y la cantidad, y conserva la frase
+    # accionable: decir "no hay stock" sin decir qué hacer no le sirve al usuario.
+    assert INSUFFICIENT_STOCK_ACTION in exc.value.user_message
+    assert product.name in exc.value.user_message
+    assert exc.value.available == 2
+    assert exc.value.requested == 5
 
     remaining = (
         await db_session.execute(
