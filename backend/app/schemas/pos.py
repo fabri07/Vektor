@@ -61,6 +61,11 @@ class PosOperationRequest(BaseModel):
         return v
 
 
+class PosVoidRequest(BaseModel):
+    #: Por qué se anula. Queda en la auditoría; no cambia qué se revierte.
+    reason: str | None = Field(default=None, max_length=300)
+
+
 class PosOperationLineResponse(BaseModel):
     model_config = {"from_attributes": True}
 

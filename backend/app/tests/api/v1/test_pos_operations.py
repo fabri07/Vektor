@@ -263,3 +263,179 @@ class TestTrazabilidadDelCajero:
         resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
         assert resp.status_code == 201, resp.text
         assert resp.json()["created_by_user_id"] is not None
+
+
+async def _cobrar(
+    client: AsyncClient, headers: dict[str, Any], productos: list[tuple[str, int]], total: str
+) -> dict[str, Any]:
+    cuerpo = _operacion(
+        [{"product_id": p, "quantity": q} for p, q in productos],
+        [{"payment_method": "cash", "amount_ars": total}],
+    )
+    resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=headers)
+    assert resp.status_code == 201, resp.text
+    return dict(resp.json())
+
+
+async def _stock(client: AsyncClient, headers: dict[str, Any], product_id: str) -> int:
+    resp = await client.get(f"/api/v1/products/{product_id}", headers=headers)
+    return int(resp.json()["stock_units"])
+
+
+class TestAnulacionDeTicket:
+    """B10. Se anula el ticket entero, nunca una línea suelta."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    async def test_anular_revierte_todas_las_lineas_y_el_stock(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        p2 = await _crear_producto(client, auth_headers, "Fideos", stock=5, price="500.00")
+        op = await _cobrar(client, auth_headers, [(p1, 2), (p2, 3)], "3500.00")
+        assert await _stock(client, auth_headers, p1) == 8
+        assert await _stock(client, auth_headers, p2) == 2
+
+        resp = await client.post(
+            f"/api/v1/pos/operations/{op['id']}/void",
+            json={"reason": "el cliente se arrepintió"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "VOIDED"
+        # Los pagos se conservan: el ticket anulado se reimprime y se audita.
+        assert len(resp.json()["tenders"]) == 1
+
+        assert await _stock(client, auth_headers, p1) == 10
+        assert await _stock(client, auth_headers, p2) == 5
+        for linea in op["lines"]:
+            venta = await client.get(
+                f"/api/v1/sales/{linea['sale_entry_id']}", headers=auth_headers
+            )
+            assert venta.status_code == 404, "la venta tendría que estar anulada"
+
+    async def test_anular_dos_veces_no_repone_stock_dos_veces(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        op = await _cobrar(client, auth_headers, [(p1, 4)], "4000.00")
+        url = f"/api/v1/pos/operations/{op['id']}/void"
+
+        primera = await client.post(url, headers=auth_headers)
+        segunda = await client.post(url, headers=auth_headers)
+        assert primera.status_code == segunda.status_code == 200
+        assert segunda.json()["status"] == "VOIDED"
+        assert await _stock(client, auth_headers, p1) == 10
+
+    async def test_deja_auditoria_de_la_operacion(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: Any
+    ) -> None:
+        from sqlalchemy import select
+
+        from app.persistence.models.audit import DecisionAuditLog
+
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        op = await _cobrar(client, auth_headers, [(p1, 1)], "1000.00")
+        await client.post(
+            f"/api/v1/pos/operations/{op['id']}/void",
+            json={"reason": "error de carga"},
+            headers=auth_headers,
+        )
+        await client.post(f"/api/v1/pos/operations/{op['id']}/void", headers=auth_headers)
+
+        filas = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "POS_OPERATION_VOIDED"
+                )
+            )
+        ).scalars().all()
+        # Una sola: el segundo void no hizo nada y no lo registra como si hubiera hecho.
+        assert len(filas) == 1
+        datos = filas[0].decision_data
+        assert datos["record_id"] == op["id"]
+        assert datos["reason"] == "error de carga"
+        assert datos["sale_entry_ids"] == [op["lines"][0]["sale_entry_id"]]
+
+    async def test_otro_tenant_no_puede_anular(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        second_auth_headers: dict[str, Any],
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        op = await _cobrar(client, auth_headers, [(p1, 1)], "1000.00")
+        resp = await client.post(
+            f"/api/v1/pos/operations/{op['id']}/void", headers=second_auth_headers
+        )
+        assert resp.status_code == 404
+        assert await _stock(client, auth_headers, p1) == 9
+
+    async def test_un_viewer_no_puede_anular(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        viewer_headers: dict[str, Any],
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        op = await _cobrar(client, auth_headers, [(p1, 1)], "1000.00")
+        resp = await client.post(f"/api/v1/pos/operations/{op['id']}/void", headers=viewer_headers)
+        assert resp.status_code == 403
+        assert await _stock(client, auth_headers, p1) == 9
+
+
+class TestLineaDeCajaNoSeTocaSuelta:
+    """El PATCH/DELETE genérico no puede dejar un ticket a medio anular."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    async def test_delete_de_una_linea_de_caja_da_409(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        op = await _cobrar(client, auth_headers, [(p1, 2)], "2000.00")
+        venta_id = op["lines"][0]["sale_entry_id"]
+
+        resp = await client.delete(f"/api/v1/sales/{venta_id}", headers=auth_headers)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "BELONGS_TO_POS_OPERATION"
+        assert resp.json()["detail"]["operation_id"] == op["id"]
+        # Nada cambió: la venta sigue viva y el stock no se repuso.
+        assert (
+            await client.get(f"/api/v1/sales/{venta_id}", headers=auth_headers)
+        ).status_code == 200
+        assert await _stock(client, auth_headers, p1) == 8
+
+    async def test_patch_de_una_linea_de_caja_da_409(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        op = await _cobrar(client, auth_headers, [(p1, 2)], "2000.00")
+        venta_id = op["lines"][0]["sale_entry_id"]
+
+        resp = await client.patch(
+            f"/api/v1/sales/{venta_id}", json={"amount": "1.00"}, headers=auth_headers
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "BELONGS_TO_POS_OPERATION"
+        venta = await client.get(f"/api/v1/sales/{venta_id}", headers=auth_headers)
+        assert float(venta.json()["amount"]) == 2000.0
+
+    async def test_una_venta_comun_se_sigue_borrando(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """El guard no puede alcanzar a lo que no es caja."""
+        resp = await client.post(
+            "/api/v1/sales",
+            json={"amount": "500.00", "transaction_date": _FECHA, "payment_method": "cash"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201, resp.text
+        borrado = await client.delete(f"/api/v1/sales/{resp.json()['id']}", headers=auth_headers)
+        assert borrado.status_code == 200, borrado.text

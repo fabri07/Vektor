@@ -13,6 +13,7 @@ sería un carrito que puede cobrar de menos.
 """
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
@@ -23,13 +24,19 @@ from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
     require_active_subscription,
+    require_modify_access,
     require_role,
 )
 
 # Se importa la resolución de cliente en vez de repetirla: la regla de que el
 # fiado exige un cliente real (nunca el centinela "Local") es una regla de
 # plata, y dos copias que pueden divergir es peor que este acoplamiento.
-from app.api.v1.sales import FIADO_PAYMENT_METHOD, _resolve_sale_customer
+from app.api.v1.sales import (
+    FIADO_PAYMENT_METHOD,
+    _audit_data_change,
+    _resolve_sale_customer,
+    _sale_snapshot,
+)
 from app.application.services import stock_service
 from app.application.services.idempotency import (
     ClaveReusada,
@@ -58,14 +65,44 @@ from app.persistence.models import (
     Tenant,
     User,
 )
+from app.persistence.models.audit import DecisionAuditLog
 from app.schemas.pos import (
     PosOperationRequest,
     PosOperationResponse,
+    PosVoidRequest,
 )
 
 router = APIRouter()
 
 _ACCION_IDEMPOTENTE = "IDEMPOTENT_POST_POS_OPERATION"
+
+#: Motivo de anulación de las `SaleEntry` de un ticket anulado desde la caja.
+#: Ya está en el CHECK `ck_sales_entries_void_reason`: no hace falta migrar.
+_VOID_REASON_TICKET = "USER_CANCELLED"
+
+
+def _a_respuesta(
+    operacion: PosOperation,
+    lineas: list[PosOperationLine],
+    tenders: list[PosTender],
+) -> PosOperationResponse:
+    return PosOperationResponse(
+        id=operacion.id,
+        client_operation_id=operacion.client_operation_id,
+        created_by_user_id=operacion.created_by_user_id,
+        customer_id=operacion.customer_id,
+        operation_date=operacion.operation_date,
+        subtotal_ars=operacion.subtotal_ars,
+        discount_ars=operacion.discount_ars,
+        total_ars=operacion.total_ars,
+        cash_received_ars=operacion.cash_received_ars,
+        cash_change_ars=operacion.cash_change_ars,
+        status=operacion.status,
+        notes=operacion.notes,
+        # Pydantic valida cada ORM contra su schema por `from_attributes`.
+        lines=lineas,
+        tenders=tenders,
+    )
 
 
 @router.post(
@@ -277,23 +314,7 @@ async def create_pos_operation(
         session, str(tenant.tenant_id), "pos_operation_created", background
     )
 
-    resultado = PosOperationResponse(
-        id=operacion.id,
-        client_operation_id=operacion.client_operation_id,
-        created_by_user_id=operacion.created_by_user_id,
-        customer_id=operacion.customer_id,
-        operation_date=operacion.operation_date,
-        subtotal_ars=operacion.subtotal_ars,
-        discount_ars=operacion.discount_ars,
-        total_ars=operacion.total_ars,
-        cash_received_ars=operacion.cash_received_ars,
-        cash_change_ars=operacion.cash_change_ars,
-        status=operacion.status,
-        notes=operacion.notes,
-        # Pydantic valida cada ORM contra su schema por `from_attributes`.
-        lines=lineas,
-        tenders=tenders,
-    )
+    resultado = _a_respuesta(operacion, lineas, tenders)
     # En la MISMA transacción que la venta: guardarla después dejaría un ticket
     # persistido cuyo reintento no recupera nada.
     await record_idempotent_response(
@@ -304,3 +325,140 @@ async def create_pos_operation(
         status.HTTP_201_CREATED,
     )
     return resultado
+
+
+@router.post(
+    "/operations/{operation_id}/void",
+    response_model=PosOperationResponse,
+    summary="Anular un ticket de caja completo (líneas + stock, atómico)",
+)
+async def void_pos_operation(
+    operation_id: uuid.UUID,
+    background: BackgroundTasks,
+    body: PosVoidRequest | None = None,
+    tenant: Tenant = Depends(get_current_tenant),
+    # Mismo gate que anular una venta suelta: OWNER o sub-cuenta con permiso, y
+    # ventana de PIN. B5 lo pasa a un permiso de cajero explícito.
+    user: User = Depends(require_modify_access),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosOperationResponse:
+    """Anula el ticket ENTERO: todas sus ventas y el stock que descontaron.
+
+    Sólo existe la anulación completa (decisión de v1: sin devolución parcial).
+    Es la ÚNICA vía para anular una línea de caja — el PATCH/DELETE genérico de
+    ventas devuelve 409 ``BELONGS_TO_POS_OPERATION`` — porque una línea suelta
+    anulada deja un ticket con sus pagos intactos que ningún arqueo cierra.
+
+    Idempotente: anular un ticket ya anulado devuelve el mismo ticket y no
+    revierte stock de nuevo. Los `pos_tenders` NO se borran: el ticket anulado
+    tiene que poder reimprimirse y auditarse, y `status = VOIDED` es lo que dice
+    que esos pagos ya no cuentan.
+    """
+    # El advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila.
+    await acquire_write_lock_shared(session, tenant.tenant_id)
+
+    # FOR UPDATE sobre la cabecera: dos anulaciones simultáneas del mismo ticket
+    # se serializan acá, y la segunda ve `VOIDED` y no revierte stock otra vez.
+    operacion = (
+        await session.execute(
+            select(PosOperation)
+            .where(
+                PosOperation.id == operation_id,
+                PosOperation.tenant_id == tenant.tenant_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if operacion is None:
+        raise HTTPException(status_code=404, detail="Operación no encontrada.")
+
+    lineas = list(
+        (
+            await session.execute(
+                select(PosOperationLine)
+                .where(PosOperationLine.operation_id == operacion.id)
+                .order_by(PosOperationLine.position)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    tenders = list(
+        (
+            await session.execute(
+                select(PosTender)
+                .where(PosTender.operation_id == operacion.id)
+                .order_by(PosTender.position)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    if operacion.status == "VOIDED":
+        return _a_respuesta(operacion, lineas, tenders)
+
+    ahora = datetime.now(UTC)
+    ventas_anuladas: list[str] = []
+    for linea in lineas:
+        if linea.sale_entry_id is None:
+            continue
+        venta = (
+            await session.execute(
+                select(SaleEntry).where(
+                    SaleEntry.id == linea.sale_entry_id,
+                    SaleEntry.tenant_id == tenant.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if venta is None or venta.voided_at is not None:
+            continue
+        antes = _sale_snapshot(venta)
+        venta.voided_at = ahora
+        venta.void_reason = _VOID_REASON_TICKET
+        await session.flush()
+        # Reversa incremental del movimiento de esta línea (`void_movement`). Nunca
+        # un `setattr` sobre stock_units: el stock no es la suma del ledger.
+        await stock_service.revert_sale_stock(venta.id, tenant.tenant_id, session)
+        # Mismo registro que una anulación suelta, para que el historial de la
+        # venta cuente lo mismo venga de donde venga.
+        _audit_data_change(
+            session,
+            tenant_id=tenant.tenant_id,
+            user_id=user.user_id,
+            decision_type="DATA_RECORD_VOIDED",
+            before=antes,
+            after=_sale_snapshot(venta),
+        )
+        ventas_anuladas.append(str(venta.id))
+
+    operacion.status = "VOIDED"
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant.tenant_id,
+            decision_type="POS_OPERATION_VOIDED",
+            decision_data={
+                "record_type": "pos_operation",
+                "record_id": str(operacion.id),
+                "client_operation_id": operacion.client_operation_id,
+                "total_ars": str(operacion.total_ars),
+                "sale_entry_ids": ventas_anuladas,
+                "tenders": [
+                    {"payment_method": t.payment_method, "amount_ars": str(t.amount_ars)}
+                    for t in tenders
+                ],
+                "reason": body.reason if body is not None else None,
+                "source": "pos",
+            },
+            triggered_by="ui:pos",
+            actor_user_id=user.user_id,
+            context={"endpoint": "pos.void"},
+            created_at=ahora,
+        )
+    )
+    await session.flush()
+
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "pos_operation_voided", background
+    )
+    return _a_respuesta(operacion, lineas, tenders)

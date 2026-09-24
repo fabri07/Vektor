@@ -41,6 +41,7 @@ from app.application.services.score_trigger_service import (
 )
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.pos_operation import PosOperationLine
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
@@ -113,6 +114,39 @@ def _audit_data_change(
             created_at=datetime.now(UTC),
         )
     )
+
+
+async def _reject_if_belongs_to_pos_operation(
+    session: AsyncSession, tenant_id: UUID, sale_id: UUID
+) -> None:
+    """409 si la venta es una línea de una operación de caja.
+
+    Una línea de caja no se corrige ni se anula suelta: la operación tiene
+    pagos, vuelto y un reparto de descuento que suman sobre TODAS sus líneas.
+    Anular una sola dejaría un ticket a medio anular con sus pagos intactos,
+    que ningún arqueo cierra. Se anula la operación entera, por
+    ``POST /pos/operations/{id}/void``.
+    """
+    operation_id = (
+        await session.execute(
+            select(PosOperationLine.operation_id).where(
+                PosOperationLine.tenant_id == tenant_id,
+                PosOperationLine.sale_entry_id == sale_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if operation_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "BELONGS_TO_POS_OPERATION",
+                "operation_id": str(operation_id),
+                "message": (
+                    "Esta venta es parte de un ticket de caja. "
+                    "Para anularla hay que anular el ticket completo."
+                ),
+            },
+        )
 
 
 async def _resolve_sale_customer(
@@ -551,6 +585,7 @@ async def update_sale(
     entry = await repo.get_by_id(sale_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found.")
+    await _reject_if_belongs_to_pos_operation(session, tenant.tenant_id, entry.id)
     before = _sale_snapshot(entry)
     _prev_product_id = entry.product_id
     _prev_quantity = entry.quantity
@@ -663,6 +698,7 @@ async def delete_sale(
     entry = await repo.get_by_id(sale_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sale not found.")
+    await _reject_if_belongs_to_pos_operation(session, tenant.tenant_id, entry.id)
     before = _sale_snapshot(entry)
     entry.voided_at = datetime.now(UTC)
     entry.void_reason = VOID_REASON_MANUAL
