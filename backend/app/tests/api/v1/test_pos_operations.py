@@ -439,3 +439,85 @@ class TestLineaDeCajaNoSeTocaSuelta:
         assert resp.status_code == 201, resp.text
         borrado = await client.delete(f"/api/v1/sales/{resp.json()['id']}", headers=auth_headers)
         assert borrado.status_code == 200, borrado.text
+
+
+class TestArreglosDelReview:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    async def test_un_producto_sin_precio_no_se_cobra(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: Any
+    ) -> None:
+        from decimal import Decimal
+
+        from app.persistence.models.product import Product
+
+        normal = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        sin_precio = await _crear_producto(client, auth_headers, "Incompleto", price="1.00")
+        # La API no deja crear un producto en $0: así nacen los que crea una compra
+        # importada (`build_incomplete_product`), que es el caso real.
+        prod = await db_session.get(Product, uuid.UUID(sin_precio))
+        prod.sale_price_ars = Decimal("0")
+        await db_session.flush()
+        cuerpo = _operacion(
+            [{"product_id": normal, "quantity": 1}, {"product_id": sin_precio, "quantity": 1}],
+            [{"payment_method": "cash", "amount_ars": "1000.00"}],
+        )
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "PRODUCT_WITHOUT_PRICE"
+        assert resp.json()["detail"]["product_id"] == sin_precio
+        assert await _stock(client, auth_headers, sin_precio) == 10
+
+    async def test_efectivo_entregado_sin_pago_en_efectivo(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Sin esto quedaba guardado $10.000 de vuelto sobre una venta con tarjeta."""
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="8500.00")
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 1}],
+            [{"payment_method": "debit_card", "amount_ars": "8500.00"}],
+            cash_received_ars="10000.00",
+        )
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "CASH_RECEIVED_WITHOUT_CASH_TENDER"
+
+    async def test_el_reintento_de_un_ticket_anulado_dice_que_esta_anulado(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Un reintento tardío de la cola no puede reimprimir un ticket muerto."""
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 1}],
+            [{"payment_method": "cash", "amount_ars": "1000.00"}],
+        )
+        alta = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert alta.status_code == 201
+        await client.post(f"/api/v1/pos/operations/{alta.json()['id']}/void", headers=auth_headers)
+
+        reintento = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert reintento.status_code == 200, reintento.text
+        assert reintento.json()["status"] == "VOIDED"
+        assert await _stock(client, auth_headers, p1) == 10
+
+    async def test_una_hora_con_zona_de_la_noche_argentina_no_es_futura(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """23:00 de hoy en Argentina es mañana en UTC: no puede dar 422."""
+        from datetime import UTC, datetime
+
+        from app.domain.business_time import AR_TZ
+
+        hoy = today_ar()
+        noche = datetime(hoy.year, hoy.month, hoy.day, 23, 0, tzinfo=AR_TZ).astimezone(UTC)
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 1}],
+            [{"payment_method": "cash", "amount_ars": "1000.00"}],
+        )
+        cuerpo["operation_date"] = noche.isoformat().replace("+00:00", "Z")
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert resp.status_code == 201, resp.text

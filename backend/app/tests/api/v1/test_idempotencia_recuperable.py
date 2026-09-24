@@ -207,3 +207,72 @@ class TestClaimANivelDeServicio:
         from app.application.services.idempotency import hash_peticion
 
         assert hash_peticion({"quantity": 2}) != hash_peticion({"quantity": 3})
+
+
+class TestTransicionDesdeLaTablaVieja:
+    """Deploy de B2: una clave reclamada con el mecanismo viejo sigue valiendo."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    async def test_una_clave_vieja_no_vuelve_a_crear_la_venta(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: Any, sample_tenant: Any
+    ) -> None:
+        """Venta encolada antes del deploy, guardada, respuesta perdida, reintento después."""
+        from app.application.services.idempotency import claim_idempotency_key
+
+        pid = await _producto(client, auth_headers, "Coca 500", 10)
+        # Lo que dejó el servidor ANTES del deploy: la clave en operation_fingerprints.
+        assert await claim_idempotency_key(
+            db_session, sample_tenant.tenant_id, "cola-vieja-1", "IDEMPOTENT_POST_SALE_BATCH"
+        )
+
+        resp = await client.post(
+            "/api/v1/sales/manual-batch",
+            json=_carrito(pid),
+            headers={**auth_headers, "Idempotency-Key": "cola-vieja-1"},
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "DUPLICATE_IDEMPOTENT"
+        prod = await client.get(f"/api/v1/products/{pid}", headers=auth_headers)
+        assert prod.json()["stock_units"] == 10, "no puede descontar stock otra vez"
+
+
+class TestHuellaEstable:
+    def test_mandar_el_default_o_no_mandarlo_da_la_misma_huella(self) -> None:
+        """Un campo nuevo con default no puede invalidar reintentos ya encolados."""
+        from app.application.services.idempotency import hash_peticion
+        from app.schemas.transaction import ManualBatchSaleRequest
+
+        base = {
+            "transaction_date": _FECHA,
+            "items": [
+                {
+                    "product_id": "00000000-0000-0000-0000-000000000001",
+                    "quantity": 1,
+                    "unit_price": "10.00",
+                }
+            ],
+        }
+        sin = ManualBatchSaleRequest.model_validate(base)
+        con = ManualBatchSaleRequest.model_validate(
+            {**base, "payment_method": "cash", "notes": None, "customer_id": None}
+        )
+        assert hash_peticion(sin) == hash_peticion(con)
+
+    def test_un_cambio_real_cambia_la_huella(self) -> None:
+        from app.application.services.idempotency import hash_peticion
+        from app.schemas.transaction import ManualBatchSaleRequest
+
+        item = {
+            "product_id": "00000000-0000-0000-0000-000000000001",
+            "quantity": 1,
+            "unit_price": "10.00",
+        }
+        a = ManualBatchSaleRequest.model_validate({"transaction_date": _FECHA, "items": [item]})
+        b = ManualBatchSaleRequest.model_validate(
+            {"transaction_date": _FECHA, "items": [{**item, "quantity": 2}]}
+        )
+        assert hash_peticion(a) != hash_peticion(b)

@@ -105,6 +105,50 @@ def _a_respuesta(
     )
 
 
+async def _cargar_operacion(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    operation_id: uuid.UUID | None = None,
+    client_operation_id: str | None = None,
+    para_actualizar: bool = False,
+) -> tuple[PosOperation, list[PosOperationLine], list[PosTender]] | None:
+    """Cabecera + líneas + pagos, en orden de posición. ``None`` si no existe."""
+    stmt = select(PosOperation).where(PosOperation.tenant_id == tenant_id)
+    if operation_id is not None:
+        stmt = stmt.where(PosOperation.id == operation_id)
+    else:
+        stmt = stmt.where(PosOperation.client_operation_id == client_operation_id)
+    if para_actualizar:
+        stmt = stmt.with_for_update()
+    operacion = (await session.execute(stmt)).scalar_one_or_none()
+    if operacion is None:
+        return None
+    lineas = list(
+        (
+            await session.execute(
+                select(PosOperationLine)
+                .where(PosOperationLine.operation_id == operacion.id)
+                .order_by(PosOperationLine.position)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    tenders = list(
+        (
+            await session.execute(
+                select(PosTender)
+                .where(PosTender.operation_id == operacion.id)
+                .order_by(PosTender.position)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return operacion, lineas, tenders
+
+
 @router.post(
     "/operations",
     response_model=PosOperationResponse,
@@ -145,10 +189,19 @@ async def create_pos_operation(
             },
         )
     if isinstance(reclamo, Repeticion):
-        if reclamo.respuesta is None:
-            raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
         # 200 y no 201: el ticket ya existía y esta petición no creó nada.
         response.status_code = status.HTTP_200_OK
+        # Se devuelve el estado ACTUAL del ticket, no el snapshot guardado al
+        # crearlo: si entre medio se anuló, un reintento tardío de la cola
+        # offline no puede recibir `COMPLETED` y reimprimir un ticket muerto. El
+        # snapshot queda como respaldo por si la operación ya no existiera.
+        actual = await _cargar_operacion(
+            session, tenant.tenant_id, client_operation_id=body.client_operation_id
+        )
+        if actual is not None:
+            return _a_respuesta(*actual)
+        if reclamo.respuesta is None:
+            raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
         return PosOperationResponse.model_validate(reclamo.respuesta)
 
     # Pago mixto: la tabla lo soporta desde ya, pero los ocho lectores de caja
@@ -176,6 +229,19 @@ async def create_pos_operation(
         )
 
     metodo_unico = body.tenders[0].payment_method
+    # El vuelto se calcula contra la parte EN EFECTIVO. Sin pago en efectivo, un
+    # "entregado" daría como vuelto el monto entero ($10.000 de vuelto sobre una
+    # venta con tarjeta) y cualquier lector de caja que use el vuelto se rompe.
+    if body.cash_received_ars is not None and not any(
+        t.payment_method == "cash" for t in body.tenders
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "CASH_RECEIVED_WITHOUT_CASH_TENDER",
+                "message": "Se informó efectivo entregado pero la venta no se paga en efectivo.",
+            },
+        )
     customer_id = await _resolve_sale_customer(
         session,
         tenant.tenant_id,
@@ -208,6 +274,19 @@ async def create_pos_operation(
         if producto is None:
             raise HTTPException(
                 status_code=400, detail=f"Producto {item.product_id} no encontrado."
+            )
+        # Un producto sin precio (los que crea una compra importada nacen con
+        # `sale_price_ars = 0` y `requires_completion`) no se puede cobrar: se
+        # regalaría y se descontaría su stock. Se rechaza con un motivo claro en
+        # vez de dejar que aparezca como un TENDERS_MISMATCH incomprensible.
+        if producto.sale_price_ars <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PRODUCT_WITHOUT_PRICE",
+                    "product_id": str(producto.id),
+                    "message": f"«{producto.name}» no tiene precio de venta cargado.",
+                },
             )
         if producto.stock_units < item.quantity:
             raise stock_service.InsufficientStockError(
@@ -359,60 +438,40 @@ async def void_pos_operation(
 
     # FOR UPDATE sobre la cabecera: dos anulaciones simultáneas del mismo ticket
     # se serializan acá, y la segunda ve `VOIDED` y no revierte stock otra vez.
-    operacion = (
-        await session.execute(
-            select(PosOperation)
-            .where(
-                PosOperation.id == operation_id,
-                PosOperation.tenant_id == tenant.tenant_id,
-            )
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if operacion is None:
+    cargada = await _cargar_operacion(
+        session, tenant.tenant_id, operation_id=operation_id, para_actualizar=True
+    )
+    if cargada is None:
         raise HTTPException(status_code=404, detail="Operación no encontrada.")
-
-    lineas = list(
-        (
-            await session.execute(
-                select(PosOperationLine)
-                .where(PosOperationLine.operation_id == operacion.id)
-                .order_by(PosOperationLine.position)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    tenders = list(
-        (
-            await session.execute(
-                select(PosTender)
-                .where(PosTender.operation_id == operacion.id)
-                .order_by(PosTender.position)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    operacion, lineas, tenders = cargada
 
     if operacion.status == "VOIDED":
         return _a_respuesta(operacion, lineas, tenders)
 
     ahora = datetime.now(UTC)
     ventas_anuladas: list[str] = []
-    for linea in lineas:
-        if linea.sale_entry_id is None:
-            continue
-        venta = (
+    ids_de_venta = [ln.sale_entry_id for ln in lineas if ln.sale_entry_id is not None]
+    ventas = (
+        (
             await session.execute(
-                select(SaleEntry).where(
-                    SaleEntry.id == linea.sale_entry_id,
+                select(SaleEntry)
+                .where(
+                    SaleEntry.id.in_(ids_de_venta),
                     SaleEntry.tenant_id == tenant.tenant_id,
+                    SaleEntry.voided_at.is_(None),
                 )
+                .order_by(SaleEntry.id)
             )
-        ).scalar_one_or_none()
-        if venta is None or venta.voided_at is not None:
-            continue
+        )
+        .scalars()
+        .all()
+        if ids_de_venta
+        else []
+    )
+    # En el orden del ticket, para que la auditoría liste las ventas como el
+    # cajero las cargó y no en el orden de los UUID.
+    posicion = {ln.sale_entry_id: ln.position for ln in lineas}
+    for venta in sorted(ventas, key=lambda v: posicion[v.id]):
         antes = _sale_snapshot(venta)
         venta.voided_at = ahora
         venta.void_reason = _VOID_REASON_TICKET

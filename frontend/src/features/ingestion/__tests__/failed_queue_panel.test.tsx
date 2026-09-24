@@ -1,8 +1,22 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render as rtlRender, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
 
 import { FailedQueuePanel } from "../FailedQueuePanel";
 import { useOfflineQueueStore, type QueuedItem } from "@/stores/offlineQueueStore";
+import { salesService } from "@/services/sales.service";
+
+jest.mock("@/services/sales.service", () => ({
+  salesService: { createSale: jest.fn(), createManualBatch: jest.fn() },
+}));
+
+const mockCreateManualBatch = salesService.createManualBatch as jest.Mock;
+
+function render(ui: ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return rtlRender(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+}
 
 function seedFailed(over: Partial<QueuedItem> = {}) {
   useOfflineQueueStore.setState({
@@ -23,6 +37,10 @@ function seedFailed(over: Partial<QueuedItem> = {}) {
 
 beforeEach(() => {
   useOfflineQueueStore.setState({ items: [] });
+  // Por defecto el reintento vuelve a fallar con un error de red: los tests que
+  // miran el estado de la cola no quieren que el flush la vacíe.
+  mockCreateManualBatch.mockReset();
+  mockCreateManualBatch.mockRejectedValue(Object.assign(new Error("offline"), { isAxiosError: true }));
 });
 
 describe("FailedQueuePanel", () => {
@@ -60,6 +78,18 @@ describe("FailedQueuePanel", () => {
     expect(items).toHaveLength(1);
     expect(items[0]?.status).toBe("PENDING");
     expect(items[0]?.attempts).toBe(0);
+  });
+
+  it("Reintentar vuelve a MANDAR la carga, no sólo cambia su estado", async () => {
+    seedFailed();
+    mockCreateManualBatch.mockResolvedValue({ sale_group_id: "g", sales: [], total: 0 });
+    render(<FailedQueuePanel />);
+    await act(async () => {
+      await userEvent.click(screen.getByRole("button", { name: "Reintentar" }));
+    });
+    expect(mockCreateManualBatch).toHaveBeenCalledWith({}, "22222222-2222-2222-2222-222222222222");
+    // Se mandó y el servidor la aceptó: sale de la cola.
+    expect(useOfflineQueueStore.getState().items).toHaveLength(0);
   });
 
   it("Descartar pide confirmación y solo borra si el usuario confirma", async () => {

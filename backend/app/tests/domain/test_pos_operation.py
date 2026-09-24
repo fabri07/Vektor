@@ -122,6 +122,29 @@ class TestRepartoDelDescuentoGlobal:
         assert op.total == op.subtotal - op.discount_global_ars
 
 
+class TestNingunaLineaNegativa:
+    """El residuo entero a UNA línea podía pasarla de su propio importe."""
+
+    def test_el_caso_del_review(self) -> None:
+        op = calcular_operacion(
+            [_linea("34.00"), _linea("33.00"), _linea("33.00")], Decimal("99.99")
+        )
+        assert all(ln.line_total >= 0 for ln in op.lineas)
+        assert sum(ln.line_total for ln in op.lineas) == op.total == Decimal("0.01")
+
+    @pytest.mark.parametrize("cantidad", [2, 3, 4, 7])
+    def test_descuentos_casi_totales_nunca_dejan_una_linea_negativa(self, cantidad: int) -> None:
+        """Barrido: cada centavo de descuento desde 0 hasta el subtotal entero."""
+        precios = ["34.00", "33.00", "33.00", "0.07", "1.01", "12.34", "0.50"]
+        lineas = [_linea(precios[i]) for i in range(cantidad)]
+        subtotal = sum(Decimal(precios[i]) for i in range(cantidad))
+        centavos = int(subtotal * 100)
+        for d in list(range(0, 50)) + list(range(max(0, centavos - 400), centavos + 1)):
+            op = calcular_operacion(lineas, Decimal(d) / 100)
+            assert all(ln.line_total >= 0 for ln in op.lineas), d
+            assert sum(ln.line_total for ln in op.lineas) == op.total
+
+
 class TestRechazos:
     def test_carrito_vacio(self) -> None:
         with pytest.raises(OperacionVaciaError):

@@ -167,9 +167,14 @@ export function useOnlineStatus(): boolean {
  * al volver online. `autoSync: true` (en el launcher, montado una vez por página)
  * registra el listener `online` y dispara el flush inicial.
  */
+// Candado de flush compartido por TODAS las instancias del hook. Con un `useRef`
+// había uno por instancia: el launcher (autoSync) y el panel de rechazadas podían
+// vaciar la cola a la vez y mandar el mismo item dos veces. El servidor lo
+// absorbe por idempotencia, pero no hay razón para depender de eso.
+let flushEnCurso = false;
+
 export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
   const queryClient = useQueryClient();
-  const flushingRef = useRef(false);
 
   // Tope de reintentos SIN pérdida: al alcanzarlo el item pasa a FAILED y deja de
   // reintentarse, pero sigue en la cola. Borrarlo acá era perder una operación que el
@@ -184,11 +189,11 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
   }, []);
 
   const flush = useCallback(async () => {
-    if (flushingRef.current) return;
+    if (flushEnCurso) return;
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
     const { items } = useOfflineQueueStore.getState();
     if (items.length === 0) return;
-    flushingRef.current = true;
+    flushEnCurso = true;
     try {
       for (const item of [...items]) {
         // Un item en estado terminal dejó de reintentarse, pero sigue en la cola:
@@ -229,7 +234,7 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
         }
       }
     } finally {
-      flushingRef.current = false;
+      flushEnCurso = false;
     }
   }, [queryClient, markWithCap]);
 

@@ -50,7 +50,7 @@ from app.application.services.product_identity import (
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
-from app.domain.business_time import today_ar
+from app.domain.business_time import fecha_de_negocio, today_ar
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     classify_expense_with_vertical,
@@ -149,7 +149,7 @@ class ResolvePurchaseRequest(BaseModel):
     @field_validator("transaction_date")
     @classmethod
     def transaction_date_not_future(cls, value: datetime) -> datetime:
-        if value.date() > today_ar():
+        if fecha_de_negocio(value) > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
         return value
 

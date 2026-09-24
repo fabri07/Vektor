@@ -13,7 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.domain.business_time import today_ar
+from app.domain.business_time import fecha_de_negocio, today_ar
 from app.schemas.transaction import PAYMENT_METHOD_PATTERN
 
 _MAX_IMPORTE = Decimal("99999999.99")
@@ -56,7 +56,7 @@ class PosOperationRequest(BaseModel):
         # de Argentina, así que entre las 21:00 y la medianoche `date.today()`
         # acepta una venta fechada mañana. Una caja vende en esa franja todas
         # las noches.
-        if v.date() > today_ar():
+        if fecha_de_negocio(v) > today_ar():
             raise ValueError("operation_date cannot be in the future.")
         return v
 

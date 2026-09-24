@@ -34,6 +34,7 @@ from app.application.services.idempotency import (
     Repeticion,
     claim_idempotency_key,
     claim_idempotent_request,
+    legacy_idempotency_key_claimed,
     record_idempotent_response,
 )
 from app.application.services.score_trigger_service import (
@@ -368,6 +369,11 @@ async def create_manual_batch_sale(
     # a vender. Una clave reusada con OTRO contenido no es un reintento y se rechaza
     # explícitamente, en vez de tragarse la segunda venta en silencio.
     if idempotency_key is not None:
+        # Una venta encolada ANTES del deploy de B2 reclamó su clave en la tabla
+        # vieja. Si su reintento llega ahora, la tabla nueva no la conoce: sin esto
+        # se crearía de nuevo. Se contesta lo mismo que antes del deploy.
+        if await legacy_idempotency_key_claimed(session, tenant.tenant_id, idempotency_key):
+            raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
         reclamo = await claim_idempotent_request(
             session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SALE_BATCH", body
         )
@@ -606,6 +612,11 @@ async def update_sale(
             _new_quantity,
             session,
         )
+    # Qué cambia DE VERDAD, no qué vino en el cuerpo: el formulario de /sales
+    # manda siempre `amount` y `quantity`, y comparar por presencia borraba el
+    # `unit_price` al editar sólo las notas o el medio de pago.
+    _amount_changed = body.amount is not None and body.amount != entry.amount
+    _quantity_changed = body.quantity is not None and body.quantity != entry.quantity
     if body.amount is not None:
         entry.amount = body.amount
     if body.quantity is not None:
@@ -618,7 +629,7 @@ async def update_sale(
     # que prohíbe esa división en el resto del código).
     if body.unit_price is not None:
         entry.unit_price = body.unit_price
-    elif body.amount is not None or body.quantity is not None:
+    elif _amount_changed or _quantity_changed:
         entry.unit_price = None
     if body.transaction_date is not None:
         entry.transaction_date = body.transaction_date

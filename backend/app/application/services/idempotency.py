@@ -105,6 +105,27 @@ async def claim_idempotency_key(
     )
 
 
+async def legacy_idempotency_key_claimed(
+    session: AsyncSession, tenant_id: uuid.UUID, key: str
+) -> bool:
+    """¿Esta clave ya se reclamó con el mecanismo VIEJO (`operation_fingerprints`)?
+
+    Existe por el deploy de B2: `manual-batch` pasó de `claim_idempotency_key` a
+    `claim_idempotent_request`, que mira OTRA tabla. Una venta encolada offline
+    antes del deploy, que el servidor guardó pero cuya respuesta se perdió, se
+    reintenta después con la misma clave; sin esta consulta la tabla nueva no la
+    conoce y la venta se crea DOS veces, con el stock descontado dos veces. Sólo
+    lectura: no reclama nada.
+    """
+    fila = await session.execute(
+        select(OperationFingerprint.id).where(
+            OperationFingerprint.tenant_id == tenant_id,
+            OperationFingerprint.fingerprint == _idempotency_fingerprint(key),
+        )
+    )
+    return fila.first() is not None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Idempotencia RECUPERABLE (bloque B2 del POS)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -136,7 +157,17 @@ def hash_peticion(payload: BaseModel | Mapping[str, Any]) -> str:
     modelo ya normalizó defaults y fechas, así que dos formas de escribir lo
     mismo dan la misma huella.
     """
-    datos = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else dict(payload)
+    # `exclude_defaults`: un campo que el cliente no mandó y vale su default no
+    # entra a la huella. Sin esto, agregar en un deploy un campo con default
+    # cambiaba el hash de los reintentos YA encolados offline, que recibían 409
+    # IDEMPOTENCY_KEY_REUSED por una venta que sí existe. Mandar el default
+    # explícito o no mandarlo describen el mismo pedido, así que es correcto que
+    # den la misma huella.
+    datos = (
+        payload.model_dump(mode="json", exclude_defaults=True)
+        if isinstance(payload, BaseModel)
+        else dict(payload)
+    )
     canonico = json.dumps(datos, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
 

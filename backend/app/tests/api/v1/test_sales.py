@@ -724,6 +724,37 @@ class TestB0DeudaPrevia:
         assert resp.status_code == 201, resp.text
         assert float(resp.json()["unit_price"]) == 500.00
 
+    async def test_editar_solo_las_notas_no_borra_unit_price(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """El formulario de /sales manda SIEMPRE amount y quantity, aunque no cambien.
+
+        Comparar por presencia en el cuerpo borraba el unitario en la primera edición
+        de cualquier otro campo.
+        """
+        payload = {**_SINGLE_PAYLOAD, "amount": "1500.00", "quantity": 3, "unit_price": "500.00"}
+        creada = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        sale_id = creada.json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}",
+            json={"amount": 1500, "quantity": 3, "notes": "cliente habitual"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert float(resp.json()["unit_price"]) == 500.00
+
+    async def test_cambiar_el_monto_sin_unitario_si_lo_borra(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        payload = {**_SINGLE_PAYLOAD, "amount": "1500.00", "quantity": 3, "unit_price": "500.00"}
+        creada = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        sale_id = creada.json()["id"]
+        resp = await client.patch(
+            f"/api/v1/sales/{sale_id}", json={"amount": 1200, "quantity": 3}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["unit_price"] is None
+
     async def test_create_sale_sin_unit_price_lo_deja_en_none(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:

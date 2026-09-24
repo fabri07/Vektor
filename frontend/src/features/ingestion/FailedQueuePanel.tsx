@@ -1,6 +1,7 @@
 "use client";
 
 import { useOfflineQueueStore, isFailed, type QueuedKind } from "@/stores/offlineQueueStore";
+import { useOfflineSubmit } from "./useOfflineSubmit";
 
 const ETIQUETA: Record<QueuedKind, string> = {
   sale: "Venta",
@@ -34,6 +35,9 @@ export function FailedQueuePanel() {
   // Zustand lo compara por identidad → re-render infinito.
   const items = useOfflineQueueStore((s) => s.items);
   const retry = useOfflineQueueStore((s) => s.retry);
+  // Reintentar es VOLVER A MANDAR, no sólo cambiar el estado: sin el flush la
+  // carga desaparecía del panel y no se enviaba hasta la próxima navegación.
+  const { flush } = useOfflineSubmit();
   const remove = useOfflineQueueStore((s) => s.remove);
   const failed = items.filter(isFailed);
 
@@ -58,7 +62,10 @@ export function FailedQueuePanel() {
             <span className="flex shrink-0 gap-1.5">
               <button
                 type="button"
-                onClick={() => retry(item.id)}
+                onClick={() => {
+                  retry(item.id);
+                  void flush();
+                }}
                 className="rounded-md border border-vk-border-w px-2 py-1 font-medium text-vektor-body hover:bg-vk-bg"
               >
                 Reintentar

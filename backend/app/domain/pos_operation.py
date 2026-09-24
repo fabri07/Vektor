@@ -115,9 +115,9 @@ def calcular_operacion(
 
     El descuento global se reparte proporcionalmente al total de cada línea, en
     centavos enteros truncados hacia abajo, y el residuo —siempre menor que la
-    cantidad de líneas— va entero a la línea de mayor importe. Con empate gana
-    la primera del carrito, así que el resultado no depende del orden en que la
-    base de datos devolvió los productos.
+    cantidad de líneas— se reparte de a un centavo por resto mayor. Los empates
+    los resuelve el importe y después el orden del carrito, así que el
+    resultado no depende del orden en que la base devolvió los productos.
     """
     if not lineas:
         raise OperacionVaciaError("La operación no tiene líneas.")
@@ -149,15 +149,27 @@ def calcular_operacion(
         # con subtotal y descuento en cero la división igual ocurriría.
         raise DescuentoExcedeElTotalError("El descuento global supera el importe de la venta.")
 
-    repartido = [
-        (global_cent * bruto) // subtotal_cent if subtotal_cent else 0 for bruto in brutos
-    ]
+    # Reparto por RESTO MAYOR, un centavo a la vez. Cada línea recibe primero
+    # su parte truncada; el residuo se reparte de a UN centavo a las líneas con
+    # mayor fracción descartada (desempate: mayor importe, después la primera
+    # del carrito). Darle el residuo entero a una sola línea podía pasarla de su
+    # propio importe: $99,99 sobre $34+$33+$33 dejaba la de $34 en −$0,01. Con
+    # resto mayor eso no puede pasar: sólo recibe un centavo extra una línea con
+    # fracción > 0, o sea cuya parte exacta supera a la truncada, y la exacta
+    # nunca supera el importe de la línea porque el descuento ≤ subtotal.
+    repartido: list[int] = []
+    fracciones: list[int] = []
+    for bruto in brutos:
+        if subtotal_cent:
+            parte, resto = divmod(global_cent * bruto, subtotal_cent)
+        else:
+            parte, resto = 0, 0
+        repartido.append(parte)
+        fracciones.append(resto)
     residuo = global_cent - sum(repartido)
-    if residuo:
-        # `max` devuelve el PRIMER máximo, así que el empate lo define el orden
-        # del carrito y no el del motor de base de datos.
-        mayor = max(range(len(brutos)), key=lambda i: brutos[i])
-        repartido[mayor] += residuo
+    orden = sorted(range(len(brutos)), key=lambda i: (-fracciones[i], -brutos[i], i))
+    for i in orden[:residuo]:
+        repartido[i] += 1
 
     calculadas = tuple(
         LineaCalculada(
