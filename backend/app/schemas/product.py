@@ -163,3 +163,17 @@ class UpdateProductRequest(BaseModel):
     @classmethod
     def _strip_name(cls, v: Any) -> Any:
         return v.strip() if isinstance(v, str) else v
+
+
+class ScanLookupResponse(BaseModel):
+    """Resultado de un escaneo que resolvió a UN producto."""
+
+    code_type: str
+    #: Por qué columna coincidió: ``barcode`` | ``sku`` | ``internal_sku``.
+    matched_by: str
+    product: ProductResponse
+
+
+class LearnBarcodeRequest(BaseModel):
+    #: Lo que mandó el lector, tal cual. El servidor lo clasifica.
+    barcode: str = Field(min_length=1, max_length=64)

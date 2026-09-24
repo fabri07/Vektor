@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # una regresión de correctness no cubierta por tests. Revisar si en algún momento
 # `maintenance_lock_service` se muda a un paquete neutral (ni app ni persistence).
 from app.application.services import maintenance_lock_service
+from app.domain.scan_code import CodigoEscaneado, TipoDeCodigo, variantes_gtin
+from app.domain.text_norm import normalize_sku
 from app.persistence.models.product import Product
 
 
@@ -31,6 +33,46 @@ class ProductRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def find_by_scan(
+        self, tenant_id: UUID, codigo: CodigoEscaneado
+    ) -> list[tuple[Product, str]]:
+        """Productos ACTIVOS que responden a un código escaneado, con la columna
+        por la que coincidieron. Sin elegir: si hay más de uno, decide el caller.
+
+        Cada tipo busca en SU columna (ver ``domain/scan_code.py``). Además, todos
+        los tipos se comparan contra ``sku_normalized`` como texto literal: es la
+        forma de detectar que el GTIN de un producto es el SKU opaco de otro. Si
+        esa búsqueda no se hiciera, el escaneo elegiría el primero que aparece y
+        el caso ambiguo quedaría invisible.
+        """
+        condiciones: list[tuple[Any, str]] = []
+        if codigo.tipo is TipoDeCodigo.INTERNAL_SKU:
+            condiciones.append((Product.internal_sku == codigo.valor, "internal_sku"))
+        elif codigo.tipo in (TipoDeCodigo.GTIN, TipoDeCodigo.SCALE):
+            condiciones.append(
+                (Product.barcode_normalized.in_(variantes_gtin(codigo.valor)), "barcode")
+            )
+        sku = normalize_sku(codigo.valor)
+        if sku is not None:
+            condiciones.append((Product.sku_normalized == sku, "sku"))
+
+        encontrados: dict[UUID, tuple[Product, str]] = {}
+        for condicion, columna in condiciones:
+            filas = (
+                await self._session.execute(
+                    select(Product)
+                    .where(
+                        Product.tenant_id == tenant_id,
+                        Product.is_active.is_(True),
+                        condicion,
+                    )
+                    .order_by(Product.id)
+                )
+            ).scalars().all()
+            for producto in filas:
+                encontrados.setdefault(producto.id, (producto, columna))
+        return list(encontrados.values())
 
     async def list_by_tenant(
         self,

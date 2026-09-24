@@ -16,7 +16,7 @@ from app.api.v1.deps import (
     require_modify_access,
     require_role,
 )
-from app.application.services import tenant_categories_service
+from app.application.services import maintenance_lock_service, tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.product_identity import (
     ProductIdentityConflictError,
@@ -28,6 +28,7 @@ from app.domain.product_categories import (
     product_category_catalog,
 )
 from app.domain.product_completion import recompute_requires_completion
+from app.domain.scan_code import TipoDeCodigo, clasificar, variantes_gtin
 from app.domain.text_norm import normalize_barcode, normalize_sku
 from app.domain.verticals import Vertical, parse_vertical
 from app.persistence.db.session import get_db_session
@@ -38,7 +39,13 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
-from app.schemas.product import CreateProductRequest, ProductResponse, UpdateProductRequest
+from app.schemas.product import (
+    CreateProductRequest,
+    LearnBarcodeRequest,
+    ProductResponse,
+    ScanLookupResponse,
+    UpdateProductRequest,
+)
 
 router = APIRouter()
 
@@ -416,6 +423,68 @@ async def create_product(
     return saved
 
 
+@router.get(
+    "/lookup",
+    response_model=ScanLookupResponse,
+    summary="Resolver un código escaneado a UN producto — DEBE ir antes de /{product_id}",
+)
+async def lookup_product_by_scan(
+    code: str = Query(min_length=1, max_length=64),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> ScanLookupResponse:
+    """El escaneo de la caja. Clasifica el código y NUNCA elige entre candidatos.
+
+    - 1 producto → 200.
+    - 2 o más → 409 ``SCAN_AMBIGUOUS`` con todos: cobrar el producto equivocado
+      es peor que pedirle al cajero que elija.
+    - 0 y el código se puede aprender → 404 ``SCAN_NOT_FOUND`` con
+      ``learnable: true``, para que la caja ofrezca vincularlo.
+    - 0 y es de balanza → 422 ``SCAN_SCALE_NOT_SUPPORTED``: leer el peso
+      embebido exige un parser que v1 no tiene.
+    """
+    codigo = clasificar(code)
+    candidatos = await ProductRepository(session).find_by_scan(tenant.tenant_id, codigo)
+    if len(candidatos) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SCAN_AMBIGUOUS",
+                "code_type": codigo.tipo.value,
+                "candidates": [
+                    {"product_id": str(p.id), "name": p.name, "matched_by": columna}
+                    for p, columna in candidatos
+                ],
+                "message": "Ese código corresponde a más de un producto. Elegí cuál es.",
+            },
+        )
+    if not candidatos:
+        if codigo.tipo is TipoDeCodigo.SCALE:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "SCAN_SCALE_NOT_SUPPORTED",
+                    "code_type": codigo.tipo.value,
+                    "message": "Los códigos de balanza todavía no se pueden leer.",
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "SCAN_NOT_FOUND",
+                "code_type": codigo.tipo.value,
+                "learnable": codigo.aprendible,
+                "message": "No hay ningún producto con ese código.",
+            },
+        )
+    producto, columna = candidatos[0]
+    return ScanLookupResponse(
+        code_type=codigo.tipo.value,
+        matched_by=columna,
+        product=ProductResponse.model_validate(producto),
+    )
+
+
 @router.get("/{product_id}", response_model=ProductResponse, summary="Get product by ID")
 async def get_product(
     product_id: UUID,
@@ -563,3 +632,125 @@ async def delete_product(
     )
     trigger_score_recalculation.delay(str(tenant.tenant_id), "product_deleted")
     return MessageResponse(message="Product deactivated.")
+
+
+@router.post(
+    "/{product_id}/barcode",
+    response_model=ProductResponse,
+    summary="Vincular un código de barras escaneado a un producto (sólo agrega)",
+)
+async def learn_product_barcode(
+    product_id: UUID,
+    body: LearnBarcodeRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_role("OWNER", "ADMIN")),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+    session: AsyncSession = Depends(get_db_session),
+) -> Product:
+    """El aprendizaje de la caja: "este código es este producto".
+
+    Endpoint propio y no ``PATCH`` por dos razones: el ``PATCH`` lleva
+    ``require_modify_access``, y un 428 ``PIN_REQUIRED`` en medio del flush de
+    una cola offline es intolerable; y el ``PATCH`` pisa, esto **sólo agrega**.
+
+    Idempotente por contenido: vincular el mismo código al mismo producto otra
+    vez devuelve 200 sin tocar nada, así que no hace falta ``Idempotency-Key``.
+
+    Rechazos:
+    - 422 ``SCAN_CODE_NOT_LEARNABLE``: sólo se aprende un GTIN válido.
+    - 409 ``BARCODE_ALREADY_SET``: el producto ya tiene OTRO código. Cambiarlo
+      es una corrección de catálogo, no algo que se decide en la caja.
+    - 409 ``BARCODE_TAKEN``: otro producto ya responde a ese código (por barcode
+      o por SKU). Para la caja offline es la señal de mandar el aprendizaje a
+      revisión; las ventas ya hechas no se tocan.
+    """
+    codigo = clasificar(body.barcode)
+    if not codigo.aprendible:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "SCAN_CODE_NOT_LEARNABLE",
+                "code_type": codigo.tipo.value,
+                "message": "Sólo se puede vincular un código de barras de producto (EAN/UPC).",
+            },
+        )
+    # El advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant.tenant_id)
+    producto = (
+        await session.execute(
+            select(Product)
+            .where(
+                Product.id == product_id,
+                Product.tenant_id == tenant.tenant_id,
+                Product.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if producto is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
+
+    variantes = variantes_gtin(codigo.valor)
+    if producto.barcode_normalized in variantes:
+        return producto
+    # Se mira el campo CRUDO, no sólo el normalizado: un código alfanumérico
+    # tiene `barcode_normalized = None` y, mirando sólo ese, esto lo pisaría.
+    if producto.barcode_normalized is not None or (producto.barcode or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "BARCODE_ALREADY_SET",
+                "current_barcode": producto.barcode,
+                "message": "Ese producto ya tiene otro código de barras.",
+            },
+        )
+
+    ocupantes = [
+        (p, columna)
+        for p, columna in await ProductRepository(session).find_by_scan(
+            tenant.tenant_id, codigo
+        )
+        if p.id != producto.id
+    ]
+    if ocupantes:
+        raise _barcode_taken(ocupantes[0][0], ocupantes[0][1])
+
+    before = _product_snapshot(producto)
+    try:
+        async with product_identity_guard(
+            session,
+            tenant_id=tenant.tenant_id,
+            barcode=codigo.valor,
+            sku=producto.sku,
+            exclude_id=producto.id,
+        ):
+            producto.barcode = codigo.valor
+            producto.has_user_edits = True
+            await session.flush()
+    except ProductIdentityConflictError as conflict:
+        # La carrera: otra caja vinculó el mismo código entre el pre-check y el
+        # flush. El índice único la atrapa; el cliente recibe el mismo 409.
+        raise _barcode_taken(conflict.existing, conflict.matched_by) from conflict
+
+    _audit_data_change(
+        session,
+        tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        decision_type="PRODUCT_BARCODE_LEARNED",
+        before={**before, "barcode": None},
+        after={**_product_snapshot(producto), "barcode": producto.barcode},
+    )
+    return producto
+
+
+def _barcode_taken(ocupante: Product, columna: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "BARCODE_TAKEN",
+            "existing_id": str(ocupante.id),
+            "existing_name": ocupante.name,
+            "field": columna,
+            "message": "Ese código ya corresponde a otro producto.",
+        },
+    )
