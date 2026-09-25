@@ -9,6 +9,7 @@ import { usePinGateStore } from "@/stores/pinGateStore";
 import { securityService, type TeamMember } from "@/services/security.service";
 import { createTeamUserRequest } from "@/services/users.service";
 import { CASHIER_ROLE, POS_PERMISSIONS, roleLabel } from "@/lib/roles";
+import { TerminalsSection } from "./TerminalsSection";
 
 const PIN_RE = /^\d{4}$/;
 
@@ -326,6 +327,7 @@ export function SecurityPanel() {
     <div className="space-y-5">
       <MyPinSection />
       {role === "OWNER" && <TeamSection />}
+      {role === "OWNER" && <TerminalsSection />}
     </div>
   );
 }

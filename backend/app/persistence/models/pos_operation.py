@@ -59,6 +59,11 @@ class PosOperation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     customer_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
     )
+    # Desde qué caja se cobró (B6). NULL en lo histórico y en lo que el dueño
+    # carga desde el navegador sin terminal: rellenarlo sería inventar.
+    terminal_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pos_terminals.id", ondelete="SET NULL"), nullable=True
+    )
     operation_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
     #: Suma de las líneas con sus descuentos de línea, antes del global.

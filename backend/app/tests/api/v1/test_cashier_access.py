@@ -21,8 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_current_user
 from app.domain.business_time import today_ar
 from app.domain.pos_permissions import CASHIER_ALLOWED_ROUTES
+from app.domain.pos_terminal import TERMINAL_HEADER, generar_secreto, hash_de_secreto
 from app.main import app as fastapi_app
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.pos_terminal import PosTerminal
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -41,7 +43,9 @@ async def _cajero(
     *,
     email: str | None = None,
     pin_abierto: bool = True,
+    con_terminal: bool = True,
 ) -> tuple[User, dict[str, str]]:
+    """Un cajero listo para operar. Por defecto, desde una caja habilitada (B6)."""
     user = User(
         user_id=uuid.uuid4(),
         tenant_id=tenant.tenant_id,
@@ -60,7 +64,19 @@ async def _cajero(
     token = create_access_token(
         {"sub": str(user.user_id), "tenant_id": str(tenant.tenant_id), "role_code": "CASHIER"}
     )
-    return user, {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}"}
+    if con_terminal:
+        secreto = generar_secreto()
+        db_session.add(
+            PosTerminal(
+                tenant_id=tenant.tenant_id,
+                name=f"Caja {uuid.uuid4().hex[:6]}",
+                credential_hash=hash_de_secreto(secreto),
+            )
+        )
+        await db_session.commit()
+        headers[TERMINAL_HEADER] = secreto
+    return user, headers
 
 
 async def _producto(

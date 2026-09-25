@@ -48,6 +48,7 @@ from app.persistence.models.pos_operation import (
     PosOperationLine,
     PosTender,
 )
+from app.persistence.models.pos_terminal import PosTerminal
 from app.persistence.models.product import Product
 from app.persistence.models.product_supplier_link import ProductSupplierLink
 from app.persistence.models.purchase_order import PurchaseOrder
@@ -104,6 +105,7 @@ __all__ = [
     "PosOperation",
     "PosOperationLine",
     "PosTender",
+    "PosTerminal",
     "ImportAttempt",
     "ImportOutbox",
     "OperationFingerprint",

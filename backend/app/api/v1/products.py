@@ -19,12 +19,17 @@ from app.api.v1.deps import (
 )
 from app.application.services import maintenance_lock_service, tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
+from app.application.services.pos_terminal_service import (
+    exigir_terminal_si_es_cajero,
+    resolver_terminal,
+)
 from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
 )
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.pos_permissions import PosPermission
+from app.domain.pos_terminal import TERMINAL_HEADER
 from app.domain.product_categories import (
     normalize_product_category,
     product_category_catalog,
@@ -652,6 +657,7 @@ async def learn_product_barcode(
     user: User = Depends(require_pos_permission(PosPermission.LEARN_BARCODE)),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
+    terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
 ) -> Product:
     """El aprendizaje de la caja: "este código es este producto".
 
@@ -670,6 +676,9 @@ async def learn_product_barcode(
       o por SKU). Para la caja offline es la señal de mandar el aprendizaje a
       revisión; las ventas ya hechas no se tocan.
     """
+    # Un cajero sólo escribe desde una caja habilitada (B6).
+    terminal = await resolver_terminal(session, tenant.tenant_id, terminal_secret)
+    exigir_terminal_si_es_cajero(user, terminal)
     codigo = clasificar(body.barcode)
     if not codigo.aprendible:
         raise HTTPException(

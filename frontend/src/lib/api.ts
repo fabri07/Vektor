@@ -2,6 +2,7 @@ import * as Sentry from "@sentry/nextjs";
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { useAuthStore } from "@/stores/authStore";
 import { usePinGateStore } from "@/stores/pinGateStore";
+import { llevaHeaderDeTerminal, usePosTerminalStore } from "@/stores/posTerminalStore";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -19,6 +20,13 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
     const token = useAuthStore.getState().token;
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
+    }
+    // B6: si esta PC es una caja habilitada DE ESTE negocio, las llamadas de caja
+    // llevan su credencial. Con otro negocio logueado no se manda: sería de otro.
+    const caja = usePosTerminalStore.getState().terminal;
+    const tenantId = useAuthStore.getState().user?.tenant_id;
+    if (caja && tenantId && caja.tenantId === tenantId && llevaHeaderDeTerminal(config.url)) {
+      config.headers["X-POS-Terminal"] = caja.secret;
     }
   }
   // Trazabilidad: una correlación por request (frontend → API → audit → response).
@@ -135,13 +143,34 @@ export async function handleApiResponseError(error: AxiosError) {
       originalRequest.headers.Authorization = `Bearer ${newToken}`;
       return api.request(originalRequest);
     } catch (refreshError) {
-      logout();
+      // B6: sólo una RESPUESTA del servidor que rechaza el refresh (401/403) es
+      // una sesión revocada. Un error de red —el refresh ni llegó— o un 5xx —el
+      // servidor está caído— no te echaron: se conservan los tokens y el
+      // próximo request con red vuelve a intentar. Antes, un corte con el access
+      // token vencido mandaba al login a quien estaba cobrando.
+      const status = axios.isAxiosError(refreshError)
+        ? refreshError.response?.status
+        : undefined;
+      if (status === 401 || status === 403) {
+        logout();
+      }
       return Promise.reject(refreshError);
     }
   }
 
   if (error.response?.status === 401 && typeof window !== "undefined") {
     useAuthStore.getState().logout();
+  }
+  // B6: el servidor rechazó la credencial de esta caja (dada de baja o de otro
+  // lado). Se marca para que Ajustes lo muestre; la caja offline (B7) lee esto
+  // para dejar sus pendientes en "requiere autenticación".
+  const codigo = (error.response?.data as { detail?: { code?: string } } | undefined)?.detail
+    ?.code;
+  if (
+    error.response?.status === 403 &&
+    (codigo === "TERMINAL_DISABLED" || codigo === "TERMINAL_UNKNOWN")
+  ) {
+    usePosTerminalStore.getState().markInvalid();
   }
   return Promise.reject(error);
 }

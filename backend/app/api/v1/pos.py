@@ -16,7 +16,16 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +35,7 @@ from app.api.v1.deps import (
     get_current_tenant,
     get_current_user,
     require_active_subscription,
+    require_owner_stepup,
     require_role,
     require_void_access,
 )
@@ -48,6 +58,13 @@ from app.application.services.idempotency import (
     record_idempotent_response,
 )
 from app.application.services.maintenance_lock_service import acquire_write_lock_shared
+from app.application.services.pos_terminal_service import (
+    dar_de_baja,
+    exigir_terminal_si_es_cajero,
+    habilitar,
+    listar,
+    resolver_terminal,
+)
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
@@ -59,6 +76,7 @@ from app.domain.pos_operation import (
     validar_tenders,
 )
 from app.domain.pos_permissions import CASHIER_ROLE, PosPermission
+from app.domain.pos_terminal import TERMINAL_HEADER
 from app.persistence.db.session import get_db_session
 from app.persistence.models import (
     PosOperation,
@@ -71,12 +89,16 @@ from app.persistence.models import (
 )
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
+from app.persistence.models.pos_terminal import PosTerminal
 from app.schemas.pos import (
     PosCatalogResponse,
     PosCustomerResponse,
     PosOperationRequest,
     PosOperationResponse,
     PosProductResponse,
+    PosTerminalCreateRequest,
+    PosTerminalEnrolledResponse,
+    PosTerminalResponse,
     PosVoidRequest,
 )
 
@@ -172,6 +194,7 @@ async def create_pos_operation(
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     _sub_guard: None = Depends(require_active_subscription),
     session: AsyncSession = Depends(get_db_session),
+    terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
 ) -> PosOperationResponse:
     """Cobra un carrito: una `SaleEntry` por línea, más la cabecera y sus pagos.
 
@@ -186,7 +209,13 @@ async def create_pos_operation(
     # NUEVA exige los permisos actuales, y se chequean ANTES del claim para que
     # un 403 no consuma la clave: el mismo pedido, reintentado cuando el dueño
     # habilite el permiso, tiene que poder entrar.
+    terminal = None
     if not await idempotent_request_exists(session, tenant.tenant_id, body.client_operation_id):
+        # La terminal, como los permisos, se valida sólo para una venta NUEVA: el
+        # reintento de una ya hecha devuelve el ticket aunque después hayan dado
+        # de baja la PC (B6).
+        terminal = await resolver_terminal(session, tenant.tenant_id, terminal_secret)
+        exigir_terminal_si_es_cajero(user, terminal)
         if body.discount_ars > 0 or any(item.discount_ars > 0 for item in body.items):
             assert_pos_permission(user, PosPermission.DISCOUNT)
         if any(t.payment_method == FIADO_PAYMENT_METHOD for t in body.tenders):
@@ -345,6 +374,7 @@ async def create_pos_operation(
         client_operation_id=body.client_operation_id,
         created_by_user_id=user.user_id,
         customer_id=customer_id,
+        terminal_id=terminal.id if terminal is not None else None,
         operation_date=body.operation_date,
         subtotal_ars=calculada.subtotal,
         discount_ars=calculada.discount_global_ars,
@@ -442,6 +472,7 @@ async def void_pos_operation(
     # `void_ticket` + ventana de SU PIN (ver `require_void_access`).
     user: User = Depends(require_void_access),
     session: AsyncSession = Depends(get_db_session),
+    terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
 ) -> PosOperationResponse:
     """Anula el ticket ENTERO: todas sus ventas y el stock que descontaron.
 
@@ -455,6 +486,10 @@ async def void_pos_operation(
     tiene que poder reimprimirse y auditarse, y `status = VOIDED` es lo que dice
     que esos pagos ya no cuentan.
     """
+    # Un cajero sólo anula desde una caja habilitada (B6).
+    terminal = await resolver_terminal(session, tenant.tenant_id, terminal_secret)
+    exigir_terminal_si_es_cajero(user, terminal)
+
     # El advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila.
     await acquire_write_lock_shared(session, tenant.tenant_id)
 
@@ -647,3 +682,52 @@ async def pos_customers(
         )
         for c in clientes
     ]
+
+
+@router.post(
+    "/terminals",
+    response_model=PosTerminalEnrolledResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Habilitar esta PC como caja (devuelve el secreto UNA sola vez)",
+)
+async def enroll_pos_terminal(
+    body: PosTerminalCreateRequest,
+    user: User = Depends(require_owner_stepup),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosTerminalEnrolledResponse:
+    """Sólo el dueño, con PIN. El secreto no se guarda: si se pierde, se da de
+    baja la caja y se habilita otra vez."""
+    terminal, secreto = await habilitar(session, user, body.name)
+    return PosTerminalEnrolledResponse(
+        id=terminal.id,
+        name=terminal.name,
+        created_at=terminal.created_at,
+        last_seen_at=terminal.last_seen_at,
+        disabled_at=terminal.disabled_at,
+        secret=secreto,
+    )
+
+
+@router.get(
+    "/terminals",
+    response_model=list[PosTerminalResponse],
+    summary="Cajas habilitadas del negocio (sin secretos)",
+)
+async def list_pos_terminals(
+    user: User = Depends(require_owner_stepup),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[PosTerminal]:
+    return await listar(session, user.tenant_id)
+
+
+@router.post(
+    "/terminals/{terminal_id}/disable",
+    response_model=PosTerminalResponse,
+    summary="Dar de baja una caja (idempotente)",
+)
+async def disable_pos_terminal(
+    terminal_id: uuid.UUID,
+    user: User = Depends(require_owner_stepup),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosTerminal:
+    return await dar_de_baja(session, user, terminal_id)

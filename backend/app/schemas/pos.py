@@ -166,3 +166,25 @@ class PosCustomerResponse(BaseModel):
 
     id: UUID
     name: str
+
+
+class PosTerminalCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class PosTerminalResponse(BaseModel):
+    """Una caja habilitada. NUNCA trae el secreto."""
+
+    model_config = {"from_attributes": True}
+
+    id: UUID
+    name: str
+    created_at: datetime
+    last_seen_at: datetime | None
+    disabled_at: datetime | None
+
+
+class PosTerminalEnrolledResponse(PosTerminalResponse):
+    """La respuesta del alta: la ÚNICA vez que se ve el secreto."""
+
+    secret: str
