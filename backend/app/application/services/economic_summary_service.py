@@ -37,7 +37,14 @@ async def _stock_valuation(
     """
     _missing = and_(Product.unit_cost_ars.is_(None), Product.stock_units > 0)
     stmt = select(
-        func.coalesce(func.sum(Product.stock_units * Product.unit_cost_ars), 0),
+        # `unit_cost_ars` es por UNIDAD DE VENTA y `stock_units` en unidades base:
+        # sin dividir por el factor, 5 kg a $800/kg valían $4.000.000.
+        func.coalesce(
+            func.sum(
+                Product.stock_units * Product.unit_cost_ars / Product.base_units_per_sale_unit
+            ),
+            0,
+        ),
         func.coalesce(func.sum(case((_missing, 1), else_=0)), 0),
         func.coalesce(func.sum(case((_missing, Product.stock_units), else_=0)), 0),
     ).where(

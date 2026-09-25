@@ -102,6 +102,13 @@ class TestLookup:
         assert detalle["code"] == "SCAN_AMBIGUOUS"
         ids = {c["product_id"] for c in detalle["candidates"]}
         assert ids == {a["id"], b["id"]}
+        # B13: cada candidato trae la vista de caja, para que la caja tenga el
+        # precio después de que el cajero elija — y sin costos (B5).
+        for candidato in detalle["candidates"]:
+            assert candidato["product"]["id"] == candidato["product_id"]
+            assert "sale_price_ars" in candidato["product"]
+            assert "unit_cost_ars" not in candidato["product"]
+            assert "margin_pct" not in candidato["product"]
 
     async def test_desconocido_se_puede_aprender(
         self, client: AsyncClient, auth_headers: dict[str, Any]

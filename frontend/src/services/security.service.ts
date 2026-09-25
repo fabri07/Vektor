@@ -13,6 +13,8 @@ export interface TeamMember {
   role_code: string;
   can_modify_sensitive: boolean;
   pin_set: boolean;
+  /** Permisos de caja efectivos (B5). */
+  pos_permissions?: string[];
 }
 
 export const securityService = {
@@ -42,6 +44,16 @@ export const securityService = {
   },
   async listTeam(): Promise<TeamMember[]> {
     const res = await api.get<TeamMember[]>("/settings/team");
+    return res.data;
+  },
+  /** Permisos de caja de un cajero. Se manda el set COMPLETO: lo que no va, queda en false. */
+  async setTeamPosPermissions(
+    userId: string,
+    permisos: Record<string, boolean>,
+  ): Promise<TeamMember> {
+    const res = await api.patch<TeamMember>(`/settings/team/${userId}`, {
+      pos_permissions: permisos,
+    });
     return res.data;
   },
   async setTeamPermission(userId: string, canModify: boolean): Promise<TeamMember> {

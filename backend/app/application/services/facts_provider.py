@@ -53,7 +53,7 @@ def _naive_ar(value: datetime | None) -> datetime | None:
 _SALES_COLS = ["sale_date", "amount_ars", "cost_ars", "payment_method", "provenance"]
 _EXPENSES_COLS = ["expense_date", "amount_ars", "category", "expense_type", "provenance"]
 _PRODUCTS_COLS = [
-    "product_id", "stock_units", "unit_cost_ars", "last_sold_date",
+    "product_id", "stock_units", "base_units_per_sale_unit", "unit_cost_ars", "last_sold_date",
     "first_seen_date", "provenance",
 ]
 
@@ -87,6 +87,7 @@ async def load_facts_frames(
             SaleEntry.payment_method,
             SaleEntry.provenance,
             Product.unit_cost_ars,
+            Product.base_units_per_sale_unit,
         )
         .outerjoin(Product, Product.id == SaleEntry.product_id)
         .where(
@@ -103,7 +104,8 @@ async def load_facts_frames(
                 "sale_date": row.transaction_date,
                 "amount_ars": float(row.amount),
                 "cost_ars": (
-                    float(row.unit_cost_ars) * row.quantity
+                    # Costo por unidad de venta × cantidad en unidades base / factor.
+                    float(row.unit_cost_ars) * row.quantity / (row.base_units_per_sale_unit or 1)
                     if row.unit_cost_ars is not None
                     else float("nan")
                 ),
@@ -151,6 +153,7 @@ async def load_facts_frames(
         Product.id,
         Product.stock_units,
         Product.unit_cost_ars,
+        Product.base_units_per_sale_unit,
         Product.acquired_at,
         Product.created_at,
         Product.provenance,
@@ -181,6 +184,8 @@ async def load_facts_frames(
             {
                 "product_id": str(row.id),
                 "stock_units": float(row.stock_units),
+                # Para valuar: el costo es por unidad de venta (ver sale_unit.valor_de_stock).
+                "base_units_per_sale_unit": int(row.base_units_per_sale_unit or 1),
                 "unit_cost_ars": (
                     float(row.unit_cost_ars) if row.unit_cost_ars is not None
                     else float("nan")

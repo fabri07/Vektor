@@ -14,15 +14,22 @@ from app.api.v1.deps import (
     get_current_tenant,
     require_active_subscription,
     require_modify_access,
+    require_pos_permission,
     require_role,
 )
 from app.application.services import maintenance_lock_service, tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
+from app.application.services.pos_terminal_service import (
+    exigir_terminal_si_es_cajero,
+    resolver_terminal,
+)
 from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
 )
 from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.domain.pos_permissions import PosPermission
+from app.domain.pos_terminal import TERMINAL_HEADER
 from app.domain.product_categories import (
     normalize_product_category,
     product_category_catalog,
@@ -39,6 +46,7 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
+from app.schemas.pos import PosProductResponse
 from app.schemas.product import (
     CreateProductRequest,
     LearnBarcodeRequest,
@@ -451,8 +459,18 @@ async def lookup_product_by_scan(
             detail={
                 "code": "SCAN_AMBIGUOUS",
                 "code_type": codigo.tipo.value,
+                # `product` es la vista de CAJA (sin costos, B5): el cajero no
+                # puede leer `/products/{id}`, así que sin ella, después de
+                # elegir, la caja no tendría el precio para mostrar.
                 "candidates": [
-                    {"product_id": str(p.id), "name": p.name, "matched_by": columna}
+                    {
+                        "product_id": str(p.id),
+                        "name": p.name,
+                        "matched_by": columna,
+                        "product": PosProductResponse.model_validate(p).model_dump(
+                            mode="json"
+                        ),
+                    }
                     for p, columna in candidatos
                 ],
                 "message": "Ese código corresponde a más de un producto. Elegí cuál es.",
@@ -481,7 +499,7 @@ async def lookup_product_by_scan(
     return ScanLookupResponse(
         code_type=codigo.tipo.value,
         matched_by=columna,
-        product=ProductResponse.model_validate(producto),
+        product=PosProductResponse.model_validate(producto),
     )
 
 
@@ -636,16 +654,20 @@ async def delete_product(
 
 @router.post(
     "/{product_id}/barcode",
-    response_model=ProductResponse,
+    # Vista de caja: lo llama un cajero y no puede devolverle costos (B5), ni al
+    # vincular ni al repetir una vinculación ya hecha.
+    response_model=PosProductResponse,
     summary="Vincular un código de barras escaneado a un producto (sólo agrega)",
 )
 async def learn_product_barcode(
     product_id: UUID,
     body: LearnBarcodeRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    # OWNER/ADMIN siempre; un CASHIER, si tiene `learn_barcode`.
+    user: User = Depends(require_pos_permission(PosPermission.LEARN_BARCODE)),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
+    terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
 ) -> Product:
     """El aprendizaje de la caja: "este código es este producto".
 
@@ -664,6 +686,9 @@ async def learn_product_barcode(
       o por SKU). Para la caja offline es la señal de mandar el aprendizaje a
       revisión; las ventas ya hechas no se tocan.
     """
+    # Un cajero sólo escribe desde una caja habilitada (B6).
+    terminal = await resolver_terminal(session, tenant.tenant_id, terminal_secret)
+    exigir_terminal_si_es_cajero(user, terminal)
     codigo = clasificar(body.barcode)
     if not codigo.aprendible:
         raise HTTPException(

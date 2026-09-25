@@ -10,7 +10,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.domain.business_time import fecha_de_negocio, today_ar
+from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
 
 _MAX_AMOUNT = Decimal("999999999")
 _PAYMENT_PATTERN = r"^(cash|debit_card|credit_card|transfer|qr|account|other)$"
@@ -58,7 +58,7 @@ class ManualPurchaseRequest(BaseModel):
     def _not_future(cls, v: datetime) -> datetime:
         if fecha_de_negocio(v) > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
-        return v
+        return a_hora_de_negocio(v)
 
 
 class PurchaseLineResult(BaseModel):

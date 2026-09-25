@@ -5,12 +5,13 @@ Column names match the migration schema exactly.
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.persistence.db.base import Base, TimestampMixin
+from app.persistence.db.base import PGJSONB, Base, TimestampMixin
 from app.persistence.models.tenant import Tenant
 
 
@@ -45,6 +46,11 @@ class User(TimestampMixin, Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
 
+    # Permisos de caja de un CASHIER (ver `domain/pos_permissions.py`). Sólo un
+    # booleano `true` habilita; OWNER y ADMIN tienen todo por rol y esto se ignora.
+    pos_permissions: Mapped[dict[str, Any]] = mapped_column(
+        PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
+    )
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
     __table_args__ = (

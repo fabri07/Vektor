@@ -1457,7 +1457,10 @@ class AgentStock(BaseAgent):
         )
 
         stock_values = [
-            float(p["stock_units"]) * float(p["unit_cost"])
+            # Costo por unidad de venta, stock en unidades base: se divide por el factor.
+            float(p["stock_units"])
+            * float(p["unit_cost"])
+            / (p.get("base_units_per_sale_unit") or 1)
             for p in products
             if (p.get("stock_units") or 0) > 0
             and p.get("unit_cost") is not None

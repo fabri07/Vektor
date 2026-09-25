@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
@@ -13,7 +14,10 @@ from app.api.v1.deps import (
     subscription_http_error,
 )
 from app.application.services import subscription_service
+from app.application.services.pin_service import PinService
+from app.application.services.team_permissions_service import aplicar_rol, cambiar_rol
 from app.domain.subscription import SUBSCRIPTION_ERRORS
+from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -86,6 +90,21 @@ async def create_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="A user with that email already exists in this tenant.",
         )
+    # El login busca el email en TODOS los negocios y toma el primero
+    # (`get_by_email_any_tenant`). Crear acá un email que ya existe en otro
+    # negocio deja una cuenta con la que nunca se puede entrar. Hasta que el
+    # login permita elegir negocio, se rechaza.
+    if await repo.get_by_email_any_tenant(body.email.lower()) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "EMAIL_IN_USE_OTHER_BUSINESS",
+                "message": (
+                    "Ese email ya tiene una cuenta en otro negocio. Usá otro email "
+                    "para este usuario."
+                ),
+            },
+        )
     # Plazas del plan: bloquear → contar → crear, todo en ESTA transacción
     # (`repo.save` solo hace flush; el commit es el del request, y hasta ahí
     # vive el lock). Contar antes del lock dejaría entrar dos altas simultáneas.
@@ -108,7 +127,11 @@ async def create_user(
         password_hash=hash_password(body.password),
         role_code=body.role_code,
         is_active=True,
+        can_modify_sensitive=False,
+        pos_permissions={},
     )
+    # Mismas reglas que un cambio de rol: un cajero nace sin permisos de caja.
+    aplicar_rol(user, body.role_code)
     return await repo.save(user)
 
 
@@ -133,8 +156,9 @@ async def update_user(
     tenant: Tenant = Depends(get_current_tenant),
     # OWNER-only: edita roles (role_code) sin restricción → debe ser exclusivo del
     # dueño para que una sub-cuenta no se auto-promueva a OWNER.
-    _: User = Depends(require_owner_stepup),
+    actor: User = Depends(require_owner_stepup),
     session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
 ) -> User:
     repo = UserRepository(session)
     user = await repo.get_by_id(user_id, tenant.tenant_id)
@@ -143,7 +167,9 @@ async def update_user(
     if body.full_name is not None:
         user.full_name = body.full_name
     if body.role_code is not None:
-        user.role_code = body.role_code
+        # La transición limpia lo que el rol nuevo no admite (un cajero sin
+        # `can_modify_sensitive`, un ex cajero sin permisos de caja) y la audita.
+        await cambiar_rol(session, PinService(redis), actor, user, body.role_code)
     return await repo.save(user)
 
 

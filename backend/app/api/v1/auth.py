@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user, require_open_registration
 from app.application.services.auth_service import AuthService
-from app.application.services.pin_service import PinError, PinService
+from app.application.services.pin_service import PinError, PinService, puede_tener_pin
+from app.domain.pos_permissions import effective_pos_permissions
 from app.main import limiter
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -187,6 +188,10 @@ async def get_me(
             else None
         ),
         onboarding_completed=profile.onboarding_completed if profile else False,
+        pos_permissions=sorted(
+            p.value
+            for p in effective_pos_permissions(current_user.role_code, current_user.pos_permissions)
+        ),
     )
 
 
@@ -274,8 +279,8 @@ async def pin_setup(
     session: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_redis),
 ) -> MessageResponse:
-    # Solo OWNER o sub-cuentas con permiso pueden configurar un PIN.
-    if not (current_user.role_code == "OWNER" or current_user.can_modify_sensitive):
+    # OWNER, sub-cuentas con permiso y cajeros que pueden anular (B5).
+    if not puede_tener_pin(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tenés permiso para configurar un PIN.",

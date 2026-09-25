@@ -50,7 +50,7 @@ from app.application.services.product_identity import (
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
-from app.domain.business_time import fecha_de_negocio, today_ar
+from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     classify_expense_with_vertical,
@@ -151,7 +151,7 @@ class ResolvePurchaseRequest(BaseModel):
     def transaction_date_not_future(cls, value: datetime) -> datetime:
         if fecha_de_negocio(value) > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
-        return value
+        return a_hora_de_negocio(value)
 
 
 class BulkImportRequest(BaseModel):

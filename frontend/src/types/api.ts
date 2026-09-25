@@ -53,6 +53,8 @@ export interface MeResponse {
     status: string;
   } | null;
   onboarding_completed: boolean;
+  /** Permisos de caja efectivos (B5). Ausente en backends anteriores. */
+  pos_permissions?: string[];
 }
 
 export interface AuthResponse {

@@ -10,6 +10,7 @@ Endpoints:
   PATCH /settings/fiscal-condition   → actualizar condición fiscal
 """
 
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -27,6 +28,10 @@ from app.application.services.health_config_service import (
     HealthConfigResponse,
     HealthConfigService,
 )
+from app.application.services.team_permissions_service import (
+    cambiar_permiso_general,
+    cambiar_permisos_pos,
+)
 from app.application.services.work_schedule_service import (
     WorkScheduleRequest,
     WorkScheduleResponse,
@@ -36,6 +41,7 @@ from app.domain.fiscal_condition import (
     FiscalCondition,
     normalize_fiscal_condition,
 )
+from app.domain.pos_permissions import CASHIER_ROLE, effective_pos_permissions
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.user import User
@@ -166,10 +172,32 @@ class TeamMemberResponse(BaseModel):
     role_code: str
     can_modify_sensitive: bool
     pin_set: bool
+    #: Permisos de caja EFECTIVOS (B5): los de un cajero según lo guardado, todos
+    #: para OWNER/ADMIN, ninguno para el resto.
+    pos_permissions: list[str] = []
 
 
 class TeamPermissionRequest(BaseModel):
-    can_modify_sensitive: bool
+    """Los dos campos son opcionales: se aplica sólo lo que viene."""
+
+    can_modify_sensitive: bool | None = None
+    #: Sólo sobre un CASHIER. Claves desconocidas o valores que no sean `true`
+    #: se descartan al guardar.
+    pos_permissions: dict[str, Any] | None = None
+
+
+def _miembro(u: User) -> TeamMemberResponse:
+    return TeamMemberResponse(
+        user_id=u.user_id,
+        email=u.email,
+        full_name=u.full_name,
+        role_code=u.role_code,
+        can_modify_sensitive=u.can_modify_sensitive,
+        pin_set=u.pin_hash is not None,
+        pos_permissions=sorted(
+            p.value for p in effective_pos_permissions(u.role_code, u.pos_permissions)
+        ),
+    )
 
 
 @router.get("/team", response_model=list[TeamMemberResponse])
@@ -179,17 +207,7 @@ async def list_team(
 ) -> list[TeamMemberResponse]:
     """Lista las cuentas del tenant con su permiso de modificación. Solo OWNER."""
     users = await UserRepository(db).list_by_tenant(current_user.tenant_id)
-    return [
-        TeamMemberResponse(
-            user_id=u.user_id,
-            email=u.email,
-            full_name=u.full_name,
-            role_code=u.role_code,
-            can_modify_sensitive=u.can_modify_sensitive,
-            pin_set=u.pin_hash is not None,
-        )
-        for u in users
-    ]
+    return [_miembro(u) for u in users]
 
 
 @router.patch("/team/{user_id}", response_model=TeamMemberResponse)
@@ -209,14 +227,23 @@ async def update_team_permission(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El dueño ya tiene permiso total; no se modifica.",
         )
-    target.can_modify_sensitive = body.can_modify_sensitive
+    es_cajero = target.role_code == CASHIER_ROLE
+    if body.pos_permissions is not None and not es_cajero:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Los permisos de caja sólo se configuran en un usuario de caja.",
+        )
+    # `can_modify_sensitive` abre el PATCH/DELETE genérico de datos: un cajero
+    # no lo puede tener, aunque el guard de rutas igual se lo cerrara.
+    if body.can_modify_sensitive and es_cajero:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Un usuario de caja no puede tener permiso de modificar datos.",
+        )
+    if body.can_modify_sensitive is not None:
+        cambiar_permiso_general(db, current_user, target, body.can_modify_sensitive)
+    if body.pos_permissions is not None:
+        cambiar_permisos_pos(db, current_user, target, body.pos_permissions)
     await repo.save(target)
     await db.commit()
-    return TeamMemberResponse(
-        user_id=target.user_id,
-        email=target.email,
-        full_name=target.full_name,
-        role_code=target.role_code,
-        can_modify_sensitive=target.can_modify_sensitive,
-        pin_set=target.pin_hash is not None,
-    )
+    return _miembro(target)

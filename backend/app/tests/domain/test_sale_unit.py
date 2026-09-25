@@ -4,9 +4,11 @@ El riesgo que cubren: `stock_units = 5000` para 5 kg es correcto en la base y
 catastrófico en una pantalla si alguien lo lee como "5000 kilos".
 """
 
+from decimal import Decimal
+
 import pytest
 
-from app.domain.sale_unit import etiqueta_de_unidad, formatear_cantidad
+from app.domain.sale_unit import etiqueta_de_unidad, formatear_cantidad, valor_de_stock
 
 
 class TestEtiqueta:
@@ -53,3 +55,11 @@ class TestFormato:
 
     def test_stock_en_cero(self) -> None:
         assert formatear_cantidad(0, "gram", 1000) == "0,000 kg"
+
+
+class TestValorDeStock:
+    def test_cinco_kilos_a_800_el_kilo(self) -> None:
+        assert valor_de_stock(5000, 1000, Decimal("800.00")) == Decimal("4000.00")
+
+    def test_por_unidad_es_la_cuenta_de_siempre(self) -> None:
+        assert valor_de_stock(12, 1, Decimal("150.00")) == Decimal("1800.00")

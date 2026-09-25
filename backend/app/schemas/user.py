@@ -26,13 +26,13 @@ class UserResponse(BaseModel):
 class CreateUserRequest(BaseModel):
     email: EmailStr
     full_name: str = Field(min_length=2, max_length=200)
-    role_code: str = Field(pattern=r"^(OWNER|ADMIN|ANALYST|VIEWER)$")
+    role_code: str = Field(pattern=r"^(OWNER|ADMIN|ANALYST|VIEWER|CASHIER)$")
     password: str = Field(min_length=8, max_length=128)
 
 
 class UpdateUserRequest(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=200)
-    role_code: str | None = Field(default=None, pattern=r"^(OWNER|ADMIN|ANALYST|VIEWER)$")
+    role_code: str | None = Field(default=None, pattern=r"^(OWNER|ADMIN|ANALYST|VIEWER|CASHIER)$")
 
 
 class UpdateMeRequest(BaseModel):

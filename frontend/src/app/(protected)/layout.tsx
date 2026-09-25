@@ -9,6 +9,8 @@ import { ActionNotificationToast } from "@/features/notifications/ActionNotifica
 import { ChatWidget } from "@/features/chat/ChatWidget";
 import { PinGateModal } from "@/components/ui/PinGateModal";
 import { useAuthStore } from "@/stores/authStore";
+import { useSessionSync } from "@/hooks/useSessionSync";
+import { CASHIER_ROLE } from "@/lib/roles";
 
 export default function ProtectedLayout({
   children,
@@ -18,9 +20,14 @@ export default function ProtectedLayout({
   const router = useRouter();
   const pathname = usePathname();
   const token = useAuthStore((s) => s.token);
+  const role = useAuthStore((s) => s.user?.role);
+  const sesion = useSessionSync();
   const [mobileOpen, setMobileOpen] = useState(false);
   const isChatPage = pathname === "/chat";
   const isDashboardRoute = pathname.startsWith("/dashboard");
+
+  const isPosRoute = pathname === "/pos" || pathname.startsWith("/pos/");
+  const isCashier = role === CASHIER_ROLE;
 
   useEffect(() => {
     if (!token) {
@@ -28,8 +35,38 @@ export default function ProtectedLayout({
     }
   }, [token, router]);
 
+  // Un cajero sólo tiene la caja (B5/B13): el backend le deniega todo lo demás,
+  // así que cualquier otra página sería una pantalla de 403.
+  useEffect(() => {
+    if (token && sesion !== "pending" && isCashier && !isPosRoute) {
+      router.replace("/pos");
+    }
+  }, [token, sesion, isCashier, isPosRoute, router]);
+
   if (!token) {
     return null;
+  }
+
+  // Hasta validar la sesión no se muestra nada: el rol guardado puede estar
+  // viejo, y renderizar la app del dueño con datos cacheados es justo lo que
+  // hay que evitar. Sin red se sigue con el rol guardado (ver useSessionSync).
+  if (sesion === "pending") {
+    return null;
+  }
+
+  if (isCashier && !isPosRoute) {
+    return null;
+  }
+
+  // La caja va a pantalla completa, sin barra lateral ni chat (B13). El modal
+  // del PIN sí: anular un ticket lo pide.
+  if (isPosRoute) {
+    return (
+      <>
+        {children}
+        <PinGateModal />
+      </>
+    );
   }
 
   return (

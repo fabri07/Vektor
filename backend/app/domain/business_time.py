@@ -45,3 +45,16 @@ def fecha_de_negocio(momento: datetime) -> date:
     if momento.tzinfo is None:
         return momento.date()
     return momento.astimezone(AR_TZ).date()
+
+
+def a_hora_de_negocio(momento: datetime) -> datetime:
+    """El instante como hora argentina SIN zona, que es como se guarda.
+
+    Las columnas de fecha de negocio (`transaction_date`, `operation_date`) son
+    `DateTime` sin zona y guardan hora local. Uno con zona (`...T02:00:00Z`) se
+    convierte (queda `23:00` del día anterior) antes de perder la zona; guardarlo
+    crudo dejaba la hora UTC como si fuera local y la venta caía en otro día.
+    """
+    if momento.tzinfo is None:
+        return momento
+    return momento.astimezone(AR_TZ).replace(tzinfo=None)

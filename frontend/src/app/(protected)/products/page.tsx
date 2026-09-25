@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { Pencil, Trash2, Eye } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
+import { LabelsModal } from "@/features/products/LabelsModal";
 import { StatCard } from "@/components/ui/StatCard";
 import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
@@ -267,6 +268,7 @@ export default function ProductsPage() {
   };
   const [stockFilter, setStockFilter] = useState<StockFilter>(resolveFilter(rawFilter));
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [labelsOpen, setLabelsOpen] = useState(false);
   // CTA desde el resumen económico (Balance): ?filter=requires_completion
   // muestra solo productos auto-creados por import sin costo/precio cargado.
   const requiresCompletionOnly = searchParams.get("filter") === "requires_completion";
@@ -387,7 +389,22 @@ export default function ProductsPage() {
     .map((p) => ({ ...p, _status: null }));
 
   return (
-    <PageWrapper title="Productos" actions={<ManualEntryLauncher />}>
+    <PageWrapper
+      title="Productos"
+      actions={
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setLabelsOpen(true)}
+            className="h-9 rounded-lg border border-vk-border-w px-3 text-sm text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+          >
+            Imprimir etiquetas
+          </button>
+          <ManualEntryLauncher />
+        </div>
+      }
+    >
+      <LabelsModal isOpen={labelsOpen} onClose={() => setLabelsOpen(false)} />
       {/* Corrección C4 (revisión externa 2026-08-19): sin este aviso, un
           catálogo más grande que PRODUCTS_MAX_ACCUMULATED se mostraba
           incompleto sin decirlo — no-invention: nunca una lista parcial
