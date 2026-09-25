@@ -113,6 +113,66 @@ class PosOperationResponse(BaseModel):
 
 
 
+class PosReceiptLine(BaseModel):
+    position: int
+    #: Nombre del producto al imprimir. "Producto eliminado" si ya no existe.
+    product_name: str
+    quantity: int
+    #: La cantidad con su unidad ("3 u.", "0,750 kg"): el ticket no hace cuentas.
+    quantity_display: str
+    unit_price_list: Decimal
+    #: Precio × cantidad, antes de cualquier descuento.
+    gross_ars: Decimal
+    #: SÓLO el descuento propio de la línea. La parte del descuento global va una
+    #: vez, en los totales: mostrarla también por línea la contaría dos veces a
+    #: la vista y las líneas dejarían de sumar el subtotal impreso.
+    discount_line_ars: Decimal
+    #: Lo que efectivamente se cobró por la línea (con su parte del global).
+    line_total_ars: Decimal
+
+
+class PosReceiptTender(BaseModel):
+    payment_method: str
+    amount_ars: Decimal
+
+
+class PosReceiptResponse(BaseModel):
+    """Todo lo que el ticket necesita, ya resuelto por el servidor (B12).
+
+    Trae el nombre del negocio porque el cajero no puede leer `/tenants/me`, y
+    los nombres de producto porque el ticket no puede depender del catálogo que
+    la caja tenga en memoria. Sin costos: lo imprime y lo lee el cliente.
+    """
+
+    id: UUID
+    #: Número corto para ubicar el ticket. NO es correlativo: es no fiscal.
+    number: str
+    business_name: str
+    operation_date: datetime
+    status: str
+    lines: list[PosReceiptLine]
+    tenders: list[PosReceiptTender]
+    subtotal_ars: Decimal
+    discount_ars: Decimal
+    total_ars: Decimal
+    cash_received_ars: Decimal | None
+    cash_change_ars: Decimal | None
+    customer_name: str | None
+    cashier_name: str | None
+    terminal_name: str | None
+
+
+class PosOperationSummary(BaseModel):
+    """Una fila de "Últimos tickets", para reimprimir."""
+
+    id: UUID
+    number: str
+    operation_date: datetime
+    total_ars: Decimal
+    status: str
+    cashier_name: str | None
+
+
 class PosProductResponse(BaseModel):
     """Un producto como lo ve la CAJA: sin costos, sin márgenes, sin lista.
 

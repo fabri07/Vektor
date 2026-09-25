@@ -9,8 +9,10 @@ import { CashierHome } from "@/features/pos/CashierHome";
 import { DiscountControl } from "@/features/pos/DiscountControl";
 import { PaymentPanel } from "@/features/pos/PaymentPanel";
 import { type PickerMode, ProductPicker } from "@/features/pos/ProductPicker";
+import { RecentTickets } from "@/features/pos/RecentTickets";
 import { ScanInput } from "@/features/pos/ScanInput";
 import { VoidLastTicket } from "@/features/pos/VoidLastTicket";
+import { usePosPrinting } from "@/features/pos/usePosPrinting";
 import { useScanner } from "@/features/pos/useScanner";
 import {
   type CartLine,
@@ -33,6 +35,7 @@ import { CASHIER_ROLE, POS_ROLES, hasPosPermission } from "@/lib/roles";
 import { logoutRequest } from "@/services/auth.service";
 import { type ScanCandidate, posService } from "@/services/pos.service";
 import { useAuthStore } from "@/stores/authStore";
+import { type PageSize, type PaperWidth, usePosPrintConfigStore } from "@/stores/posPrintConfigStore";
 import { usePosScannerConfigStore } from "@/stores/posScannerConfigStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
 
@@ -71,6 +74,8 @@ function PosRegister() {
   const terminal = usePosTerminalStore((s) => s.terminal);
   const terminalInvalid = usePosTerminalStore((s) => s.invalid);
   const { terminator, thresholdMs, setTerminator, setThresholdMs } = usePosScannerConfigStore();
+  const impresora = usePosPrintConfigStore();
+  const { printReceipt, printTest, printError } = usePosPrinting();
 
   const [sale, dispatch] = useReducer(saleReducer, initialSale);
   const saleRef = useRef(sale);
@@ -144,6 +149,9 @@ function PosRegister() {
         clearPending(payload.client_operation_id);
         dispatch({ type: "SUCCESS", result });
         setLastOperation(result);
+        // Recién ahora, con la venta confirmada: una impresión que falla no
+        // pone en duda el cobro.
+        if (usePosPrintConfigStore.getState().autoPrint) void printReceipt(result.id);
       } catch (e) {
         const info = posErrorInfo(e);
         if (isDefinitiveRejection(info, info.code)) {
@@ -161,7 +169,7 @@ function PosRegister() {
         focusScan();
       }
     },
-    [tenantId, handleRejection, focusScan],
+    [tenantId, handleRejection, focusScan, printReceipt],
   );
 
   const cobrar = useCallback(() => {
@@ -295,6 +303,48 @@ function PosRegister() {
         </div>
         <div className="flex items-center gap-3 text-sm">
           <details className="relative">
+            <summary className="cursor-pointer text-vk-text-secondary">Impresora</summary>
+            <div className="absolute right-0 z-10 mt-2 w-72 space-y-2 rounded-lg border border-vk-border-w bg-vk-surface-w p-3 shadow-vk-lg">
+              <label className="flex items-center justify-between gap-2">
+                Papel
+                <select
+                  aria-label="Ancho del papel"
+                  value={impresora.paperWidth}
+                  onChange={(e) => impresora.setPaperWidth(Number(e.target.value) as PaperWidth)}
+                  className="rounded border border-vk-border-w bg-vk-surface-w px-1"
+                >
+                  <option value={80}>80 mm</option>
+                  <option value={58}>58 mm</option>
+                </select>
+              </label>
+              <label className="flex items-center justify-between gap-2">
+                Página
+                <select
+                  aria-label="Tamaño de página"
+                  value={impresora.pageSize}
+                  onChange={(e) => impresora.setPageSize(e.target.value as PageSize)}
+                  className="rounded border border-vk-border-w bg-vk-surface-w px-1"
+                >
+                  <option value="A">A · alto fijo</option>
+                  <option value="B">B · angosto</option>
+                  <option value="C">C · la decide el driver</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  aria-label="Imprimir al cobrar"
+                  checked={impresora.autoPrint}
+                  onChange={(e) => impresora.setAutoPrint(e.target.checked)}
+                />
+                Imprimir al cobrar
+              </label>
+              <Button variant="secondary" size="sm" onClick={() => void printTest()}>
+                Imprimir prueba
+              </Button>
+            </div>
+          </details>
+          <details className="relative">
             <summary className="cursor-pointer text-vk-text-secondary">Lector</summary>
             <div className="absolute right-0 z-10 mt-2 w-64 space-y-2 rounded-lg border border-vk-border-w bg-vk-surface-w p-3 shadow-vk-lg">
               <label className="flex items-center justify-between gap-2">
@@ -380,6 +430,16 @@ function PosRegister() {
               >
                 Nueva venta
               </Button>
+              <Button
+                variant="secondary"
+                className="w-full"
+                onClick={() => {
+                  if (sale.result) void printReceipt(sale.result.id);
+                  focusScan();
+                }}
+              >
+                Reimprimir ticket
+              </Button>
             </div>
           ) : (
             <>
@@ -462,6 +522,12 @@ function PosRegister() {
             </>
           )}
 
+          {printError ? (
+            <p role="alert" className="text-sm text-vk-warning">
+              {printError}
+            </p>
+          ) : null}
+
           {canVoid && lastOperation && sale.status !== "enviando" ? (
             <VoidLastTicket
               key={lastOperation.id}
@@ -473,6 +539,19 @@ function PosRegister() {
               }}
             />
           ) : null}
+
+          <RecentTickets
+            refreshKey={`${lastOperation?.id ?? ""}:${lastOperation?.status ?? ""}`}
+            canVoid={canVoid}
+            onReprint={(id) => {
+              void printReceipt(id);
+              focusScan();
+            }}
+            onVoided={() => {
+              setScanMsg("Ticket anulado.");
+              focusScan();
+            }}
+          />
         </aside>
       </div>
 

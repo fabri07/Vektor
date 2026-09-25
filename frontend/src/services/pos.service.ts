@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import type { PosReceipt } from "@/features/pos/ticketTemplate";
 import type { PosOperationPayload, PosOperationResult, PosProduct } from "@/lib/pos/cart";
 
 export interface PosTerminal {
@@ -33,7 +34,25 @@ export interface PosCustomer {
   name: string;
 }
 
+/** Una fila de "Últimos tickets". */
+export interface PosOperationSummary {
+  id: string;
+  number: string;
+  operation_date: string;
+  total_ars: string;
+  status: string;
+  cashier_name: string | null;
+}
+
 export const posService = {
+  async getReceipt(operationId: string): Promise<PosReceipt> {
+    const res = await api.get<PosReceipt>(`/pos/operations/${operationId}/receipt`);
+    return res.data;
+  },
+  async listOperations(limit = 20): Promise<PosOperationSummary[]> {
+    const res = await api.get<PosOperationSummary[]>("/pos/operations", { params: { limit } });
+    return res.data;
+  },
   async lookup(code: string): Promise<ScanLookup> {
     const res = await api.get<ScanLookup>("/products/lookup", { params: { code } });
     return res.data;

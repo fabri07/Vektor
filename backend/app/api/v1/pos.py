@@ -78,6 +78,7 @@ from app.domain.pos_operation import (
 )
 from app.domain.pos_permissions import CASHIER_ROLE, PosPermission
 from app.domain.pos_terminal import TERMINAL_HEADER
+from app.domain.sale_unit import formatear_cantidad
 from app.persistence.db.session import get_db_session
 from app.persistence.models import (
     PosOperation,
@@ -96,7 +97,11 @@ from app.schemas.pos import (
     PosCustomerResponse,
     PosOperationRequest,
     PosOperationResponse,
+    PosOperationSummary,
     PosProductResponse,
+    PosReceiptLine,
+    PosReceiptResponse,
+    PosReceiptTender,
     PosTerminalCreateRequest,
     PosTerminalEnrolledResponse,
     PosTerminalResponse,
@@ -621,6 +626,152 @@ async def void_pos_operation(
         session, str(tenant.tenant_id), "pos_operation_voided", background
     )
     return _a_respuesta(operacion, lineas, tenders)
+
+
+def _numero_de_ticket(operation_id: uuid.UUID) -> str:
+    """Número corto para ubicar un ticket. NO es correlativo: el ticket es no fiscal."""
+    return operation_id.hex[:8].upper()
+
+
+def _solo_propios_si_es_cajero(user: User) -> uuid.UUID | None:
+    """Un cajero ve sólo SUS tickets, como sólo anula los suyos (B10/B5).
+
+    Reimprimir un ticket ajeno no toca plata, pero listar los de los compañeros
+    le mostraría cuánto vende cada uno, que no es información de caja.
+    """
+    return user.user_id if user.role_code == CASHIER_ROLE else None
+
+
+@router.get(
+    "/operations",
+    response_model=list[PosOperationSummary],
+    summary="Últimos tickets, para reimprimir",
+)
+async def list_pos_operations(
+    limit: int = Query(default=20, ge=1, le=50),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_role("OWNER", "ADMIN", CASHIER_ROLE)),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[PosOperationSummary]:
+    stmt = select(PosOperation, User.full_name).outerjoin(
+        User, User.user_id == PosOperation.created_by_user_id
+    ).where(PosOperation.tenant_id == tenant.tenant_id)
+    propio = _solo_propios_si_es_cajero(user)
+    if propio is not None:
+        stmt = stmt.where(PosOperation.created_by_user_id == propio)
+    filas = (
+        await session.execute(
+            stmt.order_by(PosOperation.created_at.desc(), PosOperation.id.desc()).limit(limit)
+        )
+    ).all()
+    return [
+        PosOperationSummary(
+            id=op.id,
+            number=_numero_de_ticket(op.id),
+            operation_date=op.operation_date,
+            total_ars=op.total_ars,
+            status=op.status,
+            cashier_name=nombre,
+        )
+        for op, nombre in filas
+    ]
+
+
+@router.get(
+    "/operations/{operation_id}/receipt",
+    response_model=PosReceiptResponse,
+    summary="El ticket de una operación, para imprimir o reimprimir",
+)
+async def pos_operation_receipt(
+    operation_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_role("OWNER", "ADMIN", CASHIER_ROLE)),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosReceiptResponse:
+    """Sólo lectura: reimprimir no crea nada ni audita un cobro.
+
+    Un ticket anulado también se devuelve (con su `status`): tiene que poder
+    reimprimirse como anulado. De otro tenant, o ajeno para un cajero → 404,
+    sin revelar que existe.
+    """
+    cargada = await _cargar_operacion(session, tenant.tenant_id, operation_id=operation_id)
+    propio = _solo_propios_si_es_cajero(user)
+    if cargada is None or (propio is not None and cargada[0].created_by_user_id != propio):
+        raise HTTPException(status_code=404, detail="Operación no encontrada.")
+    operacion, lineas, tenders = cargada
+
+    ids = [ln.product_id for ln in lineas if ln.product_id is not None]
+    productos = (
+        {
+            p.id: p
+            for p in (
+                await session.execute(
+                    select(Product).where(
+                        Product.tenant_id == tenant.tenant_id, Product.id.in_(ids)
+                    )
+                )
+            ).scalars()
+        }
+        if ids
+        else {}
+    )
+
+    def _renglon(ln: PosOperationLine) -> PosReceiptLine:
+        producto = productos.get(ln.product_id) if ln.product_id else None
+        cantidad = (
+            formatear_cantidad(
+                ln.quantity, producto.sale_unit, producto.base_units_per_sale_unit or 1
+            )
+            if producto is not None
+            else str(ln.quantity)
+        )
+        return PosReceiptLine(
+            position=ln.position,
+            product_name=producto.name if producto is not None else "Producto eliminado",
+            quantity=ln.quantity,
+            quantity_display=cantidad,
+            unit_price_list=ln.unit_price_list,
+            gross_ars=ln.line_total_ars + ln.discount_line_ars + ln.discount_global_share_ars,
+            discount_line_ars=ln.discount_line_ars,
+            line_total_ars=ln.line_total_ars,
+        )
+
+    cajero = (
+        await session.get(User, operacion.created_by_user_id)
+        if operacion.created_by_user_id
+        else None
+    )
+    caja = (
+        await session.get(PosTerminal, operacion.terminal_id) if operacion.terminal_id else None
+    )
+    cliente = (
+        await session.get(Customer, operacion.customer_id) if operacion.customer_id else None
+    )
+    nombre_cliente = None
+    # El centinela "Local" no es un cliente: no se imprime.
+    if cliente is not None and not cliente.is_sentinel:
+        nombre_cliente = " ".join(p for p in (cliente.name, cliente.last_name) if p)
+
+    return PosReceiptResponse(
+        id=operacion.id,
+        number=_numero_de_ticket(operacion.id),
+        business_name=tenant.display_name,
+        operation_date=operacion.operation_date,
+        status=operacion.status,
+        lines=[_renglon(ln) for ln in lineas],
+        tenders=[
+            PosReceiptTender(payment_method=t.payment_method, amount_ars=t.amount_ars)
+            for t in tenders
+        ],
+        subtotal_ars=operacion.subtotal_ars,
+        discount_ars=operacion.discount_ars,
+        total_ars=operacion.total_ars,
+        cash_received_ars=operacion.cash_received_ars,
+        cash_change_ars=operacion.cash_change_ars,
+        customer_name=nombre_cliente,
+        cashier_name=cajero.full_name if cajero is not None else None,
+        terminal_name=caja.name if caja is not None else None,
+    )
 
 
 @router.get(

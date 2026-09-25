@@ -52,6 +52,9 @@ CASHIER_ALLOWED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", f"{_P}/products/lookup"),
         ("POST", f"{_P}/pos/operations"),
         ("POST", f"{_P}/pos/operations/{{operation_id}}/void"),
+        # Reimprimir (B12): sólo los tickets propios, lo filtra la ruta.
+        ("GET", f"{_P}/pos/operations"),
+        ("GET", f"{_P}/pos/operations/{{operation_id}}/receipt"),
         ("POST", f"{_P}/products/{{product_id}}/barcode"),
     }
 )

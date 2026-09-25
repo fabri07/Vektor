@@ -8,8 +8,10 @@ import { cobroRejectionMessage, posErrorInfo } from "@/lib/pos/errors";
 import { posService } from "@/services/pos.service";
 
 interface VoidLastTicketProps {
-  operation: PosOperationResult;
+  operation: Pick<PosOperationResult, "id" | "total_ars" | "status">;
   onVoided: (op: PosOperationResult) => void;
+  /** Rótulo del botón; por defecto, el del último ticket. */
+  label?: string;
 }
 
 /**
@@ -20,7 +22,7 @@ interface VoidLastTicketProps {
  * interceptor reintenta. El motivo se pide siempre; para un cajero es
  * obligatorio en el servidor.
  */
-export function VoidLastTicket({ operation, onVoided }: VoidLastTicketProps) {
+export function VoidLastTicket({ operation, onVoided, label }: VoidLastTicketProps) {
   const [abierto, setAbierto] = useState(false);
   const [motivo, setMotivo] = useState("");
   const [enviando, setEnviando] = useState(false);
@@ -31,7 +33,7 @@ export function VoidLastTicket({ operation, onVoided }: VoidLastTicketProps) {
   if (!abierto) {
     return (
       <Button variant="ghost" size="sm" onClick={() => setAbierto(true)}>
-        Anular último ticket ({formatCents(toCents(operation.total_ars) ?? 0)})
+        {label ?? `Anular último ticket (${formatCents(toCents(operation.total_ars) ?? 0)})`}
       </Button>
     );
   }

@@ -8,6 +8,7 @@ import { PosScreen } from "@/features/pos/PosScreen";
 import type { PosOperationPayload, PosProduct } from "@/lib/pos/cart";
 import { posService } from "@/services/pos.service";
 import { useAuthStore } from "@/stores/authStore";
+import { usePosPrintConfigStore } from "@/stores/posPrintConfigStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
 
 jest.mock("@/services/pos.service", () => ({
@@ -18,6 +19,8 @@ jest.mock("@/services/pos.service", () => ({
     learnBarcode: jest.fn(),
     createOperation: jest.fn(),
     voidOperation: jest.fn(),
+    getReceipt: jest.fn(),
+    listOperations: jest.fn().mockResolvedValue([]),
   },
 }));
 jest.mock("@/services/auth.service", () => ({ logoutRequest: jest.fn() }));
@@ -75,6 +78,8 @@ beforeEach(() => {
   window.localStorage.clear();
   usuario("OWNER");
   usePosTerminalStore.setState({ terminal: null, invalid: false });
+  // La impresión se prueba aparte (pos_printing.test.tsx).
+  usePosPrintConfigStore.setState({ autoPrint: false });
   svc.lookup.mockResolvedValue({ code_type: "gtin", matched_by: "barcode", product: yerba });
 });
 
