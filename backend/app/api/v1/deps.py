@@ -20,6 +20,12 @@ from app.application.services import maintenance_lock_service
 from app.application.services import subscription_service as quota_service
 from app.application.services.pin_service import PinService
 from app.config.settings import get_settings
+from app.domain.pos_permissions import (
+    CASHIER_ROLE,
+    PosPermission,
+    cashier_can_reach,
+    has_pos_permission,
+)
 from app.domain.subscription import (
     SUBSCRIPTION_ERRORS,
     QuotaExceeded,
@@ -45,6 +51,7 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: AsyncSession = Depends(get_db_session),
 ) -> User:
@@ -81,6 +88,23 @@ async def get_current_user(
     # distintos pisan un mismo error.
     sentry_sdk.set_tag("tenant_id", str(user.tenant_id))
     sentry_sdk.set_user({"id": str(user.user_id)})
+
+    # B5 — un cajero llega SÓLO a la lista cerrada de rutas de caja. Denegar por
+    # defecto y acá, porque ésta es la única puerta por la que pasan las rutas
+    # autenticadas: una ruta nueva nace cerrada para el cajero aunque nadie se
+    # acuerde de él. Se mira el rol de la BASE (recién leído), no el del JWT, así
+    # que pasar a alguien a cajero rige desde el request siguiente.
+    if user.role_code == CASHIER_ROLE:
+        ruta = request.scope.get("route")
+        plantilla = getattr(ruta, "path", request.url.path)
+        if not cashier_can_reach(request.method, plantilla):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "CASHIER_ROUTE_FORBIDDEN",
+                    "message": "Tu usuario es de caja: esta sección no está disponible.",
+                },
+            )
 
     return user
 
@@ -251,6 +275,54 @@ async def _require_pin_window(current_user: User, redis: Redis) -> None:
             status_code=status.HTTP_428_PRECONDITION_REQUIRED,
             detail=PIN_REQUIRED_CODE,
         )
+
+
+def require_pos_permission(permiso: PosPermission) -> Callable:  # type: ignore[type-arg]
+    """403 ``POS_PERMISSION_DENIED`` si el usuario no tiene ese permiso de caja.
+
+    OWNER y ADMIN lo tienen siempre; un CASHIER, sólo si su dueño se lo habilitó.
+    """
+
+    async def _check(current_user: User = Depends(get_current_user)) -> User:
+        assert_pos_permission(current_user, permiso)
+        return current_user
+
+    return _check
+
+
+def assert_pos_permission(user: User, permiso: PosPermission) -> None:
+    """La misma regla que `require_pos_permission`, para usar adentro de un handler.
+
+    Existe porque hay permisos que dependen del CUERPO (un descuento, un fiado) y
+    porque crear y recuperar una operación se autorizan distinto: un reintento de
+    una venta que ya existe no se vuelve a evaluar.
+    """
+    if not has_pos_permission(user.role_code, user.pos_permissions, permiso):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "POS_PERMISSION_DENIED",
+                "permission": permiso.value,
+                "message": "Tu usuario no tiene permiso para esta acción de caja.",
+            },
+        )
+
+
+async def require_void_access(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> User:
+    """Quién puede anular un ticket de caja.
+
+    - OWNER/ADMIN: la regla de siempre, ``require_modify_access`` (PIN).
+    - CASHIER: permiso ``void_ticket`` + ventana de SU PIN. Que el ticket sea suyo
+      y que traiga motivo lo verifica el handler, que es quien lo lee.
+    """
+    if current_user.role_code == CASHIER_ROLE:
+        assert_pos_permission(current_user, PosPermission.VOID_TICKET)
+        await _require_pin_window(current_user, redis)
+        return current_user
+    return await require_modify_access(current_user, redis)
 
 
 async def require_modify_access(

@@ -26,6 +26,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.pos_permissions import CASHIER_ROLE, PosPermission, has_pos_permission
 from app.observability.logger import get_logger
 from app.persistence.models.user import User
 from app.persistence.repositories.user_repository import UserRepository
@@ -65,6 +66,20 @@ class PinLockedError(PinError):
 
 class PinMismatchError(PinError):
     detail = "Los PIN no coinciden."
+
+
+def puede_tener_pin(user: User) -> bool:
+    """Quién puede configurar (y necesita) un PIN.
+
+    OWNER, sub-cuentas con ``can_modify_sensitive`` y, desde B5, un CASHIER con
+    permiso de anular tickets: anular es devolver plata y el PIN identifica a
+    quién lo hizo. Sin esto, ese permiso sería inalcanzable.
+    """
+    if user.role_code == "OWNER" or user.can_modify_sensitive:
+        return True
+    return user.role_code == CASHIER_ROLE and has_pos_permission(
+        user.role_code, user.pos_permissions, PosPermission.VOID_TICKET
+    )
 
 
 class PinServiceUnavailableError(PinError):
@@ -109,7 +124,7 @@ class PinService:
     async def get_status(self, user: User) -> dict[str, bool]:
         pin_set = user.pin_hash is not None
         verified = await self.is_window_valid(user.tenant_id, user.user_id)
-        allowed = user.role_code == "OWNER" or user.can_modify_sensitive
+        allowed = puede_tener_pin(user)
         return {"pin_set": pin_set, "verified": verified, "must_set": allowed and not pin_set}
 
     # ── Setup / change / reset ────────────────────────────────────────────────

@@ -197,6 +197,26 @@ class ClaveReusada:
     action_type: str
 
 
+async def idempotent_request_exists(
+    session: AsyncSession, tenant_id: uuid.UUID, key: str
+) -> bool:
+    """¿Esa clave ya tiene un registro? Sólo lectura: NO reclama nada.
+
+    Sirve para autorizar distinto crear y recuperar (B5): una operación que ya
+    existe se devuelve aunque al cajero le hayan revocado el permiso después, y
+    el chequeo de permisos de una NUEVA va antes del claim, así que un 403 no
+    consume la clave. Una carrera entre esta lectura y el claim no rompe nada:
+    el claim sigue siendo el candado y contesta `Repeticion` igual.
+    """
+    fila = await session.execute(
+        select(IdempotencyRecord.id).where(
+            IdempotencyRecord.tenant_id == tenant_id,
+            IdempotencyRecord.key == key,
+        )
+    )
+    return fila.first() is not None
+
+
 async def claim_idempotent_request(
     session: AsyncSession,
     tenant_id: uuid.UUID,

@@ -11,9 +11,11 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
-from app.domain.business_time import fecha_de_negocio, today_ar
+from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
+from app.domain.product import effective_threshold
+from app.domain.sale_unit import formatear_cantidad
 from app.schemas.transaction import PAYMENT_METHOD_PATTERN
 
 _MAX_IMPORTE = Decimal("99999999.99")
@@ -58,7 +60,7 @@ class PosOperationRequest(BaseModel):
         # las noches.
         if fecha_de_negocio(v) > today_ar():
             raise ValueError("operation_date cannot be in the future.")
-        return v
+        return a_hora_de_negocio(v)
 
 
 class PosVoidRequest(BaseModel):
@@ -108,3 +110,59 @@ class PosOperationResponse(BaseModel):
     notes: str | None
     lines: list[PosOperationLineResponse]
     tenders: list[PosTenderResponse]
+
+
+
+class PosProductResponse(BaseModel):
+    """Un producto como lo ve la CAJA: sin costos, sin márgenes, sin lista.
+
+    `unit_cost_ars`, `margin_pct`, `list_price_ars` y `custom_fields` (que puede
+    traer la marca o la procedencia del costo) no están, y el test lo verifica
+    sobre las CLAVES de la respuesta: que la pantalla no los muestre no alcanza.
+
+    `stock_units` va en UNIDADES BASE para que la caja offline (B7) descuente;
+    `stock_display` es presentación y nunca se parsea para hacer cuentas.
+    `sale_price_ars` es por UNIDAD DE VENTA (por kg, por litro, por unidad).
+    """
+
+    model_config = {"from_attributes": True}
+
+    id: UUID
+    name: str
+    internal_sku: str | None = None
+    sku: str | None = None
+    barcode: str | None = None
+    sale_price_ars: Decimal
+    sale_unit: str = "unit"
+    base_units_per_sale_unit: int = 1
+    stock_units: int
+    low_stock_threshold_units: int | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def stock_display(self) -> str:
+        return formatear_cantidad(self.stock_units, self.sale_unit, self.base_units_per_sale_unit)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def stock_status(self) -> str:
+        if self.stock_units == 0:
+            return "out_of_stock"
+        if self.stock_units <= effective_threshold(self.low_stock_threshold_units):
+            return "low_stock"
+        return "in_stock"
+
+
+class PosCatalogResponse(BaseModel):
+    items: list[PosProductResponse]
+    #: Id del último producto de la página. `None` = no hay más. Se pasa como
+    #: `after` para pedir la siguiente: orden estable por id, sin saltos ni
+    #: repeticiones aunque cambien nombres o precios en el medio.
+    next_cursor: UUID | None
+
+
+class PosCustomerResponse(BaseModel):
+    """Sólo lo necesario para elegir a quién se le fía: nada de DNI/CUIT/dirección."""
+
+    id: UUID
+    name: str

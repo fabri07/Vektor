@@ -77,6 +77,17 @@ VENTAS_DROP_CRITICAL = -35.0
 SOBRESTOCK_DIAS_WARNING = 90
 
 
+def _factor_de(prod: pd.DataFrame) -> pd.Series | int:
+    """El factor de unidad de venta de cada producto (1 si el frame no lo trae).
+
+    Un frame armado a mano —los tests de reconciliación— puede no tener la
+    columna: ahí todo es por unidad y dividir por 1 no cambia nada.
+    """
+    if "base_units_per_sale_unit" in prod.columns:
+        return prod["base_units_per_sale_unit"].fillna(1).clip(lower=1)
+    return 1
+
+
 @dataclass(frozen=True)
 class SeverityThresholds:
     """Umbrales por vertical.
@@ -506,7 +517,9 @@ class FactsService:
                                 provenance=Provenance.EMPTY, confidence=0.0,
                                 sample_size=len(prod), source="products",
                                 explanation_key="valor_stock_sin_costos")
-        valor = float((prod["stock_units"] * prod["unit_cost_ars"]).sum())
+        # Costo por unidad de venta, stock en unidades base: se divide por el factor.
+        factor = _factor_de(prod)
+        valor = float((prod["stock_units"] * prod["unit_cost_ars"] / factor).sum())
         # Cobertura de costos: los productos sin unit_cost_ars valen $0 en esta
         # suma — la confidence declara cuántos quedaron afuera de la valuación.
         confidence = round(con_costo / len(prod), 2)
@@ -539,7 +552,9 @@ class FactsService:
         frozen = prod[dias > dias_warning]
         out: list[BusinessFact] = []
         for _, r in frozen.iterrows():
-            capital = float(r["stock_units"] * r["unit_cost_ars"])
+            capital = float(
+                r["stock_units"] * r["unit_cost_ars"] / r.get("base_units_per_sale_unit", 1)
+            )
             out.append(BusinessFact(
                 fact_id=f"sobrestock_{r['product_id']}", domain="inventario",
                 metric="sobrestock", value=_ars(capital), unit="ARS",

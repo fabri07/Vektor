@@ -18,6 +18,7 @@ from app.domain.pos_operation import (
     VueltoNegativoError,
     calcular_operacion,
     calcular_vuelto,
+    importe_bruto_en_centavos,
     validar_tenders,
 )
 
@@ -173,14 +174,38 @@ class TestRechazos:
 
 
 class TestUnidadesBase:
-    def test_setecientos_cincuenta_gramos_de_un_producto_en_gramos(self) -> None:
-        """Yerba a $3.200 el kilo = $3,20 el gramo. 750 g tienen que dar $2.400."""
-        op = calcular_operacion([_linea("3.20", 750)])
+    """Contrato: el precio es por UNIDAD DE VENTA; la cantidad, en unidades base."""
+
+    def _gramos(self, precio_kg: str, gramos: int) -> LineaPedida:
+        return LineaPedida(
+            product_id=uuid4(),
+            quantity=gramos,
+            unit_price_list=Decimal(precio_kg),
+            base_units_per_sale_unit=1000,
+        )
+
+    def test_setecientos_cincuenta_gramos_de_yerba_a_3200_el_kilo(self) -> None:
+        op = calcular_operacion([self._gramos("3200.00", 750)])
         assert op.total == Decimal("2400.00")
 
+    def test_un_precio_por_kilo_que_no_entra_en_dos_decimales_por_gramo(self) -> None:
+        """$1.234,56/kg son $1,23456/g: se redondea el IMPORTE de la línea, una vez."""
+        op = calcular_operacion([self._gramos("1234.56", 750)])
+        assert op.total == Decimal("925.92")
+
+    def test_sin_el_factor_seria_mil_veces_mas(self) -> None:
+        sin_factor = calcular_operacion([_linea("1000.00", 750)])
+        con_factor = calcular_operacion([self._gramos("1000.00", 750)])
+        assert sin_factor.total == con_factor.total * 1000
+
     def test_la_cantidad_en_unidades_base_no_se_convierte(self) -> None:
-        op = calcular_operacion([_linea("3.20", 750)])
+        op = calcular_operacion([self._gramos("3200.00", 750)])
         assert op.lineas[0].quantity == 750
+
+    def test_redondeo_half_up_por_linea(self) -> None:
+        # $0,01 el kilo × 500 g = $0,005 → $0,01.
+        assert importe_bruto_en_centavos(Decimal("0.01"), 500, 1000) == 1
+        assert importe_bruto_en_centavos(Decimal("0.01"), 499, 1000) == 0
 
 
 class TestTenders:

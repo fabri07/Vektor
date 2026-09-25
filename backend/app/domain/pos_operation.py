@@ -59,6 +59,19 @@ def _a_centavos(monto: Decimal) -> int:
     return int((monto * 100).to_integral_value())
 
 
+def importe_bruto_en_centavos(
+    precio_por_unidad_de_venta: Decimal, unidades_base: int, factor: int
+) -> int:
+    """precio × cantidad / factor, redondeado UNA vez, al centavo, half-up.
+
+    Se redondea el importe de la línea y no el precio por unidad base: $1.234,56
+    el kilo son $1,23456 el gramo, que no entra en dos decimales; redondear ese
+    unitario y multiplicar acumula el error por cada gramo. Todo en enteros.
+    """
+    numerador = _a_centavos(precio_por_unidad_de_venta) * unidades_base
+    return (2 * numerador + factor) // (2 * factor)
+
+
 def _a_pesos(centavos: int) -> Decimal:
     return (Decimal(centavos) / 100).quantize(CENTAVO)
 
@@ -69,14 +82,19 @@ class LineaPedida:
 
     ``quantity`` está en UNIDADES BASE (gramos, mililitros o unidades), igual que
     ``products.stock_units``: 0,750 kg de un producto en gramos con factor 1000
-    son 750. La conversión a lo que ve un humano es de presentación y no entra
-    acá — si entrara, la aritmética dejaría de ser exacta.
+    son 750.
+
+    ``unit_price_list`` es por UNIDAD DE VENTA (por kg, por litro, por unidad):
+    es el precio que el negocio pone y lee. Por eso el importe bruto divide por
+    ``base_units_per_sale_unit``: 750 g a $1.000/kg son $750, no $750.000. Con
+    factor 1 (todo lo existente) la cuenta es la de siempre.
     """
 
     product_id: UUID
     quantity: int
     unit_price_list: Decimal
     discount_ars: Decimal = Decimal("0")
+    base_units_per_sale_unit: int = 1
 
 
 @dataclass(frozen=True)
@@ -131,7 +149,11 @@ def calcular_operacion(
             raise OperacionInvalidaError(f"La línea {linea.product_id} no tiene cantidad.")
         if linea.unit_price_list < 0 or linea.discount_ars < 0:
             raise OperacionInvalidaError(f"La línea {linea.product_id} tiene un importe negativo.")
-        bruto = _a_centavos(linea.unit_price_list) * linea.quantity
+        if linea.base_units_per_sale_unit <= 0:
+            raise OperacionInvalidaError(f"La línea {linea.product_id} tiene un factor inválido.")
+        bruto = importe_bruto_en_centavos(
+            linea.unit_price_list, linea.quantity, linea.base_units_per_sale_unit
+        )
         descuento = _a_centavos(linea.discount_ars)
         if descuento > bruto:
             raise DescuentoExcedeElTotalError(

@@ -10,6 +10,8 @@ interface AuthUser {
   tenant_id: string;
   // Opcional: las sesiones persistidas previas al campo no lo tienen.
   phone?: string | null;
+  // Permisos de caja efectivos (B5), refrescados desde /auth/me en cada carga.
+  pos_permissions?: string[];
 }
 
 interface AuthState {

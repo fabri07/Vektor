@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
-from app.domain.business_time import fecha_de_negocio, today_ar
+from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
 from app.domain.expense_categories import EXPENSE_CATEGORIES_PATTERN
 
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
@@ -87,7 +87,7 @@ class CreateSaleRequest(BaseModel):
         # Compara solo la fecha: se permite registrar hoy a cualquier hora.
         if fecha_de_negocio(v) > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
-        return v
+        return a_hora_de_negocio(v)
 
 
 class UpdateSaleRequest(BaseModel):
@@ -109,7 +109,7 @@ class UpdateSaleRequest(BaseModel):
     def transaction_date_not_future(cls, v: datetime | None) -> datetime | None:
         if v is not None and fecha_de_negocio(v) > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
-        return v
+        return a_hora_de_negocio(v) if v is not None else None
 
 
 class BulkSaleEntryItem(BaseModel):
@@ -161,7 +161,7 @@ class ManualBatchSaleRequest(BaseModel):
     def transaction_date_not_future(cls, v: datetime) -> datetime:
         if fecha_de_negocio(v) > today_ar():
             raise ValueError("transaction_date cannot be in the future.")
-        return v
+        return a_hora_de_negocio(v)
 
 
 class ManualBatchSaleResponse(BaseModel):
@@ -260,7 +260,7 @@ class CreateExpenseRequest(BaseModel):
     def expense_date_not_future(cls, v: datetime) -> datetime:
         if fecha_de_negocio(v) > today_ar():
             raise ValueError("expense_date cannot be in the future.")
-        return v
+        return a_hora_de_negocio(v)
 
 
 class ProfitWithdrawalRequest(BaseModel):
@@ -284,7 +284,7 @@ class ProfitWithdrawalRequest(BaseModel):
     def withdrawal_date_not_future(cls, v: datetime) -> datetime:
         if fecha_de_negocio(v) > today_ar():
             raise ValueError("withdrawal_date cannot be in the future.")
-        return v
+        return a_hora_de_negocio(v)
 
 
 class UpdateExpenseRequest(BaseModel):
@@ -305,7 +305,7 @@ class UpdateExpenseRequest(BaseModel):
     def expense_date_not_future(cls, v: datetime | None) -> datetime | None:
         if v is not None and fecha_de_negocio(v) > today_ar():
             raise ValueError("expense_date cannot be in the future.")
-        return v
+        return a_hora_de_negocio(v) if v is not None else None
 
 
 class ExpenseSummaryResponse(BaseModel):

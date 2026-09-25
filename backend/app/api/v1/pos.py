@@ -16,16 +16,18 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
-from sqlalchemy import select
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
+    assert_pos_permission,
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
+    get_current_user,
     require_active_subscription,
-    require_modify_access,
     require_role,
+    require_void_access,
 )
 
 # Se importa la resolución de cliente en vez de repetirla: la regla de que el
@@ -42,6 +44,7 @@ from app.application.services.idempotency import (
     ClaveReusada,
     Repeticion,
     claim_idempotent_request,
+    idempotent_request_exists,
     record_idempotent_response,
 )
 from app.application.services.maintenance_lock_service import acquire_write_lock_shared
@@ -55,6 +58,7 @@ from app.domain.pos_operation import (
     calcular_vuelto,
     validar_tenders,
 )
+from app.domain.pos_permissions import CASHIER_ROLE, PosPermission
 from app.persistence.db.session import get_db_session
 from app.persistence.models import (
     PosOperation,
@@ -66,9 +70,13 @@ from app.persistence.models import (
     User,
 )
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.customer import Customer
 from app.schemas.pos import (
+    PosCatalogResponse,
+    PosCustomerResponse,
     PosOperationRequest,
     PosOperationResponse,
+    PosProductResponse,
     PosVoidRequest,
 )
 
@@ -160,7 +168,7 @@ async def create_pos_operation(
     background: BackgroundTasks,
     response: Response,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_role("OWNER", "ADMIN", CASHIER_ROLE)),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     _sub_guard: None = Depends(require_active_subscription),
     session: AsyncSession = Depends(get_db_session),
@@ -172,8 +180,20 @@ async def create_pos_operation(
     genera la caja antes del primer envío—, así que un reintento tras una
     respuesta perdida devuelve el ticket original en vez de cobrar de nuevo.
     """
-    # La idempotencia va PRIMERO: antes de tocar stock, precios o locks. Un
-    # reintento tiene que poder contestar sin repetir nada de eso.
+    # Crear y recuperar se autorizan DISTINTO (B5). Una operación que ya existe
+    # se devuelve aunque al cajero le hayan revocado el permiso después: la venta
+    # se hizo, y negarle el ticket lo deja sin saber si cobró. Sólo una operación
+    # NUEVA exige los permisos actuales, y se chequean ANTES del claim para que
+    # un 403 no consuma la clave: el mismo pedido, reintentado cuando el dueño
+    # habilite el permiso, tiene que poder entrar.
+    if not await idempotent_request_exists(session, tenant.tenant_id, body.client_operation_id):
+        if body.discount_ars > 0 or any(item.discount_ars > 0 for item in body.items):
+            assert_pos_permission(user, PosPermission.DISCOUNT)
+        if any(t.payment_method == FIADO_PAYMENT_METHOD for t in body.tenders):
+            assert_pos_permission(user, PosPermission.FIADO)
+
+    # La idempotencia va antes de tocar stock, precios o locks. Un reintento
+    # tiene que poder contestar sin repetir nada de eso.
     reclamo = await claim_idempotent_request(
         session, tenant.tenant_id, body.client_operation_id, _ACCION_IDEMPOTENTE, body
     )
@@ -299,6 +319,8 @@ async def create_pos_operation(
                 # Del CATÁLOGO, no del cuerpo de la petición.
                 unit_price_list=producto.sale_price_ars,
                 discount_ars=item.discount_ars,
+                # El precio es por unidad de venta; la cantidad, en unidades base.
+                base_units_per_sale_unit=producto.base_units_per_sale_unit or 1,
             )
         )
 
@@ -416,9 +438,9 @@ async def void_pos_operation(
     background: BackgroundTasks,
     body: PosVoidRequest | None = None,
     tenant: Tenant = Depends(get_current_tenant),
-    # Mismo gate que anular una venta suelta: OWNER o sub-cuenta con permiso, y
-    # ventana de PIN. B5 lo pasa a un permiso de cajero explícito.
-    user: User = Depends(require_modify_access),
+    # OWNER/ADMIN: `require_modify_access` (PIN), como siempre. CASHIER: permiso
+    # `void_ticket` + ventana de SU PIN (ver `require_void_access`).
+    user: User = Depends(require_void_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> PosOperationResponse:
     """Anula el ticket ENTERO: todas sus ventas y el stock que descontaron.
@@ -444,6 +466,26 @@ async def void_pos_operation(
     if cargada is None:
         raise HTTPException(status_code=404, detail="Operación no encontrada.")
     operacion, lineas, tenders = cargada
+
+    if user.role_code == CASHIER_ROLE:
+        # Un cajero anula SUS tickets; los de un compañero los resuelve el
+        # encargado. Anular es devolver plata: queda a nombre de quien cobró.
+        if operacion.created_by_user_id != user.user_id:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "VOID_NOT_OWN_TICKET",
+                    "message": "Sólo podés anular tus propios tickets. Pedíselo al encargado.",
+                },
+            )
+        if body is None or not (body.reason or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "VOID_REASON_REQUIRED",
+                    "message": "Indicá por qué se anula el ticket.",
+                },
+            )
 
     if operacion.status == "VOIDED":
         return _a_respuesta(operacion, lineas, tenders)
@@ -521,3 +563,87 @@ async def void_pos_operation(
         session, str(tenant.tenant_id), "pos_operation_voided", background
     )
     return _a_respuesta(operacion, lineas, tenders)
+
+
+@router.get(
+    "/catalog",
+    response_model=PosCatalogResponse,
+    summary="Catálogo de caja: productos vendibles, sin costos, paginado por cursor",
+)
+async def pos_catalog(
+    q: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=200, ge=1, le=500),
+    after: uuid.UUID | None = Query(default=None),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosCatalogResponse:
+    """Productos activos con precio, ordenados por id.
+
+    El orden por id y el cursor `after` hacen que recorrer todas las páginas dé
+    el catálogo COMPLETO, sin saltos ni repeticiones aunque cambien nombres o
+    precios en el medio: es lo que necesita la caja offline (B7) para bajarse
+    todo. Un producto sin precio no aparece: no se puede cobrar.
+    """
+    stmt = select(Product).where(
+        Product.tenant_id == tenant.tenant_id,
+        Product.is_active.is_(True),
+        Product.sale_price_ars > 0,
+    )
+    if after is not None:
+        stmt = stmt.where(Product.id > after)
+    if q and q.strip():
+        patron = f"%{q.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Product.name.ilike(patron),
+                Product.sku.ilike(patron),
+                Product.barcode.ilike(patron),
+                Product.internal_sku.ilike(patron),
+            )
+        )
+    filas = list(
+        (await session.execute(stmt.order_by(Product.id).limit(limit + 1))).scalars().all()
+    )
+    hay_mas = len(filas) > limit
+    pagina = filas[:limit]
+    return PosCatalogResponse(
+        items=[PosProductResponse.model_validate(p) for p in pagina],
+        next_cursor=pagina[-1].id if hay_mas and pagina else None,
+    )
+
+
+@router.get(
+    "/customers",
+    response_model=list[PosCustomerResponse],
+    summary="Clientes para fiar: sólo id y nombre",
+)
+async def pos_customers(
+    q: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=20, ge=1, le=100),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[PosCustomerResponse]:
+    """Para elegir a quién se le fía. Sólo lo necesita quien puede fiar.
+
+    Devuelve id y nombre, nada más: la ficha del cliente (DNI, CUIT, dirección)
+    no hace falta para cobrar. El centinela "Local" y los dados de baja no
+    aparecen: no se le fía a "Local".
+    """
+    assert_pos_permission(user, PosPermission.FIADO)
+    stmt = select(Customer).where(
+        Customer.tenant_id == tenant.tenant_id,
+        Customer.deactivated_at.is_(None),
+    )
+    if q and q.strip():
+        patron = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Customer.name.ilike(patron), Customer.last_name.ilike(patron)))
+    # Se pide de más porque el centinela se filtra en Python (vive en custom_fields).
+    filas = (await session.execute(stmt.order_by(Customer.name).limit(limit + 1))).scalars()
+    clientes = [c for c in filas if not c.is_sentinel][:limit]
+    return [
+        PosCustomerResponse(
+            id=c.id, name=" ".join(x for x in (c.name, c.last_name) if x)
+        )
+        for c in clientes
+    ]

@@ -92,6 +92,9 @@ class MeResponse(BaseModel):
     phone: str | None = None
     subscription: SubscriptionInMeResponse | None
     onboarding_completed: bool
+    #: Permisos de caja EFECTIVOS (B5). El frontend los lee de acá en cada
+    #: carga, no del estado guardado: un cambio de rol rige sin re-login.
+    pos_permissions: list[str] = []
 
 
 class TokenResponse(BaseModel):

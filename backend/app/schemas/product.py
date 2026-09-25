@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, computed_field, field_validator
 from app.domain.business_time import now_ar_naive
 from app.domain.product import effective_threshold
 from app.domain.sale_unit import formatear_cantidad
+from app.schemas.pos import PosProductResponse
 
 # F6-B4: umbral "próximo a vencer" (días). Documentado y único.
 EXPIRY_WARNING_DAYS = 30
@@ -166,12 +167,17 @@ class UpdateProductRequest(BaseModel):
 
 
 class ScanLookupResponse(BaseModel):
-    """Resultado de un escaneo que resolvió a UN producto."""
+    """Resultado de un escaneo que resolvió a UN producto.
+
+    `product` es la vista de CAJA, sin costos ni márgenes (B5): el escaneo lo
+    usa un cajero, y el contrato `{code_type, matched_by, product}` de B4 queda
+    igual.
+    """
 
     code_type: str
     #: Por qué columna coincidió: ``barcode`` | ``sku`` | ``internal_sku``.
     matched_by: str
-    product: ProductResponse
+    product: PosProductResponse
 
 
 class LearnBarcodeRequest(BaseModel):

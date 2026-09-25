@@ -138,6 +138,8 @@ class ProductRepository:
                     "sale_price": sale_price,
                     "unit_cost": unit_cost,
                     "stock_units": p.stock_units,
+                    # El costo es por unidad de venta; para valuar stock hay que dividir.
+                    "base_units_per_sale_unit": p.base_units_per_sale_unit or 1,
                     "margin_pct": margin_pct,
                     "margin_abs": margin_abs,
                 }

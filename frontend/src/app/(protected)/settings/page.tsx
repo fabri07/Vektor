@@ -1,5 +1,6 @@
 "use client";
 
+import { roleLabel } from "@/lib/roles";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getMeRequest } from "@/services/auth.service";
@@ -403,8 +404,8 @@ function GeneralTab() {
           </div>
           <div className="flex items-center justify-between py-2">
             <span className="text-vk-text-muted">Rol</span>
-            <span className="font-medium capitalize text-vk-text-primary">
-              {user?.role ?? "—"}
+            <span className="font-medium text-vk-text-primary">
+              {roleLabel(user?.role)}
             </span>
           </div>
         </div>

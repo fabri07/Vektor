@@ -1,5 +1,6 @@
 "use client";
 
+import { roleLabel } from "@/lib/roles";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -276,7 +277,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
               {user?.email ?? ""}
             </p>
             <span className="inline-flex items-center rounded-full bg-vk-blue/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-vk-blue-light">
-              {user?.role ?? "user"}
+              {roleLabel(user?.role)}
             </span>
           </div>
         </div>

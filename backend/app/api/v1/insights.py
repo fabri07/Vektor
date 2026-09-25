@@ -317,8 +317,11 @@ async def get_business_breakdown(
     no_rotation_count_val = no_rotation_count_result.scalar_one()
     # Plata parada total (todos los sin-rotación, no solo los listados) + cuántos
     # no se pueden valuar por unit_cost_ars NULL.
-    _immobilized_expr = func.coalesce(Product.stock_units, 0) * func.coalesce(
-        Product.unit_cost_ars, 0
+    # Costo por unidad de venta, stock en unidades base: se divide por el factor.
+    _immobilized_expr = (
+        func.coalesce(Product.stock_units, 0)
+        * func.coalesce(Product.unit_cost_ars, 0)
+        / Product.base_units_per_sale_unit
     )
     no_rotation_value_total = float(
         (

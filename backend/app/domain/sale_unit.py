@@ -7,7 +7,12 @@ de integridad, reconciliación temporal, FactsService— porque todo es consiste
 en la misma unidad. El precio es el de la presentación: ``5000`` gramos es un
 número correcto y ``5000`` kilos es un desastre.
 
-Este módulo es puro y de PRESENTACIÓN. Nada que haga cuentas debe llamarlo.
+Contrato de precios: ``sale_price_ars`` y ``unit_cost_ars`` son por UNIDAD DE
+VENTA (por kg, por litro, por unidad); ``stock_units`` y las cantidades, en
+unidades base. Todo lo que multiplique stock por costo tiene que dividir por el
+factor — :func:`valor_de_stock` es la única forma de hacerlo.
+
+El resto del módulo es de PRESENTACIÓN y nada que haga cuentas debe llamarlo.
 """
 
 from __future__ import annotations
@@ -72,3 +77,15 @@ def formatear_cantidad(
     decimales = len(str(base_units_per_sale_unit)) - 1
     valor = Decimal(unidades_base) / Decimal(base_units_per_sale_unit)
     return f"{_formato_ar(valor, decimales)} {etiqueta}"
+
+
+def valor_de_stock(
+    unidades_base: int, base_units_per_sale_unit: int, costo_por_unidad_de_venta: Decimal
+) -> Decimal:
+    """Valor del stock: unidades base × costo por unidad de venta / factor.
+
+    Sin la división, 5 kg (5000 g) de un producto que cuesta $800 el kilo valían
+    $4.000.000 en vez de $4.000.
+    """
+    factor = base_units_per_sale_unit if base_units_per_sale_unit > 0 else 1
+    return (Decimal(unidades_base) * costo_por_unidad_de_venta / factor).quantize(Decimal("0.01"))

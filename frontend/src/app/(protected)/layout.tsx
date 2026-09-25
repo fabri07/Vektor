@@ -9,6 +9,9 @@ import { ActionNotificationToast } from "@/features/notifications/ActionNotifica
 import { ChatWidget } from "@/features/chat/ChatWidget";
 import { PinGateModal } from "@/components/ui/PinGateModal";
 import { useAuthStore } from "@/stores/authStore";
+import { useSessionSync } from "@/hooks/useSessionSync";
+import { CashierHome } from "@/features/pos/CashierHome";
+import { CASHIER_ROLE } from "@/lib/roles";
 
 export default function ProtectedLayout({
   children,
@@ -18,6 +21,8 @@ export default function ProtectedLayout({
   const router = useRouter();
   const pathname = usePathname();
   const token = useAuthStore((s) => s.token);
+  const role = useAuthStore((s) => s.user?.role);
+  const sesion = useSessionSync();
   const [mobileOpen, setMobileOpen] = useState(false);
   const isChatPage = pathname === "/chat";
   const isDashboardRoute = pathname.startsWith("/dashboard");
@@ -30,6 +35,19 @@ export default function ProtectedLayout({
 
   if (!token) {
     return null;
+  }
+
+  // Hasta validar la sesión no se muestra nada: el rol guardado puede estar
+  // viejo, y renderizar la app del dueño con datos cacheados es justo lo que
+  // hay que evitar. Sin red se sigue con el rol guardado (ver useSessionSync).
+  if (sesion === "pending") {
+    return null;
+  }
+
+  // Un cajero no ve la app del dueño (B5): el backend le deniega todo lo que no
+  // es caja, así que cada página sería un 403.
+  if (role === CASHIER_ROLE) {
+    return <CashierHome />;
   }
 
   return (
