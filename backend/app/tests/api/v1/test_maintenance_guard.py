@@ -19,7 +19,6 @@ from __future__ import annotations
 import unittest.mock
 import uuid
 from collections.abc import Generator
-from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -28,6 +27,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service, purchase_service
+from app.domain.business_time import today_ar
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.unclassified_record import (
@@ -45,7 +45,7 @@ _PRODUCT_PAYLOAD = {
     "low_stock_threshold_units": 10,
 }
 
-_TODAY = str(date.today())
+_TODAY = str(today_ar())
 
 _EXPENSE_PAYLOAD = {
     "amount": "15000.00",
@@ -488,7 +488,7 @@ class TestMaintenanceGuardWiring:
         body = ManualPurchaseRequest(
             supplier_id=supplier.id,
             payment_method="cash",
-            transaction_date=date.today(),
+            transaction_date=today_ar(),
             lines=[
                 PurchaseLine(
                     name="Yerba Nueva",

@@ -7,13 +7,14 @@ Cubre:
 - Sin métricas → estructura vacía clara (has_data=False).
 """
 
-from datetime import date
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
-_TODAY = str(date.today())
+from app.domain.business_time import today_ar
+
+_TODAY = str(today_ar())
 
 
 def _metric(platform: str, **fields: Any) -> dict[str, Any]:

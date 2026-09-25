@@ -1,7 +1,7 @@
 """Tests de integración del step-up PIN: gating, permisos finos, borrado-con-historial."""
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -11,6 +11,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.pin_service import PinService
+from app.domain.business_time import today_ar
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.user import User
@@ -234,9 +235,9 @@ async def test_profit_withdrawal_creates_payroll(
 ) -> None:
     resp = await client.post(
         "/api/v1/expenses/profit-withdrawal",
-        # date.today() (local, igual que el validador del server) — no UTC, que
+        # today_ar() (la fecha argentina, igual que el validador del server) — no UTC, que
         # cerca de la medianoche UTC/local caería como "fecha futura" y daría 422.
-        json={"amount": "50000.00", "withdrawal_date": date.today().isoformat()},
+        json={"amount": "50000.00", "withdrawal_date": today_ar().isoformat()},
         headers=auth_headers,
     )
     assert resp.status_code == 201, resp.text

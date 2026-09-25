@@ -1,7 +1,6 @@
 """Resolución transaccional de compras ambiguas desde Otros."""
 
 import uuid
-from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -11,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
+from app.domain.business_time import today_ar
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.supplier import Supplier
@@ -73,7 +73,7 @@ def _payload(product_id: uuid.UUID) -> dict[str, Any]:
         "target_product_id": str(product_id),
         "amount": "600.00",
         "quantity": 4,
-        "transaction_date": datetime.now().isoformat(),
+        "transaction_date": f"{today_ar().isoformat()}T12:00:00",
         "payment_method": "transfer",
         "category": "INVENTORY",
         "description": "Compra de agua",

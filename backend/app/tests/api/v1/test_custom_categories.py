@@ -1,14 +1,14 @@
 """Tests de categorías custom por tenant (gasto + producto) en custom_fields."""
 
-from datetime import date
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
+from app.domain.business_time import today_ar
 from app.persistence.models.business import BusinessProfile
 
-_TODAY = str(date.today())
+_TODAY = str(today_ar())
 
 
 @pytest.fixture
