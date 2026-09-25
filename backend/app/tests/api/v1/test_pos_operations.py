@@ -114,6 +114,30 @@ class TestOperacionDeCaja:
         assert resp.status_code == 422, resp.text
         assert resp.json()["detail"]["code"] == "TENDERS_MISMATCH"
 
+    async def test_el_rechazo_trae_el_total_y_los_precios_vigentes(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """B13: el dueño cambia un precio entre que la caja lo agrega y el cobro.
+
+        La caja mandó el total de SU vista previa. Sin el total y los precios
+        vigentes, sólo tendría un texto y la venta quedaría trabada.
+        """
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        cambio = await client.patch(
+            f"/api/v1/products/{p1}", json={"sale_price_ars": "1200.00"}, headers=auth_headers
+        )
+        assert cambio.status_code == 200, cambio.text
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 2}],
+            [{"payment_method": "cash", "amount_ars": "2000.00"}],
+        )
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert resp.status_code == 422, resp.text
+        detalle = resp.json()["detail"]
+        assert detalle["code"] == "TENDERS_MISMATCH"
+        assert detalle["expected_total_ars"] == "2400.00"
+        assert detalle["lines"] == [{"product_id": p1, "unit_price_list": "1200.00"}]
+
     async def test_el_vuelto_no_infla_la_venta(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:

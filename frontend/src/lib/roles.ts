@@ -30,3 +30,21 @@ export const POS_PERMISSIONS = [
 ] as const;
 
 export type PosPermissionKey = (typeof POS_PERMISSIONS)[number]["key"];
+
+/** Roles que pueden cobrar en la caja (espejo del `require_role` de `POST /pos/operations`). */
+export const POS_ROLES: ReadonlySet<string> = new Set(["OWNER", "ADMIN", CASHIER_ROLE]);
+
+/**
+ * ¿El usuario tiene este permiso de caja? Lee `pos_permissions`, que `/auth/me`
+ * devuelve YA EFECTIVO (OWNER/ADMIN con todos). Es sólo para mostrar u ocultar
+ * controles: quien decide es el servidor.
+ */
+export function hasPosPermission(
+  user: { role?: string; pos_permissions?: string[] } | null | undefined,
+  permission: PosPermissionKey,
+): boolean {
+  // OWNER/ADMIN los tienen todos, como en `effective_pos_permissions`: una
+  // sesión guardada antes de B5, abierta sin red, todavía no trae la lista.
+  if (user?.role === "OWNER" || user?.role === "ADMIN") return true;
+  return Boolean(user?.pos_permissions?.includes(permission));
+}

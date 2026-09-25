@@ -5,12 +5,13 @@ import { logoutRequest } from "@/services/auth.service";
 import { useAuthStore } from "@/stores/authStore";
 
 /**
- * Lo que ve un usuario de caja hasta que exista la pantalla de caja (B13).
+ * Lo que ve un cajero en una PC que no es caja (B6/B13).
  *
- * Sin esto entraría a la app del dueño: la barra lateral, el chat y cada página
- * responderían 403, porque el backend le deniega todo lo que no es caja.
+ * El servidor le rechaza toda escritura sin una terminal habilitada
+ * (`TERMINAL_REQUIRED`), así que dejarlo armar un carrito sería hacerle perder
+ * el trabajo al cobrar. Se le dice antes, con qué hacer.
  */
-export function CashierHome() {
+export function CashierHome({ reason }: { reason: "no_terminal" | "terminal_invalid" }) {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
 
@@ -31,8 +32,10 @@ export function CashierHome() {
           Hola{user?.full_name ? `, ${user.full_name}` : ""}
         </h1>
         <p className="mt-3 text-sm text-vk-text-secondary">
-          Tu usuario es de caja. La pantalla de caja todavía no está disponible: el dueño del
-          negocio te va a avisar cuando puedas empezar a cobrar desde acá.
+          {reason === "terminal_invalid"
+            ? "Esta PC fue dada de baja como caja, así que desde acá no se puede cobrar."
+            : "Esta PC no está habilitada como caja, así que desde acá no se puede cobrar."}{" "}
+          Pedile al dueño del negocio que la habilite en Ajustes → Cajas habilitadas.
         </p>
         <Button className="mt-5" variant="secondary" onClick={() => void salir()}>
           Cerrar sesión

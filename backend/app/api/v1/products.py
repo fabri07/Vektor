@@ -459,8 +459,18 @@ async def lookup_product_by_scan(
             detail={
                 "code": "SCAN_AMBIGUOUS",
                 "code_type": codigo.tipo.value,
+                # `product` es la vista de CAJA (sin costos, B5): el cajero no
+                # puede leer `/products/{id}`, así que sin ella, después de
+                # elegir, la caja no tendría el precio para mostrar.
                 "candidates": [
-                    {"product_id": str(p.id), "name": p.name, "matched_by": columna}
+                    {
+                        "product_id": str(p.id),
+                        "name": p.name,
+                        "matched_by": columna,
+                        "product": PosProductResponse.model_validate(p).model_dump(
+                            mode="json"
+                        ),
+                    }
                     for p, columna in candidatos
                 ],
                 "message": "Ese código corresponde a más de un producto. Elegí cuál es.",

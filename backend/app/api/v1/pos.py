@@ -71,6 +71,7 @@ from app.application.services.score_trigger_service import (
 from app.domain.pos_operation import (
     LineaPedida,
     OperacionInvalidaError,
+    TendersNoCuadranError,
     calcular_operacion,
     calcular_vuelto,
     validar_tenders,
@@ -357,7 +358,29 @@ async def create_pos_operation(
     # hace que la suma de las líneas sea exactamente lo que se cobra.
     try:
         calculada = calcular_operacion(pedidas, body.discount_ars)
-        validar_tenders(calculada.total, [t.amount_ars for t in body.tenders])
+        try:
+            validar_tenders(calculada.total, [t.amount_ars for t in body.tenders])
+        except TendersNoCuadranError as exc:
+            # El caso típico no es un cliente tramposo sino un precio que el
+            # dueño cambió entre que la caja agregó el producto y el cobro. Sin
+            # el total y los precios vigentes, la caja sólo tendría un texto y
+            # la venta quedaría trabada sin explicación: con ellos actualiza el
+            # carrito y le muestra al cajero qué cambió.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": exc.CODE,
+                    "message": str(exc),
+                    "expected_total_ars": str(calculada.total),
+                    "lines": [
+                        {
+                            "product_id": str(linea.product_id),
+                            "unit_price_list": str(linea.unit_price_list),
+                        }
+                        for linea in calculada.lineas
+                    ],
+                },
+            ) from exc
         efectivo = sum(
             (t.amount_ars for t in body.tenders if t.payment_method == "cash"),
             Decimal("0"),

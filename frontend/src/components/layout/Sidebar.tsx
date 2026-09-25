@@ -19,6 +19,7 @@ import {
   Plug,
   Inbox,
   Coins,
+  ScanBarcode,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -44,6 +45,9 @@ const NAV_ITEMS = [
   { label: "Cargar datos",  href: "/ingestion",  icon: Upload },
   { label: "Aplicaciones",  href: "/apps",       icon: Plug },
 ];
+
+// La caja (B13): sólo quien puede cobrar. El cajero no ve esta barra.
+const POS_NAV_ITEM = { label: "Caja", href: "/pos", icon: ScanBarcode };
 
 // Items visibles solo para SUPERADMIN (admin de plataforma).
 const SUPERADMIN_NAV_ITEMS = [
@@ -84,10 +88,12 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const businessName = profileData?.display_name ?? "Mi negocio";
   const initials = getInitials(user?.full_name ?? user?.email ?? "U");
 
+  const puedeCobrar = user?.role === "OWNER" || user?.role === "ADMIN";
+  const baseItems = puedeCobrar ? [POS_NAV_ITEM, ...NAV_ITEMS] : NAV_ITEMS;
   const navItems =
     user?.role === "SUPERADMIN"
-      ? [...NAV_ITEMS, ...SUPERADMIN_NAV_ITEMS]
-      : NAV_ITEMS;
+      ? [...baseItems, ...SUPERADMIN_NAV_ITEMS]
+      : baseItems;
 
   return (
     <aside
