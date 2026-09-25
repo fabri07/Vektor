@@ -13,13 +13,14 @@ archivos:
 """
 
 import uuid
-from datetime import date
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
-_TODAY = str(date.today())
+from app.domain.business_time import today_ar
+
+_TODAY = str(today_ar())
 
 _SALE_PAYLOAD = {
     "amount": "1500.00",

@@ -1,6 +1,5 @@
 """Tests for /api/v1/cash-closes endpoints (arqueo de caja diario). Sprint 20."""
 
-from datetime import date
 from typing import Any
 
 import pytest
@@ -8,9 +7,10 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.business_time import today_ar
 from app.persistence.models.business import BusinessProfile
 
-_TODAY = str(date.today())
+_TODAY = str(today_ar())
 
 
 class TestCashClosePreview:

@@ -8,12 +8,13 @@ from unittest.mock import MagicMock
 import pytest
 from httpx import AsyncClient
 
+from app.domain.business_time import today_ar
 from app.heuristics.insight_templates import render_insight
 
 if TYPE_CHECKING:
     from app.persistence.models.score import HealthScoreSnapshot
 
-_TODAY = str(date.today())
+_TODAY = str(today_ar())
 
 _SALE_PAYLOAD = {
     "amount": "5000.00",

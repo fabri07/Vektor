@@ -7,13 +7,14 @@ cada entidad (bulk de ventas, categorías de gastos, RBAC, intradía) sigue en
 su archivo.
 """
 
-from datetime import date
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
-_TODAY = str(date.today())
+from app.domain.business_time import today_ar
+
+_TODAY = str(today_ar())
 
 
 def _sale_payload(fecha: str) -> dict[str, Any]:

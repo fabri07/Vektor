@@ -1,13 +1,14 @@
 """Tests for /api/v1/purchases/manual — compra de mercadería transaccional."""
 
 import unittest.mock
-from datetime import date
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
-_TODAY = str(date.today())
+from app.domain.business_time import today_ar
+
+_TODAY = str(today_ar())
 
 
 async def _create_supplier(client: AsyncClient, headers: dict[str, Any], name: str) -> str:

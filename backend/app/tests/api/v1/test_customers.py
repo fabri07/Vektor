@@ -7,13 +7,14 @@ Cubre:
 - Venta vinculada a cliente: POST /sales con customer_id y GET /sales?customer_id.
 """
 
-from datetime import date
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
-_TODAY = str(date.today())
+from app.domain.business_time import today_ar
+
+_TODAY = str(today_ar())
 
 # Alta manual de cliente REAL: identidad + documento + celular son obligatorios en
 # backend (reforma Clientes). Los payloads de test deben venir completos.
