@@ -41,6 +41,11 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+#: Clave del advisory lock que serializa `alembic upgrade`. Un número fijo y
+#: propio: cualquier otro advisory lock del sistema usa claves distintas.
+MIGRATION_LOCK_KEY = 7_411_300_921
+
+
 def do_run_migrations(connection: object) -> None:
     context.configure(
         connection=connection,  # type: ignore[arg-type]
@@ -48,6 +53,23 @@ def do_run_migrations(connection: object) -> None:
         compare_type=True,
     )
     with context.begin_transaction():
+        # Dos procesos pueden correr `alembic upgrade head` a la vez: Railway
+        # despliega `vektor-api` y `vektor-worker` en paralelo y los dos ejecutan
+        # `scripts/migrate.sh`. Pasó el 2026-09-24: los dos vieron que
+        # `idempotency_records` no existía (los guards de E8c comprueban presencia,
+        # no son atómicos), los dos la crearon, y el perdedor abortó su deploy con
+        # `UniqueViolation` sobre `pg_type`.
+        #
+        # El lock se toma como PRIMERA sentencia de la transacción de migración,
+        # antes de que alembic lea `alembic_version`: el segundo proceso espera,
+        # y cuando entra lee la versión que el primero ya commiteó y no hace nada.
+        # Es `xact` y no de sesión porque Neon se usa por el pooler en modo
+        # transacción, donde un lock de sesión puede quedar en otra conexión
+        # física; éste se suelta solo con el COMMIT/ROLLBACK.
+        if connection.dialect.name == "postgresql":  # type: ignore[attr-defined]
+            connection.exec_driver_sql(  # type: ignore[attr-defined]
+                f"SELECT pg_advisory_xact_lock({MIGRATION_LOCK_KEY})"
+            )
         context.run_migrations()
 
 
