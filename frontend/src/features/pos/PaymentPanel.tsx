@@ -27,11 +27,11 @@ export function PaymentPanel({ sale, totalCents, dispatch, locked, canFiado }: P
 
   return (
     <div className="space-y-3">
-      <label className="flex flex-col gap-1 text-sm text-vk-text-secondary">
+      <label className="flex flex-col gap-1 text-sm text-pos-text-2">
         Medio de pago
         <select
           aria-label="Medio de pago"
-          className="h-10 rounded-lg border border-vk-border-w bg-vk-surface-w px-2 text-sm text-vk-text-primary"
+          className="h-10 rounded-lg border border-pos-border bg-pos-field px-2 text-sm text-pos-text"
           value={sale.paymentMethod}
           disabled={locked}
           onChange={(e) => dispatch({ type: "SET_PAYMENT", method: e.target.value })}
@@ -46,14 +46,14 @@ export function PaymentPanel({ sale, totalCents, dispatch, locked, canFiado }: P
 
       {sale.paymentMethod === "cash" ? (
         <div className="space-y-1">
-          <label className="flex items-center justify-between gap-3 text-sm text-vk-text-secondary">
+          <label className="flex items-center justify-between gap-3 text-sm text-pos-text-2">
             <span>Efectivo recibido</span>
             <input
               aria-label="Efectivo recibido"
               data-pos-scan="capture"
               inputMode="decimal"
               placeholder="Opcional"
-              className="h-10 w-36 rounded-lg border border-vk-border-w bg-vk-surface-w px-2 text-right text-sm text-vk-text-primary disabled:opacity-50"
+              className="h-10 w-36 rounded-lg border border-pos-border bg-pos-field px-2 text-right text-sm text-pos-text disabled:opacity-50"
               value={sale.cashReceived}
               disabled={locked}
               onChange={(e) => dispatch({ type: "SET_CASH_RECEIVED", value: e.target.value })}
@@ -61,7 +61,7 @@ export function PaymentPanel({ sale, totalCents, dispatch, locked, canFiado }: P
           </label>
           {vuelto !== null ? (
             <p
-              className={`text-right text-sm ${vuelto < 0 ? "text-vk-danger" : "text-vk-text-primary"}`}
+              className={`text-right text-sm ${vuelto < 0 ? "text-pos-danger" : "text-pos-text"}`}
               data-testid="vuelto-preview"
             >
               {vuelto < 0 ? `Faltan ${formatCents(-vuelto)}` : `Vuelto: ${formatCents(vuelto)}`}
@@ -114,10 +114,10 @@ function CustomerPicker({
   if (selectedName) {
     return (
       <div className="flex items-center justify-between text-sm">
-        <span className="text-vk-text-primary">Fiado a: {selectedName}</span>
+        <span className="text-pos-text">Fiado a: {selectedName}</span>
         <button
           type="button"
-          className="text-vk-blue underline disabled:opacity-40"
+          className="text-pos-link underline disabled:opacity-40"
           disabled={disabled}
           onClick={() => onSelect(null)}
         >
@@ -131,7 +131,7 @@ function CustomerPicker({
       <input
         aria-label="Buscar cliente"
         placeholder="Cliente (nombre)"
-        className="h-10 w-full rounded-lg border border-vk-border-w bg-vk-surface-w px-2 text-sm text-vk-text-primary"
+        className="h-10 w-full rounded-lg border border-pos-border bg-pos-field px-2 text-sm text-pos-text"
         value={q}
         disabled={disabled}
         onChange={(e) => setQ(e.target.value)}
@@ -141,7 +141,7 @@ function CustomerPicker({
           <li key={c.id}>
             <button
               type="button"
-              className="w-full rounded px-2 py-1 text-left text-sm hover:bg-vk-bg-light"
+              className="w-full rounded px-2 py-1 text-left text-sm hover:bg-pos-hover"
               onClick={() => {
                 onSelect(c);
                 setQ("");

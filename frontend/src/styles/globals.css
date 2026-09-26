@@ -3,6 +3,42 @@
 @tailwind utilities;
 
 @layer base {
+  /* Caja (POS): tema claro/oscuro, elegido por PC (B13). Los valores por
+     defecto viven en :root para que un `bg-pos-*` fuera de la raíz de la caja
+     (un portal) nunca quede sin color. `color-scheme` hace que los controles
+     nativos —la lista de un select, el scroll— sigan al tema. */
+  :root,
+  .pos-claro {
+    --pos-bg: 247 248 250;
+    --pos-surface: 255 255 255;
+    --pos-field: 255 255 255;
+    --pos-hover: 241 245 249;
+    --pos-border: 229 233 240;
+    --pos-text: 15 22 35;
+    --pos-text-2: 74 85 104;
+    --pos-muted: 100 116 139;
+    --pos-danger: 220 38 38;
+    --pos-link: 43 127 212;
+  }
+  .pos-claro {
+    color-scheme: light;
+  }
+  .pos-oscuro {
+    --pos-bg: 5 9 19;
+    --pos-surface: 13 22 39;
+    --pos-field: 22 34 54;
+    --pos-hover: 22 34 54;
+    --pos-border: 36 50 70;
+    --pos-text: 247 251 255;
+    --pos-text-2: 214 226 240;
+    --pos-muted: 144 162 188;
+    /* El rojo y el azul de la paleta oscura: los del tema claro no llegan a
+       contraste legible sobre este fondo. */
+    --pos-danger: 240 108 121;
+    --pos-link: 58 134 255;
+    color-scheme: dark;
+  }
+
   :root {
     /* Véktor 2026 palette */
     --vektor-night: #050913;

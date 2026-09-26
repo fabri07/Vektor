@@ -53,19 +53,19 @@ export function VoidLastTicket({ operation, onVoided, label }: VoidLastTicketPro
   }
 
   return (
-    <div className="space-y-2 rounded-lg border border-vk-border-w p-3">
-      <p className="text-sm text-vk-text-primary">
+    <div className="space-y-2 rounded-lg border border-pos-border p-3">
+      <p className="text-sm text-pos-text">
         Anular el ticket de {formatCents(toCents(operation.total_ars) ?? 0)}. Vuelve el stock y la
         venta deja de contar.
       </p>
       <textarea
         aria-label="Motivo de la anulación"
         placeholder="Motivo (obligatorio)"
-        className="w-full rounded-lg border border-vk-border-w bg-vk-surface-w p-2 text-sm text-vk-text-primary"
+        className="w-full rounded-lg border border-pos-border bg-pos-field p-2 text-sm text-pos-text"
         value={motivo}
         onChange={(e) => setMotivo(e.target.value)}
       />
-      {error ? <p className="text-sm text-vk-danger">{error}</p> : null}
+      {error ? <p className="text-sm text-pos-danger">{error}</p> : null}
       <div className="flex gap-2">
         <Button
           variant="danger"

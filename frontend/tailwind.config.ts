@@ -41,6 +41,18 @@ const vkColors = {
   "vk-text-muted":      "rgb(100 116 139 / <alpha-value>)",
   "vk-text-light":      "rgb(232 237 244 / <alpha-value>)",
   "vk-text-placeholder":"rgb(160 174 192 / <alpha-value>)",
+  // Caja (POS): tema claro/oscuro por PC. Apuntan a variables que define la
+  // clase `.pos-claro` / `.pos-oscuro` en la raíz de la caja (globals.css).
+  "pos-bg":             "rgb(var(--pos-bg) / <alpha-value>)",
+  "pos-surface":        "rgb(var(--pos-surface) / <alpha-value>)",
+  "pos-field":          "rgb(var(--pos-field) / <alpha-value>)",
+  "pos-hover":          "rgb(var(--pos-hover) / <alpha-value>)",
+  "pos-border":         "rgb(var(--pos-border) / <alpha-value>)",
+  "pos-text":           "rgb(var(--pos-text) / <alpha-value>)",
+  "pos-text-2":         "rgb(var(--pos-text-2) / <alpha-value>)",
+  "pos-muted":          "rgb(var(--pos-muted) / <alpha-value>)",
+  "pos-danger":         "rgb(var(--pos-danger) / <alpha-value>)",
+  "pos-link":           "rgb(var(--pos-link) / <alpha-value>)",
   // Semantic
   "vk-success":         "rgb(22 163 74 / <alpha-value>)",
   "vk-success-bg":      "rgb(240 253 244 / <alpha-value>)",

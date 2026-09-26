@@ -1,5 +1,6 @@
 "use client";
 
+import { Moon, Sun } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
@@ -38,6 +39,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { type PageSize, type PaperWidth, usePosPrintConfigStore } from "@/stores/posPrintConfigStore";
 import { usePosScannerConfigStore } from "@/stores/posScannerConfigStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
+import { posThemeClass, usePosThemeStore } from "@/stores/posThemeStore";
 
 const EN_DUDA =
   "No hubo respuesta del servidor: la venta puede haber entrado. Reintentá — si ya " +
@@ -48,13 +50,24 @@ const EN_DUDA =
  * `PosRegister`.
  */
 export function PosScreen() {
+  const theme = usePosThemeStore((s) => s.theme);
+  // El tema envuelve TODO, también el bloqueo de "PC no habilitada": si no,
+  // `CashierHome` quedaría afuera y sin las variables `--pos-*` del tema.
+  return (
+    <div className={posThemeClass(theme)} data-testid="pos-root">
+      <PosGate />
+    </div>
+  );
+}
+
+function PosGate() {
   const user = useAuthStore((s) => s.user);
   const terminal = usePosTerminalStore((s) => s.terminal);
   const invalid = usePosTerminalStore((s) => s.invalid);
 
   if (!user || !POS_ROLES.has(user.role)) {
     return (
-      <div className="flex h-screen items-center justify-center p-6 text-sm text-vk-text-secondary">
+      <div className="flex h-screen items-center justify-center bg-pos-bg p-6 text-sm text-pos-text-2">
         Tu usuario no puede cobrar en la caja.
       </div>
     );
@@ -74,6 +87,7 @@ function PosRegister() {
   const terminal = usePosTerminalStore((s) => s.terminal);
   const terminalInvalid = usePosTerminalStore((s) => s.invalid);
   const { terminator, thresholdMs, setTerminator, setThresholdMs } = usePosScannerConfigStore();
+  const { theme, toggle: toggleTheme } = usePosThemeStore();
   const impresora = usePosPrintConfigStore();
   const { printReceipt, printTest, printError } = usePosPrinting();
 
@@ -289,14 +303,14 @@ function PosRegister() {
   }
 
   return (
-    // `text-vk-text-primary` en la raíz: el `body` de la app hereda un color
-    // CLARO (tema oscuro), y todo lo que no declaraba color —los menús de
-    // Impresora y Lector, sus selects— quedaba blanco sobre blanco.
-    <div className="flex h-screen flex-col bg-vk-bg-light text-vk-text-primary">
-      <header className="flex items-center justify-between border-b border-vk-border-w bg-vk-surface-w px-4 py-2">
+    // Color de texto en la raíz: el `body` de la app hereda un color CLARO, y
+    // todo lo que no declaraba color —los menús de Impresora y Lector, sus
+    // selects— quedaba blanco sobre blanco. Los `pos-*` siguen al tema.
+    <div className="flex h-screen flex-col bg-pos-bg text-pos-text">
+      <header className="flex items-center justify-between border-b border-pos-border bg-pos-surface px-4 py-2">
         <div className="text-sm">
-          <span className="font-semibold text-vk-text-primary">Caja</span>
-          <span className="ml-2 text-vk-text-muted">
+          <span className="font-semibold text-pos-text">Caja</span>
+          <span className="ml-2 text-pos-muted">
             {terminal && terminal.tenantId === tenantId && !terminalInvalid
               ? terminal.name
               : "navegador (sin caja habilitada)"}
@@ -307,23 +321,35 @@ function PosRegister() {
           !(terminal && terminal.tenantId === tenantId && !terminalInvalid) ? (
             <Link
               href="/settings?tab=seguridad"
-              className="ml-3 text-vk-blue underline hover:text-vk-blue-hover"
+              className="ml-3 text-pos-link underline hover:text-pos-link/80"
             >
               Habilitar esta PC como caja
             </Link>
           ) : null}
         </div>
         <div className="flex items-center gap-3 text-sm">
+          <button
+            type="button"
+            className="flex items-center gap-1 text-pos-text-2 hover:text-pos-text"
+            aria-label={theme === "claro" ? "Pasar a tema oscuro" : "Pasar a tema claro"}
+            onClick={() => {
+              toggleTheme();
+              focusScan();
+            }}
+          >
+            {theme === "claro" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+            {theme === "claro" ? "Oscuro" : "Claro"}
+          </button>
           <details className="relative">
-            <summary className="cursor-pointer text-vk-text-secondary">Impresora</summary>
-            <div className="absolute right-0 z-10 mt-2 w-72 space-y-2 rounded-lg border border-vk-border-w bg-vk-surface-w p-3 shadow-vk-lg">
+            <summary className="cursor-pointer text-pos-text-2">Impresora</summary>
+            <div className="absolute right-0 z-10 mt-2 w-72 space-y-2 rounded-lg border border-pos-border bg-pos-surface p-3 shadow-vk-lg">
               <label className="flex items-center justify-between gap-2">
                 Papel
                 <select
                   aria-label="Ancho del papel"
                   value={impresora.paperWidth}
                   onChange={(e) => impresora.setPaperWidth(Number(e.target.value) as PaperWidth)}
-                  className="rounded border border-vk-border-w bg-vk-surface-w px-1"
+                  className="rounded border border-pos-border bg-pos-field px-1 text-pos-text"
                 >
                   <option value={80}>80 mm</option>
                   <option value={58}>58 mm</option>
@@ -335,7 +361,7 @@ function PosRegister() {
                   aria-label="Tamaño de página"
                   value={impresora.pageSize}
                   onChange={(e) => impresora.setPageSize(e.target.value as PageSize)}
-                  className="rounded border border-vk-border-w bg-vk-surface-w px-1"
+                  className="rounded border border-pos-border bg-pos-field px-1 text-pos-text"
                 >
                   <option value="A">A · alto fijo</option>
                   <option value="B">B · angosto</option>
@@ -357,15 +383,15 @@ function PosRegister() {
             </div>
           </details>
           <details className="relative">
-            <summary className="cursor-pointer text-vk-text-secondary">Lector</summary>
-            <div className="absolute right-0 z-10 mt-2 w-64 space-y-2 rounded-lg border border-vk-border-w bg-vk-surface-w p-3 shadow-vk-lg">
+            <summary className="cursor-pointer text-pos-text-2">Lector</summary>
+            <div className="absolute right-0 z-10 mt-2 w-64 space-y-2 rounded-lg border border-pos-border bg-pos-surface p-3 shadow-vk-lg">
               <label className="flex items-center justify-between gap-2">
                 Termina con
                 <select
                   aria-label="Terminador del lector"
                   value={terminator}
                   onChange={(e) => setTerminator(e.target.value as "Enter" | "Tab")}
-                  className="rounded border border-vk-border-w bg-vk-surface-w px-1"
+                  className="rounded border border-pos-border bg-pos-field px-1 text-pos-text"
                 >
                   <option value="Enter">Enter</option>
                   <option value="Tab">Tab</option>
@@ -380,17 +406,17 @@ function PosRegister() {
                   max={200}
                   value={thresholdMs}
                   onChange={(e) => setThresholdMs(Number(e.target.value))}
-                  className="w-20 rounded border border-vk-border-w bg-vk-surface-w px-1 text-right"
+                  className="w-20 rounded border border-pos-border bg-pos-field px-1 text-right text-pos-text"
                 />
               </label>
             </div>
           </details>
           {user?.role !== CASHIER_ROLE ? (
-            <Link href="/dashboard" className="text-vk-text-secondary hover:text-vk-text-primary">
+            <Link href="/dashboard" className="text-pos-text-2 hover:text-pos-text">
               Volver a Véktor
             </Link>
           ) : null}
-          <button type="button" className="text-vk-text-secondary" onClick={() => void salir()}>
+          <button type="button" className="text-pos-text-2" onClick={() => void salir()}>
             Cerrar sesión
           </button>
         </div>
@@ -420,15 +446,15 @@ function PosRegister() {
           />
         </section>
 
-        <aside className="flex w-full flex-col gap-4 rounded-xl border border-vk-border-w bg-vk-surface-w p-4 lg:w-96">
+        <aside className="flex w-full flex-col gap-4 rounded-xl border border-pos-border bg-pos-surface p-4 lg:w-96">
           {sale.status === "cobrada" && sale.result ? (
             <div className="space-y-3" data-testid="venta-cobrada">
               <p className="text-sm text-vk-success">Venta cobrada</p>
-              <p className="text-3xl font-semibold text-vk-text-primary">
+              <p className="text-3xl font-semibold text-pos-text">
                 {formatCents(toCents(sale.result.total_ars) ?? 0)}
               </p>
               {sale.result.cash_change_ars !== null ? (
-                <p className="text-lg text-vk-text-primary">
+                <p className="text-lg text-pos-text">
                   Vuelto: {formatCents(toCents(sale.result.cash_change_ars) ?? 0)}
                 </p>
               ) : null}
@@ -456,8 +482,8 @@ function PosRegister() {
           ) : (
             <>
               <div className="flex items-baseline justify-between">
-                <span className="text-sm text-vk-text-secondary">Total</span>
-                <span className="text-3xl font-semibold text-vk-text-primary" data-testid="total">
+                <span className="text-sm text-pos-text-2">Total</span>
+                <span className="text-3xl font-semibold text-pos-text" data-testid="total">
                   {formatCents(totalCents)}
                 </span>
               </div>
@@ -479,7 +505,7 @@ function PosRegister() {
               {sale.notice ? (
                 <p
                   role="alert"
-                  className={`text-sm ${sale.status === "en_duda" ? "text-vk-warning" : "text-vk-danger"}`}
+                  className={`text-sm ${sale.status === "en_duda" ? "text-vk-warning" : "text-pos-danger"}`}
                 >
                   {sale.notice}
                 </p>
@@ -491,8 +517,8 @@ function PosRegister() {
                     Reintentar cobro
                   </Button>
                   {confirmDiscard ? (
-                    <div className="space-y-2 rounded-lg border border-vk-danger/40 p-2 text-sm">
-                      <p className="text-vk-text-primary">
+                    <div className="space-y-2 rounded-lg border border-pos-danger/40 p-2 text-sm">
+                      <p className="text-pos-text">
                         Este cobro puede haber entrado. Descartalo sólo si confirmaste en Ventas que
                         no está.
                       </p>

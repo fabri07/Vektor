@@ -36,7 +36,7 @@ export const ScanInput = forwardRef<HTMLInputElement, ScanInputProps>(function S
         aria-label="Código de barras"
         data-pos-scan="capture"
         placeholder="Escaneá o tipeá el código y Enter"
-        className="h-11 flex-1 rounded-xl border border-vk-border-w bg-vk-surface-w px-3 font-mono text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+        className="h-11 flex-1 rounded-xl border border-pos-border bg-pos-field px-3 font-mono text-sm text-pos-text focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
         value={value}
         disabled={disabled}
         onChange={(e) => setValue(e.target.value)}

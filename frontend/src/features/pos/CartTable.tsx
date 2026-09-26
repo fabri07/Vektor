@@ -28,16 +28,16 @@ function unitLabel(line: CartLine): string {
 export function CartTable({ lines, dispatch, locked, canDiscount, onAfterAction }: CartTableProps) {
   if (lines.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-vk-border-w p-10 text-sm text-vk-text-muted">
+      <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-pos-border p-10 text-sm text-pos-muted">
         Escaneá un producto o buscalo por nombre.
       </div>
     );
   }
 
   return (
-    <div className="overflow-auto rounded-xl border border-vk-border-w bg-vk-surface-w">
+    <div className="overflow-auto rounded-xl border border-pos-border bg-pos-surface">
       <table className="w-full text-sm">
-        <thead className="text-left text-xs uppercase tracking-wide text-vk-text-muted">
+        <thead className="text-left text-xs uppercase tracking-wide text-pos-muted">
           <tr>
             <th className="px-3 py-2">Producto</th>
             <th className="px-3 py-2">Cantidad</th>
@@ -52,11 +52,11 @@ export function CartTable({ lines, dispatch, locked, canDiscount, onAfterAction 
             const id = line.product.id;
             const sinStock = line.quantity > line.product.stock_units;
             return (
-              <tr key={id} className="border-t border-vk-border-w" data-testid="cart-line">
+              <tr key={id} className="border-t border-pos-border" data-testid="cart-line">
                 <td className="px-3 py-2">
-                  <p className="font-medium text-vk-text-primary">{line.product.name}</p>
+                  <p className="font-medium text-pos-text">{line.product.name}</p>
                   {sinStock ? (
-                    <p className="text-xs text-vk-danger">
+                    <p className="text-xs text-pos-danger">
                       Stock disponible: {line.product.stock_display ?? line.product.stock_units}
                     </p>
                   ) : null}
@@ -69,10 +69,10 @@ export function CartTable({ lines, dispatch, locked, canDiscount, onAfterAction 
                       disabled={locked}
                       onQuantity={(q) => dispatch({ type: "SET_QUANTITY", productId: id, quantity: q })}
                     />
-                    <span className="text-xs text-vk-text-muted">{unitLabel(line)}</span>
+                    <span className="text-xs text-pos-muted">{unitLabel(line)}</span>
                   </div>
                 </td>
-                <td className="px-3 py-2 text-right text-vk-text-secondary">
+                <td className="px-3 py-2 text-right text-pos-text-2">
                   {formatCents(toCents(line.product.sale_price_ars) ?? 0)}
                 </td>
                 {canDiscount ? (
@@ -82,11 +82,11 @@ export function CartTable({ lines, dispatch, locked, canDiscount, onAfterAction 
                       cents={line.discountCents}
                       disabled={locked}
                       onCents={(c) => dispatch({ type: "SET_LINE_DISCOUNT", productId: id, cents: c })}
-                      className="ml-auto h-9 w-28 rounded-lg border border-vk-border-w bg-vk-surface-w px-2 text-right text-sm text-vk-text-primary disabled:opacity-50"
+                      className="ml-auto h-9 w-28 rounded-lg border border-pos-border bg-pos-field px-2 text-right text-sm text-pos-text disabled:opacity-50"
                     />
                   </td>
                 ) : null}
-                <td className="px-3 py-2 text-right font-semibold text-vk-text-primary">
+                <td className="px-3 py-2 text-right font-semibold text-pos-text">
                   {formatCents(lineNetCents(line))}
                 </td>
                 <td className="px-3 py-2 text-right">
@@ -94,7 +94,7 @@ export function CartTable({ lines, dispatch, locked, canDiscount, onAfterAction 
                     type="button"
                     aria-label={`Quitar ${line.product.name}`}
                     disabled={locked}
-                    className="rounded p-1 text-vk-text-muted hover:text-vk-danger disabled:opacity-40"
+                    className="rounded p-1 text-pos-muted hover:text-pos-danger disabled:opacity-40"
                     onClick={() => {
                       dispatch({ type: "REMOVE", productId: id });
                       onAfterAction?.();

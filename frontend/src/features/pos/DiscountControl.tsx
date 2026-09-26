@@ -11,8 +11,8 @@ import { centsToAmount, toCents } from "@/lib/pos/cart";
  */
 
 const INPUT =
-  "h-9 w-full rounded-lg border border-vk-border-w bg-vk-surface-w px-2 text-right text-sm " +
-  "text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20 " +
+  "h-9 w-full rounded-lg border border-pos-border bg-pos-field px-2 text-right text-sm " +
+  "text-pos-text focus:outline-none focus:ring-2 focus:ring-vk-blue/20 " +
   "disabled:opacity-50";
 
 interface MoneyInputProps {
@@ -97,7 +97,7 @@ interface DiscountControlProps {
 /** Descuento sobre el total de la venta. Sólo se monta con el permiso `discount`. */
 export function DiscountControl({ cents, onCents, disabled }: DiscountControlProps) {
   return (
-    <label className="flex items-center justify-between gap-3 text-sm text-vk-text-secondary">
+    <label className="flex items-center justify-between gap-3 text-sm text-pos-text-2">
       <span>Descuento a la venta</span>
       <MoneyInput
         label="Descuento a la venta"
