@@ -542,6 +542,16 @@ type TabId = (typeof TABS)[number]["id"];
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>("general");
 
+  // `?tab=seguridad` abre esa pestaña: la caja manda acá para habilitar la PC,
+  // y "andá a Ajustes y buscá" no alcanzaba para encontrar "Cajas habilitadas".
+  // Se lee en un efecto y no con `useSearchParams`, que obliga a un Suspense
+  // para el build estático.
+  useEffect(() => {
+    const pedida = new URLSearchParams(window.location.search).get("tab");
+    const tab = TABS.find((t) => t.id === pedida);
+    if (tab) setActiveTab(tab.id);
+  }, []);
+
   return (
     <PageWrapper title="Configuracion">
       <div className="mb-6 flex gap-1 border-b border-vk-border-w">

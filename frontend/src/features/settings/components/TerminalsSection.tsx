@@ -123,7 +123,7 @@ export function TerminalsSection() {
               }}
             >
               <input
-                className="flex-1 rounded border border-vk-border-w px-3 py-2 text-sm"
+                className="flex-1 rounded border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm text-vk-text-primary"
                 placeholder="Nombre de esta caja (ej. Mostrador)"
                 value={nombre}
                 maxLength={80}

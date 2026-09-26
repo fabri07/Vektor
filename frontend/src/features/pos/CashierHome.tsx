@@ -35,7 +35,7 @@ export function CashierHome({ reason }: { reason: "no_terminal" | "terminal_inva
           {reason === "terminal_invalid"
             ? "Esta PC fue dada de baja como caja, así que desde acá no se puede cobrar."
             : "Esta PC no está habilitada como caja, así que desde acá no se puede cobrar."}{" "}
-          Pedile al dueño del negocio que la habilite en Ajustes → Cajas habilitadas.
+          Pedile al dueño del negocio que la habilite desde esta PC en Configuración → Seguridad → Cajas habilitadas (o desde el link de la caja).
         </p>
         <Button className="mt-5" variant="secondary" onClick={() => void salir()}>
           Cerrar sesión

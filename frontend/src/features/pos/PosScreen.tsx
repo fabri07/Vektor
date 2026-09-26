@@ -289,7 +289,10 @@ function PosRegister() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-vk-bg-light">
+    // `text-vk-text-primary` en la raíz: el `body` de la app hereda un color
+    // CLARO (tema oscuro), y todo lo que no declaraba color —los menús de
+    // Impresora y Lector, sus selects— quedaba blanco sobre blanco.
+    <div className="flex h-screen flex-col bg-vk-bg-light text-vk-text-primary">
       <header className="flex items-center justify-between border-b border-vk-border-w bg-vk-surface-w px-4 py-2">
         <div className="text-sm">
           <span className="font-semibold text-vk-text-primary">Caja</span>
@@ -300,6 +303,15 @@ function PosRegister() {
             {" · "}
             {user?.full_name}
           </span>
+          {user?.role === "OWNER" &&
+          !(terminal && terminal.tenantId === tenantId && !terminalInvalid) ? (
+            <Link
+              href="/settings?tab=seguridad"
+              className="ml-3 text-vk-blue underline hover:text-vk-blue-hover"
+            >
+              Habilitar esta PC como caja
+            </Link>
+          ) : null}
         </div>
         <div className="flex items-center gap-3 text-sm">
           <details className="relative">
