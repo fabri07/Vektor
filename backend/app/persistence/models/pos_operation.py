@@ -18,6 +18,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -28,6 +29,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import false as sa_false
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -84,6 +86,21 @@ class PosOperation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(20), nullable=False, server_default="COMPLETED", default="COMPLETED"
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- lo que sólo se sabe cuando la venta se cobró sin confirmación (B7) ---
+    #: La caja cobró y cerró el ticket sin respuesta del servidor, y esto llegó
+    #: después por la cola. No es una prueba de que el efectivo entró —no existe
+    #: tal prueba del lado del servidor—: es la afirmación, atribuida a un
+    #: usuario y a una caja habilitada, que habilita capturar stock (B11).
+    captured_offline: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_false(), default=False
+    )
+    #: Cuándo el cajero confirmó haber recibido el pago. Distinto de
+    #: `operation_date` (fecha de negocio) y de `created_at` (cuándo llegó).
+    charged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: El turno de caja del cliente. B8 lo mapea a la sesión real; sin esto una
+    #: venta que sincroniza tras el arqueo no se puede atribuir nunca más.
+    client_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         # El candado de la identidad de operación. Dos envíos de la misma caja
@@ -153,6 +170,23 @@ class PosOperationLine(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Numeric(12, 2), nullable=False, server_default="0", default=Decimal("0")
     )
     line_total_ars: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+
+    #: El precio que tenía el catálogo AL SINCRONIZAR, sólo si difería del
+    #: cobrado. NULL = no hubo divergencia. Se guarda en columna y no sólo en la
+    #: auditoría para poder listarlas sin parsear JSON.
+    unit_price_catalog_ars: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )
+
+    # --- El ticket congelado ------------------------------------------------
+    # El recibo releía nombre y unidad del catálogo actual: renombrar un
+    # producto cambiaba un ticket de ayer y borrarlo lo dejaba en "Producto
+    # eliminado". Un comprobante dice lo que decía cuando se emitió.
+    # NULL en las líneas anteriores a B7: ahí el recibo cae al catálogo, como
+    # antes. No se backfillea porque no se sabe cómo se llamaba el producto.
+    product_name_snapshot: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    sale_unit_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    base_units_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("operation_id", "position", name="uq_pos_operation_lines_posicion"),
