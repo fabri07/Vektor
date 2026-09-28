@@ -160,9 +160,10 @@ describe("flujo de cobro", () => {
     },
   );
 
-  it("un 422 que el cajero PUEDE corregir sí borra la venta local", async () => {
-    // El contrapeso: si no se borrara, cada intento fallido dejaría basura en la
-    // cola y el cajero no podría rearmar el carrito.
+  it("un rechazo corregible NO borra el cobro: queda sin completar", async () => {
+    // Al apretar Cobrar ya se afirmó `charged_at`, o sea que puede haber plata
+    // recibida. Borrarlo —lo que se hacía— dejaba ese cobro sin ninguna
+    // constancia si el cajero se iba antes de rehacerlo.
     svc.createOperation.mockRejectedValue(
       httpError(422, { detail: { code: "CASH_RECEIVED_WITHOUT_CASH_TENDER" } }),
     );
@@ -172,8 +173,39 @@ describe("flujo de cobro", () => {
     await act(async () => {
       fireEvent.click(cobrarBtn());
     });
-    await waitFor(async () => expect(await listarOperaciones("t1")).toHaveLength(0));
-    expect(cobrarBtn()).toBeEnabled();
+    // Se espera el ESTADO, no que exista: la operación se guarda como
+    // `PENDIENTE` antes de mandar y recién después pasa a `EN_CORRECCION`, así
+    // que esperar por la cantidad deja pasar el assert demasiado temprano.
+    await waitFor(async () =>
+      expect((await listarOperaciones("t1"))[0]?.estado).toBe("EN_CORRECCION"),
+    );
+    expect(await listarOperaciones("t1")).toHaveLength(1);
+    // Y el carrito sigue editable para rehacer el cobro.
+    await waitFor(() => expect(cobrarBtn()).toBeEnabled());
+  });
+
+  it("y desaparece cuando el cobro corregido entra", async () => {
+    // El contrapeso: si quedara para siempre, cada cambio de precio dejaría
+    // basura en la cola y el cajero no sabría cuál mirar.
+    svc.createOperation
+      .mockRejectedValueOnce(httpError(400, { detail: "Sin stock.", code: "INSUFFICIENT_STOCK", product_id: "p1", available: 0 }))
+      .mockResolvedValueOnce(resultado("1000.00"));
+    render(<PosScreen />);
+    await escanear("7790001234567");
+    await screen.findByText("Yerba");
+    await act(async () => {
+      fireEvent.click(cobrarBtn());
+    });
+    await waitFor(async () =>
+      expect((await listarOperaciones("t1"))[0]?.estado).toBe("EN_CORRECCION"),
+    );
+    await waitFor(() => expect(cobrarBtn()).toBeEnabled());
+    await act(async () => {
+      fireEvent.click(cobrarBtn());
+    });
+    await screen.findByTestId("venta-cobrada");
+    const guardadas = await listarOperaciones("t1");
+    expect(guardadas.filter((o) => o.estado === "EN_CORRECCION")).toHaveLength(0);
   });
 
   it("sin respuesta: la venta queda en la cola y el carrito se LIBERA", async () => {
@@ -258,16 +290,13 @@ describe("flujo de cobro", () => {
     );
     svc.syncOperation.mockResolvedValue(resultado("1000.00"));
     render(<PosScreen />);
-    // Sube con `charged_at` puesto desde su propia `operation_date`: B13 no
-    // tenía ese campo y sin él el servidor la rechaza con 422
-    // `OFFLINE_WITHOUT_CHARGED_AT` SIEMPRE, así que la migración la habría
-    // dejado en una cola que no podía subirla nunca. No se inventa nada: B13
-    // congelaba el payload al apretar Cobrar, así que las dos fechas son la misma.
+    // Se RECLAMA con el contenido original y sin el header offline: su primer
+    // envío ya ocurrió y la venta puede existir en el servidor. Cambiarle el
+    // cuerpo acá movería la huella de idempotencia y el servidor contestaría
+    // `IDEMPOTENCY_KEY_REUSED` sobre una venta que sí existe, en vez de
+    // devolver su ticket.
     await waitFor(() =>
-      expect(svc.syncOperation).toHaveBeenCalledWith({
-        ...pendiente,
-        charged_at: "2026-09-25T10:00:00",
-      }),
+      expect(svc.syncOperation).toHaveBeenCalledWith(pendiente, { offline: false }),
     );
     // La clave vieja se borra: la migración no se repite.
     expect(window.localStorage.getItem("vektor-pos-pending-operation")).toBeNull();

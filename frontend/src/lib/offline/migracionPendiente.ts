@@ -56,24 +56,24 @@ export async function migrarPendienteDeB13(
       return null;
     }
     const lines = viejo.lines ?? [];
-    // B13 no tenía `charged_at`, y sin él el servidor rechaza con 422
-    // `OFFLINE_WITHOUT_CHARGED_AT` **siempre** que la venta llegue por la cola
-    // —alcance el stock o no—: migrarla sin esto la metía en una cola que no
-    // podía subirla nunca. No se inventa una fecha: B13 congelaba todo el
-    // payload al apretar Cobrar, así que su `operation_date` ES el momento del
-    // cobro, el mismo valor que B7 escribe hoy en los dos campos.
-    const conCobro: PosOperationPayload = payload.charged_at
-      ? payload
-      : { ...payload, charged_at: payload.operation_date };
+    // **El payload NO se toca acá.** Agregarle `charged_at` cambia la huella de
+    // idempotencia (`hash_peticion` usa `exclude_defaults=True`), y si el primer
+    // envío SÍ había llegado al servidor y sólo se perdió la respuesta —que es
+    // exactamente el caso para el que existe este resguardo—, el reintento
+    // recibiría 409 `IDEMPOTENCY_KEY_REUSED` en vez del ticket original. Se
+    // guarda tal cual y se marca de dónde viene: `usePosSync` reclama primero
+    // con el contenido original y sólo lo adapta si el servidor confirma que la
+    // venta no existe.
     await guardarOperacion(
       {
-        clientOperationId: conCobro.client_operation_id,
+        clientOperationId: payload.client_operation_id,
+        origen: "b13",
         tenantId: datos.tenantId,
         userId: datos.userId,
         terminalId: datos.terminalId,
-        payload: conCobro,
+        payload,
         lines,
-        recibo: reciboLocal(conCobro, lines, {
+        recibo: reciboLocal(payload, lines, {
           businessName: datos.businessName,
           cashierName: datos.cashierName,
           terminalName: datos.terminalName,
@@ -84,7 +84,7 @@ export async function migrarPendienteDeB13(
       { sinPrimerEnvio: true },
     );
     window.localStorage.removeItem(CLAVE_VIEJA);
-    return conCobro.client_operation_id;
+    return payload.client_operation_id;
   } catch {
     // Un JSON roto no puede impedir que la caja abra. La clave queda: si más
     // adelante se puede leer, se migra; mientras tanto no se pierde el dato.
