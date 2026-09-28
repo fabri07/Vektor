@@ -35,6 +35,24 @@ export interface PosCatalogPage {
   business_name: string;
 }
 
+export interface PosStockDiscrepancy {
+  id: string;
+  operation_id: string;
+  product_id: string | null;
+  product_name: string | null;
+  /** La cantidad COMPLETA de la línea, no el faltante. */
+  pending_units: number;
+  stock_at_capture: number;
+  operation_date: string;
+  status: string;
+  resolution: string | null;
+  reason: string | null;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+export type ResolucionDeDiferencia = "ajuste_de_entrada" | "anular_ticket";
+
 export interface PosCustomer {
   id: string;
   name: string;
@@ -103,6 +121,24 @@ export const posService = {
   },
   async voidOperation(id: string, reason: string): Promise<PosOperationResult> {
     const res = await api.post<PosOperationResult>(`/pos/operations/${id}/void`, { reason });
+    return res.data;
+  },
+
+  async listStockDiscrepancies(abiertas = true): Promise<PosStockDiscrepancy[]> {
+    const res = await api.get<PosStockDiscrepancy[]>("/pos/stock-discrepancies", {
+      params: { open: abiertas },
+    });
+    return res.data;
+  },
+  async resolveStockDiscrepancy(
+    id: string,
+    resolution: ResolucionDeDiferencia,
+    reason: string,
+  ): Promise<PosStockDiscrepancy> {
+    const res = await api.post<PosStockDiscrepancy>(
+      `/pos/stock-discrepancies/${id}/resolve`,
+      { resolution, reason },
+    );
     return res.data;
   },
 

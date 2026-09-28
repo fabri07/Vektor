@@ -7,6 +7,7 @@ import { Pencil, Trash2, Eye } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 import { LabelsModal } from "@/features/products/LabelsModal";
+import { StockDiscrepanciesPanel } from "@/features/products/StockDiscrepanciesPanel";
 import { StatCard } from "@/components/ui/StatCard";
 import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
@@ -483,6 +484,9 @@ export default function ProductsPage() {
           />
         </div>
       )}
+
+      {/* Sólo aparece si hay diferencias abiertas (B11). */}
+      <StockDiscrepanciesPanel />
 
       {/* Table */}
       {isError ? (
