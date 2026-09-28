@@ -1,10 +1,11 @@
 """B9 — los lectores de plata ven el pago mixto de caja con importes EXACTOS.
 
-La escritura del mixto todavía está cerrada (422 `MIXED_TENDER_NOT_ENABLED`), así
-que estas operaciones se siembran directo en la base con la forma que va a
-escribir `POST /pos/operations`: líneas con `payment_method = "mixed"` y un
-tender por medio. Los lectores tienen que estar listos ANTES de abrir la
-escritura; si no, el primer mixto real sería plata que ningún arqueo imputa.
+Estas operaciones se siembran directo en la base con la forma que escribe
+`POST /pos/operations`: líneas con `payment_method = "mixed"` y un tender por
+medio. Así se prueban los lectores aislados de la escritura, que tiene su propio
+recorrido HTTP en `test_pos_operations.py` (`TestPagoMixto`). Los lectores se
+cablearon ANTES de abrir la escritura: si no, el primer mixto real habría sido
+plata que ningún arqueo imputa.
 
 No alcanza con que un invariante cierre: si el mixto se leyera mal faltaría de
 dos lados a la vez y la igualdad seguiría valiendo. Cada test afirma el importe

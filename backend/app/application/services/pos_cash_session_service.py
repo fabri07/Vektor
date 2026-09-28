@@ -16,10 +16,8 @@ Lo que este módulo protege
 
 3. **Al cajón sólo entra el efectivo.** El esperado es
    ``fondo inicial + efectivo cobrado en el turno``. Tarjeta, transferencia y
-   fiado no están en el cajón. Hoy cada venta tiene UN método (el pago mixto
-   sigue rechazado con ``MIXED_TENDER_NOT_ENABLED``), así que la suma no es
-   ambigua; cuando B9 lo habilite, esta consulta es uno de los lectores que hay
-   que cablear a ``pos_tenders``.
+   fiado no están en el cajón. Se lee de ``pos_tenders``, así que en un pago
+   mixto (B9) entra sólo la parte en efectivo.
 
 4. **El arqueo del turno no es el arqueo del día.** ``cash_closes`` es uno por
    (tenant, fecha) y es del negocio entero; esto es por cajero y por caja. Son
@@ -126,9 +124,8 @@ async def efectivo_del_turno(
     """Cuánto efectivo cobró el turno, según las ventas VIVAS que le pertenecen.
 
     Se lee de ``pos_tenders`` y no de ``payment_method`` de la venta porque el
-    tender es donde vive el monto por método; con el mixto todavía rechazado hay
-    uno solo por operación, así que hoy dan lo mismo — pero cuando B9 lo
-    habilite, esta consulta ya está del lado correcto.
+    tender es donde vive el monto por método: en un pago mixto (B9) la venta
+    lleva el marcador ``mixed`` y sólo el tender sabe cuánto fue en efectivo.
 
     Una operación anulada no suma: su plata volvió al cliente.
     """

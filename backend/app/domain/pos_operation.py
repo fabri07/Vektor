@@ -216,9 +216,10 @@ def calcular_operacion(
 def validar_tenders(total: Decimal, tenders: Sequence[Decimal]) -> None:
     """Σ tenders == total, al centavo.
 
-    Es la igualdad que hace que el pago mixto no rompa los ocho lectores de
-    caja (B9): si los pagos pudieran no sumar la venta, cada lector tendría que
-    decidir por su cuenta a qué método imputar la diferencia.
+    Es la igualdad que hace que el pago mixto no rompa los lectores de plata
+    (B9): las ventas de una operación mixta cuentan su total y los tenders lo
+    reparten entre medios. Si los pagos pudieran no sumar la venta, cada lector
+    tendría que decidir por su cuenta a qué método imputar la diferencia.
     """
     if not tenders:
         raise TendersNoCuadranError("La operación no tiene pagos.")

@@ -383,6 +383,40 @@ class TestPermisos:
         )
         assert resp.status_code == 403
 
+    async def test_un_mixto_con_parte_fiada_pide_el_permiso_de_fiado(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        """B9: basta con UNA parte fiada para que la venta sea un fiado."""
+        creado = await client.post(
+            "/api/v1/customers",
+            json={"name": "Ana", "last_name": "Gómez", "customer_type": "person",
+                  "doc_type": "dni", "dni": "30123457", "phone": "1155554444"},
+            headers=auth_headers,
+        )
+        assert creado.status_code == 201, creado.text
+        p = await _producto(client, auth_headers, "Yerba")
+        cuerpo = _venta(
+            p["id"],
+            customer_id=creado.json()["id"],
+            tenders=[
+                {"payment_method": "cash", "amount_ars": "60.00"},
+                {"payment_method": "account", "amount_ars": "40.00"},
+            ],
+        )
+        _, sin = await _cajero(db_session, sample_tenant, fake_redis)
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=sin)
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["permission"] == "fiado"
+
+        _, con = await _cajero(db_session, sample_tenant, fake_redis, {"fiado": True})
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=con)
+        assert resp.status_code == 201, resp.text
+
     async def test_clientes_para_fiar_solo_con_permiso_y_sin_ficha(
         self,
         client: AsyncClient,

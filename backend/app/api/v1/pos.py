@@ -92,6 +92,7 @@ from app.domain.pos_price_token import ResultadoToken
 from app.domain.pos_price_token import verificar as verificar_precio
 from app.domain.pos_terminal import TERMINAL_HEADER
 from app.domain.sale_unit import formatear_cantidad
+from app.domain.transaction import MIXED_PAYMENT_METHOD
 from app.persistence.db.session import get_db_session
 from app.persistence.models import (
     PosOperation,
@@ -334,19 +335,6 @@ async def create_pos_operation(
             raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
         return PosOperationResponse.model_validate(reclamo.respuesta)
 
-    # Pago mixto: la tabla lo soporta desde ya, pero los ocho lectores de caja
-    # todavía leen `payment_method` de la venta y no conocen los tenders. Hasta
-    # que B9 los cablee, aceptar un mixto produciría ventas cuya plata ningún
-    # arqueo puede imputar. Se rechaza explícito en vez de generar el agujero.
-    if len(body.tenders) > 1:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "MIXED_TENDER_NOT_ENABLED",
-                "message": "El pago mixto todavía no está habilitado.",
-            },
-        )
-
     # El advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila: si no,
     # deadlockea AB-BA contra el exclusive del script de dedup.
     await acquire_write_lock_shared(session, tenant.tenant_id)
@@ -358,7 +346,15 @@ async def create_pos_operation(
             detail="Hay productos repetidos en la venta. Unificá la cantidad en una sola línea.",
         )
 
-    metodo_unico = body.tenders[0].payment_method
+    # Pago mixto (B9): con más de un método DISTINTO, las líneas no tienen un
+    # método que escribir y llevan el marcador `mixed`; el importe de cada medio
+    # vive en `pos_tenders` y los lectores de plata lo leen de ahí
+    # (`_pos_tender_scope`). Dos pagos en efectivo siguen siendo efectivo.
+    metodos = {t.payment_method for t in body.tenders}
+    metodo_de_linea = next(iter(metodos)) if len(metodos) == 1 else MIXED_PAYMENT_METHOD
+    # Con CUALQUIER parte fiada la venta necesita un cliente real: si no, la
+    # deuda no tendría a quién imputarse y la venta iría al centinela "Local".
+    hay_fiado = FIADO_PAYMENT_METHOD in metodos
     # El vuelto se calcula contra la parte EN EFECTIVO. Sin pago en efectivo, un
     # "entregado" daría como vuelto el monto entero ($10.000 de vuelto sobre una
     # venta con tarjeta) y cualquier lector de caja que use el vuelto se rompe.
@@ -376,7 +372,7 @@ async def create_pos_operation(
         session,
         tenant.tenant_id,
         body.customer_id,
-        is_fiado=metodo_unico == FIADO_PAYMENT_METHOD,
+        is_fiado=hay_fiado,
     )
 
     # Bloqueo en orden estable (por id): anti-deadlock y anti-sobreventa.
@@ -594,7 +590,7 @@ async def create_pos_operation(
             # prohibida, y con descuento indivisible ni siquiera existe.
             unit_price=linea.unit_price_list,
             transaction_date=body.operation_date,
-            payment_method=metodo_unico,
+            payment_method=metodo_de_linea,
             product_id=linea.product_id,
             customer_id=customer_id,
             created_by_user_id=user.user_id,
