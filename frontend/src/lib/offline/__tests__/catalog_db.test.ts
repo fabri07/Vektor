@@ -61,8 +61,8 @@ describe("bajar el catálogo", () => {
     const total = await sincronizarCatalogo("t1", async () => paginas[i++]!);
     expect(total).toBe(3);
     expect((await catalogoDeCaja("t1")).map((p) => p.id).sort()).toEqual(["a", "b", "c"]);
-    expect(await nombreDelNegocio()).toBe("Kiosco");
-    expect(await ultimaSincronizacion()).not.toBeNull();
+    expect(await nombreDelNegocio("t1")).toBe("Kiosco");
+    expect(await ultimaSincronizacion("t1")).not.toBeNull();
   });
 
   it("lo que ya no viene se borra: así se reflejan las bajas", async () => {
@@ -140,5 +140,50 @@ describe("stock estimado", () => {
       business_name: "Kiosco",
     }));
     expect((await catalogoDeCaja("t1"))[0]!.stock_estimado).toBe(7);
+  });
+});
+
+describe("una PC usada por dos negocios", () => {
+  it("cada negocio tiene su nombre y su fecha de sincronización", async () => {
+    // Con claves globales, el ticket que la caja imprime SIN RED salía con el
+    // nombre del otro local, y la fecha decía "hace 2 minutos" sobre un
+    // catálogo que no era el que se estaba mostrando.
+    await sincronizarCatalogo("t1", async () => ({
+      items: [producto("a")],
+      next_cursor: null,
+      business_name: "Kiosco Uno",
+    }));
+    await sincronizarCatalogo("t2", async () => ({
+      items: [producto("b")],
+      next_cursor: null,
+      business_name: "Kiosco Dos",
+    }));
+    expect(await nombreDelNegocio("t1")).toBe("Kiosco Uno");
+    expect(await nombreDelNegocio("t2")).toBe("Kiosco Dos");
+    expect(await ultimaSincronizacion("t1")).not.toBeNull();
+    expect(await ultimaSincronizacion("t2")).not.toBeNull();
+  });
+});
+
+describe("el tope de páginas no puede truncar el catálogo", () => {
+  it("un cursor que no se agota falla y NO reemplaza nada", async () => {
+    // El tope existe para que un cursor que no avanza no cuelgue la caja. Pero
+    // si se dispara, no se vio el catálogo entero: reemplazarlo igual borraría
+    // como "bajas" a todo lo que quedó del otro lado, y el escáner dejaría de
+    // encontrarlo. Es el mismo caso que una página que falla.
+    await sincronizarCatalogo("t1", async () => ({
+      items: [producto("viejo")],
+      next_cursor: null,
+      business_name: "Kiosco",
+    }));
+    let pedidas = 0;
+    await expect(
+      sincronizarCatalogo("t1", async () => {
+        pedidas += 1;
+        return { items: [producto(`p${pedidas}`)], next_cursor: `p${pedidas}` };
+      }),
+    ).rejects.toThrow(/no terminó de bajar/);
+    // El catálogo viejo sigue completo y escaneable.
+    expect((await catalogoDeCaja("t1")).map((p) => p.id)).toEqual(["viejo"]);
   });
 });

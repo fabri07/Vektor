@@ -29,12 +29,19 @@ _MAX_IMPORTE = Decimal("99999999.99")
 class PosLineRequest(BaseModel):
     """Una línea del carrito.
 
-    ``unit_price_ars``, ``base_units_per_sale_unit`` y ``price_token`` son lo
-    que la caja **cobró**, con la firma que el propio servidor emitió en el
-    catálogo (ver ``domain/pos_price_token``). Van juntos o no van: sin token
-    válido el servidor usa el precio de catálogo, como antes de B7. Lo que el
-    cliente sigue sin poder declarar es el importe de la línea ni el total: eso
-    lo recalcula ``calcular_operacion``.
+    ``unit_price_ars``, ``product_name``, ``sale_unit``,
+    ``base_units_per_sale_unit`` y ``price_token`` son lo que la caja **cobró**,
+    con la firma que el propio servidor emitió en el catálogo (ver
+    ``domain/pos_price_token``). Van juntos o no van: sin token válido el
+    servidor usa el catálogo, como antes de B7. Lo que el cliente sigue sin
+    poder declarar es el importe de la línea ni el total: eso lo recalcula
+    ``calcular_operacion``.
+
+    El nombre y la unidad se declaran —firmados— porque el ticket tiene que
+    decir lo que se vendió **cuando se vendió**: leerlos del catálogo al
+    sincronizar hacía que renombrar un producto cambiara el comprobante de una
+    venta de ayer, y que cambiarle la unidad invalidara el token de una venta
+    legítima ya cobrada.
     """
 
     product_id: UUID
@@ -43,6 +50,10 @@ class PosLineRequest(BaseModel):
     unit_price_ars: Decimal | None = Field(
         default=None, gt=0, le=_MAX_IMPORTE, decimal_places=2
     )
+    #: 300 como ``Product.name``: con menos se truncaría un nombre válido y la
+    #: firma no daría.
+    product_name: str | None = Field(default=None, max_length=300)
+    sale_unit: str | None = Field(default=None, max_length=20)
     base_units_per_sale_unit: int | None = Field(default=None, ge=1)
     price_token: str | None = Field(default=None, max_length=120)
     #: Descuento monetario de esta línea. Sobre el TOTAL, nunca sobre el unitario.
@@ -50,19 +61,23 @@ class PosLineRequest(BaseModel):
 
     @model_validator(mode="after")
     def precio_declarado_completo(self) -> "PosLineRequest":
-        """Los tres campos del precio van juntos o no va ninguno.
+        """Los cinco campos firmados van juntos o no va ninguno.
 
-        Aceptar dos de tres y caer al catálogo sería un downgrade silencioso:
-        la caja cobró un precio, el servidor guardó otro y nadie se entera.
+        Aceptar cuatro de cinco y caer al catálogo por el que falta sería un
+        downgrade silencioso: la caja cobró una cosa, el servidor guardó otra y
+        nadie se entera.
         """
         declarados = (
             self.unit_price_ars is not None,
+            bool(self.product_name),
+            bool(self.sale_unit),
             self.base_units_per_sale_unit is not None,
             bool(self.price_token),
         )
         if any(declarados) and not all(declarados):
             raise ValueError(
-                "unit_price_ars, base_units_per_sale_unit y price_token van juntos."
+                "unit_price_ars, product_name, sale_unit, base_units_per_sale_unit "
+                "y price_token van juntos."
             )
         return self
 
@@ -283,6 +298,7 @@ def a_pos_product(producto: "Product", tenant_id: UUID) -> PosProductResponse:
         tenant_id,
         respuesta.id,
         respuesta.sale_price_ars,
+        respuesta.name,
         respuesta.sale_unit,
         respuesta.base_units_per_sale_unit,
     )

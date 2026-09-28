@@ -141,7 +141,14 @@ async def obtener(
         PosStockDiscrepancy.id == discrepancia_id,
     )
     if para_actualizar:
-        stmt = stmt.with_for_update()
+        # `populate_existing` es indispensable acá: si la fila ya está en la
+        # identity map (por ejemplo porque se la leyó sin candado un momento
+        # antes, para saber qué ticket bloquear), SQLAlchemy devolvería el
+        # objeto viejo aunque el `FOR UPDATE` haya esperado a otra transacción
+        # y leído una versión nueva. El candado se tomaría bien y el `status`
+        # se leería mal — que es exactamente el caso que el candado existe para
+        # cubrir.
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -153,9 +160,23 @@ async def aplicar_ajuste_de_entrada(
 ) -> int:
     """Entra el faltante y después sale la venta completa. Devuelve el faltante.
 
-    El faltante se mide **ahora**, no en la captura: si en el medio entró una
-    compra, el ajuste tiene que ser menor, y si se vendió más, mayor. Con el
-    número viejo el stock quedaría mal en los dos casos.
+    El faltante NO es el de la captura: si en el medio entró una compra o se
+    vendió más, ese número ya no cuadra. Se mide contra dos referencias y se usa
+    la mayor:
+
+    1. **El stock de ahora**, que es lo que impide que la venta completa deje el
+       stock en negativo.
+    2. **El stock reconstruido a la fecha de la venta**, que es lo que el dueño
+       está afirmando: «esas unidades estaban *cuando se vendió*». El ajuste se
+       fecha ese día (``occurred_at``), así que su tamaño tiene que salir de lo
+       que faltaba ese día y no de información posterior.
+
+    Sin (2), una compra cargada después de la venta hacía que el faltante diera
+    **cero**: no se creaba ningún ajuste, el chequeo agregado cerraba, y el
+    temporal seguía viendo el stock en negativo en la fecha original. Pero el
+    problema de fondo no era el aviso: esas unidades eran reales y el stock
+    quedaba corto — con ancla 3, venta de 5 y una compra posterior de 10, el
+    stock terminaba en 8 cuando lo correcto son 10.
     """
     if discrepancia.product_id is None:
         return 0
@@ -173,6 +194,21 @@ async def aplicar_ajuste_de_entrada(
         raise ValueError("El producto de la discrepancia ya no existe.")
 
     faltante = max(0, discrepancia.pending_units - producto.stock_units)
+    if occurred_at is not None:
+        # Import local: `inventory_temporal_service` importa este módulo para la
+        # exclusión compartida, así que a nivel de módulo sería circular.
+        from app.application.services import inventory_temporal_service
+
+        balance = await inventory_temporal_service.balance_reconstruido_a(
+            session,
+            discrepancia.tenant_id,
+            discrepancia.product_id,
+            hasta=occurred_at.date(),
+        )
+        # `None` = el chequeo temporal no mira este producto (sin ancla o ledger
+        # complejo). Ahí no hay nada que cerrar y no se inventa un número.
+        if balance is not None:
+            faltante = max(faltante, discrepancia.pending_units - balance)
     if faltante:
         await stock_service.register_reconciliation_adjustment(
             discrepancia.product_id,

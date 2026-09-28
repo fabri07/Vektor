@@ -17,10 +17,18 @@ servidor recalcula la firma **con los valores declarados**: si coincide, esos
 valores son exactamente los que él mismo emitió y los usa; si no, rechaza. No
 hace falta guardar historia de precios ni confiar en el cliente.
 
-**Se firma el factor además del precio.** ``sale_price_ars`` es por unidad de
-VENTA y la cantidad va en unidades base, así que el importe depende de los dos:
-congelar sólo el precio dejaba abierto que un producto pasara de unidad a gramos
-entre la venta y la sincronización y el importe cambiara igual.
+**Se firma todo lo que el cliente declara**, no sólo el precio:
+
+- el **factor**, porque ``sale_price_ars`` es por unidad de VENTA y la cantidad
+  va en unidades base: el importe depende de los dos, y congelar sólo el precio
+  dejaba abierto que un producto pasara de unidad a gramos entre la venta y la
+  sincronización y el importe cambiara igual;
+- la **unidad** y el **nombre**, porque son lo que el ticket dice que se vendió.
+  Verificarlos contra el catálogo del momento de la sincronización —como se
+  hacía hasta acá— tiene dos consecuencias malas: un cambio de unidad invalida
+  el token de una venta legítima ya cobrada, y un producto renombrado entre el
+  cobro y la subida imprime un nombre en el comprobante provisional y otro en el
+  definitivo. Firmados, el cliente los declara y el servidor los acredita.
 
 Límites declarados:
 
@@ -83,19 +91,34 @@ def _canonico(monto: Decimal) -> str:
     return f"{monto.quantize(Decimal('0.01')):.2f}"
 
 
+def _campo(valor: str) -> str:
+    """Cada campo va con su largo adelante, para que no haya dos lecturas.
+
+    Con un separador a secas, un nombre de producto que contenga ``|`` movería
+    la frontera entre dos campos: «Coca 2|5 L» con factor 1 y «Coca 2» con
+    factor «5 L» darían el MISMO mensaje, y por lo tanto la misma firma. Un
+    token emitido para uno serviría para el otro. Prefijar el largo lo hace
+    imposible sin prohibir ningún carácter en el nombre.
+    """
+    return f"{len(valor)}:{valor}"
+
+
 def _firma(
     tenant_id: UUID,
     product_id: UUID,
     sale_price_ars: Decimal,
+    product_name: str,
     sale_unit: str,
     base_units_per_sale_unit: int,
     emitido: int,
 ) -> str:
     mensaje = "|".join(
-        (
+        _campo(parte)
+        for parte in (
             str(tenant_id),
             str(product_id),
             _canonico(sale_price_ars),
+            product_name,
             sale_unit,
             str(base_units_per_sale_unit),
             str(emitido),
@@ -108,6 +131,7 @@ def emitir(
     tenant_id: UUID,
     product_id: UUID,
     sale_price_ars: Decimal,
+    product_name: str,
     sale_unit: str,
     base_units_per_sale_unit: int,
     *,
@@ -116,7 +140,13 @@ def emitir(
     """El token que viaja con el producto en el catálogo de caja."""
     emitido = int((ahora or datetime.now(UTC)).timestamp())
     firma = _firma(
-        tenant_id, product_id, sale_price_ars, sale_unit, base_units_per_sale_unit, emitido
+        tenant_id,
+        product_id,
+        sale_price_ars,
+        product_name,
+        sale_unit,
+        base_units_per_sale_unit,
+        emitido,
     )
     return f"{emitido}.{firma}"
 
@@ -126,6 +156,7 @@ def verificar(
     tenant_id: UUID,
     product_id: UUID,
     sale_price_ars: Decimal,
+    product_name: str,
     sale_unit: str,
     base_units_per_sale_unit: int,
     *,
@@ -146,7 +177,13 @@ def verificar(
     except ValueError:
         return ResultadoToken.INVALIDO
     esperada = _firma(
-        tenant_id, product_id, sale_price_ars, sale_unit, base_units_per_sale_unit, emitido
+        tenant_id,
+        product_id,
+        sale_price_ars,
+        product_name,
+        sale_unit,
+        base_units_per_sale_unit,
+        emitido,
     )
     # `compare_digest` y no `==`: la comparación no debe filtrar en cuánto
     # tarda cuántos caracteres coincidieron.

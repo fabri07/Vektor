@@ -178,6 +178,111 @@ def replay_timeline(*, opening_anchor_qty: int, events: Sequence[TimelineEvent])
     )
 
 
+@dataclass(frozen=True)
+class LineaDeTiempo:
+    """La línea de tiempo de UN producto, ya clasificada. Sin DB."""
+
+    opening: int
+    events: list[TimelineEvent]
+    complex_ledger: bool
+    total_purchases: int
+    total_tagged_adjustments: int
+    total_loss: int
+    total_sales: int
+
+
+def construir_linea_de_tiempo(
+    mov_rows: Sequence[tuple[str, str | None, int, Any, Any]],
+    sale_rows: Sequence[tuple[int, Any]],
+) -> LineaDeTiempo:
+    """Clasifica movimientos y ventas en eventos datados.
+
+    Extraída del escaneo porque tiene un segundo consumidor: la resolución de
+    una salida pendiente de caja (B11) necesita saber cuánto stock había **a la
+    fecha de la venta**, y tiene que reconstruirlo EXACTAMENTE igual que el
+    chequeo temporal. Con dos construcciones, la resolución cerraría una cuenta
+    que el chequeo hace distinta y la divergencia volvería a aparecer.
+    """
+    opening = 0
+    total_purchases = 0
+    total_tagged_adjustments = 0
+    total_loss = 0
+    events: list[TimelineEvent] = []
+    complex_ledger = False
+    for movement_type, source_type, qty, occurred_at, created_at in mov_rows:
+        qty = int(qty)
+        # Fecha de NEGOCIO: occurred_at si está, si no la fecha de carga. Reducimos a
+        # .date() para poder ordenar/comparar naive vs aware sin TypeError (bucketing
+        # por día es lo único válido con occurred_at wall-clock AR etiquetado UTC).
+        business_day = (occurred_at or created_at).date()
+        # Misma clasificación que el chequeo agregado (invariante ending==esperado).
+        movement_class = classify_stock_movement(movement_type, source_type)
+        if movement_class == MOVEMENT_CLASS_PURCHASE:
+            total_purchases += qty
+            events.append(TimelineEvent(business_day, qty, kind_rank=0))
+        elif movement_class == MOVEMENT_CLASS_ANCHOR:
+            # Ancla: stock inicial conocido → opening, IGNORANDO su fecha.
+            opening += qty
+        elif movement_class == MOVEMENT_CLASS_TAGGED_ADJUSTMENT:
+            total_tagged_adjustments += qty
+            events.append(TimelineEvent(business_day, qty, kind_rank=1))
+        elif movement_class == MOVEMENT_CLASS_LOSS:
+            total_loss += qty  # ya viene negativo en el ledger
+            events.append(TimelineEvent(business_day, qty, kind_rank=2))
+        elif movement_class == MOVEMENT_CLASS_COMPLEX:
+            complex_ledger = True
+        # MOVEMENT_CLASS_IGNORE_SALE: dedup, la venta se cuenta desde sales_entries.
+
+    total_sales = 0
+    for quantity, transaction_date in sale_rows:
+        quantity = int(quantity)
+        total_sales += quantity
+        events.append(TimelineEvent(transaction_date.date(), -quantity, kind_rank=3))
+
+    return LineaDeTiempo(
+        opening=opening,
+        events=events,
+        complex_ledger=complex_ledger,
+        total_purchases=total_purchases,
+        total_tagged_adjustments=total_tagged_adjustments,
+        total_loss=total_loss,
+        total_sales=total_sales,
+    )
+
+
+async def balance_reconstruido_a(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_id: uuid.UUID,
+    *,
+    hasta: date,
+) -> int | None:
+    """Cuánto stock había al cierre de ``hasta``, según la línea de tiempo.
+
+    ``None`` cuando este chequeo **no mira** ese producto —sin ancla confiable o
+    con ledger complejo—: ahí no hay divergencia temporal que cerrar y afirmar
+    un número sería inventarlo.
+
+    Las ventas con salida pendiente ya quedan afuera (``_ventas_por_producto``
+    usa la exclusión compartida), así que la venta que se está resolviendo no se
+    cuenta a sí misma.
+    """
+    candidatos = await _candidate_products(session, tenant_id, [product_id])
+    if not candidatos:
+        return None
+    movimientos = await _movimientos_por_producto(session, tenant_id, [product_id])
+    ventas = await _ventas_por_producto(session, tenant_id, [product_id])
+    linea = construir_linea_de_tiempo(
+        movimientos.get(product_id, []), ventas.get(product_id, [])
+    )
+    if linea.complex_ledger:
+        return None
+    hasta_ese_dia = [e for e in linea.events if e.day <= hasta]
+    return replay_timeline(
+        opening_anchor_qty=linea.opening, events=hasta_ese_dia
+    ).ending_balance
+
+
 async def _candidate_products(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -324,48 +429,19 @@ async def check_products_temporal_divergence(
     ventas_de = await _ventas_por_producto(session, tenant_id, _ids)
 
     for pid, pname, stock_units in candidates:
-        mov_rows = movimientos_de.get(pid, [])
-
-        opening = 0
-        total_purchases = 0
-        total_tagged_adjustments = 0
-        total_loss = 0
-        events: list[TimelineEvent] = []
-        complex_ledger = False
-        for movement_type, source_type, qty, occurred_at, created_at in mov_rows:
-            qty = int(qty)
-            # Fecha de NEGOCIO: occurred_at si está, si no la fecha de carga. Reducimos a
-            # .date() para poder ordenar/comparar naive vs aware sin TypeError (bucketing
-            # por día es lo único válido con occurred_at wall-clock AR etiquetado UTC).
-            business_day = (occurred_at or created_at).date()
-            # Misma clasificación que el chequeo agregado (invariante ending==esperado).
-            movement_class = classify_stock_movement(movement_type, source_type)
-            if movement_class == MOVEMENT_CLASS_PURCHASE:
-                total_purchases += qty
-                events.append(TimelineEvent(business_day, qty, kind_rank=0))
-            elif movement_class == MOVEMENT_CLASS_ANCHOR:
-                # Ancla: stock inicial conocido → opening, IGNORANDO su fecha.
-                opening += qty
-            elif movement_class == MOVEMENT_CLASS_TAGGED_ADJUSTMENT:
-                total_tagged_adjustments += qty
-                events.append(TimelineEvent(business_day, qty, kind_rank=1))
-            elif movement_class == MOVEMENT_CLASS_LOSS:
-                total_loss += qty  # ya viene negativo en el ledger
-                events.append(TimelineEvent(business_day, qty, kind_rank=2))
-            elif movement_class == MOVEMENT_CLASS_COMPLEX:
-                complex_ledger = True
-            # MOVEMENT_CLASS_IGNORE_SALE: dedup, la venta se cuenta desde sales_entries.
-
-        if complex_ledger:
+        linea = construir_linea_de_tiempo(
+            movimientos_de.get(pid, []), ventas_de.get(pid, [])
+        )
+        if linea.complex_ledger:
             skipped_complex_ledger += 1
             continue
 
-        sale_rows = ventas_de.get(pid, [])
-        total_sales = 0
-        for quantity, transaction_date in sale_rows:
-            quantity = int(quantity)
-            total_sales += quantity
-            events.append(TimelineEvent(transaction_date.date(), -quantity, kind_rank=3))
+        opening = linea.opening
+        events = linea.events
+        total_purchases = linea.total_purchases
+        total_tagged_adjustments = linea.total_tagged_adjustments
+        total_loss = linea.total_loss
+        total_sales = linea.total_sales
 
         result = replay_timeline(opening_anchor_qty=opening, events=events)
 

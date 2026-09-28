@@ -127,6 +127,55 @@ describe("flujo de cobro", () => {
     expect(window.localStorage.getItem("vektor-pos-pending-operation")).toBeNull();
   });
 
+  // 402 = suscripción vencida; 423 = mantenimiento.
+  it.each([
+    [402, "SUBSCRIPTION_READ_ONLY"],
+    [423, undefined],
+  ])(
+    "un %s en el PRIMER envío NO borra la venta: el cajero ya cobró",
+    async (status, code) => {
+      // El agujero más grave que tenía B7: al apretar Cobrar se registra
+      // `charged_at` —la plata entró y el cliente se fue—, y un 4xx cualquiera
+      // borraba la operación local. Con 402 y 423 no hay NADA que el cajero
+      // pueda corregir: se arreglan cuando el dueño paga o termina el
+      // mantenimiento. La venta no quedaba ni en el servidor ni en la cola.
+      svc.createOperation.mockRejectedValue(
+        httpError(status as number, code ? { detail: { code } } : { detail: "x" }),
+      );
+      svc.syncOperation.mockRejectedValue(
+        httpError(status as number, code ? { detail: { code } } : { detail: "x" }),
+      );
+      render(<PosScreen />);
+      await escanear("7790001234567");
+      await screen.findByText("Yerba");
+      await act(async () => {
+        fireEvent.click(cobrarBtn());
+      });
+      await waitFor(async () => expect(await listarOperaciones("t1")).toHaveLength(1));
+      const guardadas = await listarOperaciones("t1");
+      expect(guardadas[0]!.estado).toBe("PENDIENTE");
+      // Y no se le dice "sin conexión": el servidor contestó, y mandarlo a
+      // revisar el router es mandarlo a arreglar lo que no está roto.
+      expect(screen.queryByText(/cuando vuelva la conexión/)).not.toBeInTheDocument();
+    },
+  );
+
+  it("un 422 que el cajero PUEDE corregir sí borra la venta local", async () => {
+    // El contrapeso: si no se borrara, cada intento fallido dejaría basura en la
+    // cola y el cajero no podría rearmar el carrito.
+    svc.createOperation.mockRejectedValue(
+      httpError(422, { detail: { code: "CASH_RECEIVED_WITHOUT_CASH_TENDER" } }),
+    );
+    render(<PosScreen />);
+    await escanear("7790001234567");
+    await screen.findByText("Yerba");
+    await act(async () => {
+      fireEvent.click(cobrarBtn());
+    });
+    await waitFor(async () => expect(await listarOperaciones("t1")).toHaveLength(0));
+    expect(cobrarBtn()).toBeEnabled();
+  });
+
   it("sin respuesta: la venta queda en la cola y el carrito se LIBERA", async () => {
     // Hasta B7 la caja quedaba trabada "en duda" hasta que alguien resolviera
     // el cobro a mano. Ahora la venta ya está guardada, se sube sola, y el
@@ -209,7 +258,17 @@ describe("flujo de cobro", () => {
     );
     svc.syncOperation.mockResolvedValue(resultado("1000.00"));
     render(<PosScreen />);
-    await waitFor(() => expect(svc.syncOperation).toHaveBeenCalledWith(pendiente));
+    // Sube con `charged_at` puesto desde su propia `operation_date`: B13 no
+    // tenía ese campo y sin él el servidor la rechaza con 422
+    // `OFFLINE_WITHOUT_CHARGED_AT` SIEMPRE, así que la migración la habría
+    // dejado en una cola que no podía subirla nunca. No se inventa nada: B13
+    // congelaba el payload al apretar Cobrar, así que las dos fechas son la misma.
+    await waitFor(() =>
+      expect(svc.syncOperation).toHaveBeenCalledWith({
+        ...pendiente,
+        charged_at: "2026-09-25T10:00:00",
+      }),
+    );
     // La clave vieja se borra: la migración no se repite.
     expect(window.localStorage.getItem("vektor-pos-pending-operation")).toBeNull();
   });

@@ -9,6 +9,9 @@
  * (B3). Después de cobrar se muestra lo que el servidor devolvió.
  */
 
+import type { PosErrorInfo } from "@/lib/pos/errors";
+import { clasificarSync } from "@/lib/pos/syncClassification";
+
 export interface PosProduct {
   id: string;
   name: string;
@@ -50,8 +53,10 @@ export interface PosOperationPayload {
     product_id: string;
     quantity: number;
     discount_ars: string;
-    /** Precio, factor y firma: los tres juntos o ninguno (lo valida el servidor). */
+    /** Precio, nombre, unidad, factor y firma: los cinco juntos o ninguno. */
     unit_price_ars?: string;
+    product_name?: string;
+    sale_unit?: string;
     base_units_per_sale_unit?: number;
     price_token?: string;
   }[];
@@ -237,9 +242,15 @@ export function buildPayload(
       // El precio que la caja COBRÓ, con la firma que emitió el servidor. Sin
       // esto, una venta sincronizada después de un cambio de precio se
       // recalcularía con el precio nuevo y los pagos no cerrarían.
+      // El nombre y la unidad van con el precio y la firma: son lo que el
+      // ticket que el cliente se llevó dice que se vendió. Leerlos del catálogo
+      // al sincronizar hacía que un producto renombrado durante el corte
+      // apareciera con otro nombre en el comprobante definitivo.
       ...(l.product.price_token
         ? {
             unit_price_ars: l.product.sale_price_ars,
+            product_name: l.product.name,
+            sale_unit: l.product.sale_unit,
             base_units_per_sale_unit: l.product.base_units_per_sale_unit,
             price_token: l.product.price_token,
           }
@@ -371,32 +382,25 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
 
 // ─── Clasificación de la respuesta del cobro ─────────────────────────────────
 
-export interface HttpErrorLike {
-  /** `null` = no hubo respuesta. */
-  status: number | null;
-}
-
 /**
- * ¿El cobro quedó definido o en duda?
+ * ¿El cajero puede corregir esto en el mostrador y volver a cobrar?
  *
- * Sólo un 4xx definitivo prueba que no entró nada (el servidor revierte la
- * transacción entera). Sin respuesta (red, timeout) o con un 5xx / 408 / 429,
- * el cobro PUDO haber entrado: se reintenta con el mismo payload, nunca con
- * uno nuevo.
- */
-/**
- * ¿El servidor rechazó de verdad este PRIMER envío sincrónico?
+ * Es la ÚNICA pregunta que habilita borrar la venta local, y sólo en el primer
+ * envío sincrónico: el carrito sigue bloqueado, nadie entregó nada y el cajero
+ * está mirando la pantalla. Si la respuesta es no, la venta queda encolada.
  *
- * Vale sólo para el envío que el cajero está mirando, con el carrito bloqueado
- * y sin entrega todavía: ahí un 4xx significa que no entró nada y se puede
- * corregir. **No sirve para la cola**: trata como definitivos el 402
- * (suscripción) y el 423 (mantenimiento), que son justamente los que se
- * arreglan solos. Una venta ya cobrada se clasifica con `clasificarSync`.
+ * Se decide con `clasificarSync`, la misma y única clasificación que usa la
+ * cola. Antes esto era un rango —"cualquier 4xx menos 408 y 429"— y por eso
+ * borraba ante **402** (suscripción vencida) y **423** (mantenimiento), que son
+ * justo los dos que se arreglan solos sin tocar la venta: el cajero ya había
+ * cobrado y la venta desaparecía de los dos lados.
  */
-export function isDefinitiveRejection(err: HttpErrorLike, code: string | null): boolean {
-  if (err.status === null) return false;
+export function esCorregibleEnElMostrador(info: PosErrorInfo): boolean {
+  if (clasificarSync(info) !== "revision") return false;
   // Estos dos 409 dicen lo contrario de "no entró": la clave YA tiene una venta.
-  // Tratarlos como rechazo borraría de la cola una venta que existe.
-  if (code === "IDEMPOTENCY_KEY_REUSED" || code === "DUPLICATE_IDEMPOTENT") return false;
-  return err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429;
+  // Tratarlos como rechazo borraría una venta que existe en el servidor.
+  if (info.code === "IDEMPOTENCY_KEY_REUSED" || info.code === "DUPLICATE_IDEMPOTENT") {
+    return false;
+  }
+  return true;
 }

@@ -27,6 +27,7 @@ def _emitido(**cambios):
         "tenant_id": TENANT,
         "product_id": PRODUCTO,
         "sale_price_ars": Decimal("1234.56"),
+        "product_name": "Yerba Playadito 1 kg",
         "sale_unit": "unit",
         "base_units_per_sale_unit": 1,
     }
@@ -46,13 +47,14 @@ class TestFirma:
             {"sale_price_ars": Decimal("1.00")},
             {"base_units_per_sale_unit": 1000},
             {"sale_unit": "gram"},
+            {"product_name": "Yerba Playadito 500 g"},
             {"product_id": uuid.uuid4()},
             {"tenant_id": uuid.uuid4()},
         ],
-        ids=["precio", "factor", "unidad", "otro producto", "otro negocio"],
+        ids=["precio", "factor", "unidad", "nombre", "otro producto", "otro negocio"],
     )
     def test_cambiar_cualquier_dato_invalida(self, cambio: dict) -> None:
-        """La firma cubre los cinco: cambiar uno solo tiene que romperla.
+        """La firma cubre los seis: cambiar uno solo tiene que romperla.
 
         El factor importa tanto como el precio: el importe es
         `precio × cantidad / factor`, así que firmar sólo el precio dejaba
@@ -114,3 +116,29 @@ class TestVigencia:
             verificar(f"{viejo}.{'0' * 32}", **_emitido(), ahora=ahora)
             is ResultadoToken.INVALIDO
         )
+
+
+class TestNombreConSeparador:
+    """Un nombre con `|` no puede correr la frontera entre dos campos.
+
+    Sin largo prefijado, «Coca 2|5 L» con unidad «unit» y «Coca 2» con unidad
+    «5 L|unit» producen el MISMO mensaje: un token emitido para uno serviría
+    para el otro, y bastaría con editar la cola para cobrar un producto con la
+    firma de otro. Es el motivo de `_campo`.
+    """
+
+    def test_dos_productos_distintos_no_comparten_firma(self) -> None:
+        uno = emitir(**_emitido(product_name="Coca 2|5 L", sale_unit="unit"))
+        otro = emitir(**_emitido(product_name="Coca 2", sale_unit="5 L|unit"))
+        assert uno.split(".")[1] != otro.split(".")[1]
+
+    def test_el_token_de_uno_no_sirve_para_el_otro(self) -> None:
+        token = emitir(**_emitido(product_name="Coca 2|5 L", sale_unit="unit"))
+        cruzado = verificar(
+            token, **_emitido(product_name="Coca 2", sale_unit="5 L|unit")
+        )
+        assert cruzado is ResultadoToken.INVALIDO
+
+    def test_un_nombre_con_separador_se_verifica_contra_si_mismo(self) -> None:
+        datos = _emitido(product_name="Fernet 750|1 L")
+        assert verificar(emitir(**datos), **datos) is ResultadoToken.VALIDO

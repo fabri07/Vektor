@@ -41,16 +41,21 @@ function payload(id: string): PosOperationPayload {
 }
 
 async function sembrar(id: string, extra: Record<string, unknown> = {}) {
-  await guardarOperacion({
-    clientOperationId: id,
-    tenantId: "t1",
-    userId: "u1",
-    terminalId: "caja-1",
-    payload: payload(id),
-    lines: [],
-    recibo,
-    ...extra,
-  });
+  await guardarOperacion(
+    {
+      clientOperationId: id,
+      tenantId: "t1",
+      userId: "u1",
+      terminalId: "caja-1",
+      payload: payload(id),
+      lines: [],
+      recibo,
+      ...extra,
+    },
+    // Estos tests son sobre la COLA: la venta ya pasó por su primer envío, así
+    // que no le corresponde el resguardo que evita que el motor se adelante.
+    { sinPrimerEnvio: true },
+  );
 }
 
 function httpError(status: number, code?: string): AxiosError {
@@ -126,9 +131,11 @@ it.each([
   [503, "SUBSCRIPTION_UNAVAILABLE"],
   [500, undefined],
 ])("un %s deja la venta pendiente, no en revisión", async (status, code) => {
-  // `isDefinitiveRejection` trataría el 402 y el 423 como rechazo definitivo
-  // porque mira el rango 4xx. Para una venta ya cobrada eso es mandarla a
-  // revisión por algo que se arregla cuando el dueño paga.
+  // Una clasificación por RANGO ("cualquier 4xx") trataría el 402 y el 423
+  // como rechazo definitivo. Para una venta ya cobrada eso es mandarla a
+  // revisión por algo que se arregla cuando el dueño paga o termina el
+  // mantenimiento. Es la misma razón por la que el primer envío tampoco la
+  // borra (ver `pos_screen.test.tsx`).
   await sembrar("op-1");
   svc.syncOperation.mockRejectedValue(httpError(status as number, code as string | undefined));
   const { result } = montar();

@@ -8,6 +8,7 @@ de inventario (el agregado y el temporal) entiendan lo mismo.
 
 import unittest.mock
 import uuid
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -476,6 +477,101 @@ class TestLosDosChequeos:
         assert resp.status_code == 200, resp.text
         # 3 que había + 27 que entraron − 30 que salieron = 0.
         assert await _stock(db_session, pid) == 0
+        _sin_divergencia(
+            await check_tenant_inventory_integrity(db_session, sample_tenant.tenant_id),
+            await check_products_temporal_divergence(
+                db_session, sample_tenant.tenant_id, product_ids=[uuid.UUID(pid)]
+            ),
+        )
+
+
+class TestElFaltanteSeMideALaFechaDeLaVenta:
+    """Una compra posterior no puede hacer desaparecer el faltante.
+
+    El ajuste se **fecha el día de la venta**: el dueño está afirmando que esas
+    unidades estaban ese día. Midiendo el faltante sólo contra el stock de hoy,
+    una compra cargada después daba faltante cero —ningún ajuste— y dos cosas
+    quedaban mal: el stock perdía las unidades que de verdad existían, y el
+    chequeo temporal seguía viendo el saldo en negativo en la fecha original.
+    """
+
+    async def _escenario(
+        self, client: AsyncClient, headers: dict[str, str], db_session: AsyncSession,
+        tenant_id: uuid.UUID,
+    ) -> tuple[str, str]:
+        caja = await _caja(client, headers)
+        pid = await _producto(client, headers, stock=3)
+        await _anclar(db_session, tenant_id, pid, 3)
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_venta([{"product_id": pid, "quantity": 30}], "3000.00"),
+            headers={**caja, "X-POS-Offline": "1"},
+        )
+        assert resp.status_code == 201, resp.text
+        # Al día siguiente entra una compra de 40: el stock de hoy alcanza de
+        # sobra, pero el día de la venta seguía sin alcanzar.
+        producto = (
+            await db_session.execute(select(Product).where(Product.id == uuid.UUID(pid)))
+        ).scalar_one()
+        db_session.add(
+            InventoryMovement(
+                tenant_id=tenant_id,
+                product_id=uuid.UUID(pid),
+                movement_type="purchase",
+                qty=40,
+                occurred_at=datetime.combine(today_ar(), time(12, 0))
+                + timedelta(days=1),
+            )
+        )
+        producto.stock_units = 43
+        await db_session.flush()
+        lista = await client.get("/api/v1/pos/stock-discrepancies", headers=headers)
+        return pid, lista.json()[0]["id"]
+
+    async def test_el_ajuste_entra_por_lo_que_faltaba_ese_dia(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        pid, deuda = await self._escenario(
+            client, auth_headers, db_session, sample_tenant.tenant_id
+        )
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{deuda}/resolve",
+            json={"resolution": "ajuste_de_entrada", "reason": "Estaban, no cargadas."},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        auditoria = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "POS_STOCK_DISCREPANCY_RESOLVED"
+                )
+            )
+        ).scalar_one()
+        # Faltaban 27 el día de la venta (había 3 y salieron 30), no 0.
+        assert auditoria.decision_data["unidades_ajustadas"] == 27
+        # 43 de hoy + 27 que estaban y no figuraban − 30 que salieron = 40.
+        assert await _stock(db_session, pid) == 40
+
+    async def test_resolver_deja_el_chequeo_temporal_en_cero(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        pid, deuda = await self._escenario(
+            client, auth_headers, db_session, sample_tenant.tenant_id
+        )
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{deuda}/resolve",
+            json={"resolution": "ajuste_de_entrada", "reason": "Estaban, no cargadas."},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
         _sin_divergencia(
             await check_tenant_inventory_integrity(db_session, sample_tenant.tenant_id),
             await check_products_temporal_divergence(

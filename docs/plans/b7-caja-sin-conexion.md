@@ -167,3 +167,32 @@ nace apagado.
 La caché sólo se limpia al cambiar el nombre de `CACHE`, así que los chunks
 viejos se acumulan. Con hash en el nombre son inertes; limpiarlos por antigüedad
 es trabajo aparte.
+
+---
+
+## Revisión externa del 2026-09-27 — los nueve puntos, resueltos
+
+Los nueve se verificaron contra el código antes de tocar nada: los nueve eran
+ciertos. Dos con matices: la migración de B13 era **peor** de lo descrito (el 422
+por `charged_at` faltante es incondicional, no sólo cuando falta stock) y el
+cambio de unidad que invalida el token es **latente** (hoy `sale_unit` no tiene
+camino de escritura). Cada arreglo tiene su mutation test: se revirtió el fix y
+se confirmó que el test se pone en rojo.
+
+| # | Qué estaba mal | Cómo se resolvió |
+|---|---|---|
+| 1 | Un **402** o **423** en el primer envío borraba la venta ya cobrada: no quedaba ni en el servidor ni en la cola | `esCorregibleEnElMostrador` = `clasificarSync(...) === "revision"` menos los dos 409 de idempotencia. Una sola clasificación; se borra sólo lo que el cajero puede corregir y volver a cobrar |
+| 2 | La instalación guardaba **sólo el HTML**: los chunks ya cargados no pasaron por el SW, así que un reinicio offline abría una pantalla en blanco. Y `activate` borraba **todas** las cachés del origen | `install` precarga los `/_next/static/` del propio HTML (desescapando `\/`); la página declara con `PREPARAR` los que realmente cargó y el SW confirma; la casilla no dice «lista» sin esa confirmación. `activate` borra sólo el prefijo `vektor-pos-` |
+| 3 | La migración de B13 **borraba** el pendiente de otro tenant, y sin `charged_at` la venta migrada no podía subir nunca | Tenant ajeno: no se toca ni para borrar. `charged_at` se pone desde el `operation_date` del propio payload — el mismo instante, porque B13 congelaba todo al apretar Cobrar |
+| 4 | El token se verificaba con la **unidad actual** y el snapshot tomaba el **nombre actual** | La firma cubre nombre y unidad, y la línea los declara: cinco-o-ninguno. El snapshot usa lo declarado y verificado. Campos con largo prefijado para que un `\|` en el nombre no mueva la frontera |
+| 5 | `resolve` bloqueaba discrepancia→ticket y `void` ticket→discrepancia: deadlock | `resolve` bloquea el ticket primero (lectura sucia sólo para el `operation_id`, después `FOR UPDATE` con `populate_existing`). Test de concurrencia en PG + un test que corre el orden invertido y **exige** que se trabe + compuerta de orden sobre el handler |
+| 6 | El motor de sincronización podía tomar la venta **mientras el primer POST seguía en vuelo** y capturar stock que el intento online habría rechazado | La operación nace con `proximoIntentoEn = ahora + 60 s`. Espera, no estado nuevo: se cura sola si el proceso muere en el medio |
+| a | `businessName` y `ultimaSync` en claves globales: una PC de dos locales imprimía el nombre del otro | Claves por tenant |
+| b | Llegar al tope de 200 páginas reemplazaba el catálogo con uno **truncado** | Cursor sin agotar = sincronización fallida: no se reemplaza nada |
+| c | Con una compra posterior, el faltante daba **cero**: sin ajuste, con divergencia temporal — y el stock perdía unidades reales | El faltante se mide contra el stock de hoy **y** contra el reconstruido a la fecha de la venta, y se usa el mayor. Misma reconstrucción que el chequeo temporal (`construir_linea_de_tiempo` extraída y compartida) |
+
+El (c) no era un aviso cosmético: con ancla 3, venta de 5 y una compra posterior
+de 10, el stock terminaba en 8 cuando lo correcto son 10. El ajuste se fecha el
+día de la venta, así que su tamaño tiene que salir de lo que faltaba **ese día**
+y no de información posterior; medirlo también contra el stock de hoy es lo que
+impide dejarlo en negativo.

@@ -126,6 +126,15 @@ export async function _limpiarPosDb(): Promise<void> {
   ]);
 }
 
+/**
+ * Cuánto se le reserva al primer envío antes de que la cola pueda tomarlo.
+ *
+ * 4× el timeout del cliente (`lib/api.ts`: 15 s), que es lo máximo que el primer
+ * POST puede estar en vuelo. Suficiente para que la cola nunca se le adelante, y
+ * corto para que una venta cuya pestaña murió no espere de más.
+ */
+export const MS_DE_PRIMER_ENVIO = 60_000;
+
 export interface NuevaOperacion {
   clientOperationId: string;
   tenantId: string;
@@ -143,15 +152,38 @@ export interface NuevaOperacion {
  * su ticket entran juntos o no entra nada. Media venta guardada sería peor que
  * ninguna, porque al recuperarla no se sabría qué se cobró.
  */
-export async function guardarOperacion(nueva: NuevaOperacion): Promise<OperacionGuardada> {
+export interface OpcionesDeGuardado {
+  ahora?: number;
+  /**
+   * `true` cuando NO hay un primer envío por delante y la cola puede tomarla ya
+   * mismo: es el caso de la venta migrada desde B13, cuyo envío original pasó
+   * hace rato y se perdió la respuesta.
+   */
+  sinPrimerEnvio?: boolean;
+}
+
+export async function guardarOperacion(
+  nueva: NuevaOperacion,
+  { ahora = Date.now(), sinPrimerEnvio = false }: OpcionesDeGuardado = {},
+): Promise<OperacionGuardada> {
   const guardada: OperacionGuardada = {
     ...nueva,
     estado: "PENDIENTE",
-    creadaEn: new Date().toISOString(),
+    creadaEn: new Date(ahora).toISOString(),
     intentos: 0,
     ultimoError: null,
     ultimoCodigo: null,
-    proximoIntentoEn: 0,
+    // La cola no la toma hasta que el primer envío termine. Con
+    // `proximoIntentoEn: 0` el motor periódico podía agarrarla **mientras el
+    // primer POST seguía en vuelo** y reenviarla con `X-POS-Offline: 1`: la
+    // idempotencia evita el ticket duplicado, pero si ganaba ese envío se
+    // capturaba stock que el intento online habría rechazado con
+    // `INSUFFICIENT_STOCK` para que el cajero decidiera.
+    //
+    // Es una espera y no un estado nuevo a propósito: se cura sola. Si el
+    // navegador muere entre guardar y mandar, a los `MS_DE_PRIMER_ENVIO` la
+    // venta vuelve a ser sincronizable sin que nadie la destrabe.
+    proximoIntentoEn: sinPrimerEnvio ? 0 : ahora + MS_DE_PRIMER_ENVIO,
     resultado: null,
     sincronizadaEn: null,
   };

@@ -59,6 +59,8 @@ def _linea(producto: dict, cantidad: int = 1) -> dict:
         "product_id": producto["id"],
         "quantity": cantidad,
         "unit_price_ars": producto["sale_price_ars"],
+        "product_name": producto["name"],
+        "sale_unit": producto["sale_unit"],
         "base_units_per_sale_unit": producto["base_units_per_sale_unit"],
         "price_token": producto["price_token"],
     }
@@ -217,6 +219,7 @@ class TestPrecioFirmado:
             sample_tenant.tenant_id,
             uuid.UUID(pid),
             Decimal("1000.00"),
+            "Yerba",
             "unit",
             1,
             ahora=datetime.now(UTC) - timedelta(seconds=VIGENCIA_SEGUNDOS + 3600),
@@ -229,6 +232,8 @@ class TestPrecioFirmado:
                         "product_id": pid,
                         "quantity": 1,
                         "unit_price_ars": "1000.00",
+                        "product_name": "Yerba",
+                        "sale_unit": "unit",
                         "base_units_per_sale_unit": 1,
                         "price_token": vencido,
                     }
@@ -472,3 +477,142 @@ class TestTicketCongelado:
             f"/api/v1/pos/operations/{resp.json()['id']}/receipt", headers=auth_headers
         )
         assert recibo.json()["lines"][0]["quantity_display"] == "0,750 kg"
+
+
+class TestElTicketSeCongelaAlCobrar:
+    """Lo que el cliente se llevó impreso tiene que ser lo que queda registrado.
+
+    Una venta offline se cobra un día y llega al servidor al siguiente. Si entre
+    esos dos momentos el dueño renombra el producto o le cambia la unidad, el
+    servidor leía el catálogo de HOY: el comprobante provisional y el definitivo
+    decían cosas distintas, y un cambio de unidad además invalidaba el token de
+    una venta legítima. Por eso el nombre y la unidad viajan firmados.
+    """
+
+    async def test_renombrar_durante_el_corte_no_cambia_el_comprobante(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        pid = await _crear_producto(client, auth_headers, "Yerba Playadito", price="1000.00")
+        # La caja bajó el catálogo ANTES del corte.
+        producto = await _del_catalogo(client, auth_headers, pid)
+        # Durante el corte, el dueño renombra desde la web.
+        await client.patch(
+            f"/api/v1/products/{pid}", json={"name": "Yerba Taragüi"}, headers=auth_headers
+        )
+        # Y recién ahí sube la venta.
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_operacion(
+                [_linea(producto)], [{"payment_method": "cash", "amount_ars": "1000.00"}]
+            ),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201, resp.text
+        recibo = await client.get(
+            f"/api/v1/pos/operations/{resp.json()['id']}/receipt", headers=auth_headers
+        )
+        assert recibo.json()["lines"][0]["product_name"] == "Yerba Playadito"
+
+    async def test_la_divergencia_de_nombre_queda_auditada(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        """Congelar no es esconder: los dos nombres tienen que poder verse."""
+        pid = await _crear_producto(client, auth_headers, "Yerba Playadito", price="1000.00")
+        producto = await _del_catalogo(client, auth_headers, pid)
+        await client.patch(
+            f"/api/v1/products/{pid}", json={"name": "Yerba Taragüi"}, headers=auth_headers
+        )
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_operacion(
+                [_linea(producto)], [{"payment_method": "cash", "amount_ars": "1000.00"}]
+            ),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201, resp.text
+        log = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "POS_PRICE_DIVERGENCE"
+                )
+            )
+        ).scalars().all()
+        assert len(log) == 1
+        linea = log[0].decision_data["lines"][0]
+        assert linea["nombre_cobrado"] == "Yerba Playadito"
+        assert linea["nombre_catalogo"] == "Yerba Taragüi"
+
+    async def test_cambiar_la_unidad_durante_el_corte_no_rechaza_la_venta(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        """Antes esto daba 422 `PRICE_TOKEN_INVALID`.
+
+        El token se verificaba con `producto.sale_unit` —el de AHORA— mientras
+        que la firma se había emitido con el de antes. Una venta ya cobrada
+        quedaba en revisión por un cambio que no la toca.
+        """
+        pid = await _crear_producto(client, auth_headers, "Queso", stock=5000, price="1234.56")
+        producto = await _del_catalogo(client, auth_headers, pid)
+        assert producto["sale_unit"] == "unit"
+
+        producto_orm = (
+            await db_session.execute(select(Product).where(Product.id == uuid.UUID(pid)))
+        ).scalar_one()
+        producto_orm.sale_unit = "gram"
+        producto_orm.base_units_per_sale_unit = 1000
+        await db_session.flush()
+
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_operacion(
+                [_linea(producto)], [{"payment_method": "cash", "amount_ars": "1234.56"}]
+            ),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201, resp.text
+        recibo = await client.get(
+            f"/api/v1/pos/operations/{resp.json()['id']}/receipt", headers=auth_headers
+        )
+        # La unidad del ticket es la que se USÓ para cobrar, no la de hoy.
+        assert recibo.json()["lines"][0]["quantity_display"] == "1 un."
+
+    async def test_un_nombre_que_el_servidor_no_firmo_no_entra(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """Declarar no es decidir: sin firma, el nombre del ticket sería inventable."""
+        pid = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        producto = await _del_catalogo(client, auth_headers, pid)
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_operacion(
+                [{**_linea(producto), "product_name": "Champagne importado"}],
+                [{"payment_method": "cash", "amount_ars": "1000.00"}],
+            ),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "PRICE_TOKEN_INVALID"
+
+    @pytest.mark.parametrize(
+        "falta",
+        ["unit_price_ars", "product_name", "sale_unit", "base_units_per_sale_unit",
+         "price_token"],
+    )
+    async def test_cuatro_de_cinco_no_alcanza(
+        self, client: AsyncClient, auth_headers: dict[str, Any], falta: str
+    ) -> None:
+        """Aceptar la línea incompleta y completar con el catálogo sería el
+        downgrade silencioso de siempre: la caja cobró una cosa y el servidor
+        guardó otra."""
+        pid = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        producto = await _del_catalogo(client, auth_headers, pid)
+        linea = _linea(producto)
+        del linea[falta]
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_operacion(
+                [linea], [{"payment_method": "cash", "amount_ars": "1000.00"}]
+            ),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422, resp.text

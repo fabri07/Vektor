@@ -390,8 +390,9 @@ async def create_pos_operation(
     por_id = {p.id: p for p in locked}
 
     pedidas: list[LineaPedida] = []
-    #: product_id → (precio, factor) del CATÁLOGO, sólo si difieren de lo cobrado.
-    divergencias: dict[uuid.UUID, tuple[Decimal, int]] = {}
+    #: product_id → (precio, factor, nombre, unidad) del CATÁLOGO, sólo si
+    #: difieren de lo que la caja cobró e imprimió.
+    divergencias: dict[uuid.UUID, tuple[Decimal, int, str, str]] = {}
     #: product_id → stock disponible, de las líneas cuya salida queda pendiente.
     faltantes: dict[uuid.UUID, int] = {}
     #: Lo que el ticket va a decir de cada producto, congelado al persistir.
@@ -406,14 +407,24 @@ async def create_pos_operation(
             )
         factor_catalogo = producto.base_units_per_sale_unit or 1
 
-        if item.unit_price_ars is not None and item.base_units_per_sale_unit is not None:
-            # El schema garantiza que los tres campos vienen juntos.
+        if (
+            item.unit_price_ars is not None
+            and item.base_units_per_sale_unit is not None
+            and item.product_name is not None
+            and item.sale_unit is not None
+        ):
+            # El schema garantiza que los cinco campos vienen juntos. Se verifica
+            # con los valores DECLARADOS, los cinco: usar los del catálogo de
+            # ahora haría que cambiarle la unidad o el nombre a un producto
+            # invalidara el token de una venta que ya se cobró — justo la venta
+            # que B7 existe para salvar.
             verificacion = verificar_precio(
                 item.price_token,
                 tenant.tenant_id,
                 producto.id,
                 item.unit_price_ars,
-                producto.sale_unit,
+                item.product_name,
+                item.sale_unit,
                 item.base_units_per_sale_unit,
             )
             if verificacion is ResultadoToken.VENCIDO:
@@ -446,8 +457,21 @@ async def create_pos_operation(
                 )
             precio = item.unit_price_ars
             factor = item.base_units_per_sale_unit
-            if precio != producto.sale_price_ars or factor != factor_catalogo:
-                divergencias[producto.id] = (producto.sale_price_ars, factor_catalogo)
+            # Lo que el ticket va a decir: lo DECLARADO y verificado, que es lo
+            # que la caja le mostró al cliente cuando le cobró.
+            snapshot = (item.product_name, item.sale_unit, factor)
+            if (
+                precio != producto.sale_price_ars
+                or factor != factor_catalogo
+                or item.product_name != producto.name
+                or item.sale_unit != producto.sale_unit
+            ):
+                divergencias[producto.id] = (
+                    producto.sale_price_ars,
+                    factor_catalogo,
+                    producto.name,
+                    producto.sale_unit,
+                )
         else:
             # Sin precio declarado: catálogo, como antes de B7. Un producto sin
             # precio (los que crea una compra importada nacen con
@@ -464,8 +488,9 @@ async def create_pos_operation(
                 )
             precio = producto.sale_price_ars
             factor = factor_catalogo
+            snapshot = (producto.name, producto.sale_unit, factor)
 
-        snapshots[producto.id] = (producto.name, producto.sale_unit, factor)
+        snapshots[producto.id] = snapshot
 
         if producto.stock_units < item.quantity:
             if not es_offline:
@@ -676,6 +701,10 @@ async def create_pos_operation(
                             "catalogo_ars": str(divergencias[ln.product_id][0]),
                             "factor_cobrado": ln.base_units_snapshot,
                             "factor_catalogo": divergencias[ln.product_id][1],
+                            "nombre_cobrado": ln.product_name_snapshot,
+                            "nombre_catalogo": divergencias[ln.product_id][2],
+                            "unidad_cobrada": ln.sale_unit_snapshot,
+                            "unidad_catalogo": divergencias[ln.product_id][3],
                         }
                         for ln in lineas
                         if ln.product_id in divergencias
@@ -948,18 +977,35 @@ async def resolve_stock_discrepancy(
     nada. Idempotente: resolver dos veces devuelve lo mismo sin repetir efectos.
     """
     await acquire_write_lock_shared(session, tenant.tenant_id)
+
+    # ORDEN DE BLOQUEOS: primero el ticket, después la discrepancia — el MISMO
+    # que `void_operation`, que bloquea la cabecera y recién ahí toca las deudas
+    # de stock en `cerrar_por_anulacion`. Con el orden invertido, anular y
+    # resolver a la vez se pedían los candados cruzados y Postgres abortaba una
+    # de las dos con un 500 por deadlock.
+    #
+    # Para saber QUÉ ticket bloquear hay que leer la discrepancia, así que se la
+    # lee primero SIN candado —sólo para sacarle el `operation_id`— y se la
+    # vuelve a leer con `FOR UPDATE` recién después: entre las dos lecturas
+    # pudo haberse resuelto, y lo que vale es lo que dice la versión bloqueada.
+    referencia = await pos_discrepancy_service.obtener(
+        session, tenant.tenant_id, discrepancy_id
+    )
+    if referencia is None:
+        raise HTTPException(status_code=404, detail="Diferencia no encontrada.")
+
+    cargada = await _cargar_operacion(
+        session, tenant.tenant_id, operation_id=referencia.operation_id, para_actualizar=True
+    )
+    if cargada is None:
+        raise HTTPException(status_code=404, detail="Operación no encontrada.")
+    operacion, lineas, tenders = cargada
+
     discrepancia = await pos_discrepancy_service.obtener(
         session, tenant.tenant_id, discrepancy_id, para_actualizar=True
     )
     if discrepancia is None:
         raise HTTPException(status_code=404, detail="Diferencia no encontrada.")
-
-    cargada = await _cargar_operacion(
-        session, tenant.tenant_id, operation_id=discrepancia.operation_id, para_actualizar=True
-    )
-    if cargada is None:
-        raise HTTPException(status_code=404, detail="Operación no encontrada.")
-    operacion, lineas, tenders = cargada
 
     producto = (
         await session.get(Product, discrepancia.product_id)

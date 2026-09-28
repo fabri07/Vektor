@@ -37,7 +37,8 @@ import {
 import {
   activarVersionNueva,
   desregistrarServiceWorker,
-  registrarServiceWorker,
+  prepararParaSinInternet,
+  type EstadoSinInternet,
 } from "@/lib/offline/serviceWorker";
 import { tomarCandadoDeCaja } from "@/lib/offline/tabLock";
 import {
@@ -49,13 +50,14 @@ import {
   cannotCharge,
   formatCents,
   initialSale,
-  isDefinitiveRejection,
+  esCorregibleEnElMostrador,
   newOperationId,
   previewTotals,
   saleReducer,
   toCents,
 } from "@/lib/pos/cart";
 import { type PosErrorInfo, cobroRejectionMessage, posErrorInfo } from "@/lib/pos/errors";
+import { clasificarSync } from "@/lib/pos/syncClassification";
 import { reciboLocal } from "@/lib/pos/reciboLocal";
 import { buscarEnCatalogo, clasificar } from "@/lib/pos/scanCodeLocal";
 import { CASHIER_ROLE, POS_ROLES, hasPosPermission } from "@/lib/roles";
@@ -74,6 +76,32 @@ const NO_SE_PUDO_GUARDAR =
 
 const COBRADA_SIN_CONEXION =
   "Cobrada y guardada en esta PC. Se sube sola cuando vuelva la conexión.";
+
+/**
+ * Qué se le dice al cajero cuando la venta quedó en la cola.
+ *
+ * Si el servidor NO contestó, "cuando vuelva la conexión" es exacto. Si contestó
+ * —402 porque la suscripción venció, 423 por mantenimiento, 401 o una caja dada
+ * de baja—, decirle "sin conexión" lo manda a revisar el router en vez de lo que
+ * de verdad hay que arreglar. La venta está igual de guardada en los dos casos.
+ */
+function avisoDeEncolado(info: PosErrorInfo): string {
+  const guardada = "La venta quedó cobrada y guardada en esta PC.";
+  switch (clasificarSync(info)) {
+    case "autenticacion":
+      return `${guardada} Falta volver a entrar o habilitar esta caja de nuevo; después se sube sola.`;
+    case "revision":
+      return `${guardada} El servidor la rechazó: la tiene que revisar el encargado. ${
+        info.message ?? ""
+      }`.trim();
+    default:
+      return info.status === null
+        ? COBRADA_SIN_CONEXION
+        : `${guardada} El servidor no la pudo tomar todavía; se reintenta sola. ${
+            info.message ?? ""
+          }`.trim();
+  }
+}
 
 const OTRA_PESTANA =
   "La caja ya está abierta en otra pestaña. Cerrá esta para no cobrar dos veces lo mismo.";
@@ -247,9 +275,11 @@ function PosRegister() {
         if (usePosPrintConfigStore.getState().autoPrint) void printReceipt(result.id);
       } catch (e) {
         const info = posErrorInfo(e);
-        if (isDefinitiveRejection(info, info.code)) {
-          // Un 4xx en el envío que el cajero está mirando: el servidor revirtió
-          // todo y nadie entregó nada todavía. Es el ÚNICO borrado automático.
+        if (esCorregibleEnElMostrador(info)) {
+          // El servidor revirtió todo, nadie entregó nada y el cajero puede
+          // arreglar el carrito y volver a cobrar. Es el ÚNICO borrado
+          // automático: un 402 o un 423 NO entran acá, porque no hay nada
+          // que corregir y la venta ya se cobró.
           await borrarOperacion(payload.client_operation_id);
           handleRejection(info, lines);
         } else {
@@ -261,7 +291,7 @@ function PosRegister() {
             ultimoCodigo: info.code,
             proximoIntentoEn: Date.now() + 5_000,
           });
-          dispatch({ type: "QUEUED", notice: COBRADA_SIN_CONEXION });
+          dispatch({ type: "QUEUED", notice: avisoDeEncolado(info) });
           if (usePosPrintConfigStore.getState().autoPrint) void printLocal(recibo);
         }
       } finally {
@@ -327,8 +357,8 @@ function PosRegister() {
       // Sin red se sigue con el catálogo guardado: viejo, pero completo.
     }
     setCatalogo(await catalogoDeCaja(tenantId));
-    setSincronizadoEn(await ultimaSincronizacion());
-    setNegocio((await nombreDelNegocio()) ?? "");
+    setSincronizadoEn(await ultimaSincronizacion(tenantId));
+    setNegocio((await nombreDelNegocio(tenantId)) ?? "");
   }, [tenantId]);
 
   useEffect(() => {
@@ -353,9 +383,26 @@ function PosRegister() {
   // El service worker se registra SÓLO si el dueño encendió la casilla en esta
   // PC, y apagarla lo desregistra y borra su caché. Una PC que nunca lo
   // encendió no lo tiene: el radio de daño es una caja, no la app entera.
+  //
+  // Y "registrado" no es "lista": los chunks que esta pantalla ya tenía
+  // cargados no pasaron por el service worker, así que hay que pasárselos y
+  // esperar su confirmación antes de decirle al dueño que puede reiniciar sin
+  // red. Decirlo antes es peor que no instalar nada.
+  const [preparada, setPreparada] = useState<EstadoSinInternet | "preparando" | null>(null);
   useEffect(() => {
-    if (sinInternet.habilitado) void registrarServiceWorker();
-    else void desregistrarServiceWorker();
+    if (!sinInternet.habilitado) {
+      setPreparada(null);
+      void desregistrarServiceWorker();
+      return;
+    }
+    let vigente = true;
+    setPreparada("preparando");
+    void prepararParaSinInternet().then((estado) => {
+      if (vigente) setPreparada(estado);
+    });
+    return () => {
+      vigente = false;
+    };
   }, [sinInternet.habilitado]);
 
   // Una versión nueva se activa en un momento SEGURO: con el carrito vacío y
@@ -641,6 +688,20 @@ function PosRegister() {
                   />
                   Preparar esta PC para abrir sin internet
                 </label>
+                {preparada === "preparando" ? (
+                  <p className="text-xs text-pos-muted">Guardando la caja en esta PC…</p>
+                ) : null}
+                {preparada && preparada !== "preparando" ? (
+                  <p className={`text-xs ${preparada.lista ? "text-pos-text-2" : "text-pos-danger"}`}>
+                    {preparada.lista
+                      ? "Lista: esta PC ya puede abrir la caja sin conexión."
+                      : `Todavía NO está lista${
+                          preparada.faltan.length
+                            ? ` (faltan ${preparada.faltan.length} archivos)`
+                            : ""
+                        }. Recargá la página con conexión y volvé a probar.`}
+                  </p>
+                ) : null}
                 <p className="text-xs text-pos-muted">
                   Guarda la caja en esta PC para que abra aunque no haya conexión. Probalo
                   cortando internet y reiniciando antes de confiar en él; si algo anda mal,

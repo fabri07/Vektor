@@ -15,7 +15,40 @@
  */
 
 const CACHE = "vektor-pos-v1";
+/** Se borran sólo las cachés de la caja. Ver el handler de `activate`. */
+const PREFIJO = "vektor-pos-";
 const DOCUMENTO = "/pos";
+
+/** Los chunks de Next que el documento referencia, para el primer arranque. */
+function estaticosDelHtml(html) {
+  // El HTML de Next trae rutas escapadas (`\/_next\/static\/...`) dentro de los
+  // payloads de flight: sin desescapar, el primer arranque se queda sin la
+  // mitad de los chunks.
+  const plano = html.replace(/\\\//g, "/");
+  const encontrados = plano.match(/\/_next\/static\/[^"'`)\s\\]+/g) || [];
+  return [...new Set(encontrados)];
+}
+
+/**
+ * Guarda lo que se pueda y devuelve qué faltó.
+ *
+ * Una por una y no con `addAll`, que es atómico: un solo chunk que falle
+ * dejaría la caja sin NINGÚN recurso guardado.
+ */
+async function guardarTodo(cache, urls) {
+  const faltan = [];
+  await Promise.all(
+    urls.map(async (url) => {
+      try {
+        if (await cache.match(url)) return;
+        await cache.add(new Request(url, { cache: "reload" }));
+      } catch {
+        faltan.push(url);
+      }
+    }),
+  );
+  return faltan;
+}
 
 /**
  * Qué hace el service worker con un pedido. Es la función que decide TODO, y
@@ -42,29 +75,49 @@ function decidirRuta(url, origenPropio, esNavegacion, aceptaRsc) {
   return "ignorar";
 }
 
-// Para el test: se lee este archivo y se ejerce ESTA función.
+// Para el test: se lee este archivo y se ejercen ESTAS funciones, más los
+// propios listeners de `install` y `activate`.
 self.__decidirRuta = decidirRuta;
+self.__estaticosDelHtml = estaticosDelHtml;
+
+/**
+ * Guardar el documento NO alcanza para arrancar sin red.
+ *
+ * Los chunks de JavaScript y CSS que la página ya tenía cargados se pidieron
+ * ANTES de que este service worker existiera, así que no pasaron por él y no
+ * están en la caché. Tras un reinicio sin red, el documento se servía y sus
+ * `<script>` daban error: una pantalla en blanco, que es peor que no haber
+ * instalado nada. Así que en la instalación se leen del propio HTML y se
+ * guardan. Los chunks que Next carga dinámicamente no figuran ahí: esos los
+ * declara la página con el mensaje `PREPARAR`.
+ */
+async function precargar() {
+  const cache = await caches.open(CACHE);
+  let html = null;
+  try {
+    const respuesta = await fetch(DOCUMENTO, { cache: "reload" });
+    if (!respuesta.ok) return;
+    html = await respuesta.clone().text();
+    await cache.put(DOCUMENTO, respuesta);
+  } catch {
+    // Sin red al instalar: se guarda en la primera visita con conexión.
+    return;
+  }
+  await guardarTodo(cache, estaticosDelHtml(html));
+}
 
 self.addEventListener("install", (evento) => {
-  evento.waitUntil(
-    (async () => {
-      const cache = await caches.open(CACHE);
-      // Sólo el documento: los chunks se cachean solos al usarse, y exigirlos
-      // acá haría que un cambio de nombre de archivo rompa la instalación.
-      try {
-        await cache.add(DOCUMENTO);
-      } catch {
-        // Sin red al instalar, se cachea en la primera visita con conexión.
-      }
-    })(),
-  );
+  evento.waitUntil(precargar());
 });
 
 self.addEventListener("activate", (evento) => {
   evento.waitUntil(
     (async () => {
       for (const nombre of await caches.keys()) {
-        if (nombre !== CACHE) await caches.delete(nombre);
+        // SÓLO las de la caja. Con `nombre !== CACHE` se borraba cualquier
+        // caché del origen, incluidas las que no son nuestras: el service
+        // worker de un bloque se llevaba puesto el almacenamiento de otro.
+        if (nombre !== CACHE && nombre.startsWith(PREFIJO)) await caches.delete(nombre);
       }
       await self.clients.claim();
     })(),
@@ -72,8 +125,28 @@ self.addEventListener("activate", (evento) => {
 });
 
 self.addEventListener("message", (evento) => {
+  const datos = evento.data;
+  if (!datos) return;
   // La página decide cuándo es seguro activar la versión nueva.
-  if (evento.data && evento.data.type === "SKIP_WAITING") self.skipWaiting();
+  if (datos.type === "SKIP_WAITING") {
+    self.skipWaiting();
+    return;
+  }
+  // La página declara los recursos que realmente cargó y pregunta si quedó
+  // lista. Es lo que hace que la casilla no pueda decir "PC preparada" sobre una
+  // caché que no alcanza para abrir.
+  if (datos.type === "PREPARAR") {
+    const puerto = evento.ports && evento.ports[0];
+    evento.waitUntil(
+      (async () => {
+        const cache = await caches.open(CACHE);
+        if (!(await cache.match(DOCUMENTO))) await precargar();
+        const faltan = await guardarTodo(cache, datos.urls || []);
+        const documento = Boolean(await cache.match(DOCUMENTO));
+        if (puerto) puerto.postMessage({ documento, faltan, lista: documento && !faltan.length });
+      })(),
+    );
+  }
 });
 
 self.addEventListener("fetch", (evento) => {

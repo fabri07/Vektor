@@ -4,7 +4,7 @@ import {
   buildPayload,
   cannotCharge,
   initialSale,
-  isDefinitiveRejection,
+  esCorregibleEnElMostrador,
   lineGrossCents,
   localNaiveIso,
   previewTotals,
@@ -141,6 +141,9 @@ describe("estados del cobro", () => {
 });
 
 describe("clasificación de la respuesta", () => {
+  // `true` = el cajero puede corregir el carrito y volver a cobrar, y sólo por
+  // eso se borra la venta local. Todo lo demás queda encolado: el cajero ya
+  // recibió la plata.
   it.each([
     [null, null, false],
     [500, null, false],
@@ -149,12 +152,23 @@ describe("clasificación de la respuesta", () => {
     [429, null, false],
     [409, "IDEMPOTENCY_KEY_REUSED", false],
     [409, "DUPLICATE_IDEMPOTENT", false],
+    // Los dos que se arreglan solos sin tocar la venta. Antes daban `true` y
+    // la venta cobrada desaparecía de los dos lados.
+    [402, null, false],
+    [423, null, false],
+    // La sesión o la PC, no la venta: tampoco hay nada que corregir acá.
+    [401, null, false],
+    [403, "TERMINAL_REQUIRED", false],
+    [403, "TERMINAL_DISABLED", false],
+    // Éstos sí: el cajero saca el producto, corrige el pago y vuelve a cobrar.
     [400, "INSUFFICIENT_STOCK", true],
     [422, "TENDERS_MISMATCH", true],
-    [403, "TERMINAL_REQUIRED", true],
-    [402, null, true],
-  ])("status %s código %s → definitivo: %s", (status, code, esperado) => {
-    expect(isDefinitiveRejection({ status }, code)).toBe(esperado);
+    [422, "PRICE_TOKEN_INVALID", true],
+    [403, "POS_PERMISSION_DENIED", true],
+  ])("status %s código %s → corregible: %s", (status, code, esperado) => {
+    expect(esCorregibleEnElMostrador({ status, code, message: null, fields: {} })).toBe(
+      esperado,
+    );
   });
 });
 

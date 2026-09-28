@@ -8,6 +8,7 @@ import {
   guardarOperacion,
   listarNoSincronizadas,
   listarOperaciones,
+  MS_DE_PRIMER_ENVIO,
   pendientesSincronizables,
   podarSincronizadas,
   unidadesComprometidas,
@@ -51,17 +52,21 @@ async function sembrar(
   id: string,
   extra: Partial<Parameters<typeof guardarOperacion>[0]> = {},
   items: { product_id: string; quantity: number }[] = [{ product_id: "p1", quantity: 2 }],
+  opciones: Parameters<typeof guardarOperacion>[1] = {},
 ) {
-  return guardarOperacion({
-    clientOperationId: id,
-    tenantId: "t1",
-    userId: "u1",
-    terminalId: "caja-1",
-    payload: payload(id, items),
-    lines: [],
-    recibo,
-    ...extra,
-  });
+  return guardarOperacion(
+    {
+      clientOperationId: id,
+      tenantId: "t1",
+      userId: "u1",
+      terminalId: "caja-1",
+      payload: payload(id, items),
+      lines: [],
+      recibo,
+      ...extra,
+    },
+    opciones,
+  );
 }
 
 beforeEach(async () => {
@@ -94,7 +99,10 @@ describe("a quién le pertenece una venta", () => {
     await sembrar("otro-cajero", { userId: "u2" });
     await sembrar("otra-caja", { terminalId: "caja-2" });
 
-    const cola = await pendientesSincronizables("t1", "u1", "caja-1");
+    // Pasado el resguardo del primer envío, la propia es la única sincronizable.
+    const cola = await pendientesSincronizables(
+      "t1", "u1", "caja-1", Date.now() + MS_DE_PRIMER_ENVIO + 1,
+    );
     expect(cola.map((o) => o.clientOperationId)).toEqual(["mia"]);
   });
 
@@ -102,6 +110,30 @@ describe("a quién le pertenece una venta", () => {
     await sembrar("op-1");
     await actualizarOperacion("op-1", { proximoIntentoEn: Date.now() + 60_000 });
     expect(await pendientesSincronizables("t1", "u1", "caja-1")).toHaveLength(0);
+  });
+});
+
+describe("el primer envío y la cola no se pisan", () => {
+  it("una venta recién guardada NO se sincroniza: su primer envío sigue en vuelo", async () => {
+    await sembrar("op-1");
+    // El motor periódico corre cada 20 s y ante cada `online`: sin este
+    // resguardo tomaba la venta mientras el POST original seguía abierto y la
+    // reenviaba con `X-POS-Offline: 1`. La idempotencia evita el ticket
+    // duplicado, pero si gana ese envío se CAPTURA stock que el intento online
+    // habría rechazado para que el cajero decidiera.
+    expect(await pendientesSincronizables("t1", "u1", "caja-1")).toHaveLength(0);
+  });
+
+  it("si el proceso muere en el medio, la venta se destraba sola", async () => {
+    await sembrar("op-1");
+    const despues = Date.now() + MS_DE_PRIMER_ENVIO + 1;
+    const cola = await pendientesSincronizables("t1", "u1", "caja-1", despues);
+    expect(cola.map((o) => o.clientOperationId)).toEqual(["op-1"]);
+  });
+
+  it("la venta migrada de B13 se toma en el acto: su envío ya pasó", async () => {
+    await sembrar("vieja", {}, undefined, { sinPrimerEnvio: true });
+    expect(await pendientesSincronizables("t1", "u1", "caja-1")).toHaveLength(1);
   });
 });
 

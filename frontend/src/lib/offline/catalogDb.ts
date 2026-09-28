@@ -16,9 +16,20 @@
 import { abrirPosDb, unidadesComprometidas } from "@/lib/offline/posDb";
 import type { PosProduct } from "@/lib/pos/cart";
 
-const CLAVE_SYNC = "catalogo:ultimaSync";
-const CLAVE_NEGOCIO = "catalogo:businessName";
-const CLAVE_TENANT = "catalogo:tenantId";
+/**
+ * Las claves de meta llevan el tenant adentro.
+ *
+ * Con una clave global, una PC usada por dos negocios —el mismo dueño con dos
+ * locales— se quedaba con el nombre del último que sincronizó, y el ticket que
+ * la caja imprime sin red salía con el nombre del OTRO negocio. La fecha de
+ * última sincronización tenía el mismo problema: decía "hace 2 minutos" sobre
+ * un catálogo que no era el que se estaba mostrando.
+ */
+const CLAVE_SYNC = (tenantId: string) => `catalogo:ultimaSync:${tenantId}`;
+const CLAVE_NEGOCIO = (tenantId: string) => `catalogo:businessName:${tenantId}`;
+
+/** Tope de páginas: 200 × 500 productos = 100.000, holgado para un kiosco. */
+const MAX_PAGINAS = 200;
 
 export interface PaginaDeCatalogo {
   items: PosProduct[];
@@ -42,12 +53,12 @@ async function leerMeta<T>(clave: string): Promise<T | null> {
   return fila === undefined ? null : (fila.valor as T);
 }
 
-export async function ultimaSincronizacion(): Promise<string | null> {
-  return leerMeta<string>(CLAVE_SYNC);
+export async function ultimaSincronizacion(tenantId: string): Promise<string | null> {
+  return leerMeta<string>(CLAVE_SYNC(tenantId));
 }
 
-export async function nombreDelNegocio(): Promise<string | null> {
-  return leerMeta<string>(CLAVE_NEGOCIO);
+export async function nombreDelNegocio(tenantId: string): Promise<string | null> {
+  return leerMeta<string>(CLAVE_NEGOCIO(tenantId));
 }
 
 /**
@@ -64,13 +75,27 @@ export async function sincronizarCatalogo(
   const productos: PosProduct[] = [];
   let negocio: string | null = null;
   let cursor: string | null = null;
+  let completo = false;
   // Tope de seguridad: un cursor que no avanza no puede colgar la caja.
-  for (let pagina = 0; pagina < 200; pagina += 1) {
+  for (let pagina = 0; pagina < MAX_PAGINAS; pagina += 1) {
     const datos: PaginaDeCatalogo = await traerPagina(cursor);
     productos.push(...datos.items);
     if (datos.business_name) negocio = datos.business_name;
-    if (!datos.next_cursor) break;
+    if (!datos.next_cursor) {
+      completo = true;
+      break;
+    }
     cursor = datos.next_cursor;
+  }
+  // Llegar al tope con cursor pendiente es lo MISMO que una página que falla:
+  // no se vio el catálogo entero. Reemplazarlo igual borraría como "bajas" a
+  // todos los productos que quedaron del otro lado del tope, y el escáner
+  // dejaría de encontrarlos. Mejor el catálogo viejo completo que uno nuevo
+  // truncado.
+  if (!completo) {
+    throw new Error(
+      `El catálogo no terminó de bajar: más de ${MAX_PAGINAS} páginas. No se reemplazó nada.`,
+    );
   }
 
   const base = await abrirPosDb();
@@ -86,9 +111,8 @@ export async function sincronizarCatalogo(
   }
   await tx.done;
 
-  await guardarMeta(CLAVE_SYNC, new Date().toISOString());
-  await guardarMeta(CLAVE_TENANT, tenantId);
-  if (negocio) await guardarMeta(CLAVE_NEGOCIO, negocio);
+  await guardarMeta(CLAVE_SYNC(tenantId), new Date().toISOString());
+  if (negocio) await guardarMeta(CLAVE_NEGOCIO(tenantId), negocio);
   return productos.length;
 }
 
