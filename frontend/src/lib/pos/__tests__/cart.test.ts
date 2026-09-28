@@ -80,28 +80,29 @@ describe("carrito", () => {
 describe("estados del cobro", () => {
   const payload = buildPayload(con({ type: "ADD_PRODUCT", product: yerba }), "id-1", new Date());
 
-  it("en duda el carrito queda bloqueado: no se agrega ni se edita", () => {
-    const enDuda = con(
-      { type: "ADD_PRODUCT", product: yerba },
-      { type: "SEND", payload },
-      { type: "UNKNOWN", notice: "x" },
-    );
-    expect(enDuda.status).toBe("en_duda");
+  it("mientras se envía, el carrito no se toca", () => {
+    const enviando = con({ type: "ADD_PRODUCT", product: yerba }, { type: "SEND", payload });
+    expect(enviando.status).toBe("enviando");
     const tocado = [
       { type: "ADD_PRODUCT", product: yerba } as const,
       { type: "SET_QUANTITY", productId: "p1", quantity: 9 } as const,
       { type: "REMOVE", productId: "p1" } as const,
-    ].reduce(saleReducer, enDuda);
-    expect(tocado).toBe(enDuda);
+    ].reduce(saleReducer, enviando);
+    expect(tocado).toBe(enviando);
   });
 
-  it("el reintento conserva el payload congelado", () => {
-    const enDuda = con(
+  it("sin respuesta la venta va a la cola y el carrito se LIBERA", () => {
+    // Antes de B7 quedaba "en duda" y la caja se trababa hasta que el cajero
+    // resolviera el cobro a mano — justo cuando más falta hace vender.
+    const encolada = con(
       { type: "ADD_PRODUCT", product: yerba },
       { type: "SEND", payload },
-      { type: "UNKNOWN", notice: "x" },
+      { type: "QUEUED", notice: "se sube sola" },
     );
-    expect(enDuda.payload).toBe(payload);
+    expect(encolada.status).toBe("editando");
+    expect(encolada.lines).toEqual([]);
+    expect(encolada.payload).toBeNull();
+    expect(encolada.notice).toBe("se sube sola");
   });
 
   it("un rechazo definitivo desbloquea y descarta el payload (el próximo nace con id nuevo)", () => {

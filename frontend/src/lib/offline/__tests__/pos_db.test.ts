@@ -1,0 +1,152 @@
+/**
+ * La cola de la caja: lo que se guarda, lo que se sube y lo que NO se borra.
+ */
+import {
+  _limpiarPosDb,
+  actualizarOperacion,
+  borrarOperacion,
+  guardarOperacion,
+  listarNoSincronizadas,
+  listarOperaciones,
+  pendientesSincronizables,
+  unidadesComprometidas,
+} from "@/lib/offline/posDb";
+import type { PosOperationPayload } from "@/lib/pos/cart";
+import type { PosReceipt } from "@/features/pos/ticketTemplate";
+
+const recibo: PosReceipt = {
+  id: "x",
+  number: "X",
+  business_name: "Kiosco",
+  operation_date: "2026-09-27T10:00:00",
+  status: "PENDIENTE",
+  lines: [],
+  tenders: [],
+  subtotal_ars: "0.00",
+  discount_ars: "0.00",
+  total_ars: "0.00",
+  cash_received_ars: null,
+  cash_change_ars: null,
+  customer_name: null,
+  cashier_name: null,
+  terminal_name: null,
+};
+
+function payload(id: string, items: { product_id: string; quantity: number }[]): PosOperationPayload {
+  return {
+    client_operation_id: id,
+    customer_id: null,
+    operation_date: "2026-09-27T10:00:00",
+    discount_ars: "0.00",
+    cash_received_ars: null,
+    charged_at: "2026-09-27T10:00:00",
+    client_session_id: "turno-1",
+    items: items.map((i) => ({ ...i, discount_ars: "0.00" })),
+    tenders: [{ payment_method: "cash", amount_ars: "100.00" }],
+  };
+}
+
+async function sembrar(
+  id: string,
+  extra: Partial<Parameters<typeof guardarOperacion>[0]> = {},
+  items: { product_id: string; quantity: number }[] = [{ product_id: "p1", quantity: 2 }],
+) {
+  return guardarOperacion({
+    clientOperationId: id,
+    tenantId: "t1",
+    userId: "u1",
+    terminalId: "caja-1",
+    payload: payload(id, items),
+    lines: [],
+    recibo,
+    ...extra,
+  });
+}
+
+beforeEach(async () => {
+  await _limpiarPosDb();
+});
+
+describe("guardar", () => {
+  it("una venta nace PENDIENTE y sin intentos", async () => {
+    const op = await sembrar("op-1");
+    expect(op.estado).toBe("PENDIENTE");
+    expect(op.intentos).toBe(0);
+    expect((await listarOperaciones("t1"))).toHaveLength(1);
+  });
+
+  it("las lista en orden de cobro", async () => {
+    await sembrar("op-1");
+    await new Promise((r) => setTimeout(r, 2));
+    await sembrar("op-2");
+    expect((await listarOperaciones("t1")).map((o) => o.clientOperationId)).toEqual([
+      "op-1",
+      "op-2",
+    ]);
+  });
+});
+
+describe("a quién le pertenece una venta", () => {
+  it("una venta de otro negocio, otra caja u otro cajero no se sincroniza", async () => {
+    await sembrar("mia");
+    await sembrar("otro-negocio", { tenantId: "t2" });
+    await sembrar("otro-cajero", { userId: "u2" });
+    await sembrar("otra-caja", { terminalId: "caja-2" });
+
+    const cola = await pendientesSincronizables("t1", "u1", "caja-1");
+    expect(cola.map((o) => o.clientOperationId)).toEqual(["mia"]);
+  });
+
+  it("una venta con el reintento agendado para más tarde no se toma todavía", async () => {
+    await sembrar("op-1");
+    await actualizarOperacion("op-1", { proximoIntentoEn: Date.now() + 60_000 });
+    expect(await pendientesSincronizables("t1", "u1", "caja-1")).toHaveLength(0);
+  });
+});
+
+describe("nada se borra solo", () => {
+  it("una venta rechazada cambia de estado pero sigue guardada", async () => {
+    await sembrar("op-1");
+    await actualizarOperacion("op-1", {
+      estado: "REQUIERE_REVISION",
+      ultimoError: "sin stock",
+    });
+    const guardadas = await listarNoSincronizadas("t1");
+    expect(guardadas).toHaveLength(1);
+    expect(guardadas[0]!.estado).toBe("REQUIERE_REVISION");
+  });
+
+  it("borrar es explícito", async () => {
+    await sembrar("op-1");
+    await borrarOperacion("op-1");
+    expect(await listarOperaciones("t1")).toHaveLength(0);
+  });
+
+  it("una sincronizada deja de contar como pendiente", async () => {
+    await sembrar("op-1");
+    await actualizarOperacion("op-1", { estado: "SINCRONIZADA" });
+    expect(await listarNoSincronizadas("t1")).toHaveLength(0);
+    expect(await listarOperaciones("t1")).toHaveLength(1);
+  });
+});
+
+describe("unidades comprometidas", () => {
+  it("suma lo vendido y todavía no subido, por producto", async () => {
+    await sembrar("op-1", {}, [{ product_id: "p1", quantity: 2 }]);
+    await sembrar("op-2", {}, [
+      { product_id: "p1", quantity: 3 },
+      { product_id: "p2", quantity: 1 },
+    ]);
+    const mapa = await unidadesComprometidas("t1");
+    expect(mapa.get("p1")).toBe(5);
+    expect(mapa.get("p2")).toBe(1);
+  });
+
+  it("lo ya sincronizado deja de estar comprometido", async () => {
+    // Si siguiera contando, el stock estimado restaría dos veces la misma
+    // venta: una en el número del servidor y otra acá.
+    await sembrar("op-1", {}, [{ product_id: "p1", quantity: 2 }]);
+    await actualizarOperacion("op-1", { estado: "SINCRONIZADA" });
+    expect((await unidadesComprometidas("t1")).get("p1")).toBeUndefined();
+  });
+});

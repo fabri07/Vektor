@@ -1,0 +1,134 @@
+{
+  "revisado_en": "2026-09-27",
+  "nota": "Lo que significa cada código que sale del lector. Lo leen DOS tests: `backend/app/tests/domain/test_scan_corpus.py` contra `app/domain/scan_code.py`, y `frontend/src/lib/pos/__tests__/scan_code_local.test.ts` contra el puerto que usa la caja SIN RED. Es la única compuerta contra que las dos implementaciones se separen: si divergen, la caja offline puede cobrar un producto distinto del que el servidor habría resuelto. Una expectativa que cambia exige subir `revisado_en` y explicar por qué.",
+  "casos": [
+    {
+      "crudo": "VKT-ABC123DEF456",
+      "tipo": "INTERNAL_SKU",
+      "valor": "VKT-ABC123DEF456",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "El código que imprime Véktor en su propia etiqueta."
+    },
+    {
+      "crudo": "vkt-abc123def456",
+      "tipo": "INTERNAL_SKU",
+      "valor": "VKT-ABC123DEF456",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "Un lector con Bloq Mayús cambiado manda minúsculas; se normaliza a mayúsculas."
+    },
+    {
+      "crudo": "VKT-ABC123DEF45",
+      "tipo": "OPAQUE",
+      "valor": "VKT-ABC123DEF45",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "Un carácter de menos: no es el formato, así que no se asume que lo sea."
+    },
+    {
+      "crudo": "7790895000997",
+      "tipo": "GTIN",
+      "valor": "7790895000997",
+      "aprendible": true,
+      "variantes": ["07790895000997", "7790895000997"],
+      "por_que": "EAN-13 con verificador válido."
+    },
+    {
+      "crudo": "7790895000998",
+      "tipo": "OPAQUE",
+      "valor": "7790895000998",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "Mismo número con el verificador mal: es una lectura corrupta, no un GTIN. Aceptarlo haría que un dígito comido coincida con otro producto."
+    },
+    {
+      "crudo": "96385074",
+      "tipo": "GTIN",
+      "valor": "96385074",
+      "aprendible": true,
+      "variantes": ["00000096385074", "0000096385074", "000096385074", "96385074"],
+      "por_que": "EAN-8 válido. Las variantes son el mismo número rellenado a los largos de GTIN."
+    },
+    {
+      "crudo": "96385075",
+      "tipo": "OPAQUE",
+      "valor": "96385075",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "EAN-8 con verificador mal."
+    },
+    {
+      "crudo": "123456789012",
+      "tipo": "GTIN",
+      "valor": "123456789012",
+      "aprendible": true,
+      "variantes": ["00123456789012", "0123456789012", "123456789012"],
+      "por_que": "UPC-A de 12 dígitos: tiene que encontrar el EAN-13 guardado con el 0 adelante."
+    },
+    {
+      "crudo": "1234567890128",
+      "tipo": "GTIN",
+      "valor": "1234567890128",
+      "aprendible": true,
+      "variantes": ["01234567890128", "1234567890128"],
+      "por_que": "El mismo UPC-A ya guardado como EAN-13."
+    },
+    {
+      "crudo": "2012345678903",
+      "tipo": "SCALE",
+      "valor": "2012345678903",
+      "aprendible": false,
+      "variantes": ["02012345678903", "2012345678903"],
+      "por_que": "EAN-13 de circulación restringida (prefijo 2): lo genera la balanza del local y lleva el peso adentro. No se aprende: ataría el producto a UN peso."
+    },
+    {
+      "crudo": "2012345678909",
+      "tipo": "OPAQUE",
+      "valor": "2012345678909",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "Prefijo 2 pero verificador mal: primero tiene que ser un GTIN válido."
+    },
+    {
+      "crudo": "AB-96385074",
+      "tipo": "OPAQUE",
+      "valor": "AB-96385074",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "EL CASO. `normalize_barcode` borra letras, así que resolver el texto entero lo reduciría al EAN-8 de OTRO producto. Se busca literal en el SKU."
+    },
+    {
+      "crudo": "SKU-ROJO-01",
+      "tipo": "OPAQUE",
+      "valor": "SKU-ROJO-01",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "Un SKU cualquiera del negocio."
+    },
+    {
+      "crudo": "7790895000997\r\n",
+      "tipo": "GTIN",
+      "valor": "7790895000997",
+      "aprendible": true,
+      "variantes": ["07790895000997", "7790895000997"],
+      "por_que": "El sufijo del lector (CR/LF) se recorta sólo en los bordes."
+    },
+    {
+      "crudo": "\t96385074 ",
+      "tipo": "GTIN",
+      "valor": "96385074",
+      "aprendible": true,
+      "variantes": ["00000096385074", "0000096385074", "000096385074", "96385074"],
+      "por_que": "Tab como terminador y espacio de más."
+    },
+    {
+      "crudo": "   ",
+      "tipo": "OPAQUE",
+      "valor": "",
+      "aprendible": false,
+      "variantes": [],
+      "por_que": "Nunca falla: lo que no es nada es opaco."
+    }
+  ]
+}

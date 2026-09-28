@@ -73,6 +73,7 @@ describe("guarda de colores", () => {
     "ScanInput",
     "VoidLastTicket",
     "RecentTickets",
+    "PendingOperationsPanel",
     "CashierHome",
   ];
   const FIJOS =

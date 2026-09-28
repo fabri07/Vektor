@@ -1204,6 +1204,7 @@ async def pos_catalog(
     return PosCatalogResponse(
         items=[a_pos_product(p, tenant.tenant_id) for p in pagina],
         next_cursor=pagina[-1].id if hay_mas and pagina else None,
+        business_name=tenant.display_name,
     )
 
 

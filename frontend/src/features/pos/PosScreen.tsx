@@ -10,11 +10,30 @@ import { CashierHome } from "@/features/pos/CashierHome";
 import { DiscountControl } from "@/features/pos/DiscountControl";
 import { PaymentPanel } from "@/features/pos/PaymentPanel";
 import { type PickerMode, ProductPicker } from "@/features/pos/ProductPicker";
+import { PendingOperationsPanel } from "@/features/pos/PendingOperationsPanel";
 import { RecentTickets } from "@/features/pos/RecentTickets";
 import { ScanInput } from "@/features/pos/ScanInput";
+import type { PosReceipt } from "@/features/pos/ticketTemplate";
 import { VoidLastTicket } from "@/features/pos/VoidLastTicket";
 import { usePosPrinting } from "@/features/pos/usePosPrinting";
+import { usePosSync } from "@/features/pos/usePosSync";
 import { useScanner } from "@/features/pos/useScanner";
+import {
+  type ProductoDeCaja,
+  catalogoDeCaja,
+  nombreDelNegocio,
+  sincronizarCatalogo,
+  ultimaSincronizacion,
+} from "@/lib/offline/catalogDb";
+import { migrarPendienteDeB13 } from "@/lib/offline/migracionPendiente";
+import {
+  type OperacionGuardada,
+  actualizarOperacion,
+  borrarOperacion,
+  guardarOperacion,
+  pedirPersistencia,
+} from "@/lib/offline/posDb";
+import { tomarCandadoDeCaja } from "@/lib/offline/tabLock";
 import {
   type CartLine,
   type PosOperationPayload,
@@ -31,7 +50,8 @@ import {
   toCents,
 } from "@/lib/pos/cart";
 import { type PosErrorInfo, cobroRejectionMessage, posErrorInfo } from "@/lib/pos/errors";
-import { clearPending, loadPending, savePending } from "@/lib/pos/pendingOperation";
+import { reciboLocal } from "@/lib/pos/reciboLocal";
+import { buscarEnCatalogo, clasificar } from "@/lib/pos/scanCodeLocal";
 import { CASHIER_ROLE, POS_ROLES, hasPosPermission } from "@/lib/roles";
 import { logoutRequest } from "@/services/auth.service";
 import { type ScanCandidate, posService } from "@/services/pos.service";
@@ -41,9 +61,15 @@ import { usePosScannerConfigStore } from "@/stores/posScannerConfigStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
 import { posThemeClass, usePosThemeStore } from "@/stores/posThemeStore";
 
-const EN_DUDA =
-  "No hubo respuesta del servidor: la venta puede haber entrado. Reintentá — si ya " +
-  "estaba cobrada, no se cobra dos veces.";
+const NO_SE_PUDO_GUARDAR =
+  "No se pudo guardar la venta en esta PC, así que NO se cobró. Revisá el espacio del " +
+  "navegador y volvé a intentar.";
+
+const COBRADA_SIN_CONEXION =
+  "Cobrada y guardada en esta PC. Se sube sola cuando vuelva la conexión.";
+
+const OTRA_PESTANA =
+  "La caja ya está abierta en otra pestaña. Cerrá esta para no cobrar dos veces lo mismo.";
 
 /**
  * La caja (B13). Decide quién puede usarla y con qué PC; la pantalla en sí es
@@ -89,7 +115,7 @@ function PosRegister() {
   const { terminator, thresholdMs, setTerminator, setThresholdMs } = usePosScannerConfigStore();
   const { theme, toggle: toggleTheme } = usePosThemeStore();
   const impresora = usePosPrintConfigStore();
-  const { printReceipt, printTest, printError } = usePosPrinting();
+  const { printReceipt, printLocal, printTest, printError } = usePosPrinting();
 
   const [sale, dispatch] = useReducer(saleReducer, initialSale);
   const saleRef = useRef(sale);
@@ -97,10 +123,33 @@ function PosRegister() {
   const [picker, setPicker] = useState<PickerMode | null>(null);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
   const [lastOperation, setLastOperation] = useState<PosOperationResult | null>(null);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const scanRef = useRef<HTMLInputElement>(null);
 
   const tenantId = user?.tenant_id ?? "";
+  const userId = user?.id ?? "";
+  // La caja se identifica con la terminal SOLO si es de este negocio: el store
+  // sobrevive a un cambio de usuario a propósito (B6).
+  const terminalId =
+    terminal && terminal.tenantId === tenantId ? terminal.terminalId : null;
+
+  // ─── Sin conexión ─────────────────────────────────────────────────────────
+  const [candado, setCandado] = useState<"esperando" | "propia" | "otra">("esperando");
+  const [catalogo, setCatalogo] = useState<ProductoDeCaja[]>([]);
+  // Por ref: `handleScan` se pasa al lector, que se registra una sola vez.
+  const catalogoRef = useRef<ProductoDeCaja[]>([]);
+  catalogoRef.current = catalogo;
+  const [sincronizadoEn, setSincronizadoEn] = useState<string | null>(null);
+  const [negocio, setNegocio] = useState<string>("");
+  const [persistencia, setPersistencia] = useState<boolean | null>(null);
+  // El turno de esta caja: nace al abrir la pantalla y viaja con cada venta,
+  // para que B8 pueda atribuir lo que sincroniza después del arqueo.
+  const sesion = useRef<string>(newOperationId());
+  const { pendientes, sincronizando, flush, refrescar } = usePosSync({
+    tenantId,
+    userId,
+    terminalId,
+    habilitado: candado === "propia",
+  });
   const canDiscount = hasPosPermission(user, "discount");
   const canFiado = hasPosPermission(user, "fiado");
   const canLearn = hasPosPermission(user, "learn_barcode");
@@ -151,16 +200,38 @@ function PosRegister() {
   // `saleRef` (se actualiza al re-renderizar) y mandarían dos cobros.
   const enVuelo = useRef(false);
   const send = useCallback(
-    async (payload: PosOperationPayload, lines: CartLine[]) => {
+    async (payload: PosOperationPayload, lines: CartLine[], recibo: PosReceipt) => {
       if (enVuelo.current) return;
       enVuelo.current = true;
-      // Se guarda ANTES de mandar: si la página se cierra con el cobro en vuelo,
-      // al volver se reintenta en vez de cobrar de nuevo.
-      savePending({ tenantId, payload, lines, savedAt: new Date().toISOString() });
       dispatch({ type: "SEND", payload });
+
+      // PRIMERO se guarda, y si no se puede, NO se cobra. Hasta B7 esto era un
+      // `try/catch` vacío y el cobro se mandaba igual: si el navegador se
+      // cerraba con la respuesta en vuelo, la venta no quedaba en ningún lado.
+      try {
+        await guardarOperacion({
+          clientOperationId: payload.client_operation_id,
+          tenantId,
+          userId,
+          terminalId,
+          payload,
+          lines,
+          recibo,
+        });
+      } catch {
+        enVuelo.current = false;
+        dispatch({ type: "REJECTED", notice: NO_SE_PUDO_GUARDAR });
+        focusScan();
+        return;
+      }
+
       try {
         const result = await posService.createOperation(payload);
-        clearPending(payload.client_operation_id);
+        await actualizarOperacion(payload.client_operation_id, {
+          estado: "SINCRONIZADA",
+          resultado: result,
+          sincronizadaEn: new Date().toISOString(),
+        });
         dispatch({ type: "SUCCESS", result });
         setLastOperation(result);
         // Recién ahora, con la venta confirmada: una impresión que falla no
@@ -169,21 +240,38 @@ function PosRegister() {
       } catch (e) {
         const info = posErrorInfo(e);
         if (isDefinitiveRejection(info, info.code)) {
-          // Un 4xx: el servidor revirtió todo, no entró nada.
-          clearPending(payload.client_operation_id);
+          // Un 4xx en el envío que el cajero está mirando: el servidor revirtió
+          // todo y nadie entregó nada todavía. Es el ÚNICO borrado automático.
+          await borrarOperacion(payload.client_operation_id);
           handleRejection(info, lines);
         } else {
-          dispatch({
-            type: "UNKNOWN",
-            notice: info.code === "IDEMPOTENCY_KEY_REUSED" ? cobroRejectionMessage(info) : EN_DUDA,
+          // No se sabe si entró. La venta ya está guardada: se libera el
+          // carrito, sale el comprobante provisional y la cola la sube sola.
+          await actualizarOperacion(payload.client_operation_id, {
+            intentos: 1,
+            ultimoError: info.message ?? "Sin respuesta del servidor",
+            ultimoCodigo: info.code,
+            proximoIntentoEn: Date.now() + 5_000,
           });
+          dispatch({ type: "QUEUED", notice: COBRADA_SIN_CONEXION });
+          if (usePosPrintConfigStore.getState().autoPrint) void printLocal(recibo);
         }
       } finally {
         enVuelo.current = false;
+        void refrescar();
         focusScan();
       }
     },
-    [tenantId, handleRejection, focusScan, printReceipt],
+    [
+      tenantId,
+      userId,
+      terminalId,
+      handleRejection,
+      focusScan,
+      printReceipt,
+      printLocal,
+      refrescar,
+    ],
   );
 
   const cobrar = useCallback(() => {
@@ -194,26 +282,85 @@ function PosRegister() {
       dispatch({ type: "NOTICE", notice: motivo });
       return;
     }
-    // Id y fecha nacen acá, una sola vez: el reintento reenvía este objeto.
-    void send(buildPayload(s, newOperationId(), new Date()), s.lines);
-  }, [send]);
+    // Id, fecha y turno nacen acá, una sola vez: el reintento reenvía este
+    // mismo objeto, y recalcular la fecha cambiaría la huella de idempotencia.
+    const payload = buildPayload(s, newOperationId(), new Date(), sesion.current);
+    const recibo = reciboLocal(payload, s.lines, {
+      businessName: negocio,
+      cashierName: user?.full_name ?? null,
+      terminalName: terminal?.name ?? null,
+      customerName: s.customerName,
+    });
+    void send(payload, s.lines, recibo);
+  }, [send, negocio, user, terminal]);
 
-  const reintentar = useCallback(() => {
-    const s = saleRef.current;
-    if (s.status === "en_duda" && s.payload) void send(s.payload, s.lines);
-  }, [send]);
+  // ─── Arranque de la caja ──────────────────────────────────────────────────
 
-  // Al abrir: un cobro que quedó sin confirmar se resuelve ANTES que nada.
-  const restaurado = useRef(false);
+  // Una sola pestaña por PC: dos cajas sobre la misma cola se pisan el estado.
   useEffect(() => {
-    if (restaurado.current || !tenantId) return;
-    restaurado.current = true;
-    const pendiente = loadPending(tenantId);
-    if (pendiente) {
-      dispatch({ type: "RESTORE_PENDING", payload: pendiente.payload, lines: pendiente.lines });
-      void send(pendiente.payload, pendiente.lines);
+    let soltar = () => {};
+    let vivo = true;
+    void (async () => {
+      const c = await tomarCandadoDeCaja();
+      soltar = c.soltar;
+      if (vivo) setCandado(c.obtenido ? "propia" : "otra");
+    })();
+    return () => {
+      vivo = false;
+      soltar();
+    };
+  }, []);
+
+  const bajarCatalogo = useCallback(async () => {
+    if (!tenantId) return;
+    try {
+      await sincronizarCatalogo(tenantId, (after) => posService.catalogPage(after));
+    } catch {
+      // Sin red se sigue con el catálogo guardado: viejo, pero completo.
     }
-  }, [tenantId, send]);
+    setCatalogo(await catalogoDeCaja(tenantId));
+    setSincronizadoEn(await ultimaSincronizacion());
+    setNegocio((await nombreDelNegocio()) ?? "");
+  }, [tenantId]);
+
+  useEffect(() => {
+    if (candado !== "propia" || !tenantId) return;
+    void bajarCatalogo();
+    const alVolver = () => void bajarCatalogo();
+    window.addEventListener("online", alVolver);
+    const timer = window.setInterval(() => void bajarCatalogo(), 15 * 60_000);
+    return () => {
+      window.removeEventListener("online", alVolver);
+      window.clearInterval(timer);
+    };
+  }, [candado, tenantId, bajarCatalogo]);
+
+  // El stock estimado se recalcula cuando cambia la cola: es DERIVADO de los
+  // pendientes, nunca acumulado sobre el producto guardado.
+  useEffect(() => {
+    if (!tenantId) return;
+    void catalogoDeCaja(tenantId).then(setCatalogo);
+  }, [tenantId, pendientes]);
+
+  const arrancado = useRef(false);
+  useEffect(() => {
+    if (arrancado.current || candado !== "propia" || !tenantId || !user) return;
+    arrancado.current = true;
+    void (async () => {
+      setPersistencia(await pedirPersistencia());
+      // Puente de una sola vez: la venta que B13 dejaba en `localStorage`.
+      await migrarPendienteDeB13({
+        tenantId,
+        userId,
+        terminalId,
+        businessName: negocio,
+        cashierName: user.full_name ?? null,
+        terminalName: terminal?.name ?? null,
+      });
+      await refrescar();
+      await flush();
+    })();
+  }, [candado, tenantId, user, userId, terminalId, negocio, terminal, refrescar, flush]);
 
   // ─── Scan ─────────────────────────────────────────────────────────────────
 
@@ -222,7 +369,7 @@ function PosRegister() {
       const code = raw.trim();
       if (!code) return;
       const s = saleRef.current;
-      if (s.status === "enviando" || s.status === "en_duda") {
+      if (s.status === "enviando") {
         setScanMsg("Terminá el cobro en curso antes de escanear el próximo producto.");
         return;
       }
@@ -243,7 +390,27 @@ function PosRegister() {
         } else if (info.code === "SCAN_SCALE_NOT_SUPPORTED") {
           setScanMsg(`«${code}» es un código de balanza: todavía no se pueden leer. Buscá el producto por nombre.`);
         } else if (info.status === null) {
-          setScanMsg(`Sin conexión: no se pudo buscar «${code}».`);
+          // Sin red se busca en el catálogo de la PC, con la MISMA clasificación
+          // que usa el servidor (`lib/pos/scanCodeLocal`, probada contra el
+          // corpus compartido). Si fuera más laxa, la caja podría cobrar un
+          // producto que el servidor habría marcado como ambiguo.
+          const hallados = buscarEnCatalogo(clasificar(code), catalogoRef.current);
+          if (hallados.length === 1) {
+            const p = hallados[0]!.producto;
+            // Se muestra el stock ESTIMADO: el del servidor menos lo que la
+            // caja ya cobró y todavía no subió.
+            dispatch({ type: "ADD_PRODUCT", product: { ...p, stock_units: p.stock_estimado } });
+          } else if (hallados.length > 1) {
+            setPicker({
+              mode: "ambiguous",
+              code,
+              candidates: hallados.map((h) => h.producto),
+            });
+          } else {
+            setScanMsg(
+              `Sin conexión y «${code}» no está en el catálogo guardado en esta PC.`,
+            );
+          }
         } else {
           setScanMsg(info.message ?? `No se pudo buscar «${code}».`);
         }
@@ -302,6 +469,16 @@ function PosRegister() {
     logout();
   }
 
+  // Después de todos los hooks: dos pestañas sobre la misma cola se pisan el
+  // estado y el cajero ve "pendiente" algo que ya está sincronizado.
+  if (candado === "otra") {
+    return (
+      <div className="flex h-screen items-center justify-center bg-pos-bg p-6 text-center text-sm text-pos-text-2">
+        {OTRA_PESTANA}
+      </div>
+    );
+  }
+
   return (
     // Color de texto en la raíz: el `body` de la app hereda un color CLARO, y
     // todo lo que no declaraba color —los menús de Impresora y Lector, sus
@@ -316,6 +493,17 @@ function PosRegister() {
               : "navegador (sin caja habilitada)"}
             {" · "}
             {user?.full_name}
+          </span>
+          {/* El stock que muestra la caja sale del catálogo guardado menos lo
+              que ya se cobró y no subió: es una estimación y se dice que lo es. */}
+          <span className="ml-2 text-pos-muted" data-testid="pos-sync">
+            {sincronizadoEn
+              ? `· stock estimado — última sinc. ${new Date(sincronizadoEn).toLocaleTimeString(
+                  "es-AR",
+                  { hour: "2-digit", minute: "2-digit" },
+                )}`
+              : "· sin catálogo guardado todavía"}
+            {pendientes.length > 0 ? ` · ${pendientes.length} sin sincronizar` : ""}
           </span>
           {user?.role === "OWNER" &&
           !(terminal && terminal.tenantId === tenantId && !terminalInvalid) ? (
@@ -503,60 +691,20 @@ function PosRegister() {
               />
 
               {sale.notice ? (
-                <p
-                  role="alert"
-                  className={`text-sm ${sale.status === "en_duda" ? "text-vk-warning" : "text-pos-danger"}`}
-                >
+                <p role="alert" className="text-sm text-pos-danger">
                   {sale.notice}
                 </p>
               ) : null}
 
-              {sale.status === "en_duda" ? (
-                <div className="space-y-2">
-                  <Button className="w-full" size="lg" onClick={reintentar}>
-                    Reintentar cobro
-                  </Button>
-                  {confirmDiscard ? (
-                    <div className="space-y-2 rounded-lg border border-pos-danger/40 p-2 text-sm">
-                      <p className="text-pos-text">
-                        Este cobro puede haber entrado. Descartalo sólo si confirmaste en Ventas que
-                        no está.
-                      </p>
-                      <div className="flex gap-2">
-                        <Button
-                          variant="danger"
-                          size="sm"
-                          onClick={() => {
-                            if (sale.payload) clearPending(sale.payload.client_operation_id);
-                            dispatch({ type: "DISCARD" });
-                            setConfirmDiscard(false);
-                            focusScan();
-                          }}
-                        >
-                          Descartar igual
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => setConfirmDiscard(false)}>
-                          Volver
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <Button variant="ghost" size="sm" onClick={() => setConfirmDiscard(true)}>
-                      Descartar este cobro
-                    </Button>
-                  )}
-                </div>
-              ) : (
-                <Button
-                  className="w-full"
-                  size="lg"
-                  loading={sale.status === "enviando"}
-                  disabled={sale.status !== "editando" || sale.lines.length === 0}
-                  onClick={cobrar}
-                >
-                  Cobrar {formatCents(totalCents)}
-                </Button>
-              )}
+              <Button
+                className="w-full"
+                size="lg"
+                loading={sale.status === "enviando"}
+                disabled={sale.status !== "editando" || sale.lines.length === 0}
+                onClick={cobrar}
+              >
+                Cobrar {formatCents(totalCents)}
+              </Button>
             </>
           )}
 
@@ -577,6 +725,18 @@ function PosRegister() {
               }}
             />
           ) : null}
+
+          <PendingOperationsPanel
+            pendientes={pendientes}
+            sincronizando={sincronizando}
+            persistencia={persistencia}
+            onFlush={() => void flush()}
+            onCambio={() => void refrescar()}
+            onImprimir={(op: OperacionGuardada) => {
+              void printLocal(op.recibo);
+              focusScan();
+            }}
+          />
 
           <RecentTickets
             refreshKey={`${lastOperation?.id ?? ""}:${lastOperation?.status ?? ""}`}

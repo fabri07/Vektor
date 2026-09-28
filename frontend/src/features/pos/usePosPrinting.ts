@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 
-import { TICKET_DE_PRUEBA, renderTicket } from "@/features/pos/ticketTemplate";
+import { TICKET_DE_PRUEBA, type PosReceipt, renderTicket } from "@/features/pos/ticketTemplate";
 import { createBrowserPrinter } from "@/lib/print/browserPrinter";
 import { posService } from "@/services/pos.service";
 import { usePosPrintConfigStore } from "@/stores/posPrintConfigStore";
@@ -32,6 +32,25 @@ export function usePosPrinting() {
     }
   }, []);
 
+  /**
+   * El comprobante provisional de una venta cobrada sin conexión.
+   *
+   * Acá el recibo NO viene del servidor —no hay a quién preguntarle— sino de lo
+   * que la caja congeló al cobrar. Sale rotulado "pendiente de sincronizar"
+   * para que nadie lo confunda con el comprobante registrado.
+   */
+  const printLocal = useCallback(async (recibo: PosReceipt): Promise<boolean> => {
+    setPrintError(null);
+    const { paperWidth, pageSize } = usePosPrintConfigStore.getState();
+    try {
+      await printer.print(renderTicket(recibo, { paperWidth, pageSize }));
+      return true;
+    } catch {
+      setPrintError("No se pudo imprimir el comprobante. La venta quedó guardada.");
+      return false;
+    }
+  }, []);
+
   const printTest = useCallback(async (): Promise<void> => {
     setPrintError(null);
     const { paperWidth, pageSize } = usePosPrintConfigStore.getState();
@@ -42,5 +61,11 @@ export function usePosPrinting() {
     }
   }, []);
 
-  return { printReceipt, printTest, printError, clearPrintError: () => setPrintError(null) };
+  return {
+    printReceipt,
+    printLocal,
+    printTest,
+    printError,
+    clearPrintError: () => setPrintError(null),
+  };
 }

@@ -1,0 +1,184 @@
+/**
+ * El motor que sube las ventas cobradas.
+ *
+ * Lo que se protege: que un corte de red no queme el presupuesto de reintentos,
+ * que una venta cobrada NUNCA se borre por una respuesta, y que un 402 o un 423
+ * —que se arreglan solos— no la manden a revisión.
+ */
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { AxiosError, type InternalAxiosRequestConfig } from "axios";
+
+import { usePosSync } from "@/features/pos/usePosSync";
+import {
+  _limpiarPosDb,
+  actualizarOperacion,
+  guardarOperacion,
+  listarOperaciones,
+} from "@/lib/offline/posDb";
+import type { PosOperationPayload } from "@/lib/pos/cart";
+import type { PosReceipt } from "@/features/pos/ticketTemplate";
+import { posService } from "@/services/pos.service";
+
+jest.mock("@/services/pos.service", () => ({
+  posService: { syncOperation: jest.fn() },
+}));
+const svc = posService as jest.Mocked<typeof posService>;
+
+const recibo = { status: "PENDIENTE" } as unknown as PosReceipt;
+
+function payload(id: string): PosOperationPayload {
+  return {
+    client_operation_id: id,
+    customer_id: null,
+    operation_date: "2026-09-27T10:00:00",
+    discount_ars: "0.00",
+    cash_received_ars: null,
+    charged_at: "2026-09-27T10:00:00",
+    client_session_id: "turno-1",
+    items: [{ product_id: "p1", quantity: 1, discount_ars: "0.00" }],
+    tenders: [{ payment_method: "cash", amount_ars: "100.00" }],
+  };
+}
+
+async function sembrar(id: string, extra: Record<string, unknown> = {}) {
+  await guardarOperacion({
+    clientOperationId: id,
+    tenantId: "t1",
+    userId: "u1",
+    terminalId: "caja-1",
+    payload: payload(id),
+    lines: [],
+    recibo,
+    ...extra,
+  });
+}
+
+function httpError(status: number, code?: string): AxiosError {
+  const e = new AxiosError(`status ${status}`);
+  e.response = {
+    status,
+    data: code ? { detail: { code } } : {},
+    headers: {},
+    statusText: "",
+    config: {} as InternalAxiosRequestConfig,
+  };
+  return e;
+}
+
+function montar() {
+  return renderHook(() =>
+    usePosSync({ tenantId: "t1", userId: "u1", terminalId: "caja-1", automatico: false }),
+  );
+}
+
+async function estado(id: string) {
+  return (await listarOperaciones("t1")).find((o) => o.clientOperationId === id)!;
+}
+
+beforeEach(async () => {
+  jest.clearAllMocks();
+  await _limpiarPosDb();
+});
+
+it("sube la venta y la deja sincronizada", async () => {
+  await sembrar("op-1");
+  svc.syncOperation.mockResolvedValue({ id: "srv-1" } as never);
+  const { result } = montar();
+  await act(async () => {
+    await result.current.flush();
+  });
+  expect(svc.syncOperation).toHaveBeenCalledWith(payload("op-1"));
+  expect((await estado("op-1")).estado).toBe("SINCRONIZADA");
+});
+
+it("un corte de red NO gasta el presupuesto de reintentos", async () => {
+  // `navigator.onLine` da true con un router sin internet: si cada intento
+  // contara, unos minutos de corte dejarían la venta marcada como problemática
+  // sin que el servidor la haya visto nunca (lección de B0).
+  await sembrar("op-1");
+  svc.syncOperation.mockRejectedValue(new AxiosError("Network Error"));
+  const { result } = montar();
+  for (let i = 0; i < 3; i += 1) {
+    await actualizarOperacion("op-1", { proximoIntentoEn: 0 });
+    await act(async () => {
+      await result.current.flush();
+    });
+  }
+  const op = await estado("op-1");
+  expect(op.intentos).toBe(0);
+  expect(op.estado).toBe("PENDIENTE");
+});
+
+it("sin red corta la cola en la primera: no gasta el mismo error por venta", async () => {
+  await sembrar("op-1");
+  await sembrar("op-2");
+  svc.syncOperation.mockRejectedValue(new AxiosError("Network Error"));
+  const { result } = montar();
+  await act(async () => {
+    await result.current.flush();
+  });
+  expect(svc.syncOperation).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  [402, "SUBSCRIPTION_READ_ONLY"],
+  [423, undefined],
+  [503, "SUBSCRIPTION_UNAVAILABLE"],
+  [500, undefined],
+])("un %s deja la venta pendiente, no en revisión", async (status, code) => {
+  // `isDefinitiveRejection` trataría el 402 y el 423 como rechazo definitivo
+  // porque mira el rango 4xx. Para una venta ya cobrada eso es mandarla a
+  // revisión por algo que se arregla cuando el dueño paga.
+  await sembrar("op-1");
+  svc.syncOperation.mockRejectedValue(httpError(status as number, code as string | undefined));
+  const { result } = montar();
+  await act(async () => {
+    await result.current.flush();
+  });
+  const op = await estado("op-1");
+  expect(op.estado).toBe("PENDIENTE");
+  expect(op.intentos).toBe(1);
+});
+
+it("una caja dada de baja pide volver a entrar, no revisión", async () => {
+  await sembrar("op-1");
+  svc.syncOperation.mockRejectedValue(httpError(403, "TERMINAL_DISABLED"));
+  const { result } = montar();
+  await act(async () => {
+    await result.current.flush();
+  });
+  expect((await estado("op-1")).estado).toBe("REQUIERE_AUTENTICACION");
+});
+
+it("un rechazo del servidor va a revisión y la venta NO se borra", async () => {
+  await sembrar("op-1");
+  svc.syncOperation.mockRejectedValue(httpError(400, "INSUFFICIENT_STOCK"));
+  const { result } = montar();
+  await act(async () => {
+    await result.current.flush();
+  });
+  const op = await estado("op-1");
+  expect(op.estado).toBe("REQUIERE_REVISION");
+  expect(op.ultimoCodigo).toBe("INSUFFICIENT_STOCK");
+  expect(await listarOperaciones("t1")).toHaveLength(1);
+});
+
+it("no sube la venta de otro cajero: el servidor se la adjudicaría a quien esté logueado", async () => {
+  await sembrar("de-juan", { userId: "u2" });
+  const { result } = montar();
+  await act(async () => {
+    await result.current.flush();
+  });
+  expect(svc.syncOperation).not.toHaveBeenCalled();
+  expect((await estado("de-juan")).estado).toBe("PENDIENTE");
+});
+
+it("volver a entrar reactiva lo que esperaba autenticación", async () => {
+  await sembrar("op-1");
+  await actualizarOperacion("op-1", { estado: "REQUIERE_AUTENTICACION" });
+  svc.syncOperation.mockResolvedValue({ id: "srv-1" } as never);
+  montar();
+  await waitFor(async () => {
+    expect((await estado("op-1")).estado).toBe("SINCRONIZADA");
+  });
+});

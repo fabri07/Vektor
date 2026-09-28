@@ -6,6 +6,7 @@ import { AxiosError, type InternalAxiosRequestConfig } from "axios";
 
 import { PosScreen } from "@/features/pos/PosScreen";
 import type { PosOperationPayload, PosProduct } from "@/lib/pos/cart";
+import { _limpiarPosDb, guardarOperacion, listarOperaciones } from "@/lib/offline/posDb";
 import { posService } from "@/services/pos.service";
 import { useAuthStore } from "@/stores/authStore";
 import { usePosPrintConfigStore } from "@/stores/posPrintConfigStore";
@@ -18,12 +19,26 @@ jest.mock("@/services/pos.service", () => ({
     searchCustomers: jest.fn(),
     learnBarcode: jest.fn(),
     createOperation: jest.fn(),
+    syncOperation: jest.fn(),
+    catalogPage: jest.fn(),
     voidOperation: jest.fn(),
     getReceipt: jest.fn(),
     listOperations: jest.fn().mockResolvedValue([]),
   },
 }));
 jest.mock("@/services/auth.service", () => ({ logoutRequest: jest.fn() }));
+// La base real, con `guardarOperacion` envuelto para poder hacerla fallar en el
+// test que prueba que sin guardado NO se cobra. `jest.spyOn` sobre el namespace
+// de un módulo no sirve: sus propiedades son de sólo lectura.
+jest.mock("@/lib/offline/posDb", () => {
+  const real = jest.requireActual("@/lib/offline/posDb");
+  return {
+    ...real,
+    guardarOperacion: jest.fn((...args: unknown[]) =>
+      (real as { guardarOperacion: (...a: unknown[]) => unknown }).guardarOperacion(...args),
+    ),
+  };
+});
 
 const svc = posService as jest.Mocked<typeof posService>;
 
@@ -73,9 +88,12 @@ async function escanear(code: string) {
 
 const cobrarBtn = () => screen.getByRole("button", { name: /^Cobrar/ });
 
-beforeEach(() => {
+beforeEach(async () => {
   jest.clearAllMocks();
   window.localStorage.clear();
+  // La cola de la caja vive en IndexedDB y sobrevive entre tests a propósito
+  // (es su razón de ser): en los tests hay que vaciarla explícitamente.
+  await _limpiarPosDb();
   usuario("OWNER");
   usePosTerminalStore.setState({ terminal: null, invalid: false });
   // La impresión se prueba aparte (pos_printing.test.tsx).
@@ -109,35 +127,51 @@ describe("flujo de cobro", () => {
     expect(window.localStorage.getItem("vektor-pos-pending-operation")).toBeNull();
   });
 
-  it("sin respuesta: carrito bloqueado y el reintento reenvía el MISMO payload", async () => {
-    svc.createOperation
-      .mockRejectedValueOnce(new AxiosError("Network Error"))
-      .mockResolvedValueOnce(resultado("1000.00"));
+  it("sin respuesta: la venta queda en la cola y el carrito se LIBERA", async () => {
+    // Hasta B7 la caja quedaba trabada "en duda" hasta que alguien resolviera
+    // el cobro a mano. Ahora la venta ya está guardada, se sube sola, y el
+    // cajero sigue atendiendo al cliente siguiente.
+    svc.createOperation.mockRejectedValue(new AxiosError("Network Error"));
+    svc.syncOperation.mockRejectedValue(new AxiosError("Network Error"));
     render(<PosScreen />);
     await escanear("7790001234567");
     await screen.findByText("Yerba");
     await act(async () => {
       fireEvent.click(cobrarBtn());
     });
-    expect(await screen.findByRole("button", { name: "Reintentar cobro" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Cantidad de Yerba")).toBeDisabled();
-    // Un escaneo en duda no agrega nada.
+    expect(await screen.findByText(/Se sube sola cuando vuelva la conexión/)).toBeInTheDocument();
+    // El carrito quedó vacío y se puede volver a escanear.
+    expect(screen.queryByText("Yerba")).not.toBeInTheDocument();
     await escanear("7790001234567");
-    expect(screen.getByText(/Terminá el cobro en curso/)).toBeInTheDocument();
-    // Guardado para sobrevivir a una recarga.
-    expect(window.localStorage.getItem("vektor-pos-pending-operation")).not.toBeNull();
+    expect(await screen.findByText("Yerba")).toBeInTheDocument();
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Reintentar cobro" }));
-    });
-    await screen.findByTestId("venta-cobrada");
-    const [primero, segundo] = svc.createOperation.mock.calls.map((c) => c[0]);
-    expect(segundo).toEqual(primero);
-    expect(window.localStorage.getItem("vektor-pos-pending-operation")).toBeNull();
+    // La venta está guardada en la PC, con su payload congelado.
+    const guardadas = await listarOperaciones("t1");
+    expect(guardadas).toHaveLength(1);
+    expect(guardadas[0]!.estado).toBe("PENDIENTE");
+    expect(guardadas[0]!.payload).toEqual(svc.createOperation.mock.calls[0]?.[0]);
   });
 
-  it("un 409 IDEMPOTENCY_KEY_REUSED NO desbloquea el carrito: la venta existe", async () => {
+  it("si no se puede guardar en la PC, NO se cobra", async () => {
+    // Guardar primero es la razón de ser de la cola: si falla y se manda igual,
+    // un cierre del navegador con la respuesta en vuelo deja la venta en ningún
+    // lado. Se avisa y no se envía.
+    (guardarOperacion as jest.Mock).mockRejectedValueOnce(new Error("cuota llena"));
+    render(<PosScreen />);
+    await escanear("7790001234567");
+    await screen.findByText("Yerba");
+    await act(async () => {
+      fireEvent.click(cobrarBtn());
+    });
+    expect(await screen.findByText(/NO se cobró/)).toBeInTheDocument();
+    expect(svc.createOperation).not.toHaveBeenCalled();
+  });
+
+  it("un 409 IDEMPOTENCY_KEY_REUSED no borra la venta de la cola: existe", async () => {
     svc.createOperation.mockRejectedValue(
+      httpError(409, { detail: { code: "IDEMPOTENCY_KEY_REUSED" } }),
+    );
+    svc.syncOperation.mockRejectedValue(
       httpError(409, { detail: { code: "IDEMPOTENCY_KEY_REUSED" } }),
     );
     render(<PosScreen />);
@@ -146,17 +180,21 @@ describe("flujo de cobro", () => {
     await act(async () => {
       fireEvent.click(cobrarBtn());
     });
-    expect(await screen.findByRole("button", { name: "Reintentar cobro" })).toBeInTheDocument();
-    expect(screen.getByText(/No cobres de nuevo/)).toBeInTheDocument();
+    await waitFor(async () => {
+      const guardadas = await listarOperaciones("t1");
+      expect(guardadas).toHaveLength(1);
+    });
   });
 
-  it("al abrir, un cobro que quedó en duda se reintenta antes que nada", async () => {
+  it("al abrir, la venta que B13 dejó en localStorage pasa a la cola y se sube", async () => {
     const pendiente: PosOperationPayload = {
       client_operation_id: "op-viejo",
       customer_id: null,
       operation_date: "2026-09-25T10:00:00",
       discount_ars: "0.00",
       cash_received_ars: null,
+      charged_at: null,
+      client_session_id: null,
       items: [{ product_id: "p1", quantity: 1, discount_ars: "0.00" }],
       tenders: [{ payment_method: "cash", amount_ars: "1000.00" }],
     };
@@ -169,10 +207,10 @@ describe("flujo de cobro", () => {
         savedAt: "x",
       }),
     );
-    svc.createOperation.mockResolvedValue(resultado("1000.00"));
+    svc.syncOperation.mockResolvedValue(resultado("1000.00"));
     render(<PosScreen />);
-    await screen.findByTestId("venta-cobrada");
-    expect(svc.createOperation).toHaveBeenCalledWith(pendiente);
+    await waitFor(() => expect(svc.syncOperation).toHaveBeenCalledWith(pendiente));
+    // La clave vieja se borra: la migración no se repite.
     expect(window.localStorage.getItem("vektor-pos-pending-operation")).toBeNull();
   });
 

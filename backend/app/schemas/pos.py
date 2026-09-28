@@ -291,6 +291,10 @@ def a_pos_product(producto: "Product", tenant_id: UUID) -> PosProductResponse:
 
 class PosCatalogResponse(BaseModel):
     items: list[PosProductResponse]
+    #: El nombre del negocio, para el ticket que la caja imprime SIN RED (B7).
+    #: Viaja acá y no en una ruta propia porque el cajero no puede leer
+    #: `/tenants/me` y el catálogo se baja igual al abrir la caja.
+    business_name: str
     #: Id del último producto de la página. `None` = no hay más. Se pasa como
     #: `after` para pedir la siguiente: orden estable por id, sin saltos ni
     #: repeticiones aunque cambien nombres o precios en el medio.
