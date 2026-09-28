@@ -287,10 +287,21 @@ class TestCobradoSinConexion:
             charged_at=f"{today_ar().isoformat()}T09:30:00",
             client_session_id="turno-abc",
         )
+        # Con caja habilitada: marcar una venta como cobrada sin conexión exige
+        # una PC que el dueño haya habilitado, aunque el que cobre sea el dueño
+        # (B11). Sin eso, la afirmación no quedaría atada a nada.
+        alta = await client.post(
+            "/api/v1/pos/terminals", json={"name": "Caja 1"}, headers=auth_headers
+        )
+        assert alta.status_code == 201, alta.text
         resp = await client.post(
             "/api/v1/pos/operations",
             json=cuerpo,
-            headers={**auth_headers, "X-POS-Offline": "1"},
+            headers={
+                **auth_headers,
+                "X-POS-Offline": "1",
+                "X-POS-Terminal": alta.json()["secret"],
+            },
         )
         assert resp.status_code == 201, resp.text
         fila = (

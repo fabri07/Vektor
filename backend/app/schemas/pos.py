@@ -304,6 +304,38 @@ class PosCustomerResponse(BaseModel):
     name: str
 
 
+class PosStockDiscrepancyResponse(BaseModel):
+    """Una salida de stock que quedó pendiente (B11).
+
+    `pending_units` es la cantidad COMPLETA de la línea, no el faltante: si
+    había 3 y se vendieron 5, quedan 5 unidades pendientes de salir.
+    """
+
+    id: UUID
+    operation_id: UUID
+    product_id: UUID | None
+    product_name: str | None
+    pending_units: int
+    #: Lo que había cuando se capturó. Diagnóstico: el faltante se recalcula al
+    #: resolver, porque entre medio pudo haber compras y ventas.
+    stock_at_capture: int
+    operation_date: datetime
+    status: str
+    resolution: str | None
+    reason: str | None
+    resolved_at: datetime | None
+    created_at: datetime
+
+
+class PosResolveDiscrepancyRequest(BaseModel):
+    #: `ajuste_de_entrada` (la mercadería estaba) o `anular_ticket` (la venta
+    #: está mal). No hay una opción que sólo oculte el aviso: ocultar no
+    #: reconcilia nada.
+    resolution: str = Field(pattern=r"^(ajuste_de_entrada|anular_ticket)$")
+    #: Obligatorio: es lo único que explica después por qué se decidió así.
+    reason: str = Field(min_length=1, max_length=300)
+
+
 class PosTerminalCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 

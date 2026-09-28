@@ -61,6 +61,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import pos_discrepancy_service
 from app.application.services.inventory_movement_origin import (
     MOVEMENT_CLASS_ANCHOR,
     MOVEMENT_CLASS_IGNORE_SALE,
@@ -115,6 +116,14 @@ async def _applied_sales_qty(
             {"tid": tenant_id, "pid": product_id},
         )
     ).mappings().all()
+
+    # Una venta de caja cuya salida de stock quedó pendiente (B11) todavía no
+    # descontó, así que no puede restarse: su deuda está abierta y a la vista.
+    # Es la MISMA consulta que usa el chequeo temporal, por la misma razón.
+    pendientes = await pos_discrepancy_service.ventas_con_salida_pendiente(
+        session, tenant_id, [product_id]
+    )
+    ventas = [v for v in ventas if _as_uuid(v["id"]) not in pendientes]
 
     en_vivo = [v for v in ventas if v["source_upload_id"] is None]
     importadas = [v for v in ventas if v["source_upload_id"] is not None]

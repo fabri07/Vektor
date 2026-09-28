@@ -49,6 +49,7 @@ from typing import Any
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import pos_discrepancy_service
 from app.application.services.inventory_movement_origin import (
     MOVEMENT_CLASS_ANCHOR,
     MOVEMENT_CLASS_COMPLEX,
@@ -257,12 +258,22 @@ async def _ventas_por_producto(
 ) -> dict[uuid.UUID, list[tuple[int, Any]]]:
     """Ventas vivas de los candidatos, en pocas queries. Ver `_movimientos_por_producto`."""
     porproducto: dict[uuid.UUID, list[tuple[int, Any]]] = {pid: [] for pid in product_ids}
+    # Una venta de caja cuya salida de stock quedó pendiente (B11) todavía no
+    # descontó: contarla acá daría una divergencia falsa. La consulta es la
+    # MISMA que usa el chequeo agregado — si cada uno tuviera la suya, el mismo
+    # dato terminaría contándose distinto en cada chequeo.
+    pendientes = await pos_discrepancy_service.ventas_con_salida_pendiente(
+        session, tenant_id, list(product_ids)
+    )
     for i in range(0, len(product_ids), _PRELOAD_CHUNK):
         chunk = product_ids[i : i + _PRELOAD_CHUNK]
         filas = (
             await session.execute(
                 select(
-                    SaleEntry.product_id, SaleEntry.quantity, SaleEntry.transaction_date
+                    SaleEntry.product_id,
+                    SaleEntry.quantity,
+                    SaleEntry.transaction_date,
+                    SaleEntry.id,
                 ).where(
                     SaleEntry.tenant_id == tenant_id,
                     SaleEntry.product_id.in_(chunk),
@@ -270,7 +281,9 @@ async def _ventas_por_producto(
                 )
             )
         ).all()
-        for pid, quantity, transaction_date in filas:
+        for pid, quantity, transaction_date, sale_id in filas:
+            if sale_id in pendientes:
+                continue
             porproducto[pid].append((quantity, transaction_date))
     return porproducto
 
