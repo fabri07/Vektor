@@ -4,12 +4,13 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import Select, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._expense_scope import gasto_de_resultado
+from app.persistence.repositories._pos_tender_scope import tenders_mixtos, venta_no_mixta
 
 
 def _as_date(value: datetime | date | None) -> date | None:
@@ -167,7 +168,13 @@ class SaleRepository:
         from_date: date,
         to_date: date,
     ) -> list[dict[str, Any]]:
-        """Ventas diarias agrupadas por método de pago."""
+        """Ventas diarias agrupadas por método de pago.
+
+        Suma las dos poblaciones de ``_pos_tender_scope``: las ventas con su
+        propio método y los tenders de las operaciones de caja mixtas. Así el
+        arqueo del día y ``/insights/cash-breakdown`` ven la parte en efectivo
+        de un pago mixto como efectivo, y ``mixed`` nunca aparece como serie.
+        """
         day = func.date(SaleEntry.transaction_date).label("day")
         q = (
             select(
@@ -178,20 +185,26 @@ class SaleRepository:
             .where(
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
+                venta_no_mixta(),
                 func.date(SaleEntry.transaction_date) >= from_date,
                 func.date(SaleEntry.transaction_date) <= to_date,
             )
             .group_by(day, SaleEntry.payment_method)
-            .order_by(day)
         )
-        result = await self._session.execute(q)
+        b = tenders_mixtos(tenant_id, from_date, to_date)
+        b_day = func.date(b.c.sale_date).label("day")
+        qb = select(
+            b_day, b.c.payment_method, func.sum(b.c.amount_ars).label("total")
+        ).group_by(b_day, b.c.payment_method)
+
+        totales: dict[tuple[str, str], float] = {}
+        for query in (q, qb):
+            for row in (await self._session.execute(query)).all():
+                clave = (str(row.day), row.payment_method or "OTROS")
+                totales[clave] = totales.get(clave, 0.0) + float(row.total or 0)
         return [
-            {
-                "date": str(row.day),
-                "payment_method": row.payment_method or "OTROS",
-                "total": float(row.total or 0),
-            }
-            for row in result.all()
+            {"date": dia, "payment_method": metodo, "total": total}
+            for (dia, metodo), total in sorted(totales.items())
         ]
 
     async def get_daily_revenue_series(
@@ -336,8 +349,12 @@ class SaleRepository:
         """Cuentas por cobrar (fiado): ventas con payment_method == 'account'.
 
         Agrupa por cliente sumando el monto adeudado. Solo ventas no anuladas con
-        cliente identificado y método de pago `account` (cuenta corriente / fiado).
-        El total general lo computa `shared/analytics.py`.
+        cliente identificado y método de pago `account` (cuenta corriente / fiado),
+        más la parte fiada de los pagos mixtos de caja (B9). El total general lo
+        computa `shared/analytics.py`.
+
+        ``n_sales`` cuenta MOVIMIENTOS, no tickets: una fila por venta (una por
+        producto en un ticket de caja) más una por pago fiado de un mixto.
 
         Returns list[dict]: customer_id, customer_name, total_owed, n_sales.
         """
@@ -358,18 +375,48 @@ class SaleRepository:
                 SaleEntry.payment_method == PaymentMethod.ACCOUNT.value,
             )
             .group_by(SaleEntry.customer_id, Customer.name)
-            .order_by(func.sum(SaleEntry.amount).desc())
         )
-        result = await self._session.execute(q)
-        return [
-            {
-                "customer_id": str(row.customer_id),
-                "customer_name": row.customer_name,
-                "total_owed": float(row.total_owed or 0),
-                "n_sales": int(row.n_sales or 0),
-            }
-            for row in result.all()
-        ]
+        por_cliente: dict[str, dict[str, Any]] = {}
+        for query in (q, self._fiado_mixto_por_cliente(tenant_id, "total_owed")):
+            for row in (await self._session.execute(query)).all():
+                fila = por_cliente.setdefault(
+                    str(row.customer_id),
+                    {
+                        "customer_id": str(row.customer_id),
+                        "customer_name": row.customer_name,
+                        "total_owed": 0.0,
+                        "n_sales": 0,
+                    },
+                )
+                fila["total_owed"] += float(row.total_owed or 0)
+                fila["n_sales"] += int(row.n_sales or 0)
+        return sorted(por_cliente.values(), key=lambda r: r["total_owed"], reverse=True)
+
+    def _fiado_mixto_por_cliente(self, tenant_id: UUID, etiqueta: str) -> Select[Any]:
+        """Parte fiada de las operaciones de caja mixtas, por cliente (población B).
+
+        Una fila por cliente con ``customer_id``, ``customer_name``, el importe
+        bajo ``etiqueta`` y ``n_sales`` = cantidad de tenders ``account``. El
+        cliente sale de la CABECERA de la operación, nunca de sus líneas, que se
+        repetirían una vez por producto.
+        """
+        from app.domain.transaction import PaymentMethod  # noqa: PLC0415
+
+        b = tenders_mixtos(tenant_id)
+        return (
+            select(
+                b.c.customer_id,
+                Customer.name.label("customer_name"),
+                func.sum(b.c.amount_ars).label(etiqueta),
+                func.count().label("n_sales"),
+            )
+            .join(
+                Customer,
+                (Customer.id == b.c.customer_id) & (Customer.tenant_id == tenant_id),
+            )
+            .where(b.c.payment_method == PaymentMethod.ACCOUNT.value)
+            .group_by(b.c.customer_id, Customer.name)
+        )
 
     async def get_balance_by_customer(
         self,
@@ -399,7 +446,16 @@ class SaleRepository:
             SaleEntry.payment_method == "inflow",
             SaleEntry.voided_at.is_(None),
         )
-        total_account = float((await self._session.execute(account_q)).scalar() or 0)
+        b = tenders_mixtos(tenant_id)
+        mixto_q = select(func.sum(b.c.amount_ars)).where(
+            b.c.customer_id == customer_id,
+            b.c.payment_method == PaymentMethod.ACCOUNT.value,
+        )
+        # La parte fiada de un pago mixto también es deuda: sin ella, cobrarla
+        # dejaba el saldo en negativo.
+        total_account = float((await self._session.execute(account_q)).scalar() or 0) + float(
+            (await self._session.execute(mixto_q)).scalar() or 0
+        )
         total_paid = float((await self._session.execute(paid_q)).scalar() or 0)
         return {
             "total_account": total_account,
@@ -418,6 +474,10 @@ class SaleRepository:
         en el mismo GROUP BY cliente. Excluye filas con customer_id IS NULL.
         Ordenado por balance (total_account - total_paid) desc — calculado en Python
         para mantener compatibilidad con SQLite.
+
+        La parte fiada de los pagos mixtos de caja (B9) suma a ``total_account``.
+        ``n_sales`` cuenta MOVIMIENTOS (ventas, cobros y pagos fiados de un
+        mixto), no tickets.
 
         Returns list[dict]: customer_id, customer_name, total_account, total_paid,
         balance, n_sales.
@@ -458,17 +518,36 @@ class SaleRepository:
             )
             .group_by(SaleEntry.customer_id, Customer.name)
         )
-        result = await self._session.execute(q)
+        por_cliente: dict[str, dict[str, Any]] = {}
+
+        def _fila(row: Any) -> dict[str, Any]:
+            return por_cliente.setdefault(
+                str(row.customer_id),
+                {
+                    "customer_id": str(row.customer_id),
+                    "customer_name": row.customer_name,
+                    "total_account": 0.0,
+                    "total_paid": 0.0,
+                    "n_sales": 0,
+                },
+            )
+
+        for row in (await self._session.execute(q)).all():
+            fila = _fila(row)
+            fila["total_account"] += float(row.total_account or 0)
+            fila["total_paid"] += float(row.total_paid or 0)
+            fila["n_sales"] += int(row.n_sales or 0)
+        # Población B: un cliente cuya ÚNICA deuda viene de un pago mixto
+        # también tiene que aparecer, así que entra por su propia consulta y
+        # no como un agregado sobre los clientes de la primera.
+        mixto = self._fiado_mixto_por_cliente(tenant_id, "total_account")
+        for row in (await self._session.execute(mixto)).all():
+            fila = _fila(row)
+            fila["total_account"] += float(row.total_account or 0)
+            fila["n_sales"] += int(row.n_sales or 0)
         rows = [
-            {
-                "customer_id": str(row.customer_id),
-                "customer_name": row.customer_name,
-                "total_account": float(row.total_account or 0),
-                "total_paid": float(row.total_paid or 0),
-                "balance": float(row.total_account or 0) - float(row.total_paid or 0),
-                "n_sales": int(row.n_sales or 0),
-            }
-            for row in result.all()
+            {**fila, "balance": fila["total_account"] - fila["total_paid"]}
+            for fila in por_cliente.values()
         ]
         return sorted(rows, key=lambda r: r["balance"], reverse=True)
 

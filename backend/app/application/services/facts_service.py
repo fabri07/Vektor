@@ -205,11 +205,21 @@ class FactsDataProvider(Protocol):
         first_seen_date: date/datetime|NaT   # alta del producto (acquired_at/created_at);
                                              #   ancla el sobrestock de nunca-vendidos
         provenance:      str
+
+    mixed_tenders(tenant_id, start, end) -> DataFrame:   (B9, pago mixto de caja)
+        sale_date:       date/datetime   # operation_date de la cabecera
+        amount_ars:      float           # importe de ESE medio
+        payment_method:  str             # método del tender (nunca "mixed")
+        provenance:      str             # la de las líneas de la operación
+        Una fila por tender de cada operación de caja mixta viva. Las ventas de
+        esas operaciones vienen en `sales` con payment_method = "mixed": su
+        importe cuenta como venta, y cómo se pagó sale de acá. Sin mixtos → vacío.
     """
 
     def sales(self, tenant_id: str, start: date, end: date) -> pd.DataFrame: ...
     def expenses(self, tenant_id: str, start: date, end: date) -> pd.DataFrame: ...
     def products(self, tenant_id: str) -> pd.DataFrame: ...
+    def mixed_tenders(self, tenant_id: str, start: date, end: date) -> pd.DataFrame: ...
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,6 +246,17 @@ def _variation(current: float | None, previous: float | None) -> float | None:
 # 6. EL SERVICIO
 # ─────────────────────────────────────────────────────────────────────────────
 
+@dataclass(frozen=True)
+class Liquidez:
+    """Reparto de las ventas de un período entre medios (ver ``_split_liquidez``)."""
+
+    ventas: float    # V
+    cobros: float    # I — cobros de fiado ("inflow")
+    fiado: float     # F
+    diferido: float  # D — tarjeta de crédito
+    liquida: float   # L = V − F − D + I
+
+
 class FactsService:
     def __init__(self, provider: FactsDataProvider,
                  thresholds: SeverityThresholds | None = None) -> None:
@@ -259,6 +280,13 @@ class FactsService:
 
     def _expenses(self, tenant_id: str, p: Period, include_demo: bool) -> pd.DataFrame:
         return self._filter(self.provider.expenses(tenant_id, p.start, p.end), include_demo)
+
+    def _mixed_tenders(self, tenant_id: str, p: Period, include_demo: bool) -> pd.DataFrame:
+        # Mismo período y MISMO filtro de procedencia que las ventas: un tender
+        # REAL no puede sumarse a una liquidez calculada sobre ventas DEMO.
+        return self._filter(
+            self.provider.mixed_tenders(tenant_id, p.start, p.end), include_demo
+        )
 
     # ---- split ventas reales vs cobros de fiado ("inflow") ------------------
     @staticmethod
@@ -435,28 +463,49 @@ class FactsService:
     # ═══════════════════════════════════════════════════════════════════════
     # MÉTRICA 3 — CAJA (líquida, sin fiado ni tarjeta) + FIADO como deuda separada
     # ═══════════════════════════════════════════════════════════════════════
-    def _split_liquidez(self, sales_full: pd.DataFrame) -> tuple[float, float, float]:
-        """Devuelve (ventas_totales, caja_liquida, fiado_pendiente).
+    def _split_liquidez(self, sales_full: pd.DataFrame, mixtos: pd.DataFrame) -> Liquidez:
+        """Reparte las ventas del período entre medios, con el pago mixto de caja.
 
-        caja_liquida = ventas − fiado − delayed + cobros de fiado (inflows).
-        Invariante: caja_liquida − inflows + fiado + delayed == ventas_totales.
+        V = ventas (sin cobros) · I = cobros de fiado ("inflow")
+        F = fiado de las ventas con su método + fiado de los tenders mixtos
+        D = crédito diferido, ídem · L = V − F − D + I
+        Invariante: L − I + F + D == V.
+
+        Las ventas con payment_method = "mixed" (B9) cuentan enteras en V, pero
+        no se clasifican por su método: el reparto de su importe entre medios lo
+        dan los tenders de ``mixtos``, cuya suma es, por construcción, la de esas
+        ventas. Un invariante que cierra solo no alcanza para probar esto: si el
+        mixto se leyera mal faltaría de F y de L a la vez y seguiría cerrando.
         """
         if sales_full.empty:
-            return 0.0, 0.0, 0.0
+            return Liquidez(0.0, 0.0, 0.0, 0.0, 0.0)
         ventas, inflows = self._split_inflows(sales_full)
         pm = ventas["payment_method"].str.lower()
         total = float(ventas["amount_ars"].sum())
         fiado = float(ventas.loc[pm.isin(FIADO_METHODS), "amount_ars"].sum())
         delayed = float(ventas.loc[pm.isin(DELAYED_METHODS), "amount_ars"].sum())
+        if not mixtos.empty:
+            pm_t = mixtos["payment_method"].str.lower()
+            fiado += float(mixtos.loc[pm_t.isin(FIADO_METHODS), "amount_ars"].sum())
+            delayed += float(mixtos.loc[pm_t.isin(DELAYED_METHODS), "amount_ars"].sum())
         cobros = float(inflows["amount_ars"].sum()) if len(inflows) else 0.0
         # ratificado: fiado NO es caja; tarjeta tampoco (delay ~30d); cobros SÍ entran
         liquida = total - fiado - delayed + cobros
-        return total, liquida, fiado
+        return Liquidez(total, cobros, fiado, delayed, liquida)
+
+    def liquidez(self, tenant_id: str, p: Period, *, include_demo: bool = False) -> Liquidez:
+        """Los cinco números del reparto (V, I, F, D, L), para reconciliar."""
+        return self._split_liquidez(
+            self._sales(tenant_id, p, include_demo),
+            self._mixed_tenders(tenant_id, p, include_demo),
+        )
 
     def caja_liquida(self, tenant_id: str, p: Period, *,
                      include_demo: bool = False) -> BusinessFact:
         sales = self._sales(tenant_id, p, include_demo)
-        total, liquida, _ = self._split_liquidez(sales)
+        liquida = self._split_liquidez(
+            sales, self._mixed_tenders(tenant_id, p, include_demo)
+        ).liquida
         return BusinessFact(
             fact_id=f"caja_liquida_{p.label}", domain="caja", metric="caja_liquida",
             # EMPTY → None, nunca "$0 en caja" cuando lo que falta son los datos
@@ -470,7 +519,9 @@ class FactsService:
     def fiado_pendiente(self, tenant_id: str, p: Period, *,
                         include_demo: bool = False) -> BusinessFact:
         sales = self._sales(tenant_id, p, include_demo)
-        _, _, fiado = self._split_liquidez(sales)
+        fiado = self._split_liquidez(
+            sales, self._mixed_tenders(tenant_id, p, include_demo)
+        ).fiado
         return BusinessFact(
             fact_id=f"fiado_pendiente_{p.label}", domain="caja", metric="fiado_pendiente",
             # EMPTY → None: "$0 de fiado" solo cuando HAY ventas y ninguna es fiada

@@ -41,6 +41,7 @@ from app.domain.verticals import Vertical
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._expense_scope import gasto_de_resultado
+from app.persistence.repositories._pos_tender_scope import tenders_mixtos
 
 
 def _naive_ar(value: datetime | None) -> datetime | None:
@@ -51,6 +52,7 @@ def _naive_ar(value: datetime | None) -> datetime | None:
     return value.astimezone(AR_TZ).replace(tzinfo=None)
 
 _SALES_COLS = ["sale_date", "amount_ars", "cost_ars", "payment_method", "provenance"]
+_MIXED_TENDERS_COLS = ["sale_date", "amount_ars", "payment_method", "provenance"]
 _EXPENSES_COLS = ["expense_date", "amount_ars", "category", "expense_type", "provenance"]
 _PRODUCTS_COLS = [
     "product_id", "stock_units", "base_units_per_sale_unit", "unit_cost_ars", "last_sold_date",
@@ -66,6 +68,7 @@ class FactsFrames:
     sales: pd.DataFrame
     expenses: pd.DataFrame
     products: pd.DataFrame
+    mixed_tenders: pd.DataFrame
     coverage_start: date
     coverage_end: date
 
@@ -115,6 +118,24 @@ async def load_facts_frames(
             for row in sales_rows
         ],
         columns=_SALES_COLS,
+    )
+
+    # ── Tenders de las operaciones de caja mixtas (B9) ──────────────────────
+    # Una fila por tender; la procedencia es la de las líneas de la operación,
+    # así que FactsService les aplica el MISMO filtro que a las ventas.
+    mixtos = tenders_mixtos(tenant_id, start, end)
+    mixed_rows = (await session.execute(select(mixtos))).all()
+    mixed_df = pd.DataFrame(
+        [
+            {
+                "sale_date": row.sale_date,
+                "amount_ars": float(row.amount_ars),
+                "payment_method": row.payment_method,
+                "provenance": row.provenance,
+            }
+            for row in mixed_rows
+        ],
+        columns=_MIXED_TENDERS_COLS,
     )
 
     # ── Gastos (expense_type = frontera canónica COGS/OPEX) ─────────────────
@@ -205,6 +226,7 @@ async def load_facts_frames(
         sales=sales_df,
         expenses=expenses_df,
         products=products_df,
+        mixed_tenders=mixed_df,
         coverage_start=start,
         coverage_end=end,
     )
@@ -257,6 +279,11 @@ class PreloadedFactsProvider:
     def products(self, tenant_id: str) -> pd.DataFrame:
         self._check_tenant(tenant_id)
         return self._frames.products.copy()
+
+    def mixed_tenders(self, tenant_id: str, start: date, end: date) -> pd.DataFrame:
+        self._check_tenant(tenant_id)
+        self._check_coverage(start, end)
+        return self._slice(self._frames.mixed_tenders, "sale_date", start, end)
 
 
 def thresholds_for_vertical(vertical: Vertical) -> SeverityThresholds:
