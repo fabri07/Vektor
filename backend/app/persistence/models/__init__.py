@@ -43,6 +43,10 @@ from app.persistence.models.operation_identity import (
 )
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.pipeline_event import PipelineEvent
+from app.persistence.models.pos_cash_session import (
+    PosCashSession,
+    PosLateSale,
+)
 from app.persistence.models.pos_operation import (
     PosOperation,
     PosOperationLine,
@@ -105,6 +109,8 @@ __all__ = [
     "AgentConversationContext",
     "PendingAction",
     "IdempotencyRecord",
+    "PosCashSession",
+    "PosLateSale",
     "PosOperation",
     "PosOperationLine",
     "PosStockDiscrepancy",
