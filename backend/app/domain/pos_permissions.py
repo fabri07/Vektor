@@ -56,6 +56,13 @@ CASHIER_ALLOWED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", f"{_P}/pos/operations"),
         ("GET", f"{_P}/pos/operations/{{operation_id}}/receipt"),
         ("POST", f"{_P}/products/{{product_id}}/barcode"),
+        # Turno de caja (B8): abrir y cerrar el PROPIO es el trabajo del cajero,
+        # y sin esto no podría arrancar ni terminar su jornada. Que sea el suyo
+        # y no el de un compañero lo filtran las rutas, igual que el ticket.
+        ("POST", f"{_P}/pos/cash-sessions"),
+        ("GET", f"{_P}/pos/cash-sessions"),
+        ("GET", f"{_P}/pos/cash-sessions/{{session_id}}"),
+        ("POST", f"{_P}/pos/cash-sessions/{{session_id}}/close"),
     }
 )
 
