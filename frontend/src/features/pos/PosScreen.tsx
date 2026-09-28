@@ -33,6 +33,11 @@ import {
   guardarOperacion,
   pedirPersistencia,
 } from "@/lib/offline/posDb";
+import {
+  activarVersionNueva,
+  desregistrarServiceWorker,
+  registrarServiceWorker,
+} from "@/lib/offline/serviceWorker";
 import { tomarCandadoDeCaja } from "@/lib/offline/tabLock";
 import {
   type CartLine,
@@ -58,6 +63,7 @@ import { type ScanCandidate, posService } from "@/services/pos.service";
 import { useAuthStore } from "@/stores/authStore";
 import { type PageSize, type PaperWidth, usePosPrintConfigStore } from "@/stores/posPrintConfigStore";
 import { usePosScannerConfigStore } from "@/stores/posScannerConfigStore";
+import { usePosSwStore } from "@/stores/posSwStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
 import { posThemeClass, usePosThemeStore } from "@/stores/posThemeStore";
 
@@ -114,6 +120,7 @@ function PosRegister() {
   const terminalInvalid = usePosTerminalStore((s) => s.invalid);
   const { terminator, thresholdMs, setTerminator, setThresholdMs } = usePosScannerConfigStore();
   const { theme, toggle: toggleTheme } = usePosThemeStore();
+  const sinInternet = usePosSwStore();
   const impresora = usePosPrintConfigStore();
   const { printReceipt, printLocal, printTest, printError } = usePosPrinting();
 
@@ -341,6 +348,23 @@ function PosRegister() {
     if (!tenantId) return;
     void catalogoDeCaja(tenantId).then(setCatalogo);
   }, [tenantId, pendientes]);
+
+  // El service worker se registra SÓLO si el dueño encendió la casilla en esta
+  // PC, y apagarla lo desregistra y borra su caché. Una PC que nunca lo
+  // encendió no lo tiene: el radio de daño es una caja, no la app entera.
+  useEffect(() => {
+    if (sinInternet.habilitado) void registrarServiceWorker();
+    else void desregistrarServiceWorker();
+  }, [sinInternet.habilitado]);
+
+  // Una versión nueva se activa en un momento SEGURO: con el carrito vacío y
+  // sin nada en vuelo. `skipWaiting` a secas mezclaría código nuevo con una
+  // página vieja, y acá eso puede pasar en medio de un cobro.
+  useEffect(() => {
+    if (!sinInternet.habilitado) return;
+    if (sale.status !== "editando" || sale.lines.length > 0 || sincronizando) return;
+    void activarVersionNueva();
+  }, [sinInternet.habilitado, sale.status, sale.lines.length, sincronizando]);
 
   const arrancado = useRef(false);
   useEffect(() => {
@@ -599,6 +623,27 @@ function PosRegister() {
               </label>
             </div>
           </details>
+          {user?.role === "OWNER" ? (
+            <details className="relative">
+              <summary className="cursor-pointer text-pos-text-2">Sin internet</summary>
+              <div className="absolute right-0 z-10 mt-2 w-72 space-y-2 rounded-lg border border-pos-border bg-pos-surface p-3 shadow-vk-lg">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    aria-label="Preparar esta PC para abrir sin internet"
+                    checked={sinInternet.habilitado}
+                    onChange={(e) => sinInternet.setHabilitado(e.target.checked)}
+                  />
+                  Preparar esta PC para abrir sin internet
+                </label>
+                <p className="text-xs text-pos-muted">
+                  Guarda la caja en esta PC para que abra aunque no haya conexión. Probalo
+                  cortando internet y reiniciando antes de confiar en él; si algo anda mal,
+                  destildá y la PC vuelve como estaba.
+                </p>
+              </div>
+            </details>
+          ) : null}
           {user?.role !== CASHIER_ROLE ? (
             <Link href="/dashboard" className="text-pos-text-2 hover:text-pos-text">
               Volver a Véktor

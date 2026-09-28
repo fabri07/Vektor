@@ -111,3 +111,59 @@ error de red no gasta reintentos; nada se borra por una respuesta; el catálogo
 completo por cursor y sus bajas; el estimado no se cuenta dos veces; el corpus
 de escaneo contra el puerto; el comprobante provisional; la migración desde
 `vektor-pos-pending-operation`; dos pestañas.
+
+---
+
+## B7b — abrir la caja sin internet
+
+Service worker escrito a mano (`frontend/public/sw.js`), sin librerías, para que
+`/pos` abra con la PC reiniciada y sin red.
+
+### El interruptor es por PC, no una variable de entorno
+
+`NEXT_PUBLIC_*` se **inlinea en el build**: apagarlo exigiría recompilar y
+desplegar, que es justo lo que un kill switch no puede necesitar. La casilla
+«Preparar esta PC para abrir sin internet» (sólo OWNER, en la barra de la caja)
+vive en `posSwStore`. Apagarla **desregistra y borra la caché** en el acto, y
+una PC que nunca la encendió no tiene service worker: el radio de daño es una
+caja, no la app entera.
+
+### Qué cachea, y sobre todo qué NO
+
+`decidirRuta()` existe una sola vez, dentro de `sw.js`, y el test la **lee de
+ese archivo** con `vm`: una copia "para testear" se separaría justo en el caso
+que importa. Sólo dos cosas se interceptan —`/_next/static/**` cache-first
+(llevan hash en el nombre) y la **navegación** a `/pos` network-first con
+respaldo—. Se ignoran la API (`/api/**` y cualquier otro origen), los payloads
+de **RSC** (header `RSC` o `?_rsc=`) y cualquier otra ruta.
+
+### Activación en momento seguro
+
+Nunca `skipWaiting()` solo: una versión nueva activada en medio de un cobro
+mezcla código nuevo con página vieja. La caja manda `SKIP_WAITING` con el
+carrito vacío y sin envíos en vuelo.
+
+### Cómo se prueba en el local (es el paso 1 de B1)
+
+1. Abrir `/pos` **con internet** en la PC que va a ser la caja y encender la
+   casilla. Instalar la app (Chrome → ⋮ → Instalar).
+2. Cobrar una venta de prueba y anotar el ticket.
+3. Cortar la red **de verdad** (router apagado o adaptador deshabilitado; el
+   checkbox "Offline" de devtools no vale).
+4. **Reiniciar** la PC. No suspender ni hibernar, y en Windows 10/11 "Apagar"
+   con inicio rápido es una hibernación del kernel: usar **Reiniciar**.
+5. Encender, seguir sin red, abrir la app **desde su ícono**.
+
+**Pasa** si abre y la venta pendiente sigue ahí. **Falla** si aparece el
+dinosaurio, una pantalla en blanco, o abre con la cola vacía. En la consola,
+`await navigator.storage.persisted()` dice si Chrome concedió persistencia: si
+da `false`, la exportación de pendientes deja de ser el último recurso.
+
+Hasta que ese paso pase, B7b **no está probado contra hardware real**: por eso
+nace apagado.
+
+### Límite declarado
+
+La caché sólo se limpia al cambiar el nombre de `CACHE`, así que los chunks
+viejos se acumulan. Con hash en el nombre son inertes; limpiarlos por antigüedad
+es trabajo aparte.
