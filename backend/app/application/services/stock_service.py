@@ -16,7 +16,10 @@ from app.application.services._savepoint import (
     guarded_savepoint,
     unique_violation_classifier,
 )
-from app.application.services.inventory_movement_origin import ensure_utc
+from app.application.services.inventory_movement_origin import (
+    SOURCE_RECONCILIATION,
+    ensure_utc,
+)
 from app.domain.product import effective_threshold
 from app.domain.verticals import Vertical
 from app.persistence.models.audit import DecisionAuditLog
@@ -574,6 +577,76 @@ async def increment_stock(
     else:
         EventBus.emit("STOCK_INCREASED", event_payload)
 
+    return movement
+
+
+async def register_reconciliation_adjustment(
+    product_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    qty: int,
+    reason: str,
+    source_event_id: str,
+    db: AsyncSession,
+    *,
+    occurred_at: datetime | None = None,
+) -> InventoryMovement | None:
+    """Entrada de ajuste AUDITADA: "estas unidades estaban y el sistema no las tenía".
+
+    Es lo que cierra una salida pendiente de caja (B11) cuando el dueño confirma
+    que la mercadería existía. Se registra como ``adjustment`` con
+    ``source_type=reconciliation`` —no como ``purchase``— porque nadie compró
+    nada: el CHECK ``ck_inventory_movements_adjustment_source_type`` exige esa
+    procedencia y los dos chequeos de inventario la clasifican como ajuste
+    auditado, no como compra.
+
+    ``occurred_at`` es la fecha de NEGOCIO del ajuste, y el caller manda la de la
+    venta: el dueño está afirmando que esas unidades estaban **cuando se
+    vendió**, y es lo que hace que el replay temporal cierre.
+
+    Idempotente por ``source_event_id``: resolver dos veces no duplica el
+    ajuste. Devuelve ``None`` si ya estaba aplicado.
+    """
+    if qty <= 0:
+        raise ValueError("Un ajuste de entrada tiene que ser positivo.")
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
+    ya = (
+        await db.execute(
+            select(InventoryMovement).where(
+                InventoryMovement.tenant_id == tenant_id,
+                InventoryMovement.source_event_id == source_event_id,
+                InventoryMovement.voided_at.is_(None),
+            )
+        )
+    ).scalars().first()
+    if ya is not None:
+        return None
+
+    product = (
+        await db.execute(
+            select(Product)
+            .where(Product.id == product_id, Product.tenant_id == tenant_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if product is None:
+        raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
+
+    balance = await _get_or_create_balance(product, tenant_id, db)
+    balance.current_qty += qty
+    product.stock_units += qty
+
+    movement = InventoryMovement(
+        tenant_id=tenant_id,
+        product_id=product_id,
+        movement_type="adjustment",
+        qty=qty,
+        reason=reason,
+        source_event_id=source_event_id,
+        source_type=SOURCE_RECONCILIATION,
+        occurred_at=ensure_utc(occurred_at) or datetime.now(UTC),
+    )
+    db.add(movement)
+    await db.flush()
     return movement
 
 

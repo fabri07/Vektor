@@ -157,20 +157,20 @@ function AddCashierForm({ onDone }: { onDone: () => void }) {
     >
       <p className="text-xs font-medium text-vk-text-primary">Agregar cajero</p>
       <input
-        className="rounded border border-vk-border-w px-3 py-2 text-sm"
+        className="rounded border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm text-vk-text-primary"
         placeholder="Nombre y apellido"
         value={fullName}
         onChange={(e) => setFullName(e.target.value)}
       />
       <input
-        className="rounded border border-vk-border-w px-3 py-2 text-sm"
+        className="rounded border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm text-vk-text-primary"
         placeholder="Email"
         type="email"
         value={email}
         onChange={(e) => setEmail(e.target.value)}
       />
       <input
-        className="rounded border border-vk-border-w px-3 py-2 text-sm"
+        className="rounded border border-vk-border-w bg-vk-surface-w px-3 py-2 text-sm text-vk-text-primary"
         placeholder="Contraseña inicial (mínimo 8 caracteres)"
         type="password"
         value={password}

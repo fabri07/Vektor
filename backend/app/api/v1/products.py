@@ -46,7 +46,7 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
-from app.schemas.pos import PosProductResponse
+from app.schemas.pos import PosProductResponse, a_pos_product
 from app.schemas.product import (
     CreateProductRequest,
     LearnBarcodeRequest,
@@ -467,7 +467,7 @@ async def lookup_product_by_scan(
                         "product_id": str(p.id),
                         "name": p.name,
                         "matched_by": columna,
-                        "product": PosProductResponse.model_validate(p).model_dump(
+                        "product": a_pos_product(p, tenant.tenant_id).model_dump(
                             mode="json"
                         ),
                     }
@@ -499,7 +499,7 @@ async def lookup_product_by_scan(
     return ScanLookupResponse(
         code_type=codigo.tipo.value,
         matched_by=columna,
-        product=PosProductResponse.model_validate(producto),
+        product=a_pos_product(producto, tenant.tenant_id),
     )
 
 
@@ -668,7 +668,7 @@ async def learn_product_barcode(
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
-) -> Product:
+) -> PosProductResponse:
     """El aprendizaje de la caja: "este código es este producto".
 
     Endpoint propio y no ``PATCH`` por dos razones: el ``PATCH`` lleva
@@ -717,7 +717,7 @@ async def learn_product_barcode(
 
     variantes = variantes_gtin(codigo.valor)
     if producto.barcode_normalized in variantes:
-        return producto
+        return a_pos_product(producto, tenant.tenant_id)
     # Se mira el campo CRUDO, no sólo el normalizado: un código alfanumérico
     # tiene `barcode_normalized = None` y, mirando sólo ese, esto lo pisaría.
     if producto.barcode_normalized is not None or (producto.barcode or "").strip():
@@ -765,7 +765,7 @@ async def learn_product_barcode(
         before={**before, "barcode": None},
         after={**_product_snapshot(producto), "barcode": producto.barcode},
     )
-    return producto
+    return a_pos_product(producto, tenant.tenant_id)
 
 
 def _barcode_taken(ocupante: Product, columna: str) -> HTTPException:

@@ -9,6 +9,9 @@
  * (B3). Después de cobrar se muestra lo que el servidor devolvió.
  */
 
+import type { PosErrorInfo } from "@/lib/pos/errors";
+import { clasificarSync } from "@/lib/pos/syncClassification";
+
 export interface PosProduct {
   id: string;
   name: string;
@@ -20,6 +23,13 @@ export interface PosProduct {
   base_units_per_sale_unit: number;
   stock_units: number;
   stock_display?: string;
+  /**
+   * La firma del servidor sobre precio + unidad + factor. La caja la manda de
+   * vuelta al cobrar: es lo que le permite declarar el precio que cobró sin que
+   * el servidor tenga que confiar en ella. `null` en un producto que quedó
+   * guardado antes de B7·1 — ahí manda el catálogo, como siempre.
+   */
+  price_token?: string | null;
 }
 
 export interface CartLine {
@@ -35,7 +45,21 @@ export interface PosOperationPayload {
   operation_date: string;
   discount_ars: string;
   cash_received_ars: string | null;
-  items: { product_id: string; quantity: number; discount_ars: string }[];
+  /** Cuándo el cajero cerró el ticket. Distinto de la fecha de negocio. */
+  charged_at: string | null;
+  /** El turno de caja, para que el arqueo pueda atribuir lo que llega tarde. */
+  client_session_id: string | null;
+  items: {
+    product_id: string;
+    quantity: number;
+    discount_ars: string;
+    /** Precio, nombre, unidad, factor y firma: los cinco juntos o ninguno. */
+    unit_price_ars?: string;
+    product_name?: string;
+    sale_unit?: string;
+    base_units_per_sale_unit?: number;
+    price_token?: string;
+  }[];
   tenders: { payment_method: string; amount_ars: string }[];
 }
 
@@ -53,12 +77,15 @@ export interface PosOperationResult {
 /**
  * - `editando`: el carrito se puede tocar.
  * - `enviando`: hay un cobro en vuelo; nada se edita ni se reenvía.
- * - `en_duda`: el cobro no tuvo respuesta (red, timeout, 5xx). Puede haber
- *   entrado. El carrito queda BLOQUEADO con el payload congelado: editarlo y
- *   cobrar con un id nuevo cobraría dos veces si la primera había entrado.
  * - `cobrada`: el servidor confirmó.
+ *
+ * **`en_duda` ya no existe.** Hasta B7, una respuesta perdida dejaba el
+ * carrito bloqueado hasta que el cajero resolviera el cobro a mano: la caja se
+ * trababa justo cuando más falta hacía. Ahora la venta ya está guardada en la
+ * PC antes de enviarse, así que si no hay respuesta pasa a la cola, se sube
+ * sola y el carrito se libera para el cliente siguiente.
  */
-export type SaleStatus = "editando" | "enviando" | "en_duda" | "cobrada";
+export type SaleStatus = "editando" | "enviando" | "cobrada";
 
 export interface SaleState {
   status: SaleStatus;
@@ -188,19 +215,46 @@ export function newOperationId(): string {
  * idempotencia y el servidor contestaría `IDEMPOTENCY_KEY_REUSED` aunque la
  * venta exista.
  */
-export function buildPayload(state: SaleState, id: string, now: Date): PosOperationPayload {
+export function buildPayload(
+  state: SaleState,
+  id: string,
+  now: Date,
+  sessionId: string | null = null,
+): PosOperationPayload {
   const { totalCents } = previewTotals(state);
   const efectivo = state.paymentMethod === "cash" && state.cashReceived.trim() !== "";
+  const fecha = localNaiveIso(now);
   return {
     client_operation_id: id,
     customer_id: state.paymentMethod === "account" ? state.customerId : null,
-    operation_date: localNaiveIso(now),
+    operation_date: fecha,
     discount_ars: centsToAmount(state.globalDiscountCents),
     cash_received_ars: efectivo ? centsToAmount(toCents(state.cashReceived) ?? 0) : null,
+    // Cuándo se cobró de verdad. Una venta que sube dos días después sigue
+    // diciendo cuándo entró la plata, y es lo que habilita registrar una salida
+    // pendiente de stock en vez de perder la venta.
+    charged_at: fecha,
+    client_session_id: sessionId,
     items: state.lines.map((l) => ({
       product_id: l.product.id,
       quantity: l.quantity,
       discount_ars: centsToAmount(l.discountCents),
+      // El precio que la caja COBRÓ, con la firma que emitió el servidor. Sin
+      // esto, una venta sincronizada después de un cambio de precio se
+      // recalcularía con el precio nuevo y los pagos no cerrarían.
+      // El nombre y la unidad van con el precio y la firma: son lo que el
+      // ticket que el cliente se llevó dice que se vendió. Leerlos del catálogo
+      // al sincronizar hacía que un producto renombrado durante el corte
+      // apareciera con otro nombre en el comprobante definitivo.
+      ...(l.product.price_token
+        ? {
+            unit_price_ars: l.product.sale_price_ars,
+            product_name: l.product.name,
+            sale_unit: l.product.sale_unit,
+            base_units_per_sale_unit: l.product.base_units_per_sale_unit,
+            price_token: l.product.price_token,
+          }
+        : {}),
     })),
     tenders: [{ payment_method: state.paymentMethod, amount_ars: centsToAmount(totalCents) }],
   };
@@ -220,8 +274,7 @@ export type SaleAction =
   | { type: "SEND"; payload: PosOperationPayload }
   | { type: "SUCCESS"; result: PosOperationResult }
   | { type: "REJECTED"; notice: string }
-  | { type: "UNKNOWN"; notice: string }
-  | { type: "RESTORE_PENDING"; payload: PosOperationPayload; lines: CartLine[] }
+  | { type: "QUEUED"; notice: string }
   | { type: "APPLY_PRICES"; prices: Record<string, string>; notice: string }
   | { type: "APPLY_STOCK"; productId: string; available: number; notice: string }
   | { type: "DISCARD" }
@@ -285,7 +338,7 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
       if (state.status !== "editando") return state;
       return { ...state, customerId: action.id, customerName: action.name };
     case "SEND":
-      if (state.status !== "editando" && state.status !== "en_duda") return state;
+      if (state.status !== "editando") return state;
       return { ...state, status: "enviando", payload: action.payload, notice: null };
     case "SUCCESS":
       return { ...state, status: "cobrada", result: action.result, payload: null, notice: null };
@@ -293,16 +346,11 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
       // El servidor lo rechazó y revirtió todo: nada entró. Se puede corregir,
       // y el próximo cobro nace con id nuevo.
       return { ...state, status: "editando", payload: null, notice: action.notice };
-    case "UNKNOWN":
-      return { ...state, status: "en_duda", notice: action.notice };
-    case "RESTORE_PENDING":
-      return {
-        ...initialSale,
-        status: "en_duda",
-        lines: action.lines,
-        payload: action.payload,
-        notice: "Hay un cobro que quedó sin confirmar. Reintentalo antes de seguir.",
-      };
+    case "QUEUED":
+      // La venta quedó guardada y se sube sola: el carrito se LIBERA y el
+      // cajero sigue atendiendo. Trabar la caja hasta que vuelva la conexión
+      // sería exactamente lo que B7 viene a evitar.
+      return { ...initialSale, notice: action.notice };
     case "APPLY_PRICES":
       if (state.status !== "editando") return state;
       return {
@@ -334,24 +382,25 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
 
 // ─── Clasificación de la respuesta del cobro ─────────────────────────────────
 
-export interface HttpErrorLike {
-  /** `null` = no hubo respuesta. */
-  status: number | null;
-}
-
 /**
- * ¿El cobro quedó definido o en duda?
+ * ¿El cajero puede corregir esto en el mostrador y volver a cobrar?
  *
- * Sólo un 4xx definitivo prueba que no entró nada (el servidor revierte la
- * transacción entera). Sin respuesta (red, timeout) o con un 5xx / 408 / 429,
- * el cobro PUDO haber entrado: se reintenta con el mismo payload, nunca con
- * uno nuevo.
+ * Es la ÚNICA pregunta que habilita borrar la venta local, y sólo en el primer
+ * envío sincrónico: el carrito sigue bloqueado, nadie entregó nada y el cajero
+ * está mirando la pantalla. Si la respuesta es no, la venta queda encolada.
+ *
+ * Se decide con `clasificarSync`, la misma y única clasificación que usa la
+ * cola. Antes esto era un rango —"cualquier 4xx menos 408 y 429"— y por eso
+ * borraba ante **402** (suscripción vencida) y **423** (mantenimiento), que son
+ * justo los dos que se arreglan solos sin tocar la venta: el cajero ya había
+ * cobrado y la venta desaparecía de los dos lados.
  */
-export function isDefinitiveRejection(err: HttpErrorLike, code: string | null): boolean {
-  if (err.status === null) return false;
+export function esCorregibleEnElMostrador(info: PosErrorInfo): boolean {
+  if (clasificarSync(info) !== "revision") return false;
   // Estos dos 409 dicen lo contrario de "no entró": la clave YA tiene una venta.
-  // Desbloquear el carrito acá es exactamente el doble cobro que el estado
-  // `en_duda` existe para impedir.
-  if (code === "IDEMPOTENCY_KEY_REUSED" || code === "DUPLICATE_IDEMPOTENT") return false;
-  return err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429;
+  // Tratarlos como rechazo borraría una venta que existe en el servidor.
+  if (info.code === "IDEMPOTENCY_KEY_REUSED" || info.code === "DUPLICATE_IDEMPOTENT") {
+    return false;
+  }
+  return true;
 }

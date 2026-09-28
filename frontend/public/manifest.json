@@ -1,0 +1,13 @@
+{
+  "name": "Véktor Caja",
+  "short_name": "Caja",
+  "description": "La caja de Véktor: cobrar aunque no haya internet.",
+  "start_url": "/pos",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0B0E14",
+  "theme_color": "#0B0E14",
+  "icons": [
+    { "src": "/pos-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

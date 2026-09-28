@@ -5,11 +5,19 @@ on:
     branches: [main, develop]
     paths:
       - "frontend/**"
+      # El corpus de escaneo lo leen los tests de los DOS lados: si sólo lo
+      # viera su propio CI, un cambio ahí podría separar las dos
+      # implementaciones sin que nadie se entere.
+      - "shared/**"
       - ".github/workflows/ci-frontend.yml"
   pull_request:
     branches: [main, develop]
     paths:
       - "frontend/**"
+      # El corpus de escaneo lo leen los tests de los DOS lados: si sólo lo
+      # viera su propio CI, un cambio ahí podría separar las dos
+      # implementaciones sin que nadie se entere.
+      - "shared/**"
       - ".github/workflows/ci-frontend.yml"
 
 jobs:

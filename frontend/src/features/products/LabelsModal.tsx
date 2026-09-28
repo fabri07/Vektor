@@ -73,26 +73,26 @@ export function LabelsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Imprimir etiquetas" size="xl">
-      <div className="space-y-4 text-sm">
+      <div className="space-y-4 text-sm text-vektor-body">
         <input
           aria-label="Buscar producto para etiquetar"
           placeholder="Buscá un producto por nombre"
-          className="h-10 w-full rounded-lg border border-vk-border-w bg-vk-surface-w px-3 text-vk-text-primary"
+          className="h-10 w-full rounded-lg border border-vektor-border bg-vektor-surface px-3 text-vektor-white"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
         {results.length ? (
-          <ul className="max-h-40 overflow-auto rounded-lg border border-vk-border-w">
+          <ul className="max-h-40 overflow-auto rounded-lg border border-vektor-border">
             {results.map((p) => (
               <li key={p.id}>
                 <button
                   type="button"
-                  className="w-full px-3 py-1.5 text-left hover:bg-vk-bg-light"
+                  className="w-full px-3 py-1.5 text-left hover:bg-vektor-surface"
                   onClick={() => agregar(p)}
                 >
                   {p.name}
                   {p.internal_sku ? (
-                    <span className="ml-2 font-mono text-xs text-vk-text-muted">{p.internal_sku}</span>
+                    <span className="ml-2 font-mono text-xs text-vektor-muted">{p.internal_sku}</span>
                   ) : (
                     <span className="ml-2 text-xs text-vk-warning">sin código interno</span>
                   )}
@@ -106,14 +106,14 @@ export function LabelsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
           <ul className="space-y-1">
             {elegidos.map(({ product, copies }) => (
               <li key={product.id} className="flex items-center justify-between gap-2">
-                <span className="text-vk-text-primary">{product.name}</span>
+                <span className="text-vektor-white">{product.name}</span>
                 <span className="flex items-center gap-2">
                   <input
                     aria-label={`Copias de ${product.name}`}
                     type="number"
                     min={1}
                     max={500}
-                    className="h-8 w-20 rounded border border-vk-border-w bg-vk-surface-w px-2 text-right"
+                    className="h-8 w-20 rounded border border-vektor-border bg-vektor-surface px-2 text-right text-vektor-white"
                     value={copies}
                     onChange={(e) => {
                       const n = Math.max(1, Math.min(500, Number(e.target.value) || 1));
@@ -124,7 +124,7 @@ export function LabelsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
                   />
                   <button
                     type="button"
-                    className="text-vk-text-muted hover:text-vk-danger"
+                    className="text-vektor-muted hover:text-vk-danger"
                     onClick={() => setElegidos((prev) => prev.filter((x) => x.product.id !== product.id))}
                   >
                     Quitar
@@ -134,7 +134,7 @@ export function LabelsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
             ))}
           </ul>
         ) : (
-          <p className="text-vk-text-muted">Elegí los productos a etiquetar.</p>
+          <p className="text-vektor-muted">Elegí los productos a etiquetar.</p>
         )}
 
         <div className="flex flex-wrap items-center gap-4">
@@ -142,7 +142,7 @@ export function LabelsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
             Formato
             <select
               aria-label="Formato de etiqueta"
-              className="rounded border border-vk-border-w bg-vk-surface-w px-2 py-1"
+              className="rounded border border-vektor-border bg-vektor-surface px-2 py-1 text-vektor-white"
               value={format}
               onChange={(e) => setFormat(e.target.value as LabelFormat)}
             >
@@ -156,7 +156,7 @@ export function LabelsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () 
           </label>
         </div>
 
-        {aviso ? <p role="status" className="text-vk-text-secondary">{aviso}</p> : null}
+        {aviso ? <p role="status" className="text-vektor-body">{aviso}</p> : null}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>
             Cerrar

@@ -72,7 +72,7 @@ export function ProductPicker({ picker, onPick, onClose }: ProductPickerProps) {
   return (
     <Modal isOpen onClose={onClose} title={TITLES[picker.mode]} size="lg">
       {picker.mode !== "search" ? (
-        <p className="mb-3 text-sm text-vk-text-secondary">
+        <p className="mb-3 text-sm text-vektor-body">
           Código leído: <span className="font-mono">{picker.code}</span>
           {picker.mode === "learn" ? " — queda vinculado al producto que elijas." : null}
         </p>
@@ -82,7 +82,7 @@ export function ProductPicker({ picker, onPick, onClose }: ProductPickerProps) {
           autoFocus
           aria-label="Buscar por nombre"
           placeholder="Nombre del producto"
-          className="mb-3 h-10 w-full rounded-lg border border-vk-border-w bg-vk-surface-w px-3 text-sm text-vk-text-primary focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
+          className="mb-3 h-10 w-full rounded-lg border border-vektor-border bg-vektor-surface px-3 text-sm text-vektor-white focus:outline-none focus:ring-2 focus:ring-vk-blue/20"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
@@ -93,18 +93,18 @@ export function ProductPicker({ picker, onPick, onClose }: ProductPickerProps) {
           <li key={p.id}>
             <button
               type="button"
-              className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-vk-bg-light"
+              className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-vektor-surface"
               onClick={() => onPick(p)}
             >
-              <span className="text-vk-text-primary">{p.name}</span>
-              <span className="text-vk-text-secondary">
+              <span className="text-vektor-white">{p.name}</span>
+              <span className="text-vektor-body">
                 {formatCents(toCents(p.sale_price_ars) ?? 0)}
               </span>
             </button>
           </li>
         ))}
         {buscar && q.trim().length >= 2 && lista.length === 0 && !error ? (
-          <li className="px-3 py-2 text-sm text-vk-text-muted">Sin resultados.</li>
+          <li className="px-3 py-2 text-sm text-vektor-muted">Sin resultados.</li>
         ) : null}
       </ul>
     </Modal>

@@ -83,6 +83,11 @@ export function renderTicket(
   if (r.terminal_name) partes.push(fila("Caja", e(r.terminal_name)));
   if (r.cashier_name) partes.push(fila("Atendió", e(r.cashier_name)));
   if (r.status === "VOIDED") partes.push('<div class="anulado">TICKET ANULADO</div>');
+  // La caja cobró sin conexión: este papel NO es el comprobante registrado. El
+  // definitivo se reimprime cuando sincroniza, y tiene otro número.
+  if (r.status === "PENDIENTE") {
+    partes.push('<div class="anulado">PENDIENTE DE SINCRONIZAR</div>');
+  }
   partes.push('<div class="sep"></div>');
 
   for (const l of r.lines) {

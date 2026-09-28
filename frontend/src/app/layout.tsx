@@ -31,6 +31,10 @@ export const metadata: Metadata = {
   title: "Véktor — Salud financiera para negocios argentinos",
   description:
     "Controlá caja, margen y stock en tiempo real. Sin contabilidad, sin hojas de cálculo.",
+  // Para poder instalar la caja como app en la PC del local (B7b). El manifest
+  // por sí solo no registra nada: el service worker se enciende por PC desde
+  // la propia caja.
+  manifest: "/manifest.json",
   openGraph: {
     title: "Véktor — Salud financiera para negocios argentinos",
     description:

@@ -48,6 +48,9 @@ from app.persistence.models.pos_operation import (
     PosOperationLine,
     PosTender,
 )
+from app.persistence.models.pos_stock_discrepancy import (
+    PosStockDiscrepancy,
+)
 from app.persistence.models.pos_terminal import PosTerminal
 from app.persistence.models.product import Product
 from app.persistence.models.product_supplier_link import ProductSupplierLink
@@ -104,6 +107,7 @@ __all__ = [
     "IdempotencyRecord",
     "PosOperation",
     "PosOperationLine",
+    "PosStockDiscrepancy",
     "PosTender",
     "PosTerminal",
     "ImportAttempt",

@@ -5,11 +5,17 @@ stock, descuento idempotente por línea, idempotencia recuperable de B2— y
 agrega lo que faltaba: una cabecera referenciable, los pagos colgando de ella y
 un descuento que cierra al centavo.
 
-**El cliente no fija precios.** ``unit_price_list`` lo pone el servidor desde el
-catálogo bloqueado; el cuerpo de la petición sólo dice qué producto, cuánto y
-qué descuento. Entre el navegador y este handler hay una cola offline que se
-puede editar a mano, así que un carrito que llegara con sus propios importes
-sería un carrito que puede cobrar de menos.
+**El cliente declara el precio; el servidor lo firma.** Hasta B7 el precio salía
+del catálogo *al recibir* la operación, y eso rompía la venta cobrada durante un
+corte: si el dueño cambiaba el precio en el medio, los pagos dejaban de sumar el
+total y la venta —ya cobrada— se rechazaba. Ahora la caja manda el precio y el
+factor que cobró junto con el token que el propio servidor emitió en el catálogo
+(``domain/pos_price_token``): si la firma coincide, son valores que este servidor
+emitió y se usan; si no, se rechaza. Sin token se sigue usando el catálogo.
+
+Lo que el cliente **sigue sin poder** declarar es el importe de la línea ni el
+total: los recalcula ``calcular_operacion``, reparto de centavos incluido, y
+``Σ tenders == Σ line_total`` sigue siendo la validación.
 """
 
 import uuid
@@ -35,6 +41,7 @@ from app.api.v1.deps import (
     get_current_tenant,
     get_current_user,
     require_active_subscription,
+    require_modify_access,
     require_owner_stepup,
     require_role,
     require_void_access,
@@ -49,7 +56,7 @@ from app.api.v1.sales import (
     _resolve_sale_customer,
     _sale_snapshot,
 )
-from app.application.services import stock_service
+from app.application.services import pos_discrepancy_service, stock_service
 from app.application.services.idempotency import (
     ClaveReusada,
     Repeticion,
@@ -77,6 +84,8 @@ from app.domain.pos_operation import (
     validar_tenders,
 )
 from app.domain.pos_permissions import CASHIER_ROLE, PosPermission
+from app.domain.pos_price_token import ResultadoToken
+from app.domain.pos_price_token import verificar as verificar_precio
 from app.domain.pos_terminal import TERMINAL_HEADER
 from app.domain.sale_unit import formatear_cantidad
 from app.persistence.db.session import get_db_session
@@ -91,6 +100,11 @@ from app.persistence.models import (
 )
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
+from app.persistence.models.pos_stock_discrepancy import (
+    ESTADO_ABIERTA,
+    RESOLUCION_AJUSTE,
+    PosStockDiscrepancy,
+)
 from app.persistence.models.pos_terminal import PosTerminal
 from app.schemas.pos import (
     PosCatalogResponse,
@@ -98,19 +112,41 @@ from app.schemas.pos import (
     PosOperationRequest,
     PosOperationResponse,
     PosOperationSummary,
-    PosProductResponse,
     PosReceiptLine,
     PosReceiptResponse,
     PosReceiptTender,
+    PosResolveDiscrepancyRequest,
+    PosStockDiscrepancyResponse,
     PosTerminalCreateRequest,
     PosTerminalEnrolledResponse,
     PosTerminalResponse,
     PosVoidRequest,
+    a_pos_product,
 )
 
 router = APIRouter()
 
 _ACCION_IDEMPOTENTE = "IDEMPOTENT_POST_POS_OPERATION"
+
+#: Lo manda SÓLO el motor de sincronización de la caja, nunca el primer envío:
+#: dice "esta venta ya se cobró y el cliente se fue". Va en header y no en el
+#: cuerpo porque la huella de idempotencia es sobre el cuerpo validado, y
+#: cambiarlo en un reintento daría `IDEMPOTENCY_KEY_REUSED` con la venta
+#: existiendo — mismo criterio que `X-POS-Terminal` en B6.
+#:
+#: **No prueba nada.** Del lado del servidor no existe forma de verificar que el
+#: efectivo entró. Lo que hace es dejar la afirmación registrada (`charged_at`,
+#: el usuario, la caja) para poder auditarla.
+OFFLINE_HEADER = "X-POS-Offline"
+
+#: Lo que cuenta como "sí" en ese header. Un `bool(valor)` pelado tomaría `"0"`
+#: como verdadero —toda cadena no vacía lo es—, y ese header relaja el
+#: invariante de stock: no puede depender de leer mal un cero.
+_OFFLINE_SI = frozenset({"1", "true", "yes"})
+
+
+def _es_offline(valor: str | None) -> bool:
+    return valor is not None and valor.strip().lower() in _OFFLINE_SI
 
 #: Motivo de anulación de las `SaleEntry` de un ticket anulado desde la caja.
 #: Ya está en el CHECK `ck_sales_entries_void_reason`: no hace falta migrar.
@@ -201,6 +237,7 @@ async def create_pos_operation(
     _sub_guard: None = Depends(require_active_subscription),
     session: AsyncSession = Depends(get_db_session),
     terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
+    offline: str | None = Header(default=None, alias=OFFLINE_HEADER),
 ) -> PosOperationResponse:
     """Cobra un carrito: una `SaleEntry` por línea, más la cabecera y sus pagos.
 
@@ -215,6 +252,7 @@ async def create_pos_operation(
     # NUEVA exige los permisos actuales, y se chequean ANTES del claim para que
     # un 403 no consuma la clave: el mismo pedido, reintentado cuando el dueño
     # habilite el permiso, tiene que poder entrar.
+    es_offline = _es_offline(offline)
     terminal = None
     if not await idempotent_request_exists(session, tenant.tenant_id, body.client_operation_id):
         # La terminal, como los permisos, se valida sólo para una venta NUEVA: el
@@ -226,6 +264,34 @@ async def create_pos_operation(
             assert_pos_permission(user, PosPermission.DISCOUNT)
         if any(t.payment_method == FIADO_PAYMENT_METHOD for t in body.tenders):
             assert_pos_permission(user, PosPermission.FIADO)
+        if es_offline:
+            # `X-POS-Offline` relaja el invariante "stock negativo prohibido"
+            # para ESTA venta, así que no alcanza con el header: hace falta la
+            # afirmación fechada de que el pago se recibió y una caja que el
+            # dueño habilitó. Nada de esto PRUEBA que el efectivo entró —del
+            # lado del servidor no existe tal prueba—, pero deja la afirmación
+            # atribuida a alguien, a una PC y a un momento.
+            if body.charged_at is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "OFFLINE_WITHOUT_CHARGED_AT",
+                        "message": (
+                            "Una venta cobrada sin conexión tiene que decir cuándo se cobró."
+                        ),
+                    },
+                )
+            if terminal is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "TERMINAL_REQUIRED_FOR_CAPTURE",
+                        "message": (
+                            "Una venta cobrada sin conexión sólo se acepta desde una caja "
+                            "habilitada."
+                        ),
+                    },
+                )
 
     # La idempotencia va antes de tocar stock, precios o locks. Un reintento
     # tiene que poder contestar sin repetir nada de eso.
@@ -324,38 +390,127 @@ async def create_pos_operation(
     por_id = {p.id: p for p in locked}
 
     pedidas: list[LineaPedida] = []
+    #: product_id → (precio, factor, nombre, unidad) del CATÁLOGO, sólo si
+    #: difieren de lo que la caja cobró e imprimió.
+    divergencias: dict[uuid.UUID, tuple[Decimal, int, str, str]] = {}
+    #: product_id → stock disponible, de las líneas cuya salida queda pendiente.
+    faltantes: dict[uuid.UUID, int] = {}
+    #: Lo que el ticket va a decir de cada producto, congelado al persistir.
+    #: El factor es el que se USÓ para cobrar, no el del catálogo: es el que
+    #: hace que la cantidad impresa explique el importe impreso.
+    snapshots: dict[uuid.UUID, tuple[str, str, int]] = {}
     for item in body.items:
         producto = por_id.get(item.product_id)
         if producto is None:
             raise HTTPException(
                 status_code=400, detail=f"Producto {item.product_id} no encontrado."
             )
-        # Un producto sin precio (los que crea una compra importada nacen con
-        # `sale_price_ars = 0` y `requires_completion`) no se puede cobrar: se
-        # regalaría y se descontaría su stock. Se rechaza con un motivo claro en
-        # vez de dejar que aparezca como un TENDERS_MISMATCH incomprensible.
-        if producto.sale_price_ars <= 0:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "PRODUCT_WITHOUT_PRICE",
-                    "product_id": str(producto.id),
-                    "message": f"«{producto.name}» no tiene precio de venta cargado.",
-                },
+        factor_catalogo = producto.base_units_per_sale_unit or 1
+
+        if (
+            item.unit_price_ars is not None
+            and item.base_units_per_sale_unit is not None
+            and item.product_name is not None
+            and item.sale_unit is not None
+        ):
+            # El schema garantiza que los cinco campos vienen juntos. Se verifica
+            # con los valores DECLARADOS, los cinco: usar los del catálogo de
+            # ahora haría que cambiarle la unidad o el nombre a un producto
+            # invalidara el token de una venta que ya se cobró — justo la venta
+            # que B7 existe para salvar.
+            verificacion = verificar_precio(
+                item.price_token,
+                tenant.tenant_id,
+                producto.id,
+                item.unit_price_ars,
+                item.product_name,
+                item.sale_unit,
+                item.base_units_per_sale_unit,
             )
+            if verificacion is ResultadoToken.VENCIDO:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "PRICE_TOKEN_EXPIRED",
+                        "product_id": str(producto.id),
+                        "message": (
+                            f"El precio con el que se cobró «{producto.name}» es demasiado "
+                            "viejo para aceptarlo sin revisar."
+                        ),
+                    },
+                )
+            if verificacion is not ResultadoToken.VALIDO:
+                # La firma no corresponde a esos valores: este servidor no los
+                # emitió. Puede ser una cola editada a mano o un token de otro
+                # tenant. No se cae al catálogo en silencio — eso guardaría un
+                # precio distinto del que la caja cobró sin que nadie se entere.
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "PRICE_TOKEN_INVALID",
+                        "product_id": str(producto.id),
+                        "message": (
+                            f"No se puede verificar el precio con el que se cobró "
+                            f"«{producto.name}»."
+                        ),
+                    },
+                )
+            precio = item.unit_price_ars
+            factor = item.base_units_per_sale_unit
+            # Lo que el ticket va a decir: lo DECLARADO y verificado, que es lo
+            # que la caja le mostró al cliente cuando le cobró.
+            snapshot = (item.product_name, item.sale_unit, factor)
+            if (
+                precio != producto.sale_price_ars
+                or factor != factor_catalogo
+                or item.product_name != producto.name
+                or item.sale_unit != producto.sale_unit
+            ):
+                divergencias[producto.id] = (
+                    producto.sale_price_ars,
+                    factor_catalogo,
+                    producto.name,
+                    producto.sale_unit,
+                )
+        else:
+            # Sin precio declarado: catálogo, como antes de B7. Un producto sin
+            # precio (los que crea una compra importada nacen con
+            # `sale_price_ars = 0` y `requires_completion`) no se puede cobrar:
+            # se regalaría y se descontaría su stock.
+            if producto.sale_price_ars <= 0:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "PRODUCT_WITHOUT_PRICE",
+                        "product_id": str(producto.id),
+                        "message": f"«{producto.name}» no tiene precio de venta cargado.",
+                    },
+                )
+            precio = producto.sale_price_ars
+            factor = factor_catalogo
+            snapshot = (producto.name, producto.sale_unit, factor)
+
+        snapshots[producto.id] = snapshot
+
         if producto.stock_units < item.quantity:
-            raise stock_service.InsufficientStockError(
-                item.product_id, producto.stock_units, item.quantity, producto.name
-            )
+            if not es_offline:
+                raise stock_service.InsufficientStockError(
+                    item.product_id, producto.stock_units, item.quantity, producto.name
+                )
+            # La venta ya se cobró: rechazarla no devuelve la mercadería ni la
+            # plata. Entra completa y queda una salida pendiente (B11). Se
+            # decide acá, con la fila del producto bloqueada, y el bucle de
+            # persistencia sólo obedece: si volviera a preguntar "¿alcanza?"
+            # habría dos lugares decidiendo lo mismo.
+            faltantes[item.product_id] = producto.stock_units
         pedidas.append(
             LineaPedida(
                 product_id=item.product_id,
                 quantity=item.quantity,
-                # Del CATÁLOGO, no del cuerpo de la petición.
-                unit_price_list=producto.sale_price_ars,
+                unit_price_list=precio,
                 discount_ars=item.discount_ars,
                 # El precio es por unidad de venta; la cantidad, en unidades base.
-                base_units_per_sale_unit=producto.base_units_per_sale_unit or 1,
+                base_units_per_sale_unit=factor,
             )
         )
 
@@ -412,6 +567,9 @@ async def create_pos_operation(
         # un vuelto sin entregado no se puede explicar.
         cash_change_ars=vuelto if body.cash_received_ars is not None else None,
         notes=body.notes,
+        captured_offline=es_offline,
+        charged_at=body.charged_at,
+        client_session_id=body.client_session_id,
     )
     session.add(operacion)
 
@@ -435,8 +593,10 @@ async def create_pos_operation(
         )
         session.add(venta)
         await session.flush()
-        await stock_service.decrement_for_sale(venta, session)
+        if linea.product_id not in faltantes:
+            await stock_service.decrement_for_sale(venta, session)
 
+        nombre, unidad, factor_snap = snapshots[linea.product_id]
         lineas.append(
             PosOperationLine(
                 id=uuid.uuid4(),
@@ -450,6 +610,15 @@ async def create_pos_operation(
                 discount_line_ars=linea.discount_line_ars,
                 discount_global_share_ars=linea.discount_global_share_ars,
                 line_total_ars=linea.line_total,
+                unit_price_catalog_ars=(
+                    divergencias[linea.product_id][0]
+                    if linea.product_id in divergencias
+                    else None
+                ),
+                # El ticket deja de depender del catálogo de mañana.
+                product_name_snapshot=nombre,
+                sale_unit_snapshot=unidad,
+                base_units_snapshot=factor_snap,
             )
         )
 
@@ -469,6 +638,85 @@ async def create_pos_operation(
     session.add_all(tenders)
     await session.flush()
 
+    # Las salidas pendientes se registran después del flush: la discrepancia
+    # apunta a la línea, y la línea recién ahí tiene id.
+    for ln in lineas:
+        if ln.product_id in faltantes:
+            pos_discrepancy_service.registrar(
+                session,
+                tenant_id=tenant.tenant_id,
+                operation_id=operacion.id,
+                line_id=ln.id,
+                sale_entry_id=ln.sale_entry_id,
+                product_id=ln.product_id,
+                pending_units=ln.quantity,
+                stock_at_capture=faltantes[ln.product_id],
+            )
+            session.add(
+                DecisionAuditLog(
+                    tenant_id=tenant.tenant_id,
+                    decision_type="POS_STOCK_CAPTURED",
+                    decision_data={
+                        "operation_id": str(operacion.id),
+                        "client_operation_id": operacion.client_operation_id,
+                        "product_id": str(ln.product_id),
+                        "pending_units": ln.quantity,
+                        "stock_at_capture": faltantes[ln.product_id],
+                        "charged_at": (
+                            operacion.charged_at.isoformat()
+                            if operacion.charged_at
+                            else None
+                        ),
+                        "terminal_id": (
+                            str(operacion.terminal_id) if operacion.terminal_id else None
+                        ),
+                    },
+                    triggered_by="ui:pos",
+                    actor_user_id=user.user_id,
+                    context={"endpoint": "pos.create_operation"},
+                    created_at=datetime.now(UTC),
+                )
+            )
+
+    # Una divergencia de precio no es un error: es lo normal cuando la venta se
+    # cobró antes de que el dueño cambiara el precio. Pero tiene que quedar
+    # visible con los dos números, porque es la única forma de revisar después
+    # si la caja cobró lo que correspondía.
+    if divergencias:
+        session.add(
+            DecisionAuditLog(
+                tenant_id=tenant.tenant_id,
+                decision_type="POS_PRICE_DIVERGENCE",
+                decision_data={
+                    "operation_id": str(operacion.id),
+                    "client_operation_id": operacion.client_operation_id,
+                    "captured_offline": operacion.captured_offline,
+                    "charged_at": (
+                        operacion.charged_at.isoformat() if operacion.charged_at else None
+                    ),
+                    "lines": [
+                        {
+                            "product_id": str(ln.product_id),
+                            "cobrado_ars": str(ln.unit_price_list),
+                            "catalogo_ars": str(divergencias[ln.product_id][0]),
+                            "factor_cobrado": ln.base_units_snapshot,
+                            "factor_catalogo": divergencias[ln.product_id][1],
+                            "nombre_cobrado": ln.product_name_snapshot,
+                            "nombre_catalogo": divergencias[ln.product_id][2],
+                            "unidad_cobrada": ln.sale_unit_snapshot,
+                            "unidad_catalogo": divergencias[ln.product_id][3],
+                        }
+                        for ln in lineas
+                        if ln.product_id in divergencias
+                    ],
+                },
+                triggered_by="ui:pos",
+                actor_user_id=user.user_id,
+                context={"endpoint": "pos.create_operation"},
+                created_at=datetime.now(UTC),
+            )
+        )
+
     trigger_score_recalculation_after_commit(
         session, str(tenant.tenant_id), "pos_operation_created", background
     )
@@ -484,6 +732,104 @@ async def create_pos_operation(
         status.HTTP_201_CREATED,
     )
     return resultado
+
+
+async def _ejecutar_anulacion(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    user: User,
+    operacion: PosOperation,
+    lineas: list[PosOperationLine],
+    tenders: list[PosTender],
+    reason: str | None,
+    background: BackgroundTasks,
+) -> None:
+    """Anula el ticket entero: ventas, stock y deudas de stock. Idempotente.
+
+    Vive acá y no dentro del handler porque la resolución de una salida
+    pendiente (B11) tiene que anular EXACTAMENTE igual: dos implementaciones de
+    "anular un ticket" se separan, y una de ellas se olvidaría de revertir algo.
+    """
+    if operacion.status == "VOIDED":
+        return
+
+    ahora = datetime.now(UTC)
+    ventas_anuladas: list[str] = []
+    ids_de_venta = [ln.sale_entry_id for ln in lineas if ln.sale_entry_id is not None]
+    ventas = (
+        (
+            await session.execute(
+                select(SaleEntry)
+                .where(
+                    SaleEntry.id.in_(ids_de_venta),
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.voided_at.is_(None),
+                )
+                .order_by(SaleEntry.id)
+            )
+        )
+        .scalars()
+        .all()
+        if ids_de_venta
+        else []
+    )
+    # En el orden del ticket, para que la auditoría liste las ventas como el
+    # cajero las cargó y no en el orden de los UUID.
+    posicion = {ln.sale_entry_id: ln.position for ln in lineas}
+    for venta in sorted(ventas, key=lambda v: posicion[v.id]):
+        antes = _sale_snapshot(venta)
+        venta.voided_at = ahora
+        venta.void_reason = _VOID_REASON_TICKET
+        await session.flush()
+        # Reversa incremental del movimiento de esta línea (`void_movement`). Nunca
+        # un `setattr` sobre stock_units: el stock no es la suma del ledger.
+        await stock_service.revert_sale_stock(venta.id, tenant_id, session)
+        # Mismo registro que una anulación suelta, para que el historial de la
+        # venta cuente lo mismo venga de donde venga.
+        _audit_data_change(
+            session,
+            tenant_id=tenant_id,
+            user_id=user.user_id,
+            decision_type="DATA_RECORD_VOIDED",
+            before=antes,
+            after=_sale_snapshot(venta),
+        )
+        ventas_anuladas.append(str(venta.id))
+
+    operacion.status = "VOIDED"
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant_id,
+            decision_type="POS_OPERATION_VOIDED",
+            decision_data={
+                "record_type": "pos_operation",
+                "record_id": str(operacion.id),
+                "client_operation_id": operacion.client_operation_id,
+                "total_ars": str(operacion.total_ars),
+                "sale_entry_ids": ventas_anuladas,
+                "tenders": [
+                    {"payment_method": t.payment_method, "amount_ars": str(t.amount_ars)}
+                    for t in tenders
+                ],
+                "reason": reason,
+                "source": "pos",
+            },
+            triggered_by="ui:pos",
+            actor_user_id=user.user_id,
+            context={"endpoint": "pos.void"},
+            created_at=ahora,
+        )
+    )
+    await session.flush()
+
+    await pos_discrepancy_service.cerrar_por_anulacion(
+        session, tenant_id, operacion.id, user.user_id
+    )
+
+    trigger_score_recalculation_after_commit(
+        session, str(tenant_id), "pos_operation_voided", background
+    )
 
 
 @router.post(
@@ -550,82 +896,167 @@ async def void_pos_operation(
                 },
             )
 
-    if operacion.status == "VOIDED":
-        return _a_respuesta(operacion, lineas, tenders)
-
-    ahora = datetime.now(UTC)
-    ventas_anuladas: list[str] = []
-    ids_de_venta = [ln.sale_entry_id for ln in lineas if ln.sale_entry_id is not None]
-    ventas = (
-        (
-            await session.execute(
-                select(SaleEntry)
-                .where(
-                    SaleEntry.id.in_(ids_de_venta),
-                    SaleEntry.tenant_id == tenant.tenant_id,
-                    SaleEntry.voided_at.is_(None),
-                )
-                .order_by(SaleEntry.id)
-            )
-        )
-        .scalars()
-        .all()
-        if ids_de_venta
-        else []
-    )
-    # En el orden del ticket, para que la auditoría liste las ventas como el
-    # cajero las cargó y no en el orden de los UUID.
-    posicion = {ln.sale_entry_id: ln.position for ln in lineas}
-    for venta in sorted(ventas, key=lambda v: posicion[v.id]):
-        antes = _sale_snapshot(venta)
-        venta.voided_at = ahora
-        venta.void_reason = _VOID_REASON_TICKET
-        await session.flush()
-        # Reversa incremental del movimiento de esta línea (`void_movement`). Nunca
-        # un `setattr` sobre stock_units: el stock no es la suma del ledger.
-        await stock_service.revert_sale_stock(venta.id, tenant.tenant_id, session)
-        # Mismo registro que una anulación suelta, para que el historial de la
-        # venta cuente lo mismo venga de donde venga.
-        _audit_data_change(
-            session,
-            tenant_id=tenant.tenant_id,
-            user_id=user.user_id,
-            decision_type="DATA_RECORD_VOIDED",
-            before=antes,
-            after=_sale_snapshot(venta),
-        )
-        ventas_anuladas.append(str(venta.id))
-
-    operacion.status = "VOIDED"
-    session.add(
-        DecisionAuditLog(
-            tenant_id=tenant.tenant_id,
-            decision_type="POS_OPERATION_VOIDED",
-            decision_data={
-                "record_type": "pos_operation",
-                "record_id": str(operacion.id),
-                "client_operation_id": operacion.client_operation_id,
-                "total_ars": str(operacion.total_ars),
-                "sale_entry_ids": ventas_anuladas,
-                "tenders": [
-                    {"payment_method": t.payment_method, "amount_ars": str(t.amount_ars)}
-                    for t in tenders
-                ],
-                "reason": body.reason if body is not None else None,
-                "source": "pos",
-            },
-            triggered_by="ui:pos",
-            actor_user_id=user.user_id,
-            context={"endpoint": "pos.void"},
-            created_at=ahora,
-        )
-    )
-    await session.flush()
-
-    trigger_score_recalculation_after_commit(
-        session, str(tenant.tenant_id), "pos_operation_voided", background
+    await _ejecutar_anulacion(
+        session,
+        tenant_id=tenant.tenant_id,
+        user=user,
+        operacion=operacion,
+        lineas=lineas,
+        tenders=tenders,
+        reason=body.reason if body is not None else None,
+        background=background,
     )
     return _a_respuesta(operacion, lineas, tenders)
+
+
+def _a_discrepancia(
+    discrepancia: PosStockDiscrepancy, product_name: str | None, operation_date: datetime
+) -> PosStockDiscrepancyResponse:
+    return PosStockDiscrepancyResponse(
+        id=discrepancia.id,
+        operation_id=discrepancia.operation_id,
+        product_id=discrepancia.product_id,
+        product_name=product_name,
+        pending_units=discrepancia.pending_units,
+        stock_at_capture=discrepancia.stock_at_capture,
+        operation_date=operation_date,
+        status=discrepancia.status,
+        resolution=discrepancia.resolution,
+        reason=discrepancia.reason,
+        resolved_at=discrepancia.resolved_at,
+        created_at=discrepancia.created_at,
+    )
+
+
+@router.get(
+    "/stock-discrepancies",
+    response_model=list[PosStockDiscrepancyResponse],
+    summary="Salidas de stock que quedaron pendientes por una venta de caja",
+)
+async def list_stock_discrepancies(
+    abiertas: bool = Query(default=True, alias="open"),
+    limit: int = Query(default=100, ge=1, le=200),
+    tenant: Tenant = Depends(get_current_tenant),
+    # Sólo lectura: no pide PIN. Resolver sí, porque mueve stock.
+    _user: User = Depends(require_role("OWNER", "ADMIN")),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[PosStockDiscrepancyResponse]:
+    """Lo que la caja vendió y el stock no pudo respaldar, para que alguien decida.
+
+    Fuera de `CASHIER_ALLOWED_ROUTES` a propósito: qué pasó con el stock no es
+    una decisión de caja.
+    """
+    filas = await pos_discrepancy_service.listar(
+        session, tenant.tenant_id, solo_abiertas=abiertas, limit=limit
+    )
+    return [_a_discrepancia(d, nombre, fecha) for d, nombre, fecha in filas]
+
+
+@router.post(
+    "/stock-discrepancies/{discrepancy_id}/resolve",
+    response_model=PosStockDiscrepancyResponse,
+    summary="Resolver una salida pendiente: la mercadería estaba, o la venta está mal",
+)
+async def resolve_stock_discrepancy(
+    discrepancy_id: uuid.UUID,
+    body: PosResolveDiscrepancyRequest,
+    background: BackgroundTasks,
+    tenant: Tenant = Depends(get_current_tenant),
+    # Mueve stock y puede anular un ticket: OWNER o `can_modify_sensitive`, con PIN.
+    user: User = Depends(require_modify_access),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosStockDiscrepancyResponse:
+    """Dos caminos, los dos con efecto exacto sobre el stock y auditados.
+
+    - `ajuste_de_entrada`: entra el faltante —**recalculado ahora**, no el de la
+      captura— como ajuste de reconciliación fechado el día de la venta, y
+      después sale la venta completa.
+    - `anular_ticket`: la venta no existió; se anula el ticket entero (B10).
+
+    No hay una tercera opción que sólo oculte el aviso: ocultar no reconcilia
+    nada. Idempotente: resolver dos veces devuelve lo mismo sin repetir efectos.
+    """
+    await acquire_write_lock_shared(session, tenant.tenant_id)
+
+    # ORDEN DE BLOQUEOS: primero el ticket, después la discrepancia — el MISMO
+    # que `void_operation`, que bloquea la cabecera y recién ahí toca las deudas
+    # de stock en `cerrar_por_anulacion`. Con el orden invertido, anular y
+    # resolver a la vez se pedían los candados cruzados y Postgres abortaba una
+    # de las dos con un 500 por deadlock.
+    #
+    # Para saber QUÉ ticket bloquear hay que leer la discrepancia, así que se la
+    # lee primero SIN candado —sólo para sacarle el `operation_id`— y se la
+    # vuelve a leer con `FOR UPDATE` recién después: entre las dos lecturas
+    # pudo haberse resuelto, y lo que vale es lo que dice la versión bloqueada.
+    referencia = await pos_discrepancy_service.obtener(
+        session, tenant.tenant_id, discrepancy_id
+    )
+    if referencia is None:
+        raise HTTPException(status_code=404, detail="Diferencia no encontrada.")
+
+    cargada = await _cargar_operacion(
+        session, tenant.tenant_id, operation_id=referencia.operation_id, para_actualizar=True
+    )
+    if cargada is None:
+        raise HTTPException(status_code=404, detail="Operación no encontrada.")
+    operacion, lineas, tenders = cargada
+
+    discrepancia = await pos_discrepancy_service.obtener(
+        session, tenant.tenant_id, discrepancy_id, para_actualizar=True
+    )
+    if discrepancia is None:
+        raise HTTPException(status_code=404, detail="Diferencia no encontrada.")
+
+    producto = (
+        await session.get(Product, discrepancia.product_id)
+        if discrepancia.product_id
+        else None
+    )
+    nombre = producto.name if producto is not None else None
+
+    if discrepancia.status != ESTADO_ABIERTA:
+        return _a_discrepancia(discrepancia, nombre, operacion.operation_date)
+
+    if body.resolution == RESOLUCION_AJUSTE:
+        faltante = await pos_discrepancy_service.aplicar_ajuste_de_entrada(
+            session, discrepancia, occurred_at=operacion.operation_date
+        )
+        pos_discrepancy_service.marcar_resuelta(
+            session,
+            discrepancia,
+            resolucion=body.resolution,
+            reason=body.reason,
+            user_id=user.user_id,
+            detalle={"unidades_ajustadas": faltante},
+        )
+        trigger_score_recalculation_after_commit(
+            session, str(tenant.tenant_id), "pos_stock_discrepancy_resolved", background
+        )
+    else:
+        discrepancia.reason = body.reason
+        await _ejecutar_anulacion(
+            session,
+            tenant_id=tenant.tenant_id,
+            user=user,
+            operacion=operacion,
+            lineas=lineas,
+            tenders=tenders,
+            reason=body.reason,
+            background=background,
+        )
+        if discrepancia.status == ESTADO_ABIERTA:
+            # El ticket ya estaba anulado: `_ejecutar_anulacion` no hace nada y
+            # la deuda igual tiene que cerrarse, porque esa venta ya no existe.
+            pos_discrepancy_service.marcar_resuelta(
+                session,
+                discrepancia,
+                resolucion=body.resolution,
+                reason=body.reason,
+                user_id=user.user_id,
+            )
+
+    await session.flush()
+    return _a_discrepancia(discrepancia, nombre, operacion.operation_date)
 
 
 def _numero_de_ticket(operation_id: uuid.UUID) -> str:
@@ -717,17 +1148,28 @@ async def pos_operation_receipt(
     )
 
     def _renglon(ln: PosOperationLine) -> PosReceiptLine:
+        # El snapshot manda: un comprobante dice lo que decía cuando se emitió.
+        # Renombrar un producto no puede cambiar el ticket de ayer, y borrarlo
+        # no puede dejarlo en "Producto eliminado".
         producto = productos.get(ln.product_id) if ln.product_id else None
+        nombre = ln.product_name_snapshot
+        unidad = ln.sale_unit_snapshot
+        factor = ln.base_units_snapshot
+        if unidad is None or factor is None:
+            # Línea anterior a B7: no hay snapshot y no se inventa. Se cae al
+            # catálogo actual, que es exactamente lo que se hacía antes.
+            unidad = producto.sale_unit if producto is not None else None
+            factor = (producto.base_units_per_sale_unit or 1) if producto is not None else None
+        if nombre is None:
+            nombre = producto.name if producto is not None else "Producto eliminado"
         cantidad = (
-            formatear_cantidad(
-                ln.quantity, producto.sale_unit, producto.base_units_per_sale_unit or 1
-            )
-            if producto is not None
+            formatear_cantidad(ln.quantity, unidad, factor)
+            if unidad is not None and factor is not None
             else str(ln.quantity)
         )
         return PosReceiptLine(
             position=ln.position,
-            product_name=producto.name if producto is not None else "Producto eliminado",
+            product_name=nombre,
             quantity=ln.quantity,
             quantity_display=cantidad,
             unit_price_list=ln.unit_price_list,
@@ -816,8 +1258,9 @@ async def pos_catalog(
     hay_mas = len(filas) > limit
     pagina = filas[:limit]
     return PosCatalogResponse(
-        items=[PosProductResponse.model_validate(p) for p in pagina],
+        items=[a_pos_product(p, tenant.tenant_id) for p in pagina],
         next_cursor=pagina[-1].id if hay_mas and pagina else None,
+        business_name=tenant.display_name,
     )
 
 

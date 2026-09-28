@@ -29,6 +29,30 @@ export interface ScanCandidate {
   product: PosProduct;
 }
 
+export interface PosCatalogPage {
+  items: PosProduct[];
+  next_cursor: string | null;
+  business_name: string;
+}
+
+export interface PosStockDiscrepancy {
+  id: string;
+  operation_id: string;
+  product_id: string | null;
+  product_name: string | null;
+  /** La cantidad COMPLETA de la línea, no el faltante. */
+  pending_units: number;
+  stock_at_capture: number;
+  operation_date: string;
+  status: string;
+  resolution: string | null;
+  reason: string | null;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+export type ResolucionDeDiferencia = "ajuste_de_entrada" | "anular_ticket";
+
 export interface PosCustomer {
   id: string;
   name: string;
@@ -58,8 +82,15 @@ export const posService = {
     return res.data;
   },
   async searchCatalog(q: string, limit = 20): Promise<PosProduct[]> {
-    const res = await api.get<{ items: PosProduct[] }>("/pos/catalog", { params: { q, limit } });
+    const res = await api.get<PosCatalogPage>("/pos/catalog", { params: { q, limit } });
     return res.data.items;
+  },
+  /** Una página del catálogo completo, para bajarlo entero a la PC (B7). */
+  async catalogPage(after: string | null, limit = 500): Promise<PosCatalogPage> {
+    const params: Record<string, string | number> = { limit };
+    if (after) params.after = after;
+    const res = await api.get<PosCatalogPage>("/pos/catalog", { params });
+    return res.data;
   },
   async searchCustomers(q: string): Promise<PosCustomer[]> {
     const res = await api.get<PosCustomer[]>("/pos/customers", { params: { q, limit: 20 } });
@@ -73,8 +104,41 @@ export const posService = {
     const res = await api.post<PosOperationResult>("/pos/operations", payload);
     return res.data;
   },
+  /**
+   * El reenvío de una venta que YA se cobró y quedó en la cola.
+   *
+   * `X-POS-Offline` va en header y no en el cuerpo a propósito: la huella de
+   * idempotencia se calcula sobre el cuerpo, así que agregarle un campo al
+   * reintento haría que el servidor conteste `IDEMPOTENCY_KEY_REUSED` con la
+   * venta existiendo. Le dice al servidor "esto ya se cobró": no la rechaces
+   * por stock, registrá la salida pendiente.
+   */
+  async syncOperation(payload: PosOperationPayload): Promise<PosOperationResult> {
+    const res = await api.post<PosOperationResult>("/pos/operations", payload, {
+      headers: { "X-POS-Offline": "1" },
+    });
+    return res.data;
+  },
   async voidOperation(id: string, reason: string): Promise<PosOperationResult> {
     const res = await api.post<PosOperationResult>(`/pos/operations/${id}/void`, { reason });
+    return res.data;
+  },
+
+  async listStockDiscrepancies(abiertas = true): Promise<PosStockDiscrepancy[]> {
+    const res = await api.get<PosStockDiscrepancy[]>("/pos/stock-discrepancies", {
+      params: { open: abiertas },
+    });
+    return res.data;
+  },
+  async resolveStockDiscrepancy(
+    id: string,
+    resolution: ResolucionDeDiferencia,
+    reason: string,
+  ): Promise<PosStockDiscrepancy> {
+    const res = await api.post<PosStockDiscrepancy>(
+      `/pos/stock-discrepancies/${id}/resolve`,
+      { resolution, reason },
+    );
     return res.data;
   },
 

@@ -4,7 +4,7 @@ import {
   buildPayload,
   cannotCharge,
   initialSale,
-  isDefinitiveRejection,
+  esCorregibleEnElMostrador,
   lineGrossCents,
   localNaiveIso,
   previewTotals,
@@ -80,28 +80,29 @@ describe("carrito", () => {
 describe("estados del cobro", () => {
   const payload = buildPayload(con({ type: "ADD_PRODUCT", product: yerba }), "id-1", new Date());
 
-  it("en duda el carrito queda bloqueado: no se agrega ni se edita", () => {
-    const enDuda = con(
-      { type: "ADD_PRODUCT", product: yerba },
-      { type: "SEND", payload },
-      { type: "UNKNOWN", notice: "x" },
-    );
-    expect(enDuda.status).toBe("en_duda");
+  it("mientras se envía, el carrito no se toca", () => {
+    const enviando = con({ type: "ADD_PRODUCT", product: yerba }, { type: "SEND", payload });
+    expect(enviando.status).toBe("enviando");
     const tocado = [
       { type: "ADD_PRODUCT", product: yerba } as const,
       { type: "SET_QUANTITY", productId: "p1", quantity: 9 } as const,
       { type: "REMOVE", productId: "p1" } as const,
-    ].reduce(saleReducer, enDuda);
-    expect(tocado).toBe(enDuda);
+    ].reduce(saleReducer, enviando);
+    expect(tocado).toBe(enviando);
   });
 
-  it("el reintento conserva el payload congelado", () => {
-    const enDuda = con(
+  it("sin respuesta la venta va a la cola y el carrito se LIBERA", () => {
+    // Antes de B7 quedaba "en duda" y la caja se trababa hasta que el cajero
+    // resolviera el cobro a mano — justo cuando más falta hace vender.
+    const encolada = con(
       { type: "ADD_PRODUCT", product: yerba },
       { type: "SEND", payload },
-      { type: "UNKNOWN", notice: "x" },
+      { type: "QUEUED", notice: "se sube sola" },
     );
-    expect(enDuda.payload).toBe(payload);
+    expect(encolada.status).toBe("editando");
+    expect(encolada.lines).toEqual([]);
+    expect(encolada.payload).toBeNull();
+    expect(encolada.notice).toBe("se sube sola");
   });
 
   it("un rechazo definitivo desbloquea y descarta el payload (el próximo nace con id nuevo)", () => {
@@ -140,6 +141,9 @@ describe("estados del cobro", () => {
 });
 
 describe("clasificación de la respuesta", () => {
+  // `true` = el cajero puede corregir el carrito y volver a cobrar, y sólo por
+  // eso se borra la venta local. Todo lo demás queda encolado: el cajero ya
+  // recibió la plata.
   it.each([
     [null, null, false],
     [500, null, false],
@@ -148,12 +152,23 @@ describe("clasificación de la respuesta", () => {
     [429, null, false],
     [409, "IDEMPOTENCY_KEY_REUSED", false],
     [409, "DUPLICATE_IDEMPOTENT", false],
+    // Los dos que se arreglan solos sin tocar la venta. Antes daban `true` y
+    // la venta cobrada desaparecía de los dos lados.
+    [402, null, false],
+    [423, null, false],
+    // La sesión o la PC, no la venta: tampoco hay nada que corregir acá.
+    [401, null, false],
+    [403, "TERMINAL_REQUIRED", false],
+    [403, "TERMINAL_DISABLED", false],
+    // Éstos sí: el cajero saca el producto, corrige el pago y vuelve a cobrar.
     [400, "INSUFFICIENT_STOCK", true],
     [422, "TENDERS_MISMATCH", true],
-    [403, "TERMINAL_REQUIRED", true],
-    [402, null, true],
-  ])("status %s código %s → definitivo: %s", (status, code, esperado) => {
-    expect(isDefinitiveRejection({ status }, code)).toBe(esperado);
+    [422, "PRICE_TOKEN_INVALID", true],
+    [403, "POS_PERMISSION_DENIED", true],
+  ])("status %s código %s → corregible: %s", (status, code, esperado) => {
+    expect(esCorregibleEnElMostrador({ status, code, message: null, fields: {} })).toBe(
+      esperado,
+    );
   });
 });
 

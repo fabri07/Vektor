@@ -52,7 +52,7 @@ export function cobroRejectionMessage(info: PosErrorInfo): string {
     case "CASH_RECEIVED_TOO_LOW":
       return "El efectivo recibido no alcanza para el total.";
     case "TERMINAL_REQUIRED":
-      return "Esta PC no está habilitada como caja. Pedile al dueño que la habilite en Ajustes.";
+      return "Esta PC no está habilitada como caja. Pedile al dueño que la habilite en Configuración → Seguridad.";
     case "TERMINAL_DISABLED":
       return "Esta caja fue dada de baja. Pedile al dueño que la vuelva a habilitar.";
     case "TERMINAL_UNKNOWN":

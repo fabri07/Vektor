@@ -25,17 +25,17 @@ export function CashierHome({ reason }: { reason: "no_terminal" | "terminal_inva
   }
 
   return (
-    <div className="flex h-screen items-center justify-center bg-vk-bg-light p-6">
-      <div className="max-w-md rounded-xl border border-vk-border-w bg-vk-surface-w p-6 text-center">
-        <p className="text-xs uppercase tracking-wide text-vk-text-muted">Usuario de caja</p>
-        <h1 className="mt-2 text-lg font-semibold text-vk-text-primary">
+    <div className="flex h-screen items-center justify-center bg-pos-bg p-6">
+      <div className="max-w-md rounded-xl border border-pos-border bg-pos-surface p-6 text-center">
+        <p className="text-xs uppercase tracking-wide text-pos-muted">Usuario de caja</p>
+        <h1 className="mt-2 text-lg font-semibold text-pos-text">
           Hola{user?.full_name ? `, ${user.full_name}` : ""}
         </h1>
-        <p className="mt-3 text-sm text-vk-text-secondary">
+        <p className="mt-3 text-sm text-pos-text-2">
           {reason === "terminal_invalid"
             ? "Esta PC fue dada de baja como caja, así que desde acá no se puede cobrar."
             : "Esta PC no está habilitada como caja, así que desde acá no se puede cobrar."}{" "}
-          Pedile al dueño del negocio que la habilite en Ajustes → Cajas habilitadas.
+          Pedile al dueño del negocio que la habilite desde esta PC en Configuración → Seguridad → Cajas habilitadas (o desde el link de la caja).
         </p>
         <Button className="mt-5" variant="secondary" onClick={() => void salir()}>
           Cerrar sesión

@@ -42,37 +42,37 @@ export function RecentTickets({ refreshKey, canVoid, onReprint, onVoided }: Rece
   }, [abierto, refreshKey]);
 
   return (
-    <div className="border-t border-vk-border-w pt-3 text-sm">
+    <div className="border-t border-pos-border pt-3 text-sm">
       <button
         type="button"
-        className="text-vk-text-secondary hover:text-vk-text-primary"
+        className="text-pos-text-2 hover:text-pos-text"
         onClick={() => setAbierto((v) => !v)}
       >
         {abierto ? "Ocultar últimos tickets" : "Últimos tickets"}
       </button>
       {abierto ? (
         <div className="mt-2 max-h-72 space-y-2 overflow-auto">
-          {error ? <p className="text-vk-danger">{error}</p> : null}
-          {items?.length === 0 ? <p className="text-vk-text-muted">Todavía no hay tickets.</p> : null}
+          {error ? <p className="text-pos-danger">{error}</p> : null}
+          {items?.length === 0 ? <p className="text-pos-muted">Todavía no hay tickets.</p> : null}
           {items?.map((t) => (
-            <div key={t.id} className="space-y-1 rounded-lg border border-vk-border-w p-2">
+            <div key={t.id} className="space-y-1 rounded-lg border border-pos-border p-2">
               <div className="flex items-center justify-between">
-                <span className="font-mono text-xs text-vk-text-muted">
+                <span className="font-mono text-xs text-pos-muted">
                   {t.number} · {formatTicketDate(t.operation_date).slice(-5)}
                 </span>
-                <span className={t.status === "VOIDED" ? "text-vk-text-muted line-through" : "font-semibold"}>
+                <span className={t.status === "VOIDED" ? "text-pos-muted line-through" : "font-semibold"}>
                   {formatCents(toCents(t.total_ars) ?? 0)}
                 </span>
               </div>
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  className="text-vk-blue underline"
+                  className="text-pos-link underline"
                   onClick={() => onReprint(t.id)}
                 >
                   Reimprimir
                 </button>
-                {t.status === "VOIDED" ? <span className="text-xs text-vk-text-muted">Anulado</span> : null}
+                {t.status === "VOIDED" ? <span className="text-xs text-pos-muted">Anulado</span> : null}
               </div>
               {canVoid && t.status === "COMPLETED" ? (
                 <VoidLastTicket
