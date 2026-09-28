@@ -180,12 +180,16 @@ function PosRegister() {
   // El turno de esta caja: nace al abrir la pantalla y viaja con cada venta,
   // para que B8 pueda atribuir lo que sincroniza después del arqueo.
   const sesion = useRef<string>(newOperationId());
+  // Un cobro `EN_CORRECCION` no está "sin sincronizar" —reenviarlo daría el
+  // mismo rechazo—: está sin completar, que es otra cosa y se arregla distinto.
   const { pendientes, sincronizando, flush, refrescar } = usePosSync({
     tenantId,
     userId,
     terminalId,
     habilitado: candado === "propia",
   });
+  const sinCompletar = pendientes.filter((o) => o.estado === "EN_CORRECCION").length;
+  const sinSincronizar = pendientes.length - sinCompletar;
   const canDiscount = hasPosPermission(user, "discount");
   const canFiado = hasPosPermission(user, "fiado");
   const canLearn = hasPosPermission(user, "learn_barcode");
@@ -235,6 +239,21 @@ function PosRegister() {
   // Candado síncrono: dos clics en el mismo tick verían los dos `editando` en
   // `saleRef` (se actualiza al re-renderizar) y mandarían dos cobros.
   const enVuelo = useRef(false);
+
+  /**
+   * Los cobros rechazados por algo corregible desde que se armó este carrito.
+   *
+   * Se borran recién cuando el cobro corregido queda registrado —entró o se
+   * encoló—, que es lo que prueba que la corrección se hizo. Si el cajero se va
+   * antes, sobreviven y quedan a la vista: un `charged_at` afirmado sin venta
+   * que lo respalde tiene que poder revisarse.
+   */
+  const enCorreccion = useRef<string[]>([]);
+  const cerrarCorrecciones = useCallback(async () => {
+    const ids = enCorreccion.current;
+    enCorreccion.current = [];
+    for (const id of ids) await borrarOperacion(id);
+  }, []);
   const send = useCallback(
     async (payload: PosOperationPayload, lines: CartLine[], recibo: PosReceipt) => {
       if (enVuelo.current) return;
@@ -263,6 +282,7 @@ function PosRegister() {
 
       try {
         const result = await posService.createOperation(payload);
+        await cerrarCorrecciones();
         await actualizarOperacion(payload.client_operation_id, {
           estado: "SINCRONIZADA",
           resultado: result,
@@ -276,11 +296,18 @@ function PosRegister() {
       } catch (e) {
         const info = posErrorInfo(e);
         if (esCorregibleEnElMostrador(info)) {
-          // El servidor revirtió todo, nadie entregó nada y el cajero puede
-          // arreglar el carrito y volver a cobrar. Es el ÚNICO borrado
-          // automático: un 402 o un 423 NO entran acá, porque no hay nada
-          // que corregir y la venta ya se cobró.
-          await borrarOperacion(payload.client_operation_id);
+          // El servidor revirtió todo y el cajero puede arreglar el carrito y
+          // volver a cobrar. **Pero no se borra**: al apretar Cobrar ya se
+          // afirmó `charged_at`, así que puede haber plata recibida, y si el
+          // cajero se va o se cierra la pestaña antes de rehacer el cobro eso
+          // quedaría sin constancia. Queda `EN_CORRECCION`, a la vista y sin
+          // sincronizarse, y se borra sola cuando el cobro corregido entra.
+          await actualizarOperacion(payload.client_operation_id, {
+            estado: "EN_CORRECCION",
+            ultimoError: info.message ?? "El servidor la rechazó",
+            ultimoCodigo: info.code,
+          });
+          enCorreccion.current.push(payload.client_operation_id);
           handleRejection(info, lines);
         } else {
           // No se sabe si entró. La venta ya está guardada: se libera el
@@ -291,6 +318,9 @@ function PosRegister() {
             ultimoCodigo: info.code,
             proximoIntentoEn: Date.now() + 5_000,
           });
+          // La venta quedó registrada (en la cola): los intentos rechazados
+          // que la precedieron ya están corregidos por ésta.
+          await cerrarCorrecciones();
           dispatch({ type: "QUEUED", notice: avisoDeEncolado(info) });
           if (usePosPrintConfigStore.getState().autoPrint) void printLocal(recibo);
         }
@@ -579,7 +609,8 @@ function PosRegister() {
                   { hour: "2-digit", minute: "2-digit" },
                 )}`
               : "· sin catálogo guardado todavía"}
-            {pendientes.length > 0 ? ` · ${pendientes.length} sin sincronizar` : ""}
+            {sinSincronizar > 0 ? ` · ${sinSincronizar} sin sincronizar` : ""}
+            {sinCompletar > 0 ? ` · ${sinCompletar} sin completar` : ""}
           </span>
           {user?.role === "OWNER" &&
           !(terminal && terminal.tenantId === tenantId && !terminalInvalid) ? (

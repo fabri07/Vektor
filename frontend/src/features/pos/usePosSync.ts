@@ -89,7 +89,12 @@ export function usePosSync({
         const cola = await pendientesSincronizables(t, u, term);
         for (const op of cola) {
           try {
-            const resultado = await posService.syncOperation(op.payload);
+            // Una venta migrada de B13 se RECLAMA primero con su contenido
+            // original y sin el header: su primer envío ya ocurrió y puede
+            // existir en el servidor. Ver `adaptarMigradaDeB13`.
+            const resultado = await posService.syncOperation(op.payload, {
+              offline: op.origen !== "b13",
+            });
             await actualizarOperacion(op.clientOperationId, {
               estado: "SINCRONIZADA",
               resultado,
@@ -99,6 +104,24 @@ export function usePosSync({
             });
           } catch (e) {
             const info = posErrorInfo(e);
+            if (op.origen === "b13" && info.code === "INSUFFICIENT_STOCK") {
+              // Llegar al chequeo de stock PRUEBA que la venta no existía: una
+              // clave ya reclamada con el mismo contenido se contesta antes,
+              // con el ticket original. Y el 400 revierte la transacción, así
+              // que la clave queda libre. Recién ahora se adapta: se declara
+              // `charged_at` —el mismo instante que congeló B13 al cobrar— y el
+              // próximo intento va por el camino offline y captura la salida
+              // pendiente.
+              await actualizarOperacion(op.clientOperationId, {
+                origen: undefined,
+                payload: { ...op.payload, charged_at: op.payload.operation_date },
+                intentos: op.intentos + 1,
+                ultimoError: null,
+                ultimoCodigo: null,
+                proximoIntentoEn: 0,
+              });
+              continue;
+            }
             const clase = clasificarSync(info);
             const red = esFalloDeRed(info);
             if (clase === "reintento") {

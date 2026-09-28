@@ -24,6 +24,7 @@ const ROTULO: Record<OperacionGuardada["estado"], string> = {
   SINCRONIZADA: "Sincronizada",
   REQUIERE_AUTENTICACION: "Hay que volver a entrar",
   REQUIERE_REVISION: "Requiere revisión",
+  EN_CORRECCION: "Cobro sin completar",
 };
 
 const AYUDA: Record<OperacionGuardada["estado"], string> = {
@@ -32,6 +33,9 @@ const AYUDA: Record<OperacionGuardada["estado"], string> = {
   REQUIERE_AUTENTICACION:
     "La sesión venció o esta PC dejó de estar habilitada como caja. Volvé a entrar.",
   REQUIERE_REVISION: "El servidor la rechazó. Miralo con el encargado antes de reintentar.",
+  EN_CORRECCION:
+    "El servidor la rechazó y el cobro corregido todavía no entró. Si ya cobraste, " +
+    "rehacelo o devolvé la plata antes de descartarla.",
 };
 
 function cuando(iso: string): string {

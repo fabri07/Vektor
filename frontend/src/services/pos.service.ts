@@ -113,9 +113,16 @@ export const posService = {
    * venta existiendo. Le dice al servidor "esto ya se cobró": no la rechaces
    * por stock, registrá la salida pendiente.
    */
-  async syncOperation(payload: PosOperationPayload): Promise<PosOperationResult> {
+  async syncOperation(
+    payload: PosOperationPayload,
+    { offline = true }: { offline?: boolean } = {},
+  ): Promise<PosOperationResult> {
+    // `offline: false` para RECLAMAR con el contenido original: una venta
+    // migrada de B13 puede existir ya en el servidor, y lo único que la
+    // recupera es mandar exactamente lo que se mandó la primera vez. El header
+    // no entra en la huella, pero `charged_at` —que el header exige— sí.
     const res = await api.post<PosOperationResult>("/pos/operations", payload, {
-      headers: { "X-POS-Offline": "1" },
+      headers: offline ? { "X-POS-Offline": "1" } : {},
     });
     return res.data;
   },
