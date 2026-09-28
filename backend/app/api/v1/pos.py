@@ -56,7 +56,11 @@ from app.api.v1.sales import (
     _resolve_sale_customer,
     _sale_snapshot,
 )
-from app.application.services import pos_discrepancy_service, stock_service
+from app.application.services import (
+    pos_cash_session_service,
+    pos_discrepancy_service,
+    stock_service,
+)
 from app.application.services.idempotency import (
     ClaveReusada,
     Repeticion,
@@ -100,6 +104,7 @@ from app.persistence.models import (
 )
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
+from app.persistence.models.pos_cash_session import PosCashSession, PosLateSale
 from app.persistence.models.pos_stock_discrepancy import (
     ESTADO_ABIERTA,
     RESOLUCION_AJUSTE,
@@ -107,8 +112,12 @@ from app.persistence.models.pos_stock_discrepancy import (
 )
 from app.persistence.models.pos_terminal import PosTerminal
 from app.schemas.pos import (
+    PosCashSessionCloseRequest,
+    PosCashSessionOpenRequest,
+    PosCashSessionResponse,
     PosCatalogResponse,
     PosCustomerResponse,
+    PosLateSaleResponse,
     PosOperationRequest,
     PosOperationResponse,
     PosOperationSummary,
@@ -637,6 +646,36 @@ async def create_pos_operation(
     session.add_all(lineas)
     session.add_all(tenders)
     await session.flush()
+
+    # El turno (B8). La caja genera el id al abrir, incluso sin red, así que el
+    # servidor lo ADOPTA: una venta de un turno que no existe lo crea abierto.
+    # Exigir que existiera antes rompería el arranque sin conexión de B7b.
+    if body.client_session_id:
+        sesion = await pos_cash_session_service.abrir_o_adoptar(
+            session,
+            tenant.tenant_id,
+            body.client_session_id,
+            user_id=user.user_id,
+            terminal_id=operacion.terminal_id,
+        )
+        if not sesion.esta_abierto:
+            # Llegó después de que se firmara el arqueo. **No se toca ese
+            # número**: si una venta tardía lo reescribiera, el total que el
+            # cajero contó y firmó dejaría de ser el que firmó. Queda para
+            # conciliar, con el efectivo que habría movido.
+            await pos_cash_session_service.registrar_tardia(
+                session,
+                sesion,
+                operacion,
+                cash_ars=sum(
+                    (
+                        t.amount_ars
+                        for t in tenders
+                        if t.payment_method == pos_cash_session_service.METODO_EFECTIVO
+                    ),
+                    Decimal("0"),
+                ),
+            )
 
     # Las salidas pendientes se registran después del flush: la discrepancia
     # apunta a la línea, y la línea recién ahí tiene id.
@@ -1348,3 +1387,205 @@ async def disable_pos_terminal(
     session: AsyncSession = Depends(get_db_session),
 ) -> PosTerminal:
     return await dar_de_baja(session, user, terminal_id)
+
+
+def _a_sesion(
+    sesion: PosCashSession,
+    *,
+    cashier_name: str | None = None,
+    esperado_ahora: Decimal | None = None,
+    tardias: list[PosLateSale] | None = None,
+) -> PosCashSessionResponse:
+    respuesta = PosCashSessionResponse.model_validate(sesion)
+    respuesta.cashier_name = cashier_name
+    respuesta.expected_cash_now_ars = esperado_ahora
+    respuesta.late_sales = [
+        PosLateSaleResponse.model_validate(t) for t in (tardias or [])
+    ]
+    return respuesta
+
+
+@router.post(
+    "/cash-sessions",
+    response_model=PosCashSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Abrir el turno de esta caja",
+)
+async def open_cash_session(
+    body: PosCashSessionOpenRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+    terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
+) -> PosCashSessionResponse:
+    """Abre el turno, o devuelve el que ya estaba con ese id.
+
+    **Idempotente y adoptivo.** El id lo genera la caja, que puede haber abierto
+    el turno sin red y estar avisando recién ahora; y la primera venta que llega
+    lo crea igual. Las dos cosas pueden pasar a la vez, y el único
+    ``(tenant, client_session_id)`` decide cuál fila queda.
+
+    Abrir un turno que ya cerró devuelve ese turno cerrado: no se reabre, porque
+    su arqueo ya está firmado. La caja lo lee y abre uno nuevo.
+    """
+    terminal = await resolver_terminal(session, tenant.tenant_id, terminal_secret)
+    exigir_terminal_si_es_cajero(user, terminal)
+    sesion = await pos_cash_session_service.abrir_o_adoptar(
+        session,
+        tenant.tenant_id,
+        body.client_session_id,
+        user_id=user.user_id,
+        terminal_id=terminal.id if terminal is not None else None,
+        opening_float_ars=body.opening_float_ars,
+    )
+    return _a_sesion(sesion, cashier_name=user.full_name)
+
+
+@router.get(
+    "/cash-sessions",
+    response_model=list[PosCashSessionResponse],
+    summary="Turnos de caja",
+)
+async def list_cash_sessions(
+    abiertos: bool = Query(default=False, alias="open"),
+    limit: int = Query(default=50, ge=1, le=200),
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[PosCashSessionResponse]:
+    """Un cajero ve SUS turnos; OWNER y ADMIN, los de todos.
+
+    Mismo criterio que el ticket en B12: el arqueo de un compañero es plata de
+    la que el cajero no responde.
+    """
+    solo_mios = user.role_code == CASHIER_ROLE
+    filas = await pos_cash_session_service.listar(
+        session,
+        tenant.tenant_id,
+        solo_abiertos=abiertos,
+        user_id=user.user_id if solo_mios else None,
+        limite=limit,
+    )
+    return [_a_sesion(s) for s in filas]
+
+
+@router.post(
+    "/cash-sessions/{session_id}/close",
+    response_model=PosCashSessionResponse,
+    summary="Cerrar el turno y firmar su arqueo",
+)
+async def close_cash_session(
+    session_id: uuid.UUID,
+    body: PosCashSessionCloseRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosCashSessionResponse:
+    """Congela el arqueo: esperado, contado y diferencia dejan de cambiar.
+
+    Sin PIN a propósito: cerrar el turno es el final del trabajo del cajero y un
+    428 en ese momento lo dejaría sin poder cerrar. Lo que sí se exige es que
+    sea SU turno —el de un compañero lo cierra el encargado—, porque el arqueo
+    queda firmado a nombre de quien lo cierra.
+
+    Idempotencia: cerrar dos veces devuelve 409. No es un reintento inocente
+    como el resto de la caja — el segundo cierre traería OTRO conteo, y
+    aceptarlo pisaría el número firmado.
+    """
+    await acquire_write_lock_shared(session, tenant.tenant_id)
+    sesion = (
+        await session.execute(
+            select(PosCashSession)
+            .where(
+                PosCashSession.tenant_id == tenant.tenant_id,
+                PosCashSession.id == session_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if sesion is None:
+        raise HTTPException(status_code=404, detail="Turno no encontrado.")
+    if user.role_code == CASHIER_ROLE and sesion.user_id != user.user_id:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "CASH_SESSION_NOT_OWN",
+                "message": "Sólo podés cerrar tu propio turno. Pedíselo al encargado.",
+            },
+        )
+    try:
+        cerrada = await pos_cash_session_service.cerrar(
+            session,
+            sesion,
+            counted_cash_ars=body.counted_cash_ars,
+            user_id=user.user_id,
+            notes=body.notes,
+        )
+    except pos_cash_session_service.SesionYaCerradaError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CASH_SESSION_ALREADY_CLOSED",
+                "message": "Ese turno ya se cerró. Su arqueo no se vuelve a calcular.",
+            },
+        ) from exc
+
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant.tenant_id,
+            decision_type="POS_CASH_SESSION_CLOSED",
+            decision_data={
+                "session_id": str(cerrada.id),
+                "client_session_id": cerrada.client_session_id,
+                "cashier_user_id": str(cerrada.user_id) if cerrada.user_id else None,
+                "terminal_id": str(cerrada.terminal_id) if cerrada.terminal_id else None,
+                "opening_float_ars": str(cerrada.opening_float_ars),
+                "expected_cash_ars": str(cerrada.expected_cash_ars),
+                "counted_cash_ars": str(cerrada.counted_cash_ars),
+                "difference_ars": str(cerrada.difference_ars),
+                "notes": cerrada.notes,
+            },
+            triggered_by="ui:pos",
+            actor_user_id=user.user_id,
+            context={"endpoint": "pos.close_cash_session"},
+            created_at=datetime.now(UTC),
+        )
+    )
+    return _a_sesion(cerrada, cashier_name=user.full_name)
+
+
+@router.get(
+    "/cash-sessions/{session_id}",
+    response_model=PosCashSessionResponse,
+    summary="Detalle del turno, con lo que llegó después de cerrarlo",
+)
+async def get_cash_session(
+    session_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosCashSessionResponse:
+    """El turno y, si ya cerró, las ventas que llegaron después.
+
+    Un turno abierto trae además `expected_cash_now_ars`: lo cobrado hasta
+    ahora. **No es el arqueo** —cambia con cada venta— y por eso no se guarda.
+    """
+    sesion = await session.get(PosCashSession, session_id)
+    if sesion is None or sesion.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=404, detail="Turno no encontrado.")
+    if user.role_code == CASHIER_ROLE and sesion.user_id != user.user_id:
+        raise HTTPException(status_code=404, detail="Turno no encontrado.")
+
+    esperado_ahora = None
+    tardias: list[PosLateSale] = []
+    if sesion.esta_abierto:
+        cobrado = await pos_cash_session_service.efectivo_del_turno(
+            session, tenant.tenant_id, sesion.client_session_id
+        )
+        esperado_ahora = Decimal(sesion.opening_float_ars) + cobrado
+    else:
+        tardias = await pos_cash_session_service.listar_tardias(
+            session, tenant.tenant_id, sesion.id
+        )
+    return _a_sesion(sesion, esperado_ahora=esperado_ahora, tardias=tardias)

@@ -376,3 +376,56 @@ class PosTerminalEnrolledResponse(PosTerminalResponse):
     """La respuesta del alta: la ÚNICA vez que se ve el secreto."""
 
     secret: str
+
+
+class PosCashSessionOpenRequest(BaseModel):
+    """Abrir turno. El id lo trae la caja: puede haberlo generado sin red."""
+
+    client_session_id: str = Field(min_length=1, max_length=64)
+    #: Lo que había en el cajón al abrir. Lo declara quien abre; el servidor no
+    #: lo puede saber.
+    opening_float_ars: Decimal = Field(
+        default=Decimal("0"), ge=0, le=_MAX_IMPORTE, decimal_places=2
+    )
+
+
+class PosCashSessionCloseRequest(BaseModel):
+    #: Lo que el cajero CONTÓ en el cajón. Es el dato que el servidor no tiene.
+    counted_cash_ars: Decimal = Field(ge=0, le=_MAX_IMPORTE, decimal_places=2)
+    notes: str | None = Field(default=None, max_length=500)
+
+
+class PosLateSaleResponse(BaseModel):
+    """Una venta que llegó después del cierre. No movió el arqueo firmado."""
+
+    model_config = {"from_attributes": True}
+
+    operation_id: UUID
+    cash_ars: Decimal
+    created_at: datetime
+
+
+class PosCashSessionResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: UUID
+    client_session_id: str
+    terminal_id: UUID | None
+    user_id: UUID | None
+    cashier_name: str | None = None
+    opening_float_ars: Decimal
+    opened_at: datetime
+    closed_at: datetime | None
+    closed_by_user_id: UUID | None
+    #: `None` mientras el turno está abierto: el esperado se congela al cerrar.
+    #: Para ver el parcial de un turno abierto está `expected_cash_now_ars`.
+    expected_cash_ars: Decimal | None
+    counted_cash_ars: Decimal | None
+    difference_ars: Decimal | None
+    notes: str | None
+    status: str
+    #: Sólo en el detalle de un turno ABIERTO: lo cobrado hasta ahora. No se
+    #: guarda —cambia con cada venta— y no es el arqueo.
+    expected_cash_now_ars: Decimal | None = None
+    #: Sólo en el detalle de un turno CERRADO que recibió ventas después.
+    late_sales: list[PosLateSaleResponse] = []
