@@ -9,6 +9,7 @@ import {
   listarNoSincronizadas,
   listarOperaciones,
   pendientesSincronizables,
+  podarSincronizadas,
   unidadesComprometidas,
 } from "@/lib/offline/posDb";
 import type { PosOperationPayload } from "@/lib/pos/cart";
@@ -148,5 +149,42 @@ describe("unidades comprometidas", () => {
     await sembrar("op-1", {}, [{ product_id: "p1", quantity: 2 }]);
     await actualizarOperacion("op-1", { estado: "SINCRONIZADA" });
     expect((await unidadesComprometidas("t1")).get("p1")).toBeUndefined();
+  });
+});
+
+describe("podar lo ya subido", () => {
+  const SEMANA = 7 * 24 * 60 * 60 * 1000;
+
+  it("borra las sincronizadas viejas y deja las de esta semana", async () => {
+    // Una caja con 200 ventas por día acumularía 73.000 filas por año, y el
+    // navegador puede evacuar la base por tamaño — llevándose las PENDIENTES,
+    // que son las únicas que no están en ningún otro lado.
+    const ahora = Date.now();
+    await sembrar("vieja");
+    await actualizarOperacion("vieja", {
+      estado: "SINCRONIZADA",
+      sincronizadaEn: new Date(ahora - SEMANA - 60_000).toISOString(),
+    });
+    await sembrar("reciente");
+    await actualizarOperacion("reciente", {
+      estado: "SINCRONIZADA",
+      sincronizadaEn: new Date(ahora - 60_000).toISOString(),
+    });
+
+    expect(await podarSincronizadas("t1", ahora)).toBe(1);
+    expect((await listarOperaciones("t1")).map((o) => o.clientOperationId)).toEqual([
+      "reciente",
+    ]);
+  });
+
+  it("NUNCA borra una venta que no esté sincronizada, por vieja que sea", async () => {
+    const ahora = Date.now();
+    await sembrar("pendiente-vieja");
+    await actualizarOperacion("pendiente-vieja", {
+      estado: "REQUIERE_REVISION",
+      sincronizadaEn: new Date(ahora - 365 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    expect(await podarSincronizadas("t1", ahora)).toBe(0);
+    expect(await listarOperaciones("t1")).toHaveLength(1);
   });
 });

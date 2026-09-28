@@ -252,6 +252,41 @@ export async function unidadesComprometidas(
   return porProducto;
 }
 
+/** Cuánto se conserva una venta YA subida. Ver `podarSincronizadas`. */
+export const DIAS_DE_GRACIA = 7;
+
+/**
+ * Borra las ventas ya subidas de hace más de una semana.
+ *
+ * Una caja con 200 ventas por día acumularía 73.000 filas por año en una base
+ * que el navegador puede evacuar por tamaño — y evacuarla se llevaría puestas
+ * las PENDIENTES, que son las únicas que no están en ningún otro lado. Lo
+ * sincronizado ya vive en el servidor: acá se conserva sólo para reimprimir el
+ * comprobante de los últimos días.
+ *
+ * **Sólo toca `SINCRONIZADA`.** Una venta en cualquier otro estado no se borra
+ * por vieja, por más años que pasen.
+ */
+export async function podarSincronizadas(
+  tenantId: string,
+  ahora: number = Date.now(),
+): Promise<number> {
+  const corte = ahora - DIAS_DE_GRACIA * 24 * 60 * 60 * 1000;
+  const base = await abrirPosDb();
+  const tx = base.transaction("operaciones", "readwrite");
+  let borradas = 0;
+  for (const op of await tx.store.index("porTenant").getAll(tenantId)) {
+    if (op.estado !== "SINCRONIZADA") continue;
+    const cuando = Date.parse(op.sincronizadaEn ?? op.creadaEn);
+    if (Number.isFinite(cuando) && cuando < corte) {
+      await tx.store.delete(op.clientOperationId);
+      borradas += 1;
+    }
+  }
+  await tx.done;
+  return borradas;
+}
+
 /**
  * Le pide al navegador que no evacúe estos datos bajo presión de disco.
  *

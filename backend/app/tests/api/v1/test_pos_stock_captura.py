@@ -193,6 +193,21 @@ class TestCaptura:
         assert resp.status_code == 422, resp.text
         assert resp.json()["detail"]["code"] == "OFFLINE_WITHOUT_CHARGED_AT"
 
+    async def test_un_cero_en_el_header_no_es_un_si(
+        self, client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession
+    ) -> None:
+        """`bool("0")` es True en Python, y ese header relaja el invariante de stock."""
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers, stock=3)
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_venta([{"product_id": pid, "quantity": 5}], "500.00"),
+            headers={**caja, "X-POS-Offline": "0"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["code"] == "INSUFFICIENT_STOCK"
+        assert (await db_session.execute(select(PosStockDiscrepancy))).first() is None
+
     async def test_sin_caja_habilitada_no_se_captura_ni_siquiera_el_dueno(
         self, client: AsyncClient, auth_headers: dict[str, str]
     ) -> None:

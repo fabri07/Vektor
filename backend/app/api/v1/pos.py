@@ -139,6 +139,15 @@ _ACCION_IDEMPOTENTE = "IDEMPOTENT_POST_POS_OPERATION"
 #: el usuario, la caja) para poder auditarla.
 OFFLINE_HEADER = "X-POS-Offline"
 
+#: Lo que cuenta como "sí" en ese header. Un `bool(valor)` pelado tomaría `"0"`
+#: como verdadero —toda cadena no vacía lo es—, y ese header relaja el
+#: invariante de stock: no puede depender de leer mal un cero.
+_OFFLINE_SI = frozenset({"1", "true", "yes"})
+
+
+def _es_offline(valor: str | None) -> bool:
+    return valor is not None and valor.strip().lower() in _OFFLINE_SI
+
 #: Motivo de anulación de las `SaleEntry` de un ticket anulado desde la caja.
 #: Ya está en el CHECK `ck_sales_entries_void_reason`: no hace falta migrar.
 _VOID_REASON_TICKET = "USER_CANCELLED"
@@ -243,6 +252,7 @@ async def create_pos_operation(
     # NUEVA exige los permisos actuales, y se chequean ANTES del claim para que
     # un 403 no consuma la clave: el mismo pedido, reintentado cuando el dueño
     # habilite el permiso, tiene que poder entrar.
+    es_offline = _es_offline(offline)
     terminal = None
     if not await idempotent_request_exists(session, tenant.tenant_id, body.client_operation_id):
         # La terminal, como los permisos, se valida sólo para una venta NUEVA: el
@@ -254,7 +264,7 @@ async def create_pos_operation(
             assert_pos_permission(user, PosPermission.DISCOUNT)
         if any(t.payment_method == FIADO_PAYMENT_METHOD for t in body.tenders):
             assert_pos_permission(user, PosPermission.FIADO)
-        if offline:
+        if es_offline:
             # `X-POS-Offline` relaja el invariante "stock negativo prohibido"
             # para ESTA venta, así que no alcanza con el header: hace falta la
             # afirmación fechada de que el pago se recibió y una caja que el
@@ -458,7 +468,7 @@ async def create_pos_operation(
         snapshots[producto.id] = (producto.name, producto.sale_unit, factor)
 
         if producto.stock_units < item.quantity:
-            if not offline:
+            if not es_offline:
                 raise stock_service.InsufficientStockError(
                     item.product_id, producto.stock_units, item.quantity, producto.name
                 )
@@ -532,7 +542,7 @@ async def create_pos_operation(
         # un vuelto sin entregado no se puede explicar.
         cash_change_ars=vuelto if body.cash_received_ars is not None else None,
         notes=body.notes,
-        captured_offline=bool(offline),
+        captured_offline=es_offline,
         charged_at=body.charged_at,
         client_session_id=body.client_session_id,
     )

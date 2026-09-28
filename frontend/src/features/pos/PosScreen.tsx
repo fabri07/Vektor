@@ -32,6 +32,7 @@ import {
   borrarOperacion,
   guardarOperacion,
   pedirPersistencia,
+  podarSincronizadas,
 } from "@/lib/offline/posDb";
 import {
   activarVersionNueva,
@@ -372,6 +373,10 @@ function PosRegister() {
     arrancado.current = true;
     void (async () => {
       setPersistencia(await pedirPersistencia());
+      // Lo ya subido vive en el servidor: acá sólo se conserva unos días para
+      // reimprimir. Sin poda, la base crece hasta que el navegador la evacúa —
+      // y eso se llevaría puestas las PENDIENTES.
+      await podarSincronizadas(tenantId);
       // Puente de una sola vez: la venta que B13 dejaba en `localStorage`.
       await migrarPendienteDeB13({
         tenantId,
