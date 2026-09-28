@@ -26,7 +26,18 @@ export type EstadoPendiente =
   | "PENDIENTE"
   | "SINCRONIZADA"
   | "REQUIERE_AUTENTICACION"
-  | "REQUIERE_REVISION";
+  | "REQUIERE_REVISION"
+  /**
+   * El servidor la rechazó por algo que el cajero puede corregir en el
+   * mostrador (faltó stock, cambió un precio) y todavía no se rehízo el cobro.
+   *
+   * **No se borra.** Al apretar Cobrar ya se afirmó `charged_at`, o sea que la
+   * plata entró; borrarla dejaba sin constancia un cobro que puede haberse
+   * recibido, si el cajero se va o se cierra la pestaña antes de rehacerlo.
+   * Tampoco se sincroniza: reenviarla daría el mismo rechazo. Desaparece sola
+   * cuando el cobro corregido entra, y si no, queda a la vista.
+   */
+  | "EN_CORRECCION";
 
 export interface OperacionGuardada {
   /** El mismo id que viaja como clave de idempotencia. */
@@ -37,6 +48,8 @@ export interface OperacionGuardada {
   tenantId: string;
   userId: string;
   terminalId: string | null;
+  /** Ver `NuevaOperacion.origen`. Se limpia cuando deja de hacer falta. */
+  origen?: "b13";
   estado: EstadoPendiente;
   /** El cuerpo EXACTO que se manda, congelado al cerrar el ticket. */
   payload: PosOperationPayload;
@@ -137,6 +150,12 @@ export const MS_DE_PRIMER_ENVIO = 60_000;
 
 export interface NuevaOperacion {
   clientOperationId: string;
+  /**
+   * `"b13"` = viene del resguardo de `localStorage` anterior a B7. Su primer
+   * envío YA ocurrió y se perdió la respuesta, así que se reclama con el
+   * contenido ORIGINAL antes de adaptarlo (ver `usePosSync`).
+   */
+  origen?: "b13";
   tenantId: string;
   userId: string;
   terminalId: string | null;

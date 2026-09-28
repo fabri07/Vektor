@@ -61,22 +61,25 @@ describe("migrar el pendiente de B13", () => {
     expect(window.localStorage.getItem(CLAVE)).toBeNull();
   });
 
-  it("le pone `charged_at` desde su propia fecha de operación", async () => {
-    // Sin esto, el 422 `OFFLINE_WITHOUT_CHARGED_AT` es INCONDICIONAL para todo
-    // lo que sube por la cola —alcance el stock o no—: la venta quedaba en una
-    // cola que no podía subirla nunca. Y la fecha no se inventa: B13 congelaba
-    // el payload entero al apretar Cobrar.
-    sembrarClave("t1", payloadViejo());
+  it("NO le toca el payload: la huella de idempotencia tiene que seguir igual", async () => {
+    // Éste es el punto del bloque. `hash_peticion` usa `exclude_defaults=True`,
+    // así que agregarle `charged_at` cambia la huella — y si el primer envío SÍ
+    // llegó al servidor y sólo se perdió la respuesta (que es EXACTAMENTE el
+    // caso para el que existe este resguardo), el reintento recibiría 409
+    // `IDEMPOTENCY_KEY_REUSED` en vez del ticket original. La adaptación la
+    // hace `usePosSync`, y sólo cuando el servidor confirma que no existe.
+    const original = payloadViejo();
+    sembrarClave("t1", original);
     await migrarPendienteDeB13(DATOS);
     const guardada = await obtenerOperacion("op-viejo");
-    expect(guardada!.payload.charged_at).toBe("2026-09-25T10:00:00");
+    expect(guardada!.payload).toEqual(original);
+    expect(guardada!.payload.charged_at).toBeNull();
   });
 
-  it("si ya traía `charged_at`, no se lo toca", async () => {
-    sembrarClave("t1", payloadViejo({ charged_at: "2026-09-25T09:30:00" }));
+  it("queda marcada como venida de B13, para que se reclame antes de adaptarse", async () => {
+    sembrarClave("t1", payloadViejo());
     await migrarPendienteDeB13(DATOS);
-    const guardada = await obtenerOperacion("op-viejo");
-    expect(guardada!.payload.charged_at).toBe("2026-09-25T09:30:00");
+    expect((await obtenerOperacion("op-viejo"))!.origen).toBe("b13");
   });
 
   it("la cola la puede tomar en el acto: su primer envío ya pasó", async () => {

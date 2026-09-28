@@ -92,7 +92,9 @@ it("sube la venta y la deja sincronizada", async () => {
   await act(async () => {
     await result.current.flush();
   });
-  expect(svc.syncOperation).toHaveBeenCalledWith(payload("op-1"));
+  // Una venta de B7 lleva su `charged_at` desde el primer envío, así que
+  // sube por el camino offline sin más vueltas.
+  expect(svc.syncOperation).toHaveBeenCalledWith(payload("op-1"), { offline: true });
   expect((await estado("op-1")).estado).toBe("SINCRONIZADA");
 });
 
@@ -187,5 +189,81 @@ it("volver a entrar reactiva lo que esperaba autenticación", async () => {
   montar();
   await waitFor(async () => {
     expect((await estado("op-1")).estado).toBe("SINCRONIZADA");
+  });
+});
+
+describe("la venta migrada de B13 se reclama antes de adaptarse", () => {
+  /** Como la dejó la migración: sin `charged_at`, marcada `origen: "b13"`. */
+  async function sembrarB13(id: string) {
+    const p = payload(id);
+    await sembrar(id, { origen: "b13", payload: { ...p, charged_at: null } });
+  }
+
+  it("el primer intento va con el contenido ORIGINAL y sin el header offline", async () => {
+    // Su primer envío YA ocurrió y se perdió la respuesta: la venta puede
+    // existir en el servidor, y lo único que devuelve su ticket es mandar
+    // exactamente lo mismo. `charged_at` entra en la huella de idempotencia
+    // (`hash_peticion` usa `exclude_defaults=True`), así que agregarlo acá
+    // daría 409 `IDEMPOTENCY_KEY_REUSED` sobre una venta que sí existe.
+    await sembrarB13("op-b13");
+    svc.syncOperation.mockResolvedValue({ id: "srv-1" } as never);
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    expect(svc.syncOperation).toHaveBeenCalledWith(
+      expect.objectContaining({ client_operation_id: "op-b13", charged_at: null }),
+      { offline: false },
+    );
+    expect((await estado("op-b13")).estado).toBe("SINCRONIZADA");
+  });
+
+  it("recién con INSUFFICIENT_STOCK —que prueba que no existe— se le pone `charged_at`", async () => {
+    // Llegar al chequeo de stock prueba que la clave se reclamó fresca: una ya
+    // usada con el mismo contenido se contesta antes, con el ticket original. Y
+    // el 400 revierte la transacción, así que la clave queda libre para el
+    // intento adaptado.
+    await sembrarB13("op-b13");
+    svc.syncOperation.mockRejectedValue(httpError(400, "INSUFFICIENT_STOCK"));
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    const op = await estado("op-b13");
+    expect(op.payload.charged_at).toBe("2026-09-27T10:00:00");
+    expect(op.origen).toBeUndefined();
+    expect(op.estado).toBe("PENDIENTE");
+  });
+
+  it("y el intento siguiente ya va por el camino offline", async () => {
+    await sembrarB13("op-b13");
+    svc.syncOperation.mockRejectedValueOnce(httpError(400, "INSUFFICIENT_STOCK"));
+    svc.syncOperation.mockResolvedValueOnce({ id: "srv-1" } as never);
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    await act(async () => {
+      await result.current.flush();
+    });
+    expect(svc.syncOperation).toHaveBeenNthCalledWith(2, expect.any(Object), {
+      offline: true,
+    });
+    expect((await estado("op-b13")).estado).toBe("SINCRONIZADA");
+  });
+
+  it("un rechazo que NO es de stock no le toca el cuerpo", async () => {
+    // Un 422 de otra cosa no prueba nada sobre si la venta existe: adaptar el
+    // cuerpo ahí quemaría la única chance de recuperar su ticket.
+    await sembrarB13("op-b13");
+    svc.syncOperation.mockRejectedValue(httpError(422, "PRICE_TOKEN_INVALID"));
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    const op = await estado("op-b13");
+    expect(op.payload.charged_at).toBeNull();
+    expect(op.origen).toBe("b13");
+    expect(op.estado).toBe("REQUIERE_REVISION");
   });
 });
