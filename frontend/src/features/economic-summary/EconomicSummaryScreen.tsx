@@ -12,6 +12,8 @@ import { ForecastPanel } from "@/features/dashboard/ForecastPanel";
 import { ProfitWithdrawalModal } from "@/features/economic-summary/ProfitWithdrawalModal";
 import { type PeriodValue, resolvePeriod } from "@/lib/period";
 import { economicSummaryService } from "@/services/economic-summary.service";
+import { SubscriptionLockedNotice } from "@/components/subscription/SubscriptionLockedNotice";
+import { esAnalisisBloqueado } from "@/lib/subscription";
 
 function formatARS(value: number): string {
   return new Intl.NumberFormat("es-AR", {
@@ -31,7 +33,7 @@ export function EconomicSummaryScreen() {
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const { from, to } = resolvePeriod(period);
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["economic-summary", from, to],
     queryFn: () => economicSummaryService.getSummary({ from_date: from, to_date: to }),
     staleTime: 60 * 1000,
@@ -75,6 +77,8 @@ export function EconomicSummaryScreen() {
             />
           ))}
         </div>
+      ) : esAnalisisBloqueado(error) ? (
+        <SubscriptionLockedNotice />
       ) : isError ? (
         <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
           Error al cargar el resumen. Recargá la página.

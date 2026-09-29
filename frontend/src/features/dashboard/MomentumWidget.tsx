@@ -12,6 +12,8 @@ import {
 import { fetchMomentumProfile } from "@/services/momentum.service";
 import { Badge } from "@/components/ui/Badge";
 import type { MomentumProfileResponse, WeeklyHistoryItem } from "@/types/api";
+import { SubscriptionLockedNotice } from "@/components/subscription/SubscriptionLockedNotice";
+import { esAnalisisBloqueado, reintentarSalvoBloqueo } from "@/lib/subscription";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -204,15 +206,17 @@ function MomentumSkeleton() {
 // ── Main widget ───────────────────────────────────────────────────────────────
 
 export function MomentumWidget() {
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["momentum", "profile"],
     queryFn: fetchMomentumProfile,
     staleTime: 60 * 60 * 1000, // 1 hour
-    retry: 1,
+    retry: reintentarSalvoBloqueo,
   });
+  const bloqueado = esAnalisisBloqueado(error);
 
   const isEmpty =
     !isLoading &&
+    !bloqueado &&
     (isError ||
       data == null ||
       (data.weekly_history.length === 0 && data.best_score_ever === null));
@@ -225,6 +229,8 @@ export function MomentumWidget() {
       </p>
 
       {isLoading && <MomentumSkeleton />}
+
+      {bloqueado && <SubscriptionLockedNotice variant="compact" />}
 
       {isEmpty && (
         <p className="py-6 text-center text-sm text-vk-text-muted">

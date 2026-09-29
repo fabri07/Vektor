@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant
+from app.api.v1.deps import get_current_tenant, require_active_subscription_for_insights
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import MomentumProfile
 from app.persistence.models.score import WeeklyScoreHistory
@@ -18,7 +18,8 @@ from app.schemas.momentum import (
     WeeklyHistoryItem,
 )
 
-router = APIRouter()
+# B14: todo este router es análisis — con la suscripción bloqueada, 402.
+router = APIRouter(dependencies=[Depends(require_active_subscription_for_insights)])
 
 
 @router.get(

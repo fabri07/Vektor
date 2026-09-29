@@ -13,6 +13,8 @@ import {
 import { fetchCashForecast } from "@/services/dashboard.service";
 import type { CashForecastResponse } from "@/types/api";
 import { formatARS, formatARSCompact } from "@/features/dashboard/dashboardData";
+import { SubscriptionLockedNotice } from "@/components/subscription/SubscriptionLockedNotice";
+import { esAnalisisBloqueado, reintentarSalvoBloqueo } from "@/lib/subscription";
 
 const TIER_LABELS: Record<number, string> = {
   0: "Sin datos suficientes",
@@ -32,15 +34,19 @@ const CONFIDENCE_COLORS: Record<string, string> = {
  * trae su propia data vía fetchCashForecast. Vive en la pestaña Balance.
  */
 export function ForecastPanel() {
-  const { data, isLoading } = useQuery<CashForecastResponse>({
+  const { data, isLoading, error } = useQuery<CashForecastResponse>({
     queryKey: ["forecast", "cash"],
     queryFn: () => fetchCashForecast(),
     staleTime: 30 * 60 * 1000,
-    retry: 1,
+    retry: reintentarSalvoBloqueo,
   });
 
   if (isLoading) {
     return <div className="h-[280px] animate-pulse rounded-2xl bg-vektor-surface" />;
+  }
+
+  if (esAnalisisBloqueado(error)) {
+    return <SubscriptionLockedNotice variant="compact" />;
   }
 
   if (!data || data.tier === 0) {

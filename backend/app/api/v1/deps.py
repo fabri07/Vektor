@@ -365,12 +365,19 @@ async def require_owner_stepup(
 # ── Suscripción (Etapa 2 — política de planes) ──────────────────────────────────
 
 
-def subscription_http_error(exc: Exception) -> HTTPException:
+def subscription_http_error(
+    exc: Exception, *, codigo_bloqueo: str = "SUBSCRIPTION_READ_ONLY"
+) -> HTTPException:
     """LA traducción de un rechazo de suscripción/cupo a HTTP — una sola.
 
     402 la suscripción no habilita · 429 sin cupo · 409 plazas o clave de
     operación ya presentada · 503 dato roto nuestro (sin suscripción). Todos
     con `detail.code` estable, que es lo que lee el frontend.
+
+    `codigo_bloqueo` es el código del 402: el gate de escritura dice
+    `SUBSCRIPTION_READ_ONLY` y el de análisis `SUBSCRIPTION_INSIGHTS_LOCKED`,
+    porque el frontend muestra cosas distintas (no pudo guardar vs. el
+    análisis está pausado). La regla de QUIÉN está bloqueado es la misma.
     """
     if isinstance(exc, SubscriptionMissing):
         return HTTPException(
@@ -380,7 +387,7 @@ def subscription_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, SubscriptionAccessDenied):
         return HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail={"code": "SUBSCRIPTION_READ_ONLY", "reason": exc.reason},
+            detail={"code": codigo_bloqueo, "reason": exc.reason},
         )
     if isinstance(exc, QuotaExceeded):
         return HTTPException(
@@ -439,6 +446,31 @@ async def require_active_subscription(
         await quota_service.assert_tenant_can_write(session, tenant_id, origen="write_gate")
     except SUBSCRIPTION_ERRORS as exc:
         raise subscription_http_error(exc) from exc
+
+
+async def require_active_subscription_for_insights(
+    tenant_id: UUID = Depends(get_current_tenant_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Gate de las lecturas ANALÍTICAS (B14 del POS).
+
+    Con la suscripción bloqueada, lo que se pausa es el análisis —score,
+    insights, proyección, balance, momentum—, no los datos ni la caja: un
+    negocio que no pagó sigue cobrando y sigue viendo y corrigiendo lo que
+    cargó, pero Véktor deja de trabajar para él. 402
+    `SUBSCRIPTION_INSIGHTS_LOCKED` con el mismo `reason` que el gate de
+    escritura, y sin suscripción 503, igual que allá: nunca acceso libre.
+
+    La regla de quién está bloqueado es `resolve_access`, la misma que el
+    gate de escritura; la lista exacta de rutas la fija
+    `test_las_rutas_de_analisis_con_gate_son_exactamente_estas`.
+    """
+    try:
+        await quota_service.assert_tenant_can_see_insights(session, tenant_id)
+    except SUBSCRIPTION_ERRORS as exc:
+        raise subscription_http_error(
+            exc, codigo_bloqueo="SUBSCRIPTION_INSIGHTS_LOCKED"
+        ) from exc
 
 
 # ── Mantenimiento (F3-T3 — dedup de productos) ──────────────────────────────────

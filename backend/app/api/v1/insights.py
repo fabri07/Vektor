@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant
+from app.api.v1.deps import get_current_tenant, require_active_subscription_for_insights
 from app.domain.product import DEFAULT_LOW_STOCK_THRESHOLD_UNITS
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import ActionSuggestion, Insight
@@ -20,6 +20,10 @@ from app.persistence.repositories.inventory_repository import InventoryRepositor
 from app.persistence.repositories.transaction_repository import ExpenseRepository, SaleRepository
 
 router = APIRouter()
+
+# B14: las lecturas son análisis y llevan el gate; el PATCH de acknowledge es
+# una corrección y no.
+_GATE_DE_ANALISIS = [Depends(require_active_subscription_for_insights)]
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -61,6 +65,7 @@ class CurrentInsightResponse(BaseModel):
     "/current",
     response_model=CurrentInsightResponse,
     summary="Active insight + action suggestion for the current tenant",
+    dependencies=_GATE_DE_ANALISIS,
 )
 async def get_current_insight(
     tenant: Tenant = Depends(get_current_tenant),
@@ -129,7 +134,12 @@ async def acknowledge_action(
     return ActionSuggestionResponse.model_validate(action)
 
 
-@router.get("", response_model=list[InsightResponse], summary="List insights")
+@router.get(
+    "",
+    response_model=list[InsightResponse],
+    summary="List insights",
+    dependencies=_GATE_DE_ANALISIS,
+)
 async def list_insights(
     limit: int = Query(default=20, ge=1, le=100),
     tenant: Tenant = Depends(get_current_tenant),
@@ -149,6 +159,7 @@ async def list_insights(
     "/actions",
     response_model=list[ActionSuggestionResponse],
     summary="List action suggestions",
+    dependencies=_GATE_DE_ANALISIS,
 )
 async def list_actions(
     status_filter: str | None = Query(default=None, alias="status"),
@@ -228,6 +239,7 @@ class BusinessBreakdownResponse(BaseModel):
     "/breakdown",
     response_model=BusinessBreakdownResponse,
     summary="Desglose de gastos, proveedores y stock del período",
+    dependencies=_GATE_DE_ANALISIS,
 )
 async def get_business_breakdown(
     days: int = Query(default=30, ge=7, le=365, description="Ventana en días hacia atrás"),
@@ -445,6 +457,7 @@ def _aggregate_weekly(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     "/cash-breakdown",
     response_model=CashBreakdownResponse,
     summary="Ingresos y egresos por método de pago en el período",
+    dependencies=_GATE_DE_ANALISIS,
 )
 async def get_cash_breakdown(
     days: int = Query(default=30, ge=7, le=365, description="Ventana en días hacia atrás"),

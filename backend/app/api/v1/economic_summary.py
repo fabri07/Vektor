@@ -5,13 +5,14 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant
+from app.api.v1.deps import get_current_tenant, require_active_subscription_for_insights
 from app.application.services.economic_summary_service import compute_economic_summary
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
 from app.schemas.economic_summary import EconomicSummaryResponse
 
-router = APIRouter()
+# B14: todo este router es análisis — con la suscripción bloqueada, 402.
+router = APIRouter(dependencies=[Depends(require_active_subscription_for_insights)])
 
 
 @router.get(
