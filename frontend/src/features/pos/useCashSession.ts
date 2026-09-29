@@ -164,6 +164,15 @@ export function useCashSession({
 
   const soltar = useCallback(() => quitar(clave), [clave, quitar]);
 
+  // La caja de esta PC cambió (el dueño la habilitó, o se volvió a habilitar
+  // con otro id) con un turno abierto: es el mismo cajón, así que el turno se
+  // pasa a la clave nueva en vez de quedar huérfano y pedir abrir otro.
+  const adoptarDeOtraCaja = usePosCashSessionStore((s) => s.adoptarDeOtraCaja);
+  useEffect(() => {
+    if (!habilitado || !tenantId || !userId || turno) return;
+    adoptarDeOtraCaja(tenantId, userId, clave);
+  }, [habilitado, tenantId, userId, clave, turno, adoptarDeOtraCaja]);
+
   // Al montar (y al cambiar de usuario o caja): ¿el turno guardado sigue
   // abierto? Y ¿hay turnos anteriores sin cerrar en esta caja?
   const clientSessionId = turno?.clientSessionId ?? null;

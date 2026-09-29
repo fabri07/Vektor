@@ -597,3 +597,50 @@ describe("revisión del turno durante la jornada", () => {
     expect(svc.closeCashSession).toHaveBeenCalledWith("s1", "5000.00", null);
   });
 });
+
+describe("la caja cambia con el turno abierto", () => {
+  const turno = {
+    clientSessionId: "turno-test",
+    serverId: "s1",
+    openingFloatCents: 500000,
+    declaredFloatCents: 500000,
+    openedAt: "2026-09-29T09:00:00.000Z",
+    aperturaConfirmada: true,
+  };
+
+  it("el dueño habilita la PC como caja: el turno sigue, no pide abrir otro", async () => {
+    usePosCashSessionStore.setState({ turnos: { "t1:u1:sin-terminal": turno } });
+    usePosTerminalStore.setState({
+      terminal: { terminalId: "c", name: "Caja 1", secret: "s", tenantId: "t1" },
+      invalid: false,
+    });
+    render(<PosScreen />);
+    expect(await screen.findByTestId("turno-bar")).toBeInTheDocument();
+    expect(Object.keys(usePosCashSessionStore.getState().turnos)).toEqual(["t1:u1:c"]);
+  });
+
+  it("con dos turnos de otras cajas no adivina: pide abrir", async () => {
+    usePosCashSessionStore.setState({
+      turnos: {
+        "t1:u1:sin-terminal": turno,
+        "t1:u1:vieja": { ...turno, clientSessionId: "otro" },
+      },
+    });
+    usePosTerminalStore.setState({
+      terminal: { terminalId: "c", name: "Caja 1", secret: "s", tenantId: "t1" },
+      invalid: false,
+    });
+    render(<PosScreen />);
+    expect(await screen.findByRole("heading", { name: "Abrir turno" })).toBeInTheDocument();
+    expect(Object.keys(usePosCashSessionStore.getState().turnos).sort()).toEqual([
+      "t1:u1:sin-terminal",
+      "t1:u1:vieja",
+    ]);
+  });
+
+  it("el turno de OTRO usuario en esta PC no se adopta", async () => {
+    usePosCashSessionStore.setState({ turnos: { "t1:u9:sin-terminal": turno } });
+    render(<PosScreen />);
+    expect(await screen.findByRole("heading", { name: "Abrir turno" })).toBeInTheDocument();
+  });
+});
