@@ -9,6 +9,8 @@ interface OpenCashSessionProps {
   onAbrir: (fondoCents: number) => Promise<void>;
   /** Turnos abiertos anteriores de este usuario en esta caja. */
   anterioresAbiertos: number;
+  /** Por qué se cerró el turno anterior, si lo cerró otro. */
+  aviso?: string | null;
 }
 
 /**
@@ -18,7 +20,7 @@ interface OpenCashSessionProps {
  * fondo válido y hay que escribirlo: un campo vacío no es "cero", es "no lo
  * dije". Se puede abrir sin red; el turno se avisa solo cuando vuelve.
  */
-export function OpenCashSession({ onAbrir, anterioresAbiertos }: OpenCashSessionProps) {
+export function OpenCashSession({ onAbrir, anterioresAbiertos, aviso }: OpenCashSessionProps) {
   const [fondo, setFondo] = useState("");
   const [abriendo, setAbriendo] = useState(false);
   const cents = fondo.trim() === "" ? null : toCents(fondo);
@@ -43,6 +45,11 @@ export function OpenCashSession({ onAbrir, anterioresAbiertos }: OpenCashSession
         }}
       >
         <h2 className="text-lg font-semibold text-pos-text">Abrir turno</h2>
+        {aviso ? (
+          <p className="text-sm text-pos-danger" role="alert" data-testid="aviso-turno-cerrado">
+            {aviso}
+          </p>
+        ) : null}
         <p className="text-sm text-pos-text-2">
           Contá el efectivo que hay en el cajón antes de empezar. Al cerrar el turno se compara
           contra este fondo más lo que cobres en efectivo.

@@ -36,9 +36,13 @@ import {
 
 /** Cada cuánto se reintenta una apertura que no llegó. */
 const REINTENTO_MS = 20_000;
+/** Cada cuánto la caja pregunta si su turno sigue abierto. */
+const VERIFICACION_MS = 60_000;
 
 export interface EstadoDeTurno {
   turno: TurnoLocal | null;
+  /** Por qué se soltó el turno, si lo cerró otro (el encargado). */
+  avisoDeCierre: string | null;
   /** Turnos abiertos anteriores de este usuario en esta caja (sin contar éste). */
   anterioresAbiertos: number;
   abrir: (fondoCents: number) => Promise<void>;
@@ -78,7 +82,11 @@ export function useCashSession({
   const actualizar = usePosCashSessionStore((s) => s.actualizar);
   const quitar = usePosCashSessionStore((s) => s.quitar);
   const [anterioresAbiertos, setAnteriores] = useState(0);
-  const enVuelo = useRef(false);
+  const [avisoDeCierre, setAvisoDeCierre] = useState<string | null>(null);
+  // La apertura en vuelo, compartida: si el reintento automático está mandando
+  // la apertura justo cuando el cajero firma el cierre, el cierre la ESPERA en
+  // vez de fallar por "no se pudo avisar la apertura".
+  const enVuelo = useRef<Promise<PosCashSession | null> | null>(null);
 
   /** Toma el turno del servidor: su id, su fondo REAL y si sigue abierto. */
   const adoptarRespuesta = useCallback(
@@ -90,7 +98,17 @@ export function useCashSession({
       const actual = usePosCashSessionStore.getState().turnos[clave];
       if (!actual || actual.clientSessionId !== clientSessionId) return;
       if (sesion.status !== "OPEN") {
+        // Lo cerró otro —el encargado desde el panel, típicamente—. Se suelta,
+        // pero NO en silencio: el cajero tiene que saber que su cajón ya no
+        // tiene arqueo propio y avisarle al encargado.
         quitar(clave);
+        setAvisoDeCierre(
+          sesion.status === "ABANDONED"
+            ? `El encargado cerró tu turno sin arqueo${
+                sesion.notes ? ` (${sesion.notes})` : ""
+              }. Lo que cobraste sigue registrado; avisale cuánto hay en el cajón.`
+            : "Tu turno ya estaba cerrado. Abrí uno nuevo para seguir cobrando.",
+        );
         return;
       }
       const real = centavosDeMonto(sesion.opening_float_ars);
@@ -103,28 +121,33 @@ export function useCashSession({
     [clave, actualizar, quitar],
   );
 
-  const confirmarApertura = useCallback(async (): Promise<PosCashSession | null> => {
+  const confirmarApertura = useCallback((): Promise<PosCashSession | null> => {
     const actual = usePosCashSessionStore.getState().turnos[clave];
-    if (!actual || enVuelo.current) return null;
-    enVuelo.current = true;
-    try {
-      const sesion = await posService.openCashSession(
-        actual.clientSessionId,
-        centsToAmount(actual.declaredFloatCents),
-      );
-      adoptarRespuesta(actual.clientSessionId, sesion);
-      return sesion ?? null;
-    } catch {
-      // Sin red, o el servidor no la pudo tomar todavía: se reintenta sola.
-      return null;
-    } finally {
-      enVuelo.current = false;
-    }
+    if (!actual) return Promise.resolve(null);
+    if (enVuelo.current) return enVuelo.current;
+    const envio = (async () => {
+      try {
+        const sesion = await posService.openCashSession(
+          actual.clientSessionId,
+          centsToAmount(actual.declaredFloatCents),
+        );
+        adoptarRespuesta(actual.clientSessionId, sesion);
+        return sesion ?? null;
+      } catch {
+        // Sin red, o el servidor no la pudo tomar todavía: se reintenta sola.
+        return null;
+      } finally {
+        enVuelo.current = null;
+      }
+    })();
+    enVuelo.current = envio;
+    return envio;
   }, [clave, adoptarRespuesta]);
 
   const abrir = useCallback(
     async (fondoCents: number) => {
       if (!tenantId || !userId) return;
+      setAvisoDeCierre(null);
       // PRIMERO se guarda: el turno existe desde acá, con o sin red.
       guardar(clave, {
         clientSessionId: newOperationId(),
@@ -177,6 +200,27 @@ export function useCashSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [habilitado, tenantId, userId, terminalId, clientSessionId, adoptarRespuesta]);
 
+  // ¿Sigue abierto mi turno? Se pregunta cada tanto y al volver la red: el
+  // encargado puede cerrarlo desde otra PC, y enterarse recién al cerrar haría
+  // que el cajero siga vendiendo horas en un turno que ya no tiene arqueo.
+  useEffect(() => {
+    if (!habilitado || !automatico || !serverId || !clientSessionId) return;
+    const verificar = () => {
+      void posService
+        .getCashSession(serverId)
+        .then((sesion) => adoptarRespuesta(clientSessionId, sesion))
+        .catch(() => {
+          // Sin red: se pregunta la próxima.
+        });
+    };
+    window.addEventListener("online", verificar);
+    const timer = window.setInterval(verificar, VERIFICACION_MS);
+    return () => {
+      window.removeEventListener("online", verificar);
+      window.clearInterval(timer);
+    };
+  }, [habilitado, automatico, serverId, clientSessionId, adoptarRespuesta]);
+
   // La apertura que no llegó se reintenta: al volver la red y cada tanto.
   const pendiente = turno ? !turno.aperturaConfirmada : false;
   useEffect(() => {
@@ -192,6 +236,7 @@ export function useCashSession({
 
   return {
     turno: turno ?? null,
+    avisoDeCierre,
     anterioresAbiertos,
     abrir,
     confirmarApertura,

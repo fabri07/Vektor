@@ -197,7 +197,8 @@ function PosRegister() {
   // que cada recarga de la pantalla abría otro turno con fondo $0 que nadie
   // cerraba. Ahora vive en `posCashSessionStore` y sobrevive a la recarga; sin
   // turno abierto no se cobra.
-  const { turno, anterioresAbiertos, abrir, confirmarApertura, soltar } = useCashSession({
+  const { turno, avisoDeCierre, anterioresAbiertos, abrir, confirmarApertura, soltar } =
+    useCashSession({
     tenantId,
     userId,
     terminalId,
@@ -563,7 +564,10 @@ function PosRegister() {
 
   useScanner({
     onScan: (c) => void handleScan(c),
-    enabled: picker === null,
+    // Sólo en la caja con turno: en el cierre o en el panel de turnos una
+    // lectura agregaba un producto a un carrito que no se ve, y el turno se
+    // firmaba con una línea colgada.
+    enabled: picker === null && vista === "caja" && turno !== null,
     terminator,
     thresholdMs,
   });
@@ -792,7 +796,15 @@ function PosRegister() {
         <CashSessionBar
           turno={turno}
           onCerrar={() => {
-            if (saleRef.current.lines.length > 0 || saleRef.current.status === "enviando") {
+            const actual = saleRef.current;
+            if (actual.status === "enviando") {
+              setScanMsg("Esperá a que termine el cobro en curso antes de cerrar el turno.");
+              return;
+            }
+            // Una venta ya cobrada conserva sus líneas en el estado (para el
+            // vuelto y la reimpresión): no es un carrito pendiente.
+            if (actual.status === "cobrada") dispatch({ type: "NEW_SALE" });
+            else if (actual.lines.length > 0) {
               setScanMsg("Cobrá o vaciá el carrito antes de cerrar el turno.");
               return;
             }
@@ -814,6 +826,7 @@ function PosRegister() {
       ) : !turno ? (
         <div className="flex flex-1 flex-col">
           <OpenCashSession
+            aviso={avisoDeCierre}
             anterioresAbiertos={anterioresAbiertos}
             onAbrir={async (fondo) => {
               await abrir(fondo);

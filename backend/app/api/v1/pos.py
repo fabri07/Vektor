@@ -1438,6 +1438,28 @@ async def open_cash_session(
         terminal_id=terminal.id if terminal is not None else None,
         fondo_declarado=body.opening_float_ars,
     )
+    if not sesion.esta_abierto:
+        # La apertura llegó tarde: el turno ya se cerró o se abandonó (típico de
+        # una caja que abrió sin red). El turno no se toca, pero el fondo que el
+        # cajero DECLARÓ no puede desaparecer sin rastro: queda en la auditoría,
+        # que es lo que el encargado tiene para reconstruir ese cajón.
+        session.add(
+            DecisionAuditLog(
+                tenant_id=tenant.tenant_id,
+                decision_type="POS_CASH_SESSION_OPENED_AFTER_CLOSE",
+                decision_data={
+                    "session_id": str(sesion.id),
+                    "client_session_id": sesion.client_session_id,
+                    "status": sesion.status,
+                    "declared_opening_float_ars": str(body.opening_float_ars),
+                    "recorded_opening_float_ars": str(sesion.opening_float_ars),
+                },
+                triggered_by="ui:pos",
+                actor_user_id=user.user_id,
+                context={"endpoint": "pos.open_cash_session"},
+                created_at=datetime.now(UTC),
+            )
+        )
     return _a_sesion(sesion, cashier_name=user.full_name)
 
 

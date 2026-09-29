@@ -911,3 +911,44 @@ class TestListadoDelEncargado:
             headers=auth_headers,
         )
         assert [s["client_session_id"] for s in por_caja.json()] == ["t-lista"]
+
+
+class TestAperturaTardia:
+    async def test_la_apertura_sobre_un_turno_cerrado_audita_el_fondo_declarado(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        sample_user: User,
+        fake_redis,
+    ) -> None:
+        """La caja abrió sin red y vendió; el encargado abandonó el turno antes de
+        que llegara la apertura. El turno no se toca, pero los $5.000 declarados
+        no pueden desaparecer sin rastro."""
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        await _cobrar(client, caja, pid, "t-tardia")
+        listado = await client.get("/api/v1/pos/cash-sessions", headers=auth_headers)
+        sid = next(s["id"] for s in listado.json() if s["client_session_id"] == "t-tardia")
+        await fake_redis.set(
+            _pin_window_key(sample_tenant.tenant_id, sample_user.user_id), "1", ex=600
+        )
+        await client.post(
+            f"/api/v1/pos/cash-sessions/{sid}/abandon",
+            json={"reason": "Parecía basura."},
+            headers=auth_headers,
+        )
+
+        tarde = await _abrir(client, caja, "t-tardia", "5000.00")
+        assert tarde["status"] == "ABANDONED"
+        assert tarde["opening_float_ars"] == "0.00"
+        auditoria = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "POS_CASH_SESSION_OPENED_AFTER_CLOSE"
+                )
+            )
+        ).scalar_one()
+        assert auditoria.decision_data["declared_opening_float_ars"] == "5000.00"
+        assert auditoria.decision_data["status"] == "ABANDONED"

@@ -15,6 +15,9 @@ interface CashSessionsPanelProps {
   onVolver: () => void;
 }
 
+/** Un turno sin fondo declarado y abierto hace más que esto se sugiere cerrar. */
+const VIEJO_MS = 12 * 60 * 60 * 1000;
+
 const monto = (v: string | null) => {
   const c = centavosDeMonto(v);
   return c === null ? "—" : formatCents(c);
@@ -62,6 +65,14 @@ export function CashSessionsPanel({ turnoActual, terminalActual, onVolver }: Cas
   const abiertos = (turnos ?? []).filter((t) => t.status === "OPEN");
   const cerrados = (turnos ?? []).filter((t) => t.status !== "OPEN").slice(0, 30);
   const elegibles = abiertos.filter((t) => t.client_session_id !== turnoActual);
+  // "Basura" = sin fondo declarado Y abierto hace más de 12 h. Los turnos que
+  // la caja creaba en cada recarga nunca declararon fondo; uno recién abierto
+  // en otra caja sí lo declaró (o está por declararlo, si abrió sin red), y
+  // "0 ventas" no prueba nada: pueden estar en la cola offline de esa PC.
+  const ahora = Date.now();
+  const basura = elegibles.filter(
+    (t) => !t.float_declared && ahora - new Date(t.opened_at).getTime() > VIEJO_MS,
+  );
 
   function alternar(id: string): void {
     setElegidos((prev) => {
@@ -124,15 +135,13 @@ export function CashSessionsPanel({ turnoActual, terminalActual, onVolver }: Cas
       <section className="space-y-2 rounded-xl border border-pos-border bg-pos-surface p-4">
         <div className="flex items-center justify-between">
           <h3 className="font-semibold text-pos-text">Abiertos ({abiertos.length})</h3>
-          {elegibles.some((t) => t.sales_count === 0) ? (
+          {basura.length > 0 ? (
             <button
               type="button"
               className="text-pos-link underline"
-              onClick={() =>
-                setElegidos(new Set(elegibles.filter((t) => t.sales_count === 0).map((t) => t.id)))
-              }
+              onClick={() => setElegidos(new Set(basura.map((t) => t.id)))}
             >
-              Elegir los que no tienen ventas
+              Elegir los viejos sin fondo declarado ({basura.length})
             </button>
           ) : null}
         </div>
@@ -181,7 +190,8 @@ export function CashSessionsPanel({ turnoActual, terminalActual, onVolver }: Cas
             <p className="text-pos-text-2">
               Cerrar sin arqueo deja el turno cerrado sin conteo: no se inventa un número. Usalo
               para turnos que nadie va a contar. Las ventas que lleguen después quedan como
-              tardías.
+              tardías. Si elegís un turno que alguien está usando, esa caja se entera y tiene que
+              abrir otro.
             </p>
             <textarea
               aria-label="Motivo del cierre sin arqueo"

@@ -81,11 +81,16 @@ async def obtener_por_client_id(
     client_session_id: str,
     *,
     para_actualizar: bool = False,
+    compartido: bool = False,
 ) -> PosCashSession | None:
     stmt = select(PosCashSession).where(
         PosCashSession.tenant_id == tenant_id,
         PosCashSession.client_session_id == client_session_id,
     )
+    if compartido and not para_actualizar:
+        # FOR SHARE: la venta no cambia el turno, pero tiene que impedir que se
+        # cierre mientras ella está en vuelo. Ver ``abrir_o_adoptar``.
+        stmt = stmt.with_for_update(read=True).execution_options(populate_existing=True)
     if para_actualizar:
         # `populate_existing` por la misma razón que en `pos_discrepancy_service`:
         # si la fila ya está en la identity map, el candado se tomaría bien y el
@@ -155,7 +160,17 @@ async def abrir_o_adoptar(
             return nueva
 
     if fondo_declarado is None:
-        return existente
+        # La VENTA relee el turno con FOR SHARE. Sin candado, una venta que lo
+        # leyó abierto podía commitear DESPUÉS de que el cierre (``FOR UPDATE``)
+        # sumara los tenders commiteados: quedaba fuera del arqueo y tampoco
+        # figuraba como tardía. Con el candado compartido, el cierre espera a
+        # que la venta commitee (y la suma), o la venta espera al cierre y ve el
+        # turno cerrado (y queda como tardía). Varias ventas no se traban entre
+        # sí: el candado es compartido.
+        releida = await obtener_por_client_id(
+            session, tenant_id, client_session_id, compartido=True
+        )
+        return releida if releida is not None else existente
     return await _declarar_fondo(session, existente, fondo_declarado, momento)
 
 

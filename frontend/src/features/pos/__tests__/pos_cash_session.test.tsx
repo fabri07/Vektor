@@ -78,6 +78,9 @@ function httpError(status: number, data: unknown): AxiosError {
 }
 const sinRed = () => new AxiosError("Network Error");
 
+const VIEJO = "2026-01-01T09:00:00Z";
+const RECIEN = new Date().toISOString();
+
 function usuario(id = "u1", role = "OWNER") {
   useAuthStore.setState({
     token: "t",
@@ -222,9 +225,13 @@ describe("apertura", () => {
 
   it("un turno que el encargado cerró se suelta y vuelve la apertura", async () => {
     turnoGuardado();
-    svc.getCashSession.mockResolvedValue(sesion({ status: "ABANDONED" }));
+    svc.getCashSession.mockResolvedValue(sesion({ status: "ABANDONED", notes: "Limpieza" }));
     render(<PosScreen />);
     expect(await screen.findByRole("heading", { name: "Abrir turno" })).toBeInTheDocument();
+    // No en silencio: el cajero sabe que su cajón se quedó sin arqueo.
+    expect(screen.getByTestId("aviso-turno-cerrado")).toHaveTextContent(
+      "El encargado cerró tu turno sin arqueo (Limpieza)",
+    );
     expect(usePosCashSessionStore.getState().turnos).toEqual({});
   });
 
@@ -437,16 +444,22 @@ describe("panel del encargado", () => {
     turnoGuardado();
     svc.listCashSessions.mockResolvedValue([
       sesion({ id: "actual", client_session_id: "turno-test", sales_count: 3 }),
-      sesion({ id: "b1", client_session_id: "v1", sales_count: 0, float_declared: false }),
-      sesion({ id: "b2", client_session_id: "v2", sales_count: 0, float_declared: false }),
-      sesion({ id: "real", client_session_id: "v3", sales_count: 5 }),
+      // Basura: sin fondo declarado y viejos. Con ventas, como los de producción.
+      sesion({ id: "b1", client_session_id: "v1", sales_count: 4, float_declared: false, opened_at: VIEJO }),
+      sesion({ id: "b2", client_session_id: "v2", sales_count: 1, float_declared: false, opened_at: VIEJO }),
+      // En uso en otra caja: recién abierto, con fondo declarado y sin ventas todavía.
+      sesion({ id: "vivo", client_session_id: "v3", sales_count: 0, float_declared: true, opened_at: RECIEN }),
+      // Recién abierto sin red: todavía sin fondo declarado, pero NO es viejo.
+      sesion({ id: "sin-red", client_session_id: "v4", sales_count: 0, float_declared: false, opened_at: RECIEN }),
     ]);
     svc.abandonCashSession.mockResolvedValue(sesion({ status: "ABANDONED" }));
     render(<PosScreen />);
     fireEvent.click(await screen.findByRole("button", { name: "Turnos" }));
     await screen.findByTestId("turnos-panel");
     await act(async () => {
-      fireEvent.click(await screen.findByRole("button", { name: "Elegir los que no tienen ventas" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Elegir los viejos sin fondo declarado (2)" }),
+      );
     });
     const boton = screen.getByRole("button", { name: "Cerrar sin arqueo (2)" });
     expect(boton).toBeDisabled();
@@ -494,5 +507,93 @@ describe("panel del encargado", () => {
     render(<PosScreen />);
     expect(await screen.findByTestId("turno-bar")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Turnos" })).not.toBeInTheDocument();
+  });
+});
+
+
+describe("revisión del turno durante la jornada", () => {
+  it("si el encargado cierra el turno desde otra PC, la caja se entera sola", async () => {
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] });
+    try {
+      turnoGuardado();
+      render(<PosScreen />);
+      expect(await screen.findByTestId("turno-bar")).toBeInTheDocument();
+      svc.getCashSession.mockResolvedValue(sesion({ status: "ABANDONED" }));
+      await act(async () => {
+        jest.advanceTimersByTime(61_000);
+      });
+      expect(await screen.findByTestId("aviso-turno-cerrado")).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("con el cierre abierto, el lector no agrega productos a un carrito oculto", async () => {
+    turnoGuardado();
+    render(<PosScreen />);
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Cerrar turno" }));
+    });
+    await screen.findByLabelText("Efectivo contado");
+    await escanear("7790001234567");
+    expect(svc.lookup).not.toHaveBeenCalled();
+  });
+
+  it("después de un cobro se puede cerrar sin apretar Nueva venta", async () => {
+    turnoGuardado();
+    svc.createOperation.mockResolvedValue({
+      id: "op1",
+      client_operation_id: "x",
+      total_ars: "1000.00",
+      subtotal_ars: "1000.00",
+      discount_ars: "0.00",
+      cash_received_ars: null,
+      cash_change_ars: null,
+      status: "COMPLETED",
+    });
+    render(<PosScreen />);
+    await escanear("7790001234567");
+    await screen.findByText("Yerba");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^Cobrar/ }));
+    });
+    await screen.findByTestId("venta-cobrada");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Cerrar turno" }));
+    });
+    expect(await screen.findByLabelText("Efectivo contado")).toBeInTheDocument();
+  });
+
+  it("si la apertura ya está en vuelo, el cierre la comparte en vez de fallar", async () => {
+    turnoGuardado({ serverId: null, aperturaConfirmada: false });
+    let soltarApertura: (s: PosCashSession) => void = () => {};
+    svc.openCashSession.mockImplementation(
+      () => new Promise<PosCashSession>((r) => (soltarApertura = r)),
+    );
+    svc.closeCashSession.mockResolvedValue(
+      sesion({ status: "CLOSED", expected_cash_ars: "5000.00", counted_cash_ars: "5000.00", difference_ars: "0.00" }),
+    );
+    render(<PosScreen />);
+    await screen.findByTestId("turno-bar");
+    // El reintento automático manda la apertura y queda en vuelo...
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(svc.openCashSession).toHaveBeenCalledTimes(1);
+    // ...y el cajero abre el cierre justo ahí: comparte ese envío, no manda otro
+    // ni falla con "no se pudo avisar la apertura".
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Cerrar turno" }));
+    });
+    await act(async () => {
+      soltarApertura(sesion());
+    });
+    fireEvent.change(await screen.findByLabelText("Efectivo contado"), { target: { value: "5000" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Firmar el arqueo" }));
+    });
+    expect(await screen.findByTestId("arqueo-diferencia")).toHaveTextContent("Cierra justo");
+    expect(svc.openCashSession).toHaveBeenCalledTimes(1);
+    expect(svc.closeCashSession).toHaveBeenCalledWith("s1", "5000.00", null);
   });
 });

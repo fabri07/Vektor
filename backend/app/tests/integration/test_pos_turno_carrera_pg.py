@@ -46,7 +46,7 @@ from sqlalchemy.pool import NullPool
 
 from app.application.services import pos_cash_session_service
 from app.persistence.models.pos_cash_session import PosCashSession
-from app.persistence.models.pos_operation import PosOperation
+from app.persistence.models.pos_operation import PosOperation, PosTender
 from app.persistence.models.tenant import Tenant
 
 TEST_PG_DSN = os.environ.get("TEST_PG_DSN")
@@ -91,6 +91,7 @@ async def negocio(
         yield sm, tenant_id
     finally:
         async with sm() as s:
+            await s.execute(delete(PosTender).where(PosTender.tenant_id == tenant_id))
             await s.execute(delete(PosOperation).where(PosOperation.tenant_id == tenant_id))
             await s.execute(
                 delete(PosCashSession).where(PosCashSession.tenant_id == tenant_id)
@@ -252,3 +253,65 @@ async def test_dos_aperturas_simultaneas_declaran_un_solo_fondo(
     assert dos.opening_float_ars == Decimal("5000.00")
     guardado = await _turno(sm, tenant_id, turno)
     assert guardado.opening_float_ars == Decimal("5000.00")
+
+
+async def test_una_venta_en_vuelo_no_queda_fuera_del_arqueo(
+    negocio: tuple[async_sessionmaker[AsyncSession], uuid.UUID],
+) -> None:
+    """La venta leyó el turno abierto y todavía no commiteó; el cierre corre en
+    el medio. Sin el FOR SHARE de la venta, el cierre sumaba sólo lo commiteado
+    y la venta quedaba fuera del arqueo sin figurar como tardía."""
+    sm, tenant_id = negocio
+    turno = f"turno-{uuid.uuid4().hex[:12]}"
+    async with sm() as s:
+        abierto = await pos_cash_session_service.abrir_o_adoptar(
+            s,
+            tenant_id,
+            turno,
+            user_id=None,
+            terminal_id=None,
+            fondo_declarado=Decimal("1000.00"),
+        )
+        await s.commit()
+
+    async with sm() as venta, sm() as cierre:
+        await pos_cash_session_service.abrir_o_adoptar(
+            venta, tenant_id, turno, user_id=None, terminal_id=None
+        )
+        operacion = _operacion(tenant_id, turno)
+        operacion.status = "COMPLETED"
+        venta.add(operacion)
+        await venta.flush()
+        venta.add(
+            PosTender(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                operation_id=operacion.id,
+                position=0,
+                payment_method="cash",
+                amount_ars=Decimal("100.00"),
+            )
+        )
+        await venta.flush()
+
+        async def cerrar() -> PosCashSession:
+            fila = (
+                await cierre.execute(
+                    select(PosCashSession)
+                    .where(PosCashSession.id == abierto.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            return await pos_cash_session_service.cerrar(
+                cierre, fila, counted_cash_ars=Decimal("1100.00"), user_id=None
+            )
+
+        tarea = asyncio.create_task(cerrar())
+        await asyncio.sleep(0.5)
+        assert not tarea.done(), "el cierre no esperó a la venta en vuelo"
+        await venta.commit()
+        cerrado = await asyncio.wait_for(tarea, timeout=10)
+        await cierre.commit()
+
+    assert cerrado.expected_cash_ars == Decimal("1100.00")
