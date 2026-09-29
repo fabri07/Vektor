@@ -113,6 +113,7 @@ from app.persistence.models.pos_stock_discrepancy import (
 )
 from app.persistence.models.pos_terminal import PosTerminal
 from app.schemas.pos import (
+    PosCashSessionAbandonRequest,
     PosCashSessionCloseRequest,
     PosCashSessionOpenRequest,
     PosCashSessionResponse,
@@ -1391,10 +1392,13 @@ def _a_sesion(
     cashier_name: str | None = None,
     esperado_ahora: Decimal | None = None,
     tardias: list[PosLateSale] | None = None,
+    cantidad_de_tickets: int | None = None,
 ) -> PosCashSessionResponse:
     respuesta = PosCashSessionResponse.model_validate(sesion)
     respuesta.cashier_name = cashier_name
     respuesta.expected_cash_now_ars = esperado_ahora
+    respuesta.float_declared = sesion.float_declared_at is not None
+    respuesta.sales_count = cantidad_de_tickets
     respuesta.late_sales = [
         PosLateSaleResponse.model_validate(t) for t in (tardias or [])
     ]
@@ -1432,7 +1436,7 @@ async def open_cash_session(
         body.client_session_id,
         user_id=user.user_id,
         terminal_id=terminal.id if terminal is not None else None,
-        opening_float_ars=body.opening_float_ars,
+        fondo_declarado=body.opening_float_ars,
     )
     return _a_sesion(sesion, cashier_name=user.full_name)
 
@@ -1444,6 +1448,7 @@ async def open_cash_session(
 )
 async def list_cash_sessions(
     abiertos: bool = Query(default=False, alias="open"),
+    terminal_id: uuid.UUID | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(get_current_user),
@@ -1460,9 +1465,43 @@ async def list_cash_sessions(
         tenant.tenant_id,
         solo_abiertos=abiertos,
         user_id=user.user_id if solo_mios else None,
+        terminal_id=terminal_id,
         limite=limit,
     )
-    return [_a_sesion(s) for s in filas]
+    ids_de_cajeros = {s.user_id for s in filas if s.user_id is not None}
+    nombres: dict[uuid.UUID, str] = {}
+    if ids_de_cajeros:
+        filas_de_nombres = await session.execute(
+            select(User.user_id, User.full_name).where(
+                User.tenant_id == tenant.tenant_id,
+                User.user_id.in_(list(ids_de_cajeros)),
+            )
+        )
+        nombres = {fila.user_id: fila.full_name for fila in filas_de_nombres.all()}
+    if solo_mios:
+        # Arqueo ciego: el cajero no ve cuánto efectivo "debería" haber en un
+        # turno abierto. Tampoco la cantidad de tickets, que no necesita.
+        return [
+            _a_sesion(s, cashier_name=nombres.get(s.user_id) if s.user_id else None)
+            for s in filas
+        ]
+    resumen = await pos_cash_session_service.resumen_de_turnos(
+        session, tenant.tenant_id, [s.client_session_id for s in filas]
+    )
+    respuestas = []
+    for s in filas:
+        efectivo, tickets = resumen.get(s.client_session_id, (Decimal("0"), 0))
+        respuestas.append(
+            _a_sesion(
+                s,
+                cashier_name=nombres.get(s.user_id) if s.user_id else None,
+                esperado_ahora=(
+                    Decimal(s.opening_float_ars) + efectivo if s.esta_abierto else None
+                ),
+                cantidad_de_tickets=tickets,
+            )
+        )
+    return respuestas
 
 
 @router.post(
@@ -1551,6 +1590,92 @@ async def close_cash_session(
     return _a_sesion(cerrada, cashier_name=user.full_name)
 
 
+@router.post(
+    "/cash-sessions/{session_id}/abandon",
+    response_model=PosCashSessionResponse,
+    summary="Cerrar un turno SIN arqueo (turnos que nadie va a contar)",
+)
+async def abandon_cash_session(
+    session_id: uuid.UUID,
+    body: PosCashSessionAbandonRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_modify_access),
+    session: AsyncSession = Depends(get_db_session),
+) -> PosCashSessionResponse:
+    """Cierra el turno dejando esperado, contado y diferencia en NULL.
+
+    Para los turnos que la caja creaba en cada recarga de la pantalla y que
+    nadie va a contar: cerrarlos con un conteo inventado firmaría un arqueo
+    falso. Sólo el encargado, con PIN (cierra el turno de otro), y con motivo
+    obligatorio: es lo único que explica después por qué no hay conteo. Fuera
+    de ``CASHIER_ALLOWED_ROUTES``.
+
+    Sin gate de suscripción: es una corrección, no un alta.
+    """
+    if user.role_code not in ("OWNER", "ADMIN"):
+        raise HTTPException(status_code=403, detail="Sólo el encargado cierra un turno sin arqueo.")
+    motivo = (body.reason or "").strip()
+    if not motivo:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ABANDON_REASON_REQUIRED",
+                "message": "Contá por qué se cierra sin arqueo.",
+            },
+        )
+    await acquire_write_lock_shared(session, tenant.tenant_id)
+    sesion = (
+        await session.execute(
+            select(PosCashSession)
+            .where(
+                PosCashSession.tenant_id == tenant.tenant_id,
+                PosCashSession.id == session_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if sesion is None:
+        raise HTTPException(status_code=404, detail="Turno no encontrado.")
+    try:
+        abandonada = await pos_cash_session_service.abandonar(
+            session, sesion, user_id=user.user_id, reason=motivo
+        )
+    except pos_cash_session_service.SesionYaCerradaError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CASH_SESSION_ALREADY_CLOSED",
+                "message": "Ese turno ya se cerró.",
+            },
+        ) from exc
+
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant.tenant_id,
+            decision_type="POS_CASH_SESSION_ABANDONED",
+            decision_data={
+                "session_id": str(abandonada.id),
+                "client_session_id": abandonada.client_session_id,
+                "cashier_user_id": (
+                    str(abandonada.user_id) if abandonada.user_id else None
+                ),
+                "terminal_id": (
+                    str(abandonada.terminal_id) if abandonada.terminal_id else None
+                ),
+                "opening_float_ars": str(abandonada.opening_float_ars),
+                "float_declared": abandonada.float_declared_at is not None,
+                "reason": motivo,
+            },
+            triggered_by="ui:pos",
+            actor_user_id=user.user_id,
+            context={"endpoint": "pos.abandon_cash_session"},
+            created_at=datetime.now(UTC),
+        )
+    )
+    return _a_sesion(abandonada)
+
+
 @router.get(
     "/cash-sessions/{session_id}",
     response_model=PosCashSessionResponse,
@@ -1575,7 +1700,11 @@ async def get_cash_session(
 
     esperado_ahora = None
     tardias: list[PosLateSale] = []
-    if sesion.esta_abierto:
+    # Arqueo ciego del lado del servidor: si el esperado sólo se ocultara en la
+    # pantalla, el cajero lo tendría a un request de distancia y el conteo
+    # dejaría de ser ciego. El resultado del CIERRE sí lo trae: ahí el conteo
+    # ya está firmado.
+    if sesion.esta_abierto and user.role_code != CASHIER_ROLE:
         cobrado = await pos_cash_session_service.efectivo_del_turno(
             session, tenant.tenant_id, sesion.client_session_id
         )

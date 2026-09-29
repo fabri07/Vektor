@@ -159,3 +159,96 @@ async def test_la_venta_que_pierde_la_carrera_del_turno_sobrevive(
         ).scalars().all()
     assert guardada is not None, "la carrera del turno se llevó puesta la venta"
     assert len(turnos) == 1
+
+
+async def _turno(sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, turno: str):
+    async with sm() as s:
+        return (
+            await s.execute(
+                select(PosCashSession).where(
+                    PosCashSession.tenant_id == tenant_id,
+                    PosCashSession.client_session_id == turno,
+                )
+            )
+        ).scalar_one()
+
+
+async def test_la_apertura_que_pierde_contra_la_venta_declara_su_fondo(
+    negocio: tuple[async_sessionmaker[AsyncSession], uuid.UUID],
+) -> None:
+    """El caso que motivó ``float_declared_at``: la venta crea el turno con
+    fondo $0 y la apertura pierde la carrera del UNIQUE. El fondo tiene que
+    quedar declarado por el camino "releo la ganadora", no sólo por "lo creo"."""
+    sm, tenant_id = negocio
+    turno = f"turno-{uuid.uuid4().hex[:12]}"
+
+    async with sm() as venta, sm() as apertura:
+        await pos_cash_session_service.abrir_o_adoptar(
+            venta, tenant_id, turno, user_id=None, terminal_id=None
+        )
+        await venta.flush()
+        tarea = asyncio.create_task(
+            pos_cash_session_service.abrir_o_adoptar(
+                apertura,
+                tenant_id,
+                turno,
+                user_id=None,
+                terminal_id=None,
+                fondo_declarado=Decimal("5000.00"),
+            )
+        )
+        await asyncio.sleep(0.5)
+        assert not tarea.done(), "la apertura no quedó esperando el UNIQUE"
+        await venta.commit()
+        resultado = await asyncio.wait_for(tarea, timeout=10)
+        assert resultado.opening_float_ars == Decimal("5000.00")
+        await apertura.commit()
+
+    guardado = await _turno(sm, tenant_id, turno)
+    assert guardado.opening_float_ars == Decimal("5000.00")
+    assert guardado.float_declared_at is not None
+
+
+async def test_dos_aperturas_simultaneas_declaran_un_solo_fondo(
+    negocio: tuple[async_sessionmaker[AsyncSession], uuid.UUID],
+) -> None:
+    """El turno ya existe por adopción; dos aperturas con fondos distintos
+    corren a la vez. Sin el ``FOR UPDATE`` las dos verían el fondo sin declarar
+    y la segunda pisaría a la primera."""
+    sm, tenant_id = negocio
+    turno = f"turno-{uuid.uuid4().hex[:12]}"
+    async with sm() as s:
+        await pos_cash_session_service.abrir_o_adoptar(
+            s, tenant_id, turno, user_id=None, terminal_id=None
+        )
+        await s.commit()
+
+    async with sm() as primera, sm() as segunda:
+        uno = await pos_cash_session_service.abrir_o_adoptar(
+            primera,
+            tenant_id,
+            turno,
+            user_id=None,
+            terminal_id=None,
+            fondo_declarado=Decimal("5000.00"),
+        )
+        tarea = asyncio.create_task(
+            pos_cash_session_service.abrir_o_adoptar(
+                segunda,
+                tenant_id,
+                turno,
+                user_id=None,
+                terminal_id=None,
+                fondo_declarado=Decimal("8000.00"),
+            )
+        )
+        await asyncio.sleep(0.5)
+        assert not tarea.done(), "la segunda apertura no esperó el candado"
+        await primera.commit()
+        dos = await asyncio.wait_for(tarea, timeout=10)
+        await segunda.commit()
+
+    assert uno.opening_float_ars == Decimal("5000.00")
+    assert dos.opening_float_ars == Decimal("5000.00")
+    guardado = await _turno(sm, tenant_id, turno)
+    assert guardado.opening_float_ars == Decimal("5000.00")
