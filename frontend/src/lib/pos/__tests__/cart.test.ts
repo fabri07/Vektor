@@ -3,6 +3,8 @@ import {
   type SaleState,
   buildPayload,
   cannotCharge,
+  cashPartCents,
+  unassignedCents,
   initialSale,
   esCorregibleEnElMostrador,
   lineGrossCents,
@@ -67,7 +69,9 @@ describe("carrito", () => {
     expect(cannotCharge(saleReducer(base, { type: "SET_GLOBAL_DISCOUNT", cents: 100000 }))).toMatch(
       /\$0/,
     );
-    expect(cannotCharge(saleReducer(base, { type: "SET_PAYMENT", method: "account" }))).toMatch(
+    expect(
+      cannotCharge(saleReducer(base, { type: "SET_PAYMENT_METHOD", id: "p0", method: "account" })),
+    ).toMatch(
       /cliente/,
     );
     expect(cannotCharge(saleReducer(base, { type: "SET_CASH_RECEIVED", value: "999" }))).toMatch(
@@ -180,7 +184,7 @@ describe("payload", () => {
   it("fiado lleva el cliente; efectivo lleva lo recibido; el pago es el total", () => {
     const fiado = con(
       { type: "ADD_PRODUCT", product: yerba },
-      { type: "SET_PAYMENT", method: "account" },
+      { type: "SET_PAYMENT_METHOD", id: "p0", method: "account" },
       { type: "SET_CUSTOMER", id: "c1", name: "Ana" },
     );
     const p = buildPayload(fiado, "id", new Date());
@@ -193,5 +197,134 @@ describe("payload", () => {
       { type: "SET_CASH_RECEIVED", value: "2000" },
     );
     expect(buildPayload(efectivo, "id", new Date()).cash_received_ars).toBe("2000.00");
+  });
+});
+
+describe("pago mixto (B9)", () => {
+  /** $1.000 dividido: el primer pago queda en $1.000 explícito y el nuevo vacío. */
+  function dividido(...extra: Parameters<typeof saleReducer>[1][]): SaleState {
+    return con({ type: "ADD_PRODUCT", product: yerba }, { type: "SPLIT_PAYMENT" }, ...extra);
+  }
+  function aplicar(base: SaleState, ...acciones: Parameters<typeof saleReducer>[1][]): SaleState {
+    return acciones.reduce(saleReducer, base);
+  }
+  function ids(s: SaleState): string[] {
+    return s.payments.map((p) => p.id);
+  }
+
+  it("un solo pago manda el mismo JSON de siempre", () => {
+    const s = con({ type: "ADD_PRODUCT", product: yerba });
+    expect(buildPayload(s, "id", new Date()).tenders).toEqual([
+      { payment_method: "cash", amount_ars: "1000.00" },
+    ]);
+  });
+
+  it("dividir agrega un medio distinto y deja el reparto a cargo del cajero", () => {
+    const s = dividido();
+    expect(s.payments.map((p) => p.method)).toEqual(["cash", "debit_card"]);
+    expect(s.payments.map((p) => p.amount)).toEqual(["1000.00", ""]);
+    expect(cannotCharge(s)).toMatch(/sin importe/);
+  });
+
+  it("efectivo + débito que suman el total: se cobra, y el vuelto es contra el efectivo", () => {
+    const base = dividido();
+    const [efectivo, debito] = ids(base);
+    const s = aplicar(
+      base,
+      { type: "SET_PAYMENT_AMOUNT", id: efectivo!, value: "600" },
+      { type: "SET_PAYMENT_AMOUNT", id: debito!, value: "400" },
+      { type: "SET_CASH_RECEIVED", value: "1000" },
+    );
+    expect(cashPartCents(s, 100000)).toBe(60000);
+    expect(cannotCharge(s)).toBeNull();
+    const p = buildPayload(s, "id", new Date());
+    expect(p.tenders).toEqual([
+      { payment_method: "cash", amount_ars: "600.00" },
+      { payment_method: "debit_card", amount_ars: "400.00" },
+    ]);
+    expect(p.cash_received_ars).toBe("1000.00");
+  });
+
+  it("lo recibido tiene que cubrir la parte en efectivo, no el total", () => {
+    const base = dividido();
+    const [efectivo, debito] = ids(base);
+    const s = aplicar(
+      base,
+      { type: "SET_PAYMENT_AMOUNT", id: efectivo!, value: "600" },
+      { type: "SET_PAYMENT_AMOUNT", id: debito!, value: "400" },
+    );
+    expect(cannotCharge(saleReducer(s, { type: "SET_CASH_RECEIVED", value: "700" }))).toBeNull();
+    expect(cannotCharge(saleReducer(s, { type: "SET_CASH_RECEIVED", value: "500" }))).toMatch(
+      /parte en efectivo/,
+    );
+  });
+
+  it("pagos que no suman bloquean el cobro con lo que falta o sobra", () => {
+    const base = dividido();
+    const [efectivo, debito] = ids(base);
+    const falta = aplicar(
+      base,
+      { type: "SET_PAYMENT_AMOUNT", id: efectivo!, value: "500" },
+      { type: "SET_PAYMENT_AMOUNT", id: debito!, value: "400" },
+    );
+    expect(unassignedCents(falta, 100000)).toBe(10000);
+    expect(cannotCharge(falta)).toMatch(/Falta asignar/);
+    const sobra = saleReducer(falta, { type: "SET_PAYMENT_AMOUNT", id: efectivo!, value: "700" });
+    expect(cannotCharge(sobra)).toMatch(/de más/);
+  });
+
+  it("un cambio de precio NO redistribuye: el reparto queda y avisa lo que falta", () => {
+    const base = dividido();
+    const [efectivo, debito] = ids(base);
+    const s = aplicar(
+      base,
+      { type: "SET_PAYMENT_AMOUNT", id: efectivo!, value: "600" },
+      { type: "SET_PAYMENT_AMOUNT", id: debito!, value: "400" },
+      { type: "APPLY_PRICES", prices: { p1: "1200.00" }, notice: "Cambió el precio" },
+    );
+    expect(s.payments.map((p) => p.amount)).toEqual(["600", "400"]);
+    expect(cannotCharge(s)).toMatch(/Falta asignar/);
+  });
+
+  it("con una parte fiada hace falta el cliente, y el payload lo lleva", () => {
+    const base = dividido();
+    const [efectivo, segundo] = ids(base);
+    const s = aplicar(
+      base,
+      { type: "SET_PAYMENT_METHOD", id: segundo!, method: "account" },
+      { type: "SET_PAYMENT_AMOUNT", id: efectivo!, value: "600" },
+      { type: "SET_PAYMENT_AMOUNT", id: segundo!, value: "400" },
+    );
+    expect(cannotCharge(s)).toMatch(/cliente/);
+    const conCliente = saleReducer(s, { type: "SET_CUSTOMER", id: "c1", name: "Ana" });
+    expect(cannotCharge(conCliente)).toBeNull();
+    expect(buildPayload(conCliente, "id", new Date()).customer_id).toBe("c1");
+  });
+
+  it("sin pago en efectivo no se informa efectivo recibido", () => {
+    const base = dividido({ type: "SET_CASH_RECEIVED", value: "1000" });
+    const [efectivo] = ids(base);
+    const s = saleReducer(base, { type: "SET_PAYMENT_METHOD", id: efectivo!, method: "qr" });
+    expect(s.cashReceived).toBe("");
+    expect(buildPayload(s, "id", new Date()).cash_received_ars).toBeNull();
+  });
+
+  it("quitar hasta quedar uno vuelve a seguir el total", () => {
+    const base = dividido();
+    const [, debito] = ids(base);
+    const s = saleReducer(base, { type: "REMOVE_PAYMENT", id: debito! });
+    expect(s.payments).toHaveLength(1);
+    expect(s.payments[0]?.amount).toBe("");
+    expect(buildPayload(s, "id", new Date()).tenders).toEqual([
+      { payment_method: "cash", amount_ars: "1000.00" },
+    ]);
+  });
+
+  it("no ofrece un medio repetido", () => {
+    let s = con({ type: "ADD_PRODUCT", product: yerba });
+    for (let i = 0; i < 10; i++) s = saleReducer(s, { type: "SPLIT_PAYMENT" });
+    const metodos = s.payments.map((p) => p.method);
+    expect(new Set(metodos).size).toBe(metodos.length);
+    expect(metodos).toHaveLength(7);
   });
 });

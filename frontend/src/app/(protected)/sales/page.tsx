@@ -28,7 +28,7 @@ import {
   resolvePreviousPeriod,
   previousPeriodShortLabel,
 } from "@/lib/period";
-import { PAYMENT_LABELS } from "@/lib/payment";
+import { PAYMENT_LABELS, paymentLabel } from "@/lib/payment";
 
 // Fiado = cuenta corriente: el backend exige un cliente real (no el centinela
 // "Local"). Espejamos esa regla client-side para feedback inmediato.
@@ -129,8 +129,8 @@ function buildColumns(
     key: "payment_method",
     header: "Medio de pago",
     hideable: true,
-    render: (v: unknown) => PAYMENT_LABELS[String(v)] ?? String(v),
-    csvValue: (v: unknown) => PAYMENT_LABELS[String(v)] ?? String(v),
+    render: (v: unknown) => paymentLabel(String(v)),
+    csvValue: (v: unknown) => paymentLabel(String(v)),
   },
   {
     key: "quantity",

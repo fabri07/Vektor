@@ -50,7 +50,11 @@ export function cobroRejectionMessage(info: PosErrorInfo): string {
     case "DISCOUNT_EXCEEDS_TOTAL":
       return "El descuento supera el importe. Revisalo.";
     case "CASH_RECEIVED_TOO_LOW":
-      return "El efectivo recibido no alcanza para el total.";
+      return "El efectivo recibido no alcanza para la parte en efectivo.";
+    case "CASH_RECEIVED_WITHOUT_CASH_TENDER":
+      return "Se informó efectivo recibido pero ningún pago es en efectivo. Revisá los pagos.";
+    case "TENDERS_MISMATCH":
+      return "Los pagos no suman el total de la venta. Revisá el reparto y volvé a cobrar.";
     case "TERMINAL_REQUIRED":
       return "Esta PC no está habilitada como caja. Pedile al dueño que la habilite en Configuración → Seguridad.";
     case "TERMINAL_DISABLED":

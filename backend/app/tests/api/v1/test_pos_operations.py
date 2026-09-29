@@ -11,8 +11,14 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import today_ar
+from app.domain.transaction import MIXED_PAYMENT_METHOD
+from app.persistence.db.session import get_db_session
+from app.persistence.models.pos_operation import PosOperationLine, PosTender
+from app.persistence.models.transaction import SaleEntry
 
 _FECHA = f"{today_ar().isoformat()}T10:00:00"
 
@@ -177,22 +183,6 @@ class TestOperacionDeCaja:
         resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
         assert resp.status_code == 400, resp.text
         assert resp.json()["code"] == "INSUFFICIENT_STOCK"
-
-    async def test_pago_mixto_todavia_no(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
-    ) -> None:
-        """Hasta que B9 cablee los ocho lectores, un mixto no se puede imputar."""
-        p1 = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
-        cuerpo = _operacion(
-            [{"product_id": p1, "quantity": 1}],
-            [
-                {"payment_method": "cash", "amount_ars": "600.00"},
-                {"payment_method": "debit_card", "amount_ars": "400.00"},
-            ],
-        )
-        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
-        assert resp.status_code == 422, resp.text
-        assert resp.json()["detail"]["code"] == "MIXED_TENDER_NOT_ENABLED"
 
     async def test_fecha_futura_se_rechaza(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -545,3 +535,233 @@ class TestArreglosDelReview:
         cuerpo["operation_date"] = noche.isoformat().replace("+00:00", "Z")
         resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
         assert resp.status_code == 201, resp.text
+
+
+async def _cliente(client: AsyncClient, headers: dict[str, Any], **extra: Any) -> str:
+    resp = await client.post(
+        "/api/v1/customers",
+        json={"name": "Rosa", "last_name": "Fiada", "customer_type": "person",
+              "doc_type": "dni", "dni": str(30_000_000 + uuid.uuid4().int % 9_000_000),
+              "phone": "1155554444", **extra},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return str(resp.json()["id"])
+
+
+async def _metodos_de_linea(session: AsyncSession, operation_id: str) -> set[str]:
+    filas = await session.execute(
+        select(SaleEntry.payment_method)
+        .join(PosOperationLine, PosOperationLine.sale_entry_id == SaleEntry.id)
+        .where(PosOperationLine.operation_id == uuid.UUID(operation_id))
+    )
+    return {m for (m,) in filas.all()}
+
+
+class TestPagoMixto:
+    """B9: varios pagos por ticket. Los lectores ya los reparten (entrega 1)."""
+
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
+    async def test_efectivo_y_debito_con_vuelto_sobre_la_parte_en_efectivo(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="700.00")
+        p2 = await _crear_producto(client, auth_headers, "Fideos", price="300.00")
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 1}, {"product_id": p2, "quantity": 1}],
+            [
+                {"payment_method": "cash", "amount_ars": "600.00"},
+                {"payment_method": "debit_card", "amount_ars": "400.00"},
+            ],
+            cash_received_ars="1000.00",
+        )
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        data = resp.json()
+        assert data["total_ars"] == "1000.00"
+        # El vuelto es contra los $600 en efectivo, no contra el total.
+        assert data["cash_change_ars"] == "400.00"
+        assert [(t["payment_method"], t["amount_ars"]) for t in data["tenders"]] == [
+            ("cash", "600.00"), ("debit_card", "400.00"),
+        ]
+        assert await _metodos_de_linea(db_session, data["id"]) == {MIXED_PAYMENT_METHOD}
+
+        preview = await client.get(
+            f"/api/v1/cash-closes/preview?close_date={today_ar().isoformat()}",
+            headers=auth_headers,
+        )
+        desglose = {b["payment_method"]: b["expected_ars"] for b in preview.json()["breakdown"]}
+        assert desglose == {"cash": 600.0, "debit_card": 400.0}
+
+    async def test_dos_pagos_en_efectivo_no_son_mixto(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 1}],
+            [
+                {"payment_method": "cash", "amount_ars": "300.00"},
+                {"payment_method": "cash", "amount_ars": "700.00"},
+            ],
+        )
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        assert await _metodos_de_linea(db_session, resp.json()["id"]) == {"cash"}
+
+    async def test_una_parte_fiada_exige_un_cliente_real(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 1}],
+            [
+                {"payment_method": "cash", "amount_ars": "600.00"},
+                {"payment_method": "account", "amount_ars": "400.00"},
+            ],
+        )
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        # Sin cliente, la deuda iría al centinela "Local" y no tendría dueño.
+        assert resp.status_code == 400, resp.text
+
+    async def test_la_deuda_suma_solo_la_parte_fiada_y_la_anulacion_la_saca(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        cliente = await _cliente(client, auth_headers, credit_limit="300.00")
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="500.00")
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 2}],
+            [
+                {"payment_method": "cash", "amount_ars": "600.00"},
+                {"payment_method": "account", "amount_ars": "400.00"},
+            ],
+            customer_id=cliente,
+        )
+        resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+
+        saldo = (await client.get(f"/api/v1/customers/{cliente}/balance", headers=auth_headers))
+        assert saldo.status_code == 200, saldo.text
+        assert saldo.json()["total_account"] == 400.0
+        assert saldo.json()["balance"] == 400.0
+        # El tope es informativo: se supera con la parte fiada, no con el total.
+        assert saldo.json()["over_limit"] is True
+
+        anular = await client.post(
+            f"/api/v1/pos/operations/{resp.json()['id']}/void",
+            json={"reason": "se equivocó de cliente"},
+            headers=auth_headers,
+        )
+        assert anular.status_code == 200, anular.text
+        saldo = (await client.get(f"/api/v1/customers/{cliente}/balance", headers=auth_headers))
+        assert saldo.json()["balance"] == 0.0
+        preview = await client.get(
+            f"/api/v1/cash-closes/preview?close_date={today_ar().isoformat()}",
+            headers=auth_headers,
+        )
+        assert preview.json()["breakdown"] == []
+
+    async def test_reintentar_un_mixto_devuelve_el_mismo_ticket(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
+        cuerpo = _operacion(
+            [{"product_id": p1, "quantity": 1}],
+            [
+                {"payment_method": "cash", "amount_ars": "600.00"},
+                {"payment_method": "qr", "amount_ars": "400.00"},
+            ],
+        )
+        primera = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert primera.status_code == 201, primera.text
+        segunda = await client.post("/api/v1/pos/operations", json=cuerpo, headers=auth_headers)
+        assert segunda.status_code == 200, segunda.text
+        assert segunda.json()["id"] == primera.json()["id"]
+
+        op_id = uuid.UUID(primera.json()["id"])
+        n_tenders = (
+            await db_session.execute(
+                select(func.count()).select_from(PosTender).where(PosTender.operation_id == op_id)
+            )
+        ).scalar_one()
+        n_lineas = (
+            await db_session.execute(
+                select(func.count())
+                .select_from(PosOperationLine)
+                .where(PosOperationLine.operation_id == op_id)
+            )
+        ).scalar_one()
+        assert (n_tenders, n_lineas) == (2, 1)
+        stock = await client.get(f"/api/v1/products/{p1}", headers=auth_headers)
+        assert stock.json()["stock_units"] == 9
+
+    async def test_mixed_no_se_declara_y_hay_tope_de_pagos(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        declarado = _operacion(
+            [{"product_id": p1, "quantity": 1}],
+            [{"payment_method": MIXED_PAYMENT_METHOD, "amount_ars": "1000.00"}],
+        )
+        resp = await client.post("/api/v1/pos/operations", json=declarado, headers=auth_headers)
+        assert resp.status_code == 422, resp.text
+
+        once = _operacion(
+            [{"product_id": p1, "quantity": 1}],
+            [{"payment_method": "cash", "amount_ars": "90.00"}] * 10
+            + [{"payment_method": "qr", "amount_ars": "100.00"}],
+        )
+        resp = await client.post("/api/v1/pos/operations", json=once, headers=auth_headers)
+        assert resp.status_code == 422, resp.text
+
+    async def test_un_rechazo_despues_del_reclamo_no_deja_la_clave_tomada(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        """El 422 del guard viejo (y cualquier otro posterior al reclamo) revierte.
+
+        Una caja que mandó un mixto antes de B9 recibió `MIXED_TENDER_NOT_ENABLED`
+        DESPUÉS de reclamar la clave. Si ese reclamo hubiera quedado, reenviar la
+        misma operación ahora daría `IDEMPOTENCY_KEY_REUSED` sobre una venta que
+        no existe. `get_db_session` hace rollback ante excepción; el `client` de
+        los tests no (entrega la sesión pelada), así que acá se lo reproduce.
+        """
+        p1 = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        await db_session.commit()
+
+        async def sesion_como_produccion():
+            try:
+                yield db_session
+            except Exception:
+                await db_session.rollback()
+                raise
+
+        # La app del fixture `client` (create_app), no la de `app.main`.
+        app = client._transport.app  # type: ignore[attr-defined]
+        anterior = app.dependency_overrides[get_db_session]
+        app.dependency_overrides[get_db_session] = sesion_como_produccion
+        try:
+            clave = f"op-{uuid.uuid4().hex[:16]}"
+            # TENDERS_MISMATCH se decide después del reclamo, como el guard viejo.
+            mal = _operacion(
+                [{"product_id": p1, "quantity": 1}],
+                [
+                    {"payment_method": "cash", "amount_ars": "600.00"},
+                    {"payment_method": "debit_card", "amount_ars": "300.00"},
+                ],
+                client_operation_id=clave,
+            )
+            resp = await client.post("/api/v1/pos/operations", json=mal, headers=auth_headers)
+            assert resp.status_code == 422, resp.text
+            assert resp.json()["detail"]["code"] == "TENDERS_MISMATCH"
+
+            bien = {**mal, "tenders": [
+                {"payment_method": "cash", "amount_ars": "600.00"},
+                {"payment_method": "debit_card", "amount_ars": "400.00"},
+            ]}
+            resp = await client.post("/api/v1/pos/operations", json=bien, headers=auth_headers)
+            assert resp.status_code == 201, resp.text
+        finally:
+            app.dependency_overrides[get_db_session] = anterior

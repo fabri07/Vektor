@@ -24,6 +24,14 @@ class PaymentMethod(StrEnum):
     OTHER = "other"
 
 
+#: Marcador de las líneas de una operación de caja pagada con más de un método
+#: distinto (B9). NO es un medio de pago: queda fuera de ``PaymentMethod`` y de
+#: ``PAYMENT_METHOD_PATTERN`` a propósito, para que ningún cliente pueda
+#: declararlo. Lo escribe sólo el servidor, y el importe de cada medio de esas
+#: ventas vive en ``pos_tenders`` (ver ``repositories/_pos_tender_scope.py``).
+MIXED_PAYMENT_METHOD = "mixed"
+
+
 class ExpenseCategory(StrEnum):
     RENT = "rent"
     UTILITIES = "utilities"

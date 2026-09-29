@@ -44,6 +44,7 @@ from app.persistence.models.business import BusinessSnapshot
 from app.persistence.models.cash_close import CashClose
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.repositories._pos_tender_scope import tenders_mixtos
 from app.persistence.repositories.business_profile_repository import BusinessProfileRepository
 
 logger = get_logger(__name__)
@@ -426,6 +427,18 @@ async def compute_business_state(
         )
     )
     liquid_inflow_est: Decimal = Decimal(str(liquid_in_result.scalar_one() or 0))
+    # Pago mixto de caja (B9): sus líneas llevan `mixed`, que no está en
+    # _LIQUID_METHODS, así que arriba no suman. Acá entra sólo la parte líquida
+    # de sus tenders, con la MISMA ventana que las ventas; fiado y crédito no.
+    mixtos = tenders_mixtos(tenant_id)
+    liquid_mixed_result = await session.execute(
+        select(func.sum(mixtos.c.amount_ars)).where(
+            mixtos.c.sale_date >= window_start,
+            func.date(mixtos.c.sale_date) <= window_end,
+            mixtos.c.payment_method.in_(_LIQUID_METHODS),
+        )
+    )
+    liquid_inflow_est += Decimal(str(liquid_mixed_result.scalar_one() or 0))
     liquid_out_result = await session.execute(
         select(func.sum(ExpenseEntry.amount)).where(
             ExpenseEntry.tenant_id == tenant_id,

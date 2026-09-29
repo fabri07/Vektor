@@ -495,3 +495,69 @@ class TestAnulacion:
         )
         assert cierre.json()["expected_cash_ars"] == "200.00"
         assert buena["id"] != anulada["id"]
+
+
+def _venta_mixta(pid: str, turno: str) -> dict[str, Any]:
+    """$1.000 en diez unidades: $600 en efectivo y $400 con débito."""
+    return {
+        **_venta(pid, turno, cantidad=10),
+        "tenders": [
+            {"payment_method": "cash", "amount_ars": "600.00"},
+            {"payment_method": "debit_card", "amount_ars": "400.00"},
+        ],
+    }
+
+
+class TestPagoMixtoEnElTurno:
+    """B9: al cajón entra sólo la parte en efectivo de un pago mixto."""
+
+    async def test_el_arqueo_espera_el_fondo_mas_la_parte_en_efectivo(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        abrir = await client.post(
+            "/api/v1/pos/cash-sessions",
+            json={"client_session_id": "t1", "opening_float_ars": "5000.00"},
+            headers=caja,
+        )
+        sid = abrir.json()["id"]
+        resp = await client.post(
+            "/api/v1/pos/operations", json=_venta_mixta(pid, "t1"), headers=caja
+        )
+        assert resp.status_code == 201, resp.text
+
+        abierto = await client.get(f"/api/v1/pos/cash-sessions/{sid}", headers=auth_headers)
+        assert abierto.json()["expected_cash_now_ars"] == "5600.00"
+        cierre = await client.post(
+            f"/api/v1/pos/cash-sessions/{sid}/close",
+            json={"counted_cash_ars": "5600.00"},
+            headers=caja,
+        )
+        assert cierre.json()["expected_cash_ars"] == "5600.00"
+        assert cierre.json()["difference_ars"] == "0.00"
+
+    async def test_un_mixto_que_llega_tarde_concilia_solo_su_efectivo(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        abrir = await client.post(
+            "/api/v1/pos/cash-sessions",
+            json={"client_session_id": "t1", "opening_float_ars": "0.00"},
+            headers=caja,
+        )
+        sid = abrir.json()["id"]
+        await client.post(
+            f"/api/v1/pos/cash-sessions/{sid}/close",
+            json={"counted_cash_ars": "0.00"},
+            headers=caja,
+        )
+        resp = await client.post(
+            "/api/v1/pos/operations", json=_venta_mixta(pid, "t1"), headers=caja
+        )
+        assert resp.status_code == 201, resp.text
+
+        detalle = await client.get(f"/api/v1/pos/cash-sessions/{sid}", headers=auth_headers)
+        assert detalle.json()["expected_cash_ars"] == "0.00"
+        assert [v["cash_ars"] for v in detalle.json()["late_sales"]] == ["600.00"]

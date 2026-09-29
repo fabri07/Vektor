@@ -48,6 +48,7 @@ KIOSCO_THRESHOLDS = SeverityThresholds(
 )
 
 _SALES_COLS = ["sale_date", "amount_ars", "cost_ars", "payment_method", "provenance"]
+_MIXED_TENDERS_COLS = ["sale_date", "amount_ars", "payment_method", "provenance"]
 _EXPENSES_COLS = ["expense_date", "amount_ars", "category", "expense_type", "provenance"]
 _PRODUCTS_COLS = [
     "product_id", "stock_units", "unit_cost_ars", "last_sold_date",
@@ -58,8 +59,13 @@ _PRODUCTS_COLS = [
 class FakeProvider:
     """Provider en memoria. El provider real (facts_provider.py) se testea contra SQLite."""
 
-    def __init__(self, sales: pd.DataFrame, expenses: pd.DataFrame, products: pd.DataFrame):
+    def __init__(self, sales: pd.DataFrame, expenses: pd.DataFrame, products: pd.DataFrame,
+                 mixed_tenders: pd.DataFrame | None = None):
         self._s, self._e, self._p = sales, expenses, products
+        self._m = (
+            mixed_tenders if mixed_tenders is not None
+            else pd.DataFrame(columns=_MIXED_TENDERS_COLS)
+        )
 
     def sales(self, tenant_id, start, end):
         d = pd.to_datetime(self._s["sale_date"]).dt.date
@@ -71,6 +77,12 @@ class FakeProvider:
 
     def products(self, tenant_id):
         return self._p.copy()
+
+    def mixed_tenders(self, tenant_id, start, end):
+        if self._m.empty:
+            return self._m.copy()
+        d = pd.to_datetime(self._m["sale_date"]).dt.date
+        return self._m[(d >= start) & (d <= end)].copy()
 
 
 def _service(sales_rows: list[dict], expenses_rows: list[dict] | None = None,
@@ -332,6 +344,87 @@ def test_invariante_caja_con_inflows(svc_con_inflows):
     ventas = svc_con_inflows.ventas_periodo("t", P30).value
     inflows, delayed = 2500, 4000
     assert caja - inflows + fiado + delayed == ventas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DECISIÓN 4b — Pago mixto de caja (B9): la venta entera cuenta, el reparto
+# entre medios sale de los tenders. Se afirman V, I, F, D y L POR SEPARADO: un
+# mixto mal leído falta de F y de L a la vez y el invariante sigue cerrando.
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.fixture
+def svc_con_mixto():
+    sales = pd.DataFrame(
+        [
+            {"sale_date": TODAY, "amount_ars": 10000, "cost_ars": None,
+             "payment_method": "cash", "provenance": "REAL"},
+            # Ticket de caja de $1.500 en dos líneas: $600 efectivo + $400 fiado
+            # + $500 crédito. Las líneas llevan "mixed"; su plata, los tenders.
+            {"sale_date": TODAY, "amount_ars": 900, "cost_ars": None,
+             "payment_method": "mixed", "provenance": "REAL"},
+            {"sale_date": TODAY, "amount_ars": 600, "cost_ars": None,
+             "payment_method": "mixed", "provenance": "REAL"},
+            # Mixto DEMO: no puede sumar a una liquidez REAL.
+            {"sale_date": TODAY, "amount_ars": 800, "cost_ars": None,
+             "payment_method": "mixed", "provenance": "DEMO"},
+            # Mixto de hace 40 días: fuera del período.
+            {"sale_date": TODAY - timedelta(days=40), "amount_ars": 700, "cost_ars": None,
+             "payment_method": "mixed", "provenance": "REAL"},
+            {"sale_date": TODAY - timedelta(days=1), "amount_ars": 300, "cost_ars": None,
+             "payment_method": "inflow", "provenance": "REAL"},
+        ],
+        columns=_SALES_COLS,
+    )
+    mixtos = pd.DataFrame(
+        [
+            {"sale_date": TODAY, "amount_ars": 600, "payment_method": "cash",
+             "provenance": "REAL"},
+            {"sale_date": TODAY, "amount_ars": 400, "payment_method": "account",
+             "provenance": "REAL"},
+            {"sale_date": TODAY, "amount_ars": 500, "payment_method": "credit_card",
+             "provenance": "REAL"},
+            {"sale_date": TODAY, "amount_ars": 300, "payment_method": "cash",
+             "provenance": "DEMO"},
+            {"sale_date": TODAY, "amount_ars": 500, "payment_method": "account",
+             "provenance": "DEMO"},
+            {"sale_date": TODAY - timedelta(days=40), "amount_ars": 700,
+             "payment_method": "account", "provenance": "REAL"},
+        ],
+        columns=_MIXED_TENDERS_COLS,
+    )
+    empty_e = pd.DataFrame(columns=_EXPENSES_COLS)
+    empty_p = pd.DataFrame(columns=_PRODUCTS_COLS)
+    return FactsService(FakeProvider(sales, empty_e, empty_p, mixtos), KIOSCO_THRESHOLDS)
+
+
+def test_mixto_reparte_cada_medio_con_importe_exacto(svc_con_mixto):
+    liq = svc_con_mixto.liquidez("t", P30)
+    assert liq.ventas == 11500      # V: 10000 + el ticket entero (900 + 600)
+    assert liq.cobros == 300        # I
+    assert liq.fiado == 400         # F: sólo la parte fiada del mixto
+    assert liq.diferido == 500      # D: la parte en crédito
+    assert liq.liquida == 10900     # L = 11500 − 400 − 500 + 300
+    assert liq.liquida - liq.cobros + liq.fiado + liq.diferido == liq.ventas
+
+
+def test_mixto_en_los_facts_publicos(svc_con_mixto):
+    assert svc_con_mixto.ventas_periodo("t", P30).value == 11500
+    assert svc_con_mixto.fiado_pendiente("t", P30).value == 400
+    assert svc_con_mixto.caja_liquida("t", P30).value == 10900
+
+
+def test_mixto_demo_entra_solo_con_include_demo(svc_con_mixto):
+    liq = svc_con_mixto.liquidez("t", P30, include_demo=True)
+    assert liq.ventas == 12300      # + el ticket DEMO de 800
+    assert liq.fiado == 900         # 400 + 500 DEMO
+    assert liq.diferido == 500
+    assert liq.liquida == 11200     # 12300 − 900 − 500 + 300
+
+
+def test_sin_mixtos_el_reparto_no_cambia(svc_con_inflows):
+    liq = svc_con_inflows.liquidez("t", P30)
+    assert (liq.ventas, liq.cobros, liq.fiado, liq.diferido, liq.liquida) == (
+        20000, 2500, 6000, 4000, 12500
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

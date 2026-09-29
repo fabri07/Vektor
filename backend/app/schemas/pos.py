@@ -110,7 +110,11 @@ class PosOperationRequest(BaseModel):
     #: arqueo no se puede atribuir a su turno nunca más.
     client_session_id: str | None = Field(default=None, max_length=64)
     items: list[PosLineRequest] = Field(min_length=1)
-    tenders: list[PosTenderRequest] = Field(min_length=1)
+    #: Varios pagos = pago mixto (B9). El tope es una restricción, no un campo
+    #: con default: no mueve la huella de idempotencia de lo ya encolado. Los
+    #: métodos repetidos son válidos; lo que hace mixta a una venta es tener más
+    #: de un método DISTINTO.
+    tenders: list[PosTenderRequest] = Field(min_length=1, max_length=10)
 
     @field_validator("operation_date", "charged_at")
     @classmethod

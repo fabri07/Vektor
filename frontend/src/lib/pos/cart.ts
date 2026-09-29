@@ -87,12 +87,26 @@ export interface PosOperationResult {
  */
 export type SaleStatus = "editando" | "enviando" | "cobrada";
 
+/**
+ * Un pago de la venta (B9). Con UNA sola fila, su importe se ignora y el pago
+ * sigue al total: es la caja de siempre. Con varias —«Dividir pago»— cada
+ * importe es explícito y nadie lo redistribuye: si después cambia el total,
+ * la pantalla lo dice y Cobrar queda bloqueado hasta corregirlo.
+ */
+export interface PaymentRow {
+  id: string;
+  method: string;
+  /** Lo que escribió el cajero. Sólo cuenta con más de una fila. */
+  amount: string;
+}
+
 export interface SaleState {
   status: SaleStatus;
   lines: CartLine[];
   globalDiscountCents: number;
-  paymentMethod: string;
-  /** Lo que escribió el cajero; vacío = no informado. */
+  /** Siempre al menos una. */
+  payments: PaymentRow[];
+  /** Lo que escribió el cajero; vacío = no informado. Sólo con un pago en efectivo. */
   cashReceived: string;
   customerId: string | null;
   customerName: string | null;
@@ -107,7 +121,7 @@ export const initialSale: SaleState = {
   status: "editando",
   lines: [],
   globalDiscountCents: 0,
-  paymentMethod: "cash",
+  payments: [{ id: "p0", method: "cash", amount: "" }],
   cashReceived: "",
   customerId: null,
   customerName: null,
@@ -171,6 +185,85 @@ export function previewTotals(state: Pick<SaleState, "lines" | "globalDiscountCe
   return { subtotalCents, totalCents: subtotalCents - state.globalDiscountCents };
 }
 
+// ─── Pagos (B9) ──────────────────────────────────────────────────────────────
+
+/**
+ * Los medios que ofrece la caja, en orden. Lista EXPLÍCITA a propósito: derivar
+ * las opciones de un mapa de etiquetas ofrecería cualquier cosa que alguien le
+ * agregue para MOSTRAR (como `mixed`, que es un marcador del servidor).
+ */
+export const POS_PAYMENT_METHODS = [
+  "cash",
+  "debit_card",
+  "credit_card",
+  "transfer",
+  "qr",
+  "account",
+  "other",
+] as const;
+
+export const FIADO_METHOD = "account";
+export const CASH_METHOD = "cash";
+
+const PAGO_INICIAL: PaymentRow = { id: "p0", method: CASH_METHOD, amount: "" };
+
+/** La fila de un pago único. `payments` nunca está vacío; el respaldo es para el tipo. */
+function primerPago(payments: PaymentRow[]): PaymentRow {
+  return payments[0] ?? PAGO_INICIAL;
+}
+
+/** Varias filas = pago dividido; los importes son del cajero, no del total. */
+export function isSplit(state: Pick<SaleState, "payments">): boolean {
+  return state.payments.length > 1;
+}
+
+/** El importe de cada pago en centavos. `null` = el cajero todavía no escribió uno válido. */
+export function tenderCents(
+  state: Pick<SaleState, "payments">,
+  totalCents: number,
+): { method: string; cents: number | null }[] {
+  if (!isSplit(state)) return [{ method: primerPago(state.payments).method, cents: totalCents }];
+  return state.payments.map((p) => ({
+    method: p.method,
+    cents: p.amount.trim() === "" ? null : toCents(p.amount),
+  }));
+}
+
+/**
+ * total − Σ pagos: positivo = falta asignar, negativo = sobra. Un importe
+ * todavía VACÍO cuenta como $0 —es lo que falta asignar—; uno ilegible da
+ * `null`, porque ahí no se sabe cuánto falta.
+ */
+export function unassignedCents(
+  state: Pick<SaleState, "payments">,
+  totalCents: number,
+): number | null {
+  if (!isSplit(state)) return 0;
+  let asignado = 0;
+  for (const p of state.payments) {
+    if (p.amount.trim() === "") continue;
+    const cents = toCents(p.amount);
+    if (cents === null) return null;
+    asignado += cents;
+  }
+  return totalCents - asignado;
+}
+
+/** La parte en efectivo: contra ESTO se calcula el vuelto, no contra el total. */
+export function cashPartCents(state: Pick<SaleState, "payments">, totalCents: number): number {
+  return tenderCents(state, totalCents)
+    .filter((t) => t.method === CASH_METHOD)
+    .reduce((acc, t) => acc + (t.cents ?? 0), 0);
+}
+
+export function hasCash(state: Pick<SaleState, "payments">): boolean {
+  return state.payments.some((p) => p.method === CASH_METHOD);
+}
+
+export function hasFiado(state: Pick<SaleState, "payments">): boolean {
+  return state.payments.some((p) => p.method === FIADO_METHOD);
+}
+
 /** Lo que impide cobrar, o `null` si se puede. Evita mandar lo que el servidor rechazaría seguro. */
 export function cannotCharge(state: SaleState): string | null {
   if (state.lines.length === 0) return "El carrito está vacío.";
@@ -180,13 +273,26 @@ export function cannotCharge(state: SaleState): string | null {
   const { totalCents } = previewTotals(state);
   if (totalCents < 0) return "El descuento supera el total de la venta.";
   if (totalCents === 0) return "Una venta en $0 no se puede cobrar.";
-  if (state.paymentMethod === "account" && !state.customerId) {
+  if (isSplit(state)) {
+    for (const t of tenderCents(state, totalCents)) {
+      if (t.cents === null) return "Hay un pago sin importe válido.";
+      if (t.cents <= 0) return "Cada pago tiene que ser mayor que $0.";
+    }
+    const resto = unassignedCents(state, totalCents) ?? 0;
+    if (resto > 0) return `Falta asignar ${formatCents(resto)} entre los pagos.`;
+    if (resto < 0) return `Los pagos suman ${formatCents(-resto)} de más.`;
+  }
+  if (hasFiado(state) && !state.customerId) {
     return "Para vender fiado hay que elegir el cliente.";
   }
-  if (state.paymentMethod === "cash" && state.cashReceived.trim() !== "") {
+  if (hasCash(state) && state.cashReceived.trim() !== "") {
     const recibido = toCents(state.cashReceived);
     if (recibido === null) return "El efectivo recibido no es un monto válido.";
-    if (recibido < totalCents) return "El efectivo recibido no alcanza para el total.";
+    if (recibido < cashPartCents(state, totalCents)) {
+      return isSplit(state)
+        ? "El efectivo recibido no alcanza para la parte en efectivo."
+        : "El efectivo recibido no alcanza para el total.";
+    }
   }
   return null;
 }
@@ -222,11 +328,11 @@ export function buildPayload(
   sessionId: string | null = null,
 ): PosOperationPayload {
   const { totalCents } = previewTotals(state);
-  const efectivo = state.paymentMethod === "cash" && state.cashReceived.trim() !== "";
+  const efectivo = hasCash(state) && state.cashReceived.trim() !== "";
   const fecha = localNaiveIso(now);
   return {
     client_operation_id: id,
-    customer_id: state.paymentMethod === "account" ? state.customerId : null,
+    customer_id: hasFiado(state) ? state.customerId : null,
     operation_date: fecha,
     discount_ars: centsToAmount(state.globalDiscountCents),
     cash_received_ars: efectivo ? centsToAmount(toCents(state.cashReceived) ?? 0) : null,
@@ -256,7 +362,11 @@ export function buildPayload(
           }
         : {}),
     })),
-    tenders: [{ payment_method: state.paymentMethod, amount_ars: centsToAmount(totalCents) }],
+    // Con un solo pago, el mismo JSON de siempre: un tender por el total.
+    tenders: tenderCents(state, totalCents).map((t) => ({
+      payment_method: t.method,
+      amount_ars: centsToAmount(t.cents ?? 0),
+    })),
   };
 }
 
@@ -268,7 +378,10 @@ export type SaleAction =
   | { type: "REMOVE"; productId: string }
   | { type: "SET_LINE_DISCOUNT"; productId: string; cents: number }
   | { type: "SET_GLOBAL_DISCOUNT"; cents: number }
-  | { type: "SET_PAYMENT"; method: string }
+  | { type: "SET_PAYMENT_METHOD"; id: string; method: string }
+  | { type: "SET_PAYMENT_AMOUNT"; id: string; value: string }
+  | { type: "SPLIT_PAYMENT" }
+  | { type: "REMOVE_PAYMENT"; id: string }
   | { type: "SET_CASH_RECEIVED"; value: string }
   | { type: "SET_CUSTOMER"; id: string | null; name: string | null }
   | { type: "SEND"; payload: PosOperationPayload }
@@ -289,6 +402,23 @@ function mapLine(
   f: (l: CartLine) => CartLine,
 ): SaleState {
   return { ...state, lines: state.lines.map((l) => (l.product.id === productId ? f(l) : l)) };
+}
+
+/**
+ * Después de tocar los pagos: sin pago en efectivo no hay "efectivo recibido"
+ * que informar (el servidor lo rechaza con `CASH_RECEIVED_WITHOUT_CASH_TENDER`),
+ * y al volver a un solo pago su importe deja de contar: sigue al total.
+ */
+function conPagos(state: SaleState, payments: PaymentRow[]): SaleState {
+  const normalizados = payments.length === 1 ? [{ ...primerPago(payments), amount: "" }] : payments;
+  const siguiente = { ...state, payments: normalizados };
+  return hasCash(siguiente) ? siguiente : { ...siguiente, cashReceived: "" };
+}
+
+let pagoSeq = 0;
+function nuevoPagoId(): string {
+  pagoSeq += 1;
+  return `p${pagoSeq}-${Date.now().toString(36)}`;
 }
 
 /** Una venta cobrada que recibe una edición arranca la siguiente, sin paso extra. */
@@ -324,13 +454,47 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
     case "SET_GLOBAL_DISCOUNT":
       if (state.status !== "editando" || action.cents < 0) return state;
       return { ...state, globalDiscountCents: action.cents };
-    case "SET_PAYMENT":
+    case "SET_PAYMENT_METHOD":
+      if (state.status !== "editando") return state;
+      return conPagos(
+        state,
+        state.payments.map((p) => (p.id === action.id ? { ...p, method: action.method } : p)),
+      );
+    case "SET_PAYMENT_AMOUNT":
       if (state.status !== "editando") return state;
       return {
         ...state,
-        paymentMethod: action.method,
-        cashReceived: action.method === "cash" ? state.cashReceived : "",
+        payments: state.payments.map((p) =>
+          p.id === action.id ? { ...p, amount: action.value } : p,
+        ),
       };
+    case "SPLIT_PAYMENT": {
+      if (state.status !== "editando") return state;
+      const usados = new Set(state.payments.map((p) => p.method));
+      const libre = POS_PAYMENT_METHODS.find((m) => !usados.has(m));
+      if (!libre) return state;
+      const { totalCents } = previewTotals(state);
+      // Al pasar de uno a dos, el primero se vuelve explícito con el total de
+      // ahora; el nuevo sugiere lo que falte asignar (si falta algo).
+      const actuales = isSplit(state)
+        ? state.payments
+        : [{ ...primerPago(state.payments), amount: centsToAmount(Math.max(totalCents, 0)) }];
+      const resto = unassignedCents({ payments: actuales }, totalCents);
+      return conPagos(state, [
+        ...actuales,
+        {
+          id: nuevoPagoId(),
+          method: libre,
+          amount: resto !== null && resto > 0 ? centsToAmount(resto) : "",
+        },
+      ]);
+    }
+    case "REMOVE_PAYMENT":
+      if (state.status !== "editando" || !isSplit(state)) return state;
+      return conPagos(
+        state,
+        state.payments.filter((p) => p.id !== action.id),
+      );
     case "SET_CASH_RECEIVED":
       if (state.status !== "editando") return state;
       return { ...state, cashReceived: action.value };

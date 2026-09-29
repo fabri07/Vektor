@@ -168,7 +168,7 @@ class AgentClient(BaseAgent):
             for r in summary["by_customer"][:10]:
                 name = r.get("customer_name") or "Cliente sin nombre"
                 lines.append(
-                    f"- {name}: ${r['total_owed']:,.0f} en {r['n_sales']} venta(s)".replace(
+                    f"- {name}: ${r['total_owed']:,.0f} en {r['n_sales']} movimiento(s)".replace(
                         ",", "."
                     )
                 )
