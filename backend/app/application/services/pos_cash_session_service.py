@@ -34,6 +34,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+)
 from app.persistence.models.pos_cash_session import (
     ESTADO_ABIERTO,
     ESTADO_CERRADO,
@@ -51,6 +55,23 @@ ESTADO_OPERACION_VIVA = "COMPLETED"
 
 class SesionYaCerradaError(Exception):
     """Se intentó cerrar un turno que ya estaba cerrado."""
+
+
+_UNICO_DE_TURNO = "uq_pos_cash_sessions_client_session"
+
+
+def _clasificar_unico_de_turno(exc: IntegrityError) -> str | None:
+    """Reconoce SÓLO el UNIQUE ``(tenant, client_session_id)``.
+
+    Cualquier otra violación (una FK, un CHECK) se propaga: convertirla en "ya
+    existía, la reuso" escondería un error real.
+    """
+    mensaje = str(exc.orig)
+    if _UNICO_DE_TURNO in mensaje or (
+        "pos_cash_sessions.client_session_id" in mensaje and "UNIQUE" in mensaje
+    ):
+        return _UNICO_DE_TURNO
+    return None
 
 
 async def obtener_por_client_id(
@@ -105,12 +126,16 @@ async def abrir_o_adoptar(
         opened_at=ahora or datetime.now(UTC),
         status=ESTADO_ABIERTO,
     )
-    session.add(nueva)
+    # Dentro de un SAVEPOINT y no con ``session.rollback()``: quien llama puede
+    # ser ``create_pos_operation``, que ya hizo flush de la venta, sus líneas,
+    # sus pagos y el reclamo de idempotencia. Un rollback de la transacción
+    # entera ante la carrera se llevaba puesta la venta, y el handler seguía
+    # adelante con objetos desasociados. El savepoint deshace sólo este INSERT.
     try:
-        await session.flush()
-    except IntegrityError:
+        async with guarded_savepoint(session, _clasificar_unico_de_turno):
+            session.add(nueva)
+    except SavepointConflictError:
         # Otra transacción lo creó en el medio. Su fila es tan válida como ésta.
-        await session.rollback()
         ganadora = await obtener_por_client_id(session, tenant_id, client_session_id)
         if ganadora is None:  # pragma: no cover - sólo si el UNIQUE no existiera
             raise
