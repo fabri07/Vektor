@@ -6,8 +6,12 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { CartTable } from "@/features/pos/CartTable";
+import { CashSessionBar } from "@/features/pos/CashSessionBar";
+import { CashSessionsPanel } from "@/features/pos/CashSessionsPanel";
 import { CashierHome } from "@/features/pos/CashierHome";
+import { CloseCashSession } from "@/features/pos/CloseCashSession";
 import { DiscountControl } from "@/features/pos/DiscountControl";
+import { OpenCashSession } from "@/features/pos/OpenCashSession";
 import { PaymentPanel } from "@/features/pos/PaymentPanel";
 import { type PickerMode, ProductPicker } from "@/features/pos/ProductPicker";
 import { PendingOperationsPanel } from "@/features/pos/PendingOperationsPanel";
@@ -15,6 +19,7 @@ import { RecentTickets } from "@/features/pos/RecentTickets";
 import { ScanInput } from "@/features/pos/ScanInput";
 import type { PosReceipt } from "@/features/pos/ticketTemplate";
 import { VoidLastTicket } from "@/features/pos/VoidLastTicket";
+import { useCashSession } from "@/features/pos/useCashSession";
 import { usePosPrinting } from "@/features/pos/usePosPrinting";
 import { usePosSync } from "@/features/pos/usePosSync";
 import { useScanner } from "@/features/pos/useScanner";
@@ -177,9 +182,6 @@ function PosRegister() {
   const [sincronizadoEn, setSincronizadoEn] = useState<string | null>(null);
   const [negocio, setNegocio] = useState<string>("");
   const [persistencia, setPersistencia] = useState<boolean | null>(null);
-  // El turno de esta caja: nace al abrir la pantalla y viaja con cada venta,
-  // para que B8 pueda atribuir lo que sincroniza después del arqueo.
-  const sesion = useRef<string>(newOperationId());
   // Un cobro `EN_CORRECCION` no está "sin sincronizar" —reenviarlo daría el
   // mismo rechazo—: está sin completar, que es otra cosa y se arregla distinto.
   const { pendientes, sincronizando, flush, refrescar } = usePosSync({
@@ -190,6 +192,31 @@ function PosRegister() {
   });
   const sinCompletar = pendientes.filter((o) => o.estado === "EN_CORRECCION").length;
   const sinSincronizar = pendientes.length - sinCompletar;
+
+  // El turno de esta caja (B8). Antes nacía con un `useRef` en cada montaje, así
+  // que cada recarga de la pantalla abría otro turno con fondo $0 que nadie
+  // cerraba. Ahora vive en `posCashSessionStore` y sobrevive a la recarga; sin
+  // turno abierto no se cobra.
+  const { turno, anterioresAbiertos, abrir, confirmarApertura, soltar } = useCashSession({
+    tenantId,
+    userId,
+    terminalId,
+    habilitado: candado === "propia",
+  });
+  const turnoRef = useRef(turno);
+  turnoRef.current = turno;
+  const [vista, setVista] = useState<"caja" | "cerrar" | "turnos">("caja");
+  const esEncargado = user?.role === "OWNER" || user?.role === "ADMIN";
+  // Lo pendiente de ESTE turno, en dos grupos: lo que no subió y lo que quedó
+  // en corrección (que tiene `charged_at` afirmado: puede haber plata de eso en
+  // el cajón). Los dos se avisan al cerrar, rotulados aparte.
+  const delTurno = turno
+    ? pendientes.filter((o) => o.payload.client_session_id === turno.clientSessionId)
+    : [];
+  const pendientesDelTurno = {
+    enCorreccion: delTurno.filter((o) => o.estado === "EN_CORRECCION").length,
+    sinSincronizar: delTurno.filter((o) => o.estado !== "EN_CORRECCION").length,
+  };
   const canDiscount = hasPosPermission(user, "discount");
   const canFiado = hasPosPermission(user, "fiado");
   const canLearn = hasPosPermission(user, "learn_barcode");
@@ -345,6 +372,11 @@ function PosRegister() {
   const cobrar = useCallback(() => {
     const s = saleRef.current;
     if (s.status !== "editando") return;
+    const turnoActual = turnoRef.current;
+    if (!turnoActual) {
+      dispatch({ type: "NOTICE", notice: "Abrí el turno antes de cobrar." });
+      return;
+    }
     const motivo = cannotCharge(s);
     if (motivo) {
       dispatch({ type: "NOTICE", notice: motivo });
@@ -352,7 +384,7 @@ function PosRegister() {
     }
     // Id, fecha y turno nacen acá, una sola vez: el reintento reenvía este
     // mismo objeto, y recalcular la fecha cambiaría la huella de idempotencia.
-    const payload = buildPayload(s, newOperationId(), new Date(), sesion.current);
+    const payload = buildPayload(s, newOperationId(), new Date(), turnoActual.clientSessionId);
     const recibo = reciboLocal(payload, s.lines, {
       businessName: negocio,
       cashierName: user?.full_name ?? null,
@@ -474,6 +506,10 @@ function PosRegister() {
     async (raw: string) => {
       const code = raw.trim();
       if (!code) return;
+      if (!turnoRef.current) {
+        setScanMsg("Abrí el turno antes de escanear.");
+        return;
+      }
       const s = saleRef.current;
       if (s.status === "enviando") {
         setScanMsg("Terminá el cobro en curso antes de escanear el próximo producto.");
@@ -752,148 +788,215 @@ function PosRegister() {
         </div>
       </header>
 
-      <div className="flex flex-1 flex-col gap-4 overflow-hidden p-4 lg:flex-row">
-        <section className="flex flex-1 flex-col gap-3 overflow-hidden">
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <ScanInput ref={scanRef} onCode={(c) => void handleScan(c)} />
-            </div>
-            <Button variant="secondary" onClick={() => setPicker({ mode: "search" })}>
-              Buscar producto
-            </Button>
-          </div>
-          {scanMsg ? (
-            <p className="text-sm text-vk-warning" role="status">
-              {scanMsg}
-            </p>
-          ) : null}
-          <CartTable
-            lines={sale.status === "cobrada" ? [] : sale.lines}
-            dispatch={dispatch}
-            locked={!editable}
-            canDiscount={canDiscount}
-            onAfterAction={focusScan}
+      {turno && vista !== "turnos" ? (
+        <CashSessionBar
+          turno={turno}
+          onCerrar={() => {
+            if (saleRef.current.lines.length > 0 || saleRef.current.status === "enviando") {
+              setScanMsg("Cobrá o vaciá el carrito antes de cerrar el turno.");
+              return;
+            }
+            setVista("cerrar");
+          }}
+          onVerTurnos={esEncargado ? () => setVista("turnos") : undefined}
+        />
+      ) : null}
+
+      {vista === "turnos" && esEncargado ? (
+        <CashSessionsPanel
+          turnoActual={turno?.clientSessionId ?? null}
+          terminalActual={terminalId}
+          onVolver={() => {
+            setVista("caja");
+            focusScan();
+          }}
+        />
+      ) : !turno ? (
+        <div className="flex flex-1 flex-col">
+          <OpenCashSession
+            anterioresAbiertos={anterioresAbiertos}
+            onAbrir={async (fondo) => {
+              await abrir(fondo);
+              setVista("caja");
+              focusScan();
+            }}
           />
-        </section>
-
-        <aside className="flex w-full flex-col gap-4 rounded-xl border border-pos-border bg-pos-surface p-4 lg:w-96">
-          {sale.status === "cobrada" && sale.result ? (
-            <div className="space-y-3" data-testid="venta-cobrada">
-              <p className="text-sm text-vk-success">Venta cobrada</p>
-              <p className="text-3xl font-semibold text-pos-text">
-                {formatCents(toCents(sale.result.total_ars) ?? 0)}
-              </p>
-              {sale.result.cash_change_ars !== null ? (
-                <p className="text-lg text-pos-text">
-                  Vuelto: {formatCents(toCents(sale.result.cash_change_ars) ?? 0)}
-                </p>
-              ) : null}
-              <Button
-                className="w-full"
-                size="lg"
-                onClick={() => {
-                  dispatch({ type: "NEW_SALE" });
-                  focusScan();
-                }}
+          {esEncargado ? (
+            <div className="pb-6 text-center text-sm">
+              <button
+                type="button"
+                className="text-pos-link underline"
+                onClick={() => setVista("turnos")}
               >
-                Nueva venta
-              </Button>
-              <Button
-                variant="secondary"
-                className="w-full"
-                onClick={() => {
-                  if (sale.result) void printReceipt(sale.result.id);
-                  focusScan();
-                }}
-              >
-                Reimprimir ticket
+                Ver los turnos de todas las cajas
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : vista === "cerrar" ? (
+        <CloseCashSession
+          turno={turno}
+          pendientes={pendientesDelTurno}
+          confirmarApertura={confirmarApertura}
+          onSincronizar={async () => {
+            await confirmarApertura();
+            await flush();
+            await refrescar();
+          }}
+          onTerminado={() => {
+            soltar();
+            setVista("caja");
+            setLastOperation(null);
+          }}
+          onCancelar={() => {
+            setVista("caja");
+            focusScan();
+          }}
+        />
+      ) : (
+        <div className="flex flex-1 flex-col gap-4 overflow-hidden p-4 lg:flex-row">
+          <section className="flex flex-1 flex-col gap-3 overflow-hidden">
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <ScanInput ref={scanRef} onCode={(c) => void handleScan(c)} />
+              </div>
+              <Button variant="secondary" onClick={() => setPicker({ mode: "search" })}>
+                Buscar producto
               </Button>
             </div>
-          ) : (
-            <>
-              <div className="flex items-baseline justify-between">
-                <span className="text-sm text-pos-text-2">Total</span>
-                <span className="text-3xl font-semibold text-pos-text" data-testid="total">
-                  {formatCents(totalCents)}
-                </span>
-              </div>
-              {canDiscount ? (
-                <DiscountControl
-                  cents={sale.globalDiscountCents}
-                  disabled={!editable}
-                  onCents={(c) => dispatch({ type: "SET_GLOBAL_DISCOUNT", cents: c })}
-                />
-              ) : null}
-              <PaymentPanel
-                sale={sale}
-                totalCents={totalCents}
-                dispatch={dispatch}
-                locked={!editable}
-                canFiado={canFiado}
-              />
+            {scanMsg ? (
+              <p className="text-sm text-vk-warning" role="status">
+                {scanMsg}
+              </p>
+            ) : null}
+            <CartTable
+              lines={sale.status === "cobrada" ? [] : sale.lines}
+              dispatch={dispatch}
+              locked={!editable}
+              canDiscount={canDiscount}
+              onAfterAction={focusScan}
+            />
+          </section>
 
-              {sale.notice ? (
-                <p role="alert" className="text-sm text-pos-danger">
-                  {sale.notice}
+          <aside className="flex w-full flex-col gap-4 rounded-xl border border-pos-border bg-pos-surface p-4 lg:w-96">
+            {sale.status === "cobrada" && sale.result ? (
+              <div className="space-y-3" data-testid="venta-cobrada">
+                <p className="text-sm text-vk-success">Venta cobrada</p>
+                <p className="text-3xl font-semibold text-pos-text">
+                  {formatCents(toCents(sale.result.total_ars) ?? 0)}
                 </p>
-              ) : null}
+                {sale.result.cash_change_ars !== null ? (
+                  <p className="text-lg text-pos-text">
+                    Vuelto: {formatCents(toCents(sale.result.cash_change_ars) ?? 0)}
+                  </p>
+                ) : null}
+                <Button
+                  className="w-full"
+                  size="lg"
+                  onClick={() => {
+                    dispatch({ type: "NEW_SALE" });
+                    focusScan();
+                  }}
+                >
+                  Nueva venta
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  onClick={() => {
+                    if (sale.result) void printReceipt(sale.result.id);
+                    focusScan();
+                  }}
+                >
+                  Reimprimir ticket
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-baseline justify-between">
+                  <span className="text-sm text-pos-text-2">Total</span>
+                  <span className="text-3xl font-semibold text-pos-text" data-testid="total">
+                    {formatCents(totalCents)}
+                  </span>
+                </div>
+                {canDiscount ? (
+                  <DiscountControl
+                    cents={sale.globalDiscountCents}
+                    disabled={!editable}
+                    onCents={(c) => dispatch({ type: "SET_GLOBAL_DISCOUNT", cents: c })}
+                  />
+                ) : null}
+                <PaymentPanel
+                  sale={sale}
+                  totalCents={totalCents}
+                  dispatch={dispatch}
+                  locked={!editable}
+                  canFiado={canFiado}
+                />
 
-              <Button
-                className="w-full"
-                size="lg"
-                loading={sale.status === "enviando"}
-                disabled={sale.status !== "editando" || sale.lines.length === 0}
-                onClick={cobrar}
-              >
-                Cobrar {formatCents(totalCents)}
-              </Button>
-            </>
-          )}
+                {sale.notice ? (
+                  <p role="alert" className="text-sm text-pos-danger">
+                    {sale.notice}
+                  </p>
+                ) : null}
 
-          {printError ? (
-            <p role="alert" className="text-sm text-vk-warning">
-              {printError}
-            </p>
-          ) : null}
+                <Button
+                  className="w-full"
+                  size="lg"
+                  loading={sale.status === "enviando"}
+                  disabled={sale.status !== "editando" || sale.lines.length === 0}
+                  onClick={cobrar}
+                >
+                  Cobrar {formatCents(totalCents)}
+                </Button>
+              </>
+            )}
 
-          {canVoid && lastOperation && sale.status !== "enviando" ? (
-            <VoidLastTicket
-              key={lastOperation.id}
-              operation={lastOperation}
-              onVoided={(op) => {
-                setLastOperation(op);
-                setScanMsg(`Ticket de ${formatCents(toCents(op.total_ars) ?? 0)} anulado.`);
+            {printError ? (
+              <p role="alert" className="text-sm text-vk-warning">
+                {printError}
+              </p>
+            ) : null}
+
+            {canVoid && lastOperation && sale.status !== "enviando" ? (
+              <VoidLastTicket
+                key={lastOperation.id}
+                operation={lastOperation}
+                onVoided={(op) => {
+                  setLastOperation(op);
+                  setScanMsg(`Ticket de ${formatCents(toCents(op.total_ars) ?? 0)} anulado.`);
+                  focusScan();
+                }}
+              />
+            ) : null}
+
+            <PendingOperationsPanel
+              pendientes={pendientes}
+              sincronizando={sincronizando}
+              persistencia={persistencia}
+              onFlush={() => void flush()}
+              onCambio={() => void refrescar()}
+              onImprimir={(op: OperacionGuardada) => {
+                void printLocal(op.recibo);
                 focusScan();
               }}
             />
-          ) : null}
 
-          <PendingOperationsPanel
-            pendientes={pendientes}
-            sincronizando={sincronizando}
-            persistencia={persistencia}
-            onFlush={() => void flush()}
-            onCambio={() => void refrescar()}
-            onImprimir={(op: OperacionGuardada) => {
-              void printLocal(op.recibo);
-              focusScan();
-            }}
-          />
-
-          <RecentTickets
-            refreshKey={`${lastOperation?.id ?? ""}:${lastOperation?.status ?? ""}`}
-            canVoid={canVoid}
-            onReprint={(id) => {
-              void printReceipt(id);
-              focusScan();
-            }}
-            onVoided={() => {
-              setScanMsg("Ticket anulado.");
-              focusScan();
-            }}
-          />
-        </aside>
-      </div>
+            <RecentTickets
+              refreshKey={`${lastOperation?.id ?? ""}:${lastOperation?.status ?? ""}`}
+              canVoid={canVoid}
+              onReprint={(id) => {
+                void printReceipt(id);
+                focusScan();
+              }}
+              onVoided={() => {
+                setScanMsg("Ticket anulado.");
+                focusScan();
+              }}
+            />
+          </aside>
+        </div>
+      )}
 
       {picker ? (
         <ProductPicker

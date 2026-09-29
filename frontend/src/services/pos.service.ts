@@ -68,6 +68,40 @@ export interface PosOperationSummary {
   cashier_name: string | null;
 }
 
+/** Una venta que llegó después de que su turno cerrara (no movió el arqueo). */
+export interface PosLateSale {
+  operation_id: string;
+  cash_ars: string;
+  created_at: string;
+}
+
+export type PosCashSessionStatus = "OPEN" | "CLOSED" | "ABANDONED";
+
+/** El turno de un cajero en una caja (B8). */
+export interface PosCashSession {
+  id: string;
+  client_session_id: string;
+  terminal_id: string | null;
+  user_id: string | null;
+  cashier_name: string | null;
+  opening_float_ars: string;
+  float_declared: boolean;
+  opened_at: string;
+  closed_at: string | null;
+  closed_by_user_id: string | null;
+  /** `null` mientras está abierto, y siempre en un turno ABANDONED. */
+  expected_cash_ars: string | null;
+  counted_cash_ars: string | null;
+  difference_ars: string | null;
+  notes: string | null;
+  status: PosCashSessionStatus;
+  /** Parcial de un turno abierto. Al cajero NO le llega (arqueo ciego). */
+  expected_cash_now_ars: string | null;
+  late_sales: PosLateSale[];
+  /** Tickets vivos. Sólo en el listado del encargado. */
+  sales_count: number | null;
+}
+
 export const posService = {
   async getReceipt(operationId: string): Promise<PosReceipt> {
     const res = await api.get<PosReceipt>(`/pos/operations/${operationId}/receipt`);
@@ -124,6 +158,41 @@ export const posService = {
     const res = await api.post<PosOperationResult>("/pos/operations", payload, {
       headers: offline ? { "X-POS-Offline": "1" } : {},
     });
+    return res.data;
+  },
+  async openCashSession(clientSessionId: string, openingFloatArs: string): Promise<PosCashSession> {
+    const res = await api.post<PosCashSession>("/pos/cash-sessions", {
+      client_session_id: clientSessionId,
+      opening_float_ars: openingFloatArs,
+    });
+    return res.data;
+  },
+  async listCashSessions(
+    params: { open?: boolean; terminalId?: string | null; limit?: number } = {},
+  ): Promise<PosCashSession[]> {
+    const query: Record<string, string | number | boolean> = { limit: params.limit ?? 50 };
+    if (params.open) query.open = true;
+    if (params.terminalId) query.terminal_id = params.terminalId;
+    const res = await api.get<PosCashSession[]>("/pos/cash-sessions", { params: query });
+    return res.data;
+  },
+  async getCashSession(id: string): Promise<PosCashSession> {
+    const res = await api.get<PosCashSession>(`/pos/cash-sessions/${id}`);
+    return res.data;
+  },
+  async closeCashSession(
+    id: string,
+    countedCashArs: string,
+    notes: string | null,
+  ): Promise<PosCashSession> {
+    const res = await api.post<PosCashSession>(`/pos/cash-sessions/${id}/close`, {
+      counted_cash_ars: countedCashArs,
+      notes,
+    });
+    return res.data;
+  },
+  async abandonCashSession(id: string, reason: string): Promise<PosCashSession> {
+    const res = await api.post<PosCashSession>(`/pos/cash-sessions/${id}/abandon`, { reason });
     return res.data;
   },
   async voidOperation(id: string, reason: string): Promise<PosOperationResult> {
