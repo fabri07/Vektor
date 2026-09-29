@@ -2,6 +2,8 @@
 // (`/suppliers`) y la página de detalle (`/suppliers/[id]`) para no duplicar
 // el formateo de teléfono/forma de pago ni la validación de CUIL.
 
+import { DISPLAY_ONLY_PAYMENT_LABELS } from "@/lib/payment";
+
 export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   cash: "Efectivo",
   debit_card: "Tarjeta débito",
@@ -17,7 +19,7 @@ export const PAYMENT_METHOD_OPTIONS = Object.entries(PAYMENT_METHOD_LABELS).map(
 );
 
 export function paymentLabel(method: string): string {
-  return PAYMENT_METHOD_LABELS[method] ?? method;
+  return PAYMENT_METHOD_LABELS[method] ?? DISPLAY_ONLY_PAYMENT_LABELS[method] ?? method;
 }
 
 // Validación de CUIT/CUIL y normalización de WhatsApp viven en `lib/fiscal.ts`

@@ -450,3 +450,61 @@ describe("acceso y permisos", () => {
     expect(await screen.findByText(/anulado/)).toBeInTheDocument();
   });
 });
+
+describe("pago mixto (B9)", () => {
+  it("dividir → efectivo + débito → vuelto sobre el efectivo → dos pagos en el payload", async () => {
+    svc.createOperation.mockResolvedValue(resultado("1000.00", "400.00"));
+    render(<PosScreen />);
+    await escanear("7790001234567");
+    expect(await screen.findByText("Yerba")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dividir pago" }));
+    expect(screen.getByLabelText("Medio del pago 2")).toHaveValue("debit_card");
+    fireEvent.change(screen.getByLabelText("Importe del pago 1"), { target: { value: "600" } });
+    expect(screen.getByTestId("pago-sin-asignar")).toHaveTextContent("Falta asignar");
+    fireEvent.change(screen.getByLabelText("Importe del pago 2"), { target: { value: "400" } });
+    expect(screen.queryByTestId("pago-sin-asignar")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Efectivo recibido"), { target: { value: "1000" } });
+    // Vuelto contra los $600 en efectivo, no contra el total.
+    expect(screen.getByTestId("vuelto-preview")).toHaveTextContent("400,00");
+
+    await act(async () => {
+      fireEvent.click(cobrarBtn());
+    });
+    expect(await screen.findByTestId("venta-cobrada")).toBeInTheDocument();
+    const payload = svc.createOperation.mock.calls[0]?.[0] as PosOperationPayload;
+    expect(payload.tenders).toEqual([
+      { payment_method: "cash", amount_ars: "600.00" },
+      { payment_method: "debit_card", amount_ars: "400.00" },
+    ]);
+    expect(payload.cash_received_ars).toBe("1000.00");
+  });
+
+  it("si el servidor cambia el precio, el reparto queda y no se cobra solo", async () => {
+    svc.createOperation.mockRejectedValueOnce(
+      httpError(422, {
+        detail: {
+          code: "TENDERS_MISMATCH",
+          expected_total_ars: "1200.00",
+          lines: [{ product_id: "p1", unit_price_list: "1200.00" }],
+        },
+      }),
+    );
+    render(<PosScreen />);
+    await escanear("7790001234567");
+    expect(await screen.findByText("Yerba")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dividir pago" }));
+    fireEvent.change(screen.getByLabelText("Importe del pago 1"), { target: { value: "600" } });
+    fireEvent.change(screen.getByLabelText("Importe del pago 2"), { target: { value: "400" } });
+
+    await act(async () => {
+      fireEvent.click(cobrarBtn());
+    });
+    await waitFor(() => expect(screen.getByTestId("total")).toHaveTextContent("1.200,00"));
+    expect(screen.getByLabelText("Importe del pago 1")).toHaveValue("600");
+    expect(screen.getByLabelText("Importe del pago 2")).toHaveValue("400");
+    expect(screen.getByTestId("pago-sin-asignar")).toHaveTextContent("Falta asignar");
+    expect(svc.createOperation).toHaveBeenCalledTimes(1);
+  });
+});

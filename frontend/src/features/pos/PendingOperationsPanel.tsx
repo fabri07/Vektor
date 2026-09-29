@@ -124,7 +124,11 @@ export function PendingOperationsPanel({
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-pos-text">
-                    {cuando(op.creadaEn)} · {formatCents(toCents(op.payload.tenders[0]?.amount_ars ?? "0") ?? 0)}
+                    {cuando(op.creadaEn)} ·{" "}
+                    {/* La suma de TODOS los pagos: con un mixto, el primero no es la venta. */}
+                    {formatCents(
+                      op.payload.tenders.reduce((acc, t) => acc + (toCents(t.amount_ars) ?? 0), 0),
+                    )}
                   </span>
                   <span className="text-xs text-pos-muted">{ROTULO[op.estado]}</span>
                 </div>

@@ -84,3 +84,31 @@ it("sale rotulado: no es el comprobante registrado", () => {
   expect(doc.bodyHtml).toContain("PENDIENTE DE SINCRONIZAR");
   expect(doc.bodyHtml).toContain("Kiosco El R");
 });
+
+it("un pago mixto imprime cada medio y el vuelto sobre el efectivo (B9)", () => {
+  const base = venta(
+    { type: "ADD_PRODUCT", product: alfajor },
+    { type: "SET_QUANTITY", productId: "p1", quantity: 10 },
+    { type: "SPLIT_PAYMENT" },
+  );
+  const [efectivo, debito] = base.payments.map((p) => p.id);
+  const s = [
+    { type: "SET_PAYMENT_AMOUNT", id: efectivo!, value: "600" },
+    { type: "SET_PAYMENT_AMOUNT", id: debito!, value: "400" },
+    { type: "SET_CASH_RECEIVED", value: "1000" },
+  ].reduce(
+    (acc, a) => saleReducer(acc, a as Parameters<typeof saleReducer>[1]),
+    base,
+  );
+  const r = reciboLocal(buildPayload(s, "op-abc123456789", new Date()), s.lines, datos);
+  expect(r.tenders).toEqual([
+    { payment_method: "cash", amount_ars: "600.00" },
+    { payment_method: "debit_card", amount_ars: "400.00" },
+  ]);
+  expect(r.cash_change_ars).toBe("400.00");
+  const html = renderTicket(r, { paperWidth: 80, pageSize: "A" }).bodyHtml;
+  expect(html).toContain("Efectivo");
+  expect(html).toContain("Tarjeta débito");
+  // El ticket muestra los medios reales, nunca «Mixto» como si fuera un pago.
+  expect(html).not.toContain("Mixto");
+});
