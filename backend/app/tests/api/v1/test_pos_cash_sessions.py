@@ -561,3 +561,394 @@ class TestPagoMixtoEnElTurno:
         detalle = await client.get(f"/api/v1/pos/cash-sessions/{sid}", headers=auth_headers)
         assert detalle.json()["expected_cash_ars"] == "0.00"
         assert [v["cash_ars"] for v in detalle.json()["late_sales"]] == ["600.00"]
+
+
+async def _abrir(
+    client: AsyncClient, caja: dict[str, str], turno: str, fondo: str
+) -> dict[str, Any]:
+    resp = await client.post(
+        "/api/v1/pos/cash-sessions",
+        json={"client_session_id": turno, "opening_float_ars": fondo},
+        headers=caja,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+async def _cajero_en_caja(
+    db_session: AsyncSession, tenant: Tenant, caja: dict[str, str], nombre: str
+) -> dict[str, str]:
+    user = User(
+        tenant_id=tenant.tenant_id,
+        email=f"{nombre}-{uuid.uuid4().hex[:6]}@caja.test",
+        full_name=nombre,
+        password_hash=hash_password("X1234567!"),
+        role_code="CASHIER",
+        is_active=True,
+        pos_permissions={},
+    )
+    db_session.add(user)
+    await db_session.flush()
+    token = create_access_token(
+        {"sub": str(user.user_id), "tenant_id": str(tenant.tenant_id), "role_code": "CASHIER"}
+    )
+    return {"Authorization": f"Bearer {token}", TERMINAL_HEADER: caja[TERMINAL_HEADER]}
+
+
+class TestFondoDeclarado:
+    """La apertura puede ser sin red: una venta del turno puede llegar antes.
+
+    El fondo tiene que quedar declarado en los dos órdenes, y una segunda
+    apertura con otro fondo no puede contestar como si hubiera funcionado.
+    """
+
+    async def test_venta_antes_que_la_apertura_conserva_el_fondo(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        await _cobrar(client, caja, pid, "t-orden", cantidad=3)
+
+        turno = await _abrir(client, caja, "t-orden", "5000.00")
+        assert turno["opening_float_ars"] == "5000.00"
+        assert turno["float_declared"] is True
+
+        cierre = await client.post(
+            f"/api/v1/pos/cash-sessions/{turno['id']}/close",
+            json={"counted_cash_ars": "5300.00"},
+            headers=caja,
+        )
+        assert cierre.json()["expected_cash_ars"] == "5300.00"
+        assert cierre.json()["difference_ars"] == "0.00"
+
+    async def test_apertura_antes_que_la_venta_conserva_el_fondo(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        turno = await _abrir(client, caja, "t-orden2", "5000.00")
+        await _cobrar(client, caja, pid, "t-orden2", cantidad=3)
+
+        cierre = await client.post(
+            f"/api/v1/pos/cash-sessions/{turno['id']}/close",
+            json={"counted_cash_ars": "5300.00"},
+            headers=caja,
+        )
+        assert cierre.json()["expected_cash_ars"] == "5300.00"
+
+    async def test_turno_adoptado_no_tiene_fondo_declarado(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        await _cobrar(client, caja, pid, "t-adoptado")
+        listado = await client.get("/api/v1/pos/cash-sessions", headers=auth_headers)
+        fila = next(s for s in listado.json() if s["client_session_id"] == "t-adoptado")
+        assert fila["float_declared"] is False
+        assert fila["opening_float_ars"] == "0.00"
+
+    async def test_segunda_apertura_con_otro_fondo_devuelve_el_real(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Gana la primera declaración y la caja se entera del fondo real."""
+        caja = await _caja(client, auth_headers)
+        await _abrir(client, caja, "t-dos", "5000.00")
+        otra = await _abrir(client, caja, "t-dos", "8000.00")
+        assert otra["opening_float_ars"] == "5000.00"
+        assert otra["float_declared"] is True
+
+    async def test_declarar_cero_es_declarar(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        """$0 es un fondo válido: después no lo pisa otra apertura."""
+        caja = await _caja(client, auth_headers)
+        await _abrir(client, caja, "t-cero", "0.00")
+        otra = await _abrir(client, caja, "t-cero", "3000.00")
+        assert otra["opening_float_ars"] == "0.00"
+        assert otra["float_declared"] is True
+
+    async def test_la_apertura_no_cambia_el_fondo_de_un_turno_cerrado(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        await _cobrar(client, caja, pid, "t-cerrado")
+        listado = await client.get("/api/v1/pos/cash-sessions", headers=auth_headers)
+        sid = next(s["id"] for s in listado.json() if s["client_session_id"] == "t-cerrado")
+        await client.post(
+            f"/api/v1/pos/cash-sessions/{sid}/close",
+            json={"counted_cash_ars": "100.00"},
+            headers=caja,
+        )
+        tarde = await _abrir(client, caja, "t-cerrado", "5000.00")
+        assert tarde["status"] == "CLOSED"
+        assert tarde["opening_float_ars"] == "0.00"
+        assert tarde["expected_cash_ars"] == "100.00"
+
+
+class TestCerrarSinArqueo:
+    """Los turnos que nadie va a contar se cierran sin inventar un conteo."""
+
+    async def _pin(self, fake_redis, tenant: Tenant, user: User) -> None:
+        await fake_redis.set(_pin_window_key(tenant.tenant_id, user.user_id), "1", ex=600)
+
+    async def test_abandonar_deja_los_importes_en_null_y_audita(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        sample_user: User,
+        fake_redis,
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        await _cobrar(client, caja, pid, "t-basura")
+        listado = await client.get("/api/v1/pos/cash-sessions", headers=auth_headers)
+        sid = next(s["id"] for s in listado.json() if s["client_session_id"] == "t-basura")
+        await self._pin(fake_redis, sample_tenant, sample_user)
+
+        resp = await client.post(
+            f"/api/v1/pos/cash-sessions/{sid}/abandon",
+            json={"reason": "Turno de una recarga de la pantalla."},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        cuerpo = resp.json()
+        assert cuerpo["status"] == "ABANDONED"
+        assert cuerpo["expected_cash_ars"] is None
+        assert cuerpo["counted_cash_ars"] is None
+        assert cuerpo["difference_ars"] is None
+        assert cuerpo["closed_at"] is not None
+
+        auditoria = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "POS_CASH_SESSION_ABANDONED"
+                )
+            )
+        ).scalar_one()
+        assert auditoria.decision_data["reason"] == "Turno de una recarga de la pantalla."
+        assert auditoria.decision_data["float_declared"] is False
+
+    async def test_abandonar_exige_motivo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        sample_tenant: Tenant,
+        sample_user: User,
+        fake_redis,
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        turno = await _abrir(client, caja, "t-motivo", "0.00")
+        await self._pin(fake_redis, sample_tenant, sample_user)
+        resp = await client.post(
+            f"/api/v1/pos/cash-sessions/{turno['id']}/abandon",
+            json={"reason": "   "},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "ABANDON_REASON_REQUIRED"
+
+    async def test_abandonar_sin_pin_pide_pin(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        sample_tenant: Tenant,
+        sample_user: User,
+        fake_redis,
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        turno = await _abrir(client, caja, "t-sin-pin", "0.00")
+        # Habilitar la caja abre la ventana de PIN del dueño: se cierra para
+        # probar que cerrar sin arqueo la exige.
+        await fake_redis.delete(_pin_window_key(sample_tenant.tenant_id, sample_user.user_id))
+        resp = await client.post(
+            f"/api/v1/pos/cash-sessions/{turno['id']}/abandon",
+            json={"reason": "Basura."},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 428
+
+    async def test_abandonar_dos_veces_o_un_cerrado_da_409(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        sample_tenant: Tenant,
+        sample_user: User,
+        fake_redis,
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        uno = await _abrir(client, caja, "t-409a", "0.00")
+        dos = await _abrir(client, caja, "t-409b", "0.00")
+        await self._pin(fake_redis, sample_tenant, sample_user)
+        primero = await client.post(
+            f"/api/v1/pos/cash-sessions/{uno['id']}/abandon",
+            json={"reason": "Basura."},
+            headers=auth_headers,
+        )
+        assert primero.status_code == 200
+        segundo = await client.post(
+            f"/api/v1/pos/cash-sessions/{uno['id']}/abandon",
+            json={"reason": "Basura."},
+            headers=auth_headers,
+        )
+        assert segundo.status_code == 409
+        assert segundo.json()["detail"]["code"] == "CASH_SESSION_ALREADY_CLOSED"
+
+        await client.post(
+            f"/api/v1/pos/cash-sessions/{dos['id']}/close",
+            json={"counted_cash_ars": "0.00"},
+            headers=caja,
+        )
+        cerrado = await client.post(
+            f"/api/v1/pos/cash-sessions/{dos['id']}/abandon",
+            json={"reason": "Basura."},
+            headers=auth_headers,
+        )
+        assert cerrado.status_code == 409
+        # Y cerrar un abandonado tampoco: su "no hubo arqueo" ya está firmado.
+        tarde = await client.post(
+            f"/api/v1/pos/cash-sessions/{uno['id']}/close",
+            json={"counted_cash_ars": "0.00"},
+            headers=caja,
+        )
+        assert tarde.status_code == 409
+
+    async def test_una_venta_a_un_turno_abandonado_queda_como_tardia(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        sample_tenant: Tenant,
+        sample_user: User,
+        fake_redis,
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        turno = await _abrir(client, caja, "t-aband", "0.00")
+        await self._pin(fake_redis, sample_tenant, sample_user)
+        await client.post(
+            f"/api/v1/pos/cash-sessions/{turno['id']}/abandon",
+            json={"reason": "Basura."},
+            headers=auth_headers,
+        )
+        venta = await _cobrar(client, caja, pid, "t-aband", cantidad=2)
+        detalle = await client.get(
+            f"/api/v1/pos/cash-sessions/{turno['id']}", headers=auth_headers
+        )
+        cuerpo = detalle.json()
+        assert cuerpo["status"] == "ABANDONED"
+        assert cuerpo["expected_cash_ars"] is None
+        assert [t["operation_id"] for t in cuerpo["late_sales"]] == [venta["id"]]
+        assert cuerpo["late_sales"][0]["cash_ars"] == "200.00"
+
+
+class TestArqueoCiego:
+    """El cajero no ve cuánto 'debería' haber mientras el turno está abierto."""
+
+    async def test_el_cajero_no_recibe_el_esperado_y_el_dueno_si(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        ana = await _cajero_en_caja(db_session, sample_tenant, caja, "ana")
+        turno = await _abrir(client, ana, "t-ciego", "1000.00")
+        await _cobrar(client, ana, pid, "t-ciego", cantidad=2)
+
+        del_cajero = await client.get(f"/api/v1/pos/cash-sessions/{turno['id']}", headers=ana)
+        assert del_cajero.status_code == 200
+        assert del_cajero.json()["expected_cash_now_ars"] is None
+        listado_cajero = await client.get("/api/v1/pos/cash-sessions?open=true", headers=ana)
+        assert all(s["expected_cash_now_ars"] is None for s in listado_cajero.json())
+        assert all(s["sales_count"] is None for s in listado_cajero.json())
+
+        del_dueno = await client.get(
+            f"/api/v1/pos/cash-sessions/{turno['id']}", headers=auth_headers
+        )
+        assert del_dueno.json()["expected_cash_now_ars"] == "1200.00"
+
+        # Firmado el conteo, el cajero sí ve el resultado.
+        cierre = await client.post(
+            f"/api/v1/pos/cash-sessions/{turno['id']}/close",
+            json={"counted_cash_ars": "1150.00"},
+            headers=ana,
+        )
+        assert cierre.json()["expected_cash_ars"] == "1200.00"
+        assert cierre.json()["difference_ars"] == "-50.00"
+
+
+class TestListadoDelEncargado:
+    async def test_trae_cajero_efectivo_y_tickets_y_filtra_por_caja(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        caja = await _caja(client, auth_headers)
+        otra = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        ana = await _cajero_en_caja(db_session, sample_tenant, caja, "Ana")
+        await _abrir(client, ana, "t-lista", "500.00")
+        await _cobrar(client, ana, pid, "t-lista", cantidad=2)
+        await _cobrar(client, ana, pid, "t-lista", cantidad=1, metodo="debit_card")
+        await _abrir(client, otra, "t-otra-caja", "0.00")
+
+        listado = await client.get("/api/v1/pos/cash-sessions?open=true", headers=auth_headers)
+        fila = next(s for s in listado.json() if s["client_session_id"] == "t-lista")
+        assert fila["cashier_name"] == "Ana"
+        assert fila["expected_cash_now_ars"] == "700.00"
+        assert fila["sales_count"] == 2
+        vacia = next(s for s in listado.json() if s["client_session_id"] == "t-otra-caja")
+        assert vacia["sales_count"] == 0
+
+        por_caja = await client.get(
+            f"/api/v1/pos/cash-sessions?open=true&terminal_id={fila['terminal_id']}",
+            headers=auth_headers,
+        )
+        assert [s["client_session_id"] for s in por_caja.json()] == ["t-lista"]
+
+
+class TestAperturaTardia:
+    async def test_la_apertura_sobre_un_turno_cerrado_audita_el_fondo_declarado(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        sample_user: User,
+        fake_redis,
+    ) -> None:
+        """La caja abrió sin red y vendió; el encargado abandonó el turno antes de
+        que llegara la apertura. El turno no se toca, pero los $5.000 declarados
+        no pueden desaparecer sin rastro."""
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        await _cobrar(client, caja, pid, "t-tardia")
+        listado = await client.get("/api/v1/pos/cash-sessions", headers=auth_headers)
+        sid = next(s["id"] for s in listado.json() if s["client_session_id"] == "t-tardia")
+        await fake_redis.set(
+            _pin_window_key(sample_tenant.tenant_id, sample_user.user_id), "1", ex=600
+        )
+        await client.post(
+            f"/api/v1/pos/cash-sessions/{sid}/abandon",
+            json={"reason": "Parecía basura."},
+            headers=auth_headers,
+        )
+
+        tarde = await _abrir(client, caja, "t-tardia", "5000.00")
+        assert tarde["status"] == "ABANDONED"
+        assert tarde["opening_float_ars"] == "0.00"
+        auditoria = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "POS_CASH_SESSION_OPENED_AFTER_CLOSE"
+                )
+            )
+        ).scalar_one()
+        assert auditoria.decision_data["declared_opening_float_ars"] == "5000.00"
+        assert auditoria.decision_data["status"] == "ABANDONED"

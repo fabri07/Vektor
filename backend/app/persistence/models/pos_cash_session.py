@@ -41,6 +41,10 @@ from app.persistence.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 #: Un turno abierto todavía admite ventas; uno cerrado ya tiene su arqueo firmado.
 ESTADO_ABIERTO = "OPEN"
 ESTADO_CERRADO = "CLOSED"
+#: Cerrado SIN arqueo: esperado, contado y diferencia quedan en NULL. Es para
+#: los turnos que nadie va a contar (los que la caja creaba en cada recarga):
+#: cerrarlos con un conteo inventado firmaría un arqueo falso.
+ESTADO_ABANDONADO = "ABANDONED"
 
 
 class PosCashSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -55,7 +59,7 @@ class PosCashSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         Index("ix_pos_cash_sessions_tenant_status", "tenant_id", "status"),
         CheckConstraint(
-            f"status IN ('{ESTADO_ABIERTO}','{ESTADO_CERRADO}')",
+            f"status IN ('{ESTADO_ABIERTO}','{ESTADO_CERRADO}','{ESTADO_ABANDONADO}')",
             name="ck_pos_cash_sessions_status",
         ),
         CheckConstraint("opening_float_ars >= 0", name="ck_pos_cash_sessions_fondo"),
@@ -78,6 +82,13 @@ class PosCashSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     opening_float_ars: Mapped[Decimal] = mapped_column(
         Numeric(14, 2), nullable=False, server_default="0", default=Decimal("0")
+    )
+    #: Cuándo quien abrió declaró el fondo. NULL si el turno lo adoptó una
+    #: venta que llegó antes que la apertura (la apertura puede ser sin red):
+    #: la primera apertura explícita que llega fija el fondo aunque el turno ya
+    #: exista, y las siguientes ya no lo cambian.
+    float_declared_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(

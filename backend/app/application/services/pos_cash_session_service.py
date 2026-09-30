@@ -34,7 +34,12 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services._savepoint import (
+    SavepointConflictError,
+    guarded_savepoint,
+)
 from app.persistence.models.pos_cash_session import (
+    ESTADO_ABANDONADO,
     ESTADO_ABIERTO,
     ESTADO_CERRADO,
     PosCashSession,
@@ -53,17 +58,39 @@ class SesionYaCerradaError(Exception):
     """Se intentó cerrar un turno que ya estaba cerrado."""
 
 
+_UNICO_DE_TURNO = "uq_pos_cash_sessions_client_session"
+
+
+def _clasificar_unico_de_turno(exc: IntegrityError) -> str | None:
+    """Reconoce SÓLO el UNIQUE ``(tenant, client_session_id)``.
+
+    Cualquier otra violación (una FK, un CHECK) se propaga: convertirla en "ya
+    existía, la reuso" escondería un error real.
+    """
+    mensaje = str(exc.orig)
+    if _UNICO_DE_TURNO in mensaje or (
+        "pos_cash_sessions.client_session_id" in mensaje and "UNIQUE" in mensaje
+    ):
+        return _UNICO_DE_TURNO
+    return None
+
+
 async def obtener_por_client_id(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     client_session_id: str,
     *,
     para_actualizar: bool = False,
+    compartido: bool = False,
 ) -> PosCashSession | None:
     stmt = select(PosCashSession).where(
         PosCashSession.tenant_id == tenant_id,
         PosCashSession.client_session_id == client_session_id,
     )
+    if compartido and not para_actualizar:
+        # FOR SHARE: la venta no cambia el turno, pero tiene que impedir que se
+        # cierre mientras ella está en vuelo. Ver ``abrir_o_adoptar``.
+        stmt = stmt.with_for_update(read=True).execution_options(populate_existing=True)
     if para_actualizar:
         # `populate_existing` por la misma razón que en `pos_discrepancy_service`:
         # si la fila ya está en la identity map, el candado se tomaría bien y el
@@ -79,7 +106,7 @@ async def abrir_o_adoptar(
     *,
     user_id: uuid.UUID | None,
     terminal_id: uuid.UUID | None,
-    opening_float_ars: Decimal = Decimal("0"),
+    fondo_declarado: Decimal | None = None,
     ahora: datetime | None = None,
 ) -> PosCashSession:
     """Devuelve el turno, creándolo si la caja lo abrió sin red.
@@ -88,34 +115,88 @@ async def abrir_o_adoptar(
     que llega primero pueden ejecutarse a la vez, y el UNIQUE
     ``(tenant, client_session_id)`` decide. El perdedor re-lee en vez de fallar.
 
+    ``fondo_declarado`` lo pasa SÓLO la apertura explícita; una venta que adopta
+    el turno pasa ``None``. El fondo se declara por cualquiera de los tres
+    caminos —el turno ya existía, se creó acá, o se perdió la carrera y se
+    releyó—, porque el caso que esto resuelve es justamente el de la venta que
+    llegó primero y adoptó el turno con fondo $0. Gana la primera declaración:
+    el llamador recibe el turno con el fondo REAL, que puede no ser el que
+    mandó.
+
     **No reabre un turno cerrado.** Si ya se firmó su arqueo, una venta tardía no
     lo vuelve a abrir: se devuelve tal cual y el llamador la registra como
     tardía.
     """
+    momento = ahora or datetime.now(UTC)
     existente = await obtener_por_client_id(session, tenant_id, client_session_id)
-    if existente is not None:
-        return existente
+    if existente is None:
+        nueva = PosCashSession(
+            tenant_id=tenant_id,
+            client_session_id=client_session_id,
+            user_id=user_id,
+            terminal_id=terminal_id,
+            opening_float_ars=(
+                fondo_declarado if fondo_declarado is not None else Decimal("0")
+            ),
+            float_declared_at=momento if fondo_declarado is not None else None,
+            opened_at=momento,
+            status=ESTADO_ABIERTO,
+        )
+        # Dentro de un SAVEPOINT y no con ``session.rollback()``: quien llama
+        # puede ser ``create_pos_operation``, que ya hizo flush de la venta, sus
+        # líneas, sus pagos y el reclamo de idempotencia. Un rollback de la
+        # transacción entera ante la carrera se llevaba puesta la venta, y el
+        # handler seguía adelante con objetos desasociados. El savepoint deshace
+        # sólo este INSERT.
+        try:
+            async with guarded_savepoint(session, _clasificar_unico_de_turno):
+                session.add(nueva)
+        except SavepointConflictError:
+            # Otra transacción lo creó en el medio. Su fila es tan válida como ésta.
+            existente = await obtener_por_client_id(session, tenant_id, client_session_id)
+            if existente is None:  # pragma: no cover - sólo si el UNIQUE no existiera
+                raise
+        else:
+            return nueva
 
-    nueva = PosCashSession(
-        tenant_id=tenant_id,
-        client_session_id=client_session_id,
-        user_id=user_id,
-        terminal_id=terminal_id,
-        opening_float_ars=opening_float_ars,
-        opened_at=ahora or datetime.now(UTC),
-        status=ESTADO_ABIERTO,
+    if fondo_declarado is None:
+        # La VENTA relee el turno con FOR SHARE. Sin candado, una venta que lo
+        # leyó abierto podía commitear DESPUÉS de que el cierre (``FOR UPDATE``)
+        # sumara los tenders commiteados: quedaba fuera del arqueo y tampoco
+        # figuraba como tardía. Con el candado compartido, el cierre espera a
+        # que la venta commitee (y la suma), o la venta espera al cierre y ve el
+        # turno cerrado (y queda como tardía). Varias ventas no se traban entre
+        # sí: el candado es compartido.
+        releida = await obtener_por_client_id(
+            session, tenant_id, client_session_id, compartido=True
+        )
+        return releida if releida is not None else existente
+    return await _declarar_fondo(session, existente, fondo_declarado, momento)
+
+
+async def _declarar_fondo(
+    session: AsyncSession,
+    sesion: PosCashSession,
+    fondo: Decimal,
+    momento: datetime,
+) -> PosCashSession:
+    """Fija el fondo de un turno que lo tenía por adopción. Con candado.
+
+    Sin el ``FOR UPDATE``, dos aperturas simultáneas con fondos distintos verían
+    las dos ``float_declared_at IS NULL`` y la segunda pisaría a la primera. Con
+    él se serializan: la segunda relee, ve el fondo ya declarado y lo devuelve
+    sin tocarlo. Un turno cerrado o abandonado no se toca: su arqueo ya está.
+    """
+    bloqueada = await obtener_por_client_id(
+        session, sesion.tenant_id, sesion.client_session_id, para_actualizar=True
     )
-    session.add(nueva)
-    try:
+    if bloqueada is None:  # pragma: no cover - la fila no se borra
+        return sesion
+    if bloqueada.esta_abierto and bloqueada.float_declared_at is None:
+        bloqueada.opening_float_ars = fondo
+        bloqueada.float_declared_at = momento
         await session.flush()
-    except IntegrityError:
-        # Otra transacción lo creó en el medio. Su fila es tan válida como ésta.
-        await session.rollback()
-        ganadora = await obtener_por_client_id(session, tenant_id, client_session_id)
-        if ganadora is None:  # pragma: no cover - sólo si el UNIQUE no existiera
-            raise
-        return ganadora
-    return nueva
+    return bloqueada
 
 
 async def efectivo_del_turno(
@@ -147,6 +228,55 @@ async def efectivo_del_turno(
     return Decimal(str(total))
 
 
+async def resumen_de_turnos(
+    session: AsyncSession, tenant_id: uuid.UUID, client_session_ids: list[str]
+) -> dict[str, tuple[Decimal, int]]:
+    """Efectivo cobrado y cantidad de tickets vivos de varios turnos, en DOS
+    consultas y no dos por turno: el panel del encargado lista hasta 200.
+
+    Misma regla que ``efectivo_del_turno`` —tenders en efectivo de operaciones
+    vivas—; la cantidad de tickets es lo que deja distinguir un turno basura
+    (cero ventas) de uno que hay que contar.
+    """
+    if not client_session_ids:
+        return {}
+    efectivo = dict(
+        (
+            await session.execute(
+                select(
+                    PosOperation.client_session_id,
+                    func.coalesce(func.sum(PosTender.amount_ars), 0),
+                )
+                .join(PosTender, PosTender.operation_id == PosOperation.id)
+                .where(
+                    PosOperation.tenant_id == tenant_id,
+                    PosOperation.client_session_id.in_(client_session_ids),
+                    PosOperation.status == ESTADO_OPERACION_VIVA,
+                    PosTender.payment_method == METODO_EFECTIVO,
+                )
+                .group_by(PosOperation.client_session_id)
+            )
+        ).tuples().all()
+    )
+    tickets = dict(
+        (
+            await session.execute(
+                select(PosOperation.client_session_id, func.count(PosOperation.id))
+                .where(
+                    PosOperation.tenant_id == tenant_id,
+                    PosOperation.client_session_id.in_(client_session_ids),
+                    PosOperation.status == ESTADO_OPERACION_VIVA,
+                )
+                .group_by(PosOperation.client_session_id)
+            )
+        ).tuples().all()
+    )
+    return {
+        cid: (Decimal(str(efectivo.get(cid, 0))), int(tickets.get(cid, 0)))
+        for cid in client_session_ids
+    }
+
+
 async def cerrar(
     session: AsyncSession,
     sesion: PosCashSession,
@@ -162,7 +292,7 @@ async def cerrar(
     calculada y no derivada al leer: es lo que el cajero firmó, y recalcularla
     más tarde sobre datos que pueden haber cambiado daría otro número.
     """
-    if sesion.status == ESTADO_CERRADO:
+    if not sesion.esta_abierto:
         raise SesionYaCerradaError(str(sesion.id))
 
     cobrado = await efectivo_del_turno(session, sesion.tenant_id, sesion.client_session_id)
@@ -174,6 +304,32 @@ async def cerrar(
     sesion.closed_by_user_id = user_id
     sesion.notes = notes
     sesion.status = ESTADO_CERRADO
+    await session.flush()
+    return sesion
+
+
+async def abandonar(
+    session: AsyncSession,
+    sesion: PosCashSession,
+    *,
+    user_id: uuid.UUID | None,
+    reason: str,
+    ahora: datetime | None = None,
+) -> PosCashSession:
+    """Cierra el turno SIN arqueo. Esperado, contado y diferencia quedan en NULL.
+
+    Existe para los turnos que nadie va a contar —los que la caja creaba en cada
+    recarga de la pantalla—. Cerrarlos con un conteo inventado firmaría un
+    arqueo falso; esto dice la verdad: que no hubo arqueo, quién lo decidió y
+    por qué. Las ventas que lleguen después van a tardías, como en un turno
+    cerrado.
+    """
+    if not sesion.esta_abierto:
+        raise SesionYaCerradaError(str(sesion.id))
+    sesion.status = ESTADO_ABANDONADO
+    sesion.closed_at = ahora or datetime.now(UTC)
+    sesion.closed_by_user_id = user_id
+    sesion.notes = reason
     await session.flush()
     return sesion
 
@@ -216,6 +372,7 @@ async def listar(
     *,
     solo_abiertos: bool = False,
     user_id: uuid.UUID | None = None,
+    terminal_id: uuid.UUID | None = None,
     limite: int = 50,
 ) -> list[PosCashSession]:
     """Los turnos del negocio, del más nuevo al más viejo.
@@ -228,6 +385,8 @@ async def listar(
         stmt = stmt.where(PosCashSession.status == ESTADO_ABIERTO)
     if user_id is not None:
         stmt = stmt.where(PosCashSession.user_id == user_id)
+    if terminal_id is not None:
+        stmt = stmt.where(PosCashSession.terminal_id == terminal_id)
     stmt = stmt.order_by(PosCashSession.opened_at.desc()).limit(limite)
     return list((await session.execute(stmt)).scalars().all())
 
@@ -254,7 +413,9 @@ async def listar_tardias(
 __all__ = [
     "METODO_EFECTIVO",
     "SesionYaCerradaError",
+    "abandonar",
     "abrir_o_adoptar",
+    "resumen_de_turnos",
     "cerrar",
     "efectivo_del_turno",
     "listar",

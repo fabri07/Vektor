@@ -75,6 +75,10 @@ describe("guarda de colores", () => {
     "RecentTickets",
     "PendingOperationsPanel",
     "CashierHome",
+    "OpenCashSession",
+    "CloseCashSession",
+    "CashSessionBar",
+    "CashSessionsPanel",
   ];
   const FIJOS =
     /\b(?:bg|text|border|divide)-(?:vk-(?:text-(?:primary|secondary|muted)|surface-w|bg-light|border-w)|vektor-(?:white|body|muted|surface|ink|night|border))\b/g;

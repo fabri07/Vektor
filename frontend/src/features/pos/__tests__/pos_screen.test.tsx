@@ -10,6 +10,7 @@ import { _limpiarPosDb, guardarOperacion, listarOperaciones } from "@/lib/offlin
 import { posService } from "@/services/pos.service";
 import { useAuthStore } from "@/stores/authStore";
 import { usePosPrintConfigStore } from "@/stores/posPrintConfigStore";
+import { usePosCashSessionStore } from "@/stores/posCashSessionStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
 
 jest.mock("@/services/pos.service", () => ({
@@ -24,6 +25,9 @@ jest.mock("@/services/pos.service", () => ({
     voidOperation: jest.fn(),
     getReceipt: jest.fn(),
     listOperations: jest.fn().mockResolvedValue([]),
+    openCashSession: jest.fn(),
+    getCashSession: jest.fn(),
+    listCashSessions: jest.fn().mockResolvedValue([]),
   },
 }));
 jest.mock("@/services/auth.service", () => ({ logoutRequest: jest.fn() }));
@@ -41,6 +45,25 @@ jest.mock("@/lib/offline/posDb", () => {
 });
 
 const svc = posService as jest.Mocked<typeof posService>;
+
+/**
+ * Un turno ya abierto (B8): sin turno la caja muestra la apertura y no cobra.
+ * Se siembra para las dos cajas que usan estos tests (sin terminal y "c").
+ */
+function turnoAbierto() {
+  const turno = {
+    clientSessionId: "turno-test",
+    serverId: "s1",
+    openingFloatCents: 0,
+    declaredFloatCents: 0,
+    openedAt: "2026-09-29T09:00:00.000Z",
+    aperturaConfirmada: true,
+  };
+  usePosCashSessionStore.setState({
+    turnos: { "t1:u1:sin-terminal": turno, "t1:u1:c": turno },
+  });
+}
+
 
 const yerba: PosProduct = {
   id: "p1",
@@ -96,6 +119,7 @@ beforeEach(async () => {
   await _limpiarPosDb();
   usuario("OWNER");
   usePosTerminalStore.setState({ terminal: null, invalid: false });
+  turnoAbierto();
   // La impresión se prueba aparte (pos_printing.test.tsx).
   usePosPrintConfigStore.setState({ autoPrint: false });
   svc.lookup.mockResolvedValue({ code_type: "gtin", matched_by: "barcode", product: yerba });

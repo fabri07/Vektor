@@ -399,6 +399,13 @@ class PosCashSessionCloseRequest(BaseModel):
     notes: str | None = Field(default=None, max_length=500)
 
 
+class PosCashSessionAbandonRequest(BaseModel):
+    #: Por qué se cierra sin arqueo. Obligatorio: es lo único que explica después
+    #: por qué ese turno no tiene conteo. Se valida en la ruta para devolver un
+    #: código propio (``ABANDON_REASON_REQUIRED``) y no un 422 genérico.
+    reason: str | None = Field(default=None, max_length=500)
+
+
 class PosLateSaleResponse(BaseModel):
     """Una venta que llegó después del cierre. No movió el arqueo firmado."""
 
@@ -433,3 +440,9 @@ class PosCashSessionResponse(BaseModel):
     expected_cash_now_ars: Decimal | None = None
     #: Sólo en el detalle de un turno CERRADO que recibió ventas después.
     late_sales: list[PosLateSaleResponse] = []
+    #: Si quien abrió declaró el fondo. ``False`` = el turno lo adoptó una venta
+    #: y el fondo es el $0 por defecto, no un dato.
+    float_declared: bool = False
+    #: Tickets vivos del turno. Sólo en el listado del encargado: es lo que
+    #: distingue un turno basura (0) de uno que hay que contar.
+    sales_count: int | None = None
