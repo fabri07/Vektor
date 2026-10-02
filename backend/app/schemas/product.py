@@ -2,14 +2,14 @@
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from app.domain.business_time import now_ar_naive
 from app.domain.product import effective_threshold
-from app.domain.sale_unit import formatear_cantidad
+from app.domain.sale_unit import formatear_cantidad, validar_unidad
 from app.schemas.pos import PosProductResponse
 
 # F6-B4: umbral "próximo a vencer" (días). Documentado y único.
@@ -134,6 +134,15 @@ class CreateProductRequest(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     acquired_at: datetime | None = Field(default=None, description="Fecha/hora de alta")
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+    #: Unidad de venta (B3). Stock y umbral van en UNIDADES BASE (gramos,
+    #: mililitros); precio y costo, por unidad de venta (kg, L).
+    sale_unit: Literal["unit", "gram", "milliliter"] = "unit"
+    base_units_per_sale_unit: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def _unidad_valida(self) -> "CreateProductRequest":
+        validar_unidad(self.sale_unit, self.base_units_per_sale_unit)
+        return self
 
     @field_validator("name", mode="before")
     @classmethod
@@ -159,6 +168,18 @@ class UpdateProductRequest(BaseModel):
     is_active: bool | None = None
     acquired_at: datetime | None = None
     custom_fields: dict[str, Any] | None = None
+    sale_unit: Literal["unit", "gram", "milliliter"] | None = None
+    base_units_per_sale_unit: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _unidad_valida(self) -> "UpdateProductRequest":
+        # Van juntos: cambiar uno sin el otro dejaría una combinación que nadie
+        # eligió (gramos con factor de unidad, o al revés).
+        if (self.sale_unit is None) != (self.base_units_per_sale_unit is None):
+            raise ValueError("sale_unit y base_units_per_sale_unit van juntos.")
+        if self.sale_unit is not None and self.base_units_per_sale_unit is not None:
+            validar_unidad(self.sale_unit, self.base_units_per_sale_unit)
+        return self
 
     @field_validator("name", mode="before")
     @classmethod

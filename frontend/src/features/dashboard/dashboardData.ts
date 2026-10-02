@@ -230,13 +230,21 @@ export function buildMarginBreakdown(products: ProductResponse[]): MarginCategor
     .sort((a, b) => b.margin - a.margin);
 }
 
+/**
+ * El stock en unidades de VENTA: 5000 g de queso son 5 (kg), no 5000. Sin esto,
+ * un solo producto por peso aplastaba al resto del gráfico.
+ */
+function enUnidadesDeVenta(p: ProductResponse): number {
+  return p.stock_units / Math.max(1, p.base_units_per_sale_unit ?? 1);
+}
+
 export function buildStockStatuses(products: ProductResponse[]): StockStatusRow[] {
   const inStock = products
     .filter((p) => (p.stock_status ? p.stock_status === "in_stock" : p.stock_units > 0 && !p.is_low_stock))
-    .reduce((sum, p) => sum + p.stock_units, 0);
+    .reduce((sum, p) => sum + enUnidadesDeVenta(p), 0);
   const lowStock = products
     .filter((p) => (p.stock_status ? p.stock_status === "low_stock" : p.stock_units > 0 && p.is_low_stock))
-    .reduce((sum, p) => sum + p.stock_units, 0);
+    .reduce((sum, p) => sum + enUnidadesDeVenta(p), 0);
   const outOfStock = products.filter(
     (p) => (p.stock_status ? p.stock_status === "out_of_stock" : p.stock_units === 0)
   ).length;

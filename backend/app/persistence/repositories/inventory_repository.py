@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.sale_unit import formatear_cantidad
 from app.domain.text_norm import normalize_text
 from app.persistence.models.inventory import InventoryMovement, movement_business_time
 from app.persistence.models.product import Product
@@ -33,6 +34,10 @@ class SupplierProductPurchase:
     # Marca del producto (``custom_fields['marca']``) o None si no tiene. A
     # diferencia del breakdown contable, acá None viaja como null hasta el front.
     brand: str | None = None
+    # `total_qty` está en unidades base y `unit_price` es por unidad de venta:
+    # el importe divide por el factor, y la cantidad se muestra con su unidad.
+    base_units_per_sale_unit: int = 1
+    quantity_display: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,7 +135,10 @@ def group_products_by_brand(
         grouped.setdefault(key, []).append(row)
 
     def _group_value(products: list[SupplierProductPurchase]) -> float:
-        return sum(p.total_qty * float(p.unit_price) for p in products)
+        return sum(
+            p.total_qty * float(p.unit_price) / (p.base_units_per_sale_unit or 1)
+            for p in products
+        )
 
     def _label(products: list[SupplierProductPurchase]) -> str | None:
         """Variante cruda más frecuente de la marca; empate → primera en entrada."""
@@ -239,6 +247,8 @@ class InventoryRepository:
                 agg.c.last_purchase_at,
                 agg.c.total_qty,
                 latest_cost.c.unit_cost,
+                Product.sale_unit,
+                Product.base_units_per_sale_unit,
             )
             .join(Product, Product.id == agg.c.product_id)
             .join(
@@ -258,6 +268,12 @@ class InventoryRepository:
                 total_qty=float(row.total_qty or 0),
                 unit_price=row.unit_cost if row.unit_cost is not None else Decimal("0"),
                 brand=_brand_from_custom_fields(row.custom_fields),
+                base_units_per_sale_unit=row.base_units_per_sale_unit or 1,
+                quantity_display=formatear_cantidad(
+                    int(row.total_qty or 0),
+                    row.sale_unit or "unit",
+                    row.base_units_per_sale_unit or 1,
+                ),
             )
             for row in rows
         ]
@@ -291,7 +307,13 @@ class InventoryRepository:
             productos por importe desc, desempate por nombre. Top N productos y
             top ``top_suppliers`` proveedores (es un "Top", no la lista completa).
         """
-        amount = func.sum(InventoryMovement.qty * InventoryMovement.unit_cost)
+        # Cantidad en unidades base, costo por unidad de VENTA: divide por el
+        # factor del producto (con factor 1, costo × cantidad).
+        amount = func.sum(
+            InventoryMovement.qty
+            * InventoryMovement.unit_cost
+            / func.coalesce(Product.base_units_per_sale_unit, 1)
+        )
         qty_sum = func.sum(InventoryMovement.qty)
         costed = func.sum(
             case(
@@ -318,14 +340,24 @@ class InventoryRepository:
             return stmt
 
         # Nivel proveedor: total + cobertura de costo.
-        supplier_q = _scoped(
-            select(
-                InventoryMovement.supplier_id.label("supplier_id"),
-                amount.label("total_amount"),
-                costed.label("n_costed"),
-                total_rows.label("n_total"),
+        supplier_q = (
+            _scoped(
+                select(
+                    InventoryMovement.supplier_id.label("supplier_id"),
+                    amount.label("total_amount"),
+                    costed.label("n_costed"),
+                    total_rows.label("n_total"),
+                )
             )
-        ).group_by(InventoryMovement.supplier_id)
+            # Para el factor del importe. OUTER: un movimiento sin producto
+            # (no debería existir en una compra) no deja de contar.
+            .outerjoin(
+                Product,
+                (Product.id == InventoryMovement.product_id)
+                & (Product.tenant_id == tenant_id),
+            )
+            .group_by(InventoryMovement.supplier_id)
+        )
         supplier_rows = (await self._session.execute(supplier_q)).all()
         if not supplier_rows:
             return []

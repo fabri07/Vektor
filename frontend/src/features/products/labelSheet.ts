@@ -1,5 +1,6 @@
 import { code128Svg } from "@/lib/barcode/code128";
 import { formatCents, toCents } from "@/lib/pos/cart";
+import { esPorPeso, etiquetaDeUnidad } from "@/lib/pos/saleUnit";
 import { type PrintDocument, escapeHtml } from "@/lib/print/types";
 import { type PageSize, type PaperWidth, pageCss } from "@/stores/posPrintConfigStore";
 
@@ -22,6 +23,15 @@ export interface LabelProduct {
   name: string;
   internal_sku?: string | null;
   sale_price_ars: string;
+  /** Para imprimir "/kg" junto al precio de un producto por peso. */
+  sale_unit?: string;
+  base_units_per_sale_unit?: number;
+}
+
+/** "/kg" o "/L" para un producto por peso; vacío para uno por unidad. */
+function porUnidad(product: LabelProduct): string {
+  const factor = product.base_units_per_sale_unit ?? 1;
+  return esPorPeso(factor) ? `/${etiquetaDeUnidad(product.sale_unit ?? "unit", factor)}` : "";
 }
 
 export interface LabelRequest {
@@ -75,7 +85,9 @@ export function renderLabels(
     const una =
       `<div class="etiqueta"><div class="nombre">${escapeHtml(product.name)}</div>` +
       (opts.showPrice
-        ? `<div class="precio">${escapeHtml(formatCents(toCents(product.sale_price_ars) ?? 0))}</div>`
+        ? `<div class="precio">${escapeHtml(
+            formatCents(toCents(product.sale_price_ars) ?? 0) + porUnidad(product),
+          )}</div>`
         : "") +
       `<div class="codigo">${code128Svg(sku)}</div>` +
       `<div class="sku">${escapeHtml(sku)}</div></div>`;

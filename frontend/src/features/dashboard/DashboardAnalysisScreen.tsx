@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { enUnidadDeVenta } from "@/lib/pos/saleUnit";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown } from "lucide-react";
@@ -540,7 +541,12 @@ function BreakdownPanels() {
                 <div>
                   <p className="text-sm font-medium text-vektor-white">{p.name}</p>
                   <p className="text-xs text-vektor-muted">
-                    Stock: {p.stock_units} / mínimo {p.low_stock_threshold_units ?? 5}
+                    Stock: {p.stock_display ?? p.stock_units}
+                    {/* El mínimo se muestra en la misma unidad que el stock. */}
+                    {" / mínimo "}
+                    {(p.base_units_per_sale_unit ?? 1) > 1
+                      ? `${enUnidadDeVenta(p.low_stock_threshold_units ?? 5 * (p.base_units_per_sale_unit ?? 1), p.base_units_per_sale_unit)}`
+                      : (p.low_stock_threshold_units ?? 5)}
                   </p>
                 </div>
                 <span
@@ -592,7 +598,9 @@ function BreakdownPanels() {
                 >
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-vektor-white">{p.name}</p>
-                    <p className="text-xs text-vektor-muted">Stock actual: {p.stock_units}</p>
+                    <p className="text-xs text-vektor-muted">
+                      Stock actual: {p.stock_display ?? p.stock_units}
+                    </p>
                   </div>
                   <span className="ml-3 shrink-0 text-sm font-medium tabular-nums text-vektor-amber">
                     {p.immobilized_value > 0 ? formatARS(p.immobilized_value) : "sin costo"}

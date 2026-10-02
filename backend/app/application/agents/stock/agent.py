@@ -23,6 +23,10 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
+from app.application.agents.shared.weight_guard import (
+    nombre_si_es_por_peso,
+    pregunta_por_peso,
+)
 from app.application.security.prompt_defense import wrap_user_input
 from app.domain.product import effective_threshold
 from app.domain.verticals import Vertical, parse_vertical
@@ -226,6 +230,8 @@ class AgentStock(BaseAgent):
             ), extract_call
 
         entities["product_id"] = product_id
+        if (nombre := await nombre_si_es_por_peso(self._db, request.business_id, product_id)):
+            return self._por_peso(request, nombre, ActionType.REGISTER_STOCK_LOSS), extract_call
         summary = (
             f"Registrar merma: {entities.get('product_name') or 'producto'}"
             f" × {abs(entities.get('qty_change') or 0)} unidades"
@@ -264,6 +270,8 @@ class AgentStock(BaseAgent):
             ), extract_call
 
         entities["product_id"] = product_id
+        if (nombre := await nombre_si_es_por_peso(self._db, request.business_id, product_id)):
+            return self._por_peso(request, nombre, ActionType.UPDATE_STOCK), extract_call
         qty = entities.get("qty_change") or 0
         summary = (
             f"Ajuste de stock: {entities.get('product_name') or 'producto'} → {qty:+d} unidades"
@@ -281,6 +289,19 @@ class AgentStock(BaseAgent):
                 "structured_data": entities,
             },
         ), extract_call
+
+    def _por_peso(
+        self, request: AgentRequest, nombre: str, action_type: ActionType
+    ) -> AgentResponse:
+        return AgentResponse(
+            request_id=request.request_id,
+            agent_name=self.agent_name,
+            status="requires_clarification",
+            risk_level=RiskLevel.LOW,
+            confidence=Confidence.LOW,
+            question=pregunta_por_peso(nombre, "Productos"),
+            result={"action_type": action_type, "summary": "Producto por peso o volumen."},
+        )
 
     def _product_not_found_response(
         self,
@@ -431,6 +452,11 @@ class AgentStock(BaseAgent):
                 },
             ), extract_call
 
+        # Stock y umbral son CANTIDADES: en un producto por peso, ver arriba.
+        if {"stock_units", "low_stock_threshold_units"} & update_fields.keys() and (
+            nombre := await nombre_si_es_por_peso(self._db, request.business_id, product_id)
+        ):
+            return self._por_peso(request, nombre, ActionType.UPDATE_PRODUCT), extract_call
         fields_desc = ", ".join(f"{k}={v}" for k, v in update_fields.items())
         summary = f"Actualizar {entities.get('product_name') or 'producto'}: {fields_desc}"
         update_fields["product_id"] = product_id

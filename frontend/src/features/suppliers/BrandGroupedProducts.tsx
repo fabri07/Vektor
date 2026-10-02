@@ -30,7 +30,8 @@ function groupKey(group: SupplierBrandGroup): string {
 /** Subtotal ($) del grupo COMPLETO — no se ve afectado por búsqueda ni cap. */
 export function groupSubtotal(group: SupplierBrandGroup): number {
   return group.products.reduce(
-    (sum, p) => sum + p.total_qty * p.unit_price,
+    // `total_qty` en unidades base, `unit_price` por unidad de venta.
+    (sum, p) => sum + (p.total_qty * p.unit_price) / Math.max(1, p.base_units_per_sale_unit ?? 1),
     0,
   );
 }
@@ -61,7 +62,7 @@ export function BrandGroupedProducts({
         group.is_official ? "Sí" : "No",
         p.name,
         formatDateTime(p.last_purchase_at),
-        String(p.total_qty),
+        p.quantity_display ?? String(p.total_qty),
         String(p.unit_price),
       ]),
     );
@@ -170,7 +171,7 @@ export function BrandGroupedProducts({
                         </td>
                         <td className="whitespace-nowrap px-4 py-2.5">
                           <span className="text-vk-text-primary">
-                            {p.total_qty}
+                            {p.quantity_display ?? p.total_qty}
                           </span>
                         </td>
                         <td className="whitespace-nowrap px-4 py-2.5">

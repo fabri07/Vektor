@@ -95,6 +95,10 @@ export interface ProductStockItem {
   sale_price_ars: number;
   /** Plata inmovilizada: stock_units × unit_cost_ars (0 si no hay costo). */
   immobilized_value: number;
+  /** El stock con su unidad ("5,000 kg"); ausente en respuestas anteriores. */
+  stock_display?: string | null;
+  sale_unit?: string;
+  base_units_per_sale_unit?: number;
 }
 
 export interface SupplierBreakdownProductItem {
@@ -103,6 +107,9 @@ export interface SupplierBreakdownProductItem {
   brand: string;
   total_amount: number;
   total_qty: number;
+  /** La cantidad con su unidad ("2,500 kg"): `total_qty` está en unidades base. */
+  quantity_display?: string | null;
+  base_units_per_sale_unit?: number;
 }
 
 export interface SupplierPurchaseBreakdownItem {

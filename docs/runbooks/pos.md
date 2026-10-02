@@ -120,6 +120,19 @@ Desde la barra de la caja se entra a **«Turnos de caja»**. Ahí se ve:
   - El vuelto se calcula sólo sobre la parte en efectivo.
 - **Fiado.** Necesita un cliente real y el permiso «fiado». No funciona sin
   internet.
+- **Productos por peso o volumen.** Se configuran en **Productos** («Se vende
+  por: Kilo» o «Litro»), con precio y costo **por kg o litro**.
+  - Al escanearlo entra **1 kg**: se corrige con el peso real en la cantidad
+    (ej. `0,750`). El precio dice «/kg».
+  - Compras, remitos y archivos cargan la cantidad **en kg o litros**, como la
+    escribe el documento («5» de queso son 5 kg). En remitos y compras, sólo
+    kilos enteros.
+  - La unidad **no se puede cambiar** en un producto con stock, ventas o
+    compras: cambiaría el significado de lo ya registrado.
+  - Por chat no se mueve stock de un producto por peso: el asistente pide
+    hacerlo desde Productos, la caja o el remito.
+  - Los códigos de balanza (EAN que empieza con 2 y trae el peso) todavía no
+    se leen: se escanea el producto y se tipea el peso.
 - **Reimprimir.** Desde **«Últimos tickets» → «Reimprimir»**. Reimprimir no
   crea nada nuevo.
 - **Anular un ticket.** Desde «Últimos tickets».
@@ -232,8 +245,6 @@ la resuelve **desde la caja**, con su PIN.
 
 ## 8. Lo que la caja todavía no hace
 
-- **Vender por peso.** Todavía no se puede cargar un producto en gramos: la
-  cantidad se vende por unidad.
 - **Aprender códigos sin internet.** Vincular un código nuevo necesita conexión.
 - **Numeración correlativa y datos fiscales en el ticket.** El comprobante es
   **no fiscal**.

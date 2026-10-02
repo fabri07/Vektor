@@ -14,6 +14,10 @@ export interface CreateProductPayload {
   description?: string | null;
   acquired_at?: string | null;
   custom_fields?: Record<string, unknown>;
+  /** Unidad de venta (B3): stock y umbral en unidades base; precio y costo
+   *  por unidad de venta. Van juntos. */
+  sale_unit?: "unit" | "gram" | "milliliter";
+  base_units_per_sale_unit?: number;
 }
 
 export type UpdateProductPayload = Partial<CreateProductPayload> & {

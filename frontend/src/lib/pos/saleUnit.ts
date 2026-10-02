@@ -67,3 +67,42 @@ export function valorDeStock(
   const f = factor && factor > 0 ? factor : 1;
   return Math.round((unidadesBase * costoPorUnidadDeVenta * 100) / f) / 100;
 }
+
+/** ¿Se carga en kg o litros? (factor con nombre mayor a 1). */
+export function esPorPeso(factor: number | null | undefined): boolean {
+  return (factor ?? 1) > 1;
+}
+
+/** Cuántos decimales admite la unidad de venta: 1000 → 3 (gramos dentro del kg). */
+function decimalesDe(factor: number): number {
+  return factor > 1 ? String(factor).length - 1 : 0;
+}
+
+/**
+ * Lo que tipea una persona en la unidad de VENTA ("0,750" kg) → unidades base
+ * (750 g). Acepta coma o punto. `null` si no es una cantidad positiva o trae
+ * más decimales de los que la unidad base puede contar (0,0005 kg no son
+ * gramos enteros).
+ */
+export function aUnidadesBase(texto: string, factor: number | null | undefined): number | null {
+  const f = factor && factor > 0 ? factor : 1;
+  const limpio = texto.trim().replace(",", ".");
+  const decimales = decimalesDe(f);
+  const patron = decimales > 0 ? new RegExp(`^\\d+(\\.\\d{1,${decimales}})?$`) : /^\d+$/;
+  if (!patron.test(limpio)) return null;
+  // Se cuenta en enteros para no arrastrar el error de los floats (0,1 × 1000).
+  const [entera, frac = ""] = limpio.split(".");
+  const base = Number(entera) * f + Number((frac + "000000").slice(0, decimales) || "0") * (f / 10 ** decimales);
+  return base > 0 ? base : null;
+}
+
+/** Unidades base → texto para un campo en la unidad de venta: 750 g → "0,75". */
+export function enUnidadDeVenta(unidadesBase: number, factor: number | null | undefined): string {
+  const f = factor && factor > 0 ? factor : 1;
+  if (f === 1) return String(unidadesBase);
+  return (unidadesBase / f).toLocaleString("es-AR", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: decimalesDe(f),
+    useGrouping: false,
+  });
+}

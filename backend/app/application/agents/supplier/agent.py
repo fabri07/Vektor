@@ -24,7 +24,12 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
+from app.application.agents.shared.weight_guard import (
+    nombre_si_es_por_peso,
+    pregunta_por_peso,
+)
 from app.application.security.prompt_defense import wrap_user_input
+from app.domain.sale_unit import importe
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
 
@@ -262,6 +267,22 @@ class AgentSupplier(BaseAgent):
                 confidence=Confidence.LOW,
                 question=question,
                 result={"summary": "Producto no identificado en el catálogo."},
+                usage=usage,
+            )
+
+        if (
+            nombre := await nombre_si_es_por_peso(
+                self._session, request.business_id, product_id
+            )
+        ):
+            return AgentResponse(
+                request_id=request.request_id,
+                agent_name=self.agent_name,
+                status="requires_clarification",
+                risk_level=RiskLevel.LOW,
+                confidence=Confidence.LOW,
+                question=pregunta_por_peso(nombre, "el remito del proveedor"),
+                result={"summary": "Producto por peso o volumen."},
                 usage=usage,
             )
 
@@ -629,6 +650,7 @@ class AgentSupplier(BaseAgent):
                 "product_id": str(p.id),
                 "unit_cost": p.unit_cost_ars if p.unit_cost_ars is not None else Decimal(0),
                 "threshold": effective_threshold(p.low_stock_threshold_units),
+                "factor": p.base_units_per_sale_unit or 1,
             }
             for p in critical
         ]
@@ -703,7 +725,9 @@ class AgentSupplier(BaseAgent):
             # Mínimo 1 — si stock == threshold exacto, igual pedimos 1 unidad.
             quantity = max(p["threshold"] - p["stock"], 1)
             unit_cost: Decimal = p["unit_cost"]
-            subtotal = (Decimal(quantity) * unit_cost).quantize(two_places, rounding=ROUND_HALF_UP)
+            # Cantidad en unidades base, costo por unidad de venta: un producto
+            # por peso divide por su factor (con factor 1, costo × cantidad).
+            subtotal = importe(unit_cost, quantity, p.get("factor", 1))
             items.append(
                 PurchaseOrderItem(
                     product_id=p["product_id"],

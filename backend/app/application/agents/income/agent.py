@@ -153,9 +153,10 @@ class AgentIncome(BaseAgent):
 
     async def _lookup_product_price(
         self, product_description: str, tenant_id: str
-    ) -> tuple[Decimal | None, str | None, str | None, list[str]]:
+    ) -> tuple[Decimal | None, str | None, str | None, list[str], int]:
+        """(precio, nombre, id, alternativas, factor de la unidad de venta)."""
         if self._db is None:
-            return None, None, None, []
+            return None, None, None, [], 1
 
         from sqlalchemy import func, select  # noqa: PLC0415
 
@@ -166,7 +167,7 @@ class AgentIncome(BaseAgent):
 
             tenant_uuid = uuid_mod.UUID(str(tenant_id))
         except ValueError:
-            return None, None, None, []
+            return None, None, None, [], 1
 
         normalized_desc = product_description.strip().lower()
         base_filters = [
@@ -211,11 +212,17 @@ class AgentIncome(BaseAgent):
                     product = matches[0]
                     break
                 if len(matches) > 1:
-                    return None, None, None, [p.name for p in matches]
+                    return None, None, None, [p.name for p in matches], 1
 
         if product is None:
-            return None, None, None, []
-        return product.sale_price_ars, product.name, str(product.id), []
+            return None, None, None, [], 1
+        return (
+            product.sale_price_ars,
+            product.name,
+            str(product.id),
+            [],
+            product.base_units_per_sale_unit or 1,
+        )
 
     async def _maybe_build_uploaded_file_import(
         self, request: AgentRequest
@@ -414,9 +421,30 @@ class AgentIncome(BaseAgent):
         product_desc = (entities.get("product_description") or "").strip()
 
         if amount is None and product_desc:
-            price, matched_name, product_id, alternatives = await self._lookup_product_price(
-                product_desc, request.business_id
-            )
+            (
+                price,
+                matched_name,
+                product_id,
+                alternatives,
+                factor,
+            ) = await self._lookup_product_price(product_desc, request.business_id)
+            if price is not None and factor > 1:
+                # Un producto por peso o volumen: el chat extrae cantidades
+                # ENTERAS y sin unidad, así que "2 de queso" no dice si son 2 kg
+                # o 2 g. Antes que adivinar un importe, se pide cargarlo donde
+                # la cantidad se lee bien.
+                return AgentResponse(
+                    request_id=request.request_id,
+                    agent_name=self.agent_name,
+                    status="requires_clarification",
+                    risk_level=RiskLevel.LOW,
+                    confidence=Confidence.LOW,
+                    question=(
+                        f"'{matched_name}' se vende por peso o volumen. Registrá esa venta "
+                        "desde la caja, donde se carga la cantidad en kg o litros."
+                    ),
+                    usage=usage,
+                )
             if alternatives:
                 opts = ", ".join(alternatives[:5])
                 suffix = " (entre otros)" if len(alternatives) >= 5 else ""

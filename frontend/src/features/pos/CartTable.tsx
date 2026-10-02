@@ -4,6 +4,7 @@ import { Trash2 } from "lucide-react";
 
 import { MoneyInput, QuantityInput } from "@/features/pos/DiscountControl";
 import { PriceOverrideControl } from "@/features/pos/PriceOverrideControl";
+import { esPorPeso, etiquetaDeUnidad } from "@/lib/pos/saleUnit";
 import {
   type CartLine,
   type SaleAction,
@@ -23,9 +24,9 @@ interface CartTableProps {
   onAfterAction?: () => void;
 }
 
+/** La unidad en la que se TIPEA la cantidad: kg o L para un producto por peso. */
 function unitLabel(line: CartLine): string {
-  if (line.product.base_units_per_sale_unit <= 1) return "u.";
-  return line.product.sale_unit === "milliliter" ? "ml" : line.product.sale_unit === "gram" ? "g" : "u.";
+  return etiquetaDeUnidad(line.product.sale_unit, line.product.base_units_per_sale_unit);
 }
 
 export function CartTable({
@@ -76,6 +77,7 @@ export function CartTable({
                     <QuantityInput
                       label={`Cantidad de ${line.product.name}`}
                       quantity={line.quantity}
+                      factor={line.product.base_units_per_sale_unit}
                       disabled={locked}
                       onQuantity={(q) => dispatch({ type: "SET_QUANTITY", productId: id, quantity: q })}
                     />
@@ -86,7 +88,12 @@ export function CartTable({
                   {canOverridePrice ? (
                     <PriceOverrideControl line={line} dispatch={dispatch} disabled={locked} />
                   ) : (
-                    formatCents(precioEfectivoCents(line))
+                    <>
+                      {formatCents(precioEfectivoCents(line))}
+                      {esPorPeso(line.product.base_units_per_sale_unit)
+                        ? `/${unitLabel(line)}`
+                        : null}
+                    </>
                   )}
                 </td>
                 {canDiscount ? (

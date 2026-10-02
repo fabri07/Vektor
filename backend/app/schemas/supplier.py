@@ -124,6 +124,10 @@ class SupplierProductPurchaseResponse(BaseModel):
     last_purchase_at: datetime | None
     total_qty: float
     unit_price: Decimal
+    #: `total_qty` está en unidades base; `unit_price`, por unidad de venta.
+    base_units_per_sale_unit: int = 1
+    #: La cantidad con su unidad ("2,500 kg", "12 un.").
+    quantity_display: str | None = None
 
     @field_serializer("unit_price")
     def _serialize_unit_price(self, v: Decimal) -> float:
