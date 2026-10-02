@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/Button";
+import { deOtraCaja, listarNoSincronizadas } from "@/lib/offline/posDb";
 import { posService, type PosTerminal } from "@/services/pos.service";
 import { useAuthStore } from "@/stores/authStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
@@ -47,6 +48,23 @@ export function TerminalsSection() {
       }
       setNombre("");
       toast(`Esta PC quedó habilitada como "${t.name}".`, "success");
+      // Lo que cobró la caja anterior de esta PC no sube solo: avisarlo ACÁ,
+      // donde el dueño acaba de reemplazarla, y no recién cuando alguien
+      // abra el panel de la caja.
+      if (tenantId) {
+        try {
+          const ajenas = deOtraCaja(await listarNoSincronizadas(tenantId), t.id);
+          if (ajenas.length > 0) {
+            toast(
+              `Hay ${ajenas.length} venta(s) de la caja anterior sin subir. ` +
+                'Pasalas desde la caja, en "Ventas sin sincronizar".',
+              "warning",
+            );
+          }
+        } catch {
+          // Sin IndexedDB no hay ventas guardadas en esta PC.
+        }
+      }
       await queryClient.invalidateQueries({ queryKey: ["pos-terminals"] });
     },
     onError: () => toast("No se pudo habilitar la caja (¿nombre repetido?).", "error"),

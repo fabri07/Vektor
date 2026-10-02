@@ -376,6 +376,19 @@ class PosTerminalResponse(BaseModel):
     disabled_at: datetime | None
 
 
+class PosAdoptPendingRequest(BaseModel):
+    """Pasar a esta caja las ventas pendientes que cobró una caja reemplazada."""
+
+    #: ``None``: ventas cobradas sin caja (el dueño desde el navegador).
+    previous_terminal_id: UUID | None = None
+    client_operation_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class PosAdoptPendingResponse(BaseModel):
+    terminal_id: UUID
+    adopted: int
+
+
 class PosTerminalEnrolledResponse(PosTerminalResponse):
     """La respuesta del alta: la ÚNICA vez que se ve el secreto."""
 

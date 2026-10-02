@@ -226,6 +226,18 @@ export const posService = {
     const res = await api.post<PosTerminalEnrolled>("/pos/terminals", { name });
     return res.data;
   },
+  /** El dueño, con PIN y desde la caja nueva, autoriza que suba las ventas
+   *  pendientes que cobró la caja que esta PC reemplazó. */
+  async adoptPendingOperations(
+    previousTerminalId: string | null,
+    clientOperationIds: string[],
+  ): Promise<{ terminal_id: string; adopted: number }> {
+    const res = await api.post<{ terminal_id: string; adopted: number }>(
+      "/pos/terminals/adopt-pending",
+      { previous_terminal_id: previousTerminalId, client_operation_ids: clientOperationIds },
+    );
+    return res.data;
+  },
   async disableTerminal(id: string): Promise<PosTerminal> {
     const res = await api.post<PosTerminal>(`/pos/terminals/${id}/disable`);
     return res.data;

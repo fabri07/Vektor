@@ -157,3 +157,74 @@ async def dar_de_baja(
         _auditar(session, actor, terminal, "POS_TERMINAL_DISABLED")
         await session.flush()
     return terminal
+
+
+async def autorizar_adopcion(
+    session: AsyncSession,
+    actor: User,
+    actual: PosTerminal,
+    anterior_id: uuid.UUID | None,
+    client_operation_ids: list[str],
+) -> None:
+    """El dueño autoriza que ESTA caja suba las ventas que cobró la anterior.
+
+    Una PC rehabilitada recibe una terminal con otro id, y sus ventas pendientes
+    —que viven en el navegador y todavía no subieron— conservan el viejo: la
+    cola sólo sube lo de la caja actual, así que quedaban trabadas para siempre.
+    Esto no toca ninguna venta (todavía no existen en el servidor): deja
+    constancia de quién decidió que esas ventas pasan a esta caja.
+
+    La anterior tiene que estar DADA DE BAJA: con una caja viva, sus ventas las
+    sube ella; pasárselas a otra sería quitárselas.
+    """
+    if anterior_id is not None:
+        if anterior_id == actual.id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "SAME_TERMINAL",
+                    "message": "Esas ventas ya son de esta caja.",
+                },
+            )
+        anterior = (
+            await session.execute(
+                select(PosTerminal).where(
+                    PosTerminal.id == anterior_id,
+                    PosTerminal.tenant_id == actor.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if anterior is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Caja no encontrada."
+            )
+        if anterior.disabled_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "PREVIOUS_TERMINAL_ACTIVE",
+                    "message": (
+                        "La caja anterior sigue habilitada: sus ventas las sube ella. "
+                        "Dala de baja primero si esta PC la reemplaza."
+                    ),
+                },
+            )
+    session.add(
+        DecisionAuditLog(
+            tenant_id=actor.tenant_id,
+            decision_type="POS_PENDING_REASSIGNED",
+            decision_data={
+                "record_type": "pos_terminal",
+                "record_id": str(actual.id),
+                "from_terminal_id": str(anterior_id) if anterior_id else None,
+                "to_terminal_id": str(actual.id),
+                "client_operation_ids": client_operation_ids,
+                "source": "ui",
+            },
+            triggered_by="ui:pos_terminals",
+            actor_user_id=actor.user_id,
+            context={"endpoint": "pos.terminals.adopt_pending"},
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()

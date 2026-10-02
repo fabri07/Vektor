@@ -236,6 +236,70 @@ export async function actualizarOperacion(
   return nueva;
 }
 
+/**
+ * Las ventas de esta PC que quedaron atadas a OTRA caja.
+ *
+ * Una PC rehabilitada recibe una terminal con otro id, y lo que cobró antes
+ * conserva el viejo: la cola sólo sube lo de la caja actual
+ * (`pendientesSincronizables`), así que esas ventas no suben solas. Como
+ * IndexedDB es local, toda venta guardada acá se cobró en esta PC.
+ *
+ * Quedan fuera las sincronizadas (no hace falta nada) y las que están en
+ * corrección (no se suben: esperan que el cajero rehaga el cobro).
+ */
+export function deOtraCaja(
+  operaciones: OperacionGuardada[],
+  terminalActual: string | null,
+): OperacionGuardada[] {
+  return operaciones.filter(
+    (o) =>
+      o.terminalId !== terminalActual &&
+      o.estado !== "SINCRONIZADA" &&
+      o.estado !== "EN_CORRECCION",
+  );
+}
+
+/**
+ * Pasa a la caja actual las ventas que cobró la anterior. Se llama SÓLO con el
+ * 200 de `POST /pos/terminals/adopt-pending`: el dueño, con PIN, autorizó el
+ * cambio y quedó auditado. Antes de eso no se reescribe nada.
+ *
+ * Una sola transacción, y vuelve a verificar cada venta: sólo se mueve la que
+ * sigue siendo del mismo negocio, de la caja que se autorizó y sin sincronizar.
+ */
+export async function reasignarTerminal(
+  tenantId: string,
+  deTerminal: string | null,
+  aTerminal: string,
+  ids: string[],
+): Promise<number> {
+  const base = await abrirPosDb();
+  const tx = base.transaction("operaciones", "readwrite");
+  let movidas = 0;
+  for (const id of ids) {
+    const op = await tx.store.get(id);
+    if (
+      op === undefined ||
+      op.tenantId !== tenantId ||
+      op.terminalId !== deTerminal ||
+      op.estado === "SINCRONIZADA" ||
+      op.estado === "EN_CORRECCION"
+    ) {
+      continue;
+    }
+    await tx.store.put({
+      ...op,
+      terminalId: aTerminal,
+      // La caja vieja daba TERMINAL_DISABLED: con la nueva eso ya no aplica.
+      estado: op.estado === "REQUIERE_AUTENTICACION" ? "PENDIENTE" : op.estado,
+      proximoIntentoEn: 0,
+    });
+    movidas += 1;
+  }
+  await tx.done;
+  return movidas;
+}
+
 /** Descarte MANUAL. Nada automático llama a esto. */
 export async function borrarOperacion(clientOperationId: string): Promise<void> {
   const base = await abrirPosDb();

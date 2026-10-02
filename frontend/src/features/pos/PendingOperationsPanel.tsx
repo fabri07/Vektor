@@ -16,8 +16,15 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import type { OperacionGuardada } from "@/lib/offline/posDb";
-import { actualizarOperacion, borrarOperacion } from "@/lib/offline/posDb";
+import {
+  actualizarOperacion,
+  borrarOperacion,
+  deOtraCaja,
+  reasignarTerminal,
+} from "@/lib/offline/posDb";
 import { formatCents, toCents } from "@/lib/pos/cart";
+import { posErrorInfo } from "@/lib/pos/errors";
+import { posService } from "@/services/pos.service";
 
 const ROTULO: Record<OperacionGuardada["estado"], string> = {
   PENDIENTE: "Pendiente de sincronizar",
@@ -49,6 +56,10 @@ function cuando(iso: string): string {
 
 interface Props {
   pendientes: OperacionGuardada[];
+  /** La caja de esta PC ahora; `null` si no está habilitada. */
+  terminalId: string | null;
+  /** Sólo el dueño puede pasar ventas de una caja reemplazada (con PIN). */
+  esDuenio: boolean;
   sincronizando: boolean;
   persistencia: boolean | null;
   onFlush: () => void;
@@ -58,6 +69,8 @@ interface Props {
 
 export function PendingOperationsPanel({
   pendientes,
+  terminalId,
+  esDuenio,
   sincronizando,
   persistencia,
   onFlush,
@@ -66,8 +79,40 @@ export function PendingOperationsPanel({
 }: Props) {
   const [abierto, setAbierto] = useState(false);
   const [descartando, setDescartando] = useState<string | null>(null);
+  const [adoptando, setAdoptando] = useState(false);
+  const [errorAdopcion, setErrorAdopcion] = useState<string | null>(null);
 
   if (pendientes.length === 0) return null;
+
+  // Agrupadas por la caja anterior: el servidor autoriza una caja por vez.
+  const ajenas = deOtraCaja(pendientes, terminalId);
+  const porCaja = new Map<string | null, OperacionGuardada[]>();
+  for (const op of ajenas) {
+    porCaja.set(op.terminalId, [...(porCaja.get(op.terminalId) ?? []), op]);
+  }
+
+  async function adoptar(): Promise<void> {
+    if (terminalId === null) return;
+    setAdoptando(true);
+    setErrorAdopcion(null);
+    try {
+      for (const [anterior, ops] of porCaja) {
+        const ids = ops.map((o) => o.clientOperationId);
+        // Primero el servidor: sin su 200 (dueño + PIN + caja anterior dada
+        // de baja, y auditado) no se reescribe nada en la PC.
+        await posService.adoptPendingOperations(anterior, ids);
+        await reasignarTerminal(ops[0]?.tenantId ?? "", anterior, terminalId, ids);
+      }
+      onCambio();
+      onFlush();
+    } catch (e) {
+      const info = posErrorInfo(e);
+      setErrorAdopcion(info.message ?? "No se pudieron pasar las ventas a esta caja.");
+      onCambio();
+    } finally {
+      setAdoptando(false);
+    }
+  }
 
   async function reintentar(op: OperacionGuardada): Promise<void> {
     await actualizarOperacion(op.clientOperationId, {
@@ -108,6 +153,35 @@ export function PendingOperationsPanel({
         {abierto ? "▾" : "▸"} Ventas sin sincronizar ({pendientes.length})
         {sincronizando ? " · sincronizando…" : ""}
       </button>
+      {ajenas.length > 0 && (
+        <div className="mt-2 rounded border border-pos-border bg-pos-surface p-2">
+          <p className="text-pos-text">
+            {ajenas.length === 1
+              ? "1 venta se cobró en la caja anterior de esta PC y no se sube sola."
+              : `${ajenas.length} ventas se cobraron en la caja anterior de esta PC y no se suben solas.`}
+          </p>
+          {terminalId === null ? (
+            <p className="mt-1 text-xs text-pos-text-2">
+              Habilitá esta PC como caja para poder pasarlas.
+            </p>
+          ) : esDuenio ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="mt-2"
+              disabled={adoptando}
+              onClick={() => void adoptar()}
+            >
+              Pasarlas a esta caja
+            </Button>
+          ) : (
+            <p className="mt-1 text-xs text-pos-text-2">
+              Pedile al dueño que las pase a esta caja.
+            </p>
+          )}
+          {errorAdopcion && <p className="mt-1 text-xs text-pos-danger">{errorAdopcion}</p>}
+        </div>
+      )}
       {abierto && (
         <div className="mt-2 space-y-2">
           {persistencia === false && (

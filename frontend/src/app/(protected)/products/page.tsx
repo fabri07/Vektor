@@ -25,6 +25,7 @@ import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFieldColumns";
 import { AllDataModal } from "@/features/customFields/AllDataModal";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
+import { valorDeStock } from "@/lib/pos/saleUnit";
 import { useToastStore } from "@/stores/toastStore";
 import { useAuthStore } from "@/stores/authStore";
 
@@ -367,8 +368,11 @@ export default function ProductsPage() {
   const totalActive = products.length;
   const lowStockCount = products.filter((p) => p.is_low_stock && p.stock_units > 0).length;
   const outOfStockCount = products.filter((p) => p.stock_units === 0).length;
+  // Por el helper: precio y costo son por unidad de VENTA y el stock está en
+  // unidades base, así que un producto en gramos divide por su factor.
   const inventoryValue = products.reduce(
-    (s, p) => s + p.stock_units * (p.unit_cost_ars ?? 0),
+    (s, p) =>
+      s + valorDeStock(p.stock_units, p.base_units_per_sale_unit, p.unit_cost_ars ?? 0),
     0,
   );
 

@@ -296,3 +296,166 @@ class TestCajeroSinTerminal:
         )
         assert resp.status_code == 403
         assert resp.json()["detail"]["code"] == "TERMINAL_REQUIRED"
+
+
+class TestAdoptarPendientes:
+    """Una PC rehabilitada recibe otra terminal: sus ventas pendientes —que viven
+    en el navegador con el id viejo— sólo vuelven a la cola si el dueño, con PIN
+    y desde la caja nueva, autoriza el cambio. Hasta este arreglo quedaban
+    trabadas para siempre."""
+
+    _URL = "/api/v1/pos/terminals/adopt-pending"
+
+    async def _reemplazo(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> tuple[dict, dict]:
+        vieja = await _habilitar(client, auth_headers, "Vieja")
+        await client.post(f"/api/v1/pos/terminals/{vieja['id']}/disable", headers=auth_headers)
+        nueva = await _habilitar(client, auth_headers, "Nueva")
+        return vieja, nueva
+
+    async def test_el_duenio_las_pasa_y_queda_auditado(
+        self, client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession
+    ) -> None:
+        vieja, nueva = await self._reemplazo(client, auth_headers)
+        resp = await client.post(
+            self._URL,
+            json={"previous_terminal_id": vieja["id"],
+                  "client_operation_ids": ["op-a", "op-b", "op-a"]},
+            headers={**auth_headers, TERMINAL_HEADER: nueva["secret"]},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"terminal_id": nueva["id"], "adopted": 2}
+
+        fila = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "POS_PENDING_REASSIGNED"
+                )
+            )
+        ).scalar_one()
+        assert fila.decision_data["from_terminal_id"] == vieja["id"]
+        assert fila.decision_data["to_terminal_id"] == nueva["id"]
+        assert fila.decision_data["client_operation_ids"] == ["op-a", "op-b"]
+
+    async def test_la_venta_adoptada_sube_una_sola_vez_con_la_caja_nueva(
+        self, client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession
+    ) -> None:
+        vieja, nueva = await self._reemplazo(client, auth_headers)
+        venta = _venta(await _producto(client, auth_headers))
+        await client.post(
+            self._URL,
+            json={"previous_terminal_id": vieja["id"],
+                  "client_operation_ids": [venta["client_operation_id"]]},
+            headers={**auth_headers, TERMINAL_HEADER: nueva["secret"]},
+        )
+        con_caja = {**auth_headers, TERMINAL_HEADER: nueva["secret"]}
+        primera = await client.post("/api/v1/pos/operations", json=venta, headers=con_caja)
+        segunda = await client.post("/api/v1/pos/operations", json=venta, headers=con_caja)
+        assert primera.status_code == 201, primera.text
+        assert segunda.status_code == 200
+        ops = (
+            await db_session.execute(
+                select(PosOperation).where(
+                    PosOperation.client_operation_id == venta["client_operation_id"]
+                )
+            )
+        ).scalars().all()
+        assert len(ops) == 1
+        assert str(ops[0].terminal_id) == nueva["id"]
+
+    async def test_no_se_le_quitan_ventas_a_una_caja_viva(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        viva = await _habilitar(client, auth_headers, "Viva")
+        nueva = await _habilitar(client, auth_headers, "Nueva")
+        resp = await client.post(
+            self._URL,
+            json={"previous_terminal_id": viva["id"], "client_operation_ids": ["op-a"]},
+            headers={**auth_headers, TERMINAL_HEADER: nueva["secret"]},
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "PREVIOUS_TERMINAL_ACTIVE"
+
+    async def test_la_misma_caja(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        nueva = await _habilitar(client, auth_headers)
+        resp = await client.post(
+            self._URL,
+            json={"previous_terminal_id": nueva["id"], "client_operation_ids": ["op-a"]},
+            headers={**auth_headers, TERMINAL_HEADER: nueva["secret"]},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "SAME_TERMINAL"
+
+    async def test_caja_de_otro_negocio_o_inexistente(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        nueva = await _habilitar(client, auth_headers)
+        resp = await client.post(
+            self._URL,
+            json={"previous_terminal_id": str(uuid.uuid4()), "client_operation_ids": ["op-a"]},
+            headers={**auth_headers, TERMINAL_HEADER: nueva["secret"]},
+        )
+        assert resp.status_code == 404
+
+    async def test_sin_caja_actual_no(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        vieja, _ = await self._reemplazo(client, auth_headers)
+        resp = await client.post(
+            self._URL,
+            json={"previous_terminal_id": vieja["id"], "client_operation_ids": ["op-a"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "TERMINAL_REQUIRED"
+
+    async def test_desde_la_caja_vieja_no(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        vieja, _ = await self._reemplazo(client, auth_headers)
+        resp = await client.post(
+            self._URL,
+            json={"previous_terminal_id": None, "client_operation_ids": ["op-a"]},
+            headers={**auth_headers, TERMINAL_HEADER: vieja["secret"]},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "TERMINAL_DISABLED"
+
+    @pytest.mark.parametrize("rol", ["ADMIN", "CASHIER"])
+    async def test_solo_el_duenio(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+        rol: str,
+    ) -> None:
+        vieja, nueva = await self._reemplazo(client, auth_headers)
+        headers = await _usuario(db_session, sample_tenant, fake_redis, rol)
+        resp = await client.post(
+            self._URL,
+            json={"previous_terminal_id": vieja["id"], "client_operation_ids": ["op-a"]},
+            headers={**headers, TERMINAL_HEADER: nueva["secret"]},
+        )
+        assert resp.status_code == 403
+
+    async def test_sin_pin_pide_pin(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        sample_tenant: Tenant,
+        sample_user: User,
+        fake_redis: Any,
+    ) -> None:
+        vieja, nueva = await self._reemplazo(client, auth_headers)
+        await fake_redis.delete(_pin_window_key(sample_tenant.tenant_id, sample_user.user_id))
+        resp = await client.post(
+            self._URL,
+            json={"previous_terminal_id": vieja["id"], "client_operation_ids": ["op-a"]},
+            headers={**auth_headers, TERMINAL_HEADER: nueva["secret"]},
+        )
+        assert resp.status_code == 428
