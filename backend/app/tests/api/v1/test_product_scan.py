@@ -11,9 +11,12 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import today_ar
 from app.domain.scan_code import digito_verificador_gs1
+from app.persistence.models.audit import DecisionAuditLog
 
 
 def _ean13(cuerpo12: str) -> str:
@@ -166,6 +169,31 @@ class TestAprendizaje:
         scan = await _lookup(client, auth_headers, EAN_A)
         assert scan.status_code == 200
         assert scan.json()["product"]["id"] == p["id"]
+
+    @pytest.mark.parametrize(("header", "esperado"), [("1", True), ("0", False), (None, False)])
+    async def test_la_auditoria_dice_si_se_aprendio_sin_red(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        header: str | None,
+        esperado: bool,
+    ) -> None:
+        """Un código aprendido sin red llega desde la cola de la caja (cierre de
+        B4): la auditoría lo distingue de uno vinculado en el momento. Un "0" no
+        cuenta como sí (toda cadena no vacía es verdadera)."""
+        p = await _producto(client, auth_headers, "Galletitas")
+        headers = {**auth_headers, **({"X-POS-Offline": header} if header else {})}
+        resp = await self._aprender(client, headers, p["id"], _ean13("779000000123"))
+        assert resp.status_code == 200, resp.text
+        fila = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "PRODUCT_BARCODE_LEARNED"
+                )
+            )
+        ).scalar_one()
+        assert fila.decision_data["learned_offline"] is esperado
 
     async def test_aprender_dos_veces_lo_mismo_es_idempotente(
         self, client: AsyncClient, auth_headers: dict[str, Any]

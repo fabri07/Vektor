@@ -26,6 +26,23 @@ interface ProductPickerProps {
   picker: PickerMode;
   onPick: (product: PosProduct) => void;
   onClose: () => void;
+  /**
+   * El catálogo guardado en la PC. Sin red, la búsqueda por nombre cae acá: si
+   * no, sin conexión no se podía ni buscar un producto sin código ni aprender
+   * uno nuevo.
+   */
+  local?: readonly PosProduct[];
+}
+
+/** Búsqueda local por nombre o SKU, sin acentos ni mayúsculas. */
+export function buscarLocal(productos: readonly PosProduct[], termino: string): PosProduct[] {
+  const plano = (t: string) =>
+    t.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const q = plano(termino.trim());
+  if (q.length < 2) return [];
+  return productos
+    .filter((p) => plano(p.name).includes(q) || plano(p.sku ?? "").includes(q))
+    .slice(0, 20);
 }
 
 const TITLES: Record<PickerMode["mode"], string> = {
@@ -34,10 +51,11 @@ const TITLES: Record<PickerMode["mode"], string> = {
   learn: "Código nuevo: ¿a qué producto corresponde?",
 };
 
-export function ProductPicker({ picker, onPick, onClose }: ProductPickerProps) {
+export function ProductPicker({ picker, onPick, onClose, local }: ProductPickerProps) {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<PosProduct[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [sinRed, setSinRed] = useState(false);
   const buscar = picker.mode !== "ambiguous";
 
   useEffect(() => {
@@ -55,17 +73,25 @@ export function ProductPicker({ picker, onPick, onClose }: ProductPickerProps) {
           if (vigente) {
             setResults(items);
             setError(null);
+            setSinRed(false);
           }
         })
         .catch(() => {
-          if (vigente) setError("No se pudo buscar. Revisá la conexión.");
+          if (!vigente) return;
+          if (local && local.length > 0) {
+            setResults(buscarLocal(local, term));
+            setError(null);
+            setSinRed(true);
+          } else {
+            setError("No se pudo buscar. Revisá la conexión.");
+          }
         });
     }, 250);
     return () => {
       vigente = false;
       clearTimeout(t);
     };
-  }, [q, buscar]);
+  }, [q, buscar, local]);
 
   const lista = picker.mode === "ambiguous" ? picker.candidates : results;
 
@@ -75,6 +101,11 @@ export function ProductPicker({ picker, onPick, onClose }: ProductPickerProps) {
         <p className="mb-3 text-sm text-vektor-body">
           Código leído: <span className="font-mono">{picker.code}</span>
           {picker.mode === "learn" ? " — queda vinculado al producto que elijas." : null}
+        </p>
+      ) : null}
+      {sinRed ? (
+        <p className="mb-2 text-xs text-vektor-muted">
+          Sin conexión: buscando en el catálogo guardado en esta PC.
         </p>
       ) : null}
       {buscar ? (

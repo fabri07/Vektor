@@ -13,6 +13,7 @@
  * fórmula, un solo lugar.
  */
 
+import { podarAprendizajesSubidos, superposicion } from "@/lib/offline/aprendizajes";
 import { abrirPosDb, unidadesComprometidas } from "@/lib/offline/posDb";
 import type { PosProduct } from "@/lib/pos/cart";
 
@@ -111,6 +112,10 @@ export async function sincronizarCatalogo(
   }
   await tx.done;
 
+  // Un código aprendido sin red y ya subido sobra cuando el catálogo bajado lo
+  // trae: desde acá lo resuelve el catálogo mismo.
+  await podarAprendizajesSubidos(tenantId);
+
   await guardarMeta(CLAVE_SYNC(tenantId), new Date().toISOString());
   if (negocio) await guardarMeta(CLAVE_NEGOCIO(tenantId), negocio);
   return productos.length;
@@ -121,10 +126,16 @@ export async function catalogoDeCaja(tenantId: string): Promise<ProductoDeCaja[]
   const base = await abrirPosDb();
   const filas = await base.getAllFromIndex("catalogo", "porTenant", tenantId);
   const comprometidas = await unidadesComprometidas(tenantId);
+  // Los códigos aprendidos sin red, superpuestos: el segundo escaneo los
+  // encuentra igual que si el catálogo ya los trajera. Sólo sobre un producto
+  // sin código: el aprendizaje nunca pisa uno (la misma regla del servidor).
+  const aprendidos = await superposicion(tenantId);
   return filas.map((fila) => {
     const producto = fila.datos as unknown as PosProduct;
+    const aprendido = aprendidos.get(producto.id);
     return {
       ...producto,
+      barcode: producto.barcode || aprendido || producto.barcode,
       stock_estimado: producto.stock_units - (comprometidas.get(producto.id) ?? 0),
     };
   });

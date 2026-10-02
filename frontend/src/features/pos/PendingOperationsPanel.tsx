@@ -15,7 +15,8 @@
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
-import type { OperacionGuardada } from "@/lib/offline/posDb";
+import { borrarAprendizaje } from "@/lib/offline/aprendizajes";
+import type { AprendizajeGuardado, OperacionGuardada } from "@/lib/offline/posDb";
 import {
   actualizarOperacion,
   borrarOperacion,
@@ -56,6 +57,8 @@ function cuando(iso: string): string {
 
 interface Props {
   pendientes: OperacionGuardada[];
+  /** Códigos aprendidos sin red: pendientes de subir o en revisión. */
+  aprendizajes?: AprendizajeGuardado[];
   /** La caja de esta PC ahora; `null` si no está habilitada. */
   terminalId: string | null;
   /** Sólo el dueño puede pasar ventas de una caja reemplazada (con PIN). */
@@ -69,6 +72,7 @@ interface Props {
 
 export function PendingOperationsPanel({
   pendientes,
+  aprendizajes = [],
   terminalId,
   esDuenio,
   sincronizando,
@@ -82,7 +86,7 @@ export function PendingOperationsPanel({
   const [adoptando, setAdoptando] = useState(false);
   const [errorAdopcion, setErrorAdopcion] = useState<string | null>(null);
 
-  if (pendientes.length === 0) return null;
+  if (pendientes.length === 0 && aprendizajes.length === 0) return null;
 
   // Agrupadas por la caja anterior: el servidor autoriza una caja por vez.
   const ajenas = deOtraCaja(pendientes, terminalId);
@@ -247,6 +251,47 @@ export function PendingOperationsPanel({
           <Button size="sm" variant="ghost" onClick={exportar}>
             Exportar a un archivo
           </Button>
+        </div>
+      )}
+      {aprendizajes.length > 0 && (
+        <div className="mt-3 space-y-2">
+          <p className="text-pos-text-2">Códigos aprendidos sin conexión ({aprendizajes.length})</p>
+          <ul className="space-y-2">
+            {aprendizajes.map((a) => (
+              <li key={a.id} className="rounded border border-pos-border bg-pos-surface p-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-pos-text">
+                    <span className="font-mono">{a.codigo}</span> → {a.productName}
+                  </span>
+                  <span className="text-xs text-pos-muted">
+                    {a.estado === "REQUIERE_REVISION" ? "Requiere revisión" : "Pendiente de subir"}
+                  </span>
+                </div>
+                {a.estado === "REQUIERE_REVISION" ? (
+                  // El conflicto no tocó ninguna venta: lo vendido con este
+                  // código ya se cobró con el producto que se eligió.
+                  <p className="mt-1 text-xs text-pos-text-2">
+                    {a.ultimoError ?? "El servidor no aceptó el código."} Las ventas
+                    hechas con este código no cambian.
+                  </p>
+                ) : null}
+                {/* Descartar vale para cualquiera, también uno pendiente: si lo
+                    aprendió un cajero que no vuelve a esta PC, o una caja que se
+                    reemplazó, no tendría otra salida. Descartar un código no
+                    toca ninguna venta. */}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="mt-2"
+                  onClick={() => {
+                    void borrarAprendizaje(a.id).then(onCambio);
+                  }}
+                >
+                  Descartar
+                </Button>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

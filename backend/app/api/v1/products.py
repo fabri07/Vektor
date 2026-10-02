@@ -29,7 +29,7 @@ from app.application.services.product_identity import (
 )
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.pos_permissions import PosPermission
-from app.domain.pos_terminal import TERMINAL_HEADER
+from app.domain.pos_terminal import OFFLINE_HEADER, TERMINAL_HEADER, es_offline
 from app.domain.product import DEFAULT_LOW_STOCK_THRESHOLD_UNITS
 from app.domain.product_categories import (
     normalize_product_category,
@@ -263,6 +263,7 @@ def _audit_data_change(
     decision_type: str,
     before: dict[str, object],
     after: dict[str, object],
+    extra: dict[str, object] | None = None,
 ) -> None:
     session.add(
         DecisionAuditLog(
@@ -274,6 +275,7 @@ def _audit_data_change(
                 "before": before,
                 "after": after,
                 "source": "ui",
+                **(extra or {}),
             },
             triggered_by="ui:data_records",
             actor_user_id=user_id,
@@ -729,6 +731,7 @@ async def learn_product_barcode(
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
+    offline: str | None = Header(default=None, alias=OFFLINE_HEADER),
 ) -> PosProductResponse:
     """El aprendizaje de la caja: "este código es este producto".
 
@@ -825,6 +828,12 @@ async def learn_product_barcode(
         decision_type="PRODUCT_BARCODE_LEARNED",
         before={**before, "barcode": None},
         after={**_product_snapshot(producto), "barcode": producto.barcode},
+        # Un código aprendido sin red llega tarde y desde la cola de la caja: la
+        # auditoría tiene que poder distinguirlo de uno vinculado en el momento.
+        extra={
+            "learned_offline": es_offline(offline),
+            "terminal_id": str(terminal.id) if terminal is not None else None,
+        },
     )
     return a_pos_product(producto, tenant.tenant_id)
 

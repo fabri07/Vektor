@@ -92,7 +92,7 @@ from app.domain.pos_operation import (
 from app.domain.pos_permissions import CASHIER_ROLE, PosPermission
 from app.domain.pos_price_token import ResultadoToken
 from app.domain.pos_price_token import verificar as verificar_precio
-from app.domain.pos_terminal import TERMINAL_HEADER
+from app.domain.pos_terminal import OFFLINE_HEADER, TERMINAL_HEADER, es_offline
 from app.domain.sale_unit import formatear_cantidad
 from app.domain.transaction import MIXED_PAYMENT_METHOD
 from app.persistence.db.session import get_db_session
@@ -152,16 +152,9 @@ _ACCION_IDEMPOTENTE = "IDEMPOTENT_POST_POS_OPERATION"
 #: **No prueba nada.** Del lado del servidor no existe forma de verificar que el
 #: efectivo entró. Lo que hace es dejar la afirmación registrada (`charged_at`,
 #: el usuario, la caja) para poder auditarla.
-OFFLINE_HEADER = "X-POS-Offline"
-
-#: Lo que cuenta como "sí" en ese header. Un `bool(valor)` pelado tomaría `"0"`
-#: como verdadero —toda cadena no vacía lo es—, y ese header relaja el
-#: invariante de stock: no puede depender de leer mal un cero.
-_OFFLINE_SI = frozenset({"1", "true", "yes"})
-
-
-def _es_offline(valor: str | None) -> bool:
-    return valor is not None and valor.strip().lower() in _OFFLINE_SI
+# `OFFLINE_HEADER` y la lectura del header viven en `domain/pos_terminal`: el
+# aprendizaje de códigos sin red (products.py) lee el mismo header.
+_es_offline = es_offline
 
 #: Motivo de anulación de las `SaleEntry` de un ticket anulado desde la caja.
 #: Ya está en el CHECK `ck_sales_entries_void_reason`: no hace falta migrar.
