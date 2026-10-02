@@ -12,6 +12,7 @@ import { useState } from "react";
 
 import { MoneyInput } from "@/features/pos/DiscountControl";
 import { type CartLine, type SaleAction, formatCents, toCents } from "@/lib/pos/cart";
+import { esPorPeso, etiquetaDeUnidad } from "@/lib/pos/saleUnit";
 
 interface Props {
   line: CartLine;
@@ -32,6 +33,9 @@ export function PriceOverrideControl({ line, dispatch, disabled }: Props) {
       <div className="flex flex-col items-end">
         <span className={manual !== null ? "font-medium text-pos-text" : "text-pos-text-2"}>
           {formatCents(manual ?? lista)}
+          {esPorPeso(line.product.base_units_per_sale_unit)
+            ? `/${etiquetaDeUnidad(line.product.sale_unit, line.product.base_units_per_sale_unit)}`
+            : null}
         </span>
         {manual !== null ? (
           <span className="text-xs text-pos-muted" title={line.manualPriceReason}>

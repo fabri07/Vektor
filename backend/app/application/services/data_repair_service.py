@@ -35,6 +35,7 @@ from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
 )
+from app.domain.sale_unit import importe
 from app.domain.verticals import Vertical, try_parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessProfile
@@ -226,6 +227,7 @@ async def _find_unique_product_for_description(
             "product_id": str(product.id),
             "name": product.name,
             "sale_price_ars": str(product.sale_price_ars),
+            "base_units_per_sale_unit": product.base_units_per_sale_unit,
         }
         for product in matches.values()
     ]
@@ -271,7 +273,9 @@ async def detect_chat_sale_quality_issues(
             amount_matches = [
                 alt
                 for alt in alternatives
-                if Decimal(str(alt["sale_price_ars"])) * Decimal(str(quantity)) == sale.amount
+                # Sólo por unidad: ver la exclusión de productos por peso abajo.
+                if int(alt.get("base_units_per_sale_unit") or 1) == 1
+                and importe(Decimal(str(alt["sale_price_ars"])), quantity, 1) == sale.amount
             ]
             if len(amount_matches) == 1:
                 product = await db.get(Product, uuid.UUID(amount_matches[0]["product_id"]))
@@ -293,7 +297,14 @@ async def detect_chat_sale_quality_issues(
             )
             continue
 
-        expected_amount = product.sale_price_ars * Decimal(str(quantity))
+        # Un producto por peso o volumen queda fuera: la cantidad de la nota del
+        # chat ("2 queso") no dice la unidad, y repararla con un importe
+        # calculado sería inventarlo. El chat ya no registra esas ventas.
+        if (product.base_units_per_sale_unit or 1) > 1:
+            continue
+        expected_amount = importe(
+            product.sale_price_ars, quantity, product.base_units_per_sale_unit
+        )
         needs_update = (
             sale.quantity != quantity
             or sale.product_id != product.id
@@ -1088,7 +1099,11 @@ async def _process_chat_sale_candidate(
         await db.flush()
         return
 
-    expected_amount = candidate.product.sale_price_ars * Decimal(str(candidate.quantity))
+    expected_amount = importe(
+        candidate.product.sale_price_ars,
+        candidate.quantity,
+        candidate.product.base_units_per_sale_unit,
+    )
     after = {
         **before,
         "amount": str(expected_amount),

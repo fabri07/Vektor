@@ -17,7 +17,7 @@ El resto del módulo es de PRESENTACIÓN y nada que haga cuentas debe llamarlo.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 #: Los valores admitidos por el CHECK de `products.sale_unit`.
 SALE_UNITS = ("unit", "gram", "milliliter")
@@ -89,3 +89,54 @@ def valor_de_stock(
     """
     factor = base_units_per_sale_unit if base_units_per_sale_unit > 0 else 1
     return (Decimal(unidades_base) * costo_por_unidad_de_venta / factor).quantize(Decimal("0.01"))
+
+
+#: Factores con nombre por unidad: los únicos que se pueden CONFIGURAR en un
+#: producto. Un factor sin nombre se seguiría mostrando en unidad base, pero
+#: dejarlo cargar sería invitar a una unidad que nadie sabe leer.
+FACTORES_ADMITIDOS: dict[str, tuple[int, ...]] = {
+    "unit": (1,),
+    "gram": (1, 1000),
+    "milliliter": (1, 1000),
+}
+
+
+def importe(
+    precio_por_unidad_de_venta: Decimal, unidades_base: int, base_units_per_sale_unit: int
+) -> Decimal:
+    """Importe de una cantidad: precio por unidad de venta × unidades base / factor.
+
+    LA cuenta de precio (o costo) por cantidad fuera de la caja: $800 el kilo ×
+    750 g = $600, no $600.000. Redondea UNA vez, a centavos, half-up — la misma
+    regla que ``importe_bruto_en_centavos`` de la caja. Con factor 1 (todo
+    producto por unidad) es exactamente ``precio × cantidad``.
+    """
+    factor = base_units_per_sale_unit if base_units_per_sale_unit > 0 else 1
+    return (Decimal(precio_por_unidad_de_venta) * Decimal(unidades_base) / factor).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+
+
+def a_unidades_base(cantidad_en_unidad_de_venta: int, base_units_per_sale_unit: int) -> int:
+    """Cantidad que un DOCUMENTO declara en la unidad de venta → unidades base.
+
+    Un archivo, un remito o una compra dicen "5" de queso y significan 5 kg, que
+    son 5000 g de stock. Sólo para lo que escribe una persona en la unidad del
+    producto: la caja ya manda unidades base. Con factor 1 es la identidad.
+    """
+    factor = base_units_per_sale_unit if base_units_per_sale_unit > 0 else 1
+    return cantidad_en_unidad_de_venta * factor
+
+
+def validar_unidad(sale_unit: str, base_units_per_sale_unit: int) -> None:
+    """Sólo combinaciones con nombre: unidad ×1, g/ml ×1 o ×1000 (kg, L).
+
+    Levanta ``ValueError`` (Pydantic lo vuelve 422) con el motivo legible.
+    """
+    admitidos = FACTORES_ADMITIDOS.get(sale_unit)
+    if admitidos is None:
+        raise ValueError(f"Unidad de venta desconocida: {sale_unit}.")
+    if base_units_per_sale_unit not in admitidos:
+        raise ValueError(
+            f"Para '{sale_unit}' el factor tiene que ser uno de {list(admitidos)}."
+        )

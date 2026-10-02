@@ -30,6 +30,7 @@ from app.application.services.product_identity import (
 from app.application.services.score_trigger_service import trigger_score_recalculation
 from app.domain.pos_permissions import PosPermission
 from app.domain.pos_terminal import TERMINAL_HEADER
+from app.domain.product import DEFAULT_LOW_STOCK_THRESHOLD_UNITS
 from app.domain.product_categories import (
     normalize_product_category,
     product_category_catalog,
@@ -41,8 +42,10 @@ from app.domain.verticals import Vertical, parse_vertical
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
+from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.user import User
 from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
@@ -363,6 +366,28 @@ async def create_product_category(
     return created
 
 
+async def _tiene_historia(session: AsyncSession, product: Product) -> bool:
+    """¿Hay algo registrado que dependa de la unidad actual del producto?"""
+    if (product.stock_units or 0) != 0:
+        return True
+    venta = await session.execute(
+        select(SaleEntry.id)
+        .where(SaleEntry.tenant_id == product.tenant_id, SaleEntry.product_id == product.id)
+        .limit(1)
+    )
+    if venta.first() is not None:
+        return True
+    movimiento = await session.execute(
+        select(InventoryMovement.id)
+        .where(
+            InventoryMovement.tenant_id == product.tenant_id,
+            InventoryMovement.product_id == product.id,
+        )
+        .limit(1)
+    )
+    return movimiento.first() is not None
+
+
 @router.post(
     "",
     dependencies=[Depends(require_active_subscription)],
@@ -391,6 +416,14 @@ async def create_product(
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     repo = ProductRepository(session)
     data = body.model_dump()
+    # Un producto por peso o volumen sin umbral propio: el default (5) contado
+    # en unidades base serían 5 gramos, que nunca alerta. Se lo lleva a 5 de la
+    # unidad de venta (5 kg) y queda explícito, para que todos los lectores
+    # —que comparan en unidades base— lo vean igual.
+    if data.get("low_stock_threshold_units") is None and data["base_units_per_sale_unit"] > 1:
+        data["low_stock_threshold_units"] = (
+            DEFAULT_LOW_STOCK_THRESHOLD_UNITS * data["base_units_per_sale_unit"]
+        )
     barcode_match, sku_match = await _find_identity_matches(
         session, tenant.tenant_id, barcode=data.get("barcode"), sku=data.get("sku")
     )
@@ -539,6 +572,34 @@ async def update_product(
     # permitiendo limpiar opcionales a null (ej. borrar acquired_at). Los campos no
     # enviados quedan intactos.
     updates = body.model_dump(exclude_unset=True)
+    # Cambiar la unidad de venta reinterpreta el stock y el historial: 5000
+    # "unidades" pasarían a ser 5 kg. Sólo se permite en un producto sin
+    # historia; con historia, cambiarla mentiría sobre lo ya vendido y comprado.
+    cambia_unidad = (
+        updates.get("sale_unit") not in (None, product.sale_unit)
+        or updates.get("base_units_per_sale_unit")
+        not in (None, product.base_units_per_sale_unit)
+    )
+    if cambia_unidad and await _tiene_historia(session, product):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SALE_UNIT_LOCKED",
+                "message": (
+                    "No se puede cambiar la unidad de venta de un producto con stock, "
+                    "ventas o movimientos: cambiaría el significado de lo ya registrado."
+                ),
+            },
+        )
+    # Pasar a kilo o litro sin umbral propio: el default de 5 contado en
+    # unidades base serían 5 g y nunca alertaría (la misma regla que el alta).
+    nuevo_factor = updates.get("base_units_per_sale_unit") or product.base_units_per_sale_unit
+    if (
+        cambia_unidad
+        and nuevo_factor > 1
+        and updates.get("low_stock_threshold_units", product.low_stock_threshold_units) is None
+    ):
+        updates["low_stock_threshold_units"] = DEFAULT_LOW_STOCK_THRESHOLD_UNITS * nuevo_factor
     # Review F2 #2: validar identidad duplicada ANTES de aplicar un cambio de
     # sku/barcode (el PATCH aplicaba setattr directo → dos productos activos con
     # el mismo SKU). Solo se chequea el identificador que efectivamente cambia,

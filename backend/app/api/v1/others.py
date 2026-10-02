@@ -62,6 +62,7 @@ from app.domain.product_categories import (
     normalize_product_category,
 )
 from app.domain.product_completion import recompute_requires_completion
+from app.domain.sale_unit import a_unidades_base
 from app.persistence.db.session import get_db_session
 from app.persistence.models.customer import Customer
 from app.persistence.models.product import Product
@@ -459,11 +460,20 @@ async def reclassify_record(
     try:
         if body.entity_type == "sale":
             sale_req = CreateSaleRequest(**body.fields)
+            # La fila es de un DOCUMENTO: su cantidad está en la unidad de venta
+            # («2» de queso son 2 kg). Misma regla que «Importar sugeridos».
+            _cantidad = sale_req.quantity
+            if sale_req.product_id is not None:
+                _vendido = await session.get(Product, sale_req.product_id)
+                if _vendido is not None and _vendido.tenant_id == tenant.tenant_id:
+                    _cantidad = a_unidades_base(
+                        sale_req.quantity, _vendido.base_units_per_sale_unit or 1
+                    )
             session.add(
                 SaleEntry(
                     tenant_id=tenant.tenant_id,
                     amount=sale_req.amount,
-                    quantity=sale_req.quantity,
+                    quantity=_cantidad,
                     transaction_date=sale_req.transaction_date,
                     payment_method=sale_req.payment_method,
                     product_id=sale_req.product_id,
@@ -728,7 +738,10 @@ async def resolve_purchase(
     await stock_service.increment_stock(
         target.id,
         tenant.tenant_id,
-        body.quantity,
+        # La cantidad de una compra está en la unidad de VENTA del producto ("5"
+        # de queso = 5 kg) y el stock en unidades base; el costo, por unidad de
+        # venta (monto / cantidad). Con factor 1 no cambia nada.
+        a_unidades_base(body.quantity, target.base_units_per_sale_unit or 1),
         unit_cost,
         source_event_id=f"others:{record_id}",
         db=session,

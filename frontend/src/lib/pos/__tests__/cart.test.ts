@@ -409,3 +409,29 @@ describe("APPLY_PRICES y la firma", () => {
     expect(s.lines[0]?.product.price_token).toBe("tok");
   });
 });
+
+
+describe("producto por peso", () => {
+  const queso: PosProduct = {
+    id: "q1",
+    name: "Queso",
+    sale_price_ars: "1234.56",
+    sale_unit: "gram",
+    base_units_per_sale_unit: 1000,
+    stock_units: 5000,
+  };
+
+  it("escanearlo agrega 1 kg (1000 g), no 1 gramo", () => {
+    const s = con({ type: "ADD_PRODUCT", product: queso }, { type: "ADD_PRODUCT", product: queso });
+    expect(s.lines[0]?.quantity).toBe(2000);
+  });
+
+  it("0,750 kg × $1.234,56/kg = $925,92, como el servidor", () => {
+    const s = con(
+      { type: "ADD_PRODUCT", product: queso },
+      { type: "SET_QUANTITY", productId: "q1", quantity: 750 },
+    );
+    expect(previewTotals(s).totalCents).toBe(92592);
+    expect(buildPayload(s, "op-1", new Date(2026, 9, 2, 10)).items[0]?.quantity).toBe(750);
+  });
+});

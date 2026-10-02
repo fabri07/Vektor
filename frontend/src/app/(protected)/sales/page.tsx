@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { aUnidadesBase, enUnidadDeVenta } from "@/lib/pos/saleUnit";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, Pencil, Trash2 } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
@@ -432,10 +433,18 @@ function SaleEditModal({
 }) {
   const [form, setForm] = useState<SaleEntryResponse | null>(sale);
   const [error, setError] = useState<string | null>(null);
+  // La cantidad se guarda en unidades base; en un producto por peso se escribe
+  // en kg o L ("0,750"), así que el texto del campo vive aparte.
+  const [cantidadTexto, setCantidadTexto] = useState("");
+  const factorDe = (productId: string | null | undefined): number =>
+    products.find((p) => p.id === productId)?.base_units_per_sale_unit ?? 1;
 
   useEffect(() => {
     setForm(sale);
     setError(null);
+    if (sale) setCantidadTexto(enUnidadDeVenta(Number(sale.quantity), factorDe(sale.product_id)));
+    // `products` cambia de identidad en cada render del padre.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sale]);
 
   if (!form) {
@@ -459,8 +468,15 @@ function SaleEditModal({
     setForm((prev) => {
       if (!prev) return prev;
       const next: SaleEntryResponse = { ...prev, product_id: productId || null };
-      if (product && Number(prev.quantity) > 0) {
-        next.amount = Number(product.sale_price_ars) * Number(prev.quantity);
+      // La cantidad del campo se relee con la unidad del producto elegido.
+      const factor = product?.base_units_per_sale_unit ?? 1;
+      const base = aUnidadesBase(cantidadTexto, factor);
+      if (base !== null) next.quantity = base;
+      if (product && Number(next.quantity) > 0) {
+        // Precio por unidad de venta × cantidad en unidades base / factor.
+        next.amount =
+          Math.round((Number(product.sale_price_ars) * Number(next.quantity) * 100) / factor) /
+          100;
       }
       return next;
     });
@@ -538,8 +554,17 @@ function SaleEditModal({
         </label>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vektor-body">
-            Cantidad
-            <input className="rounded border border-vk-border-w px-3 py-2" type="number" min={1} value={form.quantity} onChange={(e) => set("quantity", Number(e.target.value))} />
+            Cantidad{factorDe(form.product_id) > 1 ? " (kg o L)" : ""}
+            <input
+              className="rounded border border-vk-border-w px-3 py-2"
+              inputMode="decimal"
+              value={cantidadTexto}
+              onChange={(e) => {
+                setCantidadTexto(e.target.value);
+                const base = aUnidadesBase(e.target.value, factorDe(form.product_id));
+                if (base !== null) set("quantity", base);
+              }}
+            />
           </label>
           <label className="grid gap-1 text-sm text-vektor-body">
             Monto

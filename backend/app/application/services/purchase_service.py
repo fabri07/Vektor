@@ -28,6 +28,7 @@ from app.application.services.product_identity import (
     add_product_or_reuse,
 )
 from app.domain.product_categories import normalize_product_category
+from app.domain.sale_unit import a_unidades_base
 from app.domain.verticals import Vertical, parse_vertical
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -145,7 +146,10 @@ async def register_manual_purchase(
         await stock_service.increment_stock(
             product.id,
             tenant_id,
-            line.quantity,
+            # La compra se carga en la unidad de VENTA ("5" de queso = 5 kg) y el
+            # stock vive en unidades base; el costo es por unidad de venta, así
+            # que el COGS de abajo (costo × cantidad) no cambia.
+            a_unidades_base(line.quantity, product.base_units_per_sale_unit or 1),
             line.unit_cost,
             source_event,
             session,

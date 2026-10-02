@@ -1,6 +1,7 @@
 """Insights and action suggestions endpoints."""
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant, require_active_subscription_for_insights
 from app.domain.product import DEFAULT_LOW_STOCK_THRESHOLD_UNITS
+from app.domain.sale_unit import formatear_cantidad, valor_de_stock
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import ActionSuggestion, Insight
 from app.persistence.models.product import Product
@@ -191,8 +193,13 @@ class ProductStockItem(BaseModel):
     # None = umbral no configurado; el frontend muestra el default (5) con ?? 5
     low_stock_threshold_units: int | None
     sale_price_ars: float
-    # Plata inmovilizada en este producto: stock_units × unit_cost_ars (0 si no hay costo).
+    # Plata inmovilizada en este producto: stock × costo / factor (0 si no hay costo).
     immobilized_value: float = 0.0
+    # El stock está en unidades base: sin la unidad, 5000 de un producto en
+    # gramos se leería como 5000 unidades.
+    sale_unit: str = "unit"
+    base_units_per_sale_unit: int = 1
+    stock_display: str | None = None
 
 
 class SupplierBreakdownProductItem(BaseModel):
@@ -261,9 +268,12 @@ async def get_business_breakdown(
     stock_value_result = await session.execute(
         select(
             func.coalesce(
+                # Costo por unidad de VENTA × stock en unidades base: divide por
+                # el factor (5000 g a $800/kg valen $4.000, no $4.000.000).
                 func.sum(
                     func.coalesce(Product.stock_units, 0)
                     * func.coalesce(Product.unit_cost_ars, 0)
+                    / Product.base_units_per_sale_unit
                 ),
                 0,
             )
@@ -373,7 +383,14 @@ async def get_business_breakdown(
             stock_units=stock,
             low_stock_threshold_units=p.low_stock_threshold_units,
             sale_price_ars=float(p.sale_price_ars or 0),
-            immobilized_value=stock * cost,
+            sale_unit=p.sale_unit or "unit",
+            base_units_per_sale_unit=p.base_units_per_sale_unit or 1,
+            stock_display=formatear_cantidad(
+                stock, p.sale_unit or "unit", p.base_units_per_sale_unit or 1
+            ),
+            immobilized_value=float(
+                valor_de_stock(stock, p.base_units_per_sale_unit or 1, Decimal(str(cost)))
+            ),
         )
 
     return BusinessBreakdownResponse(

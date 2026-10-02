@@ -40,6 +40,7 @@ from app.application.services.idempotency import (
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
+from app.domain.sale_unit import importe
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.pos_operation import PosOperationLine
@@ -452,7 +453,11 @@ async def create_manual_batch_sale(
     saved: list[SaleEntry] = []
     total = Decimal("0")
     for item in body.items:
-        amount = (item.unit_price * item.quantity).quantize(Decimal("0.01"))
+        # Precio por unidad de VENTA × cantidad en unidades base: un producto en
+        # gramos divide por su factor (mismo contrato que la caja).
+        amount = importe(
+            item.unit_price, item.quantity, by_id[item.product_id].base_units_per_sale_unit
+        )
         entry = await repo.save(
             SaleEntry(
                 tenant_id=tenant.tenant_id,

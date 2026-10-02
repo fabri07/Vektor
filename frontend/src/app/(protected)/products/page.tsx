@@ -25,7 +25,9 @@ import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFieldColumns";
 import { AllDataModal } from "@/features/customFields/AllDataModal";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
-import { valorDeStock } from "@/lib/pos/saleUnit";
+import { UNIDADES_DE_VENTA, unidadDeVentaDe } from "@/features/products/saleUnitOptions";
+import { aUnidadesBase, enUnidadDeVenta, valorDeStock } from "@/lib/pos/saleUnit";
+import { posErrorInfo } from "@/lib/pos/errors";
 import { useToastStore } from "@/stores/toastStore";
 import { useAuthStore } from "@/stores/authStore";
 
@@ -155,8 +157,11 @@ const COLUMNS = [
     key: "stock_units",
     header: "Stock",
     hideable: true,
-    render: (v: unknown) => String(v),
-    csvValue: (v: unknown) => String(v ?? ""),
+    // Con su unidad: 5000 de un producto por kilo son "5,000 kg", no 5000.
+    render: (v: unknown, row: Record<string, unknown>) =>
+      String((row as unknown as ProductResponse).stock_display ?? v),
+    csvValue: (v: unknown, row: Record<string, unknown>) =>
+      String((row as unknown as ProductResponse).stock_display ?? v ?? ""),
   },
   {
     key: "sale_price_ars",
@@ -343,6 +348,10 @@ export default function ProductsPage() {
         unit_cost_ars: payload.unit_cost_ars == null ? null : Number(payload.unit_cost_ars),
         list_price_ars: payload.list_price_ars == null ? null : Number(payload.list_price_ars),
         stock_units: Number(payload.stock_units),
+        // Van juntos (el servidor lo exige). Mandarlos sin cambio no cambia
+        // nada; cambiarlos en un producto con historia da 409.
+        sale_unit: payload.sale_unit ?? "unit",
+        base_units_per_sale_unit: payload.base_units_per_sale_unit ?? 1,
         // null = no configurado (usa default 5 del servidor); 0 = umbral explícito
         low_stock_threshold_units: payload.low_stock_threshold_units == null ? null : Number(payload.low_stock_threshold_units),
         acquired_at: payload.acquired_at ?? null,
@@ -352,7 +361,13 @@ export default function ProductsPage() {
       toast("Producto actualizado.", "success");
       await queryClient.invalidateQueries({ queryKey: ["products-list"] });
     },
-    onError: () => toast("No se pudo actualizar el producto.", "error"),
+    onError: (e) =>
+      toast(
+        errorCode(e) === "SALE_UNIT_LOCKED"
+          ? "No se puede cambiar la unidad de un producto con stock, ventas o movimientos."
+          : "No se pudo actualizar el producto.",
+        "error",
+      ),
   });
 
   const deleteMutation = useMutation({
@@ -589,6 +604,10 @@ export default function ProductsPage() {
   );
 }
 
+function errorCode(e: unknown): string | null {
+  return posErrorInfo(e).code;
+}
+
 function ProductEditModal({
   product,
   categories,
@@ -603,16 +622,43 @@ function ProductEditModal({
   onSave: (product: ProductResponse) => void;
 }) {
   const [form, setForm] = useState<ProductResponse | null>(product);
+  // Stock y umbral se escriben en la unidad de VENTA (kg, L) y se guardan en
+  // unidades base: el texto vive aparte para poder tipear "0,750".
+  const [stockText, setStockText] = useState("");
+  const [umbralText, setUmbralText] = useState("");
   useEffect(() => {
     setForm(product);
+    if (product) {
+      const f = product.base_units_per_sale_unit ?? 1;
+      setStockText(enUnidadDeVenta(product.stock_units, f));
+      setUmbralText(
+        product.low_stock_threshold_units == null
+          ? ""
+          : enUnidadDeVenta(product.low_stock_threshold_units, f),
+      );
+    }
   }, [product]);
   if (!form) return null;
   const set = (key: keyof ProductResponse, value: string | number | null) => {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
+  const unidad = unidadDeVentaDe(form.sale_unit, form.base_units_per_sale_unit);
+  const factor = unidad.factor;
+  const cantidad = (texto: string): number | null =>
+    texto.trim() === "" || texto.trim() === "0" ? 0 : aUnidadesBase(texto, factor);
+  const stockBase = cantidad(stockText);
+  const umbralBase = umbralText.trim() === "" ? null : cantidad(umbralText);
+  const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
   return (
     <Modal isOpen={!!product} onClose={onClose} title="Editar producto" size="lg">
-      <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); onSave(form); }}>
+      <form
+        className="grid gap-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (invalido) return;
+          onSave({ ...form, stock_units: stockBase ?? 0, low_stock_threshold_units: umbralBase });
+        }}
+      >
         <label className="grid gap-1 text-sm text-vektor-body">Producto<input className="rounded border border-vk-border-w px-3 py-2" value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vektor-body">SKU<input className="rounded border border-vk-border-w px-3 py-2" value={form.sku ?? ""} onChange={(e) => set("sku", e.target.value || null)} /></label>
@@ -635,23 +681,53 @@ function ProductEditModal({
             </select>
           </label>
         </div>
+        <label className="grid gap-1 text-sm text-vektor-body">
+          Se vende por
+          <select
+            className="rounded border border-vk-border-w px-3 py-2"
+            value={unidad.key}
+            onChange={(e) => {
+              const nueva = UNIDADES_DE_VENTA.find((u) => u.key === e.target.value);
+              if (!nueva) return;
+              setForm((prev) =>
+                prev
+                  ? { ...prev, sale_unit: nueva.saleUnit, base_units_per_sale_unit: nueva.factor }
+                  : prev,
+              );
+            }}
+          >
+            {UNIDADES_DE_VENTA.map((u) => (
+              <option key={u.key} value={u.key}>
+                {u.label}
+              </option>
+            ))}
+          </select>
+          <span className="text-xs text-vektor-muted">
+            Sólo se puede cambiar en un producto sin stock, ventas ni compras.
+          </span>
+        </label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vektor-body">Precio<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.sale_price_ars} onChange={(e) => set("sale_price_ars", Number(e.target.value))} /></label>
-          <label className="grid gap-1 text-sm text-vektor-body">Costo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.unit_cost_ars ?? ""} onChange={(e) => set("unit_cost_ars", e.target.value ? Number(e.target.value) : null)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Precio{unidad.sufijo}<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.sale_price_ars} onChange={(e) => set("sale_price_ars", Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Costo{unidad.sufijo}<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.unit_cost_ars ?? ""} onChange={(e) => set("unit_cost_ars", e.target.value ? Number(e.target.value) : null)} /></label>
         </div>
         <label className="grid gap-1 text-sm text-vektor-body">
           Precio de lista (sugerido)
           <input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.list_price_ars ?? ""} onChange={(e) => set("list_price_ars", e.target.value ? Number(e.target.value) : null)} />
         </label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vektor-body">Stock<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} value={form.stock_units} onChange={(e) => set("stock_units", Number(e.target.value))} /></label>
-          <label className="grid gap-1 text-sm text-vektor-body">Umbral mínimo<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} placeholder="5 (default)" value={form.low_stock_threshold_units ?? ""} onChange={(e) => set("low_stock_threshold_units", e.target.value === "" ? null : Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Stock ({unidad.etiqueta})<input className="rounded border border-vk-border-w px-3 py-2" inputMode="decimal" value={stockText} onChange={(e) => setStockText(e.target.value)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Umbral mínimo ({unidad.etiqueta})<input className="rounded border border-vk-border-w px-3 py-2" inputMode="decimal" placeholder="5 (default)" value={umbralText} onChange={(e) => setUmbralText(e.target.value)} /></label>
         </div>
+        {invalido ? (
+          <p className="text-xs text-vk-danger">
+            Revisá el stock y el umbral: {unidad.factor > 1 ? "hasta 3 decimales" : "números enteros"}.
+          </p>
+        ) : null}
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
         <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
-          <button type="submit" disabled={saving} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
+          <button type="submit" disabled={saving || invalido} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
         </div>
       </form>
     </Modal>

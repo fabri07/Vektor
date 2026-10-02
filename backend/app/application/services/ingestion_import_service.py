@@ -161,6 +161,7 @@ from app.domain.purchase_shipping import (
     plan_line_shipping,
     plan_shipping_charges,
 )
+from app.domain.sale_unit import a_unidades_base, importe
 from app.domain.text_norm import (
     normalize_barcode,
     normalize_brand,
@@ -1834,7 +1835,9 @@ def _product_name_tokens(name: str) -> list[str]:
 
 
 async def _load_product_index(
-    session: AsyncSession, tenant_id: uuid.UUID
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    factores: dict[uuid.UUID, int] | None = None,
 ) -> tuple[dict[str, uuid.UUID], dict[str, uuid.UUID | None], dict[str, set[uuid.UUID]]]:
     """Carga el catálogo del tenant UNA vez para vincular transacciones en memoria.
 
@@ -1850,12 +1853,18 @@ async def _load_product_index(
     from app.persistence.models.product import Product  # noqa: PLC0415
 
     result = await session.execute(
-        select(Product.id, Product.name, Product.sku).where(Product.tenant_id == tenant_id)
+        select(
+            Product.id, Product.name, Product.sku, Product.base_units_per_sale_unit
+        ).where(Product.tenant_id == tenant_id)
     )
     by_sku: dict[str, uuid.UUID] = {}
     by_name: dict[str, uuid.UUID | None] = {}
     by_token: dict[str, set[uuid.UUID]] = {}
-    for pid, pname, psku in result.all():
+    for pid, pname, psku, pfactor in result.all():
+        # Los productos por peso o volumen, en la MISMA consulta: una venta
+        # importada que se vincule a uno trae la cantidad en su unidad de venta.
+        if factores is not None and pfactor and pfactor > 1:
+            factores[pid] = pfactor
         # F2-T4: clave de SKU canónica (``normalize_sku``), misma que el motor de
         # identidad — antes era ``str(psku).strip().lower()`` (sin NFKD/colapso).
         sku_key = normalize_sku(psku)
@@ -2715,6 +2724,42 @@ def _label_fila_sin_monto(raw: Any) -> str:
     return _SIN_MONTO_LABEL
 
 
+def _cantidad_base_de_documento(qty_raw: Any, factor: int) -> int:
+    """Cantidad de un DOCUMENTO en la unidad de venta → unidades base.
+
+    Un producto por peso se compra y se lista en kilos con decimales («2,5» kg),
+    que la política de cantidades —enteras— descartaría como fraccionarias. Acá
+    la fracción vale mientras dé unidades base enteras: 2,5 kg son 2500 g, y
+    0,0005 kg no son gramos enteros (0). Con factor 1 es `_parse_qty` tal cual.
+    Devuelve 0 para lo que no se puede usar, como `_parse_qty`.
+    """
+    if factor <= 1:
+        return _parse_qty(qty_raw)
+    monto = parsear_monto(qty_raw)
+    if monto.valor is None or monto.valor <= 0:
+        return 0
+    base = monto.valor * factor
+    if base != base.to_integral_value():
+        return 0
+    return int(base)
+
+
+def _factor_de(factores: dict[uuid.UUID, int], product_id: uuid.UUID | None) -> int:
+    """El factor de un producto por peso, o 1 (sin producto o por unidad)."""
+    return factores.get(product_id, 1) if product_id is not None else 1
+
+
+def _es_fraccion_positiva(qty_raw: Any) -> bool:
+    """¿La celda dice una cantidad positiva con decimales? Sólo eso justifica
+    mirar el producto antes de descartarla: puede ser uno por peso."""
+    monto = parsear_monto(qty_raw)
+    return (
+        monto.valor is not None
+        and monto.valor > 0
+        and monto.valor != monto.valor.to_integral_value()
+    )
+
+
 def _cantidad_de_venta(qty_raw: Any) -> tuple[int, str | None]:
     """Unidades de una venta importada, y el motivo si el archivo declaró algo ilegible.
 
@@ -2963,7 +3008,9 @@ async def _apply_purchase_to_stock(
     # 0 para vacía, fraccionaria, negativa o ilegible, y acá 0 ya significaba
     # "no hay cantidad que sumar al stock".
     qty = _parse_qty(qty_raw)
-    if qty <= 0:
+    # Una fracción («2,5») no es una cantidad de unidades, pero puede ser de un
+    # producto por peso: sólo en ese caso vale cargar el producto para decidir.
+    if qty <= 0 and not _es_fraccion_positiva(qty_raw):
         return
     from app.persistence.models.product import Product  # noqa: PLC0415
 
@@ -2979,7 +3026,14 @@ async def _apply_purchase_to_stock(
             product_cache[expense.product_id] = product
     elif product.tenant_id != tenant_id:
         return
-    product.stock_units += qty
+    # La cantidad del documento (archivo o remito) está en la unidad de VENTA del
+    # producto —"5" de queso son 5 kg— y el stock vive en unidades base. Con
+    # factor 1 (todo producto por unidad) no cambia nada. `qty` (la del
+    # documento) se conserva para la huella de la fila.
+    qty_base = _cantidad_base_de_documento(qty_raw, product.base_units_per_sale_unit or 1)
+    if qty_base <= 0:
+        return
+    product.stock_units += qty_base
     # F-H6.d: son DOS preguntas distintas y hasta acá se respondían con el mismo
     # número. `unit_cost` es lo que FACTURÓ el proveedor y queda en el movimiento
     # (abajo); `costo_final` es lo que la mercadería costó de verdad una vez
@@ -3068,7 +3122,7 @@ async def _apply_purchase_to_stock(
         session,
         tenant_id,
         product.id,
-        qty,
+        qty_base,
         _costo_facturado,
         "purchase",
         product.stock_units,
@@ -3097,6 +3151,7 @@ def _add_catalog_initial_stock_cogs(
     tx_date: datetime,
     source_upload_id: uuid.UUID | None,
     source_row_ref: str | None,
+    base_units_per_sale_unit: int = 1,
 ) -> None:
     """Crea el gasto de mercadería (COGS) de un stock de catálogo tratado como COMPRA.
 
@@ -3116,7 +3171,9 @@ def _add_catalog_initial_stock_cogs(
 
     expense = ExpenseEntry(
         tenant_id=tenant_id,
-        amount=(unit_cost * qty).quantize(Decimal("0.01")),
+        # `qty` en unidades base y el costo por unidad de venta: un producto por
+        # peso divide por su factor (con factor 1 es costo × cantidad).
+        amount=importe(unit_cost, qty, base_units_per_sale_unit),
         category="INVENTORY",
         # Producto ligado + categoría INVENTORY ⇒ COGS (mismo helper que el resto).
         expense_type=infer_expense_type("INVENTORY", product_id=product_id),
@@ -3182,6 +3239,7 @@ async def _apply_catalog_stock(
     is_purchase: bool = False,
     supplier_id: uuid.UUID | None = None,
     opening_date: datetime | None = None,
+    base_units_per_sale_unit: int = 1,
 ) -> None:
     """Aplica el stock de una fila de CATÁLOGO al inventario, según su tratamiento.
 
@@ -3267,6 +3325,7 @@ async def _apply_catalog_stock(
             tx_date=tx_date,
             source_upload_id=uploaded_file_id,
             source_row_ref=source_row_ref,
+            base_units_per_sale_unit=base_units_per_sale_unit,
         )
 
 
@@ -5003,8 +5062,11 @@ async def _insert_confirmed_data_impl(
         # FASE 3: índice de catálogo en memoria para el LINK de ventas/gastos/compras
         # (tiers sku exacto → nombre → tokens, con SKU-que-gana-sobre-nombre). Una
         # sola carga; vacío si no hay columnas de nombre/sku.
+        #: Productos por peso o volumen (factor > 1): una venta vinculada a uno
+        #: trae la cantidad en su unidad de venta. Se llena en la misma consulta.
+        _factores: dict[uuid.UUID, int] = {}
         _by_sku, _by_name, _by_token = (
-            await _load_product_index(session, tenant_id)
+            await _load_product_index(session, tenant_id, _factores)
             if (wants_ventas or wants_gastos) and (nombre_col or sku_col)
             else ({}, {}, {})
         )
@@ -5479,6 +5541,12 @@ async def _insert_confirmed_data_impl(
                         by_barcode=_identity_indexes.by_barcode,
                         barcode=row.get(barcode_col) if barcode_col else None,
                     )
+                    # Producto por peso o volumen: el archivo dice la cantidad en
+                    # su unidad de venta ("2" de queso = 2 kg) y la venta guarda
+                    # unidades base, como la caja.
+                    if entry.product_id in _factores:
+                        qty = a_unidades_base(qty, _factores[entry.product_id])
+                        entry.quantity = qty
                     # F-H3.b: la venta entra a la proyección, que es el impacto que
                     # se REPORTA. El descuento lo aplica la segunda pasada del
                     # confirm (F-F.3), no esta línea. Una fila sin fecha ya se fue a
@@ -5806,7 +5874,11 @@ async def _insert_confirmed_data_impl(
                             await _proyeccion_recorder.registrar_compra(
                                 expense.product_id,
                                 tx_date.date(),
-                                _parse_qty(exp_qty_raw),
+                                # En unidades base, como la venta y el saldo: un
+                                # «5» de queso son 5000 g también acá.
+                                _cantidad_base_de_documento(
+                                    exp_qty_raw, _factor_de(_factores, expense.product_id)
+                                ),
                                 _ctx_inline,
                             )
                         await _apply_purchase_to_stock(
@@ -6112,6 +6184,8 @@ async def _insert_confirmed_data_impl(
                     cost: Decimal | None = cost,
                     list_price: Decimal | None = list_price,
                     stock_val: int = stock_val,
+                    # La celda cruda: un producto por peso la lee con decimales.
+                    _stock_raw: Any = row.get(stock_col) if stock_col else None,
                     prod_cat: str | None = prod_cat,
                     prod_desc: str | None = prod_desc,
                     store_name: str | None = store_name,
@@ -6190,6 +6264,11 @@ async def _insert_confirmed_data_impl(
                         existing.unit_cost_ars = cost
                     if list_price:
                         existing.list_price_ars = list_price
+                    # Un producto por peso o volumen: el archivo habla en su
+                    # unidad de venta (kg, L) y el stock vive en unidades base.
+                    _factor = existing.base_units_per_sale_unit or 1
+                    if _factor > 1:
+                        stock_val = _cantidad_base_de_documento(_stock_raw, _factor)
                     if stock_val > 0:
                         _delta = stock_val - existing.stock_units
                         # F-H3.b: el catálogo declara un ABSOLUTO (pisa la apertura,
@@ -6215,6 +6294,7 @@ async def _insert_confirmed_data_impl(
                             source_row_ref=_prod_row_ref,
                             balance_index=_balance_index,
                             is_purchase=stock_is_purchase,
+                            base_units_per_sale_unit=_factor,
                         )
                     if sku:
                         existing.sku = sku
@@ -7105,7 +7185,9 @@ async def _insert_multisheet_data(
     }
 
     # FASE 3: índice de catálogo para el LINK de ventas/gastos/compras (en memoria).
-    _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
+    #: Productos por peso o volumen: ver `_add_sale`.
+    _factores: dict[uuid.UUID, int] = {}
+    _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id, _factores)
     # Índice de proveedores para find-or-create en compras (una carga).
     _supplier_index = await _load_supplier_index(session, tenant_id)
     # Bloque 2: pares (product_id, supplier_id) declarados por ESTA corrida vía
@@ -7556,6 +7638,11 @@ async def _insert_multisheet_data(
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         _venta_producto = _venta_nombre_producto(row, cols)
         entry.product_id = _venta_producto_id(row, cols)
+        # Producto por peso o volumen: el archivo dice la cantidad en su unidad
+        # de venta ("2" de queso = 2 kg) y la venta guarda unidades base.
+        if entry.product_id in _factores:
+            qty = a_unidades_base(qty, _factores[entry.product_id])
+            entry.quantity = qty
         # F-H2: la venta se vincula igual; lo que NO se afirma es que hubiera
         # stock. Vincular es identidad, no disponibilidad.
         _evaluar_historial(entry.product_id, tx_date, _clean_str(_venta_producto, 299))
@@ -7890,7 +7977,11 @@ async def _insert_multisheet_data(
         # incluye esta misma compra y la contaría dos veces.
         if proyeccion is not None:
             await proyeccion.registrar_compra(
-                expense.product_id, tx_date.date(), _parse_qty(exp_qty_raw), context_id
+                expense.product_id,
+                tx_date.date(),
+                # En unidades base, como la venta y el saldo.
+                _cantidad_base_de_documento(exp_qty_raw, _factor_de(_factores, expense.product_id)),
+                context_id,
             )
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
@@ -8260,17 +8351,27 @@ async def _insert_multisheet_data(
                 existing.unit_cost_ars = cost
             if list_price:
                 existing.list_price_ars = list_price
-            if stock_val > 0:
-                _delta = stock_val - existing.stock_units
+            # Un producto por peso o volumen: el archivo habla en su unidad de
+            # venta (kg, L) y el stock vive en unidades base.
+            _factor = existing.base_units_per_sale_unit or 1
+            _stock_base = (
+                _cantidad_base_de_documento(
+                    _val(row, cols.get("stock_units"), _STOCK_COLS), _factor
+                )
+                if _factor > 1
+                else stock_val
+            )
+            if _stock_base > 0:
+                _delta = _stock_base - existing.stock_units
                 # F-H3.b: un catálogo declara un ABSOLUTO, no un movimiento. Es la
                 # apertura del replay y pisa el saldo previo en vez de sumarse: leer
                 # "tengo 10 en góndola" como "entraron 10" inventa una compra sobre
                 # un producto que ya existía. Antes del `=`, que ya lo cambia.
                 if proyeccion is not None:
                     proyeccion.declarar_catalogo(
-                        existing.id, name, int(existing.stock_units), stock_val
+                        existing.id, name, int(existing.stock_units), _stock_base
                     )
-                existing.stock_units = stock_val
+                existing.stock_units = _stock_base
                 # A2/A5: movimiento estampado catalog_initial_stock + COGS del delta.
                 await _apply_catalog_stock(
                     session,
@@ -8278,7 +8379,7 @@ async def _insert_multisheet_data(
                     product_id=existing.id,
                     product_name=name,
                     delta=_delta,
-                    final_qty=stock_val,
+                    final_qty=_stock_base,
                     unit_cost=cost,
                     store_name=store_name,
                     tx_date=today,
@@ -8289,6 +8390,7 @@ async def _insert_multisheet_data(
                     pending_balances=_pending_balances,
                     is_purchase=stock_is_purchase,
                     supplier_id=await _supplier_id_for_stock_movement(),
+                    base_units_per_sale_unit=_factor,
                 )
             if sku:
                 existing.sku = sku
@@ -8332,7 +8434,8 @@ async def _insert_multisheet_data(
                         if (cost or existing.unit_cost_ars) is not None
                         else None
                     ),
-                    "stock_units": stock_val or existing.stock_units,
+                    # Ya en unidades base (si el archivo traía stock, ya se aplicó).
+                    "stock_units": existing.stock_units,
                     "sku": existing.sku,
                     "barcode": existing.barcode,
                     "category": existing.category,
@@ -9457,7 +9560,8 @@ async def bulk_import_unclassified(
     if not records:
         return counts
 
-    _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id)
+    _factores: dict[uuid.UUID, int] = {}
+    _by_sku, _by_name, _by_token = await _load_product_index(session, tenant_id, _factores)
     # F2-T5: índices de identidad solo para el tier de barcode del link.
     _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
     _vertical = await _load_tenant_vertical(session, tenant_id)
@@ -9519,6 +9623,10 @@ async def bulk_import_unclassified(
                 # contador que la UI ya usa para "exige atención del usuario".
                 counts["needs_manual"] += 1
                 continue
+            # Producto por peso o volumen: la fila dice la cantidad en su unidad
+            # de venta y la venta guarda unidades base.
+            if product_id in _factores:
+                qty = a_unidades_base(qty, _factores[product_id])
             session.add(
                 SaleEntry(
                     tenant_id=tenant_id,

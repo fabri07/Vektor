@@ -53,6 +53,8 @@ export interface SupplierProductPurchase {
   name: string;
   last_purchase_at: string | null;
   total_qty: number;
+  quantity_display?: string | null;
+  base_units_per_sale_unit?: number;
   unit_price: number;
 }
 

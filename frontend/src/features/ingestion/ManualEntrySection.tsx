@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { UNIDADES_DE_VENTA, type UnidadDeVenta } from "@/features/products/saleUnitOptions";
+import { aUnidadesBase } from "@/lib/pos/saleUnit";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -196,11 +198,20 @@ function SaleTab({ onToast, online }: { onToast: (t: ToastState) => void; online
     });
   }
 
-  const total = lines.reduce((s, l) => {
-    const q = parseInt(l.quantity) || 0;
-    const u = parseFloat(l.unit_price) || 0;
-    return s + q * u;
-  }, 0);
+  // Un producto por peso o volumen: la cantidad se escribe en kg o L y viaja en
+  // unidades base; el precio es por kg, así que el subtotal divide por el factor.
+  function factorDe(productId: string): number {
+    return (products ?? []).find((x) => x.id === productId)?.base_units_per_sale_unit ?? 1;
+  }
+  function cantidadBase(l: SaleLine): number | null {
+    return aUnidadesBase(l.quantity, factorDe(l.product_id));
+  }
+  function subtotalDe(l: SaleLine): number {
+    const base = cantidadBase(l) ?? 0;
+    return (base * (parseFloat(l.unit_price) || 0)) / factorDe(l.product_id);
+  }
+
+  const total = lines.reduce((s, l) => s + subtotalDe(l), 0);
 
   function reset() {
     setPaymentMethod("cash");
@@ -223,7 +234,7 @@ function SaleTab({ onToast, online }: { onToast: (t: ToastState) => void; online
       .filter((l) => l.product_id)
       .map((l) => ({
         product_id: l.product_id,
-        quantity: parseInt(l.quantity) || 0,
+        quantity: cantidadBase(l) ?? 0,
         unit_price: round2(parseFloat(l.unit_price) || 0),
       }));
     if (items.length === 0) {
@@ -341,7 +352,8 @@ function SaleTab({ onToast, online }: { onToast: (t: ToastState) => void; online
           const opts = l.category
             ? (productsByCat.get(l.category) ?? [])
             : (products ?? []);
-          const subtotal = (parseInt(l.quantity) || 0) * (parseFloat(l.unit_price) || 0);
+          const subtotal = subtotalDe(l);
+          const porPeso = factorDe(l.product_id) > 1;
           return (
             <div
               key={l.id}
@@ -370,17 +382,16 @@ function SaleTab({ onToast, online }: { onToast: (t: ToastState) => void; online
                 <option value="">Producto…</option>
                 {opts.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name} (stock {p.stock_units})
+                    {p.name} (stock {p.stock_display ?? p.stock_units})
                   </option>
                 ))}
               </select>
               <input
-                type="number"
-                min={1}
-                step={1}
+                inputMode={porPeso ? "decimal" : "numeric"}
                 value={l.quantity}
                 onChange={(e) => setLine(l.id, { quantity: e.target.value })}
-                placeholder="Cant."
+                placeholder={porPeso ? "Kg / L" : "Cant."}
+                aria-label={porPeso ? "Cantidad en kg o litros" : "Cantidad"}
                 className={selectClass}
               />
               <input
@@ -1000,7 +1011,7 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
 
               {existing && (
                 <p className="text-xs text-vk-text-muted">
-                  Stock actual: <strong>{existing.stock_units}</strong> · Umbral:{" "}
+                  Stock actual: <strong>{existing.stock_display ?? existing.stock_units}</strong> · Umbral:{" "}
                   {existing.low_stock_threshold_units ?? "default del sistema"}
                 </p>
               )}
@@ -1103,8 +1114,10 @@ function CatalogProductTab({
   const [threshold, setThreshold] = useState("");
   const [sku, setSku] = useState("");
   const [description, setDescription] = useState("");
+  const [unidadKey, setUnidadKey] = useState<UnidadDeVenta["key"]>("unit");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const unidad = UNIDADES_DE_VENTA.find((u) => u.key === unidadKey) ?? UNIDADES_DE_VENTA[0]!;
 
   function reset() {
     setName("");
@@ -1115,6 +1128,7 @@ function CatalogProductTab({
     setThreshold("");
     setSku("");
     setDescription("");
+    setUnidadKey("unit");
     setError(null);
   }
 
@@ -1133,6 +1147,20 @@ function CatalogProductTab({
       setError("El costo, si lo cargás, debe ser mayor a 0.");
       return;
     }
+    // Stock y umbral se escriben en la unidad de VENTA (kg, L) y viajan en
+    // unidades base (g, ml), que es como los guarda el servidor.
+    const cantidad = (texto: string): number | null =>
+      texto.trim() === "" || texto.trim() === "0" ? 0 : aUnidadesBase(texto, unidad.factor);
+    const stockBase = cantidad(stock);
+    const umbralBase = threshold.trim() === "" ? null : cantidad(threshold);
+    if (stockBase === null || (threshold.trim() !== "" && umbralBase === null)) {
+      setError(
+        unidad.factor > 1
+          ? "Stock y umbral en kg o litros, con hasta 3 decimales."
+          : "Stock y umbral tienen que ser números enteros.",
+      );
+      return;
+    }
     setSubmitting(true);
     await submit(
       "product",
@@ -1140,8 +1168,10 @@ function CatalogProductTab({
         name: name.trim(),
         sale_price_ars: round2(parseFloat(salePrice)),
         unit_cost_ars: unitCost ? round2(parseFloat(unitCost)) : null,
-        stock_units: stock ? parseInt(stock) : 0,
-        ...(threshold !== "" ? { low_stock_threshold_units: parseInt(threshold) } : {}),
+        stock_units: stockBase,
+        ...(umbralBase !== null ? { low_stock_threshold_units: umbralBase } : {}),
+        sale_unit: unidad.saleUnit,
+        base_units_per_sale_unit: unidad.factor,
         category: category.trim() || null,
         sku: sku.trim() || null,
         description: description.trim() || null,
@@ -1180,6 +1210,20 @@ function CatalogProductTab({
         onChange={(e) => setName(e.target.value)}
       />
 
+      <Field label="Se vende por">
+        <select
+          value={unidadKey}
+          onChange={(e) => setUnidadKey(e.target.value as UnidadDeVenta["key"])}
+          className={selectClass}
+        >
+          {UNIDADES_DE_VENTA.map((u) => (
+            <option key={u.key} value={u.key}>
+              {u.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+
       <div className="grid grid-cols-2 gap-4">
         <Field label="Categoría (opcional)">
           <select
@@ -1196,7 +1240,7 @@ function CatalogProductTab({
           </select>
         </Field>
         <Input
-          label="Precio de venta ($)"
+          label={`Precio de venta ($${unidad.sufijo})`}
           type="number"
           min={0}
           step="any"
@@ -1208,7 +1252,7 @@ function CatalogProductTab({
 
       <div className="grid grid-cols-2 gap-4">
         <Input
-          label="Costo unitario ($, opcional)"
+          label={`Costo ($${unidad.sufijo}, opcional)`}
           type="number"
           min={0}
           step="any"
@@ -1217,10 +1261,8 @@ function CatalogProductTab({
           onChange={(e) => setUnitCost(e.target.value)}
         />
         <Input
-          label="Stock inicial"
-          type="number"
-          min={0}
-          step={1}
+          label={`Stock inicial (${unidad.etiqueta})`}
+          inputMode="decimal"
           placeholder="0"
           value={stock}
           onChange={(e) => setStock(e.target.value)}
@@ -1229,10 +1271,8 @@ function CatalogProductTab({
 
       <div className="grid grid-cols-2 gap-4">
         <Input
-          label="Umbral de stock bajo (opcional)"
-          type="number"
-          min={0}
-          step={1}
+          label={`Umbral de stock bajo (${unidad.etiqueta}, opcional)`}
+          inputMode="decimal"
           placeholder="Default del sistema"
           value={threshold}
           onChange={(e) => setThreshold(e.target.value)}

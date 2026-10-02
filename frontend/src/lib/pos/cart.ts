@@ -457,14 +457,17 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
       if (!EDITABLE.has(state.status)) return state;
       const base = editable(state);
       const existe = base.lines.some((l) => l.product.id === action.product.id);
+      // Una unidad de VENTA: 1 unidad, o 1 kg (1000 g) de un producto por peso,
+      // que el cajero corrige al peso real. Sumar 1 sería sumar un gramo.
+      const paso = Math.max(1, action.product.base_units_per_sale_unit || 1);
       const lines = existe
         ? base.lines.map((l) =>
             l.product.id === action.product.id
               ? // El precio y el stock más recientes que se conocen.
-                { ...l, product: action.product, quantity: l.quantity + 1 }
+                { ...l, product: action.product, quantity: l.quantity + paso }
               : l,
           )
-        : [...base.lines, { product: action.product, quantity: 1, discountCents: 0 }];
+        : [...base.lines, { product: action.product, quantity: paso, discountCents: 0 }];
       return { ...base, lines, notice: null };
     }
     case "SET_QUANTITY":

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { centsToAmount, toCents } from "@/lib/pos/cart";
+import { aUnidadesBase, enUnidadDeVenta, esPorPeso } from "@/lib/pos/saleUnit";
 
 /**
  * Inputs numéricos de la caja. Todos llevan `data-pos-scan="capture"`: si el
@@ -54,36 +55,46 @@ export function MoneyInput({ cents, onCents, disabled, label, className }: Money
 }
 
 interface QuantityInputProps {
+  /** En UNIDADES BASE. */
   quantity: number;
   onQuantity: (q: number) => void;
   disabled?: boolean;
   label: string;
+  /** Unidades base por unidad de venta (1000 = se tipea en kg o L). */
+  factor?: number;
 }
 
-export function QuantityInput({ quantity, onQuantity, disabled, label }: QuantityInputProps) {
-  const [text, setText] = useState(String(quantity));
+export function QuantityInput({
+  quantity,
+  onQuantity,
+  disabled,
+  label,
+  factor = 1,
+}: QuantityInputProps) {
+  // La cantidad viaja en unidades BASE (como el servidor); el campo se escribe
+  // en la unidad de venta. En un producto por peso, "0,750" kg son 750 g.
+  const [text, setText] = useState(enUnidadDeVenta(quantity, factor));
 
   useEffect(() => {
-    if (Number(text) !== quantity) setText(String(quantity));
+    if (aUnidadesBase(text, factor) !== quantity) setText(enUnidadDeVenta(quantity, factor));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quantity]);
+  }, [quantity, factor]);
 
   return (
     <input
       aria-label={label}
       data-pos-scan="capture"
-      inputMode="numeric"
+      inputMode={esPorPeso(factor) ? "decimal" : "numeric"}
       className={`${INPUT} w-20`}
       disabled={disabled}
       value={text}
       onChange={(e) => {
         setText(e.target.value);
-        if (/^\d+$/.test(e.target.value) && Number(e.target.value) >= 1) {
-          onQuantity(Number(e.target.value));
-        }
+        const base = aUnidadesBase(e.target.value, factor);
+        if (base !== null) onQuantity(base);
       }}
       // Un campo que quedó vacío o en 0 vuelve a la cantidad vigente.
-      onBlur={() => setText(String(quantity))}
+      onBlur={() => setText(enUnidadDeVenta(quantity, factor))}
     />
   );
 }
