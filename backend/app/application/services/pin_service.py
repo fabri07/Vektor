@@ -72,13 +72,17 @@ def puede_tener_pin(user: User) -> bool:
     """Quién puede configurar (y necesita) un PIN.
 
     OWNER, sub-cuentas con ``can_modify_sensitive`` y, desde B5, un CASHIER con
-    permiso de anular tickets: anular es devolver plata y el PIN identifica a
-    quién lo hizo. Sin esto, ese permiso sería inalcanzable.
+    permiso de anular tickets o de resolver diferencias de stock: anular es
+    devolver plata y el PIN identifica a quién lo hizo. Sin esto, esos permisos
+    serían inalcanzables.
     """
     if user.role_code == "OWNER" or user.can_modify_sensitive:
         return True
-    return user.role_code == CASHIER_ROLE and has_pos_permission(
-        user.role_code, user.pos_permissions, PosPermission.VOID_TICKET
+    # Resolver una diferencia de stock mueve stock y puede anular: el mismo
+    # criterio que anular.
+    return user.role_code == CASHIER_ROLE and any(
+        has_pos_permission(user.role_code, user.pos_permissions, permiso)
+        for permiso in (PosPermission.VOID_TICKET, PosPermission.RESOLVE_DISCREPANCY)
     )
 
 

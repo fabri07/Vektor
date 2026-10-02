@@ -100,3 +100,33 @@ it("exige un motivo y resuelve con la opción elegida", async () => {
     "Se tipeó mal la cantidad.",
   );
 });
+
+
+it("un cajero con el permiso delegado las ve, y sin él no se le pregunta al servidor", async () => {
+  svc.listStockDiscrepancies.mockResolvedValue([diferencia]);
+  useAuthStore.setState({
+    token: "t",
+    user: {
+      id: "u2", email: "c@b.com", full_name: "Caja", role: "CASHIER", tenant_id: "t1",
+      pos_permissions: ["resolve_discrepancy"],
+    },
+  });
+  montar();
+  expect(await screen.findByText(/Diferencias de stock/)).toBeInTheDocument();
+
+  jest.clearAllMocks();
+  useAuthStore.setState({
+    token: "t",
+    user: {
+      id: "u3", email: "d@b.com", full_name: "Otra", role: "CASHIER", tenant_id: "t1",
+      pos_permissions: ["void_ticket"],
+    },
+  });
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <StockDiscrepanciesPanel enCaja />
+    </QueryClientProvider>,
+  );
+  expect(svc.listStockDiscrepancies).not.toHaveBeenCalled();
+});

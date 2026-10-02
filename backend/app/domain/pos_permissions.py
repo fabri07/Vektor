@@ -27,6 +27,10 @@ class PosPermission(StrEnum):
     VOID_TICKET = "void_ticket"
     FIADO = "fiado"
     LEARN_BARCODE = "learn_barcode"
+    #: Cobrar una línea a un precio distinto del de lista, con motivo.
+    PRICE_OVERRIDE = "price_override"
+    #: Resolver una salida de stock pendiente (B11) desde la caja, con PIN.
+    RESOLVE_DISCREPANCY = "resolve_discrepancy"
 
 
 #: (método, plantilla de ruta) que un cajero puede llamar. La plantilla es la de
@@ -63,6 +67,10 @@ CASHIER_ALLOWED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", f"{_P}/pos/cash-sessions"),
         ("GET", f"{_P}/pos/cash-sessions/{{session_id}}"),
         ("POST", f"{_P}/pos/cash-sessions/{{session_id}}/close"),
+        # Diferencias de stock (B11): sólo con el permiso `resolve_discrepancy`,
+        # que lo verifican las rutas (y resolver pide además SU PIN).
+        ("GET", f"{_P}/pos/stock-discrepancies"),
+        ("POST", f"{_P}/pos/stock-discrepancies/{{discrepancy_id}}/resolve"),
     }
 )
 

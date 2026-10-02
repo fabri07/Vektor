@@ -40,6 +40,8 @@ from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
     get_current_user,
+    require_discrepancy_access,
+    require_discrepancy_view,
     require_modify_access,
     require_owner_stepup,
     require_role,
@@ -280,6 +282,20 @@ async def create_pos_operation(
             assert_pos_permission(user, PosPermission.DISCOUNT)
         if any(t.payment_method == FIADO_PAYMENT_METHOD for t in body.tenders):
             assert_pos_permission(user, PosPermission.FIADO)
+        if any(item.manual_unit_price_ars is not None for item in body.items):
+            assert_pos_permission(user, PosPermission.PRICE_OVERRIDE)
+            if any(
+                item.manual_unit_price_ars is not None
+                and not (item.manual_price_reason or "").strip()
+                for item in body.items
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "PRICE_OVERRIDE_REASON_REQUIRED",
+                        "message": "Indicá por qué se cobra a otro precio.",
+                    },
+                )
         if es_offline:
             # `X-POS-Offline` relaja el invariante "stock negativo prohibido"
             # para ESTA venta, así que no alcanza con el header: hace falta la
@@ -410,7 +426,10 @@ async def create_pos_operation(
     #: El factor es el que se USÓ para cobrar, no el del catálogo: es el que
     #: hace que la cantidad impresa explique el importe impreso.
     snapshots: dict[uuid.UUID, tuple[str, str, int]] = {}
-    for item in body.items:
+    #: posición de la línea → (precio de lista, motivo), de las cobradas a mano.
+    #: Por posición y no por producto: el mismo producto puede ir dos veces.
+    manuales: dict[int, tuple[Decimal, str]] = {}
+    for indice, item in enumerate(body.items):
         producto = por_id.get(item.product_id)
         if producto is None:
             raise HTTPException(
@@ -502,6 +521,12 @@ async def create_pos_operation(
             snapshot = (producto.name, producto.sale_unit, factor)
 
         snapshots[producto.id] = snapshot
+
+        if item.manual_unit_price_ars is not None:
+            # El de lista (verificado o del catálogo) queda registrado; se cobra
+            # el manual. El permiso y el motivo se chequearon antes del claim.
+            manuales[indice] = (precio, (item.manual_price_reason or "").strip())
+            precio = item.manual_unit_price_ars
 
         if producto.stock_units < item.quantity:
             if not es_offline:
@@ -622,9 +647,15 @@ async def create_pos_operation(
                 discount_global_share_ars=linea.discount_global_share_ars,
                 line_total_ars=linea.line_total,
                 unit_price_catalog_ars=(
-                    divergencias[linea.product_id][0]
+                    manuales[posicion][0]
+                    if posicion in manuales
+                    else divergencias[linea.product_id][0]
                     if linea.product_id in divergencias
                     else None
+                ),
+                price_overridden=posicion in manuales,
+                price_override_reason=(
+                    manuales[posicion][1] if posicion in manuales else None
                 ),
                 # El ticket deja de depender del catálogo de mañana.
                 product_name_snapshot=nombre,
@@ -723,7 +754,17 @@ async def create_pos_operation(
     # cobró antes de que el dueño cambiara el precio. Pero tiene que quedar
     # visible con los dos números, porque es la única forma de revisar después
     # si la caja cobró lo que correspondía.
-    if divergencias:
+    # Una línea cobrada a mano no entra acá: su "cobrado" es el manual, y
+    # compararlo con el catálogo confundiría las dos cosas. Va en
+    # `POS_PRICE_OVERRIDE`, con el catálogo al lado si además divergía.
+    divergentes = [
+        (ln, divergencias[ln.product_id])
+        for ln in lineas
+        if ln.product_id is not None
+        and ln.product_id in divergencias
+        and ln.position not in manuales
+    ]
+    if divergentes:
         session.add(
             DecisionAuditLog(
                 tenant_id=tenant.tenant_id,
@@ -739,16 +780,50 @@ async def create_pos_operation(
                         {
                             "product_id": str(ln.product_id),
                             "cobrado_ars": str(ln.unit_price_list),
-                            "catalogo_ars": str(divergencias[ln.product_id][0]),
+                            "catalogo_ars": str(cat[0]),
                             "factor_cobrado": ln.base_units_snapshot,
-                            "factor_catalogo": divergencias[ln.product_id][1],
+                            "factor_catalogo": cat[1],
                             "nombre_cobrado": ln.product_name_snapshot,
-                            "nombre_catalogo": divergencias[ln.product_id][2],
+                            "nombre_catalogo": cat[2],
                             "unidad_cobrada": ln.sale_unit_snapshot,
-                            "unidad_catalogo": divergencias[ln.product_id][3],
+                            "unidad_catalogo": cat[3],
+                        }
+                        for ln, cat in divergentes
+                    ],
+                },
+                triggered_by="ui:pos",
+                actor_user_id=user.user_id,
+                context={"endpoint": "pos.create_operation"},
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    # Un precio puesto a mano es una decisión de alguien, no un accidente: queda
+    # con el de lista, el cobrado, el motivo y quién.
+    if manuales:
+        session.add(
+            DecisionAuditLog(
+                tenant_id=tenant.tenant_id,
+                decision_type="POS_PRICE_OVERRIDE",
+                decision_data={
+                    "operation_id": str(operacion.id),
+                    "client_operation_id": operacion.client_operation_id,
+                    "captured_offline": operacion.captured_offline,
+                    "lines": [
+                        {
+                            "position": ln.position,
+                            "product_id": str(ln.product_id),
+                            "lista_ars": str(manuales[ln.position][0]),
+                            "cobrado_ars": str(ln.unit_price_list),
+                            "motivo": manuales[ln.position][1],
+                            "catalogo_ars": (
+                                str(divergencias[ln.product_id][0])
+                                if ln.product_id in divergencias
+                                else None
+                            ),
                         }
                         for ln in lineas
-                        if ln.product_id in divergencias
+                        if ln.position in manuales
                     ],
                 },
                 triggered_by="ui:pos",
@@ -773,6 +848,38 @@ async def create_pos_operation(
         status.HTTP_201_CREATED,
     )
     return resultado
+
+
+def _exigir_anulacion_del_cajero(
+    user: User, operacion: PosOperation, reason: str | None
+) -> None:
+    """Las reglas de anulación de un cajero, en UN lugar.
+
+    Las aplican la anulación directa y la resolución de una diferencia por
+    `anular_ticket`: si cada una las repitiera, un permiso nuevo podría
+    saltearse alguna. OWNER/ADMIN no pasan por acá.
+    """
+    if user.role_code != CASHIER_ROLE:
+        return
+    assert_pos_permission(user, PosPermission.VOID_TICKET)
+    # Un cajero anula SUS tickets; los de un compañero los resuelve el
+    # encargado. Anular es devolver plata: queda a nombre de quien cobró.
+    if operacion.created_by_user_id != user.user_id:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "VOID_NOT_OWN_TICKET",
+                "message": "Sólo podés anular tus propios tickets. Pedíselo al encargado.",
+            },
+        )
+    if not (reason or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VOID_REASON_REQUIRED",
+                "message": "Indicá por qué se anula el ticket.",
+            },
+        )
 
 
 async def _ejecutar_anulacion(
@@ -917,25 +1024,7 @@ async def void_pos_operation(
         raise HTTPException(status_code=404, detail="Operación no encontrada.")
     operacion, lineas, tenders = cargada
 
-    if user.role_code == CASHIER_ROLE:
-        # Un cajero anula SUS tickets; los de un compañero los resuelve el
-        # encargado. Anular es devolver plata: queda a nombre de quien cobró.
-        if operacion.created_by_user_id != user.user_id:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "VOID_NOT_OWN_TICKET",
-                    "message": "Sólo podés anular tus propios tickets. Pedíselo al encargado.",
-                },
-            )
-        if body is None or not (body.reason or "").strip():
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "VOID_REASON_REQUIRED",
-                    "message": "Indicá por qué se anula el ticket.",
-                },
-            )
+    _exigir_anulacion_del_cajero(user, operacion, body.reason if body is not None else None)
 
     await _ejecutar_anulacion(
         session,
@@ -979,13 +1068,12 @@ async def list_stock_discrepancies(
     limit: int = Query(default=100, ge=1, le=200),
     tenant: Tenant = Depends(get_current_tenant),
     # Sólo lectura: no pide PIN. Resolver sí, porque mueve stock.
-    _user: User = Depends(require_role("OWNER", "ADMIN")),
+    _user: User = Depends(require_discrepancy_view),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[PosStockDiscrepancyResponse]:
     """Lo que la caja vendió y el stock no pudo respaldar, para que alguien decida.
 
-    Fuera de `CASHIER_ALLOWED_ROUTES` a propósito: qué pasó con el stock no es
-    una decisión de caja.
+    OWNER/ADMIN, o un cajero al que el dueño le delegó `resolve_discrepancy`.
     """
     filas = await pos_discrepancy_service.listar(
         session, tenant.tenant_id, solo_abiertas=abiertas, limit=limit
@@ -1003,9 +1091,11 @@ async def resolve_stock_discrepancy(
     body: PosResolveDiscrepancyRequest,
     background: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
-    # Mueve stock y puede anular un ticket: OWNER o `can_modify_sensitive`, con PIN.
-    user: User = Depends(require_modify_access),
+    # Mueve stock y puede anular un ticket: OWNER o `can_modify_sensitive`, con
+    # PIN; o un cajero con `resolve_discrepancy` y SU PIN.
+    user: User = Depends(require_discrepancy_access),
     session: AsyncSession = Depends(get_db_session),
+    terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
 ) -> PosStockDiscrepancyResponse:
     """Dos caminos, los dos con efecto exacto sobre el stock y auditados.
 
@@ -1017,6 +1107,10 @@ async def resolve_stock_discrepancy(
     No hay una tercera opción que sólo oculte el aviso: ocultar no reconcilia
     nada. Idempotente: resolver dos veces devuelve lo mismo sin repetir efectos.
     """
+    # Un cajero, como al cobrar y al anular, sólo desde una caja habilitada.
+    terminal = await resolver_terminal(session, tenant.tenant_id, terminal_secret)
+    exigir_terminal_si_es_cajero(user, terminal)
+
     await acquire_write_lock_shared(session, tenant.tenant_id)
 
     # ORDEN DE BLOQUEOS: primero el ticket, después la discrepancia — el MISMO
@@ -1074,6 +1168,8 @@ async def resolve_stock_discrepancy(
             session, str(tenant.tenant_id), "pos_stock_discrepancy_resolved", background
         )
     else:
+        # El permiso de resolver no saltea las reglas de anulación del cajero.
+        _exigir_anulacion_del_cajero(user, operacion, body.reason)
         discrepancia.reason = body.reason
         await _ejecutar_anulacion(
             session,

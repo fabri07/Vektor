@@ -168,7 +168,8 @@ Desde la barra de la caja se entra a **«Turnos de caja»**. Ahí se ve:
 Una venta cobrada sin internet puede llegar cuando el stock ya no alcanza.
 **La venta entra igual**: el cliente ya se llevó la mercadería. Queda una
 diferencia para resolver en **Productos → panel de diferencias** (dueño o
-encargado, con PIN y motivo obligatorio).
+encargado, con PIN y motivo obligatorio). Si el dueño se lo delegó, un cajero
+la resuelve **desde la caja**, con su PIN.
 
 - La diferencia muestra la **salida pendiente completa**. Si había 3 y se
   vendieron 5, la salida pendiente es de 5, no de 2.
@@ -185,11 +186,15 @@ encargado, con PIN y motivo obligatorio).
 - El alta se hace en **Ajustes → Seguridad → Equipo**, con el rol **Cajero**.
   - El cajero **ocupa una plaza** del plan.
   - Sólo ve la caja. No ve costos, márgenes ni reportes.
-- Hay cuatro permisos, y cada uno se marca aparte:
+- Hay seis permisos, y cada uno se marca aparte:
   - **descuentos**;
   - **anular tickets** (sólo los propios, con su PIN);
   - **fiado**;
-  - **aprender códigos**.
+  - **aprender códigos**;
+  - **cobrar a otro precio** — en la línea, «cambiar precio», con motivo
+    obligatorio; queda registrado el precio de lista al lado del cobrado;
+  - **resolver diferencias de stock** — desde la caja, con su PIN. Si elige
+    «la venta está mal», además necesita poder anular y que el ticket sea suyo.
 - Un cajero **sólo cobra desde una PC habilitada**.
 
 ---

@@ -37,6 +37,14 @@ export interface CartLine {
   /** En UNIDADES BASE (gramos, mililitros o unidades), como el servidor. */
   quantity: number;
   discountCents: number;
+  /**
+   * Precio puesto A MANO (permiso `price_override`), por unidad de venta. Va
+   * aparte del precio firmado: el servidor sigue verificando el de lista con
+   * su firma y cobra éste. Ausente = el de lista.
+   */
+  manualPriceCents?: number | null;
+  /** Obligatorio con precio manual: el servidor lo exige. */
+  manualPriceReason?: string;
 }
 
 export interface PosOperationPayload {
@@ -59,6 +67,10 @@ export interface PosOperationPayload {
     sale_unit?: string;
     base_units_per_sale_unit?: number;
     price_token?: string;
+    /** Sólo si se cobró a mano: así una venta sin cambio de precio conserva
+     *  exactamente la huella de siempre. */
+    manual_unit_price_ars?: string;
+    manual_price_reason?: string;
   }[];
   tenders: { payment_method: string; amount_ars: string }[];
 }
@@ -167,8 +179,13 @@ export function lineGrossCents(priceCents: number, quantity: number, factor: num
   return Math.floor((2 * numerador + f) / (2 * f));
 }
 
+/** El precio que se cobra: el manual si lo hay, si no el de lista. */
+export function precioEfectivoCents(line: CartLine): number {
+  return line.manualPriceCents ?? toCents(line.product.sale_price_ars) ?? 0;
+}
+
 export function lineNetCents(line: CartLine): number {
-  const precio = toCents(line.product.sale_price_ars) ?? 0;
+  const precio = precioEfectivoCents(line);
   return (
     lineGrossCents(precio, line.quantity, line.product.base_units_per_sale_unit) -
     line.discountCents
@@ -361,6 +378,12 @@ export function buildPayload(
             price_token: l.product.price_token,
           }
         : {}),
+      ...(l.manualPriceCents != null
+        ? {
+            manual_unit_price_ars: centsToAmount(l.manualPriceCents),
+            manual_price_reason: l.manualPriceReason ?? "",
+          }
+        : {}),
     })),
     // Con un solo pago, el mismo JSON de siempre: un tender por el total.
     tenders: tenderCents(state, totalCents).map((t) => ({
@@ -377,6 +400,8 @@ export type SaleAction =
   | { type: "SET_QUANTITY"; productId: string; quantity: number }
   | { type: "REMOVE"; productId: string }
   | { type: "SET_LINE_DISCOUNT"; productId: string; cents: number }
+  /** `cents: null` vuelve al precio de lista. */
+  | { type: "SET_LINE_PRICE"; productId: string; cents: number | null; reason: string }
   | { type: "SET_GLOBAL_DISCOUNT"; cents: number }
   | { type: "SET_PAYMENT_METHOD"; id: string; method: string }
   | { type: "SET_PAYMENT_AMOUNT"; id: string; value: string }
@@ -451,6 +476,23 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
     case "SET_LINE_DISCOUNT":
       if (state.status !== "editando" || action.cents < 0) return state;
       return mapLine(state, action.productId, (l) => ({ ...l, discountCents: action.cents }));
+    case "SET_LINE_PRICE":
+      if (state.status !== "editando") return state;
+      if (action.cents === null) {
+        return mapLine(state, action.productId, (l) => ({
+          ...l,
+          manualPriceCents: null,
+          manualPriceReason: undefined,
+        }));
+      }
+      // Un precio manual sin motivo, o en cero, el servidor lo rechaza: mejor
+      // no dejarlo entrar al carrito.
+      if (action.cents <= 0 || action.reason.trim() === "") return state;
+      return mapLine(state, action.productId, (l) => ({
+        ...l,
+        manualPriceCents: action.cents,
+        manualPriceReason: action.reason.trim(),
+      }));
     case "SET_GLOBAL_DISCOUNT":
       if (state.status !== "editando" || action.cents < 0) return state;
       return { ...state, globalDiscountCents: action.cents };
@@ -521,8 +563,24 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
         ...state,
         notice: action.notice,
         lines: state.lines.map((l) => {
+          // Una línea cobrada a mano no se toca: el servidor devuelve como
+          // "precio" el manual, y pisar con él el de lista dejaría la firma
+          // del catálogo apuntando a otro número (PRICE_TOKEN_INVALID).
+          if (l.manualPriceCents != null) return l;
           const precio = action.prices[l.product.id];
-          return precio ? { ...l, product: { ...l.product, sale_price_ars: precio } } : l;
+          if (!precio) return l;
+          // Con firma, el precio de lista sólo puede ser el firmado: si el
+          // servidor dice otro, la firma ya no sirve y se descarta — sin ella
+          // el servidor cobra el de catálogo, que es justo el que informó.
+          const firmaVigente = precio === l.product.sale_price_ars;
+          return {
+            ...l,
+            product: {
+              ...l.product,
+              sale_price_ars: precio,
+              price_token: firmaVigente ? l.product.price_token : null,
+            },
+          };
         }),
       };
     case "APPLY_STOCK":

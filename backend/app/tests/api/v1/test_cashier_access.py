@@ -20,10 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
 from app.domain.business_time import today_ar
-from app.domain.pos_permissions import CASHIER_ALLOWED_ROUTES
+from app.domain.pos_permissions import CASHIER_ALLOWED_ROUTES, PosPermission
 from app.domain.pos_terminal import TERMINAL_HEADER, generar_secreto, hash_de_secreto
 from app.main import app as fastapi_app
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.pos_operation import PosOperationLine
 from app.persistence.models.pos_terminal import PosTerminal
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -150,7 +151,7 @@ class TestDenegarPorDefecto:
             db_session,
             sample_tenant,
             fake_redis,
-            {"discount": True, "void_ticket": True, "fiado": True, "learn_barcode": True},
+            {p.value: True for p in PosPermission},
         )
         colados = []
         for metodo, plantilla in _rutas_autenticadas():
@@ -579,14 +580,18 @@ class TestAnulacionDelCajero:
         )
         assert resp.status_code == 428
 
+    @pytest.mark.parametrize("permiso", ["void_ticket", "resolve_discrepancy"])
     async def test_un_cajero_que_puede_anular_puede_configurar_su_pin(
         self,
         client: AsyncClient,
         db_session: AsyncSession,
         sample_tenant: Tenant,
         fake_redis: Any,
+        permiso: str,
     ) -> None:
-        user, headers = await _cajero(db_session, sample_tenant, fake_redis, {"void_ticket": True})
+        # Resolver una diferencia también pide SU PIN: sin poder configurarlo,
+        # el permiso sería inalcanzable.
+        user, headers = await _cajero(db_session, sample_tenant, fake_redis, {permiso: True})
         user.pin_hash = None
         await db_session.commit()
         resp = await client.post(
@@ -806,3 +811,294 @@ class TestVentaFraccionada:
         assert resumen.status_code == 200, resumen.text
         # 4.250 g quedan, a $800 el kilo = $3.400 (no $3.400.000).
         assert float(resumen.json()["stock_value_ars"]) == pytest.approx(3400.0)
+
+
+class TestPrecioManual:
+    """Cobrar una línea a otro precio: permiso propio, motivo obligatorio, y el
+    de lista queda registrado al lado del cobrado (cierre de B5)."""
+
+    def _cuerpo(self, pid: str, **linea: Any) -> dict[str, Any]:
+        return _venta(
+            pid,
+            items=[{"product_id": pid, "quantity": 2, **linea}],
+            tenders=[{"payment_method": "cash", "amount_ars": "160.00"}],
+        )
+
+    async def test_sin_permiso_no(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, headers = await _cajero(db_session, sample_tenant, fake_redis, {"discount": True})
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=self._cuerpo(p["id"], manual_unit_price_ars="80.00", manual_price_reason="x"),
+            headers=headers,
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["permission"] == "price_override"
+
+    async def test_sin_motivo_no(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, headers = await _cajero(
+            db_session, sample_tenant, fake_redis, {"price_override": True}
+        )
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=self._cuerpo(p["id"], manual_unit_price_ars="80.00", manual_price_reason=" "),
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "PRICE_OVERRIDE_REASON_REQUIRED"
+
+    async def test_con_permiso_cobra_el_manual_y_registra_el_de_lista(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, headers = await _cajero(
+            db_session, sample_tenant, fake_redis, {"price_override": True}
+        )
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=self._cuerpo(
+                p["id"], manual_unit_price_ars="80.00", manual_price_reason="cliente fiel"
+            ),
+            headers=headers,
+        )
+        assert resp.status_code == 201, resp.text
+        cuerpo = resp.json()
+        assert Decimal(cuerpo["total_ars"]) == Decimal("160.00")
+
+        linea = (
+            await db_session.execute(
+                select(PosOperationLine).where(
+                    PosOperationLine.operation_id == uuid.UUID(cuerpo["id"])
+                )
+            )
+        ).scalar_one()
+        assert linea.unit_price_list == Decimal("80.00")
+        assert linea.line_total_ars == Decimal("160.00")
+        assert linea.price_overridden is True
+        assert linea.price_override_reason == "cliente fiel"
+        assert linea.unit_price_catalog_ars == Decimal("100.00")
+
+        auditoria = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.decision_type == "POS_PRICE_OVERRIDE"
+                )
+            )
+        ).scalar_one()
+        [detalle] = auditoria.decision_data["lines"]
+        assert detalle["lista_ars"] == "100.00"
+        assert detalle["cobrado_ars"] == "80.00"
+        assert detalle["motivo"] == "cliente fiel"
+
+    async def test_reintento_con_el_permiso_revocado_devuelve_el_ticket(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        cajero, headers = await _cajero(
+            db_session, sample_tenant, fake_redis, {"price_override": True}
+        )
+        venta = self._cuerpo(p["id"], manual_unit_price_ars="80.00", manual_price_reason="x")
+        primera = await client.post("/api/v1/pos/operations", json=venta, headers=headers)
+        assert primera.status_code == 201
+        cajero.pos_permissions = {}
+        await db_session.commit()
+        segunda = await client.post("/api/v1/pos/operations", json=venta, headers=headers)
+        assert segunda.status_code == 200
+        assert segunda.json()["id"] == primera.json()["id"]
+
+    async def test_una_linea_sin_precio_manual_no_queda_marcada(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, headers = await _cajero(db_session, sample_tenant, fake_redis)
+        resp = await client.post("/api/v1/pos/operations", json=_venta(p["id"]), headers=headers)
+        assert resp.status_code == 201
+        linea = (
+            await db_session.execute(
+                select(PosOperationLine).where(
+                    PosOperationLine.operation_id == uuid.UUID(resp.json()["id"])
+                )
+            )
+        ).scalar_one()
+        assert linea.price_overridden is False
+        assert linea.unit_price_catalog_ars is None
+
+
+class TestDiferenciasDelegadas:
+    """`resolve_discrepancy`: el dueño puede delegar en un cajero resolver una
+    salida de stock pendiente, con SU PIN y desde una caja. Elegir anular el
+    ticket sigue exigiendo las reglas de anulación del cajero."""
+
+    async def _diferencia(
+        self, client: AsyncClient, headers: dict[str, str], pid: str
+    ) -> str:
+        # Vendida sin red más de lo que había (10): queda una salida pendiente.
+        venta = _venta(
+            pid,
+            charged_at=_FECHA,
+            items=[{"product_id": pid, "quantity": 12}],
+            tenders=[{"payment_method": "cash", "amount_ars": "1200.00"}],
+        )
+        resp = await client.post(
+            "/api/v1/pos/operations", json=venta, headers={**headers, "X-POS-Offline": "1"}
+        )
+        assert resp.status_code == 201, resp.text
+        lista = await client.get("/api/v1/pos/stock-discrepancies", headers=headers)
+        assert lista.status_code == 200, lista.text
+        [dif] = [d for d in lista.json() if d["operation_id"] == resp.json()["id"]]
+        return str(dif["id"])
+
+    async def test_sin_permiso_no_las_ve(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        _, headers = await _cajero(db_session, sample_tenant, fake_redis, {"void_ticket": True})
+        resp = await client.get("/api/v1/pos/stock-discrepancies", headers=headers)
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["permission"] == "resolve_discrepancy"
+
+    async def test_con_permiso_resuelve_un_ajuste(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, headers = await _cajero(
+            db_session, sample_tenant, fake_redis, {"resolve_discrepancy": True}
+        )
+        dif = await self._diferencia(client, headers, p["id"])
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{dif}/resolve",
+            json={"resolution": "ajuste_de_entrada", "reason": "había en el depósito"},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["resolution"] == "ajuste_de_entrada"
+        assert resp.json()["status"] != "OPEN"
+
+    async def test_sin_pin_pide_pin(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        cajero, headers = await _cajero(
+            db_session, sample_tenant, fake_redis, {"resolve_discrepancy": True}
+        )
+        dif = await self._diferencia(client, headers, p["id"])
+        await fake_redis.delete(_pin_window_key(sample_tenant.tenant_id, cajero.user_id))
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{dif}/resolve",
+            json={"resolution": "ajuste_de_entrada", "reason": "x"},
+            headers=headers,
+        )
+        assert resp.status_code == 428
+
+    async def test_sin_caja_no(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, headers = await _cajero(
+            db_session, sample_tenant, fake_redis, {"resolve_discrepancy": True}
+        )
+        dif = await self._diferencia(client, headers, p["id"])
+        sin_caja = {k: v for k, v in headers.items() if k != TERMINAL_HEADER}
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{dif}/resolve",
+            json={"resolution": "ajuste_de_entrada", "reason": "x"},
+            headers=sin_caja,
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "TERMINAL_REQUIRED"
+
+    async def test_anular_un_ticket_ajeno_no(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, quien_cobro = await _cajero(
+            db_session, sample_tenant, fake_redis, {"resolve_discrepancy": True}
+        )
+        dif = await self._diferencia(client, quien_cobro, p["id"])
+        _, otro = await _cajero(
+            db_session,
+            sample_tenant,
+            fake_redis,
+            {"resolve_discrepancy": True, "void_ticket": True},
+        )
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{dif}/resolve",
+            json={"resolution": "anular_ticket", "reason": "no se vendió"},
+            headers=otro,
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "VOID_NOT_OWN_TICKET"
+
+    async def test_anular_sin_permiso_de_anulacion_no(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, headers = await _cajero(
+            db_session, sample_tenant, fake_redis, {"resolve_discrepancy": True}
+        )
+        dif = await self._diferencia(client, headers, p["id"])
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{dif}/resolve",
+            json={"resolution": "anular_ticket", "reason": "no se vendió"},
+            headers=headers,
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["permission"] == "void_ticket"

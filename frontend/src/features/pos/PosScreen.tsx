@@ -15,6 +15,7 @@ import { OpenCashSession } from "@/features/pos/OpenCashSession";
 import { PaymentPanel } from "@/features/pos/PaymentPanel";
 import { type PickerMode, ProductPicker } from "@/features/pos/ProductPicker";
 import { PendingOperationsPanel } from "@/features/pos/PendingOperationsPanel";
+import { StockDiscrepanciesPanel } from "@/features/products/StockDiscrepanciesPanel";
 import { RecentTickets } from "@/features/pos/RecentTickets";
 import { ScanInput } from "@/features/pos/ScanInput";
 import type { PosReceipt } from "@/features/pos/ticketTemplate";
@@ -222,6 +223,8 @@ function PosRegister() {
   const canFiado = hasPosPermission(user, "fiado");
   const canLearn = hasPosPermission(user, "learn_barcode");
   const canVoid = hasPosPermission(user, "void_ticket");
+  const canOverridePrice = hasPosPermission(user, "price_override");
+  const canResolve = hasPosPermission(user, "resolve_discrepancy");
 
   const focusScan = useCallback(() => {
     // Después de la acción: el foco vuelve a donde lee el lector.
@@ -887,6 +890,7 @@ function PosRegister() {
               dispatch={dispatch}
               locked={!editable}
               canDiscount={canDiscount}
+              canOverridePrice={canOverridePrice}
               onAfterAction={focusScan}
             />
           </section>
@@ -996,6 +1000,11 @@ function PosRegister() {
                 focusScan();
               }}
             />
+
+            {/* El cajero no llega a /products: si el dueño le delegó resolver
+                diferencias de stock, las resuelve acá, con su PIN. El dueño y
+                el encargado las siguen resolviendo en /products. */}
+            {canResolve && user?.role === CASHIER_ROLE ? <StockDiscrepanciesPanel enCaja /> : null}
 
             <RecentTickets
               refreshKey={`${lastOperation?.id ?? ""}:${lastOperation?.status ?? ""}`}

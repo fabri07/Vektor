@@ -58,6 +58,15 @@ class PosLineRequest(BaseModel):
     price_token: str | None = Field(default=None, max_length=120)
     #: Descuento monetario de esta línea. Sobre el TOTAL, nunca sobre el unitario.
     discount_ars: Decimal = Field(default=Decimal("0"), ge=0, le=_MAX_IMPORTE, decimal_places=2)
+    #: Precio puesto A MANO por quien tiene el permiso `price_override` (cierre
+    #: de B5). Va APARTE del bloque firmado: el token sigue acreditando el
+    #: precio de lista que la caja vio, y éste es el que se cobra. Con default
+    #: `None`, una venta sin precio manual tiene la misma huella de siempre.
+    manual_unit_price_ars: Decimal | None = Field(
+        default=None, gt=0, le=_MAX_IMPORTE, decimal_places=2
+    )
+    #: Obligatorio con precio manual: es lo único que explica después el cambio.
+    manual_price_reason: str | None = Field(default=None, max_length=200)
 
     @model_validator(mode="after")
     def precio_declarado_completo(self) -> "PosLineRequest":

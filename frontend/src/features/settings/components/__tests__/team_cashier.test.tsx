@@ -74,6 +74,8 @@ describe("Equipo — cajeros", () => {
       fiado: true,
       learn_barcode: false,
       void_ticket: false,
+      price_override: false,
+      resolve_discrepancy: false,
     });
   });
 });

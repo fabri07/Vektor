@@ -27,6 +27,8 @@ export const POS_PERMISSIONS = [
   { key: "fiado", label: "Vender fiado" },
   { key: "learn_barcode", label: "Vincular códigos de barras" },
   { key: "void_ticket", label: "Anular sus tickets (con su PIN)" },
+  { key: "price_override", label: "Cobrar a otro precio (con motivo)" },
+  { key: "resolve_discrepancy", label: "Resolver diferencias de stock (con su PIN)" },
 ] as const;
 
 export type PosPermissionKey = (typeof POS_PERMISSIONS)[number]["key"];
