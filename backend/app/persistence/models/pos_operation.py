@@ -178,6 +178,14 @@ class PosOperationLine(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Numeric(12, 2), nullable=True
     )
 
+    #: La línea se cobró a un precio puesto A MANO por alguien con el permiso
+    #: `price_override` (cierre de B5). El de lista queda en
+    #: `unit_price_catalog_ars`; el motivo, acá al lado y en `POS_PRICE_OVERRIDE`.
+    price_overridden: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_false(), default=False
+    )
+    price_override_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     # --- El ticket congelado ------------------------------------------------
     # El recibo releía nombre y unidad del catálogo actual: renombrar un
     # producto cambiaba un ticket de ayer y borrarlo lo dejaba en "Producto

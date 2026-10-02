@@ -3,12 +3,13 @@
 import { Trash2 } from "lucide-react";
 
 import { MoneyInput, QuantityInput } from "@/features/pos/DiscountControl";
+import { PriceOverrideControl } from "@/features/pos/PriceOverrideControl";
 import {
   type CartLine,
   type SaleAction,
   formatCents,
   lineNetCents,
-  toCents,
+  precioEfectivoCents,
 } from "@/lib/pos/cart";
 
 interface CartTableProps {
@@ -17,6 +18,8 @@ interface CartTableProps {
   /** El carrito sólo se toca en `editando`: en duda o enviando queda bloqueado. */
   locked: boolean;
   canDiscount: boolean;
+  /** Permiso `price_override`: cobrar una línea a otro precio, con motivo. */
+  canOverridePrice?: boolean;
   onAfterAction?: () => void;
 }
 
@@ -25,7 +28,14 @@ function unitLabel(line: CartLine): string {
   return line.product.sale_unit === "milliliter" ? "ml" : line.product.sale_unit === "gram" ? "g" : "u.";
 }
 
-export function CartTable({ lines, dispatch, locked, canDiscount, onAfterAction }: CartTableProps) {
+export function CartTable({
+  lines,
+  dispatch,
+  locked,
+  canDiscount,
+  canOverridePrice = false,
+  onAfterAction,
+}: CartTableProps) {
   if (lines.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-pos-border p-10 text-sm text-pos-muted">
@@ -73,7 +83,11 @@ export function CartTable({ lines, dispatch, locked, canDiscount, onAfterAction 
                   </div>
                 </td>
                 <td className="px-3 py-2 text-right text-pos-text-2">
-                  {formatCents(toCents(line.product.sale_price_ars) ?? 0)}
+                  {canOverridePrice ? (
+                    <PriceOverrideControl line={line} dispatch={dispatch} disabled={locked} />
+                  ) : (
+                    formatCents(precioEfectivoCents(line))
+                  )}
                 </td>
                 {canDiscount ? (
                   <td className="px-3 py-2">

@@ -12,7 +12,13 @@
  * el servidor con su número real, y va a tener uno distinto del provisional.
  */
 
-import { centsToAmount, lineGrossCents, lineNetCents, toCents } from "@/lib/pos/cart";
+import {
+  centsToAmount,
+  lineGrossCents,
+  lineNetCents,
+  precioEfectivoCents,
+  toCents,
+} from "@/lib/pos/cart";
 import type { CartLine, PosOperationPayload } from "@/lib/pos/cart";
 import { formatearCantidad } from "@/lib/pos/saleUnit";
 import type { PosReceipt } from "@/features/pos/ticketTemplate";
@@ -43,7 +49,8 @@ export function reciboLocal(
 ): PosReceipt {
   const brutos = lines.map((l) =>
     lineGrossCents(
-      toCents(l.product.sale_price_ars) ?? 0,
+      // El que se cobró: el manual si lo hubo.
+      precioEfectivoCents(l),
       l.quantity,
       l.product.base_units_per_sale_unit,
     ),
@@ -80,7 +87,7 @@ export function reciboLocal(
         l.product.sale_unit,
         l.product.base_units_per_sale_unit,
       ),
-      unit_price_list: l.product.sale_price_ars,
+      unit_price_list: centsToAmount(precioEfectivoCents(l)),
       gross_ars: centsToAmount(bruto),
       discount_line_ars: centsToAmount(descuentoLinea),
       line_total_ars: centsToAmount(total),

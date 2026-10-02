@@ -15,6 +15,7 @@ import { OpenCashSession } from "@/features/pos/OpenCashSession";
 import { PaymentPanel } from "@/features/pos/PaymentPanel";
 import { type PickerMode, ProductPicker } from "@/features/pos/ProductPicker";
 import { PendingOperationsPanel } from "@/features/pos/PendingOperationsPanel";
+import { StockDiscrepanciesPanel } from "@/features/products/StockDiscrepanciesPanel";
 import { RecentTickets } from "@/features/pos/RecentTickets";
 import { ScanInput } from "@/features/pos/ScanInput";
 import type { PosReceipt } from "@/features/pos/ticketTemplate";
@@ -222,6 +223,8 @@ function PosRegister() {
   const canFiado = hasPosPermission(user, "fiado");
   const canLearn = hasPosPermission(user, "learn_barcode");
   const canVoid = hasPosPermission(user, "void_ticket");
+  const canOverridePrice = hasPosPermission(user, "price_override");
+  const canResolve = hasPosPermission(user, "resolve_discrepancy");
 
   const focusScan = useCallback(() => {
     // Después de la acción: el foco vuelve a donde lee el lector.
@@ -239,6 +242,9 @@ function PosRegister() {
       for (const l of info.fields.lines as { product_id: string; unit_price_list: string }[]) {
         prices[l.product_id] = l.unit_price_list;
         const antes = lines.find((x) => x.product.id === l.product_id);
+        // Una línea cobrada a mano vuelve con el precio manual: no cambió nada
+        // del catálogo, y `APPLY_PRICES` tampoco la toca.
+        if (antes?.manualPriceCents != null) continue;
         if (antes && toCents(antes.product.sale_price_ars) !== toCents(l.unit_price_list)) {
           cambios.push(
             `${antes.product.name}: ${formatCents(toCents(antes.product.sale_price_ars) ?? 0)} → ` +
@@ -887,6 +893,7 @@ function PosRegister() {
               dispatch={dispatch}
               locked={!editable}
               canDiscount={canDiscount}
+              canOverridePrice={canOverridePrice}
               onAfterAction={focusScan}
             />
           </section>
@@ -996,6 +1003,11 @@ function PosRegister() {
                 focusScan();
               }}
             />
+
+            {/* El cajero no llega a /products: si el dueño le delegó resolver
+                diferencias de stock, las resuelve acá, con su PIN. El dueño y
+                el encargado las siguen resolviendo en /products. */}
+            {canResolve && user?.role === CASHIER_ROLE ? <StockDiscrepanciesPanel enCaja /> : null}
 
             <RecentTickets
               refreshKey={`${lastOperation?.id ?? ""}:${lastOperation?.status ?? ""}`}

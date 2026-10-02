@@ -79,6 +79,7 @@ describe("guarda de colores", () => {
     "CloseCashSession",
     "CashSessionBar",
     "CashSessionsPanel",
+    "PriceOverrideControl",
   ];
   const FIJOS =
     /\b(?:bg|text|border|divide)-(?:vk-(?:text-(?:primary|secondary|muted)|surface-w|bg-light|border-w)|vektor-(?:white|body|muted|surface|ink|night|border))\b/g;

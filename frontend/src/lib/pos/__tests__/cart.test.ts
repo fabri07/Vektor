@@ -9,6 +9,7 @@ import {
   esCorregibleEnElMostrador,
   lineGrossCents,
   localNaiveIso,
+  precioEfectivoCents,
   previewTotals,
   saleReducer,
   toCents,
@@ -326,5 +327,85 @@ describe("pago mixto (B9)", () => {
     const metodos = s.payments.map((p) => p.method);
     expect(new Set(metodos).size).toBe(metodos.length);
     expect(metodos).toHaveLength(7);
+  });
+});
+
+
+describe("precio manual (permiso price_override)", () => {
+  const firmado: PosProduct = { ...yerba, price_token: "tok" };
+
+  it("sin motivo o en cero no entra al carrito", () => {
+    const base = con({ type: "ADD_PRODUCT", product: firmado });
+    expect(
+      saleReducer(base, { type: "SET_LINE_PRICE", productId: "p1", cents: 80000, reason: " " })
+        .lines[0]?.manualPriceCents,
+    ).toBeUndefined();
+    expect(
+      saleReducer(base, { type: "SET_LINE_PRICE", productId: "p1", cents: 0, reason: "x" })
+        .lines[0]?.manualPriceCents,
+    ).toBeUndefined();
+  });
+
+  it("cobra el manual y el payload lo manda APARTE del precio firmado", () => {
+    const s = con(
+      { type: "ADD_PRODUCT", product: firmado },
+      { type: "SET_QUANTITY", productId: "p1", quantity: 2 },
+      { type: "SET_LINE_PRICE", productId: "p1", cents: 80000, reason: "cliente fiel" },
+    );
+    expect(precioEfectivoCents(s.lines[0]!)).toBe(80000);
+    expect(previewTotals(s).totalCents).toBe(160000);
+    const [item] = buildPayload(s, "op-1", new Date(2026, 9, 2, 10)).items;
+    // El de lista sigue firmado: el servidor lo verifica y registra.
+    expect(item?.unit_price_ars).toBe("1000.00");
+    expect(item?.price_token).toBe("tok");
+    expect(item?.manual_unit_price_ars).toBe("800.00");
+    expect(item?.manual_price_reason).toBe("cliente fiel");
+  });
+
+  it("sin precio manual el payload no lleva las claves (la huella no cambia)", () => {
+    const s = con({ type: "ADD_PRODUCT", product: firmado });
+    const [item] = buildPayload(s, "op-1", new Date(2026, 9, 2, 10)).items;
+    expect(item).not.toHaveProperty("manual_unit_price_ars");
+    expect(item).not.toHaveProperty("manual_price_reason");
+  });
+
+  it("quitarlo vuelve al de lista", () => {
+    const s = con(
+      { type: "ADD_PRODUCT", product: firmado },
+      { type: "SET_LINE_PRICE", productId: "p1", cents: 80000, reason: "x" },
+      { type: "SET_LINE_PRICE", productId: "p1", cents: null, reason: "" },
+    );
+    expect(precioEfectivoCents(s.lines[0]!)).toBe(100000);
+  });
+
+  it("APPLY_PRICES no pisa una línea cobrada a mano", () => {
+    const s = con(
+      { type: "ADD_PRODUCT", product: firmado },
+      { type: "SET_LINE_PRICE", productId: "p1", cents: 80000, reason: "x" },
+      { type: "APPLY_PRICES", prices: { p1: "800.00" }, notice: "n" },
+    );
+    expect(s.lines[0]?.product.sale_price_ars).toBe("1000.00");
+    expect(s.lines[0]?.product.price_token).toBe("tok");
+  });
+});
+
+describe("APPLY_PRICES y la firma", () => {
+  it("si el precio cambia, la firma vieja se descarta (si no daría PRICE_TOKEN_INVALID)", () => {
+    const s = con(
+      { type: "ADD_PRODUCT", product: { ...yerba, price_token: "tok" } },
+      { type: "APPLY_PRICES", prices: { p1: "1200.00" }, notice: "n" },
+    );
+    expect(s.lines[0]?.product.sale_price_ars).toBe("1200.00");
+    expect(s.lines[0]?.product.price_token).toBeNull();
+    const [item] = buildPayload(s, "op-1", new Date(2026, 9, 2, 10)).items;
+    expect(item).not.toHaveProperty("price_token");
+  });
+
+  it("si el precio es el firmado, la firma se conserva", () => {
+    const s = con(
+      { type: "ADD_PRODUCT", product: { ...yerba, price_token: "tok" } },
+      { type: "APPLY_PRICES", prices: { p1: "1000.00" }, notice: "n" },
+    );
+    expect(s.lines[0]?.product.price_token).toBe("tok");
   });
 });

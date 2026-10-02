@@ -325,6 +325,39 @@ async def require_void_access(
     return await require_modify_access(current_user, redis)
 
 
+async def require_discrepancy_view(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Quién ve las diferencias de stock: OWNER/ADMIN, o un cajero con el permiso."""
+    if current_user.role_code == CASHIER_ROLE:
+        assert_pos_permission(current_user, PosPermission.RESOLVE_DISCREPANCY)
+        return current_user
+    if current_user.role_code not in ("OWNER", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permiso para ver las diferencias de stock.",
+        )
+    return current_user
+
+
+async def require_discrepancy_access(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> User:
+    """Quién resuelve una diferencia de stock (mueve stock, puede anular).
+
+    - OWNER/ADMIN: ``require_modify_access`` (PIN), como siempre.
+    - CASHIER: permiso ``resolve_discrepancy`` + ventana de SU PIN. Si elige
+      anular el ticket, el handler exige además las reglas de anulación del
+      cajero: el permiso nuevo no saltea las de B10.
+    """
+    if current_user.role_code == CASHIER_ROLE:
+        assert_pos_permission(current_user, PosPermission.RESOLVE_DISCREPANCY)
+        await _require_pin_window(current_user, redis)
+        return current_user
+    return await require_modify_access(current_user, redis)
+
+
 async def require_modify_access(
     current_user: User = Depends(get_current_user),
     redis: Redis = Depends(get_redis),
