@@ -130,8 +130,20 @@ export const posService = {
     const res = await api.get<PosCustomer[]>("/pos/customers", { params: { q, limit: 20 } });
     return res.data;
   },
-  async learnBarcode(productId: string, barcode: string): Promise<PosProduct> {
-    const res = await api.post<PosProduct>(`/products/${productId}/barcode`, { barcode });
+  /**
+   * `offline: true` lo manda sólo el motor de sincronización, para un código
+   * que se aprendió sin red: queda en la auditoría (`learned_offline`).
+   */
+  async learnBarcode(
+    productId: string,
+    barcode: string,
+    { offline = false }: { offline?: boolean } = {},
+  ): Promise<PosProduct> {
+    const res = await api.post<PosProduct>(
+      `/products/${productId}/barcode`,
+      { barcode },
+      { headers: offline ? { "X-POS-Offline": "1" } : {} },
+    );
     return res.data;
   },
   async createOperation(payload: PosOperationPayload): Promise<PosOperationResult> {

@@ -110,7 +110,13 @@ Desde la barra de la caja se entra a **«Turnos de caja»**. Ahí se ve:
   - Si un código responde a más de un producto, la caja **pide elegir**: nunca
     elige sola.
   - Un código desconocido puede **vincularse** a un producto. Lo hace quien
-    tiene el permiso «aprender códigos», y hace falta internet.
+    tiene el permiso «aprender códigos».
+  - **Sin internet también**: el vínculo queda guardado en la PC, el próximo
+    escaneo ya lo encuentra y se sube solo al volver la conexión. Si mientras
+    tanto ese código quedó en otro producto, aparece en «Ventas sin
+    sincronizar» → «Códigos aprendidos sin conexión» como «Requiere revisión»;
+    **las ventas hechas con él no cambian**. Sin red, el buscador por nombre
+    busca en el catálogo guardado en la PC.
 - **Descuentos**, por línea o a la venta, si el usuario tiene el permiso. El
   total cobrado siempre cierra al centavo.
 - **Pago mixto.** Con **«Dividir pago»** se reparte el cobro, por ejemplo
@@ -245,7 +251,6 @@ la resuelve **desde la caja**, con su PIN.
 
 ## 8. Lo que la caja todavía no hace
 
-- **Aprender códigos sin internet.** Vincular un código nuevo necesita conexión.
 - **Numeración correlativa y datos fiscales en el ticket.** El comprobante es
   **no fiscal**.
 - **Confirmar que salió el papel.** El navegador no lo sabe.

@@ -67,6 +67,29 @@ export interface OperacionGuardada {
   sincronizadaEn: string | null;
 }
 
+/**
+ * Un código aprendido SIN RED (cierre de B4): "este código es este producto",
+ * pendiente de subir. Ver `lib/offline/aprendizajes.ts`.
+ */
+export type EstadoAprendizaje = "PENDIENTE" | "SINCRONIZADO" | "REQUIERE_REVISION";
+
+export interface AprendizajeGuardado {
+  /** `${tenantId}:${codigo}`: un código se aprende una sola vez por negocio. */
+  id: string;
+  tenantId: string;
+  userId: string;
+  terminalId: string | null;
+  codigo: string;
+  productId: string;
+  productName: string;
+  estado: EstadoAprendizaje;
+  creadoEn: string;
+  intentos: number;
+  ultimoError: string | null;
+  ultimoCodigo: string | null;
+  proximoIntentoEn: number;
+}
+
 export interface ProductoGuardado {
   id: string;
   tenantId: string;
@@ -86,10 +109,17 @@ interface EsquemaPos extends DBSchema {
     indexes: { porTenant: string };
   };
   meta: { key: string; value: { clave: string; valor: unknown } };
+  aprendizajes: {
+    key: string;
+    value: AprendizajeGuardado;
+    indexes: { porTenant: string };
+  };
 }
 
 const NOMBRE = "vektor-pos";
-const VERSION = 1;
+/** v2 (cierre de B4): store `aprendizajes`. Subir de versión no toca los demás
+ *  stores: `upgrade` sólo crea lo que falta. */
+const VERSION = 2;
 
 let db: Promise<IDBPDatabase<EsquemaPos>> | null = null;
 
@@ -111,6 +141,10 @@ export function abrirPosDb(): Promise<IDBPDatabase<EsquemaPos>> {
         if (!base.objectStoreNames.contains("meta")) {
           base.createObjectStore("meta", { keyPath: "clave" });
         }
+        if (!base.objectStoreNames.contains("aprendizajes")) {
+          const apr = base.createObjectStore("aprendizajes", { keyPath: "id" });
+          apr.createIndex("porTenant", "tenantId");
+        }
       },
     });
   }
@@ -130,11 +164,12 @@ export function _resetPosDb(): void {
  */
 export async function _limpiarPosDb(): Promise<void> {
   const base = await abrirPosDb();
-  const tx = base.transaction(["operaciones", "catalogo", "meta"], "readwrite");
+  const tx = base.transaction(["operaciones", "catalogo", "meta", "aprendizajes"], "readwrite");
   await Promise.all([
     tx.objectStore("operaciones").clear(),
     tx.objectStore("catalogo").clear(),
     tx.objectStore("meta").clear(),
+    tx.objectStore("aprendizajes").clear(),
     tx.done,
   ]);
 }

@@ -32,3 +32,18 @@ def hash_de_secreto(secreto: str) -> str:
 def secreto_coincide(secreto: str, hash_guardado: str) -> bool:
     """Comparación en tiempo constante: no filtra cuántos caracteres coinciden."""
     return hmac.compare_digest(hash_de_secreto(secreto), hash_guardado)
+
+
+#: Lo manda SÓLO el motor de sincronización de la caja: "esto se hizo sin
+#: conexión y recién ahora llega". En la venta relaja el invariante de stock
+#: (B11); en el aprendizaje de un código sólo queda en la auditoría.
+OFFLINE_HEADER = "X-POS-Offline"
+
+#: Lo que cuenta como "sí" en ese header. Un `bool(valor)` pelado tomaría `"0"`
+#: como verdadero —toda cadena no vacía lo es—, y ese header relaja el
+#: invariante de stock: no puede depender de leer mal un cero.
+_OFFLINE_SI = frozenset({"1", "true", "yes"})
+
+
+def es_offline(valor: str | None) -> bool:
+    return valor is not None and valor.strip().lower() in _OFFLINE_SI

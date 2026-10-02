@@ -15,6 +15,7 @@ import { OpenCashSession } from "@/features/pos/OpenCashSession";
 import { PaymentPanel } from "@/features/pos/PaymentPanel";
 import { type PickerMode, ProductPicker } from "@/features/pos/ProductPicker";
 import { PendingOperationsPanel } from "@/features/pos/PendingOperationsPanel";
+import { guardarAprendizaje } from "@/lib/offline/aprendizajes";
 import { StockDiscrepanciesPanel } from "@/features/products/StockDiscrepanciesPanel";
 import { RecentTickets } from "@/features/pos/RecentTickets";
 import { ScanInput } from "@/features/pos/ScanInput";
@@ -63,7 +64,7 @@ import {
   toCents,
 } from "@/lib/pos/cart";
 import { type PosErrorInfo, cobroRejectionMessage, posErrorInfo } from "@/lib/pos/errors";
-import { clasificarSync } from "@/lib/pos/syncClassification";
+import { clasificarSync, esFalloDeRed } from "@/lib/pos/syncClassification";
 import { reciboLocal } from "@/lib/pos/reciboLocal";
 import { buscarEnCatalogo, clasificar } from "@/lib/pos/scanCodeLocal";
 import { CASHIER_ROLE, POS_ROLES, hasPosPermission } from "@/lib/roles";
@@ -185,7 +186,7 @@ function PosRegister() {
   const [persistencia, setPersistencia] = useState<boolean | null>(null);
   // Un cobro `EN_CORRECCION` no está "sin sincronizar" —reenviarlo daría el
   // mismo rechazo—: está sin completar, que es otra cosa y se arregla distinto.
-  const { pendientes, sincronizando, flush, refrescar } = usePosSync({
+  const { pendientes, aprendizajes, sincronizando, flush, refrescar } = usePosSync({
     tenantId,
     userId,
     terminalId,
@@ -444,10 +445,11 @@ function PosRegister() {
 
   // El stock estimado se recalcula cuando cambia la cola: es DERIVADO de los
   // pendientes, nunca acumulado sobre el producto guardado.
+  // Lo mismo con los códigos aprendidos sin red: se superponen al leer.
   useEffect(() => {
     if (!tenantId) return;
     void catalogoDeCaja(tenantId).then(setCatalogo);
-  }, [tenantId, pendientes]);
+  }, [tenantId, pendientes, aprendizajes]);
 
   // El service worker se registra SÓLO si el dueño encendió la casilla en esta
   // PC, y apagarla lo desregistra y borra su caché. Una PC que nunca lo
@@ -555,6 +557,10 @@ function PosRegister() {
               code,
               candidates: hallados.map((h) => h.producto),
             });
+          } else if (canLearn && clasificar(code).aprendible) {
+            // Sin red también se puede aprender: queda guardado en la PC y
+            // sube cuando vuelve la conexión (ver `lib/offline/aprendizajes`).
+            setPicker({ mode: "learn", code });
           } else {
             setScanMsg(
               `Sin conexión y «${code}» no está en el catálogo guardado en esta PC.`,
@@ -578,6 +584,40 @@ function PosRegister() {
     thresholdMs,
   });
 
+  /**
+   * Aprender un código sin red. Las MISMAS precondiciones que el servidor,
+   * antes de guardar: si no, la caja vendería con un vínculo que al sincronizar
+   * se rechaza. Devuelve el motivo si no se puede, o `null` si quedó guardado.
+   */
+  const aprenderSinRed = useCallback(
+    async (code: string, product: PosProduct): Promise<string | null> => {
+      const codigo = clasificar(code);
+      if (!codigo.aprendible) return `«${code}» no es un código que se pueda vincular.`;
+      const actual = catalogoRef.current.find((p) => p.id === product.id);
+      if ((actual?.barcode ?? product.barcode)?.trim()) {
+        return `${product.name} ya tiene otro código cargado: no se vinculó «${code}».`;
+      }
+      if (buscarEnCatalogo(codigo, catalogoRef.current).length > 0) {
+        return `«${code}» ya es de otro producto. Avisale al encargado.`;
+      }
+      try {
+        await guardarAprendizaje({
+          tenantId,
+          userId,
+          terminalId,
+          codigo: codigo.valor,
+          productId: product.id,
+          productName: product.name,
+        });
+      } catch {
+        return "No se pudo guardar el código en esta PC.";
+      }
+      await refrescar();
+      return null;
+    },
+    [tenantId, userId, terminalId, refrescar],
+  );
+
   const onPick = useCallback(
     async (product: PosProduct) => {
       const actual = picker;
@@ -593,6 +633,19 @@ function PosRegister() {
         setScanMsg(`«${actual.code}» quedó vinculado a ${product.name}.`);
       } catch (e) {
         const info = posErrorInfo(e);
+        if (esFalloDeRed(info)) {
+          const motivo = await aprenderSinRed(actual.code, product);
+          if (motivo === null) {
+            dispatch({ type: "ADD_PRODUCT", product });
+            setScanMsg(
+              `«${actual.code}» quedó vinculado a ${product.name} en esta PC. ` +
+                "Se sube cuando vuelva la conexión.",
+            );
+          } else {
+            setScanMsg(motivo);
+          }
+          return;
+        }
         if (info.code === "BARCODE_ALREADY_SET") {
           // Lo eligió a propósito: se vende igual, pero el código no se vinculó.
           dispatch({ type: "ADD_PRODUCT", product });
@@ -604,7 +657,7 @@ function PosRegister() {
         }
       }
     },
-    [picker, focusScan],
+    [picker, focusScan, aprenderSinRed],
   );
 
   // ─── Render ───────────────────────────────────────────────────────────────
@@ -992,6 +1045,7 @@ function PosRegister() {
 
             <PendingOperationsPanel
               pendientes={pendientes}
+              aprendizajes={aprendizajes}
               terminalId={terminalId}
               esDuenio={user?.role === "OWNER"}
               sincronizando={sincronizando}
@@ -1028,6 +1082,7 @@ function PosRegister() {
       {picker ? (
         <ProductPicker
           picker={picker}
+          local={catalogo}
           onPick={(p) => void onPick(p)}
           onClose={() => {
             setPicker(null);

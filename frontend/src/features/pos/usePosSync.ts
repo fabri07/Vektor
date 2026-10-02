@@ -21,6 +21,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  actualizarAprendizaje,
+  aprendizajesSincronizables,
+  listarAprendizajes,
+} from "@/lib/offline/aprendizajes";
+import {
+  type AprendizajeGuardado,
   type OperacionGuardada,
   actualizarOperacion,
   listarNoSincronizadas,
@@ -42,9 +48,22 @@ function esperaPorIntentos(intentos: number): number {
   return Math.min(ESPERA_MAXIMA_MS, 5_000 * 2 ** Math.max(0, intentos - 1));
 }
 
+/**
+ * Lo que dice el servidor de un código aprendido sin red y que NO se arregla
+ * reintentando: otro producto ya lo tiene, el producto ya tiene otro, el código
+ * no es aprendible, o el producto ya no existe. Va a revisión.
+ */
+const RECHAZOS_DE_APRENDIZAJE = new Set([
+  "BARCODE_TAKEN",
+  "BARCODE_ALREADY_SET",
+  "SCAN_CODE_NOT_LEARNABLE",
+]);
+
 export interface EstadoDeSync {
   /** Todo lo que todavía no está en el servidor, en orden de cobro. */
   pendientes: OperacionGuardada[];
+  /** Códigos aprendidos sin red que todavía no subieron o quedaron en revisión. */
+  aprendizajes: AprendizajeGuardado[];
   sincronizando: boolean;
   flush: () => Promise<void>;
   refrescar: () => Promise<void>;
@@ -71,6 +90,7 @@ export function usePosSync({
   automatico = true,
 }: OpcionesDeSync): EstadoDeSync {
   const [pendientes, setPendientes] = useState<OperacionGuardada[]>([]);
+  const [aprendizajes, setAprendizajes] = useState<AprendizajeGuardado[]>([]);
   const [sincronizando, setSincronizando] = useState(false);
   const datos = useRef({ tenantId, userId, terminalId });
   datos.current = { tenantId, userId, terminalId };
@@ -78,6 +98,11 @@ export function usePosSync({
   const refrescar = useCallback(async () => {
     if (!datos.current.tenantId) return;
     setPendientes(await listarNoSincronizadas(datos.current.tenantId));
+    setAprendizajes(
+      (await listarAprendizajes(datos.current.tenantId)).filter(
+        (a) => a.estado !== "SINCRONIZADO",
+      ),
+    );
   }, []);
 
   const flush = useCallback(async () => {
@@ -86,6 +111,7 @@ export function usePosSync({
     setSincronizando(true);
     try {
       await conCandadoDeSync(async () => {
+        let sinRed = false;
         const cola = await pendientesSincronizables(t, u, term);
         for (const op of cola) {
           try {
@@ -135,7 +161,10 @@ export function usePosSync({
               });
               // Sin red no tiene sentido seguir con el resto de la cola: sería
               // gastar el mismo error una vez por venta.
-              if (red) break;
+              if (red) {
+                sinRed = true;
+                break;
+              }
             } else {
               await actualizarOperacion(op.clientOperationId, {
                 estado:
@@ -143,6 +172,44 @@ export function usePosSync({
                 intentos: op.intentos + 1,
                 ultimoError: info.message ?? "El servidor la rechazó",
                 ultimoCodigo: info.code,
+              });
+            }
+          }
+        }
+        // Después de las ventas, los códigos aprendidos sin red. Un conflicto
+        // NO toca ninguna venta: lo vendido con ese código se vendió con el
+        // producto que el cajero eligió, que es lo que se cobró.
+        if (sinRed) return;
+        for (const a of await aprendizajesSincronizables(t, u, term)) {
+          try {
+            await posService.learnBarcode(a.productId, a.codigo, { offline: true });
+            await actualizarAprendizaje(a.id, {
+              estado: "SINCRONIZADO",
+              ultimoError: null,
+              ultimoCodigo: null,
+            });
+          } catch (e) {
+            const info = posErrorInfo(e);
+            if (esFalloDeRed(info)) break;
+            if (
+              (info.code !== null && RECHAZOS_DE_APRENDIZAJE.has(info.code)) ||
+              info.status === 404
+            ) {
+              await actualizarAprendizaje(a.id, {
+                estado: "REQUIERE_REVISION",
+                intentos: a.intentos + 1,
+                ultimoError: info.message ?? "El servidor no aceptó el código.",
+                ultimoCodigo: info.code,
+              });
+            } else {
+              // Sesión vencida, caja dada de baja o error del servidor: se
+              // reintenta más tarde, sin perder el aprendizaje.
+              const intentos = a.intentos + 1;
+              await actualizarAprendizaje(a.id, {
+                intentos,
+                ultimoError: info.message ?? "No se pudo subir el código.",
+                ultimoCodigo: info.code,
+                proximoIntentoEn: Date.now() + esperaPorIntentos(intentos),
               });
             }
           }
@@ -206,5 +273,5 @@ export function usePosSync({
     };
   }, [habilitado, tenantId, userId, terminalId, automatico, flush, revivir]);
 
-  return { pendientes, sincronizando, flush, refrescar };
+  return { pendientes, aprendizajes, sincronizando, flush, refrescar };
 }
