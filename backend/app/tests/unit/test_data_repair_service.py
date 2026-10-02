@@ -158,6 +158,7 @@ async def test_detect_chat_sale_quality_issue_unique_product():
     mock_product.tenant_id = tenant_id
     mock_product.name = "Coca-Cola 600ml"
     mock_product.sale_price_ars = Decimal("500")
+    mock_product.base_units_per_sale_unit = 1  # por unidad
     mock_product.is_active = True
 
     sales_result = MagicMock()

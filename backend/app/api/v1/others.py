@@ -460,11 +460,20 @@ async def reclassify_record(
     try:
         if body.entity_type == "sale":
             sale_req = CreateSaleRequest(**body.fields)
+            # La fila es de un DOCUMENTO: su cantidad está en la unidad de venta
+            # («2» de queso son 2 kg). Misma regla que «Importar sugeridos».
+            _cantidad = sale_req.quantity
+            if sale_req.product_id is not None:
+                _vendido = await session.get(Product, sale_req.product_id)
+                if _vendido is not None and _vendido.tenant_id == tenant.tenant_id:
+                    _cantidad = a_unidades_base(
+                        sale_req.quantity, _vendido.base_units_per_sale_unit or 1
+                    )
             session.add(
                 SaleEntry(
                     tenant_id=tenant.tenant_id,
                     amount=sale_req.amount,
-                    quantity=sale_req.quantity,
+                    quantity=_cantidad,
                     transaction_date=sale_req.transaction_date,
                     payment_method=sale_req.payment_method,
                     product_id=sale_req.product_id,

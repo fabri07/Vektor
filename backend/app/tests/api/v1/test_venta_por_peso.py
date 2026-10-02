@@ -115,6 +115,23 @@ class TestAltaYEdicion:
         assert resp.status_code == 200, resp.text
         assert resp.json()["sale_unit"] == "unit"
 
+    async def test_pasar_a_kilo_sin_umbral_pone_5_kg(
+        self, client: AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        """La misma regla que el alta: sin umbral propio, 5 de la unidad de venta."""
+        resp = await client.post(
+            "/api/v1/products", json={"name": "Pan", "sale_price_ars": "100.00"},
+            headers=auth_headers,
+        )
+        pid = resp.json()["id"]
+        resp = await client.patch(
+            f"/api/v1/products/{pid}",
+            json={"sale_unit": "gram", "base_units_per_sale_unit": 1000},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["low_stock_threshold_units"] == 5000
+
     async def test_con_stock_no_se_puede_cambiar_la_unidad(
         self, client: AsyncClient, auth_headers: dict[str, str]
     ) -> None:

@@ -591,6 +591,15 @@ async def update_product(
                 ),
             },
         )
+    # Pasar a kilo o litro sin umbral propio: el default de 5 contado en
+    # unidades base serían 5 g y nunca alertaría (la misma regla que el alta).
+    nuevo_factor = updates.get("base_units_per_sale_unit") or product.base_units_per_sale_unit
+    if (
+        cambia_unidad
+        and nuevo_factor > 1
+        and updates.get("low_stock_threshold_units", product.low_stock_threshold_units) is None
+    ):
+        updates["low_stock_threshold_units"] = DEFAULT_LOW_STOCK_THRESHOLD_UNITS * nuevo_factor
     # Review F2 #2: validar identidad duplicada ANTES de aplicar un cambio de
     # sku/barcode (el PATCH aplicaba setattr directo → dos productos activos con
     # el mismo SKU). Solo se chequea el identificador que efectivamente cambia,

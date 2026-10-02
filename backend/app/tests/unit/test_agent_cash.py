@@ -187,6 +187,7 @@ async def test_sale_with_quantity_looks_up_product_price():
     }
     mock_product = MagicMock()
     mock_product.sale_price_ars = Decimal("500")
+    mock_product.base_units_per_sale_unit = 1  # por unidad
     mock_product.name = "Coca-Cola 600ml"
     mock_product.id = "00000000-0000-0000-0000-000000000099"
 
@@ -324,6 +325,7 @@ async def test_llm_invents_amount_but_message_has_no_monetary_signal_uses_catalo
     }
     mock_product = MagicMock()
     mock_product.sale_price_ars = Decimal("500")
+    mock_product.base_units_per_sale_unit = 1  # por unidad
     mock_product.name = "Coca-Cola 600ml"
     mock_product.id = "00000000-0000-0000-0000-000000000099"
 
@@ -367,6 +369,7 @@ async def test_llm_invents_amount_but_message_only_has_year_uses_catalog():
     }
     mock_product = MagicMock()
     mock_product.sale_price_ars = Decimal("500")
+    mock_product.base_units_per_sale_unit = 1  # por unidad
     mock_product.name = "Coca-Cola 600ml"
     mock_product.id = "00000000-0000-0000-0000-000000000099"
 

@@ -2724,6 +2724,42 @@ def _label_fila_sin_monto(raw: Any) -> str:
     return _SIN_MONTO_LABEL
 
 
+def _cantidad_base_de_documento(qty_raw: Any, factor: int) -> int:
+    """Cantidad de un DOCUMENTO en la unidad de venta → unidades base.
+
+    Un producto por peso se compra y se lista en kilos con decimales («2,5» kg),
+    que la política de cantidades —enteras— descartaría como fraccionarias. Acá
+    la fracción vale mientras dé unidades base enteras: 2,5 kg son 2500 g, y
+    0,0005 kg no son gramos enteros (0). Con factor 1 es `_parse_qty` tal cual.
+    Devuelve 0 para lo que no se puede usar, como `_parse_qty`.
+    """
+    if factor <= 1:
+        return _parse_qty(qty_raw)
+    monto = parsear_monto(qty_raw)
+    if monto.valor is None or monto.valor <= 0:
+        return 0
+    base = monto.valor * factor
+    if base != base.to_integral_value():
+        return 0
+    return int(base)
+
+
+def _factor_de(factores: dict[uuid.UUID, int], product_id: uuid.UUID | None) -> int:
+    """El factor de un producto por peso, o 1 (sin producto o por unidad)."""
+    return factores.get(product_id, 1) if product_id is not None else 1
+
+
+def _es_fraccion_positiva(qty_raw: Any) -> bool:
+    """¿La celda dice una cantidad positiva con decimales? Sólo eso justifica
+    mirar el producto antes de descartarla: puede ser uno por peso."""
+    monto = parsear_monto(qty_raw)
+    return (
+        monto.valor is not None
+        and monto.valor > 0
+        and monto.valor != monto.valor.to_integral_value()
+    )
+
+
 def _cantidad_de_venta(qty_raw: Any) -> tuple[int, str | None]:
     """Unidades de una venta importada, y el motivo si el archivo declaró algo ilegible.
 
@@ -2972,7 +3008,9 @@ async def _apply_purchase_to_stock(
     # 0 para vacía, fraccionaria, negativa o ilegible, y acá 0 ya significaba
     # "no hay cantidad que sumar al stock".
     qty = _parse_qty(qty_raw)
-    if qty <= 0:
+    # Una fracción («2,5») no es una cantidad de unidades, pero puede ser de un
+    # producto por peso: sólo en ese caso vale cargar el producto para decidir.
+    if qty <= 0 and not _es_fraccion_positiva(qty_raw):
         return
     from app.persistence.models.product import Product  # noqa: PLC0415
 
@@ -2992,7 +3030,9 @@ async def _apply_purchase_to_stock(
     # producto —"5" de queso son 5 kg— y el stock vive en unidades base. Con
     # factor 1 (todo producto por unidad) no cambia nada. `qty` (la del
     # documento) se conserva para la huella de la fila.
-    qty_base = a_unidades_base(qty, product.base_units_per_sale_unit or 1)
+    qty_base = _cantidad_base_de_documento(qty_raw, product.base_units_per_sale_unit or 1)
+    if qty_base <= 0:
+        return
     product.stock_units += qty_base
     # F-H6.d: son DOS preguntas distintas y hasta acá se respondían con el mismo
     # número. `unit_cost` es lo que FACTURÓ el proveedor y queda en el movimiento
@@ -5834,7 +5874,11 @@ async def _insert_confirmed_data_impl(
                             await _proyeccion_recorder.registrar_compra(
                                 expense.product_id,
                                 tx_date.date(),
-                                _parse_qty(exp_qty_raw),
+                                # En unidades base, como la venta y el saldo: un
+                                # «5» de queso son 5000 g también acá.
+                                _cantidad_base_de_documento(
+                                    exp_qty_raw, _factor_de(_factores, expense.product_id)
+                                ),
                                 _ctx_inline,
                             )
                         await _apply_purchase_to_stock(
@@ -6140,6 +6184,8 @@ async def _insert_confirmed_data_impl(
                     cost: Decimal | None = cost,
                     list_price: Decimal | None = list_price,
                     stock_val: int = stock_val,
+                    # La celda cruda: un producto por peso la lee con decimales.
+                    _stock_raw: Any = row.get(stock_col) if stock_col else None,
                     prod_cat: str | None = prod_cat,
                     prod_desc: str | None = prod_desc,
                     store_name: str | None = store_name,
@@ -6221,7 +6267,8 @@ async def _insert_confirmed_data_impl(
                     # Un producto por peso o volumen: el archivo habla en su
                     # unidad de venta (kg, L) y el stock vive en unidades base.
                     _factor = existing.base_units_per_sale_unit or 1
-                    stock_val = a_unidades_base(stock_val, _factor)
+                    if _factor > 1:
+                        stock_val = _cantidad_base_de_documento(_stock_raw, _factor)
                     if stock_val > 0:
                         _delta = stock_val - existing.stock_units
                         # F-H3.b: el catálogo declara un ABSOLUTO (pisa la apertura,
@@ -7930,7 +7977,11 @@ async def _insert_multisheet_data(
         # incluye esta misma compra y la contaría dos veces.
         if proyeccion is not None:
             await proyeccion.registrar_compra(
-                expense.product_id, tx_date.date(), _parse_qty(exp_qty_raw), context_id
+                expense.product_id,
+                tx_date.date(),
+                # En unidades base, como la venta y el saldo.
+                _cantidad_base_de_documento(exp_qty_raw, _factor_de(_factores, expense.product_id)),
+                context_id,
             )
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
@@ -8303,7 +8354,13 @@ async def _insert_multisheet_data(
             # Un producto por peso o volumen: el archivo habla en su unidad de
             # venta (kg, L) y el stock vive en unidades base.
             _factor = existing.base_units_per_sale_unit or 1
-            _stock_base = a_unidades_base(stock_val, _factor)
+            _stock_base = (
+                _cantidad_base_de_documento(
+                    _val(row, cols.get("stock_units"), _STOCK_COLS), _factor
+                )
+                if _factor > 1
+                else stock_val
+            )
             if _stock_base > 0:
                 _delta = _stock_base - existing.stock_units
                 # F-H3.b: un catálogo declara un ABSOLUTO, no un movimiento. Es la
@@ -8377,7 +8434,8 @@ async def _insert_multisheet_data(
                         if (cost or existing.unit_cost_ars) is not None
                         else None
                     ),
-                    "stock_units": stock_val or existing.stock_units,
+                    # Ya en unidades base (si el archivo traía stock, ya se aplicó).
+                    "stock_units": existing.stock_units,
                     "sku": existing.sku,
                     "barcode": existing.barcode,
                     "category": existing.category,

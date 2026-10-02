@@ -125,3 +125,52 @@ async def test_libro_de_varias_hojas_dice_kilos_en_stock_y_ventas(
     assert venta.product_id == queso.id
     assert venta.quantity == 2000
     assert venta.amount == Decimal("20000")
+
+
+async def test_una_compra_de_2_5_kg_entra_como_2500_g(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Un kilo fraccionado es lo normal en un producto por peso: la cantidad del
+    documento con decimales vale mientras dé unidades base enteras. Antes se
+    descartaba como fraccionaria y el gasto entraba sin el stock."""
+    tid = sample_tenant.tenant_id
+    queso = Product(
+        tenant_id=tid, name="Queso", sale_price_ars=Decimal("10000"),
+        unit_cost_ars=Decimal("800"), stock_units=0,
+        sale_unit="gram", base_units_per_sale_unit=1000,
+    )
+    db_session.add(queso)
+    await db_session.flush()
+
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {"context_id": "sheet:Compras", "entity_type": "expense", "source_kind": "sheet",
+             "headers": ["fecha", "producto", "cantidad", "monto", "categoria"],
+             "fields": None, "preview_rows": [], "row_count": 1},
+        ],
+        "gastos_detectados": [
+            {"fecha": "2024-01-15", "producto": "Queso", "cantidad": Decimal("2.5"),
+             "monto": "2000", "categoria": "Mercadería", "__context__": "sheet:Compras"}
+        ],
+        "ventas_detectadas": [],
+        "stock_detectado": [],
+    }
+    await insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"gastos": True},
+        context_mappings={
+            "sheet:Compras": {"fecha": "expense_date", "producto": "product_name",
+                              "cantidad": "quantity", "monto": "amount",
+                              "categoria": "category"},
+        },
+        context_confirmed={"sheet:Compras": True},
+        uploaded_file_id=await _archivo(db_session, tid),
+    )
+    await db_session.flush()
+    await db_session.refresh(queso)
+    assert queso.stock_units == 2500

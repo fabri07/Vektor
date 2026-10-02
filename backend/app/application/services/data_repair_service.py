@@ -273,12 +273,9 @@ async def detect_chat_sale_quality_issues(
             amount_matches = [
                 alt
                 for alt in alternatives
-                if importe(
-                    Decimal(str(alt["sale_price_ars"])),
-                    quantity,
-                    int(alt.get("base_units_per_sale_unit") or 1),
-                )
-                == sale.amount
+                # Sólo por unidad: ver la exclusión de productos por peso abajo.
+                if int(alt.get("base_units_per_sale_unit") or 1) == 1
+                and importe(Decimal(str(alt["sale_price_ars"])), quantity, 1) == sale.amount
             ]
             if len(amount_matches) == 1:
                 product = await db.get(Product, uuid.UUID(amount_matches[0]["product_id"]))
@@ -300,6 +297,11 @@ async def detect_chat_sale_quality_issues(
             )
             continue
 
+        # Un producto por peso o volumen queda fuera: la cantidad de la nota del
+        # chat ("2 queso") no dice la unidad, y repararla con un importe
+        # calculado sería inventarlo. El chat ya no registra esas ventas.
+        if (product.base_units_per_sale_unit or 1) > 1:
+            continue
         expected_amount = importe(
             product.sale_price_ars, quantity, product.base_units_per_sale_unit
         )
