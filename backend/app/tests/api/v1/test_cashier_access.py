@@ -896,7 +896,11 @@ class TestPrecioManual:
         assert linea.line_total_ars == Decimal("160.00")
         assert linea.price_overridden is True
         assert linea.price_override_reason == "cliente fiel"
+        # El catálogo (100) difiere de lo cobrado (80): queda, como en toda
+        # divergencia. La respuesta dice además que fue a mano.
         assert linea.unit_price_catalog_ars == Decimal("100.00")
+        [respuesta] = cuerpo["lines"]
+        assert respuesta["price_overridden"] is True
 
         auditoria = (
             await db_session.execute(
@@ -909,6 +913,33 @@ class TestPrecioManual:
         assert detalle["lista_ars"] == "100.00"
         assert detalle["cobrado_ars"] == "80.00"
         assert detalle["motivo"] == "cliente fiel"
+        assert detalle["catalogo_ars"] == "100.00"
+
+    async def test_precio_manual_igual_al_catalogo_no_es_divergencia(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        fake_redis: Any,
+    ) -> None:
+        p = await _producto(client, auth_headers, "Yerba")
+        _, headers = await _cajero(
+            db_session, sample_tenant, fake_redis, {"price_override": True}
+        )
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_venta(
+                p["id"],
+                items=[{"product_id": p["id"], "quantity": 1,
+                        "manual_unit_price_ars": "100.00", "manual_price_reason": "x"}],
+            ),
+            headers=headers,
+        )
+        assert resp.status_code == 201, resp.text
+        [linea] = resp.json()["lines"]
+        assert linea["unit_price_catalog_ars"] is None
+        assert linea["price_overridden"] is True
 
     async def test_reintento_con_el_permiso_revocado_devuelve_el_ticket(
         self,

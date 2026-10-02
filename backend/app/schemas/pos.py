@@ -161,6 +161,9 @@ class PosOperationLineResponse(BaseModel):
     #: El precio que tenía el catálogo AL SINCRONIZAR, sólo si difería del que
     #: se cobró. `None` = no hubo divergencia (o la venta es anterior a B7).
     unit_price_catalog_ars: Decimal | None = None
+    #: La línea se cobró a un precio puesto a mano (`price_override`). Es lo que
+    #: distingue "el catálogo cambió" de "alguien cobró otro precio".
+    price_overridden: bool = False
 
 
 class PosTenderResponse(BaseModel):

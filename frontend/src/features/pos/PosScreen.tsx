@@ -242,6 +242,9 @@ function PosRegister() {
       for (const l of info.fields.lines as { product_id: string; unit_price_list: string }[]) {
         prices[l.product_id] = l.unit_price_list;
         const antes = lines.find((x) => x.product.id === l.product_id);
+        // Una línea cobrada a mano vuelve con el precio manual: no cambió nada
+        // del catálogo, y `APPLY_PRICES` tampoco la toca.
+        if (antes?.manualPriceCents != null) continue;
         if (antes && toCents(antes.product.sale_price_ars) !== toCents(l.unit_price_list)) {
           cambios.push(
             `${antes.product.name}: ${formatCents(toCents(antes.product.sale_price_ars) ?? 0)} → ` +

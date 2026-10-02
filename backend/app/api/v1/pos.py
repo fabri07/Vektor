@@ -426,9 +426,10 @@ async def create_pos_operation(
     #: El factor es el que se USÓ para cobrar, no el del catálogo: es el que
     #: hace que la cantidad impresa explique el importe impreso.
     snapshots: dict[uuid.UUID, tuple[str, str, int]] = {}
-    #: posición de la línea → (precio de lista, motivo), de las cobradas a mano.
-    #: Por posición y no por producto: el mismo producto puede ir dos veces.
-    manuales: dict[int, tuple[Decimal, str]] = {}
+    #: posición de la línea → (precio de lista, motivo, precio de catálogo), de
+    #: las cobradas a mano. Por posición y no por producto: el mismo producto
+    #: puede ir dos veces.
+    manuales: dict[int, tuple[Decimal, str, Decimal]] = {}
     for indice, item in enumerate(body.items):
         producto = por_id.get(item.product_id)
         if producto is None:
@@ -525,7 +526,11 @@ async def create_pos_operation(
         if item.manual_unit_price_ars is not None:
             # El de lista (verificado o del catálogo) queda registrado; se cobra
             # el manual. El permiso y el motivo se chequearon antes del claim.
-            manuales[indice] = (precio, (item.manual_price_reason or "").strip())
+            manuales[indice] = (
+                precio,
+                (item.manual_price_reason or "").strip(),
+                producto.sale_price_ars,
+            )
             precio = item.manual_unit_price_ars
 
         if producto.stock_units < item.quantity:
@@ -646,8 +651,15 @@ async def create_pos_operation(
                 discount_line_ars=linea.discount_line_ars,
                 discount_global_share_ars=linea.discount_global_share_ars,
                 line_total_ars=linea.line_total,
+                # Mismo contrato que siempre: el CATÁLOGO al sincronizar, sólo si
+                # difiere de lo cobrado. En una línea manual, lo cobrado es el
+                # manual; el precio de lista firmado queda en la auditoría.
                 unit_price_catalog_ars=(
-                    manuales[posicion][0]
+                    (
+                        manuales[posicion][2]
+                        if manuales[posicion][2] != linea.unit_price_list
+                        else None
+                    )
                     if posicion in manuales
                     else divergencias[linea.product_id][0]
                     if linea.product_id in divergencias
@@ -816,11 +828,7 @@ async def create_pos_operation(
                             "lista_ars": str(manuales[ln.position][0]),
                             "cobrado_ars": str(ln.unit_price_list),
                             "motivo": manuales[ln.position][1],
-                            "catalogo_ars": (
-                                str(divergencias[ln.product_id][0])
-                                if ln.product_id in divergencias
-                                else None
-                            ),
+                            "catalogo_ars": str(manuales[ln.position][2]),
                         }
                         for ln in lineas
                         if ln.position in manuales

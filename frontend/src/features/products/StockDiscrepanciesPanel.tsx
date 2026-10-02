@@ -89,6 +89,12 @@ export function StockDiscrepanciesPanel({ enCaja = false }: Props) {
   // 403 a cada visita de /products.
   const user = useAuthStore((s) => s.user);
   const puedeVer = hasPosPermission(user, "resolve_discrepancy");
+  // «La venta está mal» anula el ticket: un cajero además necesita poder anular
+  // (y que el ticket sea suyo, lo que verifica el servidor). Sin el permiso,
+  // ofrecerla sólo lleva a un rechazo después del motivo y el PIN.
+  const opciones = OPCIONES.filter(
+    (o) => o.valor !== "anular_ticket" || hasPosPermission(user, "void_ticket"),
+  );
   const { data } = useQuery({
     queryKey: ["pos-stock-discrepancies"],
     queryFn: () => posService.listStockDiscrepancies(true),
@@ -136,7 +142,7 @@ export function StockDiscrepanciesPanel({ enCaja = false }: Props) {
             </div>
             {abierta === d.id ? (
               <div className="mt-3 space-y-2">
-                {OPCIONES.map((o) => (
+                {opciones.map((o) => (
                   <label key={o.valor} className={`flex gap-2 text-sm ${t.secundario}`}>
                     <input
                       type="radio"

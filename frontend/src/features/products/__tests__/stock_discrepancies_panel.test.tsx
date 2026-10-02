@@ -130,3 +130,18 @@ it("un cajero con el permiso delegado las ve, y sin él no se le pregunta al ser
   );
   expect(svc.listStockDiscrepancies).not.toHaveBeenCalled();
 });
+
+it("a un cajero sin permiso de anular no le ofrece «la venta está mal»", async () => {
+  svc.listStockDiscrepancies.mockResolvedValue([diferencia]);
+  useAuthStore.setState({
+    token: "t",
+    user: {
+      id: "u2", email: "c@b.com", full_name: "Caja", role: "CASHIER", tenant_id: "t1",
+      pos_permissions: ["resolve_discrepancy"],
+    },
+  });
+  montar();
+  fireEvent.click(await screen.findByRole("button", { name: "Resolver" }));
+  expect(screen.getByText("La mercadería estaba")).toBeInTheDocument();
+  expect(screen.queryByText("La venta está mal")).not.toBeInTheDocument();
+});
