@@ -108,19 +108,17 @@ export async function superposicion(tenantId: string): Promise<Map<string, strin
 }
 
 /**
- * Después de reemplazar el catálogo: los ya subidos cuyo producto bajó CON ese
- * código sobran. Los pendientes nunca se tocan acá.
+ * Después de reemplazar el catálogo COMPLETO: todo lo ya subido sobra. Si el
+ * producto bajó con ese código, lo resuelve el catálogo; si bajó con otro o no
+ * bajó, el servidor es la verdad y el vínculo viejo no puede volver a aparecer
+ * (quedaría escondido detrás del código nuevo y reviviría si lo borran). Los
+ * pendientes nunca se tocan acá.
  */
-export async function podarAprendizajesSubidos(
-  tenantId: string,
-  barcodePorProducto: Map<string, string | null | undefined>,
-): Promise<void> {
+export async function podarAprendizajesSubidos(tenantId: string): Promise<void> {
   const base = await abrirPosDb();
   const tx = base.transaction("aprendizajes", "readwrite");
   for (const a of await tx.store.index("porTenant").getAll(tenantId)) {
-    if (a.estado === "SINCRONIZADO" && barcodePorProducto.get(a.productId) === a.codigo) {
-      await tx.store.delete(a.id);
-    }
+    if (a.estado === "SINCRONIZADO") await tx.store.delete(a.id);
   }
   await tx.done;
 }

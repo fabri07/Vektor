@@ -635,15 +635,15 @@ function PosRegister() {
         const info = posErrorInfo(e);
         if (esFalloDeRed(info)) {
           const motivo = await aprenderSinRed(actual.code, product);
-          if (motivo === null) {
-            dispatch({ type: "ADD_PRODUCT", product });
-            setScanMsg(
-              `«${actual.code}» quedó vinculado a ${product.name} en esta PC. ` +
-                "Se sube cuando vuelva la conexión.",
-            );
-          } else {
-            setScanMsg(motivo);
-          }
+          // El cajero eligió el producto a propósito: se vende igual aunque el
+          // código no se pueda vincular, como en el camino con red.
+          dispatch({ type: "ADD_PRODUCT", product });
+          setScanMsg(
+            motivo === null
+              ? `«${actual.code}» quedó vinculado a ${product.name} en esta PC. ` +
+                  "Se sube cuando vuelva la conexión."
+              : `${motivo} Se agregó ${product.name} igual.`,
+          );
           return;
         }
         if (info.code === "BARCODE_ALREADY_SET") {

@@ -268,25 +268,27 @@ export function PendingOperationsPanel({
                   </span>
                 </div>
                 {a.estado === "REQUIERE_REVISION" ? (
-                  <>
-                    {/* El conflicto no tocó ninguna venta: lo vendido con este
-                        código ya se cobró con el producto que se eligió. */}
-                    <p className="mt-1 text-xs text-pos-text-2">
-                      {a.ultimoError ?? "El servidor no aceptó el código."} Las ventas
-                      hechas con este código no cambian.
-                    </p>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="mt-2"
-                      onClick={() => {
-                        void borrarAprendizaje(a.id).then(onCambio);
-                      }}
-                    >
-                      Descartar
-                    </Button>
-                  </>
+                  // El conflicto no tocó ninguna venta: lo vendido con este
+                  // código ya se cobró con el producto que se eligió.
+                  <p className="mt-1 text-xs text-pos-text-2">
+                    {a.ultimoError ?? "El servidor no aceptó el código."} Las ventas
+                    hechas con este código no cambian.
+                  </p>
                 ) : null}
+                {/* Descartar vale para cualquiera, también uno pendiente: si lo
+                    aprendió un cajero que no vuelve a esta PC, o una caja que se
+                    reemplazó, no tendría otra salida. Descartar un código no
+                    toca ninguna venta. */}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="mt-2"
+                  onClick={() => {
+                    void borrarAprendizaje(a.id).then(onCambio);
+                  }}
+                >
+                  Descartar
+                </Button>
               </li>
             ))}
           </ul>

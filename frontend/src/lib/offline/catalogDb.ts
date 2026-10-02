@@ -114,7 +114,7 @@ export async function sincronizarCatalogo(
 
   // Un código aprendido sin red y ya subido sobra cuando el catálogo bajado lo
   // trae: desde acá lo resuelve el catálogo mismo.
-  await podarAprendizajesSubidos(tenantId, new Map(productos.map((p) => [p.id, p.barcode])));
+  await podarAprendizajesSubidos(tenantId);
 
   await guardarMeta(CLAVE_SYNC(tenantId), new Date().toISOString());
   if (negocio) await guardarMeta(CLAVE_NEGOCIO(tenantId), negocio);

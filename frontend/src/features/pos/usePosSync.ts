@@ -191,9 +191,14 @@ export function usePosSync({
           } catch (e) {
             const info = posErrorInfo(e);
             if (esFalloDeRed(info)) break;
+            // Lo que el servidor rechaza para siempre —el código ya es de otro,
+            // el permiso fue revocado, un 404 o un 422— va a revisión y deja de
+            // superponerse: si siguiera pendiente, esta PC resolvería ese código
+            // a ese producto indefinidamente. Sesión o caja (autenticación) y
+            // errores pasajeros se reintentan.
             if (
               (info.code !== null && RECHAZOS_DE_APRENDIZAJE.has(info.code)) ||
-              info.status === 404
+              clasificarSync(info) === "revision"
             ) {
               await actualizarAprendizaje(a.id, {
                 estado: "REQUIERE_REVISION",

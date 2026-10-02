@@ -149,6 +149,33 @@ describe("la subida", () => {
     expect(await listarOperaciones("t1")).toHaveLength(0);
   });
 
+  it("un permiso revocado no se reintenta para siempre: va a revisión", async () => {
+    await catalogo([alfajor]);
+    await aprender();
+    svc.learnBarcode.mockRejectedValue(rechazo(403, "POS_PERMISSION_DENIED"));
+    const { result } = motor();
+    await act(async () => {
+      await result.current.flush();
+    });
+    expect((await listarAprendizajes("t1"))[0]?.estado).toBe("REQUIERE_REVISION");
+    expect((await catalogoDeCaja("t1"))[0]?.barcode).toBeNull();
+  });
+
+  it("uno subido que el catálogo contradice se poda y no revive", async () => {
+    await catalogo([alfajor]);
+    await aprender();
+    svc.learnBarcode.mockResolvedValue({ ...alfajor, barcode: EAN });
+    const { result } = motor();
+    await act(async () => {
+      await result.current.flush();
+    });
+    // El dueño le cambió el código después: el vínculo viejo no puede volver.
+    await catalogo([{ ...alfajor, barcode: "7790009999998" }]);
+    expect(await listarAprendizajes("t1")).toHaveLength(0);
+    await catalogo([alfajor]);
+    expect((await catalogoDeCaja("t1"))[0]?.barcode).toBeNull();
+  });
+
   it("sin red queda pendiente, sin gastar intentos", async () => {
     await catalogo([alfajor]);
     await aprender();
