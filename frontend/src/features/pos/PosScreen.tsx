@@ -985,6 +985,8 @@ function PosRegister() {
 
             <PendingOperationsPanel
               pendientes={pendientes}
+              terminalId={terminalId}
+              esDuenio={user?.role === "OWNER"}
               sincronizando={sincronizando}
               persistencia={persistencia}
               onFlush={() => void flush()}

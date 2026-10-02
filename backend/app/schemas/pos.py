@@ -9,7 +9,7 @@ offline que se puede editar—.
 
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
@@ -374,6 +374,23 @@ class PosTerminalResponse(BaseModel):
     created_at: datetime
     last_seen_at: datetime | None
     disabled_at: datetime | None
+
+
+class PosAdoptPendingRequest(BaseModel):
+    """Pasar a esta caja las ventas pendientes que cobró una caja reemplazada."""
+
+    #: ``None``: ventas cobradas sin caja (el dueño desde el navegador).
+    previous_terminal_id: UUID | None = None
+    #: Cada id con el mismo tope que `PosOperationRequest.client_operation_id`:
+    #: van enteros a la auditoría y no pueden inflarla.
+    client_operation_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        min_length=1, max_length=500
+    )
+
+
+class PosAdoptPendingResponse(BaseModel):
+    terminal_id: UUID
+    adopted: int
 
 
 class PosTerminalEnrolledResponse(PosTerminalResponse):

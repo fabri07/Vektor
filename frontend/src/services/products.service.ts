@@ -38,6 +38,12 @@ export interface ProductResponse {
   unit_cost_ars: number | null;
   /** Precio de lista/sugerido por proveedor. Informativo: no entra al margen. */
   list_price_ars: number | null;
+  /** Unidad de venta (B3). El stock está en unidades BASE; precio y costo, por
+   *  unidad de venta: toda cuenta stock × costo divide por el factor. */
+  sale_unit?: "unit" | "gram" | "milliliter";
+  base_units_per_sale_unit?: number;
+  /** El stock ya formateado por el servidor ("1,250 kg", "12 un."). */
+  stock_display?: string;
   stock_units: number;
   // null = umbral no configurado (servidor aplica DEFAULT_LOW_STOCK_THRESHOLD_UNITS = 5)
   // 0   = umbral explícito: solo sin-stock aplica

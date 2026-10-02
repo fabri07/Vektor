@@ -69,6 +69,7 @@ from app.application.services.idempotency import (
 )
 from app.application.services.maintenance_lock_service import acquire_write_lock_shared
 from app.application.services.pos_terminal_service import (
+    autorizar_adopcion,
     dar_de_baja,
     exigir_terminal_si_es_cajero,
     habilitar,
@@ -112,6 +113,8 @@ from app.persistence.models.pos_stock_discrepancy import (
 )
 from app.persistence.models.pos_terminal import PosTerminal
 from app.schemas.pos import (
+    PosAdoptPendingRequest,
+    PosAdoptPendingResponse,
     PosCashSessionAbandonRequest,
     PosCashSessionCloseRequest,
     PosCashSessionOpenRequest,
@@ -1386,6 +1389,36 @@ async def disable_pos_terminal(
     session: AsyncSession = Depends(get_db_session),
 ) -> PosTerminal:
     return await dar_de_baja(session, user, terminal_id)
+
+
+@router.post(
+    "/terminals/adopt-pending",
+    response_model=PosAdoptPendingResponse,
+    summary="Pasar a esta caja las ventas pendientes de una caja reemplazada",
+)
+async def adopt_pending_operations(
+    body: PosAdoptPendingRequest,
+    user: User = Depends(require_owner_stepup),
+    session: AsyncSession = Depends(get_db_session),
+    terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
+) -> PosAdoptPendingResponse:
+    """Sólo el dueño, con PIN, y DESDE la caja que las recibe (su header).
+
+    Las ventas siguen en la PC: esto autoriza y audita el cambio de caja; la
+    caja reescribe su cola recién con este 200, y las sube con su terminal.
+    """
+    actual = await resolver_terminal(session, user.tenant_id, terminal_secret)
+    if actual is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "TERMINAL_REQUIRED",
+                "message": "Hay que hacerlo desde la PC habilitada como caja.",
+            },
+        )
+    ids = list(dict.fromkeys(body.client_operation_ids))
+    await autorizar_adopcion(session, user, actual, body.previous_terminal_id, ids)
+    return PosAdoptPendingResponse(terminal_id=actual.id, adopted=len(ids))
 
 
 def _a_sesion(

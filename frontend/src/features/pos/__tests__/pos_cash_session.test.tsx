@@ -575,6 +575,11 @@ describe("revisión del turno durante la jornada", () => {
     );
     render(<PosScreen />);
     await screen.findByTestId("turno-bar");
+    // La barra se ve antes de que la caja tome su candado, y el reintento recién
+    // escucha `online` con el candado tomado (`habilitado`). Sin esperarlo, el
+    // evento podía llegar antes que el listener y el test fallaba según la
+    // carrera. La consulta de turnos anteriores corre con el candado tomado.
+    await waitFor(() => expect(svc.listCashSessions).toHaveBeenCalled());
     // El reintento automático manda la apertura y queda en vuelo...
     await act(async () => {
       window.dispatchEvent(new Event("online"));

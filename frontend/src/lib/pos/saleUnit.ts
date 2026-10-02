@@ -50,3 +50,20 @@ export function formatearCantidad(
   const decimales = String(factor).length - 1;
   return `${formatoAr(unidadesBase / factor, decimales)} ${etiqueta}`;
 }
+
+/**
+ * Valor del stock: unidades base × costo por unidad de venta / factor.
+ *
+ * Espejo de `sale_unit.valor_de_stock`. Sin la división, 5 kg (5000 g) de un
+ * producto que cuesta $800 el kilo valían $4.000.000 en vez de $4.000. Un
+ * factor ausente o no positivo vale 1: es lo que tienen todos los productos
+ * por unidad.
+ */
+export function valorDeStock(
+  unidadesBase: number,
+  factor: number | null | undefined,
+  costoPorUnidadDeVenta: number,
+): number {
+  const f = factor && factor > 0 ? factor : 1;
+  return Math.round((unidadesBase * costoPorUnidadDeVenta * 100) / f) / 100;
+}
