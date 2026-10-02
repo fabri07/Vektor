@@ -67,7 +67,9 @@ export function cobroRejectionMessage(info: PosErrorInfo): string {
       break;
   }
   if (info.status === 402) {
-    return "La suscripción del negocio no está activa y la caja no puede cobrar. Avisale al dueño.";
+    // Desde B14 la caja no tiene gate de suscripción: un 402 acá no debería
+    // llegar. Si llega, no se afirma nada sobre la venta.
+    return "El servidor rechazó el cobro por la suscripción del negocio. Avisale al dueño.";
   }
   if (info.status === 403) {
     return info.message ?? "Tu usuario no tiene permiso para esta operación.";

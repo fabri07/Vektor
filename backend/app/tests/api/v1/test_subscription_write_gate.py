@@ -1,9 +1,15 @@
 """Bloque B — la suscripción vencida bloquea las ALTAS, nunca las correcciones.
 
 La clasificación es por efecto, no por verbo HTTP, y tiene que ser la misma
-por API, por el agente y por el alta de usuarios. El test estructural
-(`test_las_rutas_con_gate_son_exactamente_estas`) es la compuerta: agregar
-una ruta de alta sin gate, o ponerle gate a una corrección, lo pone en rojo.
+por API, por el agente y por el alta de usuarios. Tres compuertas
+estructurales, las tres por introspección de dependencias:
+
+- `test_las_rutas_con_gate_son_exactamente_estas`: las altas bloqueadas.
+- `test_las_rutas_de_analisis_con_gate_son_exactamente_estas` (B14): las
+  lecturas analíticas bloqueadas.
+- `test_la_caja_no_lleva_ningun_gate` (B14): el tripwire — la caja sigue
+  cobrando con la suscripción vencida, y ponerle cualquiera de los dos gates
+  a una ruta de caja lo pone en rojo.
 """
 
 from __future__ import annotations
@@ -18,7 +24,10 @@ from httpx import AsyncClient
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import require_active_subscription
+from app.api.v1.deps import (
+    require_active_subscription,
+    require_active_subscription_for_insights,
+)
 from app.application.agents.shared.schemas import ActionType
 from app.application.services.pending_action_service import (
     WRITE_EXEMPT_ACTION_TYPES,
@@ -37,16 +46,12 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", f"{P}/sales"),
         ("POST", f"{P}/sales/bulk"),
+        # La carga manual del dueño es un alta como `POST /sales`; la CAJA no
+        # está acá (B14, ver `RUTAS_DE_CAJA_SIN_GATE`).
         ("POST", f"{P}/sales/manual-batch"),
-        # B3. Es un alta, así que entra bajo la misma política que el resto.
-        # **B14 la va a SACAR de acá**: la decisión de producto es que la caja
-        # siempre vende y lo que se bloquea por suscripción vencida es el
-        # análisis. Hasta entonces sigue la regla vigente, no la futura.
-        ("POST", f"{P}/pos/operations"),
         ("POST", f"{P}/expenses"),
         ("POST", f"{P}/products"),
         ("POST", f"{P}/products/custom-categories"),
-        ("POST", f"{P}/cash-closes"),
         ("POST", f"{P}/customers"),
         ("POST", f"{P}/customers/extract"),
         ("POST", f"{P}/customers/import/confirm"),
@@ -69,24 +74,108 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _tiene_gate(route: APIRoute) -> bool:
+#: B14 — lecturas analíticas: con la suscripción bloqueada, 402
+#: `SUBSCRIPTION_INSIGHTS_LOCKED`. Los datos propios y sus correcciones siguen
+#: abiertos (el `PATCH .../acknowledge` de insights no está acá); `/chat` no
+#: lleva este gate porque ya lo bloquea `reserve()` al reservar el cupo.
+RUTAS_DE_ANALISIS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", f"{P}/insights"),
+        ("GET", f"{P}/insights/current"),
+        ("GET", f"{P}/insights/actions"),
+        ("GET", f"{P}/insights/breakdown"),
+        ("GET", f"{P}/insights/cash-breakdown"),
+        ("GET", f"{P}/forecast/cash"),
+        ("GET", f"{P}/health-scores/current"),
+        ("GET", f"{P}/health-scores/summary"),
+        ("GET", f"{P}/health-scores/history"),
+        ("GET", f"{P}/health-scores/weekly"),
+        ("GET", f"{P}/health-scores/latest"),
+        ("GET", f"{P}/health-scores/margin-history"),
+        ("GET", f"{P}/health-scores/history/v2"),
+        # Un informe del score: es análisis, no una exportación de datos
+        # propios (esa es el CSV de las tablas, que no pasa por el backend).
+        ("POST", f"{P}/health-scores/{{snapshot_id}}/export"),
+        ("GET", f"{P}/economic-summary"),
+        ("GET", f"{P}/momentum/profile"),
+    }
+)
+
+#: B14 — la caja fuera de cualquier gate de suscripción. Además de este set,
+#: `test_la_caja_no_lleva_ningun_gate` barre TODO lo que cuelga de `/pos`, así
+#: que una ruta de caja nueva nace cubierta.
+RUTAS_DE_CAJA_SIN_GATE: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", f"{P}/pos/operations"),
+        ("POST", f"{P}/pos/operations/{{operation_id}}/void"),
+        ("GET", f"{P}/pos/catalog"),
+        ("POST", f"{P}/pos/cash-sessions"),
+        ("POST", f"{P}/pos/cash-sessions/{{session_id}}/close"),
+        ("GET", f"{P}/products/lookup"),
+        ("POST", f"{P}/products/{{product_id}}/barcode"),
+        ("POST", f"{P}/cash-closes"),
+    }
+)
+
+
+def _depende_de(route: APIRoute, dependencia: object) -> bool:
     pendientes = list(route.dependant.dependencies)
     while pendientes:
         dep = pendientes.pop()
-        if dep.call is require_active_subscription:
+        if dep.call is dependencia:
             return True
         pendientes.extend(dep.dependencies)
     return False
 
 
+def _tiene_gate(route: APIRoute) -> bool:
+    return _depende_de(route, require_active_subscription)
+
+
+def _rutas() -> list[APIRoute]:
+    return [r for r in create_app().routes if isinstance(r, APIRoute)]
+
+
 def test_las_rutas_con_gate_son_exactamente_estas() -> None:
     reales = {
         (metodo, route.path)
-        for route in create_app().routes
-        if isinstance(route, APIRoute) and _tiene_gate(route)
+        for route in _rutas()
+        if _tiene_gate(route)
         for metodo in route.methods
     }
     assert reales == RUTAS_CON_GATE
+
+
+def test_las_rutas_de_analisis_con_gate_son_exactamente_estas() -> None:
+    reales = {
+        (metodo, route.path)
+        for route in _rutas()
+        if _depende_de(route, require_active_subscription_for_insights)
+        for metodo in route.methods
+    }
+    assert reales == RUTAS_DE_ANALISIS_CON_GATE
+
+
+def test_la_caja_no_lleva_ningun_gate() -> None:
+    """El tripwire de B14: ninguna ruta de caja depende de un gate de suscripción."""
+    por_ruta = {(m, r.path): r for r in _rutas() for m in r.methods}
+    faltantes = RUTAS_DE_CAJA_SIN_GATE - por_ruta.keys()
+    assert not faltantes, f"rutas de caja que ya no existen: {faltantes}"
+
+    de_caja = {k for k in por_ruta if k[1].startswith(f"{P}/pos/")} | RUTAS_DE_CAJA_SIN_GATE
+    con_gate = {
+        k
+        for k in de_caja
+        if _depende_de(por_ruta[k], require_active_subscription)
+        or _depende_de(por_ruta[k], require_active_subscription_for_insights)
+    }
+    assert not con_gate, f"rutas de caja con gate de suscripción: {con_gate}"
+
+
+def test_ningun_gate_de_analisis_cae_sobre_una_escritura_de_datos() -> None:
+    """Los dos sets no se pisan, y el de análisis no tiene correcciones ni bajas."""
+    assert not RUTAS_CON_GATE & RUTAS_DE_ANALISIS_CON_GATE
+    assert not {m for m, _ in RUTAS_DE_ANALISIS_CON_GATE if m in {"PATCH", "PUT", "DELETE"}}
 
 
 def test_ninguna_correccion_ni_baja_lleva_gate() -> None:

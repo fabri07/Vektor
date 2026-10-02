@@ -31,6 +31,7 @@ from app.persistence.models.business import BusinessProfile
 from app.persistence.models.score import HealthScoreSnapshot
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
+from app.tests.conftest import _suscripcion_free_legado
 from app.utils.security import create_access_token, hash_password
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
@@ -90,6 +91,10 @@ async def tenant(session: AsyncSession) -> Tenant:
         status="ACTIVE",
     )
     session.add(t)
+    await session.flush()
+    # Como en producción, el tenant nace con su suscripción: sin ninguna, el
+    # gate de análisis de `/health-scores` (B14) contesta 503.
+    session.add(_suscripcion_free_legado(t.tenant_id))
     await session.commit()
     return t
 

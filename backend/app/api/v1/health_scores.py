@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant
+from app.api.v1.deps import get_current_tenant, require_active_subscription_for_insights
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
 from app.persistence.repositories.health_score_repository import HealthScoreRepository
@@ -20,7 +20,8 @@ from app.schemas.health_score import (
     WeeklyScoreHistoryResponse,
 )
 
-router = APIRouter()
+# B14: todo este router es análisis — con la suscripción bloqueada, 402.
+router = APIRouter(dependencies=[Depends(require_active_subscription_for_insights)])
 
 
 class MarginHistoryItem(BaseModel):

@@ -21,6 +21,8 @@ import { EmptyState } from "@/features/dashboard/EmptyState";
 import { HealthScoreCard } from "@/features/dashboard/HealthScoreCard";
 import { DashboardSummaryCards } from "@/features/dashboard/DashboardSummaryCards";
 import { HealthAlertBanner } from "@/components/dashboard/HealthAlertBanner";
+import { SubscriptionLockedNotice } from "@/components/subscription/SubscriptionLockedNotice";
+import { esAnalisisBloqueado, reintentarSalvoBloqueo } from "@/lib/subscription";
 
 // Sólo "¿hay que seguir esperando?". El resto de los estados se resuelven con
 // `esScoreReal`. Esta función tenía antes una copia propia de la clasificación
@@ -63,6 +65,7 @@ export default function DashboardPage() {
     data: scoreData,
     isLoading: scoreLoading,
     isError: scoreError,
+    error: scoreErrorDetalle,
   } = useQuery({
     queryKey: ["health-scores", "latest"],
     queryFn: fetchLatestScore,
@@ -76,7 +79,7 @@ export default function DashboardPage() {
       calcRetries.current += 1;
       return delay;
     },
-    retry: 1,
+    retry: reintentarSalvoBloqueo,
   });
 
   // Sin cast: `esScoreReal` es un type predicate, así que adentro del `&&` el
@@ -92,13 +95,13 @@ export default function DashboardPage() {
     queryKey: ["insights", "current"],
     queryFn: fetchCurrentInsight,
     enabled: scoreHasData,
-    retry: 1,
+    retry: reintentarSalvoBloqueo,
   });
 
   const { data: momentumData } = useQuery({
     queryKey: ["momentum", "profile"],
     queryFn: fetchMomentumProfile,
-    retry: 1,
+    retry: reintentarSalvoBloqueo,
   });
 
   const { data: sales = [], isLoading: salesLoading } = useQuery({
@@ -156,6 +159,17 @@ export default function DashboardPage() {
   // cualquier payload que no sea un score termina en el empty state. Antes
   // `NO_DATA` seguía de largo y el dashboard se armaba alrededor de un objeto
   // sin `score_total`.
+  // B14: con la suscripción bloqueada el score no está vacío, está pausado.
+  // Decirlo como un empty state ("cargá datos") sería mentirle al dueño.
+  if (esAnalisisBloqueado(scoreErrorDetalle)) {
+    return (
+      <div className="space-y-5">
+        <DashboardLaunchpadNav active="dashboard" />
+        <SubscriptionLockedNotice />
+      </div>
+    );
+  }
+
   if (scoreError || calculatingTimeout || !esScoreReal(scoreData)) {
     return (
       <div className="space-y-5">

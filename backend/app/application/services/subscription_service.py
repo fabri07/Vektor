@@ -178,6 +178,18 @@ async def assert_tenant_can_write(
     return subscription
 
 
+async def assert_tenant_can_see_insights(
+    session: AsyncSession, tenant_id: uuid.UUID, *, now: datetime | None = None
+) -> Subscription:
+    """¿Puede este tenant ver el análisis? (B14 del POS)
+
+    Misma regla que una alta de negocio —`resolve_access`—, con otro
+    `origen` en el log: bloquear el análisis y bloquear la escritura son la
+    misma decisión comercial, y si la regla viviera dos veces se separaría.
+    """
+    return await assert_tenant_can_write(session, tenant_id, origen="insights_gate", now=now)
+
+
 async def reserve(
     session: AsyncSession,
     *,

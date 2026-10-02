@@ -40,7 +40,6 @@ from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
     get_current_user,
-    require_active_subscription,
     require_modify_access,
     require_owner_stepup,
     require_role,
@@ -245,7 +244,10 @@ async def create_pos_operation(
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_role("OWNER", "ADMIN", CASHIER_ROLE)),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
-    _sub_guard: None = Depends(require_active_subscription),
+    # Sin gate de suscripción, a propósito (B14): una caja que deja de cobrar
+    # porque venció el plan le corta la venta al negocio, no a Véktor. Lo que
+    # se pausa con la suscripción bloqueada es el análisis. Terminal,
+    # permisos, mantenimiento y el lock siguen igual.
     session: AsyncSession = Depends(get_db_session),
     terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
     offline: str | None = Header(default=None, alias=OFFLINE_HEADER),

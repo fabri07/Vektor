@@ -42,6 +42,8 @@ import {
   formatSignedPercent,
   LINE_METRIC_OPTIONS,
 } from "@/features/dashboard/dashboardData";
+import { SubscriptionLockedNotice } from "@/components/subscription/SubscriptionLockedNotice";
+import { esAnalisisBloqueado } from "@/lib/subscription";
 
 interface Props {
   sales: SaleEntryResponse[];
@@ -76,7 +78,7 @@ const CHART_COLORS = [
 ];
 
 function InsightBlock() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ["current-insight"],
     queryFn: fetchCurrentInsight,
     staleTime: 5 * 60 * 1000,
@@ -85,6 +87,14 @@ function InsightBlock() {
 
   if (isLoading) {
     return <div className="mt-4 h-16 animate-pulse rounded-xl bg-vektor-surface" />;
+  }
+
+  if (esAnalisisBloqueado(error)) {
+    return (
+      <div className="mt-4">
+        <SubscriptionLockedNotice variant="compact" />
+      </div>
+    );
   }
 
   const text = data?.insight?.description;
@@ -419,7 +429,7 @@ export function DashboardAnalysisScreen({
 // ── Breakdown panels ─────────────────────────────────────────────────────────
 
 function BreakdownPanels() {
-  const { data, isLoading } = useQuery<BusinessBreakdownResponse>({
+  const { data, isLoading, error } = useQuery<BusinessBreakdownResponse>({
     queryKey: ["breakdown", 30],
     queryFn: () => fetchBusinessBreakdown(30),
     staleTime: 5 * 60 * 1000,
@@ -435,6 +445,8 @@ function BreakdownPanels() {
       </>
     );
   }
+
+  if (esAnalisisBloqueado(error)) return <SubscriptionLockedNotice variant="compact" />;
 
   if (!data) return null;
 

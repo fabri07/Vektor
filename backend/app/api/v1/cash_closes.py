@@ -5,11 +5,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import (
-    get_current_tenant,
-    require_active_subscription,
-    require_role,
-)
+from app.api.v1.deps import get_current_tenant, require_role
 from app.application.services.cash_close_service import (
     CashCloseAlreadyExistsError,
     CashCloseService,
@@ -39,7 +35,8 @@ async def cash_close_preview(
 
 @router.post(
     "",
-    dependencies=[Depends(require_active_subscription)],
+    # Sin gate de suscripción (B14): cerrar la caja del día es contar plata
+    # que ya entró, no una alta de negocio.
     response_model=CashCloseResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Register a daily cash close",
