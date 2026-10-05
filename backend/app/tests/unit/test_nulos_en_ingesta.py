@@ -130,6 +130,20 @@ def test_dos_encabezados_que_quedan_iguales_no_se_fusionan() -> None:
     assert any("Monto (2)" in w for w in summary["warnings"])
 
 
+def test_la_columna_con_nulos_se_renombra_aunque_venga_primero() -> None:
+    """El orden del archivo no decide: antes, con la columna sucia ADELANTE, la
+    limpia no se renombraba y quedaban dos «Monto» (una columna perdida)."""
+    contenido = "fecha,Mon\x00to,Monto\n2026-09-01,200,100\n"
+    summary = parse_uploaded_content(contenido.encode(), "text/csv", "ventas.csv")
+
+    fila = summary["preview_rows"][0]
+    assert fila["Monto"] == "100", "la columna que no tenía nulos conserva su nombre"
+    assert fila["Monto (2)"] == "200"
+    limpios, avisos = desambiguar_encabezados(["Monto\x00", "Monto"], ["Monto", "Monto"])
+    assert limpios == ["Monto (2)", "Monto"]
+    assert len(avisos) == 1
+
+
 def test_desambiguar_solo_actua_sobre_colisiones_creadas_por_la_limpieza() -> None:
     """Dos encabezados que YA venían repetidos no son asunto de la limpieza."""
     limpios, avisos = desambiguar_encabezados(["a", "a", "b\x00"], ["a", "a", "b"])

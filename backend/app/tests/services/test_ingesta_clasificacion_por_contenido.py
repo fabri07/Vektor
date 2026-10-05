@@ -58,6 +58,22 @@ def test_un_catalogo_con_producto_stock_y_proveedor_es_stock() -> None:
     assert _tipo(["Proveedor", "Producto", "Stock", "Precio"]) == "stock"
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [
+        ["Proveedor", "CUIT", "Teléfono", "Productos que provee"],
+        ["Proveedor", "Email", "Producto principal"],
+    ],
+)
+def test_un_maestro_que_dice_que_productos_provee_sigue_siendo_maestro(
+    headers: list[str],
+) -> None:
+    """Revisión de código: la guarda de catálogo se disparaba con CUALQUIER
+    columna con "producto" y mandaba este maestro a stock. La identidad fiscal
+    o de contacto dice que es un maestro; una existencia, nunca."""
+    assert _tipo(headers) == "proveedores"
+
+
 # ── F2b: una hoja de totales por período junto a sus movimientos es derivada ──
 
 import io  # noqa: E402
@@ -135,6 +151,36 @@ def test_totales_por_periodo_sin_movimientos_al_lado_se_importan() -> None:
         "x.xlsx",
     )
     assert not _contexto(summary, "Ventas mensuales").get("is_summary_or_derived")
+
+
+def test_una_hoja_de_ventas_con_columna_de_mes_y_totales_no_es_derivada() -> None:
+    """Revisión de código: una hoja de ventas REAL con columnas auxiliares de mes,
+    total y margen se tomaba como resumen y sus ventas no entraban. Un resumen
+    no tiene días; esta hoja sí."""
+    ventas: list[list[Any]] = [
+        ["Fecha", "Mes", "Cliente", "Total $", "Margen $"],
+        [datetime(2026, 6, 3), "2026-06", "Ana", 1200, 400],
+        [datetime(2026, 6, 9), "2026-06", "Luis", 3400, 1100],
+        [datetime(2026, 7, 2), "2026-07", "Ana", 800, 300],
+    ]
+    gastos: list[list[Any]] = [
+        ["Fecha", "Proveedor", "Gasto $"],
+        [datetime(2026, 6, 4), "Luz", 500],
+        [datetime(2026, 6, 5), "Flete", 700],
+    ]
+    summary = parse_uploaded_content(
+        _libro({"Ventas": ventas, "Gastos": gastos}), _XLSX, "x.xlsx"
+    )
+    assert not _contexto(summary, "Ventas").get("is_summary_or_derived")
+
+
+def test_mes_se_busca_como_palabra_y_no_dentro_de_mesero() -> None:
+    from app.application.services.file_parsing import _es_tabla_por_periodo
+
+    encabezado = ["Mesero", "Total $", "Promedio $"]
+    filas: list[list[Any]] = [["Marcos", 100, 50], ["Ana", 200, 100], ["Luis", 300, 150]]
+    assert not _es_tabla_por_periodo(encabezado, filas)
+    assert _es_tabla_por_periodo(["Mes", "Total $", "Promedio $"], [["marzo", 1, 1], ["x", 2, 2]])
 
 
 def test_la_hoja_de_movimientos_no_es_derivada() -> None:
@@ -234,6 +280,34 @@ def test_vocabulario_de_tipos(tipo: str | None, destino: str) -> None:
 def test_una_hoja_de_solo_ventas_con_columna_tipo_no_es_mixta() -> None:
     filas = [{"Tipo": "Venta", "Monto": "100"}, {"Tipo": "Venta", "Monto": "200"}]
     assert separar_libro_mixto(["Tipo", "Monto"], filas) is None
+
+
+def test_un_numero_de_comprobante_no_compite_con_el_importe() -> None:
+    """Revisión de código: "Nro comprobante" o "Precio unitario" eran candidatas a
+    importe y cada fila terminaba en «Otros» por no poder decidir entre dos."""
+    encabezados = ["Fecha", "Tipo de movimiento", "Nro comprobante", "Precio unitario", "Importe"]
+    filas = [
+        {"Fecha": "2026-06-03", "Tipo de movimiento": "Venta", "Nro comprobante": "1501",
+         "Precio unitario": "400", "Importe": "1200"},
+        {"Fecha": "2026-06-04", "Tipo de movimiento": "Gasto", "Nro comprobante": "88",
+         "Precio unitario": "", "Importe": "500"},
+    ]
+    resultado = separar_libro_mixto(encabezados, filas)
+    assert resultado is not None
+    assert [Decimal(f["monto"]) for f in resultado["ventas"]] == [Decimal("1200")]
+    assert [Decimal(f["monto"]) for f in resultado["gastos"]] == [Decimal("500")]
+    assert resultado["pendientes"] == {}
+
+
+def test_entre_dos_importes_gana_la_columna_que_se_llama_importe() -> None:
+    encabezados = ["Tipo de movimiento", "Envío $", "Importe"]
+    filas = [
+        {"Tipo de movimiento": "Venta", "Envío $": "300", "Importe": "1200"},
+        {"Tipo de movimiento": "Flete", "Envío $": "", "Importe": "500"},
+    ]
+    resultado = separar_libro_mixto(encabezados, filas)
+    assert resultado is not None
+    assert [Decimal(f["monto"]) for f in resultado["ventas"]] == [Decimal("1200")]
 
 
 def test_el_libro_mixto_se_reparte_por_fila() -> None:

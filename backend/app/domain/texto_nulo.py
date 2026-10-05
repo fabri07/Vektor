@@ -126,23 +126,30 @@ def desambiguar_encabezados(
     """
     resultado = list(limpios)
     avisos: list[str] = []
-    vistos: dict[Any, Any] = {}
+    # Los encabezados que la limpieza NO tocó se quedan con su nombre: el que se
+    # renombra es siempre el que cambió, venga antes o después en el archivo.
+    ocupados: dict[Any, Any] = {}
+    for original, limpio in zip(originales, limpios, strict=True):
+        if original == limpio:
+            ocupados.setdefault(limpio, original)
     for i, (original, limpio) in enumerate(zip(originales, limpios, strict=True)):
-        if limpio in vistos and vistos[limpio] != original and original != limpio:
+        if original == limpio:
+            continue
+        if limpio in ocupados and ocupados[limpio] != original:
             n = 2
             candidato = f"{limpio} ({n})"
-            while candidato in vistos or candidato in resultado:
+            while candidato in ocupados or candidato in resultado:
                 n += 1
                 candidato = f"{limpio} ({n})"
             resultado[i] = candidato
             avisos.append(
                 f"La columna «{limpio}» aparecía dos veces una vez quitados los "
-                f"caracteres nulos; la segunda se renombró «{candidato}» para no "
-                "perder sus datos."
+                f"caracteres nulos; la que tenía nulos se renombró «{candidato}» "
+                "para no perder sus datos."
             )
-            vistos[candidato] = original
+            ocupados[candidato] = original
             continue
-        vistos.setdefault(limpio, original)
+        ocupados.setdefault(limpio, original)
     return resultado, avisos
 
 

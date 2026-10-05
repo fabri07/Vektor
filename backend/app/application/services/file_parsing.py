@@ -526,8 +526,13 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     has_identidad_contacto = any(
         any(k in col for k in IDENTIDAD_CONTACTO_COLS) for col in normalized
     )
+    # Una existencia nunca está en un maestro. Un "producto" sí puede estarlo
+    # ("Productos que provee"), y la identidad fiscal o de contacto lo dice: un
+    # catálogo no trae CUIT ni teléfono.
     has_listado_de_productos = any(
-        any(k in col for k in LISTADO_DE_PRODUCTOS_COLS) for col in normalized
+        any(k in col for k in LISTADO_DE_PRODUCTOS_COLS - {"producto"}) for col in normalized
+    ) or (
+        any("producto" in col for col in normalized) and not has_identidad_contacto
     )
 
     inferred_type = infer_spreadsheet_type(
@@ -880,7 +885,7 @@ _PERIODO_SIN_DIA = re.compile(
     r"(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)[a-z]*\.?(\s*[-/]?\s*\d{2,4})?)\s*$"
 )
 _FECHA_CON_DIA = re.compile(r"^\s*(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})")
-_ENCABEZADO_DE_PERIODO = ("periodo", "mes", "month")
+_ENCABEZADO_DE_PERIODO = frozenset({"periodo", "mes", "month"})
 _ENCABEZADOS_DE_AGREGADO = (
     "total",
     "promedio",
@@ -932,7 +937,8 @@ def _es_tabla_por_periodo(encabezado: list[Any], filas: list[list[Any]]) -> bool
         )
         if por_forma >= _PROPORCION_DE_FORMA:
             return True
-        if any(k in h for k in _ENCABEZADO_DE_PERIODO) and por_forma > 0:
+        # Palabra entera: "mes" no es "mesero" ni "mesa".
+        if _ENCABEZADO_DE_PERIODO.intersection(re.split(r"[^a-z0-9]+", h)) and por_forma > 0:
             return True
     return False
 
@@ -976,7 +982,12 @@ def _motivo_de_hoja_derivada(
     if not hay_otra_hoja_con_movimientos or len(filas) < 2:
         return None
     i = _detect_header_row(filas)
-    if _es_tabla_por_periodo(list(filas[i] or []), filas[i + 1 :]):
+    encabezado, datos = list(filas[i] or []), filas[i + 1 :]
+    # Una hoja que registra movimientos con fecha y día es una fuente, aunque
+    # además tenga una columna de mes y totales: un resumen no tiene días.
+    if _tiene_movimientos_fechados(encabezado, datos):
+        return None
+    if _es_tabla_por_periodo(encabezado, datos):
         return "contenido"
     return None
 
@@ -1195,6 +1206,18 @@ _NO_ES_IMPORTE = (
     "unidad",
     "stock",
 )
+#: Palabras de columnas numéricas que identifican o miden por unidad, nunca
+#: totalizan la operación: un número de comprobante no es un importe. Se comparan
+#: por PALABRA entera del encabezado plegado ("id" no es "ingreso_vidrieria").
+_IDENTIFICA_O_ES_UNITARIO = frozenset(
+    {
+        "nro", "num", "numero", "id", "codigo", "cod", "comprobante", "factura",
+        "cuit", "cuil", "dni", "telefono", "tel", "sku", "ean", "remito",
+        "unitario", "unit",
+    }
+)
+#: Una columna que se llama así es el importe; entre varias con valor, gana ésa.
+_NOMBRE_DE_IMPORTE = frozenset({"importe", "monto", "total"})
 _IMPORTE_DE_SALIDA = ("salida", "egreso", "pago", "gasto", "compra")
 _IMPORTE_DE_ENTRADA = ("venta", "ingreso", "cobr", "entrada")
 #: Proporción de valores del vocabulario para afirmar que la columna es de tipos.
@@ -1225,6 +1248,10 @@ def _columna_de_tipo_de_movimiento(
     return None
 
 
+def _palabras(encabezado: str) -> set[str]:
+    return set(re.split(r"[^a-z0-9]+", fold_header(encabezado))) - {""}
+
+
 def _importe_de_la_fila(
     fila: dict[str, Any], candidatas: list[str], destino: str, convenios: dict[str, Any]
 ) -> tuple[str | None, str | None]:
@@ -1246,6 +1273,12 @@ def _importe_de_la_fila(
             valores[h] = str(interpretado.valor)
     prohibidas = _IMPORTE_DE_ENTRADA if destino != "venta" else _IMPORTE_DE_SALIDA
     compatibles = [h for h in con_valor if not any(k in fold_header(h) for k in prohibidas)]
+    if len(compatibles) > 1:
+        # Decisión por NOMBRE de columna, igual para todas las filas: nunca por
+        # cuál celda "parece" más un importe.
+        nombradas = [h for h in compatibles if _NOMBRE_DE_IMPORTE.intersection(_palabras(h))]
+        if len(nombradas) == 1:
+            compatibles = nombradas
     if len(compatibles) == 1:
         return valores[compatibles[0]], None
     if not compatibles:
@@ -1379,6 +1412,7 @@ def separar_libro_mixto(
         if h not in excluidas
         and not any(k in plegados[h] for k in FECHA_COLS)
         and not any(k in plegados[h] for k in _NO_ES_IMPORTE)
+        and not _IDENTIFICA_O_ES_UNITARIO.intersection(_palabras(h))
     ]
 
     convenios = {h: inferir_convenio([f.get(h) for f in filas]) for h in candidatas}
