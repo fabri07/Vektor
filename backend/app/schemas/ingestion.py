@@ -685,6 +685,19 @@ class ConfirmIngestionRequest(BaseModel):
             "completa el ejecutor asíncrono; el cliente no lo manda."
         ),
     )
+    #: Fase 2 (ASTERIA, 2026-10-05): la persona vio el aviso de que el archivo
+    #: coincide masivamente con operaciones ya importadas y confirma igual.
+    #: Sin esto, ese confirm se rechaza con 409 ``POSIBLE_REPETICION`` y no se
+    #: guarda nada. Entra a la huella del intento asíncrono SÓLO cuando vale
+    #: ``True`` (ver ``start_import``): con ``False`` siempre presente, un reintento
+    #: de un intento registrado antes del deploy cambiaría de huella.
+    acepto_posible_repeticion: bool = Field(
+        default=False,
+        description=(
+            "La persona confirma a sabiendas de que el archivo puede repetir "
+            "operaciones ya cargadas."
+        ),
+    )
 
 
 class InventoryImpactItem(BaseModel):

@@ -201,6 +201,40 @@ async def _nombres_de_archivo(
     return salida
 
 
+#: Desde cuándo una coincidencia es "masiva": la mitad de las operaciones del
+#: archivo, y al menos 10 (dos compras iguales el mismo día son normales; cien no).
+PROPORCION_MASIVA = Decimal("0.5")
+MINIMO_MASIVO = 10
+
+
+def es_repeticion_masiva(solapamiento: SolapamientoDetectado, importadas: int) -> bool:
+    """¿El archivo parece, en su mayoría, una carga repetida?
+
+    Sigue sin ser una prueba —sin clave fuerte nada lo es—, así que no descarta
+    nada: decide si el confirm exige que la persona lo reconozca explícitamente
+    antes de guardar. Un resultado no concluyente (demasiados movimientos para
+    comparar) NO cuenta como masivo: no se puede afirmar lo que no se midió.
+    """
+    if not solapamiento.concluyente or importadas <= 0:
+        return False
+    return (
+        solapamiento.filas >= MINIMO_MASIVO
+        and Decimal(solapamiento.filas) / Decimal(importadas) >= PROPORCION_MASIVA
+    )
+
+
+def texto_de_repeticion_masiva(solapamiento: SolapamientoDetectado, importadas: int) -> str:
+    origenes = ", ".join(
+        f"«{nombre}» ({cuantas})" for nombre, cuantas in sorted(solapamiento.por_archivo.items())
+    )
+    return (
+        f"{solapamiento.filas} de las {importadas} operaciones de este archivo coinciden "
+        f"en fecha e importe con otras ya importadas desde {origenes}. Parece una carga "
+        "repetida del mismo período. No se guardó nada: si de verdad son operaciones "
+        "nuevas, confirmá marcando que sabés que puede repetir datos."
+    )
+
+
 def texto_del_aviso(solapamiento: SolapamientoDetectado) -> str | None:
     """El aviso, en castellano, o ``None`` si no hay nada que decir.
 

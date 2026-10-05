@@ -99,6 +99,8 @@ from app.application.services.import_attempt_service import (
 )
 from app.application.services.import_overlap_service import (
     detectar_solapamiento,
+    es_repeticion_masiva,
+    texto_de_repeticion_masiva,
 )
 from app.application.services.import_overlap_service import (
     texto_del_aviso as texto_del_solapamiento,
@@ -1992,6 +1994,10 @@ def _sanitize_error_message(exc: BaseException) -> str:
 #: de "el archivo no está". El usuario no tiene que volver a SUBIR nada: su archivo
 #: está perfecto, lo que cambió es la interpretación.
 REVISION_CAMBIADA_CODE = "FILE_REVISION_CHANGED"
+#: Fase 2: el confirm se frenó porque el archivo coincide masivamente con lo ya
+#: cargado y no traía `acepto_posible_repeticion`. El frontend lo reconoce por
+#: este código para ofrecer la confirmación explícita.
+POSIBLE_REPETICION_CODE = "POSIBLE_REPETICION"
 
 
 async def _exigir_revision_confirmada(
@@ -3658,6 +3664,34 @@ async def confirm_file(
             # para el usuario de una que nunca guardó su explicación.
             required=True,
         )
+        # Fase 2 (ASTERIA, 2026-10-05): ¿el archivo repite, en su mayoría, lo que
+        # ya estaba cargado? Se mide SOBRE LO RECIÉN PERSISTIDO —la misma lectura
+        # que hizo el importador, no una segunda interpretación de la planilla— y,
+        # si es masivo y la persona no lo reconoció, el `except` de abajo revierte
+        # todo: nada queda guardado hasta que confirme a sabiendas.
+        try:
+            _solapamiento = await detectar_solapamiento(session, tenant.tenant_id, record.id)
+        except Exception as exc:  # noqa: BLE001 — un aviso no puede tumbar el import
+            _solapamiento = None
+            logger.warning(
+                "ingestion.solapamiento_no_verificado", file_id=str(record.id), error=str(exc)
+            )
+        _importadas = counts["ventas"] + counts["gastos"]
+        if (
+            _solapamiento is not None
+            and not body.acepto_posible_repeticion
+            and es_repeticion_masiva(_solapamiento, _importadas)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": POSIBLE_REPETICION_CODE,
+                    "message": texto_de_repeticion_masiva(_solapamiento, _importadas),
+                    "coincidencias": _solapamiento.filas,
+                    "operaciones": _importadas,
+                    "archivos": dict(_solapamiento.por_archivo),
+                },
+            )
         # Import OK: liberar el savepoint (los cambios quedan en la transacción del
         # request, que los commitea al final).
         await _import_sp.commit()
@@ -3920,13 +3954,8 @@ async def confirm_file(
     # desde Excel cambia de hash. Se AVISA con los archivos que se le parecen;
     # no se descarta nada: sin una clave fuerte, coincidir en fecha e importe no
     # prueba que sean la misma operación (ver `import_overlap_service`).
-    try:
-        _solapamiento = await detectar_solapamiento(session, tenant.tenant_id, record.id)
-    except Exception as exc:  # noqa: BLE001 — un aviso no puede tumbar el import
-        logger.warning(
-            "ingestion.solapamiento_no_verificado", file_id=str(record.id), error=str(exc)
-        )
-    else:
+    # Se reusa la medición de arriba (adentro del savepoint): mismas filas.
+    if _solapamiento is not None:
         _aviso_solapamiento = texto_del_solapamiento(_solapamiento)
         if _aviso_solapamiento:
             warnings.append(_aviso_solapamiento)
@@ -4832,9 +4861,10 @@ async def registrar_importacion(
     # la request. Metiéndola acá cambiaría la ENTRADA de la huella, y una clave de
     # petición repetida después del deploy pasaría a ser un conflicto — romper lo
     # que está en vuelo es lo que esta ruta existe para evitar.
-    _payload = body.model_dump(
-        mode="json", exclude={"request_key", "revision_ingestion", "revision_preview"}
-    )
+    _excluidos = {"request_key", "revision_ingestion", "revision_preview"}
+    if not body.acepto_posible_repeticion:
+        _excluidos.add("acepto_posible_repeticion")
+    _payload = body.model_dump(mode="json", exclude=_excluidos)
     try:
         registro = await registrar_intento(
             session,

@@ -133,6 +133,10 @@ ERROR_REVISION: Final = "revision_cambiada"
 #: (la reserva del intento ya no sirve). No se reintenta solo: depende del
 #: usuario regularizar o esperar la renovación.
 ERROR_SUSCRIPCION: Final = "suscripcion"
+#: Fase 2 (ASTERIA, 2026-10-05): la mayoría de las operaciones coinciden en
+#: fecha e importe con otras ya importadas y el pedido no traía la confirmación
+#: explícita. No reintentable: la persona tiene que mirar el aviso y decidir.
+ERROR_POSIBLE_REPETICION: Final = "posible_repeticion"
 ERROR_TRANSITORIO: Final = "transitorio"
 ERROR_DESCONOCIDO: Final = "desconocido"
 

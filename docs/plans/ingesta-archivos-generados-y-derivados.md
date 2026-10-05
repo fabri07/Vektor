@@ -32,19 +32,38 @@ quedó `FAILED` con el mensaje crudo de asyncpg. Reproducido en local con
 - **F1e El gate deja de mirar signos.** La regla 3 se saca del ValidationGate (corre antes del mapeo, sobre columnas que no se van a importar). El signo se valida en la Fase 2, por fila y sobre el mapeo efectivo.
 - Compuertas `-m postgres` que recorren **el guardado real del worker** (`_save_result` y el camino del gate) con: fórmula sin calcular, `\x00` real en celda y en encabezado, colisión de encabezados.
 
-### Fase 2 — el signo por fila con contexto, y clasificación por contenido
-**Un negativo no es un error por sí mismo** (puede ser una pérdida real, un error de cálculo o de tipeo). Se evalúa DESPUÉS del mapeo efectivo (incluye correcciones del usuario) y según qué representa la columna:
-- **Columna de resultado/saldo/flujo/diferencia** (no es un monto de operación, o no está mapeada): no se valida; nunca bloquea. Una pérdida es un dato.
-- **Monto de una operación** (venta, gasto, compra) negativo → la fila va a «Otros» con un motivo que dice QUÉ parece, deducido del contexto de la fila, nunca corregido solo:
-  - `parece_devolucion`: el tipo/concepto dice devolución, anulación, nota de crédito, reintegro.
-  - `signo_probablemente_invertido`: `|monto|` coincide con cantidad × precio unitario de la misma fila.
-  - `no_cuadra_con_la_fila`: hay cantidad y precio y el monto no coincide con ninguno de los dos signos (error de cálculo o tipeo).
-  - `negativo_sin_contexto`: no hay de dónde deducir nada.
-  Nunca se invierte el signo automáticamente (no-invention). Si en el futuro se soportan devoluciones, `parece_devolucion` es la que pasa a importarse.
-- **Columnas derivadas con fórmula conocida** (margen = ventas − costo): si cuadra con las otras columnas de la fila, es una pérdida real; si no cuadra, se avisa como posible error de cálculo. Informativo: estas columnas no se importan (las métricas las calcula FactsService).
-- **Hojas derivadas por contenido**, reusando `is_summary_or_derived`/`derived_detected`: el nombre deja de ser la única señal (y se ignora la numeración adelante: `"3. Resumen mensual"`); por contenido = período sin día (`YYYY-MM`), encabezados de totales/%/promedio/acumulado, y otra hoja del mismo archivo con movimientos fechados del mismo rango.
-- **Libro mixto** con columna "tipo de movimiento": cada fila se rutea por su tipo (venta/gasto/compra); aportes y retiros de socios a «Otros» con motivo. Catálogo con columna proveedor → `product` con el proveedor como vínculo.
-- **Prueba completa** con el archivo de ASTERIA anonimizado en el corpus: no duplica ventas (Σ ventas importadas == Σ de "Movimientos", la hoja resumen excluida), los pendientes quedan en «Otros» con su motivo, y ningún negativo de saldo bloquea.
+### Fase 2 — clasificar por contenido y explicar cada fila que no entra ✅ (rama `fix/ingesta-clasificacion-por-contenido`)
+
+**Diagnóstico medido sobre el archivo (2026-10-05):**
+- "1. Precios y stock" → `proveedores`: la regla -0.5 (maestro) se dispara con `Proveedores` y sólo la frena `has_catalogo_fuerte` (sku/código/artículo/ítem); ni `Productos` ni `Stock` cuentan.
+- "2. Movimientos" → `stock`: la regla 0 (compra de mercadería + cantidad) gana con `Mercadería recibida $` + `Cant.`. Es un **libro mixto**: la columna `Tipo de movimiento` trae 14 valores (Venta 2.209, Mercadería recibida 447, Compra de mercadería 80, Venta (costo sin registrar) 66, Flete/envío 61, Retiro de socios 23, Gasto operativo 20, Aporte de socio 17, Packaging/insumos 10, Devolución de proveedor 8, Publicidad 7, Préstamo a socio 4, Ajuste 4, Saldo inicial 1) y **cada tipo llena exactamente una columna de flujo** (`Venta cobrada $` | `Salida de caja $` | `Otro ingreso de caja $` | `Mercadería recibida $`); el resto (margen, reinversión, distribuible, saldo) es derivado.
+- "3. Resumen mensual" → `ventas`: la detección de derivadas es por prefijo de nombre y `"3. Resumen…"` no matchea.
+- `Origen del dato`: **389 filas "simulado"** junto a 2.568 "registro original (LD 2025/2026)".
+- El archivo reorganiza los Libros Diarios 2025/2026 que el tenant YA importó; sin clave fuerte, importarlo duplica ~2.500 operaciones (`import_overlap_service` sólo avisa después).
+
+**F2a Catálogo con columna de proveedor.** Una columna de producto (`producto`) o de existencias (`stock`) es evidencia de catálogo y excluye la regla de maestro: un maestro de proveedores no lista productos. El proveedor queda como vínculo (`supplier:name`, con su compuerta).
+
+**F2b Hojas derivadas por contenido** (reusa `is_summary_or_derived`/`derived_detected`): (1) el nombre se compara sin la numeración adelante (`"3. Resumen mensual"`); (2) por contenido, aunque el nombre no diga nada: columna de período sin día (`YYYY-MM` / "mes"), mayoría de encabezados de agregado (total, promedio, %, acumulado, margen, ticket, operaciones) y **otra hoja del mismo archivo con movimientos fechados**. Las dos señales juntas; una sola no alcanza (una hoja de ventas mensuales sin otra de movimientos es legítima).
+
+**F2c Libro mixto: ruteo por fila según el tipo.** Se detecta una columna cuyo encabezado dice tipo/movimiento/concepto-de-movimiento y cuyos VALORES son mayormente tipos reconocibles. Vocabulario versionado (`domain/tipo_de_movimiento.py`), por palabras y no por igualdad:
+| Tipo (ejemplos) | Destino |
+|---|---|
+| venta, venta (costo sin registrar), cobro | venta |
+| gasto operativo, flete/envío, publicidad, packaging/insumos, servicios, alquiler, sueldos | gasto (categoría inferida por el texto) |
+| compra de mercadería | gasto COGS (compra) |
+| mercadería recibida | «Otros» — ingreso de stock **sin pago**: es la otra cara de una compra; importarlo además de la compra duplicaría el costo |
+| retiro de socios | «Otros» (sugerido: retiro de ganancias, que ya existe como operación) |
+| aporte de socio, préstamo a socio, devolución de proveedor, ajuste, saldo inicial | «Otros» con su motivo (movimientos de capital/caja que hoy no son operaciones) |
+| tipo desconocido | «Otros» — nunca se adivina |
+El **monto** de cada fila es la ÚNICA columna de flujo con valor para ese tipo (venta → la de venta; gasto/compra → la de salida). Si hay cero o más de una con valor, la fila va a «Otros» con el motivo. Las columnas derivadas (margen, saldo, reinversión) nunca se importan.
+
+**F2d Filas no reales.** Una columna de procedencia (`origen`, `fuente`, `origen del dato`) con valores simulado/estimado/proyectado/ejemplo/prueba → esas filas no se importan como reales: van a «Otros» con el motivo. Invariante de no-invención.
+
+**F2e El signo, con contexto** (sobre el mapeo efectivo): sin cambios respecto de lo ya decidido — `parece_devolucion` / `signo_probablemente_invertido` / `no_cuadra_con_la_fila` / `negativo_sin_contexto`, nunca corregido solo; columnas de saldo/flujo/derivadas no se validan.
+
+**F2f Archivo que repite lo ya cargado** — aviso ANTES de confirmar: comparar fecha+importe del archivo contra lo ya importado del tenant (la misma señal de `import_overlap_service`, adelantada al preview) y, si la coincidencia es masiva (ej. > 50 % de las operaciones), decirlo arriba de todo con el archivo de origen. Sigue sin bloquear ni descartar: sin clave fuerte, coincidir no prueba duplicado.
+
+**Compuerta:** prueba completa con el archivo de ASTERIA anonimizado en el corpus (sin nombres de clientes/proveedores): clasificación de las 4 hojas, Σ ventas importadas == Σ `Venta cobrada $` de las filas reales tipo venta, el resumen excluido, simuladas y capital en «Otros» con motivo, ningún saldo negativo bloquea, y el aviso de repetición.
 
 ### Fase 3 — fórmulas sin calcular
 Evaluador propio, con especificación exigente y sin prometer "exacto como Excel":
@@ -57,3 +76,4 @@ Evaluador propio, con especificación exigente y sin prometer "exacto como Excel
 ## Decisiones tomadas
 - Negativo en monto de operación → «Otros» con motivo contextual; nunca se corrige solo (dueño, 2026-10-05).
 - Orden: persistencia → fila y clasificación → fórmulas (revisión externa).
+- Fase 2 (dueño, 2026-10-05): filas que el archivo marca como simuladas → «Otros» con motivo (nunca entran como reales; en una cuenta de prueba se pueden importar desde «Otros» a propósito). «Mercadería recibida» → «Otros». Archivo que repite masivamente lo cargado → aviso + **confirmación explícita exigida por el backend**. Un solo PR.

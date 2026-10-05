@@ -901,6 +901,9 @@ export const ingestionService = {
     // AVISA en la respuesta, para que un descuento mapeado no quede ignorado en
     // silencio.
     purchaseCostDecisions?: PurchaseCostDecision[],
+    // Fase 2: la persona vio que el archivo repite, en su mayoría, lo ya cargado
+    // (409 `POSIBLE_REPETICION`) y confirma igual. Viaja SÓLO cuando es true.
+    aceptoPosibleRepeticion?: boolean,
   ): Promise<ConfirmIngestionResult> {
     const res = await api.post<ConfirmIngestionResult>(
       `/ingestion/files/${fileId}/confirm`,
@@ -916,6 +919,7 @@ export const ingestionService = {
         inventory_effect: inventoryEffect ?? null,
         shipping_decisions: shippingDecisions ?? [],
         purchase_cost_decisions: purchaseCostDecisions ?? [],
+        ...(aceptoPosibleRepeticion ? { acepto_posible_repeticion: true } : {}),
       },
       { timeout: CONFIRM_TIMEOUT_MS },
     );
