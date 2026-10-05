@@ -65,7 +65,7 @@ El **monto** de cada fila es la ÚNICA columna de flujo con valor para ese tipo 
 
 **Compuerta:** prueba completa con el archivo de ASTERIA anonimizado en el corpus (sin nombres de clientes/proveedores): clasificación de las 4 hojas, Σ ventas importadas == Σ `Venta cobrada $` de las filas reales tipo venta, el resumen excluido, simuladas y capital en «Otros» con motivo, ningún saldo negativo bloquea, y el aviso de repetición.
 
-### Fase 3 — fórmulas sin calcular
+### Fase 3 — fórmulas sin calcular ✅ (rama `fix/ingesta-formulas`)
 Evaluador propio, con especificación exigente y sin prometer "exacto como Excel":
 - **Subconjunto declarado:** `+ - * /`, paréntesis, `^`, referencias A1 relativas/absolutas **de la misma hoja**, `SUM`, `ROUND` (half-away-from-zero, como Excel), constantes numéricas. Cualquier otra cosa → pendiente.
 - **Semántica documentada:** `Decimal`; celda vacía = 0 sólo en aritmética (como Excel) y se registra; texto en aritmética, división por cero o error de Excel (`#N/A`, …) → pendiente, nunca 0.
