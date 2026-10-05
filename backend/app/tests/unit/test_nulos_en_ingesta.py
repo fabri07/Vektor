@@ -68,7 +68,9 @@ def test_un_libro_con_formulas_sin_calcular_produce_un_resumen_guardable() -> No
     ws.title = "Precios"
     ws.append(["Producto", "Precio de compra", "Envio", "compra+envio"])
     for i in range(2, 6):
-        ws.append([f"Producto {i}", 1000 * i, f"=B{i}*0.1", f"=(B{i}+C{i})"])
+        # La última queda fuera del subconjunto que Véktor calcula (Fase 3), así
+        # que su marca tiene que llegar al resumen.
+        ws.append([f"Producto {i}", 1000 * i, f"=B{i}*0.1", f"=VLOOKUP(B{i},A1:B5,2)"])
     buffer = io.BytesIO()
     wb.save(buffer)
 

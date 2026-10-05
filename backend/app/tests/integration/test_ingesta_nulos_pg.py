@@ -50,7 +50,9 @@ def _libro_como_el_de_asteria() -> bytes:
     precios.title = "Precios y stock"
     precios.append(["Producto", "Stock", "Precio de compra", "Envio", "compra+envio"])
     for i in range(2, 8):
-        precios.append([f"Vaso {i}", i, 1000 * i, f"=C{i}*0.1", f"=(C{i}+D{i})"])
+        # La última queda fuera del subconjunto que se calcula (Fase 3): su marca
+        # es la que tiene que poder guardarse y leerse de vuelta.
+        precios.append([f"Vaso {i}", i, 1000 * i, f"=C{i}*0.1", f"=VLOOKUP(C{i},A1:B5,2)"])
     resumen = wb.create_sheet("Resumen mensual")
     resumen.append(["Fecha", "Ventas $", "Flujo neto de caja $", "Saldo de caja acumulado $"])
     resumen.append(["2026-06-30", 755300, -119969.18, 12000])

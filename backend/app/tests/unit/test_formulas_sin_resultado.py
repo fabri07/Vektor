@@ -42,7 +42,8 @@ def _libro_con_los_tres_casos() -> bytes:
     ws = wb.active
     ws.title = "Ventas"
     ws.append(["fecha", "detalle", "monto"])
-    ws.append(["2024-03-05", "con formula sin calcular", "=10+20"])
+    # Fuera del subconjunto que Véktor calcula (Fase 3): queda con la marca.
+    ws.append(["2024-03-05", "con formula sin calcular", "=VLOOKUP(1,A1:B2,2)"])
     ws.append(["2024-03-06", "con valor cargado", 500])
     ws.append(["2024-03-07", "con la celda vacia", None])
     buffer = io.BytesIO()
@@ -166,3 +167,64 @@ def test_la_fila_con_la_formula_no_entra_como_si_estuviera_vacia() -> None:
     assert "recalcule" in etiqueta or "CSV" in etiqueta
     # La celda realmente vacía conserva su mensaje de siempre.
     assert "fórmula" not in _label_fila_sin_monto(None)
+
+
+# ── Fase 3: lo que se puede calcular, se calcula ─────────────────────────────
+
+
+def _libro_de_ventas_con_formula(formula: str) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ventas"
+    ws.append(["fecha", "cliente", "detalle", "cantidad", "precio", "monto"])
+    ws.append(["2024-03-05", "Ana", "vela", 3, 1200, formula])
+    ws.append(["2024-03-06", "Luis", "difusor", 2, 900, 1800])
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def test_una_formula_simple_se_calcula_y_deja_procedencia() -> None:
+    summary = parse_uploaded_content(_libro_de_ventas_con_formula("=D2*E2"), _XLSX, "x.xlsx")
+
+    assert summary["formulas_sin_resultado"] == 0, "lo calculado no queda pendiente"
+    calculadas = summary["formulas_calculadas"]
+    assert calculadas["celdas"] == 1
+    assert calculadas["ejemplos"][0] == {
+        "hoja": "Ventas",
+        "celda": "F2",
+        "formula": "=D2*E2",
+        "resultado": "3600",
+    }
+    assert any("calculó 1 celda" in w for w in summary["warnings"])
+    fila = next(f for f in summary["ventas_detectadas"] if f.get("detalle") == "vela")
+    assert fila["monto"] == "3600"
+
+
+def test_lo_que_no_se_calcula_sigue_pendiente_con_su_motivo() -> None:
+    summary = parse_uploaded_content(
+        _libro_de_ventas_con_formula("=IF(D2>0,D2*E2,0)"), _XLSX, "x.xlsx"
+    )
+    assert summary["formulas_sin_resultado"] == 1
+    pendientes = summary["formulas_calculadas"]["pendientes"]
+    assert any("IF" in motivo for motivo in pendientes)
+
+
+async def test_la_venta_con_monto_calculado_se_importa(
+    db_session: Any, sample_tenant: Any
+) -> None:
+    """De punta a punta: antes esta fila iba a «Otros» por fórmula sin calcular."""
+    from decimal import Decimal
+
+    from sqlalchemy import select
+
+    from app.application.services.ingestion_import_service import insert_confirmed_data
+    from app.persistence.models.transaction import SaleEntry
+
+    summary = parse_uploaded_content(_libro_de_ventas_con_formula("=D2*E2"), _XLSX, "x.xlsx")
+    counts = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"ventas": True}
+    )
+    assert counts["ventas"] == 2
+    montos = sorted(v.amount for v in (await db_session.execute(select(SaleEntry))).scalars())
+    assert montos == [Decimal("1800"), Decimal("3600")]

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from decimal import Decimal
 
 from app.domain.expense_categories import strip_accents
+from app.domain.formulas import Evaluador, RegistroDeCalculo
 from app.domain.header_keys import fold_header, match_key
 from app.domain.ingestion_limits import (
     FORMULA_SIN_RESULTADO,
@@ -1753,6 +1754,7 @@ def marcar_formulas_sin_resultado(
     hojas: dict[str, list[list[Any]]],
     reloj: RelojDeParsing,
     limites: LimitesDeArchivo,
+    calculo: RegistroDeCalculo | None = None,
 ) -> tuple[int, bool]:
     """Distingue "celda vacía" de "fórmula que el archivo no trae calculada".
 
@@ -1781,6 +1783,15 @@ def marcar_formulas_sin_resultado(
     Límite declarado: esto detecta la fórmula **sin resultado**, no la que tiene un
     resultado VIEJO. Un archivo cuyo caché quedó desactualizado guarda un número
     plausible, y desde afuera no hay forma de saber que ya no corresponde.
+
+    **Fase 3** (ASTERIA, 2026-10-05) — con ``calculo``, después de marcar se
+    intenta CALCULAR cada fórmula marcada con el evaluador acotado
+    (``domain/formulas.py``). Dos pasadas a propósito: primero se marca todo, y
+    recién después se reemplaza la marca por el valor en las que se pudieron
+    calcular. Si el reloj corta en el medio del cálculo, lo que faltaba queda
+    con la marca —va a «Otros»—, nunca vacío. El primer número devuelto es lo que
+    quedó PENDIENTE (marcado), que es lo que manda filas a revisión; lo calculado
+    queda en ``calculo``.
     """
     import openpyxl  # noqa: PLC0415
 
@@ -1797,11 +1808,14 @@ def marcar_formulas_sin_resultado(
         return 0, False
 
     marcadas = 0
+    #: hoja → {(fila, columna) 1-based de Excel: texto de la fórmula}.
+    por_hoja: dict[str, dict[tuple[int, int], str]] = {}
     try:
         for nombre, filas in hojas.items():
             if nombre not in libro.sheetnames:
                 continue
             hoja = libro[nombre]
+            formulas = por_hoja.setdefault(nombre, {})
             for indice, fila_formula in enumerate(hoja.iter_rows(values_only=True)):
                 reloj.controlar()
                 if indice >= len(filas):
@@ -1813,13 +1827,64 @@ def marcar_formulas_sin_resultado(
                     if isinstance(valor, str) and valor.startswith("="):
                         destino[col] = FORMULA_SIN_RESULTADO
                         marcadas += 1
+                        # La fila `indice` de `iter_rows` es la fila `indice + 1`
+                        # de Excel: las dos lecturas empiezan en la fila 1.
+                        formulas[(indice + 1, col + 1)] = valor
     except LimiteExcedidoError:
         # El reloj cortó la verificación. Lo ya marcado vale; lo que falta se
         # declara NO verificado en vez de darse por limpio.
         return marcadas, False
     finally:
         libro.close()
+    if calculo is not None and marcadas:
+        marcadas -= _calcular_formulas_marcadas(hojas, por_hoja, reloj, calculo)
     return marcadas, True
+
+
+def _anotar_calculo_de_formulas(summary: dict[str, Any], calculo: RegistroDeCalculo) -> None:
+    """Procedencia de lo calculado: viaja en el resumen y se avisa."""
+    if not calculo.celdas and not calculo.pendientes:
+        return
+    summary["formulas_calculadas"] = calculo.a_resumen()
+    aviso = calculo.aviso()
+    if aviso:
+        summary["warnings"].append(aviso)
+
+
+def _calcular_formulas_marcadas(
+    hojas: dict[str, list[list[Any]]],
+    por_hoja: dict[str, dict[tuple[int, int], str]],
+    reloj: RelojDeParsing,
+    calculo: RegistroDeCalculo,
+) -> int:
+    """Reemplaza la marca por el valor en las fórmulas que se pueden calcular.
+
+    Devuelve cuántas se calcularon. Una que no se puede calcular conserva la
+    marca y su motivo queda en ``calculo``.
+    """
+    calculadas = 0
+    try:
+        for nombre, formulas in por_hoja.items():
+            filas = hojas[nombre]
+
+            def _valor(fila: int, columna: int, _filas: list[list[Any]] = filas) -> Any:
+                if 1 <= fila <= len(_filas) and 1 <= columna <= len(_filas[fila - 1] or []):
+                    return _filas[fila - 1][columna - 1]
+                return None
+
+            evaluador = Evaluador(valor_de=_valor, formulas=formulas, controlar=reloj.controlar)
+            for (fila, columna), texto in formulas.items():
+                resultado = evaluador.calcular(fila, columna)
+                if resultado.valor is None:
+                    calculo.pendiente(resultado.motivo or "No se pudo calcular")
+                    continue
+                filas[fila - 1][columna - 1] = resultado.valor
+                calculo.calculada(nombre, fila, columna, texto, resultado)
+                calculadas += 1
+    except LimiteExcedidoError:
+        # Se acabó el tiempo: lo calculado vale, el resto conserva la marca.
+        calculo.incompleto = True
+    return calculadas
 
 
 def _leer_hoja_acotada(
@@ -2149,11 +2214,13 @@ def _parse_spreadsheet(
             # ANTES de clasificar. Después sería tarde: la detección de Libro
             # Diario y la de tipo de hoja miran los valores, y una columna
             # calculada que se lee vacía cambia lo que el archivo parece ser.
+            _calculo = RegistroDeCalculo()
             _formulas, _verificado = marcar_formulas_sin_resultado(
-                content, _crudas, reloj, limites
+                content, _crudas, reloj, limites, _calculo
             )
             summary["formulas_sin_resultado"] = _formulas
             summary["formulas_verificadas"] = _verificado
+            _anotar_calculo_de_formulas(summary, _calculo)
             for sheet_name, rows in _crudas.items():
                 sheets_data.append((sheet_name, rows, detect_libro_diario_header(rows)))
 
@@ -2390,11 +2457,13 @@ def _parse_spreadsheet(
             _filas_hoja, registro, worksheet.title
         )
         summary["warnings"].extend(_avisos_nulos)
+        _calculo = RegistroDeCalculo()
         _formulas, _verificado = marcar_formulas_sin_resultado(
-            content, {worksheet.title: _filas_hoja}, reloj, limites
+            content, {worksheet.title: _filas_hoja}, reloj, limites, _calculo
         )
         summary["formulas_sin_resultado"] = _formulas
         summary["formulas_verificadas"] = _verificado
+        _anotar_calculo_de_formulas(summary, _calculo)
         all_rows = [tuple(f) for f in _filas_hoja]
         if not all_rows:
             summary.update(
