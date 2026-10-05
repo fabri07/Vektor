@@ -88,11 +88,13 @@ def trigger_score_recalculation(tenant_id: str, triggered_by: str) -> None:
     s = get_settings()
 
     # Use sync engine for Celery (psycopg2)
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
+    from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
+
     async def _run() -> None:
-        engine = create_async_engine(
+        engine = crear_engine(
             s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args
         )
         async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]

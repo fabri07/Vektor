@@ -162,12 +162,16 @@ class ValidationGate:
             logger.info("validation_gate.rejected", reason=schema_result)
             return ValidationResult(passed=False, rejection_reason=schema_result)
 
-        # ── Regla 3: Sanity check de montos ───────────────────────────────────
+        # ── Regla 3: Sanity check de escala ───────────────────────────────────
+        # El SIGNO no se valida acá, a propósito. Este gate corre antes de que
+        # exista un mapeo y mira TODAS las columnas numéricas del bucket: un
+        # "Flujo neto de caja" o un "Saldo acumulado" negativos son datos —una
+        # pérdida es un dato—, y rechazaban el archivo entero (ASTERIA,
+        # 2026-10-05: 11 negativos, todos de saldo y flujo, ninguno de venta).
+        # Un monto de operación negativo lo descarta el importador POR FILA,
+        # sobre el mapeo efectivo (`monto_positivo`), y la fila va a "Otros".
         amounts = _extract_amounts(parsed_summary)
         for amt in amounts:
-            if amt < 0:
-                logger.info("validation_gate.rejected", reason="negative_amount")
-                return ValidationResult(passed=False, rejection_reason="negative_amount")
             if amt > _AMOUNT_CEILING:
                 warnings.append(f"amount_scale_warning:{amt}")
                 logger.warning(

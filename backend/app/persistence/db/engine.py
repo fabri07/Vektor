@@ -2,21 +2,22 @@
 Async SQLAlchemy engine — one shared instance per process.
 """
 
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config.settings import get_settings
+from app.persistence.db.engine_factory import crear_engine
 
 settings = get_settings()
 
 _is_sqlite = settings.DATABASE_URL.startswith("sqlite")
 
 if _is_sqlite:
-    engine: AsyncEngine = create_async_engine(
+    engine: AsyncEngine = crear_engine(
         settings.DATABASE_URL,
         echo=settings.DEBUG,
     )
 else:
-    engine = create_async_engine(
+    engine = crear_engine(
         settings.DATABASE_URL,
         pool_size=10,
         max_overflow=20,

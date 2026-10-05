@@ -87,7 +87,7 @@ def should_skip_insight(confidence_level: str | None, data_completeness: float) 
 async def _run(tenant_id_str: str) -> None:
     from redis.asyncio import Redis  # noqa: PLC0415
     from sqlalchemy import select  # noqa: PLC0415
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
     from app.config.settings import get_settings  # noqa: PLC0415
@@ -95,6 +95,7 @@ async def _run(tenant_id_str: str) -> None:
         render_insight,
         severity_from_score,
     )
+    from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
     from app.persistence.models.audit import DecisionAuditLog  # noqa: PLC0415
     from app.persistence.models.business import ActionSuggestion, Insight  # noqa: PLC0415
     from app.persistence.models.score import HealthScoreSnapshot  # noqa: PLC0415
@@ -104,7 +105,7 @@ async def _run(tenant_id_str: str) -> None:
     tenant_id = uuid.UUID(tenant_id_str)
     t0 = time.monotonic()
 
-    engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
+    engine = crear_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
     session_factory = sessionmaker(  # type: ignore[call-overload]
         engine, class_=AsyncSession, expire_on_commit=False
     )

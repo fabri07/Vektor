@@ -332,6 +332,62 @@ def _es_transitorio(exc: BaseException) -> bool:
     return isinstance(exc, ConnectionError | TimeoutError)
 
 
+#: El resultado no se pudo guardar porque traía un U+0000 (ver ``texto_nulo``).
+ERROR_RESULTADO_NO_PERSISTIBLE = "RESULTADO_NO_PERSISTIBLE"
+#: La base rechazó la escritura por otro motivo.
+ERROR_AL_GUARDAR = "ERROR_AL_GUARDAR"
+#: Cualquier otro fallo del procesamiento (parseo, S3, …).
+ERROR_PROCESAMIENTO = "PROCESAMIENTO_FALLIDO"
+
+
+def _causas(exc: BaseException) -> list[BaseException]:
+    """La excepción y todas sus causas: SQLAlchemy envuelve lo que levanta un
+    serializador o el driver (``StatementError``/``DBAPIError`` con ``.orig``)."""
+    vistas: list[BaseException] = []
+    actual: BaseException | None = exc
+    while actual is not None and actual not in vistas:
+        vistas.append(actual)
+        siguiente = getattr(actual, "orig", None)
+        if not isinstance(siguiente, BaseException):
+            siguiente = actual.__cause__ or actual.__context__
+        actual = siguiente
+    return vistas
+
+
+def resumen_de_fallo(exc: BaseException, file_type: str) -> dict[str, Any]:
+    """Lo que ve el usuario de un procesamiento que falló.
+
+    Un error de la BASE nunca se muestra tal cual: es texto de asyncpg en inglés,
+    con el SQL y parámetros adentro (ASTERIA, 2026-10-05: el usuario vio
+    ``UntranslatableCharacterError: unsupported Unicode escape sequence``). El
+    detalle técnico queda en el log y en Sentry. Los errores propios del parseo
+    —que ya se escriben para el usuario— se conservan.
+    """
+    from sqlalchemy.exc import SQLAlchemyError  # noqa: PLC0415
+
+    from app.domain.texto_nulo import NuloEnJsonError  # noqa: PLC0415
+
+    causas = _causas(exc)
+    if any(isinstance(c, NuloEnJsonError) for c in causas):
+        codigo = ERROR_RESULTADO_NO_PERSISTIBLE
+        mensaje = (
+            "Leímos el archivo pero no pudimos guardar el resultado: trae un carácter "
+            "que la base de datos no acepta. Ya quedó registrado para revisarlo. Si "
+            "podés, volvé a exportarlo desde el programa de origen (por ejemplo como "
+            "CSV en UTF-8) y subilo de nuevo."
+        )
+    elif any(isinstance(c, SQLAlchemyError) for c in causas):
+        codigo = ERROR_AL_GUARDAR
+        mensaje = (
+            "Leímos el archivo pero no pudimos guardar el resultado por un error "
+            "interno. Ya quedó registrado; probá subirlo de nuevo en unos minutos."
+        )
+    else:
+        codigo = ERROR_PROCESAMIENTO
+        mensaje = str(exc)
+    return {"error": mensaje, "error_code": codigo, "file_type": file_type}
+
+
 def _espera_antes_de_reintentar(intentos_previos: int) -> int:
     """Espera creciente: 30 s, 60 s, 120 s. Un servicio caído no se recupera en
     tres segundos, y machacarlo cada 30 s empeora una caída por saturación."""
@@ -477,12 +533,13 @@ async def _record_failure(
 
 
 def _build_async_session(database_url: str) -> Any:
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
     from app.config.settings import get_settings  # noqa: PLC0415
+    from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
 
-    engine = create_async_engine(
+    engine = crear_engine(
         database_url,
         pool_pre_ping=True,
         connect_args=get_settings().pg_connect_args,
@@ -752,7 +809,7 @@ def process_spreadsheet(self: Any, file_id: str, tenant_id: str, force: bool = F
                 file_id,
                 tenant_id,
                 token,
-                {"error": str(exc), "file_type": "spreadsheet"},
+                resumen_de_fallo(exc, "spreadsheet"),
                 "jobs.process_spreadsheet",
                 t0,
                 str(exc),
@@ -957,7 +1014,7 @@ def process_text_document(self: Any, file_id: str, tenant_id: str, force: bool =
                 file_id,
                 tenant_id,
                 token,
-                {"error": str(exc), "file_type": "text"},
+                resumen_de_fallo(exc, "text"),
                 "jobs.process_text_document",
                 t0,
                 str(exc),
@@ -1168,7 +1225,7 @@ def process_image_ocr(self: Any, file_id: str, tenant_id: str, force: bool = Fal
                 file_id,
                 tenant_id,
                 token,
-                {"error": str(exc), "file_type": "image", "confidence": "LOW"},
+                {**resumen_de_fallo(exc, "image"), "confidence": "LOW"},
                 "jobs.process_image_ocr",
                 t0,
                 str(exc),

@@ -76,13 +76,14 @@ _PARAMS_TAREA: dict[str, Any] = {
 @asynccontextmanager
 async def _sesion() -> AsyncIterator[AsyncSession]:
     """Sesión efímera con engine propio: el worker no comparte el pool del API."""
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
     from app.config.settings import get_settings  # noqa: PLC0415
+    from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
 
     s = get_settings()
-    engine = create_async_engine(
+    engine = crear_engine(
         s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args
     )
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
