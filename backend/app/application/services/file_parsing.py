@@ -39,6 +39,12 @@ from app.domain.ingestion_limits import (
     RelojDeParsing,
 )
 from app.domain.numeric_parsing import parsear_monto
+from app.domain.texto_nulo import (
+    Normalizaciones,
+    desambiguar_encabezados,
+    quitar_nulos_de_filas,
+    quitar_nulos_de_texto,
+)
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1483,17 +1489,50 @@ def parse_uploaded_content(
     # Antes de descomprimir nada pesado: un `.xlsx` es un ZIP y 16 MB de XML
     # repetitivo expanden a mucho más.
     verificar_tamano_expandido(content, limites)
+    # Lo que se quitó de la entrada (sólo U+0000) se registra acá, una vez por
+    # archivo, y se anota en el resumen sea cual sea el camino que lo produjo.
+    registro = Normalizaciones()
     if mime in SPREADSHEET_MIMES:
-        return _parse_spreadsheet(content, mime, filename, limites)
-    if mime in IMAGE_MIMES:
-        return _parse_image(content, mime, filename)
-    return _parse_document(content, mime, filename)
+        summary = _parse_spreadsheet(content, mime, filename, limites, registro)
+    elif mime in IMAGE_MIMES:
+        summary = _parse_image(content, mime, filename)
+    else:
+        summary = _parse_document(content, mime, filename, registro)
+    if registro.celdas:
+        summary["normalizaciones"] = registro.a_resumen()
+        summary.setdefault("warnings", []).append(registro.aviso())
+    return summary
+
+
+def _quitar_nulos_de_hoja(
+    filas: list[list[Any]], registro: Normalizaciones, hoja: str | None
+) -> tuple[list[list[Any]], list[str]]:
+    """Las filas de una hoja sin ``U+0000``, con el encabezado desambiguado.
+
+    El encabezado se ubica con ``_detect_header_row`` —la MISMA función que usa
+    después cada camino de clasificación—, así que la fila que se desambigua es la
+    que después se lee como encabezado. Devuelve los avisos de columnas
+    renombradas.
+    """
+    limpias = quitar_nulos_de_filas(filas, registro, hoja=hoja)
+    if limpias is filas or not limpias:
+        return limpias, []
+    i = _detect_header_row(limpias)
+    original = list(filas[i] or [])
+    encabezado, avisos = desambiguar_encabezados(original, list(limpias[i] or []))
+    limpias[i] = encabezado
+    return limpias, avisos
 
 
 def _parse_spreadsheet(
-    content: bytes, mime: str, filename: str, limites: LimitesDeArchivo | None = None
+    content: bytes,
+    mime: str,
+    filename: str,
+    limites: LimitesDeArchivo | None = None,
+    registro: Normalizaciones | None = None,
 ) -> dict[str, Any]:
     limites = limites or LIMITES
+    registro = registro if registro is not None else Normalizaciones()
     source_format = infer_source_format(filename, mime)
     #: E6c-2: el reloj que corta la iteración. Se crea acá —una vez por archivo—
     #: para que el tope sea del parseo completo y no de cada hoja por separado.
@@ -1513,6 +1552,8 @@ def _parse_spreadsheet(
         delimiter = _sniff_delimiter(text[:8192])
         reader = csv.reader(io.StringIO(text), delimiter=delimiter)
         rows = [r for r in reader if any((c or "").strip() for c in r)]  # descarta filas vacías
+        rows, _avisos_nulos = _quitar_nulos_de_hoja(rows, registro, None)
+        summary["warnings"].extend(_avisos_nulos)
         if not rows:
             summary.update(
                 {
@@ -1623,6 +1664,9 @@ def _parse_spreadsheet(
                 rows, celdas = _leer_hoja_acotada(ws, reloj, limites, celdas)
                 if len(rows) < 2:
                     continue
+                # Antes de marcar fórmulas: la marca se escribe sobre estas filas.
+                rows, _avisos_nulos = _quitar_nulos_de_hoja(rows, registro, sheet_name)
+                summary["warnings"].extend(_avisos_nulos)
                 _crudas[sheet_name] = rows
             # E6c-2: separar "celda vacía" de "fórmula sin resultado cacheado"
             # ANTES de clasificar. Después sería tarde: la detección de Libro
@@ -1837,6 +1881,10 @@ def _parse_spreadsheet(
         # ── Una sola hoja: comportamiento original (con límite ampliado) ─────
         worksheet = workbook.active
         _filas_hoja, celdas = _leer_hoja_acotada(worksheet, reloj, limites, celdas)
+        _filas_hoja, _avisos_nulos = _quitar_nulos_de_hoja(
+            _filas_hoja, registro, worksheet.title
+        )
+        summary["warnings"].extend(_avisos_nulos)
         _formulas, _verificado = marcar_formulas_sin_resultado(
             content, {worksheet.title: _filas_hoja}, reloj, limites
         )
@@ -1899,9 +1947,17 @@ def _parse_spreadsheet(
         workbook.close()
 
 
-def _parse_document(content: bytes, mime: str, filename: str) -> dict[str, Any]:
+def _parse_document(
+    content: bytes, mime: str, filename: str, registro: Normalizaciones | None = None
+) -> dict[str, Any]:
     source_format = infer_source_format(filename, mime)
     raw_text = extract_document_text(content, mime, filename)
+    # Un PDF o un .docx mal codificado trae nulos de relleno: se quitan antes de
+    # buscar montos, que es de donde salen todas las filas del resumen.
+    raw_text, _nulos = quitar_nulos_de_texto(raw_text)
+    if _nulos and registro is not None:
+        registro.celdas += 1
+        registro.nulos += _nulos
     detected = extract_amounts_from_text(raw_text)
     preview_rows = _preview_from_detected_rows(detected)  # limpio (antes de marcar)
     contexts = _build_text_contexts(detected, "text_group")  # marca filas con __context__

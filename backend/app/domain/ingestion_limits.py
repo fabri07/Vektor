@@ -209,12 +209,26 @@ class RelojDeParsing:
 #: Con la marca, la fila sigue el camino que ya existe para lo ilegible (va a
 #: "Otros" con su motivo) en vez de entrar como si el usuario no hubiera cargado
 #: nada. **Nunca se sustituye por cero ni por vacío.**
-FORMULA_SIN_RESULTADO = "\x00formula-sin-resultado\x00"
+#:
+#: Los delimitadores son ``U+E000`` (uso privado): nadie los tipea y Postgres los
+#: acepta. La marca original usaba ``\x00``, que Postgres **rechaza** en JSONB y
+#: en TEXT — en SQLite se guardaba sin problema, así que ningún test lo vio, y en
+#: producción todo archivo con fórmulas sin calcular reventaba el worker al
+#: guardar el resumen (ASTERIA, 2026-10-05: 3.250 nulos, todos esta marca).
+FORMULA_SIN_RESULTADO = "\ue000formula-sin-resultado\ue000"
+
+#: La marca anterior. Se sigue RECONOCIENDO —no se vuelve a producir— por lo que
+#: pueda quedar en vuelo, y para que la limpieza de nulos de la entrada nunca
+#: confunda una marca vieja con texto: la identidad se decide antes de limpiar.
+FORMULA_SIN_RESULTADO_LEGADO = "\x00formula-sin-resultado\x00"
 
 
 def es_formula_sin_resultado(valor: object) -> bool:
     """¿Esta celda es una fórmula que el archivo nunca calculó?"""
-    return valor is FORMULA_SIN_RESULTADO or valor == FORMULA_SIN_RESULTADO
+    return valor is FORMULA_SIN_RESULTADO or valor in (
+        FORMULA_SIN_RESULTADO,
+        FORMULA_SIN_RESULTADO_LEGADO,
+    )
 
 
 TEXTO_FORMULA_SIN_RESULTADO = (

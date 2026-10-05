@@ -73,12 +73,13 @@ def rebuild_weekly_history() -> None:
 
     async def _run() -> None:
         from sqlalchemy import select  # noqa: PLC0415
-        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+        from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
+        from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
         from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
-        engine = create_async_engine(
+        engine = crear_engine(
             s.DATABASE_URL,
             pool_pre_ping=True,
             connect_args=s.pg_connect_args,
@@ -119,10 +120,12 @@ def trigger_score_recalculation(tenant_id: str, snapshot_id: str) -> None:
     async def _run() -> None:
         import uuid as _uuid  # noqa: PLC0415
 
-        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+        from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
-        engine = create_async_engine(
+        from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
+
+        engine = crear_engine(
             s.DATABASE_URL,
             pool_pre_ping=True,
             connect_args=s.pg_connect_args,

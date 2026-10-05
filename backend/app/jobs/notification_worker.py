@@ -31,14 +31,15 @@ def send_notification(
     import uuid  # noqa: PLC0415
 
     async def _run() -> None:
-        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+        from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
         from app.config.settings import get_settings  # noqa: PLC0415
+        from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
         from app.persistence.models.notification import Notification  # noqa: PLC0415
 
         s = get_settings()
-        engine = create_async_engine(
+        engine = crear_engine(
             s.DATABASE_URL,
             pool_pre_ping=True,
             connect_args=s.pg_connect_args,

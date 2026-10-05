@@ -33,13 +33,14 @@ _TRIGGERED_BY = "celery:inventory_integrity_check"
 
 async def _run(tenant_id_str: str) -> None:
     from sqlalchemy import select  # noqa: PLC0415
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
     from app.application.services.inventory_integrity_service import (  # noqa: PLC0415
         check_tenant_inventory_integrity,
     )
     from app.config.settings import get_settings  # noqa: PLC0415
+    from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
     from app.persistence.models.audit import DecisionAuditLog  # noqa: PLC0415
     from app.persistence.models.notification import Notification  # noqa: PLC0415
     from app.persistence.models.user import User  # noqa: PLC0415
@@ -47,7 +48,7 @@ async def _run(tenant_id_str: str) -> None:
     s = get_settings()
     tenant_id = uuid.UUID(tenant_id_str)
 
-    engine = create_async_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
+    engine = crear_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
     session_factory = sessionmaker(  # type: ignore[call-overload]
         engine, class_=AsyncSession, expire_on_commit=False
     )
@@ -182,12 +183,13 @@ def inventory_integrity_check_all_tenants() -> None:
 
     async def _collect_tenants() -> list[str]:
         from sqlalchemy import select  # noqa: PLC0415
-        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+        from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
         from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
+        from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
         from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
-        engine = create_async_engine(
+        engine = crear_engine(
             s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args
         )
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]

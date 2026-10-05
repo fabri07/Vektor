@@ -29,19 +29,20 @@ def notify_contact_lead(self: Any, lead_id: str) -> None:
     import asyncio  # noqa: PLC0415
     import uuid  # noqa: PLC0415
 
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: PLC0415
+    from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
     from app.application.services.contact_lead_service import build_lead_email  # noqa: PLC0415
     from app.config.settings import get_settings  # noqa: PLC0415
     from app.domain.contact_lead import EmailNotificationStatus  # noqa: PLC0415
     from app.integrations.smtp import SMTPClient  # noqa: PLC0415
+    from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
     from app.persistence.models.contact_lead import ContactLead  # noqa: PLC0415
 
     s = get_settings()
 
     async def _load() -> tuple[str, str, str] | None:
-        engine = create_async_engine(
+        engine = crear_engine(
             s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args
         )
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
@@ -56,7 +57,7 @@ def notify_contact_lead(self: Any, lead_id: str) -> None:
             await engine.dispose()
 
     async def _mark(status: EmailNotificationStatus) -> None:
-        engine = create_async_engine(
+        engine = crear_engine(
             s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args
         )
         factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]

@@ -130,14 +130,30 @@ class TestRegla2Schema:
 
 
 class TestRegla3Montos:
-    def test_negative_amount_rejected(self, gate: ValidationGate) -> None:
+    def test_un_negativo_no_rechaza_el_archivo(self, gate: ValidationGate) -> None:
+        """El gate corre antes del mapeo: no sabe si la columna es un monto de
+        venta o un saldo. El signo de un monto de operación lo decide el
+        importador por fila; acá un negativo no puede tumbar el archivo."""
         summary = _spreadsheet_ventas()
         summary["ventas_detectadas"] = [
             {"fecha": date.today().strftime("%d/%m/%Y"), "monto": "-5000"},
         ]
         result = gate.validate(summary)
-        assert not result.passed
-        assert result.rejection_reason == "negative_amount"
+        assert result.passed
+
+    def test_columna_de_saldo_negativa_no_rechaza(self, gate: ValidationGate) -> None:
+        """El caso real (ASTERIA): un resumen mensual con flujo y saldo negativos."""
+        summary = _spreadsheet_ventas()
+        summary["ventas_detectadas"] = [
+            {
+                "fecha": date.today().strftime("%d/%m/%Y"),
+                "Ventas $": "755300",
+                "Flujo neto de caja $": "-119969.18",
+                "Saldo de caja acumulado $": "-3363.49",
+            },
+        ]
+        result = gate.validate(summary)
+        assert result.passed
 
     def test_large_amount_warning_not_rejected(self, gate: ValidationGate) -> None:
         summary = _spreadsheet_ventas()
