@@ -346,7 +346,10 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
     """
     from fastapi import HTTPException  # noqa: PLC0415
 
-    from app.api.v1.ingestion import REVISION_CAMBIADA_CODE  # noqa: PLC0415
+    from app.api.v1.ingestion import (  # noqa: PLC0415
+        POSIBLE_REPETICION_CODE,
+        REVISION_CAMBIADA_CODE,
+    )
     from app.application.services.ingestion_lease_service import (  # noqa: PLC0415
         ImportLeaseLostError,
     )
@@ -354,6 +357,7 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
         ERROR_DESCONOCIDO,
         ERROR_IMPORT_VACIO,
         ERROR_LEASE_PERDIDO,
+        ERROR_POSIBLE_REPETICION,
         ERROR_REVISION,
         ERROR_SUSCRIPCION,
         ERROR_TRANSITORIO,
@@ -382,6 +386,8 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
             and exc.detail.get("code") == REVISION_CAMBIADA_CODE
         ):
             return ERROR_REVISION, str(exc.detail.get("message") or "")
+        if isinstance(exc.detail, dict) and exc.detail.get("code") == POSIBLE_REPETICION_CODE:
+            return ERROR_POSIBLE_REPETICION, str(exc.detail.get("message") or "")
         detalle = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         if exc.status_code == 422 and "no se importó" in detalle.lower():
             return ERROR_IMPORT_VACIO, detalle

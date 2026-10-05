@@ -114,6 +114,7 @@ from app.domain.line_amount import (
     LineAmount,
     resolve_line_amount,
 )
+from app.domain.monto_negativo import motivo_de_negativo, texto_de_motivo
 from app.domain.numeric_parsing import (
     CAMPOS_DE_CANTIDAD,
     CAMPOS_MONETARIOS,
@@ -2690,7 +2691,12 @@ _SIN_MONTO_LABEL = (
 )
 
 
-def _label_fila_sin_monto(raw: Any) -> str:
+def _label_fila_sin_monto(
+    raw: Any,
+    fila: dict[str, Any] | None = None,
+    cantidad: Any = None,
+    precio_unitario: Any = None,
+) -> str:
     """Por qué esta fila se quedó sin monto, cuando se puede decir algo mejor.
 
     El mensaje por defecto le pide al usuario que mapee la columna del monto — y
@@ -2721,6 +2727,15 @@ def _label_fila_sin_monto(raw: Any) -> str:
         )
     if interpretado.motivo == MOTIVO_ILEGIBLE:
         return f"El monto «{str(raw).strip()}» no se pudo leer como número"
+    if interpretado.valor is not None and interpretado.valor < 0:
+        # Fase 2 (ASTERIA, 2026-10-05): un negativo no es "falta el monto". La
+        # fila dice qué parece —devolución, signo invertido, cuenta que no
+        # cierra— y el signo NUNCA se corrige solo.
+        return texto_de_motivo(
+            motivo_de_negativo(interpretado.valor, fila, cantidad, precio_unitario), raw
+        )
+    if interpretado.valor is not None and interpretado.valor == 0:
+        return f"El monto es cero ({str(raw).strip()}): no se registra como operación"
     return _SIN_MONTO_LABEL
 
 
@@ -5939,7 +5954,7 @@ async def _insert_confirmed_data_impl(
                     source=source,
                     uploaded_file_id=uploaded_file_id,
                     context_label=_label_fila_sin_monto(
-                        row.get(venta_col or gasto_col or "")
+                        row.get(venta_col or gasto_col or ""), row
                     ),
                     suggested_entity="sale" if wants_ventas else "expense",
                     row_ref=_source_row_ref(_row_anchor),
@@ -7567,7 +7582,10 @@ async def _insert_multisheet_data(
                 source=source,
                 uploaded_file_id=uploaded_file_id,
                 context_label=_label_fila_sin_monto(
-                    row.get(cols["amount"]) if cols.get("amount") else None
+                    row.get(cols["amount"]) if cols.get("amount") else None,
+                    row,
+                    _venta_cantidad_cruda(row, cols),
+                    _unit_price,
                 ),
                 suggested_entity="sale",
                 row_ref=row_ref,
@@ -7750,7 +7768,7 @@ async def _insert_multisheet_data(
                 source=source,
                 uploaded_file_id=uploaded_file_id,
                 context_label=_label_fila_sin_monto(
-                    row.get(cols["amount"]) if cols.get("amount") else None
+                    row.get(cols["amount"]) if cols.get("amount") else None, row
                 ),
                 suggested_entity="expense",
                 row_ref=row_ref,

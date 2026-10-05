@@ -170,3 +170,29 @@ describe("F-H6.c — la decisión de costo viaja por la red", () => {
     expect(bodyDelConfirm().purchase_cost_decisions).toEqual([]);
   });
 });
+
+describe("acepto_posible_repeticion (Fase 2)", () => {
+  it("no viaja si no se aceptó: no cambia la huella de lo que ya se mandaba", async () => {
+    await ingestionService.confirmFile("f1", { ventas: true });
+    const body = (api.post as jest.Mock).mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(body).not.toHaveProperty("acepto_posible_repeticion");
+  });
+
+  it("viaja en true cuando la persona aceptó", async () => {
+    await ingestionService.confirmFile(
+      "f1",
+      { ventas: true },
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    const body = (api.post as jest.Mock).mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(body.acepto_posible_repeticion).toBe(true);
+  });
+});

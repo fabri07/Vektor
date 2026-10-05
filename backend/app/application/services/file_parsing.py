@@ -38,13 +38,15 @@ from app.domain.ingestion_limits import (
     LimitesDeArchivo,
     RelojDeParsing,
 )
-from app.domain.numeric_parsing import parsear_monto
+from app.domain.numeric_parsing import inferir_convenio, parsear_monto
 from app.domain.texto_nulo import (
     Normalizaciones,
     desambiguar_encabezados,
     quitar_nulos_de_filas,
     quitar_nulos_de_texto,
 )
+from app.domain.tipo_de_movimiento import clasificar as clasificar_tipo
+from app.domain.tipo_de_movimiento import es_reconocido as es_tipo_reconocido
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -116,6 +118,10 @@ GASTO_COLS = {"costo", "gasto", "gastos", "egreso", "compra", "deuda", "pago", "
 
 # Señales fuertes: inequívocamente un catálogo/inventario — no aparecen en transacciones
 CATALOGO_COLS = {"sku", "codigo", "inventario", "articulo", "item"}
+# Columnas que listan productos o existencias. NO son "catálogo fuerte" (una
+# venta también nombra el producto): sólo sirven para descartar que la hoja sea
+# un MAESTRO de clientes/proveedores, que nunca las trae.
+LISTADO_DE_PRODUCTOS_COLS = {"producto", "stock", "existencia"}
 
 # Señales débiles: pueden aparecer en ventas/gastos también (descripcion de venta, nombre del
 # proveedor)
@@ -520,6 +526,14 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
     has_identidad_contacto = any(
         any(k in col for k in IDENTIDAD_CONTACTO_COLS) for col in normalized
     )
+    # Una existencia nunca está en un maestro. Un "producto" sí puede estarlo
+    # ("Productos que provee"), y la identidad fiscal o de contacto lo dice: un
+    # catálogo no trae CUIT ni teléfono.
+    has_listado_de_productos = any(
+        any(k in col for k in LISTADO_DE_PRODUCTOS_COLS - {"producto"}) for col in normalized
+    ) or (
+        any("producto" in col for col in normalized) and not has_identidad_contacto
+    )
 
     inferred_type = infer_spreadsheet_type(
         has_fecha=has_fecha,
@@ -542,6 +556,7 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         cliente_score=cliente_score,
         proveedor_master_score=proveedor_master_score,
         has_identidad_contacto=has_identidad_contacto,
+        has_listado_de_productos=has_listado_de_productos,
     )
 
     has_catalogo_signal = has_catalogo_fuerte or has_nombre
@@ -579,6 +594,7 @@ def infer_spreadsheet_type(
     has_identidad_contacto: bool = False,
     has_fecha_transaccional: bool | None = None,
     has_contexto_operacion: bool | None = None,
+    has_listado_de_productos: bool = False,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
@@ -676,6 +692,12 @@ def infer_spreadsheet_type(
         and not has_cantidad
         and not has_fecha_transaccional
         and not has_catalogo_fuerte
+        # Una columna de PRODUCTO o de STOCK también es catálogo: un maestro de
+        # proveedores no lista productos ni existencias. Sin esto, un catálogo
+        # que nombra a quién se le compra cada producto ("Proveedores | Productos
+        # | Stock | Precio…") caía como maestro de proveedores (ASTERIA,
+        # 2026-10-05), porque lo único que frenaba la regla era un sku/código.
+        and not has_listado_de_productos
     ):
         if proveedor_master_score > cliente_score:
             return "proveedores"
@@ -848,6 +870,126 @@ def _ld_norm_cell(value: Any) -> str:
         return ""
     s = strip_accents(str(value).strip().lower())
     return re.sub(r"[\s\-_/]+", " ", s)
+
+
+# ── Hojas derivadas por CONTENIDO (incidente ASTERIA, 2026-10-05) ────────────
+# El nombre sólo no alcanza: "3. Resumen mensual" no empieza con "resumen", y una
+# hoja de totales puede llamarse "Tablero" o "Mensual". Por contenido, una hoja es
+# derivada cuando se cumplen LAS DOS cosas: es una tabla por PERÍODO (sin día) con
+# columnas de agregado, Y el mismo archivo trae otra hoja con los movimientos
+# fechados de los que salen esos totales. Una sola no alcanza: una planilla de
+# ventas mensuales sin movimientos al lado es el dato que el usuario tiene.
+_NUMERACION_DE_HOJA = re.compile(r"^\s*\d+\s*[.)\-–:]*\s*")
+_PERIODO_SIN_DIA = re.compile(
+    r"^\s*(\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}|"
+    r"(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)[a-z]*\.?(\s*[-/]?\s*\d{2,4})?)\s*$"
+)
+_FECHA_CON_DIA = re.compile(r"^\s*(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})")
+_ENCABEZADO_DE_PERIODO = frozenset({"periodo", "mes", "month"})
+_ENCABEZADOS_DE_AGREGADO = (
+    "total",
+    "promedio",
+    "%",
+    "acumulad",
+    "margen",
+    "ticket",
+    "operaciones",
+    "flujo",
+    "saldo",
+    "distribuible",
+    "reinversion",
+)
+#: Proporción mínima de celdas con la forma esperada para decir "esta columna es X".
+_PROPORCION_DE_FORMA = 0.8
+
+
+def _nombre_de_hoja_sin_numeracion(nombre: str) -> str:
+    """"3. Resumen mensual" → "resumen mensual" (normalizado)."""
+    return _ld_norm_cell(_NUMERACION_DE_HOJA.sub("", str(nombre)))
+
+
+def _valores_de_columna(filas: list[list[Any]], j: int) -> list[Any]:
+    return [
+        f[j]
+        for f in filas
+        if f is not None and j < len(f) and f[j] is not None and str(f[j]).strip()
+    ]
+
+
+def _proporcion(valores: list[Any], predicado: Any) -> float:
+    return sum(1 for v in valores if predicado(v)) / len(valores) if valores else 0.0
+
+
+def _es_tabla_por_periodo(encabezado: list[Any], filas: list[list[Any]]) -> bool:
+    """¿Alguna columna es un período sin día, y hay al menos dos de agregado?"""
+    normalizados = [fold_header(str(h)) if h is not None else "" for h in encabezado]
+    agregados = sum(1 for h in normalizados if any(k in h for k in _ENCABEZADOS_DE_AGREGADO))
+    if agregados < 2:
+        return False
+    for j, h in enumerate(normalizados):
+        valores = _valores_de_columna(filas, j)
+        if not valores:
+            continue
+        por_forma = _proporcion(
+            valores,
+            lambda v: not hasattr(v, "day")
+            and bool(_PERIODO_SIN_DIA.match(strip_accents(str(v).strip().lower()))),
+        )
+        if por_forma >= _PROPORCION_DE_FORMA:
+            return True
+        # Palabra entera: "mes" no es "mesero" ni "mesa".
+        if _ENCABEZADO_DE_PERIODO.intersection(re.split(r"[^a-z0-9]+", h)) and por_forma > 0:
+            return True
+    return False
+
+
+def _es_numero_nativo(valor: Any) -> bool:
+    return isinstance(valor, int | float) and not isinstance(valor, bool)
+
+
+def _tiene_movimientos_fechados(encabezado: list[Any], filas: list[list[Any]]) -> bool:
+    """¿La hoja registra movimientos: una fecha CON día y al menos un importe?
+
+    El importe es lo que separa un registro de operaciones de una lista de notas
+    fechadas (la hoja "Notas y pendientes" de ASTERIA tiene fecha y no tiene
+    montos), que no es de donde sale ningún total.
+    """
+    if len(filas) < 2:
+        return False
+    normalizados = [fold_header(str(h)) if h is not None else "" for h in encabezado]
+    hay_fecha = False
+    hay_importe = False
+    for j, h in enumerate(normalizados):
+        valores = _valores_de_columna(filas, j)
+        if not valores:
+            continue
+        if any(k in h for k in FECHA_COLS) and _proporcion(
+            valores,
+            lambda v: hasattr(v, "day") or bool(_FECHA_CON_DIA.match(str(v))),
+        ) >= _PROPORCION_DE_FORMA:
+            hay_fecha = True
+        elif _proporcion(valores, _es_numero_nativo) >= 0.5:
+            hay_importe = True
+    return hay_fecha and hay_importe
+
+
+def _motivo_de_hoja_derivada(
+    nombre: str, filas: list[list[Any]], hay_otra_hoja_con_movimientos: bool
+) -> str | None:
+    """``"nombre"`` / ``"contenido"`` si la hoja es un resumen de otras, si no ``None``."""
+    if _nombre_de_hoja_sin_numeracion(nombre).startswith(_DERIVED_SHEET_PREFIXES):
+        return "nombre"
+    if not hay_otra_hoja_con_movimientos or len(filas) < 2:
+        return None
+    i = _detect_header_row(filas)
+    encabezado, datos = list(filas[i] or []), filas[i + 1 :]
+    # Una hoja que registra movimientos con fecha y día es una fuente, aunque
+    # además tenga una columna de mes y totales: un resumen no tiene días.
+    if _tiene_movimientos_fechados(encabezado, datos):
+        return None
+    if _es_tabla_por_periodo(encabezado, datos):
+        return "contenido"
+    return None
 
 
 def detect_libro_diario_header(
@@ -1044,6 +1186,340 @@ def _append_libro_diario_contexts(
             "entra y sale en la misma fila, o salida de mercadería sin plata) y "
             "quedaron para revisión manual."
         )
+
+
+# ── Libro mixto: una columna dice qué es cada fila (incidente ASTERIA) ───────
+_ENCABEZADO_DE_TIPO = ("tipo", "movimiento")
+_ENCABEZADO_DE_DETALLE = ("concepto", "detalle", "descripcion")
+#: Columnas numéricas que NO son el importe de la operación: derivadas (margen,
+#: saldo, repartos) o informativas (costo, cantidad). Ninguna se importa.
+_NO_ES_IMPORTE = (
+    "margen",
+    "saldo",
+    "acumulad",
+    "reinversion",
+    "distribuible",
+    "%",
+    "promedio",
+    "costo",
+    "cant",
+    "unidad",
+    "stock",
+)
+#: Palabras de columnas numéricas que identifican o miden por unidad, nunca
+#: totalizan la operación: un número de comprobante no es un importe. Se comparan
+#: por PALABRA entera del encabezado plegado ("id" no es "ingreso_vidrieria").
+_IDENTIFICA_O_ES_UNITARIO = frozenset(
+    {
+        "nro", "num", "numero", "id", "codigo", "cod", "comprobante", "factura",
+        "cuit", "cuil", "dni", "telefono", "tel", "sku", "ean", "remito",
+        "unitario", "unit",
+    }
+)
+#: Una columna que se llama así es el importe; entre varias con valor, gana ésa.
+_NOMBRE_DE_IMPORTE = frozenset({"importe", "monto", "total"})
+_IMPORTE_DE_SALIDA = ("salida", "egreso", "pago", "gasto", "compra")
+_IMPORTE_DE_ENTRADA = ("venta", "ingreso", "cobr", "entrada")
+#: Proporción de valores del vocabulario para afirmar que la columna es de tipos.
+_PROPORCION_DE_TIPOS = 0.8
+
+
+def _columna_de_tipo_de_movimiento(
+    encabezados: list[str], filas: list[dict[str, Any]]
+) -> str | None:
+    """La columna que dice qué es cada fila, si la hoja es un libro MIXTO.
+
+    Mixto = los valores son tipos del vocabulario (``domain/tipo_de_movimiento``)
+    Y al menos dos destinos importables distintos aparecen. Una hoja de sólo
+    ventas con columna "Tipo" no es mixta: su clasificación por encabezados ya
+    alcanza y no hay nada que repartir.
+    """
+    for h in encabezados:
+        if not any(k in fold_header(h) for k in _ENCABEZADO_DE_TIPO):
+            continue
+        valores = [f.get(h) for f in filas if f.get(h) is not None and str(f.get(h)).strip()]
+        if len(valores) < 2:
+            continue
+        if _proporcion(valores, es_tipo_reconocido) < _PROPORCION_DE_TIPOS:
+            continue
+        destinos = {clasificar_tipo(v).destino for v in valores} - {"otros"}
+        if len(destinos) >= 2:
+            return h
+    return None
+
+
+def _palabras(encabezado: str) -> set[str]:
+    return set(re.split(r"[^a-z0-9]+", fold_header(encabezado))) - {""}
+
+
+def _importe_de_la_fila(
+    fila: dict[str, Any], candidatas: list[str], destino: str, convenios: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """``(importe, None)`` si hay exactamente UN importe compatible con el
+    destino —ya interpretado, como texto canónico—; si no, ``(None, motivo)``.
+    Nunca se elige entre dos.
+
+    Cada celda se lee con el convenio de SU columna (E4): sin él, ``"29706.5"``
+    no tiene escala decidible y la fila parecía no tener importe."""
+    con_valor: list[str] = []
+    valores: dict[str, str] = {}
+    for h in candidatas:
+        v = fila.get(h)
+        if v is None or not str(v).strip():
+            continue
+        interpretado = parsear_monto(v, convenios.get(h))
+        if interpretado.valor is not None and interpretado.valor != 0:
+            con_valor.append(h)
+            valores[h] = str(interpretado.valor)
+    prohibidas = _IMPORTE_DE_ENTRADA if destino != "venta" else _IMPORTE_DE_SALIDA
+    compatibles = [h for h in con_valor if not any(k in fold_header(h) for k in prohibidas)]
+    if len(compatibles) > 1:
+        # Decisión por NOMBRE de columna, igual para todas las filas: nunca por
+        # cuál celda "parece" más un importe.
+        nombradas = [h for h in compatibles if _NOMBRE_DE_IMPORTE.intersection(_palabras(h))]
+        if len(nombradas) == 1:
+            compatibles = nombradas
+    if len(compatibles) == 1:
+        return valores[compatibles[0]], None
+    if not compatibles:
+        return None, (
+            "No se encontró el importe: la fila no trae un monto en una columna "
+            "que corresponda a este tipo de movimiento"
+        )
+    return None, (
+        "No se pudo decidir el importe: la fila trae montos en "
+        + ", ".join(f"«{h}»" for h in compatibles)
+    )
+
+
+# ── Filas que el propio archivo marca como no reales (F2d) ──────────────────
+_ENCABEZADO_DE_PROCEDENCIA = ("origen", "fuente", "procedencia")
+_VALOR_NO_REAL = re.compile(
+    r"\b(simulad|simulacion|estimad|proyectad|ejemplo|prueba|ficticio|inventad|demo)"
+)
+
+
+def separar_filas_no_reales(
+    encabezados: list[str], filas: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    """``(reales, no_reales, columna)`` según una columna de procedencia.
+
+    Véktor no inventa datos, y tampoco puede importar como reales los que el
+    archivo mismo declara inventados: en ASTERIA (2026-10-05) 389 movimientos
+    traían ``Origen del dato = "simulado"`` junto a 2.568 originales. Sólo actúa
+    si existe una columna de procedencia y algún valor dice simulado/estimado/
+    proyectado/ejemplo/prueba; si no, devuelve las filas tal cual.
+    """
+    for h in encabezados:
+        if not any(k in fold_header(h) for k in _ENCABEZADO_DE_PROCEDENCIA):
+            continue
+        no_reales = [
+            f
+            for f in filas
+            if f.get(h) is not None and _VALOR_NO_REAL.search(_ld_norm_cell(f.get(h)))
+        ]
+        if no_reales:
+            ids = {id(f) for f in no_reales}
+            return [f for f in filas if id(f) not in ids], no_reales, h
+    return filas, [], None
+
+
+def _apartar_filas_no_reales(
+    summary: dict[str, Any],
+    contexts: list[dict[str, Any]],
+    etiqueta: str,
+    encabezados: list[str],
+    filas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Saca de la hoja las filas no reales y las deja en «Otros» con su motivo."""
+    reales, no_reales, columna = separar_filas_no_reales(encabezados, filas)
+    if not no_reales:
+        return filas
+    ctx_id = f"sheet:{etiqueta}:no_reales"
+    contexts.append(
+        {
+            "context_id": ctx_id,
+            "label": (
+                f"{etiqueta} — El archivo marca estas filas como no reales "
+                f"(columna «{columna}»): no se importan como operaciones"
+            ),
+            "source_kind": "sheet_group",
+            "entity_type": None,
+            "headers": encabezados,
+            "fields": None,
+            "preview_rows": no_reales[:10],
+            "row_count": len(no_reales),
+            "unclassified": True,
+        }
+    )
+    summary.setdefault("otros_detectados", []).extend(
+        {**r, "__context__": ctx_id} for r in no_reales
+    )
+    summary["warnings"].append(
+        f"{len(no_reales)} fila(s) de '{etiqueta}' están marcadas como simuladas o "
+        f"estimadas en la columna «{columna}». No se importan como reales: quedan en "
+        "«Otros», desde donde podés importarlas a propósito si corresponde."
+    )
+    return reales
+
+
+def _avisar_filas_no_reales(
+    summary: dict[str, Any], encabezados: list[str], filas: list[dict[str, Any]]
+) -> None:
+    """Tabla suelta (CSV / una hoja): por ahora sólo se avisa.
+
+    Límite declarado: el importador de una tabla suelta no procesa contextos de
+    «Otros» adicionales (ese despacho es el de multihoja), así que apartarlas
+    acá exigiría cambiar ese camino. Se avisa arriba para que el usuario no
+    confirme sin saberlo.
+    """
+    _, no_reales, columna = separar_filas_no_reales(encabezados, filas)
+    if no_reales:
+        summary["warnings"].append(
+            f"Atención: {len(no_reales)} fila(s) están marcadas como simuladas o "
+            f"estimadas en la columna «{columna}» y se importarían como reales. "
+            "Sacalas del archivo antes de confirmar."
+        )
+
+
+def separar_libro_mixto(
+    encabezados: list[str], filas: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Reparte un libro mixto en ventas, gastos y pendientes con su motivo.
+
+    Devuelve ``None`` si la hoja no es un libro mixto. Las filas importables
+    salen con claves canónicas (``fecha``, ``detalle``, ``monto``, ``categoria``,
+    más ``cliente``/``proveedor`` si la hoja los trae), igual que el Libro Diario;
+    las pendientes conservan la fila ORIGINAL entera, agrupadas por motivo.
+    """
+    col_tipo = _columna_de_tipo_de_movimiento(encabezados, filas)
+    if col_tipo is None:
+        return None
+    plegados = {h: fold_header(h) for h in encabezados}
+    col_fecha = next(
+        (h for h in encabezados if "fecha" in plegados[h]),
+        next((h for h in encabezados if any(k in plegados[h] for k in FECHA_COLS)), None),
+    )
+    col_detalle = next(
+        (h for h in encabezados if any(k in plegados[h] for k in _ENCABEZADO_DE_DETALLE)), None
+    )
+    col_cliente = next((h for h in encabezados if "cliente" in plegados[h]), None)
+    col_proveedor = next((h for h in encabezados if "proveedor" in plegados[h]), None)
+    excluidas = {col_tipo, col_fecha, col_detalle, col_cliente, col_proveedor}
+    candidatas = [
+        h
+        for h in encabezados
+        if h not in excluidas
+        and not any(k in plegados[h] for k in FECHA_COLS)
+        and not any(k in plegados[h] for k in _NO_ES_IMPORTE)
+        and not _IDENTIFICA_O_ES_UNITARIO.intersection(_palabras(h))
+    ]
+
+    convenios = {h: inferir_convenio([f.get(h) for f in filas]) for h in candidatas}
+    ventas: list[dict[str, Any]] = []
+    gastos: list[dict[str, Any]] = []
+    pendientes: dict[str, list[dict[str, Any]]] = {}
+    for fila in filas:
+        if not any(v is not None and str(v).strip() for v in fila.values()):
+            continue
+        clasificacion = clasificar_tipo(fila.get(col_tipo))
+        if clasificacion.destino == "otros":
+            pendientes.setdefault(clasificacion.motivo or "Sin motivo", []).append(fila)
+            continue
+        monto, motivo = _importe_de_la_fila(fila, candidatas, clasificacion.destino, convenios)
+        if monto is None:
+            pendientes.setdefault(motivo or "Sin importe", []).append(fila)
+            continue
+        base: dict[str, Any] = {
+            "fecha": (
+                str(fila[col_fecha]) if col_fecha and fila.get(col_fecha) is not None else None
+            ),
+            "detalle": fila.get(col_detalle) if col_detalle else None,
+            "monto": monto,
+        }
+        if clasificacion.destino == "venta":
+            if col_cliente and fila.get(col_cliente):
+                base["cliente"] = fila.get(col_cliente)
+            ventas.append(base)
+        else:
+            base["categoria"] = clasificacion.categoria or str(fila.get(col_tipo)).strip()
+            if col_proveedor and fila.get(col_proveedor):
+                base["proveedor"] = fila.get(col_proveedor)
+            gastos.append(base)
+    return {
+        "columna_de_tipo": col_tipo,
+        "ventas": ventas,
+        "gastos": gastos,
+        "pendientes": pendientes,
+    }
+
+
+def _append_libro_mixto_contexts(
+    summary: dict[str, Any],
+    contexts: list[dict[str, Any]],
+    etiqueta: str,
+    separado: dict[str, Any],
+    ventas_bucket: list[dict[str, Any]],
+    gastos_bucket: list[dict[str, Any]],
+) -> None:
+    """Vuelca un libro mixto como el Libro Diario: un contexto por destino y uno
+    por cada motivo de pendiente, para que «Otros» diga POR QUÉ quedó ahí."""
+    spec = (
+        ("ventas", "sale", "Ventas", ventas_bucket, ["fecha", "detalle", "monto", "cliente"]),
+        (
+            "gastos",
+            "expense",
+            "Gastos y compras",
+            gastos_bucket,
+            ["fecha", "detalle", "monto", "categoria", "proveedor"],
+        ),
+    )
+    for clave, entidad, sub, bucket, encabezados in spec:
+        filas = separado[clave]
+        if not filas:
+            continue
+        ctx_id = f"sheet:{etiqueta}:{clave}"
+        bucket.extend({**r, "__context__": ctx_id} for r in filas)
+        presentes = [h for h in encabezados if any(h in r for r in filas)]
+        contexts.append(
+            {
+                "context_id": ctx_id,
+                "label": f"{etiqueta} — {sub}",
+                "source_kind": "sheet_group",
+                "entity_type": entidad,
+                "headers": presentes,
+                "fields": None,
+                "preview_rows": filas[:10],
+                "row_count": len(filas),
+                "libro_mixto": True,
+            }
+        )
+    for n, (motivo, filas) in enumerate(sorted(separado["pendientes"].items()), start=1):
+        ctx_id = f"sheet:{etiqueta}:pendientes:{n}"
+        contexts.append(
+            {
+                "context_id": ctx_id,
+                "label": f"{etiqueta} — {motivo}",
+                "source_kind": "sheet_group",
+                "entity_type": None,
+                "headers": None,
+                "fields": sorted({k for r in filas for k in r}),
+                "preview_rows": filas[:10],
+                "row_count": len(filas),
+                "unclassified": True,
+                "libro_mixto": True,
+            }
+        )
+        summary.setdefault("otros_detectados", []).extend(
+            {**r, "__context__": ctx_id} for r in filas
+        )
+    total_pendientes = sum(len(v) for v in separado["pendientes"].values())
+    summary["warnings"].append(
+        f"La hoja '{etiqueta}' mezcla ventas, gastos y otros movimientos según la "
+        f"columna «{separado['columna_de_tipo']}»: {len(separado['ventas'])} venta(s), "
+        f"{len(separado['gastos'])} gasto(s)/compra(s) y {total_pendientes} movimiento(s) "
+        "que quedan en «Otros» con su motivo."
+    )
 
 
 def _finish_libro_diario_summary(
@@ -1578,6 +2054,7 @@ def _parse_spreadsheet(
         data_rows = rows[hdr_idx + 1 :]
         analysis = analyze_headers(headers)
         all_dicts = rows_to_dicts(headers, data_rows)
+        _avisar_filas_no_reales(summary, headers, all_dicts)
         preview_rows = all_dicts[:10]
         null_stats = compute_column_null_stats(all_dicts)
         at_risk = flag_columns_at_risk(null_stats)
@@ -1680,6 +2157,21 @@ def _parse_spreadsheet(
             for sheet_name, rows in _crudas.items():
                 sheets_data.append((sheet_name, rows, detect_libro_diario_header(rows)))
 
+            # Qué hojas registran movimientos (un Libro Diario siempre lo hace): una
+            # hoja de totales por período sólo es derivada si hay OTRA así.
+            _con_movimientos = {
+                nombre
+                for nombre, filas, ld in sheets_data
+                if ld is not None
+                or _tiene_movimientos_fechados(
+                    list(filas[_detect_header_row(filas)] or []),
+                    filas[_detect_header_row(filas) + 1 :],
+                )
+            }
+
+            def _otra_hoja_con_movimientos(nombre: str) -> bool:
+                return bool(_con_movimientos - {nombre})
+
             for sheet_name, rows, ld in sheets_data:
                 if ld is not None:
                     hdr_idx, col_map = ld
@@ -1689,7 +2181,9 @@ def _parse_spreadsheet(
                     )
                     total_rows += sum(len(v) for v in parsed.values())
                     continue
-                if _ld_norm_cell(sheet_name).startswith(_DERIVED_SHEET_PREFIXES):
+                if _motivo_de_hoja_derivada(
+                    sheet_name, rows, _otra_hoja_con_movimientos(sheet_name)
+                ):
                     # Hoja derivada (resumen/ganancias/balance): es un agregado de
                     # los movimientos que ya vienen en el archivo, así que importarla
                     # los contaría dos veces. Se preserva sin clasificar por si el
@@ -1748,6 +2242,17 @@ def _parse_spreadsheet(
                     primary_headers = headers
 
                 total_rows += len(data_rows)
+
+                dicts = _apartar_filas_no_reales(summary, contexts, sheet_name, headers, dicts)
+
+                # Libro mixto: la columna de tipo decide fila por fila. Va antes de
+                # clasificar la hoja entera, que le daría un solo destino a todas.
+                _mixto = separar_libro_mixto(headers, dicts)
+                if _mixto is not None:
+                    _append_libro_mixto_contexts(
+                        summary, contexts, sheet_name, _mixto, all_ventas, all_gastos
+                    )
+                    continue
 
                 # Content-first: el CONTENIDO (columnas) decide el tipo de hoja; el
                 # NOMBRE es solo una orientación/contexto que desempata cuando el
@@ -1923,6 +2428,7 @@ def _parse_spreadsheet(
         data_rows = _all[hdr_idx + 1 :]
         analysis = analyze_headers(headers)
         all_dicts = rows_to_dicts(headers, data_rows)
+        _avisar_filas_no_reales(summary, headers, all_dicts)
         preview_rows = all_dicts[:10]
         null_stats = compute_column_null_stats(all_dicts)
         at_risk = flag_columns_at_risk(null_stats)

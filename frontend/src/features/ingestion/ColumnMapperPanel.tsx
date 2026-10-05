@@ -46,6 +46,8 @@ import { TargetSelect } from "./TargetSelect";
 import { AmbiguityHint } from "./AmbiguityHint";
 import { StatusDot } from "./StatusDot";
 import { ImportacionEnCursoPanel } from "./ImportacionEnCursoPanel";
+import { PosibleRepeticionAviso } from "./PosibleRepeticionAviso";
+import { repeticionDelConfirm, repeticionDelIntento } from "./posibleRepeticion";
 import { useImportacionAsincronica } from "./useImportacionAsincronica";
 import {
   customFieldCollisions,
@@ -171,6 +173,12 @@ function isTransientConfirmError(error: unknown): boolean {
   return e?.response?.status === 409 || e?.code === "ECONNABORTED";
 }
 
+// Fase 2: el 409 de repetición masiva NO es transitorio ni de mapeo — es una
+// decisión. Lo muestra `PosibleRepeticionAviso`, nunca el banner rojo ni el toast.
+function esErrorDeMapeo(error: unknown): boolean {
+  return !isTransientConfirmError(error) && repeticionDelConfirm(error) === null;
+}
+
 /**
  * F-H6.d: el tenant no tiene habilitado el motor de costos de compra.
  *
@@ -192,6 +200,7 @@ function handleTransientConfirmError(
   invalidate: () => void,
 ): boolean {
   const e = error as { response?: { status?: number }; code?: string } | null;
+  if (repeticionDelConfirm(error) !== null) return true;
   if (e?.response?.status === 409) {
     toast(
       "Ya se está importando este archivo o ya se importó — actualizá la lista",
@@ -1486,7 +1495,8 @@ function MultiContextMapper({
   });
 
   const confirmMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (opciones?: { acepto?: boolean }) => {
+      const acepto = opciones?.acepto === true;
       const columnMappings: ColumnMapping[] = [];
       const contextEntity: Record<string, string> = {};
       for (const ctx of contexts) {
@@ -1549,6 +1559,8 @@ function MultiContextMapper({
         column_risk_decisions: riskDecisions,
         shipping_decisions: envioPayload,
         purchase_cost_decisions: costoPayload,
+        // Sólo cuando es true: es lo que el backend mete en la huella del intento.
+        ...(acepto ? { acepto_posible_repeticion: true } : {}),
       });
       if (resultadoAsync === "registrado") return null;
 
@@ -1570,6 +1582,7 @@ function MultiContextMapper({
         undefined,
         envioPayload,
         costoPayload,
+        acepto,
       );
     },
     onSuccess: (result) => {
@@ -1609,12 +1622,16 @@ function MultiContextMapper({
   const errDetail = (
     confirmMutation.error as { response?: { data?: { detail?: string } } } | null
   )?.response?.data?.detail;
+  // Fase 2: la repetición masiva llega por los dos caminos — 409 del confirm
+  // sincrónico, o un intento asíncrono FALLADO con su código.
+  const repeticionAsync = repeticionDelIntento(importacion);
+  const repeticion = repeticionAsync ?? repeticionDelConfirm(confirmMutation.error);
 
   // F-H3.c: importado y con impacto sobre el stock → mostrarlo en vez del mapeo.
   // E6c-3: mientras la importación corre en segundo plano, el panel muestra su
   // progreso en vez del formulario. La persona puede cerrar la pantalla y volver:
   // el seguimiento se retoma solo (el id queda guardado).
-  if (importacion && importacion.status !== "COMPLETADO") {
+  if (importacion && importacion.status !== "COMPLETADO" && !repeticionAsync) {
     return (
       <ImportacionEnCursoPanel
         importacion={importacion}
@@ -1722,12 +1739,22 @@ function MultiContextMapper({
         </p>
       )}
 
-      {confirmMutation.isError &&
-        !isTransientConfirmError(confirmMutation.error) && (
-          <p className="mt-3 text-xs text-vk-danger">
-            {errDetail ?? "Error al confirmar. Revisá los campos requeridos de cada hoja."}
-          </p>
-        )}
+      {repeticion && (
+        <PosibleRepeticionAviso
+          mensaje={repeticion}
+          enviando={confirmMutation.isPending}
+          onImportarIgual={() => {
+            if (repeticionAsync) descartarSeguimiento();
+            confirmMutation.mutate({ acepto: true });
+          }}
+        />
+      )}
+
+      {confirmMutation.isError && esErrorDeMapeo(confirmMutation.error) && (
+        <p className="mt-3 text-xs text-vk-danger">
+          {errDetail ?? "Error al confirmar. Revisá los campos requeridos de cada hoja."}
+        </p>
+      )}
 
       {sinSeccion.length > 0 && (
         <p className="mt-3 flex gap-1.5 text-xs text-vk-warning">
@@ -1803,7 +1830,7 @@ function MultiContextMapper({
       <div className="mt-4 flex items-center gap-2">
         <button
           type="button"
-          onClick={() => confirmMutation.mutate()}
+          onClick={() => confirmMutation.mutate({})}
           disabled={
             confirmMutation.isPending ||
             !anyIncluded ||
@@ -2083,7 +2110,13 @@ export function ColumnMapperPanel({
     useImpactoPostConfirm(onDone, fileId);
 
   const confirmMutation = useMutation({
-    mutationFn: (columnMappings: ColumnMapping[]) =>
+    mutationFn: ({
+      columnMappings,
+      acepto = false,
+    }: {
+      columnMappings: ColumnMapping[];
+      acepto?: boolean;
+    }) =>
       ingestionService.confirmFile(
         fileId,
         confirmedFields,
@@ -2101,6 +2134,7 @@ export function ColumnMapperPanel({
         // sólo puede terminar en un rechazo. Ver el comentario de
         // `columnasDeCostoEnTablaUnica`.
         undefined,
+        acepto,
       ),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
@@ -2121,6 +2155,9 @@ export function ColumnMapperPanel({
       );
     },
   });
+
+  // Fase 2: 409 `POSIBLE_REPETICION` — el archivo repite lo ya cargado.
+  const repeticionTabla = repeticionDelConfirm(confirmMutation.error);
 
   const cancelMutation = useMutation({
     mutationFn: () => ingestionService.cancelFile(fileId),
@@ -2252,7 +2289,7 @@ export function ColumnMapperPanel({
         // riesgo, el recálculo en vivo— ya viajaba calificado así.
         ...(hojaPlana ? { context_id: hojaPlana, entity_type: entityType } : {}),
       }));
-    confirmMutation.mutate(columnMappings);
+    confirmMutation.mutate({ columnMappings });
   }
 
   const rowCount =
@@ -2679,13 +2716,23 @@ export function ColumnMapperPanel({
         </div>
       )}
 
+      {repeticionTabla && (
+        <PosibleRepeticionAviso
+          mensaje={repeticionTabla}
+          enviando={confirmMutation.isPending}
+          onImportarIgual={() => {
+            const anterior = confirmMutation.variables;
+            if (anterior) confirmMutation.mutate({ ...anterior, acepto: true });
+          }}
+        />
+      )}
+
       {/* Error de API (excluye 409/timeout: los maneja el toast, no el banner) */}
-      {confirmMutation.isError &&
-        !isTransientConfirmError(confirmMutation.error) && (
-          <p className="mb-2 text-xs text-vk-danger">
-            Error al confirmar. Verificá que los campos requeridos estén mapeados.
-          </p>
-        )}
+      {confirmMutation.isError && esErrorDeMapeo(confirmMutation.error) && (
+        <p className="mb-2 text-xs text-vk-danger">
+          Error al confirmar. Verificá que los campos requeridos estén mapeados.
+        </p>
+      )}
 
       {/* Acciones */}
       <div className="flex items-center gap-2">
