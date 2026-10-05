@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_UP, Decimal, DecimalException, localcontext
 from typing import Any
 
 #: Versión del subconjunto soportado. Ampliarlo cambia qué celdas se calculan.
@@ -50,6 +50,13 @@ MAX_CELDAS_POR_FORMULA = 10_000
 MAX_PROFUNDIDAD = 64
 #: Dígitos significativos del resultado: la precisión visible de Excel.
 DIGITOS_SIGNIFICATIVOS = 15
+#: Exponente decimal máximo de un número de Excel (~1,8E+308, doble precisión).
+#: Más allá Excel da ``#NUM!``; acá, pendiente. Sin este tope, ``=A1^999999``
+#: devolvía un número de un millón de dígitos que viajaba al resumen como texto.
+EXPONENTE_MAXIMO = 308
+#: Exponente de ``^`` más allá del cual el resultado es seguro fuera de rango o
+#: indistinguible de cero: se rechaza ANTES de calcular la potencia.
+MAX_EXPONENTE_DE_POTENCIA = 10_000
 
 _ERRORES_DE_EXCEL = ("#N/A", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#NULL!")
 
@@ -325,6 +332,10 @@ class Evaluador:
             arbol = analizar(self.formulas[clave])
             with localcontext() as ctx:
                 ctx.prec = 34
+                # Overflow queda atrapado (es el default) y ahora a la escala de
+                # Excel: cualquier paso que se pase levanta `decimal.Overflow`.
+                ctx.Emax = EXPONENTE_MAXIMO
+                ctx.Emin = -EXPONENTE_MAXIMO
                 bruto = self._eval(arbol, estado)
                 ctx.prec = DIGITOS_SIGNIFICATIVOS
                 valor = +bruto
@@ -334,8 +345,12 @@ class Evaluador:
             resultado = Calculada(plano, uso_vacias=estado.vacias)
         except Pendiente as p:
             resultado = Calculada(None, p.motivo)
-        except (InvalidOperation, OverflowError):
-            resultado = Calculada(None, "El cálculo no da un número válido")
+        except (DecimalException, OverflowError):
+            # `decimal.Overflow` NO es `InvalidOperation` ni `OverflowError`: sin
+            # la base común, `=1E+999999*10` hacía fallar el parseo del archivo.
+            resultado = Calculada(
+                None, "El cálculo no da un número válido o es más grande de lo que Excel admite"
+            )
         finally:
             self._en_curso.discard(clave)
         self._hechas[clave] = resultado
@@ -398,6 +413,8 @@ class Evaluador:
                 raise Pendiente("La fórmula eleva a un exponente con decimales")
             if a == 0 and b < 0:
                 raise Pendiente("La fórmula divide por cero")
+            if abs(b) > MAX_EXPONENTE_DE_POTENCIA:
+                raise Pendiente("La fórmula eleva a un exponente demasiado grande")
             return a ** int(b)
         if isinstance(nodo, _Funcion):
             return self._funcion(nodo, estado)

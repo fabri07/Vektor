@@ -114,6 +114,32 @@ def test_lo_que_no_se_calcula_queda_pendiente_con_motivo(
     assert resultado.motivo is not None and en_el_motivo in resultado.motivo
 
 
+@pytest.mark.parametrize(
+    ("valores", "formula", "en_el_motivo"),
+    [
+        # `decimal.Overflow` escapaba al except y tiraba el parseo del archivo.
+        ({}, "=1E+999999*10", "Excel admite"),
+        ({"A1": 10}, "=A1^400", "Excel admite"),
+        # Antes devolvía un número de un millón de dígitos.
+        ({"A1": 10}, "=A1^999999", "demasiado grande"),
+        ({"A1": 2}, "=A1^2000000", "demasiado grande"),
+        ({}, "=1E+300*1E+300", "Excel admite"),
+    ],
+)
+def test_un_resultado_fuera_del_rango_de_excel_queda_pendiente(
+    valores: dict[str, Any], formula: str, en_el_motivo: str
+) -> None:
+    """Revisión de código: Excel da ``#NUM!`` más allá de ~1E+308."""
+    resultado = _calc(valores, {"Z1": formula})
+    assert resultado.valor is None
+    assert resultado.motivo is not None and en_el_motivo in resultado.motivo
+
+
+def test_el_borde_del_rango_de_excel_se_calcula() -> None:
+    assert _calc({"A1": 10}, {"Z1": "=A1^300"}).valor == Decimal(10) ** 300
+    assert _calc({"A1": 2}, {"Z1": "=A1^-10"}).valor == Decimal("0.0009765625")
+
+
 def test_referencia_circular() -> None:
     hoja = _hoja({}, {"A1": "=B1+1", "B1": "=A1+1"})
     resultado = hoja.calcular(1, 1)
