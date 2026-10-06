@@ -223,6 +223,93 @@ async def test_libro_diario_insert_end_to_end(
     assert fiada.payment_method == "account"  # "cuenta corriente" → canónico
 
 
+# ── Una entrada de plata no es siempre una venta (D0, 2026-10-06) ─────────────
+
+_LD_CON_APORTES: list[list[Any]] = [
+    ["Fecha", "Detalle", "Dinero", None, "Mercadería", None],
+    [None, None, "Ingreso", "Egreso", "Ingreso", "Egreso"],
+    ["2026-05-01", "Venta del día", 120000, None, None, 80000],
+    [None, "Aporte socio Juan", 500000, None, None, None],
+    [None, "Préstamo de Ana", 200000, None, None, None],
+    [None, "Devolución proveedor textiles", 7000, None, None, None],
+    # Detalle libre, sin vocabulario: sigue siendo venta, como siempre.
+    ["2026-05-02", "Mostrador", 30000, None, None, None],
+    [None, "Cobro cliente Pérez", 15000, None, None, None],
+]
+
+
+def test_una_entrada_que_el_detalle_dice_que_no_es_venta_no_se_importa_como_venta() -> None:
+    """Antes TODA fila con Dinero/Ingreso era una venta: el aporte de un socio
+    inflaba la facturación, el margen y el score."""
+    detected = detect_libro_diario_header(_LD_CON_APORTES)
+    assert detected is not None
+    parsed = parse_libro_diario(_LD_CON_APORTES, *detected)
+
+    assert sorted(v["monto"] for v in parsed["ventas"]) == ["120000", "15000", "30000"]
+    apartadas = {f["detalle"]: f for f in parsed["no_ventas"]}
+    assert set(apartadas) == {
+        "Aporte socio Juan",
+        "Préstamo de Ana",
+        "Devolución proveedor textiles",
+    }
+    assert apartadas["Aporte socio Juan"]["dinero_ingreso"] == "500000"
+    assert apartadas["Aporte socio Juan"]["motivo"].startswith("Aporte de socio")
+    assert apartadas["Préstamo de Ana"]["motivo"].startswith("Préstamo")
+
+
+def test_el_libro_diario_con_aportes_deja_un_contexto_de_otros_por_motivo() -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Libro Diario"
+    for row in _LD_CON_APORTES:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    summary = parse_uploaded_content(buf.getvalue(), _XLSX_MIME, "ld.xlsx")
+
+    contextos = summary["mapping_contexts"]
+    ventas = next(c for c in contextos if c["entity_type"] == "sale")
+    assert ventas["row_count"] == 3
+    motivos = [c for c in contextos if ":no_ventas:" in c["context_id"]]
+    assert len(motivos) == 3 and all(c["unclassified"] for c in motivos)
+    assert any("Aporte de socio" in c["label"] for c in motivos)
+    # La fila llega a «Otros» con el dato original y sin la clave interna.
+    aporte = next(
+        f for f in summary["otros_detectados"] if f.get("detalle") == "Aporte socio Juan"
+    )
+    assert aporte["dinero_ingreso"] == "500000" and "motivo" not in aporte
+    assert any("no son ventas" in w for w in summary["warnings"])
+
+
+async def test_un_aporte_en_el_libro_diario_no_termina_como_venta_en_la_base(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """De punta a punta: parseo + confirmación. El aporte va a «Otros»."""
+    from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row in _LD_CON_APORTES:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    summary = parse_uploaded_content(buf.getvalue(), _XLSX_MIME, "ld.xlsx")
+
+    counts = await insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"ventas": True, "gastos": True}
+    )
+
+    montos = sorted(
+        s.amount for s in (await db_session.execute(select(SaleEntry))).scalars().all()
+    )
+    assert montos == [Decimal("15000"), Decimal("30000"), Decimal("120000")]
+    assert counts["otros"] == 3
+    otros = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+    assert len(otros) == 3
+
+
 # ── payment_method canónico ───────────────────────────────────────────────────
 
 
