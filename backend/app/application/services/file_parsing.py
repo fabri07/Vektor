@@ -1063,6 +1063,7 @@ def parse_libro_diario(
     ventas: list[dict[str, Any]] = []
     gastos: list[dict[str, Any]] = []
     otros: list[dict[str, Any]] = []
+    no_ventas: list[dict[str, Any]] = []
     last_fecha: Any = None
 
     for raw_row in rows[hdr_idx + 2 :]:
@@ -1102,7 +1103,19 @@ def parse_libro_diario(
                 }
             )
         elif din_in:
-            ventas.append({**base, "monto": str(din_in)})
+            # Plata que entra no es siempre una venta: un aporte de socio, un
+            # préstamo o una devolución también entran por "Dinero / Ingreso".
+            # Antes TODA entrada se importaba como venta e inflaba la
+            # facturación. Sólo se aparta lo que el detalle NOMBRA con el
+            # vocabulario de tipos (`domain/tipo_de_movimiento`); un detalle
+            # libre ("Juan", "mostrador") sigue siendo venta como siempre.
+            tipo = clasificar_tipo(detalle)
+            if detalle and tipo.destino == "otros" and es_tipo_reconocido(detalle):
+                no_ventas.append(
+                    {**base, "dinero_ingreso": str(din_in), "motivo": tipo.motivo}
+                )
+            else:
+                ventas.append({**base, "monto": str(din_in)})
         elif mer_in:
             # Compra de mercadería: entra stock, sale plata → gasto INVENTORY
             # (COGS). Sin salida de plata en la fila, la compra fue a cuenta
@@ -1121,7 +1134,7 @@ def parse_libro_diario(
             # no es venta ni gasto → revisión manual.
             otros.append({**base, "mercaderia_egreso": str(mer_out)})
 
-    return {"ventas": ventas, "gastos": gastos, "otros": otros}
+    return {"ventas": ventas, "gastos": gastos, "otros": otros, "no_ventas": no_ventas}
 
 
 def _append_libro_diario_contexts(
@@ -1186,6 +1199,38 @@ def _append_libro_diario_contexts(
             f"{len(otros)} movimiento(s) de '{sheet_label}' son ambiguos (plata que "
             "entra y sale en la misma fila, o salida de mercadería sin plata) y "
             "quedaron para revisión manual."
+        )
+    # Entradas de plata que el detalle dice que NO son ventas: un contexto de
+    # «Otros» por motivo, igual que el libro mixto, para que la bandeja diga por qué.
+    por_motivo: dict[str, list[dict[str, Any]]] = {}
+    for fila in parsed.get("no_ventas") or []:
+        resto = {k: v for k, v in fila.items() if k != "motivo"}
+        por_motivo.setdefault(str(fila.get("motivo") or "Sin motivo"), []).append(resto)
+    for n, (motivo, filas) in enumerate(sorted(por_motivo.items()), start=1):
+        ctx_id = f"sheet:{sheet_label}:no_ventas:{n}"
+        contexts.append(
+            {
+                "context_id": ctx_id,
+                "label": f"{sheet_label} — {motivo}",
+                "source_kind": "sheet_group",
+                "entity_type": None,
+                "headers": None,
+                "fields": sorted({k for r in filas for k in r}),
+                "preview_rows": filas[:10],
+                "row_count": len(filas),
+                "unclassified": True,
+                "libro_diario": True,
+            }
+        )
+        summary.setdefault("otros_detectados", []).extend(
+            {**r, "__context__": ctx_id} for r in filas
+        )
+    if por_motivo:
+        total = sum(len(f) for f in por_motivo.values())
+        summary["warnings"].append(
+            f"{total} entrada(s) de dinero de '{sheet_label}' no son ventas según su "
+            "detalle (aporte, préstamo, devolución, ajuste…) y quedaron en «Otros» "
+            "con su motivo."
         )
 
 
