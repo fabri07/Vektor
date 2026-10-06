@@ -9,6 +9,7 @@
  * (B3). Después de cobrar se muestra lo que el servidor devolvió.
  */
 
+import type { PosReceipt } from "@/features/pos/ticketTemplate";
 import type { PosErrorInfo } from "@/lib/pos/errors";
 import { clasificarSync } from "@/lib/pos/syncClassification";
 
@@ -132,6 +133,13 @@ export interface SaleState {
    * pero tampoco está en el servidor todavía (ámbar, no rojo ni verde).
    */
   noticeTono: "error" | "aviso";
+  /**
+   * La venta cobrada que quedó en la cola sin confirmar. Con esto la pantalla
+   * muestra el mismo cierre que una venta confirmada —total, vuelto,
+   * comprobante— con el sello de pendiente. Hasta 2026-10 el carrito volvía a
+   * $0 con un aviso chico, y sin red el cajero no sabía si había cobrado.
+   */
+  guardada: PosReceipt | null;
 }
 
 export const initialSale: SaleState = {
@@ -146,6 +154,7 @@ export const initialSale: SaleState = {
   result: null,
   notice: null,
   noticeTono: "error",
+  guardada: null,
 };
 
 // ─── Montos ──────────────────────────────────────────────────────────────────
@@ -418,7 +427,7 @@ export type SaleAction =
   | { type: "SEND"; payload: PosOperationPayload }
   | { type: "SUCCESS"; result: PosOperationResult }
   | { type: "REJECTED"; notice: string }
-  | { type: "QUEUED"; notice: string }
+  | { type: "QUEUED"; notice: string; recibo: PosReceipt }
   | { type: "APPLY_PRICES"; prices: Record<string, string>; notice: string }
   | { type: "APPLY_STOCK"; productId: string; available: number; notice: string }
   | { type: "DISCARD" }
@@ -570,8 +579,15 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
     case "QUEUED":
       // La venta quedó guardada y se sube sola: el carrito se LIBERA y el
       // cajero sigue atendiendo. Trabar la caja hasta que vuelva la conexión
-      // sería exactamente lo que B7 viene a evitar.
-      return { ...initialSale, notice: action.notice, noticeTono: "aviso" };
+      // sería exactamente lo que B7 viene a evitar. Queda `cobrada` como una
+      // confirmada: escanear arranca la siguiente, igual que después de cobrar.
+      return {
+        ...initialSale,
+        status: "cobrada",
+        guardada: action.recibo,
+        notice: action.notice,
+        noticeTono: "aviso",
+      };
     case "APPLY_PRICES":
       if (state.status !== "editando") return state;
       return {

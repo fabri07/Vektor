@@ -31,6 +31,11 @@ jest.mock("@/services/pos.service", () => ({
   },
 }));
 jest.mock("@/services/auth.service", () => ({ logoutRequest: jest.fn() }));
+// La impresora del navegador: abre el diálogo nativo, en jsdom no existe.
+const imprimir = jest.fn().mockResolvedValue(undefined);
+jest.mock("@/lib/print/browserPrinter", () => ({
+  createBrowserPrinter: () => ({ print: (...a: unknown[]) => imprimir(...a) }),
+}));
 // La base real, con `guardarOperacion` envuelto para poder hacerla fallar en el
 // test que prueba que sin guardado NO se cobra. `jest.spyOn` sobre el namespace
 // de un módulo no sirve: sus propiedades son de sólo lectura.
@@ -249,6 +254,18 @@ describe("flujo de cobro", () => {
     const aviso = await screen.findByText(/No se pudo contactar al servidor; se reintenta sola/);
     expect(aviso).toHaveClass("text-vk-warning");
     expect(screen.queryByText(/vuelva la conexión/)).not.toBeInTheDocument();
+    // Se ve como un cobro: total y sello de pendiente, no un carrito en $0
+    // (hasta 2026-10, sin red el cajero no sabía si había cobrado).
+    const cierre = screen.getByTestId("venta-guardada");
+    expect(cierre).toHaveTextContent("PENDIENTE DE SINCRONIZAR");
+    expect(cierre).toHaveTextContent("$");
+    // El comprobante sale del recibo local, sin ir al servidor.
+    imprimir.mockClear();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Imprimir comprobante" }));
+    });
+    expect(imprimir).toHaveBeenCalledTimes(1);
+    expect(svc.getReceipt).not.toHaveBeenCalled();
     // El carrito quedó vacío y se puede volver a escanear.
     expect(screen.queryByText("Yerba")).not.toBeInTheDocument();
     await escanear("7790001234567");

@@ -245,12 +245,13 @@ export function PendingOperationsPanel({
                     <Button size="sm" variant="secondary" onClick={() => void reintentar(op)}>
                       Reintentar
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => onImprimir(op)}>
+                    {/* `ghost` (gris, sin borde) se leía como deshabilitado. */}
+                    <Button size="sm" variant="secondary" onClick={() => onImprimir(op)}>
                       Imprimir comprobante
                     </Button>
                     <Button
                       size="sm"
-                      variant="ghost"
+                      variant="secondary"
                       onClick={() => setDescartando(op.clientOperationId)}
                     >
                       Descartar
@@ -260,7 +261,7 @@ export function PendingOperationsPanel({
               </li>
             ))}
           </ul>
-          <Button size="sm" variant="ghost" onClick={exportar}>
+          <Button size="sm" variant="secondary" onClick={exportar}>
             Exportar a un archivo
           </Button>
         </div>

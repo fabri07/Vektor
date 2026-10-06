@@ -56,6 +56,12 @@ export function ProductPicker({ picker, onPick, onClose, local }: ProductPickerP
   const [results, setResults] = useState<PosProduct[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [sinRed, setSinRed] = useState(false);
+  /**
+   * El término cuya búsqueda ya contestó. Mientras no coincide con lo escrito,
+   * la búsqueda está en curso: decir «Sin resultados» ahí es falso, y el cajero
+   * cerraba el buscador creyendo que el producto no existía.
+   */
+  const [respondido, setRespondido] = useState<string | null>(null);
   const buscar = picker.mode !== "ambiguous";
 
   useEffect(() => {
@@ -74,6 +80,7 @@ export function ProductPicker({ picker, onPick, onClose, local }: ProductPickerP
             setResults(items);
             setError(null);
             setSinRed(false);
+            setRespondido(term);
           }
         })
         .catch(() => {
@@ -85,6 +92,7 @@ export function ProductPicker({ picker, onPick, onClose, local }: ProductPickerP
           } else {
             setError("No se pudo buscar. Revisá la conexión.");
           }
+          setRespondido(term);
         });
     }, 250);
     return () => {
@@ -94,6 +102,8 @@ export function ProductPicker({ picker, onPick, onClose, local }: ProductPickerP
   }, [q, buscar, local]);
 
   const lista = picker.mode === "ambiguous" ? picker.candidates : results;
+  const termino = q.trim();
+  const buscando = buscar && termino.length >= 2 && respondido !== termino;
 
   return (
     <Modal isOpen onClose={onClose} title={TITLES[picker.mode]} size="lg">
@@ -134,7 +144,11 @@ export function ProductPicker({ picker, onPick, onClose, local }: ProductPickerP
             </button>
           </li>
         ))}
-        {buscar && q.trim().length >= 2 && lista.length === 0 && !error ? (
+        {buscando ? (
+          <li role="status" className="px-3 py-2 text-sm text-vektor-muted">
+            Buscando…
+          </li>
+        ) : buscar && termino.length >= 2 && lista.length === 0 && !error ? (
           <li className="px-3 py-2 text-sm text-vektor-muted">Sin resultados.</li>
         ) : null}
       </ul>

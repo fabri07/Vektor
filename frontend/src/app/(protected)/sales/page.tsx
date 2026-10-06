@@ -65,6 +65,7 @@ function saleCategoryDisplay(
 
 function buildColumns(
   productById: Map<string, ProductResponse>,
+  cargandoProductos: boolean,
   catalogLabels: Record<string, string>,
   customerById: Map<string, CustomerResponse>,
 ) {
@@ -97,7 +98,10 @@ function buildColumns(
     hideable: true,
     render: (v: unknown) => {
       const id = String(v ?? "");
-      return id ? productById.get(id)?.name ?? "Producto no encontrado" : "—";
+      if (!id) return "—";
+      // Mientras cargan los productos no se afirma que no existe.
+      if (cargandoProductos) return "…";
+      return productById.get(id)?.name ?? "Producto no encontrado";
     },
     csvValue: (v: unknown) => {
       const id = String(v ?? "");
@@ -187,9 +191,13 @@ export default function SalesPage() {
   });
   const entriesTruncated = !isLoading && totalEntries > entries.length;
 
-  const { data: products = [] } = useQuery({
-    queryKey: ["products-list"],
-    queryFn: () => productsService.getAllProducts({ is_active: true }),
+  // Con los archivados: una venta vieja de un producto que ya no se vende
+  // tiene que seguir mostrando su nombre. La clave cuelga de "products-list"
+  // para que toda invalidación de productos la alcance, pero no la pisa: ahí
+  // vive la lista de activos.
+  const { data: products = [], isLoading: cargandoProductos } = useQuery({
+    queryKey: ["products-list", "con-archivados"],
+    queryFn: () => productsService.getAllProducts(),
     staleTime: 2 * 60 * 1000,
   });
 
@@ -283,7 +291,7 @@ export default function SalesPage() {
 
   const columns = useBusinessFieldColumns<SaleEntryResponse>({
     entityType: "sale",
-    existingColumns: buildColumns(productById, catalogLabels, customerById),
+    existingColumns: buildColumns(productById, cargandoProductos, catalogLabels, customerById),
     onSaveCustomField: saveCustomField,
   });
 

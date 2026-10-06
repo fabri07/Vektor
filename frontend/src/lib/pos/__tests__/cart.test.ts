@@ -24,6 +24,24 @@ const yerba: PosProduct = {
   stock_units: 10,
 };
 
+const recibo = {
+  id: "op-1",
+  number: "OP1",
+  business_name: "Kiosco",
+  operation_date: "2026-10-06T15:37:00",
+  status: "PENDIENTE",
+  lines: [],
+  tenders: [{ payment_method: "cash", amount_ars: "1000.00" }],
+  subtotal_ars: "1000.00",
+  discount_ars: "0.00",
+  total_ars: "1000.00",
+  cash_received_ars: "2000.00",
+  cash_change_ars: "1000.00",
+  customer_name: null,
+  cashier_name: null,
+  terminal_name: null,
+};
+
 function con(...acciones: Parameters<typeof saleReducer>[1][]): SaleState {
   return acciones.reduce(saleReducer, initialSale);
 }
@@ -102,12 +120,22 @@ describe("estados del cobro", () => {
     const encolada = con(
       { type: "ADD_PRODUCT", product: yerba },
       { type: "SEND", payload },
-      { type: "QUEUED", notice: "se sube sola" },
+      { type: "QUEUED", notice: "se sube sola", recibo },
     );
-    expect(encolada.status).toBe("editando");
+    // Queda cobrada, con el comprobante local a mano: sin red, el cajero tiene
+    // que ver que cobró (hasta 2026-10 el total volvía a $0 sin más).
+    expect(encolada.status).toBe("cobrada");
+    expect(encolada.guardada).toBe(recibo);
     expect(encolada.lines).toEqual([]);
     expect(encolada.payload).toBeNull();
     expect(encolada.notice).toBe("se sube sola");
+    expect(encolada.noticeTono).toBe("aviso");
+    // Y escanear el próximo producto arranca la venta siguiente, sin paso extra.
+    const siguiente = saleReducer(encolada, { type: "ADD_PRODUCT", product: yerba });
+    expect(siguiente.status).toBe("editando");
+    expect(siguiente.guardada).toBeNull();
+    expect(siguiente.notice).toBeNull();
+    expect(siguiente.lines).toHaveLength(1);
   });
 
   it("un rechazo definitivo desbloquea y descarta el payload (el próximo nace con id nuevo)", () => {
