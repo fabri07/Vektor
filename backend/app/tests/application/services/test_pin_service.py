@@ -119,8 +119,10 @@ async def test_reset_pin_with_password(db_session: AsyncSession, fake_redis) -> 
 async def test_reset_pin_wrong_password(db_session: AsyncSession, fake_redis) -> None:
     user = await _make_user(db_session, with_pin=True)
     svc = PinService(fake_redis, db_session)
-    with pytest.raises(PinInvalidError):
+    with pytest.raises(PinInvalidError) as exc:
         await svc.reset_pin(user, "WrongPass1", "7777", "7777")
+    # El reset no pide PIN: el mensaje tiene que hablar de la contraseña.
+    assert exc.value.detail == "La contraseña no es correcta."
 
 
 async def test_is_window_valid_fail_closed(

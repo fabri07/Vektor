@@ -4,8 +4,10 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/Button";
 import { deOtraCaja, listarNoSincronizadas } from "@/lib/offline/posDb";
+import { describirFalloSinRespuesta, posErrorInfo, referenciaCorta } from "@/lib/pos/errors";
 import { posService, type PosTerminal } from "@/services/pos.service";
 import { useAuthStore } from "@/stores/authStore";
+import { esPinCancelado } from "@/stores/pinGateStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
 import { useToastStore } from "@/stores/toastStore";
 
@@ -34,11 +36,34 @@ export function TerminalsSection() {
 
   const esEstaPc = (t: PosTerminal) => local?.terminalId === t.id;
 
-  const { data: cajas = [], isLoading } = useQuery({
+  const {
+    data: cajas = [],
+    isLoading,
+    isError,
+    error: errorDeLista,
+    refetch,
+  } = useQuery({
     queryKey: ["pos-terminals"],
     queryFn: () => posService.listTerminals(),
     enabled: show, // Pide PIN de dueño: no se dispara hasta que lo abre.
   });
+
+  /**
+   * Lo que contestó el servidor, o nada si el dueño canceló el PIN. Hasta
+   * 2026-10 cualquier fallo decía "¿nombre repetido?", incluso cancelar el PIN.
+   */
+  function avisarFallo(e: unknown, siNoHayMotivo: string): void {
+    if (esPinCancelado(e)) return;
+    const info = posErrorInfo(e);
+    const motivo = (
+      info.message ?? (info.status === null ? describirFalloSinRespuesta(info) : null)
+    )?.replace(/\.$/, "");
+    const ref = referenciaCorta(info.traceId);
+    toast(
+      `${motivo ? `${siNoHayMotivo} ${motivo}.` : siNoHayMotivo}${ref ? ` (ref ${ref})` : ""}`,
+      "error",
+    );
+  }
 
   const habilitar = useMutation({
     mutationFn: () => posService.enrollTerminal(nombre.trim()),
@@ -67,7 +92,7 @@ export function TerminalsSection() {
       }
       await queryClient.invalidateQueries({ queryKey: ["pos-terminals"] });
     },
-    onError: () => toast("No se pudo habilitar la caja (¿nombre repetido?).", "error"),
+    onError: (e) => avisarFallo(e, "No se pudo habilitar la caja."),
   });
 
   const baja = useMutation({
@@ -77,7 +102,7 @@ export function TerminalsSection() {
       toast("Caja dada de baja.", "success");
       await queryClient.invalidateQueries({ queryKey: ["pos-terminals"] });
     },
-    onError: () => toast("No se pudo dar de baja la caja.", "error"),
+    onError: (e) => avisarFallo(e, "No se pudo dar de baja la caja."),
   });
 
   return (
@@ -99,6 +124,20 @@ export function TerminalsSection() {
         </Button>
       ) : isLoading ? (
         <p className="mt-4 text-sm text-vk-text-muted">Cargando…</p>
+      ) : isError ? (
+        // Sin esto, una lista que no se pudo leer (o un PIN cancelado) se veía
+        // como "Todavía no hay cajas habilitadas": falso, y llevaba a dar de
+        // alta otra caja con el mismo nombre.
+        <div className="mt-4">
+          <p className="mb-2 text-sm text-vk-text-secondary">
+            {esPinCancelado(errorDeLista)
+              ? "Para ver las cajas hace falta tu PIN."
+              : "No se pudo cargar la lista de cajas."}
+          </p>
+          <Button size="sm" variant="secondary" onClick={() => void refetch()}>
+            {esPinCancelado(errorDeLista) ? "Ingresar PIN" : "Reintentar"}
+          </Button>
+        </div>
       ) : (
         <>
           {cajas.length === 0 ? (

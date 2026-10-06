@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { type PosOperationResult, formatCents, toCents } from "@/lib/pos/cart";
 import { cobroRejectionMessage, posErrorInfo } from "@/lib/pos/errors";
+import { esPinCancelado } from "@/stores/pinGateStore";
 import { posService } from "@/services/pos.service";
 
 interface VoidLastTicketProps {
@@ -46,6 +47,8 @@ export function VoidLastTicket({ operation, onVoided, label }: VoidLastTicketPro
       onVoided(r);
       setAbierto(false);
     } catch (e) {
+      // Cancelar el PIN no es un rechazo: el ticket sigue como estaba.
+      if (esPinCancelado(e)) return;
       setError(cobroRejectionMessage(posErrorInfo(e)));
     } finally {
       setEnviando(false);

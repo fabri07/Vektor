@@ -42,7 +42,13 @@ function PinInput({
 function MyPinSection() {
   const toast = useToastStore((s) => s.add);
   const openSetup = usePinGateStore((s) => s.openSetup);
-  const { data: status, refetch } = useQuery({
+  const openReset = usePinGateStore((s) => s.openReset);
+  const {
+    data: status,
+    refetch,
+    isPending,
+    isError,
+  } = useQuery({
     queryKey: ["pin-status"],
     queryFn: () => securityService.pinStatus(),
   });
@@ -87,7 +93,21 @@ function MyPinSection() {
         configuraciones, releer archivos, retiro de ganancias).
       </p>
 
-      {!status?.pin_set ? (
+      {/* Tres estados, no dos: mientras carga, "no configuraste un PIN" es
+          falso para quien sí lo tiene, y lo manda a un formulario que no sirve. */}
+      {isPending ? (
+        <div className="mt-4 space-y-2" aria-busy="true" aria-label="Cargando el estado del PIN">
+          <div className="h-4 w-48 animate-pulse rounded bg-vk-border-w" />
+          <div className="h-9 w-32 animate-pulse rounded bg-vk-border-w" />
+        </div>
+      ) : isError ? (
+        <div className="mt-4">
+          <p className="mb-2 text-sm text-vk-danger">No se pudo cargar el estado de tu PIN.</p>
+          <Button size="sm" variant="ghost" onClick={() => void refetch()}>
+            Reintentar
+          </Button>
+        </div>
+      ) : !status?.pin_set ? (
         <div className="mt-4">
           <p className="mb-2 text-sm text-vk-text-secondary">Todavía no configuraste un PIN.</p>
           <Button size="sm" onClick={() => openSetup()}>
@@ -102,6 +122,13 @@ function MyPinSection() {
           <Button size="sm" onClick={submit} loading={changeMutation.isPending}>
             Cambiar PIN
           </Button>
+          <button
+            type="button"
+            className="pb-2 text-xs text-vk-text-muted underline hover:text-vk-text-secondary"
+            onClick={() => openReset()}
+          >
+            ¿Olvidaste tu PIN?
+          </button>
         </div>
       )}
     </section>
