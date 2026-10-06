@@ -63,7 +63,9 @@ export default function CustomerDetailPage() {
   });
 
   const { data: products = [] } = useQuery({
-    queryKey: ["products-list"],
+    // Todos, con los archivados: con la clave de la lista de activos pisaba la
+    // caché de /products y mostraba ahí productos inactivos.
+    queryKey: ["products-list", "con-archivados"],
     queryFn: () => productsService.getAllProducts(),
     staleTime: 5 * 60 * 1000,
   });

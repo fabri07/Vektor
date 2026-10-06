@@ -169,3 +169,12 @@ test("«Exportar todo» (Cambio 3) está disponible junto al selector de columna
   await waitFor(() => expect(screen.getByText("Alfombra nórdica")).toBeInTheDocument());
   expect(screen.getByRole("button", { name: /exportar todo/i })).toBeInTheDocument();
 });
+
+test("mientras carga no dice que no hay productos", () => {
+  // Con 398 productos detrás, la tabla vacía decía «No hay datos para mostrar»
+  // y parecía que el catálogo se había borrado.
+  mockGetAllProducts.mockReturnValue(new Promise(() => {}));
+  renderizar();
+  expect(screen.getByLabelText("Cargando productos")).toBeInTheDocument();
+  expect(screen.queryByText(/No hay datos para mostrar/)).not.toBeInTheDocument();
+});

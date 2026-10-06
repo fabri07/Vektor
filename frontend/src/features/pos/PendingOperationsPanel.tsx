@@ -12,6 +12,7 @@
  * borrado de la cola. Nada automático borra una venta cobrada.
  */
 
+import Link from "next/link";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -38,13 +39,25 @@ const ROTULO: Record<OperacionGuardada["estado"], string> = {
 const AYUDA: Record<OperacionGuardada["estado"], string> = {
   PENDIENTE: "Se reintenta sola.",
   SINCRONIZADA: "Ya está registrada.",
-  REQUIERE_AUTENTICACION:
-    "La sesión venció o esta PC dejó de estar habilitada como caja. Volvé a entrar.",
+  REQUIERE_AUTENTICACION: "La sesión venció. Volvé a entrar; después se sube sola.",
   REQUIERE_REVISION: "El servidor la rechazó. Miralo con el encargado antes de reintentar.",
   EN_CORRECCION:
     "El servidor la rechazó y el cobro corregido todavía no entró. Si ya cobraste, " +
     "rehacelo o devolvé la plata antes de descartarla.",
 };
+
+/**
+ * ¿El problema es la caja y no la sesión? Con `TERMINAL_*` volver a entrar no
+ * arregla nada: hay que habilitar esta PC. Hasta 2026-10 los dos casos decían
+ * «Hay que volver a entrar», y la venta quedaba trabada después del re-login.
+ */
+export function faltaHabilitarLaCaja(op: OperacionGuardada): boolean {
+  return op.estado === "REQUIERE_AUTENTICACION" && (op.ultimoCodigo ?? "").startsWith("TERMINAL_");
+}
+
+function rotulo(op: OperacionGuardada): string {
+  return faltaHabilitarLaCaja(op) ? "Esta PC no está habilitada como caja" : ROTULO[op.estado];
+}
 
 /** "TERMINAL_UNKNOWN · ref 3f2a9c1d", o `null` si no hay nada que mostrar. */
 function datosDelFallo(op: OperacionGuardada): string | null {
@@ -215,7 +228,7 @@ export function PendingOperationsPanel({
                       op.payload.tenders.reduce((acc, t) => acc + (toCents(t.amount_ars) ?? 0), 0),
                     )}
                   </span>
-                  <span className="text-xs text-pos-muted">{ROTULO[op.estado]}</span>
+                  <span className="text-xs text-pos-muted">{rotulo(op)}</span>
                 </div>
                 <p className="mt-1 text-xs text-pos-text-2">
                   {op.ultimoError ?? AYUDA[op.estado]}
@@ -225,6 +238,18 @@ export function PendingOperationsPanel({
                     <span className="ml-1 font-mono text-pos-muted">({datosDelFallo(op)})</span>
                   ) : null}
                 </p>
+                {faltaHabilitarLaCaja(op) ? (
+                  <p className="mt-1 text-xs text-pos-text-2">
+                    {esDuenio ? (
+                      <Link className="text-pos-link underline" href="/settings?tab=seguridad">
+                        Habilitar esta PC como caja
+                      </Link>
+                    ) : (
+                      "Pedile al dueño que habilite esta PC como caja."
+                    )}{" "}
+                    Después se sube sola.
+                  </p>
+                ) : null}
                 {descartando === op.clientOperationId ? (
                   <div className="mt-2 space-y-1">
                     <p className="text-xs text-pos-danger">
@@ -245,12 +270,13 @@ export function PendingOperationsPanel({
                     <Button size="sm" variant="secondary" onClick={() => void reintentar(op)}>
                       Reintentar
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => onImprimir(op)}>
+                    {/* `ghost` (gris, sin borde) se leía como deshabilitado. */}
+                    <Button size="sm" variant="secondary" onClick={() => onImprimir(op)}>
                       Imprimir comprobante
                     </Button>
                     <Button
                       size="sm"
-                      variant="ghost"
+                      variant="secondary"
                       onClick={() => setDescartando(op.clientOperationId)}
                     >
                       Descartar
@@ -260,7 +286,7 @@ export function PendingOperationsPanel({
               </li>
             ))}
           </ul>
-          <Button size="sm" variant="ghost" onClick={exportar}>
+          <Button size="sm" variant="secondary" onClick={exportar}>
             Exportar a un archivo
           </Button>
         </div>

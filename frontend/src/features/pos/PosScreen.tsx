@@ -6,6 +6,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { CartTable } from "@/features/pos/CartTable";
+import { MenuCabecera } from "@/features/pos/MenuCabecera";
 import { CashSessionBar } from "@/features/pos/CashSessionBar";
 import { CashSessionsPanel } from "@/features/pos/CashSessionsPanel";
 import { CashierHome } from "@/features/pos/CashierHome";
@@ -102,7 +103,10 @@ function avisoDeEncolado(info: PosErrorInfo): string {
   const guardada = "La venta quedó cobrada y guardada en esta PC.";
   switch (clasificarSync(info)) {
     case "autenticacion":
-      return `${guardada} Falta volver a entrar o habilitar esta caja de nuevo; después se sube sola.`;
+      // Volver a entrar no arregla una caja sin habilitar: decir cuál de las dos.
+      return (info.code ?? "").startsWith("TERMINAL_")
+        ? `${guardada} Esta PC no está habilitada como caja: hay que habilitarla; después se sube sola.`
+        : `${guardada} La sesión venció: volvé a entrar; después se sube sola.`;
     case "revision":
       return `${guardada} El servidor la rechazó: la tiene que revisar el encargado. ${
         info.message ?? ""
@@ -373,7 +377,7 @@ function PosRegister() {
           // La venta quedó registrada (en la cola): los intentos rechazados
           // que la precedieron ya están corregidos por ésta.
           await cerrarCorrecciones();
-          dispatch({ type: "QUEUED", notice: avisoDeEncolado(info) });
+          dispatch({ type: "QUEUED", notice: avisoDeEncolado(info), recibo });
           if (usePosPrintConfigStore.getState().autoPrint) void printLocal(recibo);
         }
       } finally {
@@ -751,8 +755,7 @@ function PosRegister() {
             {theme === "claro" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
             {theme === "claro" ? "Oscuro" : "Claro"}
           </button>
-          <details className="relative">
-            <summary className="cursor-pointer text-pos-text-2">Impresora</summary>
+          <MenuCabecera titulo="Impresora">
             <div className="absolute right-0 z-10 mt-2 w-72 space-y-2 rounded-lg border border-pos-border bg-pos-surface p-3 shadow-vk-lg">
               <label className="flex items-center justify-between gap-2">
                 Papel
@@ -792,9 +795,8 @@ function PosRegister() {
                 Imprimir prueba
               </Button>
             </div>
-          </details>
-          <details className="relative">
-            <summary className="cursor-pointer text-pos-text-2">Lector</summary>
+          </MenuCabecera>
+          <MenuCabecera titulo="Lector">
             <div className="absolute right-0 z-10 mt-2 w-64 space-y-2 rounded-lg border border-pos-border bg-pos-surface p-3 shadow-vk-lg">
               <label className="flex items-center justify-between gap-2">
                 Termina con
@@ -821,10 +823,9 @@ function PosRegister() {
                 />
               </label>
             </div>
-          </details>
+          </MenuCabecera>
           {user?.role === "OWNER" ? (
-            <details className="relative">
-              <summary className="cursor-pointer text-pos-text-2">Sin internet</summary>
+            <MenuCabecera titulo="Sin internet">
               <div className="absolute right-0 z-10 mt-2 w-72 space-y-2 rounded-lg border border-pos-border bg-pos-surface p-3 shadow-vk-lg">
                 <label className="flex items-center gap-2">
                   <input
@@ -855,7 +856,7 @@ function PosRegister() {
                   destildá y la PC vuelve como estaba.
                 </p>
               </div>
-            </details>
+            </MenuCabecera>
           ) : null}
           {user?.role !== CASHIER_ROLE ? (
             <Link href="/dashboard" className="text-pos-text-2 hover:text-pos-text">
@@ -943,8 +944,11 @@ function PosRegister() {
           }}
         />
       ) : (
-        <div className="flex flex-1 flex-col gap-4 overflow-hidden p-4 lg:flex-row">
-          <section className="flex flex-1 flex-col gap-3 overflow-hidden">
+        // Angosta (una columna): scrollea la página y el buscador conserva un
+        // alto mínimo. Ancha: cada columna scrollea por su cuenta. Hasta 2026-10
+        // la columna derecha empujaba al buscador a 0 px en una notebook chica.
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 lg:flex-row lg:overflow-hidden">
+          <section className="flex min-h-[18rem] flex-1 flex-col gap-3 overflow-hidden lg:min-h-0">
             <div className="flex gap-2">
               <div className="flex-1">
                 <ScanInput ref={scanRef} onCode={(c) => void handleScan(c)} />
@@ -968,7 +972,7 @@ function PosRegister() {
             />
           </section>
 
-          <aside className="flex w-full flex-col gap-4 rounded-xl border border-pos-border bg-pos-surface p-4 lg:w-96">
+          <aside className="flex w-full shrink-0 flex-col gap-4 rounded-xl border border-pos-border bg-pos-surface p-4 lg:min-h-0 lg:w-96 lg:shrink lg:overflow-y-auto">
             {sale.status === "cobrada" && sale.result ? (
               <div className="space-y-3" data-testid="venta-cobrada">
                 <p className="text-sm text-vk-success">Venta cobrada</p>
@@ -999,6 +1003,47 @@ function PosRegister() {
                   }}
                 >
                   Reimprimir ticket
+                </Button>
+              </div>
+            ) : sale.status === "cobrada" && sale.guardada ? (
+              // Cobrada pero sin confirmar: el mismo cierre que una confirmada,
+              // con el sello de pendiente. El comprobante sale del recibo local.
+              <div className="space-y-3" data-testid="venta-guardada">
+                <p className="text-sm font-semibold text-vk-warning">
+                  Venta cobrada · PENDIENTE DE SINCRONIZAR
+                </p>
+                <p className="text-3xl font-semibold text-pos-text">
+                  {formatCents(toCents(sale.guardada.total_ars) ?? 0)}
+                </p>
+                {sale.guardada.cash_change_ars !== null ? (
+                  <p className="text-lg text-pos-text">
+                    Vuelto: {formatCents(toCents(sale.guardada.cash_change_ars) ?? 0)}
+                  </p>
+                ) : null}
+                {sale.notice ? (
+                  <p role="status" className="text-sm text-vk-warning">
+                    {sale.notice}
+                  </p>
+                ) : null}
+                <Button
+                  className="w-full"
+                  size="lg"
+                  onClick={() => {
+                    dispatch({ type: "NEW_SALE" });
+                    focusScan();
+                  }}
+                >
+                  Nueva venta
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  onClick={() => {
+                    if (sale.guardada) void printLocal(sale.guardada);
+                    focusScan();
+                  }}
+                >
+                  Imprimir comprobante
                 </Button>
               </div>
             ) : (

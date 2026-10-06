@@ -46,6 +46,10 @@ export function MoneyInput({ cents, onCents, disabled, label, className }: Money
       placeholder="0"
       value={text}
       onChange={(e) => {
+        // Un importe sólo lleva dígitos, coma y punto. Antes el campo aceptaba
+        // cualquier texto (las teclas que el cajero creía mandar al buscador)
+        // y lo dejaba a la vista sin aplicarlo.
+        if (/[^\d.,\s]/.test(e.target.value)) return;
         setText(e.target.value);
         const v = e.target.value.trim() === "" ? 0 : toCents(e.target.value);
         if (v !== null) onCents(v);

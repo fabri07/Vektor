@@ -512,7 +512,18 @@ export default function ProductsPage() {
         <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
           Error al cargar los productos. Recargá la página.
         </p>
-      ) : !isLoading && filtered.length === 0 ? (
+      ) : isLoading ? (
+        // Sin esto la tabla vacía decía «No hay datos para mostrar» mientras
+        // cargaba, y parecía que el catálogo se había borrado.
+        <div className="space-y-2" aria-busy="true" aria-label="Cargando productos">
+          {[...Array<number>(6)].map((_, i) => (
+            <div
+              key={i}
+              className="h-10 animate-pulse rounded-lg border border-vk-border-w bg-vk-surface-w"
+            />
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
         <EmptyState
           title={
             requiresCompletionOnly

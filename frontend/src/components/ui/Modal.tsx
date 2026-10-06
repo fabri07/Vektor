@@ -59,8 +59,13 @@ export function Modal({ isOpen, onClose, title, children, size = "md" }: ModalPr
     const panel = panelRef.current;
     if (!panel) return;
 
+    // Si un campo del contenido ya tomó el foco (`autoFocus`), se respeta: si
+    // no, el buscador de la caja abría con el foco en la X y lo que el cajero
+    // tipeaba no iba al campo de búsqueda.
     const focusables = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
-    if (focusables.length > 0) focusables[0]!.focus();
+    if (!panel.contains(document.activeElement) && focusables.length > 0) {
+      focusables[0]!.focus();
+    }
 
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== "Tab" || !panel) return;
