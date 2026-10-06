@@ -24,7 +24,7 @@ import {
   reasignarTerminal,
 } from "@/lib/offline/posDb";
 import { formatCents, toCents } from "@/lib/pos/cart";
-import { posErrorInfo } from "@/lib/pos/errors";
+import { posErrorInfo, referenciaCorta } from "@/lib/pos/errors";
 import { posService } from "@/services/pos.service";
 
 const ROTULO: Record<OperacionGuardada["estado"], string> = {
@@ -36,7 +36,7 @@ const ROTULO: Record<OperacionGuardada["estado"], string> = {
 };
 
 const AYUDA: Record<OperacionGuardada["estado"], string> = {
-  PENDIENTE: "Se reintenta sola cuando vuelve la conexión.",
+  PENDIENTE: "Se reintenta sola.",
   SINCRONIZADA: "Ya está registrada.",
   REQUIERE_AUTENTICACION:
     "La sesión venció o esta PC dejó de estar habilitada como caja. Volvé a entrar.",
@@ -45,6 +45,13 @@ const AYUDA: Record<OperacionGuardada["estado"], string> = {
     "El servidor la rechazó y el cobro corregido todavía no entró. Si ya cobraste, " +
     "rehacelo o devolvé la plata antes de descartarla.",
 };
+
+/** "TERMINAL_UNKNOWN · ref 3f2a9c1d", o `null` si no hay nada que mostrar. */
+function datosDelFallo(op: OperacionGuardada): string | null {
+  const ref = referenciaCorta(op.ultimoTraceId);
+  const partes = [op.ultimoCodigo, ref ? `ref ${ref}` : null].filter(Boolean);
+  return partes.length > 0 ? partes.join(" · ") : null;
+}
 
 function cuando(iso: string): string {
   return new Date(iso).toLocaleString("es-AR", {
@@ -212,6 +219,11 @@ export function PendingOperationsPanel({
                 </div>
                 <p className="mt-1 text-xs text-pos-text-2">
                   {op.ultimoError ?? AYUDA[op.estado]}
+                  {/* Código y referencia: lo que el encargado dicta por teléfono
+                      o busca en Sentry. Sin esto, todo fallo se veía igual. */}
+                  {datosDelFallo(op) ? (
+                    <span className="ml-1 font-mono text-pos-muted">({datosDelFallo(op)})</span>
+                  ) : null}
                 </p>
                 {descartando === op.clientOperationId ? (
                   <div className="mt-2 space-y-1">

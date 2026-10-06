@@ -1,6 +1,22 @@
 import { create } from "zustand";
 
-export type PinMode = "verify" | "setup";
+export type PinMode = "verify" | "setup" | "reset";
+
+/**
+ * El usuario cerró el modal del PIN. No es un fallo: la acción simplemente no
+ * se hace. Hasta 2026-10 el interceptor devolvía en su lugar el 428 original, y
+ * cada pantalla lo mostraba como un error inventado ("¿nombre repetido?").
+ */
+export class PinCancelledError extends Error {
+  constructor() {
+    super("PIN_CANCELLED");
+    this.name = "PinCancelledError";
+  }
+}
+
+export function esPinCancelado(e: unknown): boolean {
+  return e instanceof PinCancelledError;
+}
 
 interface PinGateState {
   isOpen: boolean;
@@ -15,6 +31,8 @@ interface PinGateState {
   requirePin: (mode?: PinMode) => Promise<void>;
   /** Abre el modal en modo setup sin promesa pendiente (primera sesión). */
   openSetup: () => void;
+  /** Abre el modal para restablecer el PIN con la contraseña (PIN olvidado). */
+  openReset: () => void;
   /** Llamado por el modal cuando el PIN se verificó/configuró OK. */
   succeed: () => void;
   /** Llamado por el modal al cancelar: rechaza la acción original. */
@@ -54,13 +72,18 @@ export const usePinGateStore = create<PinGateState>((set, get) => ({
     set({ isOpen: true, mode: "setup" });
   },
 
+  openReset: () => {
+    if (get().isOpen) return;
+    set({ isOpen: true, mode: "reset" });
+  },
+
   succeed: () => {
     get()._resolve?.();
     set({ isOpen: false, _resolve: null, _reject: null, _promise: null });
   },
 
   cancel: () => {
-    get()._reject?.(new Error("PIN_CANCELLED"));
+    get()._reject?.(new PinCancelledError());
     set({ isOpen: false, _resolve: null, _reject: null, _promise: null });
   },
 }));

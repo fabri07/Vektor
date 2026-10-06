@@ -52,6 +52,17 @@ class PinInvalidError(PinError):
     detail = "PIN inválido."
 
 
+class PasswordInvalidError(PinInvalidError):
+    """La contraseña del reset no coincide.
+
+    Subclase de `PinInvalidError` (mismo throttle, mismo 400) pero con su propio
+    texto: el reset no pide ningún PIN, y "PIN inválido." mandaba a quien olvidó
+    el PIN a buscar el error en el PIN nuevo.
+    """
+
+    detail = "La contraseña no es correcta."
+
+
 class PinNotSetError(PinError):
     detail = "PIN inválido."  # genérico: no revelar que no está configurado
 
@@ -169,7 +180,7 @@ class PinService:
         await self._assert_not_locked(tenant_id, user_id)
         if not verify_password(password, user.password_hash):
             await self._register_failed_attempt(tenant_id, user_id)
-            raise PinInvalidError()
+            raise PasswordInvalidError()
         if new_pin != new_pin_confirm:
             raise PinMismatchError()
         await self._clear_attempts(tenant_id, user_id)

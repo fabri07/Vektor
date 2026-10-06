@@ -18,12 +18,13 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import today_ar
 from app.domain.pos_price_token import VIGENCIA_SEGUNDOS, emitir
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.pos_operation import PosOperation, PosOperationLine
 from app.persistence.models.product import Product
 
@@ -321,14 +322,22 @@ class TestCobradoSinConexion:
         assert fila.client_session_id == "turno-abc"
 
     async def test_el_header_no_cambia_la_huella_de_idempotencia(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
     ) -> None:
         """El mismo pedido, reintentado por la cola, sigue siendo el mismo pedido.
 
         Si el marcador viajara en el cuerpo, el reintento cambiaría la huella y
         el servidor contestaría `IDEMPOTENCY_KEY_REUSED` con la venta hecha.
+
+        Es el caso de la venta que quedó en la cola con la respuesta perdida: el
+        servidor la guardó, la caja no se enteró, y la cola la reenvía con el
+        mismo id, el mismo cuerpo y `X-POS-Offline`. Tiene que volver el ticket
+        original, con UNA venta y UN descuento de stock.
         """
-        pid = await _crear_producto(client, auth_headers, "Yerba", price="1000.00")
+        pid = await _crear_producto(client, auth_headers, "Yerba", stock=10, price="1000.00")
         producto = await _del_catalogo(client, auth_headers, pid)
         cuerpo = _operacion(
             [_linea(producto)], [{"payment_method": "cash", "amount_ars": "1000.00"}]
@@ -344,6 +353,26 @@ class TestCobradoSinConexion:
         )
         assert segunda.status_code == 200, segunda.text
         assert segunda.json()["id"] == primera.json()["id"]
+
+        ventas = (
+            await db_session.execute(
+                select(func.count())
+                .select_from(PosOperation)
+                .where(PosOperation.client_operation_id == cuerpo["client_operation_id"])
+            )
+        ).scalar_one()
+        assert ventas == 1
+        movimientos = (
+            await db_session.execute(
+                select(func.count())
+                .select_from(InventoryMovement)
+                .where(InventoryMovement.product_id == uuid.UUID(pid))
+                .where(InventoryMovement.qty < 0)
+            )
+        ).scalar_one()
+        assert movimientos == 1
+        prod = await client.get(f"/api/v1/products/{pid}", headers=auth_headers)
+        assert prod.json()["stock_units"] == 9
 
     async def test_una_fecha_de_cobro_futura_se_rechaza(
         self, client: AsyncClient, auth_headers: dict[str, Any]

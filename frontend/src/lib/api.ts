@@ -98,9 +98,11 @@ export async function handleApiResponseError(error: AxiosError) {
     originalRequest._pinRetry = true;
     try {
       await usePinGateStore.getState().requirePin("verify");
-    } catch {
-      // El usuario canceló el modal: rechazar la acción original sin reintentar.
-      return Promise.reject(error);
+    } catch (cancelado) {
+      // El usuario canceló el modal: la acción no se hace y NO se reintenta.
+      // Se rechaza con la cancelación (`esPinCancelado`), no con el 428: si no,
+      // cada pantalla lo mostraba como un fallo con una causa inventada.
+      return Promise.reject(cancelado);
     }
     return api.request(originalRequest);
   }

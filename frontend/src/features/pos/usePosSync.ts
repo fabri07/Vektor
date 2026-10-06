@@ -18,6 +18,7 @@
  *   queda a la vista hasta que una persona decida.
  */
 
+import * as Sentry from "@sentry/nextjs";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -34,7 +35,7 @@ import {
   pendientesSincronizables,
 } from "@/lib/offline/posDb";
 import { conCandadoDeSync } from "@/lib/offline/tabLock";
-import { posErrorInfo } from "@/lib/pos/errors";
+import { describirFalloSinRespuesta, posErrorInfo } from "@/lib/pos/errors";
 import { clasificarSync, esFalloDeRed } from "@/lib/pos/syncClassification";
 import { posService } from "@/services/pos.service";
 
@@ -127,6 +128,8 @@ export function usePosSync({
               sincronizadaEn: new Date().toISOString(),
               ultimoError: null,
               ultimoCodigo: null,
+              ultimoTipo: null,
+              ultimoTraceId: null,
             });
           } catch (e) {
             const info = posErrorInfo(e);
@@ -148,14 +151,31 @@ export function usePosSync({
               });
               continue;
             }
+            // La abortó la propia app (la pestaña se va, un desmontaje): no es
+            // un intento ni un fallo, y no hay nada nuevo que contar.
+            if (info.tipo === "cancelada") break;
+            if (info.tipo === "local") {
+              // Un error del código de la caja: no es la red y no se arregla
+              // reintentando. Que lo vea una persona, y que quede en Sentry.
+              Sentry.captureException(e, {
+                tags: { pos_sync: "excepcion_local" },
+                extra: { client_operation_id: op.clientOperationId },
+              });
+            }
             const clase = clasificarSync(info);
             const red = esFalloDeRed(info);
+            const detalle = {
+              ultimoCodigo: info.code,
+              ultimoTipo: info.tipo,
+              ultimoTraceId: info.traceId,
+            };
             if (clase === "reintento") {
               const intentos = red ? op.intentos : op.intentos + 1;
               await actualizarOperacion(op.clientOperationId, {
                 intentos,
-                ultimoError: info.message ?? (red ? "Sin conexión" : "Error del servidor"),
-                ultimoCodigo: info.code,
+                ultimoError:
+                  info.message ?? (red ? describirFalloSinRespuesta(info) : "Error del servidor"),
+                ...detalle,
                 proximoIntentoEn:
                   Date.now() + (red ? ESPERA_DE_RED_MS : esperaPorIntentos(intentos)),
               });
@@ -170,8 +190,12 @@ export function usePosSync({
                 estado:
                   clase === "autenticacion" ? "REQUIERE_AUTENTICACION" : "REQUIERE_REVISION",
                 intentos: op.intentos + 1,
-                ultimoError: info.message ?? "El servidor la rechazó",
-                ultimoCodigo: info.code,
+                ultimoError:
+                  info.message ??
+                  (info.tipo === "local"
+                    ? describirFalloSinRespuesta(info)
+                    : "El servidor la rechazó"),
+                ...detalle,
               });
             }
           }

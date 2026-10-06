@@ -2,13 +2,32 @@ import { clasificarSync, esFalloDeRed } from "@/lib/pos/syncClassification";
 import type { PosErrorInfo } from "@/lib/pos/errors";
 
 function info(status: number | null, code: string | null = null): PosErrorInfo {
-  return { status, code, message: null, fields: {} };
+  return {
+    status,
+    code,
+    message: null,
+    fields: {},
+    tipo: status === null ? "transporte" : "respuesta",
+    traceId: null,
+  };
 }
 
 describe("clasificarSync", () => {
   it("sin respuesta es reintento, nunca rechazo", () => {
     expect(clasificarSync(info(null))).toBe("reintento");
     expect(esFalloDeRed(info(null))).toBe(true);
+  });
+
+  it("un timeout también es reintento sin gastar intentos", () => {
+    const timeout: PosErrorInfo = { ...info(null), tipo: "timeout" };
+    expect(clasificarSync(timeout)).toBe("reintento");
+    expect(esFalloDeRed(timeout)).toBe(true);
+  });
+
+  it("un error del código de la caja va a revisión y no se llama falta de red", () => {
+    const local: PosErrorInfo = { ...info(null), tipo: "local" };
+    expect(clasificarSync(local)).toBe("revision");
+    expect(esFalloDeRed(local)).toBe(false);
   });
 
   it("la suscripción vencida y el mantenimiento se reintentan", () => {

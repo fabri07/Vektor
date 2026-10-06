@@ -171,9 +171,29 @@ describe("clasificación de la respuesta", () => {
     [422, "PRICE_TOKEN_INVALID", true],
     [403, "POS_PERMISSION_DENIED", true],
   ])("status %s código %s → corregible: %s", (status, code, esperado) => {
-    expect(esCorregibleEnElMostrador({ status, code, message: null, fields: {} })).toBe(
-      esperado,
-    );
+    expect(
+      esCorregibleEnElMostrador({
+        status,
+        code,
+        message: null,
+        fields: {},
+        tipo: status === null ? "transporte" : "respuesta",
+        traceId: null,
+      }),
+    ).toBe(esperado);
+  });
+
+  it("una excepción local no libera el carrito: pudo saltar con la venta ya guardada", () => {
+    expect(
+      esCorregibleEnElMostrador({
+        status: null,
+        code: null,
+        message: null,
+        fields: {},
+        tipo: "local",
+        traceId: null,
+      }),
+    ).toBe(false);
   });
 });
 

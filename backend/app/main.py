@@ -23,12 +23,14 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from app.api.v1.deps import rate_limit_key, subscription_http_error
 from app.application.middleware.tenant import TenantMiddleware
+from app.application.middleware.unhandled_errors import UnhandledErrorMiddleware
 from app.application.services.stock_service import (
     InsufficientStockError,
     SaleProductNotFoundError,
 )
 from app.bootstrap import shutdown, startup
 from app.config.settings import get_settings
+from app.domain.pos_terminal import OFFLINE_HEADER, TERMINAL_HEADER
 from app.domain.subscription import SUBSCRIPTION_ERRORS
 from app.observability.logger import get_logger
 from app.observability.sentry import init_sentry
@@ -47,6 +49,24 @@ init_sentry("web")
 # consumen TODOS los endpoints vía `default_limits`, no solo los públicos.
 limiter = Limiter(key_func=rate_limit_key, default_limits=["200/minute"])
 
+#: Headers que el front manda y que el preflight tiene que aceptar. Un header
+#: propio que falte acá no da error en el servidor: el NAVEGADOR corta el
+#: preflight con 400 y el request nunca sale. Así quedó la cola del POS
+#: (`X-POS-Offline`) y toda caja habilitada (`X-POS-Terminal`) hasta 2026-10:
+#: cada reintento parecía un corte de red. Header nuevo del front ⇒ va acá.
+CORS_ALLOW_HEADERS: list[str] = [
+    "Authorization",
+    "Content-Type",
+    "Accept",
+    "X-Request-ID",
+    "X-Trace-Id",
+    "sentry-trace",
+    "baggage",
+    TERMINAL_HEADER,
+    OFFLINE_HEADER,
+]
+CORS_EXPOSE_HEADERS: list[str] = ["X-Request-ID", "X-Trace-Id"]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -58,6 +78,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     await shutdown()
     logger.info("vektor.shutdown")
+
+
+async def _respuesta_500(request: Request, exc: Exception) -> Response:
+    """El 500 de una excepción no manejada: log, Sentry y un cuerpo sin detalles."""
+    logger.error(
+        "request.unhandled_exception",
+        path=str(request.url.path),
+        exc_type=type(exc).__name__,
+        exc_msg=str(exc),
+    )
+    # Este handler INTERCEPTA la excepción (nunca se repropaga), así que el
+    # middleware automático de FastApiIntegration nunca la ve — sin esta
+    # línea, Sentry queda con la integración activa pero cero eventos
+    # reales de error.
+    sentry_sdk.capture_exception(exc)
+    detail = (
+        f"[DEBUG] {type(exc).__name__}: {exc}"
+        if settings.is_development or settings.DEBUG
+        else "Internal Server Error"
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": detail},
+    )
 
 
 def create_app() -> FastAPI:
@@ -80,6 +124,12 @@ def create_app() -> FastAPI:
     # ── Tenant context (RLS) ──────────────────────────────────────────────────
     app.add_middleware(TenantMiddleware)
 
+    # ── 500 legible por el navegador ─────────────────────────────────────────
+    # Va justo ADENTRO de CORS (el último `add_middleware` queda más afuera):
+    # así el 500 sube por CORS y por el logger que pone `X-Trace-Id`. Ver
+    # `unhandled_errors.py`.
+    app.add_middleware(UnhandledErrorMiddleware, handler=_respuesta_500)
+
     # ── CORS ─────────────────────────────────────────────────────────────────
     app.add_middleware(
         CORSMiddleware,
@@ -87,16 +137,8 @@ def create_app() -> FastAPI:
         allow_origin_regex=settings.CORS_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "Authorization",
-            "Content-Type",
-            "Accept",
-            "X-Request-ID",
-            "X-Trace-Id",
-            "sentry-trace",
-            "baggage",
-        ],
-        expose_headers=["X-Request-ID", "X-Trace-Id"],
+        allow_headers=CORS_ALLOW_HEADERS,
+        expose_headers=CORS_EXPOSE_HEADERS,
     )
 
     # ── Security headers ──────────────────────────────────────────────────────
@@ -266,28 +308,9 @@ def create_app() -> FastAPI:
             content={"detail": exc.user_message},
         )
 
-    @app.exception_handler(Exception)
-    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-        logger.error(
-            "request.unhandled_exception",
-            path=str(request.url.path),
-            exc_type=type(exc).__name__,
-            exc_msg=str(exc),
-        )
-        # Este handler INTERCEPTA la excepción (nunca se repropaga), así que el
-        # middleware automático de FastApiIntegration nunca la ve — sin esta
-        # línea, Sentry queda con la integración activa pero cero eventos
-        # reales de error.
-        sentry_sdk.capture_exception(exc)
-        detail = (
-            f"[DEBUG] {type(exc).__name__}: {exc}"
-            if settings.is_development or settings.DEBUG
-            else "Internal Server Error"
-        )
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": detail},
-        )
+    # Última red: sólo llega acá lo que falla AFUERA de CORS (en los propios
+    # middlewares externos). Lo de adentro lo atrapa `UnhandledErrorMiddleware`.
+    app.add_exception_handler(Exception, _respuesta_500)
 
     # ── Health check ──────────────────────────────────────────────────────────
     @app.get("/health", tags=["Infra"], summary="Health check")

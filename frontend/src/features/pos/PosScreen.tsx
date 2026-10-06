@@ -63,7 +63,13 @@ import {
   saleReducer,
   toCents,
 } from "@/lib/pos/cart";
-import { type PosErrorInfo, cobroRejectionMessage, posErrorInfo } from "@/lib/pos/errors";
+import {
+  type PosErrorInfo,
+  cobroRejectionMessage,
+  describirFalloSinRespuesta,
+  posErrorInfo,
+  referenciaCorta,
+} from "@/lib/pos/errors";
 import { clasificarSync, esFalloDeRed } from "@/lib/pos/syncClassification";
 import { reciboLocal } from "@/lib/pos/reciboLocal";
 import { buscarEnCatalogo, clasificar } from "@/lib/pos/scanCodeLocal";
@@ -102,11 +108,18 @@ function avisoDeEncolado(info: PosErrorInfo): string {
         info.message ?? ""
       }`.trim();
     default:
-      return info.status === null
-        ? COBRADA_SIN_CONEXION
-        : `${guardada} El servidor no la pudo tomar todavía; se reintenta sola. ${
-            info.message ?? ""
-          }`.trim();
+      if (info.status === null) {
+        // "Sin conexión" sólo si el navegador está desconectado de verdad. Si
+        // no, se dice lo que se sabe —el servidor no contestó— y la referencia
+        // para buscarlo, sin mandar al cajero a revisar el router.
+        const motivo = describirFalloSinRespuesta(info);
+        if (motivo === "Sin conexión") return COBRADA_SIN_CONEXION;
+        const ref = referenciaCorta(info.traceId);
+        return `${guardada} ${motivo}; se reintenta sola.${ref ? ` (ref ${ref})` : ""}`;
+      }
+      return `${guardada} El servidor no la pudo tomar todavía; se reintenta sola. ${
+        info.message ?? ""
+      }`.trim();
   }
 }
 
@@ -349,8 +362,12 @@ function PosRegister() {
           // carrito, sale el comprobante provisional y la cola la sube sola.
           await actualizarOperacion(payload.client_operation_id, {
             intentos: 1,
-            ultimoError: info.message ?? "Sin respuesta del servidor",
+            ultimoError:
+              info.message ??
+              (info.status === null ? describirFalloSinRespuesta(info) : "Error del servidor"),
             ultimoCodigo: info.code,
+            ultimoTipo: info.tipo,
+            ultimoTraceId: info.traceId,
             proximoIntentoEn: Date.now() + 5_000,
           });
           // La venta quedó registrada (en la cola): los intentos rechazados
@@ -1008,7 +1025,12 @@ function PosRegister() {
                 />
 
                 {sale.notice ? (
-                  <p role="alert" className="text-sm text-pos-danger">
+                  <p
+                    role="alert"
+                    className={`text-sm ${
+                      sale.noticeTono === "aviso" ? "text-vk-warning" : "text-pos-danger"
+                    }`}
+                  >
                     {sale.notice}
                   </p>
                 ) : null}
