@@ -127,6 +127,11 @@ export interface SaleState {
   result: PosOperationResult | null;
   /** Último rechazo o aviso, para mostrar. */
   notice: string | null;
+  /**
+   * `aviso` = la venta se cobró y quedó en la cola: no es un error del cajero,
+   * pero tampoco está en el servidor todavía (ámbar, no rojo ni verde).
+   */
+  noticeTono: "error" | "aviso";
 }
 
 export const initialSale: SaleState = {
@@ -140,6 +145,7 @@ export const initialSale: SaleState = {
   payload: null,
   result: null,
   notice: null,
+  noticeTono: "error",
 };
 
 // ─── Montos ──────────────────────────────────────────────────────────────────
@@ -554,17 +560,24 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
     case "REJECTED":
       // El servidor lo rechazó y revirtió todo: nada entró. Se puede corregir,
       // y el próximo cobro nace con id nuevo.
-      return { ...state, status: "editando", payload: null, notice: action.notice };
+      return {
+        ...state,
+        status: "editando",
+        payload: null,
+        notice: action.notice,
+        noticeTono: "error",
+      };
     case "QUEUED":
       // La venta quedó guardada y se sube sola: el carrito se LIBERA y el
       // cajero sigue atendiendo. Trabar la caja hasta que vuelva la conexión
       // sería exactamente lo que B7 viene a evitar.
-      return { ...initialSale, notice: action.notice };
+      return { ...initialSale, notice: action.notice, noticeTono: "aviso" };
     case "APPLY_PRICES":
       if (state.status !== "editando") return state;
       return {
         ...state,
         notice: action.notice,
+        noticeTono: "error",
         lines: state.lines.map((l) => {
           // Una línea cobrada a mano no se toca: el servidor devuelve como
           // "precio" el manual, y pisar con él el de lista dejaría la firma
@@ -594,12 +607,13 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
           product: { ...l.product, stock_units: action.available },
         })),
         notice: action.notice,
+        noticeTono: "error",
       };
     case "DISCARD":
     case "NEW_SALE":
       return { ...initialSale };
     case "NOTICE":
-      return { ...state, notice: action.notice };
+      return { ...state, notice: action.notice, noticeTono: "error" };
     default:
       return state;
   }
@@ -621,6 +635,10 @@ export function saleReducer(state: SaleState, action: SaleAction): SaleState {
  * cobrado y la venta desaparecía de los dos lados.
  */
 export function esCorregibleEnElMostrador(info: PosErrorInfo): boolean {
+  // Sólo lo que el SERVIDOR contestó. Una excepción local (`tipo: "local"`) va
+  // a revisión en la cola, pero acá no prueba que la venta no entró: puede
+  // saltar después de la respuesta, en un interceptor. Ante la duda, se encola.
+  if (info.status === null) return false;
   if (clasificarSync(info) !== "revision") return false;
   // Estos dos 409 dicen lo contrario de "no entró": la clave YA tiene una venta.
   // Tratarlos como rechazo borraría una venta que existe en el servidor.

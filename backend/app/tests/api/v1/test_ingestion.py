@@ -2153,13 +2153,15 @@ class TestConfirmLeaseF4:
                 new_callable=unittest.mock.AsyncMock,
                 side_effect=RuntimeError("boom en el import"),
             ),
-            pytest.raises(RuntimeError),
         ):
-            await client.post(
+            respuesta = await client.post(
                 f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
                 headers=auth_headers,
                 json={"confirmed_fields": {"ventas": True, "gastos": False}},
             )
+        # El fallo no escapa: sale como un 500 que el navegador puede leer
+        # (`UnhandledErrorMiddleware`), sin detalles internos.
+        assert respuesta.status_code == 500
 
         eventos = (
             (
@@ -2215,13 +2217,15 @@ class TestConfirmLeaseF4:
                 new_callable=unittest.mock.AsyncMock,
                 side_effect=boom,
             ),
-            pytest.raises(IntegrityError),
         ):
-            await client.post(
+            respuesta = await client.post(
                 f"/api/v1/ingestion/files/{confirmed_file.id}/confirm",
                 headers=auth_headers,
                 json={"confirmed_fields": {"ventas": True, "gastos": False}},
             )
+        # El fallo no escapa: sale como un 500 que el navegador puede leer
+        # (`UnhandledErrorMiddleware`), sin detalles internos.
+        assert respuesta.status_code == 500
 
         evento = (
             await db_session.execute(

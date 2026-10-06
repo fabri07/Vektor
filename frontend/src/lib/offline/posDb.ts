@@ -20,6 +20,7 @@
 import { type DBSchema, type IDBPDatabase, openDB } from "idb";
 
 import type { CartLine, PosOperationPayload, PosOperationResult } from "@/lib/pos/cart";
+import type { TipoDeFallo } from "@/lib/pos/errors";
 import type { PosReceipt } from "@/features/pos/ticketTemplate";
 
 export type EstadoPendiente =
@@ -61,6 +62,13 @@ export interface OperacionGuardada {
   intentos: number;
   ultimoError: string | null;
   ultimoCodigo: string | null;
+  /**
+   * Qué clase de fallo fue el último (ver `TipoDeFallo`). Opcional: las ventas
+   * guardadas antes de 2026-10 no lo tienen, y no hace falta migrar la base.
+   */
+  ultimoTipo?: TipoDeFallo | null;
+  /** El `X-Trace-Id` del último intento, para cruzarlo con Sentry. */
+  ultimoTraceId?: string | null;
   /** Epoch ms: hasta cuándo no vale la pena reintentar (backoff). */
   proximoIntentoEn: number;
   resultado: PosOperationResult | null;

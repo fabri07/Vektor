@@ -244,7 +244,11 @@ describe("flujo de cobro", () => {
     await act(async () => {
       fireEvent.click(cobrarBtn());
     });
-    expect(await screen.findByText(/Se sube sola cuando vuelva la conexión/)).toBeInTheDocument();
+    // Con la PC conectada no se afirma "sin conexión": se dice lo que se sabe.
+    // Y el aviso es ámbar —cobrada, pero todavía no en el servidor—, no rojo.
+    const aviso = await screen.findByText(/No se pudo contactar al servidor; se reintenta sola/);
+    expect(aviso).toHaveClass("text-vk-warning");
+    expect(screen.queryByText(/vuelva la conexión/)).not.toBeInTheDocument();
     // El carrito quedó vacío y se puede volver a escanear.
     expect(screen.queryByText("Yerba")).not.toBeInTheDocument();
     await escanear("7790001234567");
@@ -255,6 +259,26 @@ describe("flujo de cobro", () => {
     expect(guardadas).toHaveLength(1);
     expect(guardadas[0]!.estado).toBe("PENDIENTE");
     expect(guardadas[0]!.payload).toEqual(svc.createOperation.mock.calls[0]?.[0]);
+    expect(guardadas[0]!.ultimoTipo).toBe("transporte");
+  });
+
+  it("con el navegador desconectado sí promete subirla al volver la conexión", async () => {
+    const onLine = jest.spyOn(window.navigator, "onLine", "get").mockReturnValue(false);
+    try {
+      svc.createOperation.mockRejectedValue(new AxiosError("Network Error"));
+      svc.syncOperation.mockRejectedValue(new AxiosError("Network Error"));
+      render(<PosScreen />);
+      await escanear("7790001234567");
+      await screen.findByText("Yerba");
+      await act(async () => {
+        fireEvent.click(cobrarBtn());
+      });
+      expect(
+        await screen.findByText(/Se sube sola cuando vuelva la conexión/),
+      ).toBeInTheDocument();
+    } finally {
+      onLine.mockRestore();
+    }
   });
 
   it("si no se puede guardar en la PC, NO se cobra", async () => {

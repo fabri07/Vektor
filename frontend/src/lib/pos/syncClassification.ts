@@ -38,6 +38,10 @@ const REINTENTABLES = new Set([402, 408, 423, 429, 503]);
 
 export function clasificarSync(info: PosErrorInfo): ClaseSync {
   const { status } = info;
+  // Un error del código de la caja no se arregla reintentando: se repetiría
+  // igual cada 5 segundos para siempre, con la venta "pendiente" a la vista y
+  // sin que nadie se entere. Lo mira una persona (y queda en Sentry).
+  if (info.tipo === "local") return "revision";
   // Sin respuesta: la venta pudo haber entrado. Reintentar es seguro porque el
   // `client_operation_id` hace que el servidor devuelva el ticket original.
   if (status === null) return "reintento";
@@ -50,7 +54,10 @@ export function clasificarSync(info: PosErrorInfo): ClaseSync {
   return "revision";
 }
 
-/** Un fallo de red no gasta presupuesto de reintentos (lección de B0). */
+/**
+ * Sin respuesta del servidor (red, DNS, CORS, timeout): no gasta presupuesto de
+ * reintentos (lección de B0). Una excepción local NO cuenta: no es la red.
+ */
 export function esFalloDeRed(info: PosErrorInfo): boolean {
-  return info.status === null;
+  return info.status === null && info.tipo !== "local";
 }

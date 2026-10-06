@@ -5,8 +5,9 @@
  * que una venta cobrada NUNCA se borre por una respuesta, y que un 402 o un 423
  * —que se arreglan solos— no la manden a revisión.
  */
+import * as Sentry from "@sentry/nextjs";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { AxiosError, type InternalAxiosRequestConfig } from "axios";
+import { AxiosError, CanceledError, type InternalAxiosRequestConfig } from "axios";
 
 import { usePosSync } from "@/features/pos/usePosSync";
 import {
@@ -18,6 +19,9 @@ import {
 import type { PosOperationPayload } from "@/lib/pos/cart";
 import type { PosReceipt } from "@/features/pos/ticketTemplate";
 import { posService } from "@/services/pos.service";
+
+jest.mock("@sentry/nextjs", () => ({ captureException: jest.fn() }));
+const sentry = Sentry as unknown as { captureException: jest.Mock };
 
 jest.mock("@/services/pos.service", () => ({
   posService: { syncOperation: jest.fn() },
@@ -265,5 +269,93 @@ describe("la venta migrada de B13 se reclama antes de adaptarse", () => {
     expect(op.payload.charged_at).toBeNull();
     expect(op.origen).toBe("b13");
     expect(op.estado).toBe("REQUIERE_REVISION");
+  });
+});
+
+describe("sin respuesta, sin inventar la causa", () => {
+  it("con la PC conectada no dice «Sin conexión», y guarda el tipo y la referencia", async () => {
+    // El incidente de 2026-10: un preflight de CORS rechazado se veía igual
+    // que un corte, y la caja mandaba a revisar el router con internet andando.
+    await sembrar("op-1");
+    const e = new AxiosError("Network Error", "ERR_NETWORK", {
+      headers: { "X-Trace-Id": "3f2a9c1d-0000" },
+    } as unknown as InternalAxiosRequestConfig);
+    svc.syncOperation.mockRejectedValue(e);
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    const op = await estado("op-1");
+    expect(op.estado).toBe("PENDIENTE");
+    expect(op.intentos).toBe(0);
+    expect(op.ultimoError).toBe("No se pudo contactar al servidor");
+    expect(op.ultimoTipo).toBe("transporte");
+    expect(op.ultimoTraceId).toBe("3f2a9c1d-0000");
+  });
+
+  it("un timeout se dice como timeout y tampoco gasta intentos", async () => {
+    await sembrar("op-1");
+    svc.syncOperation.mockRejectedValue(new AxiosError("timeout", "ECONNABORTED"));
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    const op = await estado("op-1");
+    expect(op.intentos).toBe(0);
+    expect(op.ultimoError).toBe("El servidor no respondió a tiempo");
+    expect(op.ultimoTipo).toBe("timeout");
+  });
+
+  it("con el navegador desconectado sí dice «Sin conexión»", async () => {
+    const onLine = jest.spyOn(window.navigator, "onLine", "get").mockReturnValue(false);
+    try {
+      await sembrar("op-1");
+      svc.syncOperation.mockRejectedValue(new AxiosError("Network Error", "ERR_NETWORK"));
+      const { result } = montar();
+      await act(async () => {
+        await result.current.flush();
+      });
+      expect((await estado("op-1")).ultimoError).toBe("Sin conexión");
+    } finally {
+      onLine.mockRestore();
+    }
+  });
+
+  it("una cancelación no es un intento ni cambia el motivo", async () => {
+    await sembrar("op-1");
+    await actualizarOperacion("op-1", { ultimoError: "motivo anterior" });
+    svc.syncOperation.mockRejectedValue(new CanceledError());
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    const op = await estado("op-1");
+    expect(op.estado).toBe("PENDIENTE");
+    expect(op.intentos).toBe(0);
+    expect(op.ultimoError).toBe("motivo anterior");
+  });
+
+  it("una excepción del código de la caja va a revisión, a Sentry, y no se reintenta sola", async () => {
+    // Reintentarla sola la repetiría cada 5 segundos para siempre con la venta
+    // "pendiente" a la vista y sin que nadie se entere.
+    await sembrar("op-1");
+    svc.syncOperation.mockRejectedValue(new TypeError("x is undefined"));
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    const op = await estado("op-1");
+    expect(op.estado).toBe("REQUIERE_REVISION");
+    expect(op.intentos).toBe(1);
+    expect(op.ultimoTipo).toBe("local");
+    expect(op.ultimoError).toBe("Error interno de la caja");
+    expect(sentry.captureException).toHaveBeenCalledTimes(1);
+
+    // No vuelve a intentarse sola.
+    svc.syncOperation.mockClear();
+    await act(async () => {
+      await result.current.flush();
+    });
+    expect(svc.syncOperation).not.toHaveBeenCalled();
   });
 });
