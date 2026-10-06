@@ -67,3 +67,10 @@ it("«Sin resultados» sólo cuando la búsqueda terminó vacía", async () => {
   expect(screen.getByText("Sin resultados.")).toBeInTheDocument();
   expect(screen.queryByText("Buscando…")).not.toBeInTheDocument();
 });
+
+it("al abrir, el foco está en el campo de búsqueda y no en la X del modal", () => {
+  // Lo que el cajero tipea tiene que ir al buscador: con el foco en la X las
+  // teclas terminaban en otro campo de la caja.
+  render(<ProductPicker picker={{ mode: "search" }} onPick={jest.fn()} onClose={jest.fn()} />);
+  expect(screen.getByLabelText("Buscar por nombre")).toHaveFocus();
+});

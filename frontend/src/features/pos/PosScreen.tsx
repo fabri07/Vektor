@@ -103,7 +103,10 @@ function avisoDeEncolado(info: PosErrorInfo): string {
   const guardada = "La venta quedó cobrada y guardada en esta PC.";
   switch (clasificarSync(info)) {
     case "autenticacion":
-      return `${guardada} Falta volver a entrar o habilitar esta caja de nuevo; después se sube sola.`;
+      // Volver a entrar no arregla una caja sin habilitar: decir cuál de las dos.
+      return (info.code ?? "").startsWith("TERMINAL_")
+        ? `${guardada} Esta PC no está habilitada como caja: hay que habilitarla; después se sube sola.`
+        : `${guardada} La sesión venció: volvé a entrar; después se sube sola.`;
     case "revision":
       return `${guardada} El servidor la rechazó: la tiene que revisar el encargado. ${
         info.message ?? ""
