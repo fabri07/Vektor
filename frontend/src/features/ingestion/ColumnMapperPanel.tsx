@@ -510,6 +510,7 @@ function SheetMapperSection({
   onEntityChange,
   onColumnTouched,
   isColumnTouched,
+  onColumnUntouched,
   onIssuesChange,
   stockTreatment,
   onStockTreatmentChange,
@@ -538,6 +539,11 @@ function SheetMapperSection({
   // sección no puede distinguir lo que eligió el usuario de lo que quedó de una
   // sugerencia, y al cambiar de sección pisaría las dos cosas por igual.
   isColumnTouched?: (ctxId: string, col: string) => boolean;
+  // Saca una columna del touched-set: su elección manual ya no aplica en la
+  // sección nueva y la columna pasó a la sugerencia automática. Si siguiera
+  // marcada, esa sugerencia viajaría como `user_selected` y saltearía la
+  // compuerta de riesgo de F8 como si la persona la hubiera confirmado.
+  onColumnUntouched?: (ctxId: string, col: string) => void;
   // Problemas que impiden importar ESTA hoja. El padre los junta para decidir si
   // habilita Confirmar — así el bloqueo usa las mismas reglas que el confirm del
   // backend en vez de descubrirse recién con un 422.
@@ -655,15 +661,18 @@ function SheetMapperSection({
       for (const s of suggestions) {
         const col = s.source_column;
         const elegido = prev[col] ?? "";
-        if (
-          isColumnTouched?.(context.context_id, col) &&
-          targetSobreviveALaEntidad(elegido, fields, crossFields)
-        ) {
-          // Incluye el caso de un «Sin mapear» explícito: si la persona sacó esa
-          // columna a propósito, cambiar de sección no es motivo para volver a
-          // meterla.
-          if (elegido) next[col] = elegido;
-          continue;
+        if (isColumnTouched?.(context.context_id, col)) {
+          if (targetSobreviveALaEntidad(elegido, fields, crossFields)) {
+            // Incluye el caso de un «Sin mapear» explícito: si la persona sacó
+            // esa columna a propósito, cambiar de sección no es motivo para
+            // volver a meterla.
+            if (elegido) next[col] = elegido;
+            continue;
+          }
+          // Lo elegido ya no existe acá: la columna toma la sugerencia nueva,
+          // que nadie confirmó. Borrar del Set es idempotente, así que repetir
+          // este updater (StrictMode) no cambia nada.
+          onColumnUntouched?.(context.context_id, col);
         }
         if (s.target_field) next[col] = s.target_field;
       }
@@ -681,6 +690,7 @@ function SheetMapperSection({
     loadingCatalog,
     context.context_id,
     isColumnTouched,
+    onColumnUntouched,
   ]);
 
   // Reportar mapeos al padre cuando cambian (vacío en texto/imagen).
@@ -1198,6 +1208,9 @@ function MultiContextMapper({
     (ctxId: string, col: string) => touchedRef.current.has(riskKey(ctxId, col)),
     [],
   );
+  const handleColumnUntouched = useCallback((ctxId: string, col: string) => {
+    touchedRef.current.delete(riskKey(ctxId, col));
+  }, []);
 
   const { byContext: warningsByCtx, general: generalWarnings } = useMemo(
     () => splitWarningsByContext(parserWarnings, contexts),
@@ -1695,6 +1708,7 @@ function MultiContextMapper({
             onEntityChange={handleEntityChange}
             onColumnTouched={handleColumnTouched}
             isColumnTouched={isColumnTouched}
+            onColumnUntouched={handleColumnUntouched}
             onIssuesChange={handleIssuesChange}
             stockTreatment={stockTreatmentByCtx[ctx.context_id] ?? "opening_balance"}
             onStockTreatmentChange={handleStockTreatmentChange}
@@ -2059,12 +2073,11 @@ export function ColumnMapperPanel({
     if (opt) {
       setConfirmedOverride({ ...NINGUN_BUCKET, [opt.field]: true });
     }
-    // Re-inicializar el mapeo con el nuevo schema de entidad.
+    // F-A (portado del PR #48): re-derivar el mapeo contra el schema nuevo SIN
+    // vaciar `mappings` ni el touched-set. Lo decide la fusión de abajo, con el
+    // mismo criterio que `SheetMapperSection`. Antes una columna corregida a
+    // mano se perdía al cambiar de propósito.
     setInitialized(false);
-    setMappings({});
-    // F8c: el mapeo se re-deriva de las sugerencias del nuevo schema — ninguna
-    // columna quedó tocada a mano en el schema nuevo (evita fuga de user_selected).
-    touchedRef.current.clear();
   }
 
   // Multi-contexto: se usa el mapeo por contexto cuando hay >1 contexto (multi-hoja)
@@ -2096,13 +2109,30 @@ export function ColumnMapperPanel({
     enabled: !!fileId && !!preview && !isMultiContext && !needsPurpose,
   });
 
-  // Inicializar mappings desde sugerencias cuando cargan
-  if (suggestions.length > 0 && !initialized) {
-    const initial: Record<string, string> = {};
+  // F-A: MERGE, no reemplazo. Lo tocado a mano sobrevive si su target sigue
+  // existiendo en la entidad; si no, la columna toma la sugerencia nueva y SALE
+  // del touched-set (F8c): si siguiera marcada, esa sugerencia viajaría como
+  // `user_selected` y saltearía la compuerta de riesgo. Sin catálogo no se
+  // puede afirmar que un target dejó de existir: se espera a que llegue.
+  if (suggestions.length > 0 && !initialized && !loadingCatalog) {
+    const fields = catalog?.[entityType]?.fields ?? [];
+    const crossFields = catalog?.[entityType]?.cross_fields ?? [];
+    const next: Record<string, string> = {};
     for (const s of suggestions) {
-      if (s.target_field) initial[s.source_column] = s.target_field;
+      const col = s.source_column;
+      const elegido = mappings[col] ?? "";
+      const clave = riskKey("table", col);
+      if (touchedRef.current.has(clave)) {
+        if (targetSobreviveALaEntidad(elegido, fields, crossFields)) {
+          // Incluye el «Sin mapear» explícito: sacarla fue a propósito.
+          if (elegido) next[col] = elegido;
+          continue;
+        }
+        touchedRef.current.delete(clave);
+      }
+      if (s.target_field) next[col] = s.target_field;
     }
-    setMappings(initial);
+    setMappings(next);
     setInitialized(true);
   }
 
