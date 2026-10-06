@@ -2427,6 +2427,30 @@ describe("ColumnMapperPanel — F-A: cambiar de sección conserva lo mapeado a m
     expect(selectDe("Detalle").value).toBe("category");
     expect(selectDe("Monto").value).toBe("amount");
   });
+
+  test("la columna que perdió su target y tomó la sugerencia NO viaja como user_selected", async () => {
+    // Paso 2 del cierre del #48: la columna seguía en el touched-set después de
+    // caer a la sugerencia nueva, viajaba como `user_selected: true` y salteaba
+    // la compuerta de riesgo de F8 como si la persona la hubiera confirmado.
+    renderPanel();
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    fireEvent.change(selectDe("Detalle"), { target: { value: "product_name" } });
+    fireEvent.change(selectDe("Monto"), { target: { value: "amount" } });
+
+    cambiarSeccion("expense");
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("category");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/i }));
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+    expect(enviado.find((m) => m.source_column === "Detalle")?.user_selected).toBeFalsy();
+    // Lo que sí sobrevivió sigue siendo una elección de la persona.
+    expect(enviado.find((m) => m.source_column === "Monto")?.user_selected).toBe(true);
+  });
 });
 
 /**
@@ -2996,5 +3020,129 @@ describe("ColumnMapperPanel — los buckets salen de lo detectado", () => {
       "sheet:LD:ventas": true,
       "sheet:Ganancias": false,
     });
+  });
+});
+
+/**
+ * F-A, camino PLANO (archivo ambiguo con un único propósito). Portado del PR
+ * #48 (`687dd622`) en el paso 2 de su cierre, con la corrección del touched-set.
+ * Antes `choosePurpose` vaciaba `mappings` y el touched-set: cambiar el
+ * propósito de un archivo con columnas corregidas a mano las perdía todas.
+ */
+describe("ColumnMapperPanel — F-A: cambiar de propósito (camino plano) conserva lo mapeado a mano", () => {
+  const PREVIEW_AMBIGUO = {
+    file_id: "file-1",
+    processing_status: "NEEDS_CONFIRMATION",
+    parsed_summary_json: {
+      inferred_type: "general",
+      headers: ["Fecha", "Monto", "Detalle"],
+    },
+    columns_at_risk: [],
+  };
+
+  function sugerencia(source_column: string, target_field: string | null) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["x"],
+      target_field,
+      confidence: 0.9,
+      source: target_field ? "heuristic" : "none",
+      status: target_field ? "mapped" : "unmapped",
+    };
+  }
+
+  const POR_ENTIDAD: Record<string, ReturnType<typeof sugerencia>[]> = {
+    sale: [
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "notes"),
+    ],
+    expense: [
+      sugerencia("Fecha", "expense_date"),
+      sugerencia("Monto", "amount"),
+      sugerencia("Detalle", "category"),
+    ],
+  };
+
+  // El camino plano no pone `title` en el nombre de columna: vive en un span.
+  function selectDe(columna: string): HTMLSelectElement {
+    const fila = screen.getByText(columna).closest(".grid");
+    return within(fila as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+  }
+
+  // El selector de propósito aparece recién cuando carga el preview.
+  async function cambiarProposito(nombre: string) {
+    fireEvent.click(await screen.findByRole("button", { name: nombre }));
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockRegistrarImportacion.mockRejectedValue({ response: { status: 404 } });
+    mockGetPreview.mockResolvedValue(PREVIEW_AMBIGUO);
+    mockGetColumnMappings.mockImplementation((_fileId: string, entity: string) =>
+      Promise.resolve(POR_ENTIDAD[entity] ?? []),
+    );
+  });
+
+  test("lo elegido a mano sobrevive; lo no tocado se recalcula", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `payment_method` existe en Ventas y en Gastos: sigue siendo elegible.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "payment_method" } });
+
+    await cambiarProposito("Gastos");
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("payment_method");
+  });
+
+  test("un target que el propósito nuevo no tiene NO se conserva, y deja de contar como manual", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+    await waitFor(() => {
+      expect(selectDe("Detalle").value).toBe("notes");
+    });
+    // `customer_name` sólo existe en Ventas.
+    fireEvent.change(selectDe("Detalle"), { target: { value: "customer_name" } });
+    fireEvent.change(selectDe("Monto"), { target: { value: "amount" } });
+
+    await cambiarProposito("Gastos");
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("category");
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/i }));
+    await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+    const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+    // La sugerencia de Gastos nadie la confirmó: no puede saltear F8.
+    expect(enviado.find((m) => m.source_column === "Detalle")?.user_selected).toBeFalsy();
+    expect(enviado.find((m) => m.source_column === "Monto")?.user_selected).toBe(true);
+  });
+
+  test("sin tocar nada, todo se recalcula con el propósito nuevo", async () => {
+    renderPanel();
+    await cambiarProposito("Ventas");
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("transaction_date");
+    });
+
+    await cambiarProposito("Gastos");
+    await waitFor(() => {
+      expect(selectDe("Fecha").value).toBe("expense_date");
+    });
+    expect(selectDe("Detalle").value).toBe("category");
+    expect(selectDe("Monto").value).toBe("amount");
   });
 });

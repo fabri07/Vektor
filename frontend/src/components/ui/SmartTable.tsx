@@ -201,6 +201,9 @@ function SmartTableContent<T extends object>({
           key: "__actions",
           header: "Acciones",
           render: (_: unknown, row: T) => renderActions(row),
+          // F-V.1 (portado del PR #48): fija a la derecha. Era la columna que
+          // el scroll horizontal cortaba —y es la que tiene los botones—.
+          stickyRight: true,
         },
       ]
     : visibleColumns;
