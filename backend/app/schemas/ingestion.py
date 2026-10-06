@@ -851,6 +851,12 @@ class RereadCounts(BaseModel):
     # Impacto estimado en el catálogo de productos.
     products_new: int = 0
     products_restock: int = 0
+    # Compuerta de relectura (B1, 2026-10-06): ``to_void`` = to_replace + to_lose.
+    # Default 0 para que un frontend viejo siga leyendo la respuesta.
+    to_replace: int = 0
+    to_lose: int = 0
+    to_lose_to_others: int = 0
+    edited_at_risk: int = 0
 
 
 class RereadImpactProjection(BaseModel):
@@ -942,6 +948,10 @@ class RereadPreviewResponse(BaseModel):
     # archivo, conocido desde acá — evita que el indicador de "Aplicando…" sea
     # una barra indeterminada sin ningún dato. `None` si no se pudo calcular.
     total_rows: int | None = None
+    # Compuerta de relectura: si esta sesión ya se aplicó una vez y se frenó por
+    # pérdida de datos (mismo `draft_version`), la medición exacta — retomar la
+    # sesión lleva directo a confirmar, sin volver a correr el apply entero.
+    data_loss: "RereadDataLoss | None" = None
 
 
 class RereadApplyRequest(BaseModel):
@@ -950,6 +960,9 @@ class RereadApplyRequest(BaseModel):
 
     run_id: UUID
     draft_version: int
+    #: Compuerta de relectura (B1): el apply mide lo que pierde; sin esto, si
+    #: pierde algo, se frena y la sesión vuelve a READY_TO_APPLY con la medición.
+    accept_data_loss: bool = False
 
 
 class RereadCancelResponse(BaseModel):
@@ -979,6 +992,19 @@ class RereadApplyResponse(BaseModel):
     # F-RR Fase 4: None si lo proyectado en el preview coincidió con lo
     # persistido; si no, el detalle del desvío — nunca se oculta en un log.
     reconciliation_warning: dict[str, Any] | None = None
+
+
+class RereadDataLoss(BaseModel):
+    """Compuerta de relectura: lo que el apply perdería, medido sobre registros
+    reales (``reread_service.medir_perdida_real``)."""
+
+    to_lose: int = 0
+    to_lose_to_others: int = 0
+    edited_at_risk: int = 0
+    samples: list[RereadItem] = Field(default_factory=list)
+
+
+RereadPreviewResponse.model_rebuild()
 
 
 class RereadApplyStartResponse(BaseModel):
@@ -1018,6 +1044,12 @@ class RereadRunStatusResponse(BaseModel):
     # de informar. Es `updated_at`, no `created_at`: el reclamo atómico
     # QUEUED→APPLYING lo pisa explícitamente al tomar el run.
     applying_since: datetime | None = None
+    # Compuerta de relectura: con `error_code == "REREAD_WOULD_LOSE_DATA"` el
+    # apply NO se aplicó; `data_loss` dice qué se perdería, y se confirma
+    # reenviando el apply con `accept_data_loss` y este `draft_version`.
+    error_code: str | None = None
+    data_loss: RereadDataLoss | None = None
+    draft_version: int | None = None
 
 
 class RereadUndoResponse(BaseModel):

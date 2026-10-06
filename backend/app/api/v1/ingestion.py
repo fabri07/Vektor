@@ -244,6 +244,7 @@ from app.schemas.ingestion import (
     RereadApplyStartResponse,
     RereadCancelResponse,
     RereadCounts,
+    RereadDataLoss,
     RereadImpactProjection,
     RereadItem,
     RereadPreviewRequest,
@@ -4435,6 +4436,21 @@ async def reread_preview(
         legacy_fallback=preview.legacy_fallback,
         sample_changes=preview.sample_changes,
         total_rows=(run.details_json or {}).get("total_rows"),
+        data_loss=_perdida_de_la_sesion(run),
+    )
+
+
+def _perdida_de_la_sesion(run: Any) -> RereadDataLoss | None:
+    """La medición exacta guardada por un apply frenado (compuerta de relectura),
+    o ``None``. ``preview_reread`` ya descarta la de otro ``draft_version``."""
+    perdida = (run.details_json or {}).get("data_loss")
+    if run.status != "READY_TO_APPLY" or not isinstance(perdida, dict):
+        return None
+    return RereadDataLoss(
+        to_lose=int(perdida.get("to_lose") or 0),
+        to_lose_to_others=int(perdida.get("to_lose_to_others") or 0),
+        edited_at_risk=int(perdida.get("edited_at_risk") or 0),
+        samples=[RereadItem(**it) for it in perdida.get("samples") or [] if isinstance(it, dict)],
     )
 
 
@@ -4539,6 +4555,16 @@ async def reread_apply(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
 
+    # Compuerta de relectura (B1): la decisión la toma el apply con la medición
+    # EXACTA (ver `reread_service.medir_perdida_real`); acá sólo viaja si el
+    # usuario ya aceptó perder datos. Va en el run y no en la task: un worker
+    # viejo no conoce el argumento.
+    validated_run.details_json = {
+        **(validated_run.details_json or {}),
+        "accept_data_loss": bool(body.accept_data_loss),
+    }
+    await session.flush()
+
     # Best-effort: `.delay()` más abajo publica al broker y SIEMPRE devuelve
     # éxito, incluso sin ningún worker escuchando la cola `ingestion` — ahí es
     # donde quedaron trabadas las dos relecturas de ASTERIA (RUNNING para
@@ -4620,6 +4646,22 @@ async def reread_run_status(
     # status del run → status del apply: RUNNING / APPLIED / FAILED.
     items = [RereadItem(**it) for it in d.get("sample_changes", []) if isinstance(it, dict)]
     _total_rows = d.get("total_rows")
+    # Compuerta de relectura: el apply se frenó porque perdería datos y la sesión
+    # volvió a READY_TO_APPLY. Se reporta como FAILED con el mensaje: un frontend
+    # viejo sólo deja de consultar con APPLIED/FAILED (con otro estado quedaría
+    # girando para siempre) y muestra `error`. El nuevo mira `data_loss`.
+    _perdida = _perdida_de_la_sesion(run)
+    if _perdida is not None:
+        return RereadRunStatusResponse(
+            run_id=run.id,
+            file_id=file_id,
+            status="FAILED",
+            error=str((d.get("data_loss") or {}).get("message") or ""),
+            error_code=reread_service.REREAD_WOULD_LOSE_DATA,
+            data_loss=_perdida,
+            draft_version=int(d.get("draft_version", 0)),
+            total_rows=int(_total_rows) if _total_rows is not None else None,
+        )
     return RereadRunStatusResponse(
         run_id=run.id,
         file_id=file_id,
