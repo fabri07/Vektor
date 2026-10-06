@@ -3230,8 +3230,19 @@ async def test_reread_excluye_hoja_elimina_sus_filas_previas(
     db_session.add(run)
     await db_session.commit()
 
+    # Compuerta de relectura: excluir la hoja PIERDE su gasto, y eso no se aplica
+    # sin aceptarlo. Frenado = nada guardado (savepoint revertido).
+    file_id, tenant_id = file.id, tenant.tenant_id
+    with pytest.raises(reread_service.RereadWouldLoseDataError) as frenado:
+        async with db_session.begin_nested():
+            await reread_service.apply_reread(db_session, file_id, tenant_id, run=run)
+    assert frenado.value.perdida.to_lose == 1
+    await db_session.refresh(run)
+    await db_session.refresh(file)
+    assert len(await _active_expenses(db_session, tenant, file)) == 3
+
     result = await reread_service.apply_reread(
-        db_session, file.id, tenant.tenant_id, run=run
+        db_session, file.id, tenant.tenant_id, run=run, accept_data_loss=True
     )
     await db_session.commit()
 
@@ -3404,6 +3415,10 @@ def _xlsx_dos_hojas() -> bytes:
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+# Los tests de abajo excluyen «Sucursal Norte» a propósito: perder su gasto ES la
+# decisión del usuario, así que aceptan la pérdida explícitamente
+# (`accept_data_loss=True`). Que sin aceptar frena lo prueba
+# `test_reread_excluye_hoja_elimina_sus_filas_previas`.
 async def _archivo_dos_hojas(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[UploadedFile, dict[str, Any]]:
@@ -3528,7 +3543,7 @@ async def test_reread_descarta_pendientes_de_hoja_no_seleccionada(
     await db_session.commit()
 
     result = await reread_service.apply_reread(
-        db_session, file.id, tenant.tenant_id, run=run
+        db_session, file.id, tenant.tenant_id, run=run, accept_data_loss=True
     )
     await db_session.commit()
 
@@ -3574,7 +3589,9 @@ async def test_segunda_relectura_no_revive_los_pendientes_descartados(
         run = _run_excluyendo_norte(tenant, file, confirmed)
         db_session.add(run)
         await db_session.commit()
-        await reread_service.apply_reread(db_session, file.id, tenant.tenant_id, run=run)
+        await reread_service.apply_reread(
+            db_session, file.id, tenant.tenant_id, run=run, accept_data_loss=True
+        )
         await db_session.commit()
 
     total = await db_session.scalar(
@@ -3611,7 +3628,7 @@ async def test_label_ambiguo_no_descarta_nada(
     db_session.add(run)
     await db_session.commit()
     result = await reread_service.apply_reread(
-        db_session, file.id, tenant.tenant_id, run=run
+        db_session, file.id, tenant.tenant_id, run=run, accept_data_loss=True
     )
     await db_session.commit()
 
