@@ -314,6 +314,7 @@ async function rereadFlowToResultPhase(user: ReturnType<typeof userEvent.setup>)
       "file-1",
       PREVIEW_RESPONSE.run_id,
       PREVIEW_RESPONSE.draft_version,
+      false, // sin pérdidas: no hay nada que aceptar
     ),
   );
 
@@ -485,6 +486,158 @@ describe("FileListSection — deshacer relectura (F9b)", () => {
  * red no es un estado vacío: la UI no puede afirmar que no hay nada cuando lo
  * que pasó es que no pudo preguntar.
  */
+// ── Compuerta de relectura (B1) ──────────────────────────────────────────────
+//
+// El preview ESTIMA (informativo, no bloquea). El apply MIDE: si se pierde algo,
+// no guarda nada y el estado del run vuelve con `REREAD_WOULD_LOSE_DATA`; ahí la
+// pantalla pide la tilde y «Aplicar igual» reenvía con `accept_data_loss`.
+
+const PREVIEW_CON_ESTIMADO = {
+  ...PREVIEW_RESPONSE,
+  counts: {
+    ...PREVIEW_RESPONSE.counts,
+    to_void: 6,
+    to_replace: 3,
+    to_lose: 3,
+    to_lose_to_others: 3,
+    edited_at_risk: 0,
+  },
+};
+
+function frenadoPorPerdida() {
+  return {
+    ...appliedRunStatus(),
+    status: "FAILED",
+    error: "La relectura no se aplicó: 3 registro(s) no vuelven como venta o gasto.",
+    error_code: "REREAD_WOULD_LOSE_DATA",
+    draft_version: 0,
+    data_loss: {
+      to_lose: 3,
+      to_lose_to_others: 3,
+      edited_at_risk: 0,
+      samples: [
+        {
+          action: "lose",
+          before: { kind: "sale", amount: "7000.00", notes: "Devolución proveedor" },
+          after: { destino: "Otros" },
+        },
+      ],
+    },
+  };
+}
+
+async function abrirPreview(user: ReturnType<typeof userEvent.setup>) {
+  await waitFor(() =>
+    expect(screen.getByTitle("Volver a leer este archivo")).toBeInTheDocument(),
+  );
+  await user.click(screen.getByTitle("Volver a leer este archivo"));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /sí, releer/i })).toBeInTheDocument(),
+  );
+  await user.click(screen.getByRole("button", { name: /sí, releer/i }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /aplicar relectura/i })).toBeInTheDocument(),
+  );
+}
+
+describe("FileListSection — compuerta de relectura (B1)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("el preview muestra la estimación sin bloquear el apply", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadPreview.mockResolvedValue(PREVIEW_CON_ESTIMADO);
+    renderList();
+    await abrirPreview(user);
+
+    expect(screen.getByText("Se reemplazan (estimado)")).toBeInTheDocument();
+    expect(screen.getByText("Se pierden (estimado)")).toBeInTheDocument();
+    expect(screen.queryByText("A anular")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /aplicar relectura/i }));
+    await waitFor(() =>
+      expect(mockRereadApply).toHaveBeenCalledWith(
+        "file-1",
+        PREVIEW_CON_ESTIMADO.run_id,
+        PREVIEW_CON_ESTIMADO.draft_version,
+        false,
+      ),
+    );
+  });
+
+  test("un backend viejo (sin `to_lose`) sigue mostrando «A anular»", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    renderList();
+    await abrirPreview(user);
+
+    expect(screen.getByText("A anular")).toBeInTheDocument();
+    expect(screen.queryByText(/estimado/)).not.toBeInTheDocument();
+  });
+
+  test("retomar una sesión ya frenada abre directo la confirmación", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadPreview.mockResolvedValue({
+      ...PREVIEW_RESPONSE,
+      data_loss: frenadoPorPerdida().data_loss,
+    });
+    renderList();
+    await user.click(await screen.findByTitle("Volver a leer este archivo"));
+    await user.click(await screen.findByRole("button", { name: /sí, releer/i }));
+
+    expect(
+      await screen.findByText("La relectura no se aplicó: pierde datos"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /aplicar relectura/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /aplicar igual/i })).toBeDisabled();
+  });
+
+  test("el apply frenado pide la tilde y «Aplicar igual» reenvía aceptando", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadRunStatus
+      .mockResolvedValueOnce(frenadoPorPerdida())
+      .mockResolvedValue(appliedRunStatus());
+    renderList();
+    await abrirPreview(user);
+    await user.click(screen.getByRole("button", { name: /aplicar relectura/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("La relectura no se aplicó: pierde datos")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/3 pasan a «Otros»/)).toBeInTheDocument();
+    expect(screen.getByText("Se pierde")).toBeInTheDocument(); // la muestra
+    // No es un error: no hay toast rojo.
+    expect(mockAddToast).not.toHaveBeenCalledWith(expect.anything(), "error");
+
+    const aplicarIgual = screen.getByRole("button", { name: /aplicar igual/i });
+    expect(aplicarIgual).toBeDisabled();
+    await user.click(
+      screen.getByRole("checkbox", { name: /quiero aplicar la relectura igual/i }),
+    );
+    expect(aplicarIgual).toBeEnabled();
+    await user.click(aplicarIgual);
+
+    await waitFor(() =>
+      expect(mockRereadApply).toHaveBeenLastCalledWith(
+        "file-1",
+        PREVIEW_RESPONSE.run_id,
+        PREVIEW_RESPONSE.draft_version,
+        true,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /^deshacer relectura$/i }),
+      ).toBeInTheDocument(),
+    );
+  });
+});
+
 describe("FileListSection — la API falla", () => {
   beforeEach(() => {
     jest.clearAllMocks();

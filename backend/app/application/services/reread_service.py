@@ -69,6 +69,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
 
 from sqlalchemy import delete, func, select, text, update
@@ -273,6 +274,15 @@ class RereadPreview:
     products_restock: int = 0
     legacy_fallback: bool = False
     sample_changes: list[dict[str, Any]] = field(default_factory=list)
+    # Compuerta de relectura (B1, 2026-10-06) — ver ``_medir_perdidas``. ``to_void``
+    # cuenta TODO lo no editado, incluido lo que la relectura vuelve a crear: no
+    # distingue una actualización de una pérdida. Estos tres sí.
+    to_replace: int = 0
+    to_lose: int = 0
+    #: Parte de ``to_lose`` cuya fila vuelve, pero a «Otros» (ya no es venta/gasto).
+    to_lose_to_others: int = 0
+    #: Ediciones a mano cuya posición en el archivo se corrió (ver ``_medir_perdidas``).
+    edited_at_risk: int = 0
     # F9a: resultado de la resolución de riesgo de columnas (ver ``ResolvedRisk``).
     # Default "NO_RISK_FOUND" — el valor conservador si nadie lo pisa explícitamente.
     column_risk_outcome: str = "NO_RISK_FOUND"
@@ -300,7 +310,15 @@ class RereadPreview:
             "unchanged": self.unchanged,
             "products_new": self.products_new,
             "products_restock": self.products_restock,
+            "to_replace": self.to_replace,
+            "to_lose": self.to_lose,
+            "to_lose_to_others": self.to_lose_to_others,
+            "edited_at_risk": self.edited_at_risk,
         }
+
+    @property
+    def requires_data_loss_acceptance(self) -> bool:
+        return self.to_lose > 0 or self.edited_at_risk > 0
 
 
 @dataclass
@@ -344,6 +362,11 @@ class RereadApplyResult:
     #: `external_code_conflict`) y no están en ninguno de los campos de
     #: arriba, que son conteos de la RECONCILIACIÓN, no del import en sí.
     import_counts: dict[str, Any] = field(default_factory=dict)
+    #: Compuerta de relectura: fotos de las ediciones a mano que la relectura
+    #: preservó — ``medir_perdida_real`` busca si alguna volvió a entrar repetida.
+    edited_snapshots: list[dict[str, Any]] = field(default_factory=list)
+    #: Refs reimportadas que reemplazan un registro clasificado desde «Otros».
+    reemplazos_de_otros: set[str] = field(default_factory=set)
     #: Cambio 4: comprobante columna por columna de esta relectura — mismo
     #: contrato que `pipeline_events.detail.receipt.columns` del confirm.
     receipt: list[dict[str, Any]] = field(default_factory=list)
@@ -1619,6 +1642,12 @@ async def _reconcile(
         items=void_items_payload + items_payload,
         otros_descartados=_pendientes_descartados,
         import_counts=dict(_reimport_detail),
+        edited_snapshots=[
+            _snapshot_sale(r) if isinstance(r, SaleEntry) else _snapshot_expense(r)
+            for r in all_existing
+            if r.has_user_edits
+        ],
+        reemplazos_de_otros={r for r in refs_de_otros.values() if r in _refs_reimportadas},
     )
 
 
@@ -1794,13 +1823,21 @@ def _fresh_row_snapshot(row: dict[str, Any], kind: str) -> dict[str, Any]:
 
 
 def _iter_importable_fresh_rows(
-    fresh: dict[str, Any], confirmed_fields: dict[str, bool]
+    fresh: dict[str, Any],
+    confirmed_fields: dict[str, bool],
+    *,
+    exigir_monto: bool = True,
 ) -> list[tuple[str | None, int, dict[str, Any], str]]:
     """Filas frescas que producirían venta/gasto, con su ``(context_id, índice)``
     — replicando el anclado de ``insert_confirmed_data`` para reconciliar por
     ``source_row_ref``. Gatea por ``confirmed_fields`` (no cuenta tipos no
     confirmados; las filas 'otros' solo si ventas/gastos están confirmados). Los
     productos NO entran en los contadores de la relectura.
+
+    ``exigir_monto=False`` (compuerta de relectura): también las filas cuyo monto
+    el preview no sabe leer. El import puede calcularlo igual —con el mapeo
+    confirmado o como precio × cantidad—, y dejarlas afuera haría «perder» cada
+    registro que vino de ellas.
     """
     want_v = bool(confirmed_fields.get("ventas"))
     want_g = bool(confirmed_fields.get("gastos"))
@@ -1829,7 +1866,7 @@ def _iter_importable_fresh_rows(
         if not _kind_ok(kind):
             return out
         for idx, row in enumerate(rows):
-            if isinstance(row, dict) and _row_amount(row, kind) is not None:
+            if isinstance(row, dict) and (not exigir_monto or _row_amount(row, kind) is not None):
                 out.append((None, idx, row, kind))
         return out
 
@@ -1853,7 +1890,7 @@ def _iter_importable_fresh_rows(
                 ctx = row.get("__context__")
                 idx = per_ctx.get(ctx, 0)
                 per_ctx[ctx] = idx + 1
-                if _row_amount(row, kind) is not None:
+                if not exigir_monto or _row_amount(row, kind) is not None:
                     out.append((ctx, idx, row, kind))
     else:
         # Legacy (sin mapping_contexts): insert ancla con context_id LITERAL
@@ -1865,7 +1902,9 @@ def _iter_importable_fresh_rows(
             if not _kind_ok(kind):
                 continue
             for idx, row in enumerate(fresh.get(bucket_key) or []):
-                if isinstance(row, dict) and _row_amount(row, kind) is not None:
+                if not isinstance(row, dict):
+                    continue
+                if not exigir_monto or _row_amount(row, kind) is not None:
                     out.append((ctx_literal, idx, row, kind))
     return out
 
@@ -2159,6 +2198,507 @@ async def _verify_unlinked_products_reconciliation(
         return {"check_failed": {"reason": "No se pudo verificar el resultado."}}
 
 
+# ── Compuerta de relectura (B1, 2026-10-06): qué se reemplaza y qué se pierde ──
+#
+# ``to_void`` cuenta TODO lo no editado, porque todo se anula y se vuelve a crear.
+# Para el dueño eso no dice nada: un número rojo grande que casi siempre es «se
+# actualiza». Lo que sí importa es qué registro NO vuelve.
+#
+# Eso no se puede medir por ``source_row_ref``. La referencia es la POSICIÓN de la
+# fila dentro de su contexto (``_row_anchor``): si el parser aparta una fila —D0
+# sacó del bucket de ventas los aportes y las devoluciones del Libro Diario—,
+# todas las que venían después corren su índice. Por referencia, «se pierde»
+# daría la cantidad correcta pero las filas equivocadas (las últimas del libro), y
+# cientos de ventas aparecerían como «reemplazadas» por otra fila. Se mide por
+# CONTENIDO: (tipo, importe, día), como multiconjunto.
+
+_CENTAVO = Decimal("0.01")
+#: Tope de anclas a calcular para ubicar las ediciones a mano en el archivo. Por
+#: encima, se declara en riesgo toda edición con referencia (conservador).
+_MAX_ANCLAS_DE_EDICIONES = 500_000
+
+_Contenido = tuple[str, Decimal | None, str | None]  # (tipo, importe, día ISO)
+
+
+def _monto_normalizado(raw: Any) -> Decimal | None:
+    if raw is None:
+        return None
+    try:
+        return abs(Decimal(str(raw))).quantize(_CENTAVO)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _contenido_de_registro(rec: SaleEntry | ExpenseEntry) -> _Contenido:
+    tipo = "sale" if isinstance(rec, SaleEntry) else "expense"
+    dia = rec.transaction_date.date().isoformat() if rec.transaction_date else None
+    return (tipo, _monto_normalizado(rec.amount), dia)
+
+
+def _contenido_de_fila(row: dict[str, Any], kind: str) -> _Contenido:
+    snap = _fresh_row_snapshot(row, kind)
+    return (kind, _monto_normalizado(snap["amount"]), snap["transaction_date"])
+
+
+def _coincide(rec: _Contenido, fila: _Contenido, *, por_importe: bool = True) -> bool:
+    """Mismo tipo e importe; el día sólo se compara si los dos lo tienen.
+
+    ``por_importe=False`` (el importe de ese tipo no es confiable, ver
+    ``_importe_confiable``) o una fila cuyo importe el preview no sabe leer:
+    mismo tipo y mismo día."""
+    if rec[0] != fila[0]:
+        return False
+    if not por_importe or fila[1] is None:
+        return rec[2] is None or fila[2] is None or rec[2] == fila[2]
+    if rec[1] != fila[1]:
+        return False
+    return rec[2] is None or fila[2] is None or rec[2] == fila[2]
+
+
+#: Niveles de emparejamiento, en orden. Cada uno se corre ENTERO antes del
+#: siguiente: si se mezclaran, una coincidencia floja le robaría la fila a una
+#: exacta.
+_NIVEL_EXACTO = "exacto"  # (tipo, importe, día)
+_NIVEL_IMPORTE = "importe"  # (tipo, importe): la relectura corrigió o no leyó la fecha
+_NIVEL_DIA = "dia"  # (tipo, día): sólo si el importe del tipo no es confiable
+
+
+class _Bolsa:
+    """Multiconjunto de contenidos, cada uno con una etiqueta (su destino), que
+    se consume por niveles (``_NIVEL_*``)."""
+
+    def __init__(self) -> None:
+        self._etiquetas: list[str] = []
+        self._usada: list[bool] = []
+        self._indices: dict[str, dict[Any, list[int]]] = defaultdict(lambda: defaultdict(list))
+
+    @staticmethod
+    def _clave(nivel: str, c: _Contenido) -> Any:
+        if nivel == _NIVEL_EXACTO:
+            return c
+        if nivel == _NIVEL_IMPORTE:
+            return (c[0], c[1])
+        return (c[0], c[2]) if c[2] is not None else None
+
+    def poner(self, contenido: _Contenido, etiqueta: str = "") -> None:
+        i = len(self._etiquetas)
+        self._etiquetas.append(etiqueta)
+        self._usada.append(False)
+        for nivel in (_NIVEL_EXACTO, _NIVEL_IMPORTE, _NIVEL_DIA):
+            clave = self._clave(nivel, contenido)
+            if clave is not None:
+                self._indices[nivel][clave].append(i)
+
+    def sacar(self, nivel: str, contenido: _Contenido) -> str | None:
+        clave = self._clave(nivel, contenido)
+        if clave is None:
+            return None
+        candidatos = self._indices[nivel].get(clave)
+        while candidatos:
+            i = candidatos.pop()
+            if not self._usada[i]:
+                self._usada[i] = True
+                return self._etiquetas[i]
+        return None
+
+
+def _emparejar(
+    registros: list[SaleEntry | ExpenseEntry],
+    bolsa: _Bolsa,
+    niveles: tuple[str, ...],
+    *,
+    sin_tipo: bool = False,
+    ya: dict[int, str] | None = None,
+) -> dict[int, str]:
+    """``{índice del registro: etiqueta}``, nivel por nivel. ``ya``: lo emparejado
+    en una pasada anterior (se respeta y se completa).
+
+    ``sin_tipo``: la bolsa de «Otros» no sabe si la fila era venta o gasto, así
+    que se compara sólo importe y día."""
+
+    def _clave(rec: SaleEntry | ExpenseEntry) -> _Contenido:
+        c = _contenido_de_registro(rec)
+        return ("otros", c[1], c[2]) if sin_tipo else c
+
+    emparejados = dict(ya or {})
+    for nivel in niveles:
+        for i, rec in enumerate(registros):
+            if i in emparejados:
+                continue
+            etiqueta = bolsa.sacar(nivel, _clave(rec))
+            if etiqueta is not None:
+                emparejados[i] = etiqueta
+    return emparejados
+
+
+#: Debajo de esta proporción de registros emparejados por importe, el importe de
+#: ese tipo NO es confiable para emparejar: el import lo calcula con el mapeo
+#: confirmado y con precio × cantidad (F-H4), y el preview lo lee por heurística
+#: de columnas. Sin esta guarda, una planilla de precio × cantidad «perdía» el
+#: archivo entero — y una tilde que aparece siempre deja de significar algo.
+_PROPORCION_IMPORTE_CONFIABLE = 0.5
+
+
+def _importe_confiable(
+    registros: list[SaleEntry | ExpenseEntry], emparejados: dict[int, str]
+) -> dict[str, bool]:
+    total: dict[str, int] = defaultdict(int)
+    ok: dict[str, int] = defaultdict(int)
+    for i, rec in enumerate(registros):
+        tipo = _contenido_de_registro(rec)[0]
+        total[tipo] += 1
+        if i in emparejados:
+            ok[tipo] += 1
+    return {t: ok[t] / n >= _PROPORCION_IMPORTE_CONFIABLE for t, n in total.items()}
+
+
+@dataclass
+class _Perdidas:
+    to_replace: int = 0
+    to_lose: int = 0
+    to_lose_to_others: int = 0
+    edited_at_risk: int = 0
+    samples: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _ediciones_en_riesgo(
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    filas: list[tuple[str | None, int, dict[str, Any], str]],
+    recon: _Reconciliation,
+    editados: list[SaleEntry | ExpenseEntry],
+    confiable: dict[str, bool],
+) -> list[SaleEntry | ExpenseEntry]:
+    """Las ediciones a mano cuya fila pudo haberse corrido de lugar.
+
+    Una edición se preserva por su ``source_row_ref``: la relectura saltea la fila
+    fresca con esa referencia. Si las filas se corrieron, esa referencia apunta a
+    OTRA fila —que se saltea y se pierde— y la fila original de la edición entra
+    de nuevo: queda duplicada. Corregir eso no es de este paso; acá se detecta.
+
+    El corrimiento se ve en los registros NO editados del mismo contexto: el
+    primero cuya fila fresca (misma referencia) ya no coincide en contenido marca
+    desde dónde se corrió. Toda edición en esa posición o después está en riesgo.
+    Límite: un contexto donde TODO está editado no tiene con qué detectarlo. Si el
+    importe del tipo no es confiable (``_importe_confiable``) se compara por día,
+    que ve el corrimiento recién cuando cruza a otro día.
+    """
+    con_ref = [r for r in editados if r.source_row_ref]
+    if not con_ref:
+        return []
+    fila_en: dict[tuple[str | None, int], _Contenido] = {
+        (ctx, idx): _contenido_de_fila(row, kind) for ctx, idx, row, kind in filas
+    }
+    ultimo: dict[str | None, int] = {}
+    for ctx, idx, _row, _kind in filas:
+        ultimo[ctx] = max(ultimo.get(ctx, -1), idx)
+    # Un registro puede estar más allá de la última fila fresca (el archivo se
+    # acortó), así que el rango se extiende en la cantidad de registros.
+    extension = len(recon.non_edited) + len(editados)
+    if sum(n + 1 + extension for n in ultimo.values()) > _MAX_ANCLAS_DE_EDICIONES:
+        return con_ref
+    posicion: dict[str, tuple[str | None, int]] = {}
+    for ctx, n in ultimo.items():
+        for idx in range(n + 1 + extension):
+            posicion[_hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))] = (ctx, idx)
+
+    corrido_desde: dict[str | None, int] = {}
+    for rec in recon.non_edited_with_ref:
+        pos = posicion.get(rec.source_row_ref or "")
+        if pos is None:
+            continue
+        fila = fila_en.get(pos)
+        contenido = _contenido_de_registro(rec)
+        if fila is None or not _coincide(
+            contenido, fila, por_importe=confiable.get(contenido[0], True)
+        ):
+            ctx, idx = pos
+            corrido_desde[ctx] = min(corrido_desde.get(ctx, idx), idx)
+
+    en_riesgo: list[SaleEntry | ExpenseEntry] = []
+    for rec in con_ref:
+        pos = posicion.get(rec.source_row_ref or "")
+        if pos is not None and pos[0] in corrido_desde and pos[1] >= corrido_desde[pos[0]]:
+            en_riesgo.append(rec)
+    return en_riesgo
+
+
+def _medir_perdidas(
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    fresh: dict[str, Any],
+    filas: list[tuple[str | None, int, dict[str, Any], str]],
+    recon: _Reconciliation,
+    editados: list[SaleEntry | ExpenseEntry],
+    edited_refs: set[str],
+    voided_refs: set[str],
+    fingerprints: set[str],
+) -> _Perdidas:
+    """Cuántos registros no editados vuelven (``to_replace``) y cuáles no
+    (``to_lose``), y adónde va la fila de los que no vuelven como venta/gasto."""
+    etiquetas = {
+        str(c.get("context_id")): str(c.get("label") or "Otros")
+        for c in fresh.get("mapping_contexts") or []
+        if isinstance(c, dict)
+    }
+    recrea = _Bolsa()
+    a_otros = _Bolsa()
+    for ctx, idx, row, kind in filas:
+        contenido = _contenido_de_fila(row, kind)
+        if kind == "unknown":
+            a_otros.poner(("otros", contenido[1], contenido[2]), etiquetas.get(str(ctx), "Otros"))
+            continue
+        fp = _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))
+        # Sólo las filas que el apply va a CREAR: la de una edición se saltea, y
+        # la de una huella ya registrada que no se anula, también.
+        if fp in edited_refs or (fp in fingerprints and fp not in voided_refs):
+            continue
+        recrea.poner(contenido)
+
+    registros = recon.non_edited
+    vuelven = _emparejar(registros, recrea, (_NIVEL_EXACTO, _NIVEL_IMPORTE))
+    confiable = _importe_confiable(registros, vuelven)
+    no_confiables = {t for t, ok in confiable.items() if not ok}
+    if no_confiables:
+        # Sólo para los tipos cuyo importe no sirve: el día como última pareja.
+        sueltos = [
+            i
+            for i, r in enumerate(registros)
+            if i not in vuelven and _contenido_de_registro(r)[0] in no_confiables
+        ]
+        extra = _emparejar([registros[i] for i in sueltos], recrea, (_NIVEL_DIA,))
+        vuelven.update({sueltos[j]: e for j, e in extra.items()})
+    perdidos = [r for i, r in enumerate(registros) if i not in vuelven]
+    destinos = _emparejar(perdidos, a_otros, (_NIVEL_EXACTO, _NIVEL_IMPORTE), sin_tipo=True)
+    en_riesgo = _ediciones_en_riesgo(tenant_id, file_id, filas, recon, editados, confiable)
+
+    samples: list[dict[str, Any]] = []
+    for i, rec in enumerate(perdidos[:_SAMPLE_PER_KIND]):
+        snap = _snapshot_sale(rec) if isinstance(rec, SaleEntry) else _snapshot_expense(rec)
+        destino = destinos.get(i)
+        samples.append(
+            {
+                "action": "lose",
+                "before": snap,
+                "after": {"destino": f"Otros — {destino}"} if destino is not None else None,
+            }
+        )
+    for rec in en_riesgo[:_SAMPLE_PER_KIND]:
+        snap = _snapshot_sale(rec) if isinstance(rec, SaleEntry) else _snapshot_expense(rec)
+        samples.append({"action": "edited_at_risk", "before": snap, "after": None})
+
+    return _Perdidas(
+        to_replace=len(recon.non_edited) - len(perdidos),
+        to_lose=len(perdidos),
+        to_lose_to_others=len(destinos),
+        edited_at_risk=len(en_riesgo),
+        samples=samples,
+    )
+
+
+# ── Compuerta de relectura, medición EXACTA en el apply ───────────────────────
+#
+# El preview ESTIMA reconstruyendo qué filas crearía el import, y el import decide
+# con más de lo que el preview ve (mapeo confirmado, precio × cantidad, fecha
+# ilegible o futura que manda la fila a «Otros», hojas destildadas en el borrador,
+# venta y gasto en la misma fila). Medido en la revisión: falsos negativos —una
+# venta perdida sin aviso— y falsos positivos masivos. La autoridad es esta
+# medición: se hace DENTRO de la transacción del apply, con lo que de verdad se
+# anuló y lo que de verdad se volvió a crear (las dos puntas son registros reales,
+# con la misma derivación de importe y fecha), y si se pierde algo sin aceptar,
+# el apply se revierte entero.
+
+_TIPOS_OPERACION = ("sale", "expense")
+
+
+def _contenido_de_foto(foto: dict[str, Any]) -> _Contenido:
+    fecha = foto.get("transaction_date")
+    dia = str(fecha)[:10] if fecha else None
+    return (str(foto.get("kind")), _monto_normalizado(foto.get("amount")), dia)
+
+
+def _texto_de_foto(foto: dict[str, Any]) -> str:
+    texto = foto.get("notes") if foto.get("kind") == "sale" else foto.get("description")
+    return str(texto or "").strip().lower()
+
+
+def _emparejar_fotos(
+    anuladas: list[dict[str, Any]],
+    insertadas: list[dict[str, Any]],
+) -> tuple[set[int], set[int]]:
+    """``(anuladas que vuelven, insertadas emparejadas)`` por índice.
+
+    Niveles, cada uno ENTERO antes del siguiente: (1) mismo tipo, importe y día;
+    (2) mismo tipo, importe y texto (o la misma fila, si no hay texto) — la
+    relectura corrigió la fecha. Sin el texto, una pérdida quedaba tapada por
+    cualquier alta del mismo importe en OTRO día de la misma relectura (revisión
+    2: D0 + Fase 3 sobre ASTERIA es justo «se van filas y entran otras»); (3) la misma fila
+    (``source_row_ref``) con el mismo día y el mismo texto — la relectura corrigió
+    el importe (sin el texto, otra operación del mismo día que cayó en esa
+    posición pasaba por corrección). No
+    hay nivel «mismo día» suelto: con registros reales de los dos lados no hace
+    falta, y taparía una pérdida con cualquier operación nueva de esa fecha.
+    """
+    claves = (
+        lambda f: _contenido_de_foto(f),
+        lambda f: (*_contenido_de_foto(f)[:2], _texto_de_foto(f) or f.get("source_row_ref"))
+        if (_texto_de_foto(f) or f.get("source_row_ref"))
+        else None,
+        lambda f: (
+            (f.get("kind"), f.get("source_row_ref"), _contenido_de_foto(f)[2], _texto_de_foto(f))
+            if f.get("source_row_ref")
+            else None
+        ),
+    )
+    vuelven: set[int] = set()
+    usadas: set[int] = set()
+    for clave in claves:
+        disponibles: dict[Any, list[int]] = defaultdict(list)
+        for j, foto in enumerate(insertadas):
+            if j not in usadas:
+                k = clave(foto)
+                if k is not None:
+                    disponibles[k].append(j)
+        for i, foto in enumerate(anuladas):
+            if i in vuelven:
+                continue
+            k = clave(foto)
+            if k is not None and disponibles.get(k):
+                usadas.add(disponibles[k].pop())
+                vuelven.add(i)
+    return vuelven, usadas
+
+
+def _montos_de_fila(row: dict[str, Any]) -> set[Decimal]:
+    """Todo importe que se pueda leer en una fila de «Otros» (no se sabe cuál
+    columna lo trae: el Libro Diario la llama ``dinero_ingreso``)."""
+    montos: set[Decimal] = set()
+    for valor in row.values():
+        monto = _monto_normalizado(_parse_amount(valor)) if valor is not None else None
+        if monto is not None:
+            montos.add(monto)
+    return montos
+
+
+@dataclass
+class PerdidaDeRelectura:
+    """Lo que la relectura aplicada perdería, medido sobre registros reales."""
+
+    to_lose: int = 0
+    to_lose_to_others: int = 0
+    edited_at_risk: int = 0
+    samples: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def hay_perdida(self) -> bool:
+        return self.to_lose > 0 or self.edited_at_risk > 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "to_lose": self.to_lose,
+            "to_lose_to_others": self.to_lose_to_others,
+            "edited_at_risk": self.edited_at_risk,
+            "samples": self.samples,
+        }
+
+
+def medir_perdida_real(
+    items: list[dict[str, Any]],
+    editados: list[dict[str, Any]],
+    otros_nuevos: list[dict[str, Any]],
+    reemplazos_de_otros: set[str] | None = None,
+) -> PerdidaDeRelectura:
+    """Compara lo anulado contra lo vuelto a crear por ESTA relectura.
+
+    ``items``: los de ``RereadApplyResult`` (``REREAD_VOID`` con ``before`` y
+    ``REREAD_INSERT`` con ``after``). ``editados``: fotos de las ediciones a mano
+    preservadas. ``otros_nuevos``: ``row_data`` de los pendientes de «Otros» que
+    creó esta relectura.
+
+    - **Se pierde:** un registro anulado sin pareja entre los insertados. Si su
+      importe aparece en una fila nueva de «Otros», se dice que va ahí.
+    - **Edición en riesgo:** un insertado sin pareja que repite una edición
+      preservada —mismo tipo y dos de tres entre importe, día y texto—. Es la
+      fila de la edición que volvió a entrar porque su posición se corrió: quedan
+      dos. Conservador a propósito: un alta nueva igual en dos de tres también
+      frena, y eso sólo cuesta una confirmación.
+
+    ``reemplazos_de_otros``: refs de los insertados que reemplazan un registro
+    clasificado desde «Otros» (F-O.2). Ese anulado no está entre los ``items``,
+    así que su insertado quedaría suelto y podría tapar una pérdida real.
+    """
+    anuladas = [
+        it["before"]
+        for it in items
+        if it.get("action") == ACTION_VOID
+        and isinstance(it.get("before"), dict)
+        and it["before"].get("kind") in _TIPOS_OPERACION
+    ]
+    insertadas = [
+        it["after"]
+        for it in items
+        if it.get("action") == ACTION_INSERT
+        and isinstance(it.get("after"), dict)
+        and it["after"].get("kind") in _TIPOS_OPERACION
+        and it["after"].get("source_row_ref") not in (reemplazos_de_otros or set())
+    ]
+    vuelven, usadas = _emparejar_fotos(anuladas, insertadas)
+    perdidas = [f for i, f in enumerate(anuladas) if i not in vuelven]
+
+    montos_en_otros: dict[Decimal, int] = defaultdict(int)
+    for row in otros_nuevos:
+        for leido in _montos_de_fila(row):
+            montos_en_otros[leido] += 1
+    a_otros = 0
+    samples: list[dict[str, Any]] = []
+    for foto in perdidas:
+        perdido = _contenido_de_foto(foto)[1]
+        va_a_otros = perdido is not None and montos_en_otros.get(perdido, 0) > 0
+        if va_a_otros and perdido is not None:
+            montos_en_otros[perdido] -= 1
+            a_otros += 1
+        if len(samples) < _SAMPLE_PER_KIND:
+            samples.append(
+                {
+                    "action": "lose",
+                    "before": foto,
+                    "after": {"destino": "Otros"} if va_a_otros else None,
+                }
+            )
+
+    repetidas = 0
+    for j, foto in enumerate(insertadas):
+        if j in usadas:
+            continue
+        tipo, monto, dia = _contenido_de_foto(foto)
+        texto = _texto_de_foto(foto)
+        for ed in editados:
+            e_tipo, e_monto, e_dia = _contenido_de_foto(ed)
+            if e_tipo != tipo:
+                continue
+            # Dos de tres: la edición cambió UNO de los campos (la fecha, el
+            # importe o el texto), y la fila original que volvió a entrar
+            # conserva los otros dos. Pedir el día siempre dejaba pasar una
+            # edición de fecha (revisión 2).
+            coincidencias = (
+                (e_monto is not None and e_monto == monto)
+                + (e_dia is not None and e_dia == dia)
+                + bool(texto and _texto_de_foto(ed) == texto)
+            )
+            if coincidencias >= 2:
+                repetidas += 1
+                if len(samples) < 2 * _SAMPLE_PER_KIND:
+                    samples.append({"action": "edited_at_risk", "before": ed, "after": foto})
+                break
+
+    return PerdidaDeRelectura(
+        to_lose=len(perdidas),
+        to_lose_to_others=a_otros,
+        edited_at_risk=repetidas,
+        samples=samples,
+    )
+
+
 def _estimate_reread(
     file: UploadedFile,
     tenant_id: uuid.UUID,
@@ -2187,7 +2727,8 @@ def _estimate_reread(
     update_samples: list[dict[str, Any]] = []
     new_samples: list[dict[str, Any]] = []
 
-    for ctx, idx, row, kind in _iter_importable_fresh_rows(fresh, confirmed_fields):
+    filas = _iter_importable_fresh_rows(fresh, confirmed_fields)
+    for ctx, idx, row, kind in filas:
         fp = _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))
         if fp in edited_refs:
             continue  # editado → insert lo saltea (preservado)
@@ -2228,10 +2769,18 @@ def _estimate_reread(
         fresh, confirmed_fields, catalog
     )
 
-    void_samples: list[dict[str, Any]] = []
-    for rec in recon.non_edited[:_SAMPLE_PER_KIND]:
-        snap = _snapshot_sale(rec) if isinstance(rec, SaleEntry) else _snapshot_expense(rec)
-        void_samples.append({"action": "void", "before": snap, "after": None})
+    editados = [r for r in all_recs if r.has_user_edits]
+    perdidas = _medir_perdidas(
+        tenant_id,
+        file_id,
+        fresh,
+        _iter_importable_fresh_rows(fresh, confirmed_fields, exigir_monto=False),
+        recon,
+        editados,
+        edited_refs,
+        voided_refs,
+        fingerprints,
+    )
 
     return RereadPreview(
         file_id=file_id,
@@ -2244,7 +2793,12 @@ def _estimate_reread(
         products_new=products_new,
         products_restock=products_restock,
         legacy_fallback=recon.legacy_fallback,
-        sample_changes=void_samples + update_samples + new_samples + product_samples,
+        # Lo que se pierde va PRIMERO: es lo único de la muestra que exige decidir.
+        sample_changes=perdidas.samples + update_samples + new_samples + product_samples,
+        to_replace=perdidas.to_replace,
+        to_lose=perdidas.to_lose,
+        to_lose_to_others=perdidas.to_lose_to_others,
+        edited_at_risk=perdidas.edited_at_risk,
     )
 
 
@@ -2893,6 +3447,66 @@ class FileChangedSincePreviewError(ValueError):
     que el usuario vio."""
 
 
+#: Código con el que el estado del run avisa que la relectura se frenó porque
+#: perdería datos. El frontend lo reconoce por este código.
+REREAD_WOULD_LOSE_DATA = "REREAD_WOULD_LOSE_DATA"
+
+
+def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
+    partes: list[str] = []
+    if perdida.to_lose:
+        texto = f"{perdida.to_lose} registro(s) no vuelven como venta o gasto"
+        if perdida.to_lose_to_others:
+            texto += f" ({perdida.to_lose_to_others} pasan a «Otros»)"
+        partes.append(texto)
+    if perdida.edited_at_risk:
+        partes.append(
+            f"{perdida.edited_at_risk} edición(es) a mano quedarían repetidas, porque "
+            "las filas del archivo se corrieron de lugar"
+        )
+    return (
+        "La relectura no se aplicó: " + "; ".join(partes) + ". No se guardó "
+        "nada. Revisá lo que se pierde y confirmá si querés aplicarla igual."
+    )
+
+
+class RereadWouldLoseDataError(ValueError):
+    """El apply perdería registros (o repetiría ediciones a mano) y no se
+    aceptó. Lanzado ANTES de estampar: el caller hace rollback."""
+
+    def __init__(self, perdida: PerdidaDeRelectura) -> None:
+        super().__init__(texto_de_perdida(perdida))
+        self.perdida = perdida
+
+
+def _perdida_aceptada(
+    perdida: PerdidaDeRelectura, aceptada: bool, tope: dict[str, Any] | None
+) -> bool:
+    if not aceptada:
+        return False
+    if tope is None:
+        return True
+    return perdida.to_lose <= int(tope.get("to_lose") or 0) and perdida.edited_at_risk <= int(
+        tope.get("edited_at_risk") or 0
+    )
+
+
+def volver_a_confirmar(run: DataRepairRun, perdida: PerdidaDeRelectura) -> None:
+    """Devuelve la sesión a READY_TO_APPLY con la medición exacta, para que el
+    usuario vea qué se pierde y decida. El ``draft_version`` no cambia: aceptar
+    aplica EXACTAMENTE la misma interpretación que se acaba de medir."""
+    details = dict(run.details_json or {})
+    details["data_loss"] = {
+        **perdida.as_dict(),
+        "message": texto_de_perdida(perdida),
+        "draft_version": int(details.get("draft_version", 0)),
+    }
+    details.pop("accept_data_loss", None)
+    run.details_json = details
+    run.status = "READY_TO_APPLY"
+    run.completed_at = None
+
+
 async def validate_ready_to_apply(
     session: AsyncSession,
     run_id: uuid.UUID,
@@ -3194,6 +3808,13 @@ async def preview_reread(
     if run is not None:
         details = dict(run.details_json or {})
         details["projected_impact"] = asdict(preview.unlinked_products)
+        # Compuerta de relectura: una medición exacta de un apply frenado vale
+        # para el borrador con que se midió; un preview nuevo la invalida.
+        perdida_previa = details.get("data_loss")
+        if isinstance(perdida_previa, dict) and int(
+            perdida_previa.get("draft_version", -1)
+        ) != int(details.get("draft_version", 0)):
+            details.pop("data_loss", None)
         run.details_json = details
     return preview
 
@@ -3206,9 +3827,21 @@ async def apply_reread(
     run: DataRepairRun | None = None,
     origin: Literal["interactive", "batch_auto", "batch_manual"] = "interactive",
     fresh_override: dict[str, Any] | None = None,
+    accept_data_loss: bool = False,
+    tope_aceptado: dict[str, Any] | None = None,
 ) -> RereadApplyResult:
     """Aplica la relectura: void no-editados + reimport corregido, auditado y
     reversible. El commit lo hace el caller (get_db_session o el worker).
+
+    Compuerta de relectura: si lo aplicado pierde registros o repite una edición
+    a mano (``medir_perdida_real``) y no viene ``accept_data_loss``, lanza
+    ``RereadWouldLoseDataError`` ANTES de estampar nada; el caller tiene que hacer
+    rollback (el worker lo hace y devuelve la sesión a READY_TO_APPLY).
+
+    ``tope_aceptado``: la medición que el usuario VIO al aceptar. Si esta corrida
+    pierde más que eso (la base cambió entre el frenado y la confirmación), se
+    frena otra vez: aceptar no es un sí en blanco. Sin tope, ``accept_data_loss``
+    acepta cualquier pérdida — sólo para llamadas explícitas desde código.
 
     Si se pasa ``run`` (creado por ``start_background_apply`` y ejecutado por el
     worker), se reusa; si no, se crea uno (camino síncrono / tests).
@@ -3274,6 +3907,19 @@ async def apply_reread(
         session, tenant_id, file, summary_for_import, confirmed_fields, run.id, draft
     )
 
+    # Compuerta: qué pendientes de «Otros» ya existían, para saber cuáles crea
+    # esta relectura (adónde va lo que deja de ser venta/gasto).
+    otros_previos = set(
+        (
+            await session.execute(
+                select(UnclassifiedRecord.id).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.uploaded_file_id == file_id,
+                )
+            )
+        ).scalars()
+    )
+
     result = await _reconcile(
         session, file, tenant_id, summary_for_import, confirmed_fields, run, draft=draft
     )
@@ -3289,6 +3935,26 @@ async def apply_reread(
     # REAPPLIED (único outcome con ``applied`` no-``None``).
     if resolved.applied is not None:
         await _reconcile_column_risk(session, file, tenant_id, resolved.applied)
+
+    # Compuerta de relectura: medición EXACTA, con lo que este apply escribió.
+    await session.flush()
+    otros_nuevos = [
+        r.row_data or {}
+        for r in (
+            await session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.uploaded_file_id == file_id,
+                )
+            )
+        ).scalars()
+        if r.id not in otros_previos
+    ]
+    perdida = medir_perdida_real(
+        result.items, result.edited_snapshots, otros_nuevos, result.reemplazos_de_otros
+    )
+    if perdida.hay_perdida and not _perdida_aceptada(perdida, accept_data_loss, tope_aceptado):
+        raise RereadWouldLoseDataError(perdida)
 
     # Cambio 4: comprobante de importación de ESTA relectura — mismo criterio
     # que confirm_file. `_draft_effective_mappings` es pura y barata: se
@@ -3409,6 +4075,8 @@ async def apply_reread(
         # confirm — versionado para que una reconstrucción histórica sepa
         # distinguir "no hay comprobante" de "comprobante vacío".
         "receipt": {"version": 1, "columns": result.receipt},
+        # Compuerta: lo que se perdió A SABIENDAS (aceptado), para el historial.
+        "data_loss": perdida.as_dict() if perdida.hay_perdida else None,
     }
     await session.flush()
 

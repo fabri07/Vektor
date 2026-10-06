@@ -397,8 +397,12 @@ async def test_persist_import_fingerprints_is_idempotent(
 async def test_preview_returns_before_after_sample(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """El preview (estimado en memoria) devuelve un sample antes/después: voids
-    con `before`, y filas nuevas con `after` y sin `before`."""
+    """El preview (estimado en memoria) devuelve un sample antes/después:
+    reemplazos con `before` y `after`, y filas nuevas con `after` y sin `before`.
+
+    Compuerta de relectura (B1): la muestra ya NO lista como «anulado» lo que la
+    relectura vuelve a crear — eso era el número rojo que no decía nada. Sólo
+    aparece `lose` cuando un registro no vuelve."""
     _patch_s3(monkeypatch, _CSV_BASE)
     file = await _make_file(db_session, tenant, _CSV_BASE)
     await _initial_import(db_session, tenant, file, _CSV_BASE)
@@ -409,14 +413,17 @@ async def test_preview_returns_before_after_sample(
 
     assert preview.sample_changes, "el preview debe traer un sample de cambios"
     actions = {c["action"] for c in preview.sample_changes}
-    # Hay voids (no-editados) y al menos un nuevo (la fila extra).
-    assert "void" in actions
+    # Los no-editados se reemplazan y hay un nuevo (la fila extra); nada se pierde.
+    assert "update" in actions
     assert "new" in actions
+    assert "lose" not in actions and "void" not in actions
+    assert (preview.to_replace, preview.to_lose) == (2, 0)
     new_items = [c for c in preview.sample_changes if c["action"] == "new"]
     assert new_items[0]["before"] is None
     assert new_items[0]["after"] is not None
-    void_items = [c for c in preview.sample_changes if c["action"] == "void"]
-    assert void_items[0]["before"] is not None
+    update_items = [c for c in preview.sample_changes if c["action"] == "update"]
+    assert update_items[0]["before"] is not None
+    assert update_items[0]["after"] is not None
 
 
 async def test_batch_fingerprints_preloaded_and_idempotent(

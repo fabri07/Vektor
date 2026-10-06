@@ -10,6 +10,7 @@ import {
   type RereadPreviewResponse,
   type RereadApplyResponse,
   type RereadNotRevertedEntity,
+  type RereadDataLoss,
 } from "@/services/ingestion.service";
 import { useToastStore } from "@/stores/toastStore";
 import { Modal } from "@/components/ui/Modal";
@@ -20,6 +21,8 @@ import { DeleteFileModal } from "./DeleteFileModal";
 import { FileInterpretationReview } from "./FileInterpretationReview";
 import { ImportReceiptModal } from "./ImportReceiptModal";
 import { RereadDiff } from "./RereadDiff";
+import { RereadPerdidasAviso } from "./RereadPerdidasAviso";
+import { midePerdidas, perdidaDelApply } from "./relecturaPerdidas";
 import { RereadProgress } from "./RereadProgress";
 import { IndeterminateBar } from "./IndeterminateBar";
 
@@ -87,7 +90,9 @@ function hasActiveFiles(files: UploadedFileItem[]): boolean {
 
 
 /** Fase de la relectura dentro del modal. */
-type RereadPhase = "loading" | "preview" | "applying" | "result";
+// "confirmLoss": el apply midió que se pierde algo y no guardó nada (compuerta de
+// relectura); la sesión sigue abierta y aplicar igual es una decisión explícita.
+type RereadPhase = "loading" | "preview" | "applying" | "confirmLoss" | "result";
 
 interface RereadState {
   fileId: string;
@@ -97,6 +102,8 @@ interface RereadState {
   result: RereadApplyResponse | null;
   // run del apply en background (fase "applying") para hacer polling del estado.
   runId?: string;
+  // Fase "confirmLoss": lo que el apply midió que se pierde.
+  dataLoss?: RereadDataLoss;
 }
 
 export function FileListSection() {
@@ -142,6 +149,9 @@ export function FileListSection() {
   // lugar (mismo patrón secuencial que `rereadConfirm` → `reread`, nunca dos
   // modales apilados a la vez).
   const [undoConfirmOpen, setUndoConfirmOpen] = useState(false);
+  // Compuerta de relectura (B1): la tilde vale para la medición que se está
+  // mostrando — se limpia cada vez que llega una nueva (ver el efecto del estado).
+  const [aceptoPerdida, setAceptoPerdida] = useState(false);
   // F9b: aviso persistente (no un toast que desaparece a los 4s) con los
   // clientes/proveedores/productos que el último undo NO pudo revertir porque
   // alguien los editó después de la relectura. Sobrevive al cierre del modal
@@ -350,9 +360,14 @@ export function FileListSection() {
       });
     },
     onSuccess: (preview, file) => {
+      // Compuerta de relectura: una sesión que ya se frenó por pérdida de datos
+      // (p. ej. tras recargar la página) se retoma en la confirmación, sin volver
+      // a correr el apply entero para enterarse de lo mismo.
+      const dataLoss = preview.data_loss ?? undefined;
+      setAceptoPerdida(false);
       setReread((prev) =>
         prev && prev.fileId === file.id
-          ? { ...prev, phase: "preview", preview }
+          ? { ...prev, phase: dataLoss ? "confirmLoss" : "preview", preview, dataLoss }
           : prev,
       );
     },
@@ -373,17 +388,26 @@ export function FileListSection() {
       fileId,
       runId,
       draftVersion,
+      acceptDataLoss,
     }: {
       fileId: string;
       runId: string;
       draftVersion: number;
-    }) => ingestionService.rereadApply(fileId, runId, draftVersion),
+      acceptDataLoss: boolean;
+    }) =>
+      ingestionService.rereadApply(fileId, runId, draftVersion, acceptDataLoss),
     onMutate: ({ fileId }) => {
       setReread((prev) =>
         prev && prev.fileId === fileId ? { ...prev, phase: "applying" } : prev,
       );
     },
     onSuccess: (start) => {
+      // Aplicar igual (compuerta de relectura) reencola el MISMO run: sin esto, la
+      // consulta del estado arrancaría con el «frenado» anterior en caché, que
+      // es terminal y corta el polling.
+      queryClient.removeQueries({
+        queryKey: ["reread-run", start.file_id, start.run_id],
+      });
       setReread((prev) =>
         prev && prev.fileId === start.file_id
           ? { ...prev, phase: "applying", runId: start.run_id }
@@ -436,6 +460,15 @@ export function FileListSection() {
       );
       invalidateDataQueries();
       addToast("Relectura aplicada.", "success");
+    } else if (perdidaDelApply(data)) {
+      // No es un error: el apply se frenó antes de guardar porque perdería datos.
+      const dataLoss = perdidaDelApply(data) ?? undefined;
+      setAceptoPerdida(false);
+      setReread((prev) =>
+        prev && prev.fileId === data.file_id
+          ? { ...prev, phase: "confirmLoss", runId: undefined, dataLoss }
+          : prev,
+      );
     } else if (data.status === "FAILED") {
       setReread((prev) =>
         prev && prev.fileId === data.file_id
@@ -461,7 +494,11 @@ export function FileListSection() {
   // cancel falla (red, sesión ya vencida), el sweep la limpia igual — no
   // bloquea el cierre del modal.
   const closeRereadModal = () => {
-    if (reread?.phase === "preview" && reread.preview?.run_id) {
+    // "confirmLoss" también: la sesión volvió a READY_TO_APPLY y sigue abierta.
+    if (
+      (reread?.phase === "preview" || reread?.phase === "confirmLoss") &&
+      reread.preview?.run_id
+    ) {
       rereadCancelMutation.mutate({
         fileId: reread.fileId,
         runId: reread.preview.run_id,
@@ -934,28 +971,56 @@ export function FileListSection() {
             {/* Fase preview: contadores + nota legacy + acciones */}
             {reread.phase === "preview" && reread.preview && (
               <>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  <CountCard
-                    label="A actualizar"
-                    value={reread.preview.counts.to_update}
-                    tone="info"
-                  />
-                  <CountCard
-                    label="Preservados"
-                    value={reread.preview.counts.preserved}
-                    tone="muted"
-                  />
-                  <CountCard
-                    label="Nuevos"
-                    value={reread.preview.counts.new}
-                    tone="success"
-                  />
-                  <CountCard
-                    label="A anular"
-                    value={reread.preview.counts.to_void}
-                    tone="danger"
-                  />
-                </div>
+                {/* Compuerta de relectura (B1): «A anular» contaba también lo
+                    que la relectura vuelve a crear. Con un backend que lo
+                    separa, se muestra qué se reemplaza y qué se pierde. */}
+                {midePerdidas(reread.preview.counts) ? (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <CountCard
+                      label="Se reemplazan (estimado)"
+                      value={reread.preview.counts.to_replace ?? 0}
+                      tone="info"
+                    />
+                    <CountCard
+                      label="Preservados"
+                      value={reread.preview.counts.preserved}
+                      tone="muted"
+                    />
+                    <CountCard
+                      label="Nuevos"
+                      value={reread.preview.counts.new}
+                      tone="success"
+                    />
+                    <CountCard
+                      label="Se pierden (estimado)"
+                      value={reread.preview.counts.to_lose ?? 0}
+                      tone={(reread.preview.counts.to_lose ?? 0) > 0 ? "danger" : "muted"}
+                    />
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <CountCard
+                      label="A actualizar"
+                      value={reread.preview.counts.to_update}
+                      tone="info"
+                    />
+                    <CountCard
+                      label="Preservados"
+                      value={reread.preview.counts.preserved}
+                      tone="muted"
+                    />
+                    <CountCard
+                      label="Nuevos"
+                      value={reread.preview.counts.new}
+                      tone="success"
+                    />
+                    <CountCard
+                      label="A anular"
+                      value={reread.preview.counts.to_void}
+                      tone="danger"
+                    />
+                  </div>
+                )}
 
                 {/* Impacto en productos + filas ya importadas (sin cambios) */}
                 {(reread.preview.counts.products_new > 0 ||
@@ -1042,6 +1107,14 @@ export function FileListSection() {
                     chequeaba que hubiera un preview, no su `status` — el backend
                     rechazaba con un error genérico en vez de indicar qué falta
                     revisar. */}
+                {midePerdidas(reread.preview.counts) && (
+                  <p className="text-xs text-vektor-muted">
+                    Los números son una estimación. Al aplicar medimos lo que de
+                    verdad se pierde y, si se pierde algo, no guardamos nada hasta
+                    que lo confirmes.
+                  </p>
+                )}
+
                 {reread.preview.status === "NEEDS_REVIEW" && (
                   <p className="text-xs text-vk-warning">
                     Todavía hay columnas con riesgo sin resolver — revisalas arriba
@@ -1065,6 +1138,7 @@ export function FileListSection() {
                         fileId: reread.fileId,
                         runId: reread.preview.run_id,
                         draftVersion: reread.preview.draft_version,
+                        acceptDataLoss: false,
                       })
                     }
                     disabled={
@@ -1075,6 +1149,45 @@ export function FileListSection() {
                     className="flex items-center gap-1.5 rounded-lg bg-vk-blue px-3 py-1.5 text-sm font-medium text-white hover:brightness-110 transition-colors disabled:opacity-50"
                   >
                     Aplicar relectura
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Compuerta de relectura: el apply se frenó antes de guardar. */}
+            {reread.phase === "confirmLoss" && reread.dataLoss && reread.preview && (
+              <>
+                <RereadPerdidasAviso
+                  perdida={reread.dataLoss}
+                  acepto={aceptoPerdida}
+                  onAceptoChange={setAceptoPerdida}
+                />
+                {reread.dataLoss.samples.length > 0 && (
+                  <RereadDiff items={reread.dataLoss.samples} />
+                )}
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={closeRereadModal}
+                    className="rounded-lg px-3 py-1.5 text-sm font-medium text-vektor-body hover:bg-vektor-surface transition-colors"
+                  >
+                    No aplicar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      reread.preview &&
+                      rereadApplyMutation.mutate({
+                        fileId: reread.fileId,
+                        runId: reread.preview.run_id,
+                        draftVersion: reread.preview.draft_version,
+                        acceptDataLoss: true,
+                      })
+                    }
+                    disabled={rereadApplyMutation.isPending || !aceptoPerdida}
+                    className="rounded-lg bg-vk-blue px-3 py-1.5 text-sm font-medium text-white hover:brightness-110 transition-colors disabled:opacity-50"
+                  >
+                    Aplicar igual
                   </button>
                 </div>
               </>

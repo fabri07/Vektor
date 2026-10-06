@@ -555,6 +555,12 @@ export interface RereadCounts {
   unchanged: number;
   products_new: number;
   products_restock: number;
+  // Compuerta de relectura (B1): `to_void` = reemplazo + pérdida. Opcionales
+  // porque un backend viejo no los manda.
+  to_replace?: number;
+  to_lose?: number;
+  to_lose_to_others?: number;
+  edited_at_risk?: number;
 }
 
 export interface RereadItem {
@@ -622,6 +628,9 @@ export interface RereadPreviewResponse {
   // conocido desde acá — le da contexto al indicador de "Aplicando…" sin
   // tocar el motor de import. `null` si no se pudo calcular.
   total_rows: number | null;
+  // Compuerta de relectura: la sesión ya se aplicó y se frenó por pérdida de
+  // datos (mismo borrador) — se retoma directo en la confirmación.
+  data_loss?: RereadDataLoss | null;
 }
 
 export interface RereadApplyResponse {
@@ -661,6 +670,19 @@ export interface RereadRunStatusResponse {
   // Desde cuándo el run está EN CURSO (QUEUED/APPLYING), ISO string —
   // `null` en un estado terminal (APPLIED/FAILED).
   applying_since: string | null;
+  // Compuerta de relectura: con `error_code === "REREAD_WOULD_LOSE_DATA"` el
+  // apply NO se aplicó (status llega FAILED para clientes viejos). Opcionales:
+  // un backend viejo no los manda.
+  error_code?: string | null;
+  data_loss?: RereadDataLoss | null;
+  draft_version?: number | null;
+}
+
+export interface RereadDataLoss {
+  to_lose: number;
+  to_lose_to_others: number;
+  edited_at_risk: number;
+  samples: RereadItem[];
 }
 
 // F9b (Task 7 backend / Task 8 frontend): clientes/proveedores/productos que
@@ -1088,10 +1110,16 @@ export const ingestionService = {
     fileId: string,
     runId: string,
     draftVersion: number,
+    acceptDataLoss = false,
   ): Promise<RereadApplyStartResponse> {
     const res = await api.post<RereadApplyStartResponse>(
       `/ingestion/files/${fileId}/reread/apply`,
-      { run_id: runId, draft_version: draftVersion },
+      {
+        run_id: runId,
+        draft_version: draftVersion,
+        // Sólo cuando es `true`: un backend viejo no conoce el campo.
+        ...(acceptDataLoss ? { accept_data_loss: true } : {}),
+      },
     );
     return res.data;
   },

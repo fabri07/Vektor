@@ -68,6 +68,9 @@ BUCKET_AMBIGUOUS = "ambiguous"
 BUCKET_HAS_USER_EDITS = "has_user_edits"
 BUCKET_APPLIED = "applied"
 BUCKET_ELIGIBLE_NOT_APPLIED = "eligible_not_applied"
+# Compuerta de relectura: el apply perdería registros o repetiría ediciones. Un
+# batch sin supervisión nunca acepta eso — queda para que un humano decida.
+BUCKET_WOULD_LOSE_DATA = "would_lose_data"
 # Fallo puntual de I/O (S3/DB) durante la evaluación de UN archivo — aislado
 # por `run_scan` para que no aborte el resto del batch (ver docstring de
 # `run_scan`).
@@ -112,6 +115,10 @@ _EXCLUSION_REASONS: dict[str, str] = {
     ),
     BUCKET_ELIGIBLE_NOT_APPLIED: (
         "outcome REAPPLIED sin ediciones humanas, pero no se pasó --apply"
+    ),
+    BUCKET_WOULD_LOSE_DATA: (
+        "aplicarla perdería registros (o repetiría ediciones a mano) — se revirtió "
+        "y queda para que alguien lo revise desde la pantalla de relectura"
     ),
 }
 
@@ -274,7 +281,16 @@ async def evaluate_file(
     # en toda corrida futura del batch, así que la auditoría faltante nunca se
     # reintenta. Con un solo commit, un fallo en cualquiera de los dos pasos
     # hace rollback de ambos — o se aplican los dos, o ninguno.
-    await reread_service.apply_reread(session, file.id, file.tenant_id, s3=s3, origin="batch_auto")
+    try:
+        await reread_service.apply_reread(
+            session, file.id, file.tenant_id, s3=s3, origin="batch_auto"
+        )
+    except reread_service.RereadWouldLoseDataError:
+        # La compuerta mide sobre lo aplicado: nada de esto queda. El rollback
+        # expira `file`, y leerlo sin recargar en una sesión async rompe.
+        await session.rollback()
+        await session.refresh(file)
+        return _entry(BUCKET_WOULD_LOSE_DATA)
     # Delega 1:1 en el helper canónico de `_db.py` — sin bifurcación por
     # dialecto acá. En producción esto SIEMPRE corre contra Postgres real
     # (`gen_random_uuid()`/`now()` server-side); no existe una segunda
@@ -330,7 +346,8 @@ def record_bookkeeping(file: UploadedFile, entry: ScanEntry) -> None:
     if entry.applied:
         file.latest_preview_version = INGESTION_VERSION
         return
-    if entry.bucket != BUCKET_ELIGIBLE_NOT_APPLIED:
+    # Pendientes de una decisión real: no se estampan (ver arriba).
+    if entry.bucket not in (BUCKET_ELIGIBLE_NOT_APPLIED, BUCKET_WOULD_LOSE_DATA):
         file.latest_preview_version = INGESTION_VERSION
     file.reread_status = REREAD_STATUS_NEEDS_REVIEW
     file.reread_summary = reread_service.build_reread_summary(

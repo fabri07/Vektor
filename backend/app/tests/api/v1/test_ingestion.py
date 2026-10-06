@@ -3570,8 +3570,10 @@ async def _start_ready_reread_session(
         run, fresh = await reread_service.start_or_resume_preview_session(
             db_session, file.id, tenant.tenant_id
         )
+        # `run=run`, como el endpoint: ahí queda la medición de la compuerta de
+        # relectura, y sin ella el apply cierra con 409 (fail-closed).
         await reread_service.preview_reread(
-            db_session, file.id, tenant.tenant_id, fresh_override=fresh
+            db_session, file.id, tenant.tenant_id, fresh_override=fresh, run=run
         )
     reread_service.mark_session_ready_to_apply(run)
     await db_session.commit()
