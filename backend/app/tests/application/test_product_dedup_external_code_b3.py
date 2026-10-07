@@ -333,3 +333,46 @@ async def test_revert_rebota_si_otro_producto_tomo_el_codigo_del_conflicto(
     db_session.expunge_all()
     dup = await db_session.get(Product, dup_id)
     assert dup is not None and dup.is_active is False
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+@pytest.mark.parametrize("reactivado", [False, True], ids=["inactivo", "reactivado_a_mano"])
+async def test_revert_no_pisa_un_codigo_puesto_despues_al_duplicado_fuente(
+    db_session: AsyncSession, sample_tenant: Tenant, reactivado: bool
+) -> None:
+    """El apply le liberó el código al duplicado fuente; si después alguien le puso
+    OTRO, devolverle el viejo lo pisaría sin avisar. La validación del canónico no
+    lo ataja (el canónico sigue con A-001) y el chequeo de colisión mira la clave
+    TRANSFERIDA, no la actual del duplicado: la única barrera es el guard de
+    ``dup_id == ext_source_id`` en ``_revert_one_group``, y va antes del
+    ``if dup.is_active: continue`` para cubrir también la reactivación manual."""
+    tid = sample_tenant.tenant_id
+    canonical_id, dup_id = await _seed_pair(
+        db_session, tid, canonical_code=None, dup_code=("A-001", "tango")
+    )
+    applied = await _plan_apply(db_session, tid)
+    assert applied.status == "APPLIED"
+
+    await _free_shared_sku(db_session, canonical_id)
+    dup = await db_session.get(Product, dup_id)
+    assert dup is not None
+    # Por el ORM y no con `update()`: el listener recalcula `external_code_key`.
+    dup.external_code = "B-777"
+    if reactivado:
+        dup.is_active = True
+        dup.deactivated_at = None
+        dup.deactivation_reason = None
+    await db_session.commit()
+
+    reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert reverted.groups_reverted == 0
+    assert reverted.groups_skipped == 1
+    assert reverted.group_results[0]["reason"] == "state_diverged"
+
+    db_session.expunge_all()
+    canonical = await db_session.get(Product, canonical_id)
+    dup = await db_session.get(Product, dup_id)
+    assert canonical is not None and dup is not None
+    assert dup.external_code == "B-777"  # la edición sobrevive
+    assert dup.is_active is reactivado
+    assert (canonical.external_code, canonical.external_source) == ("A-001", "tango")
