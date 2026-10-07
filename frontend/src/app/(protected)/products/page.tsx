@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import { Pencil, Trash2, Eye } from "lucide-react";
@@ -384,7 +384,7 @@ export default function ProductsPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: (payload: ProductResponse) =>
+    mutationFn: ({ product: payload, incluirStock }: { product: ProductResponse; incluirStock: boolean }) =>
       productsService.updateProduct(payload.id, {
         name: payload.name,
         sku: payload.sku,
@@ -393,7 +393,10 @@ export default function ProductsPage() {
         sale_price_ars: Number(payload.sale_price_ars),
         unit_cost_ars: payload.unit_cost_ars == null ? null : Number(payload.unit_cost_ars),
         list_price_ars: payload.list_price_ars == null ? null : Number(payload.list_price_ars),
-        stock_units: Number(payload.stock_units),
+        // El servidor asigna stock_units en absoluto, sin movimiento: mandar el
+        // valor de una fila vieja pisaría las ventas del medio. Sólo viaja si
+        // el usuario lo cambió en el editor.
+        ...(incluirStock ? { stock_units: Number(payload.stock_units) } : {}),
         // Van juntos (el servidor lo exige). Mandarlos sin cambio no cambia
         // nada; cambiarlos en un producto con historia da 409.
         sale_unit: payload.sale_unit ?? "unit",
@@ -647,7 +650,7 @@ export default function ProductsPage() {
         canCreateCategory={user?.role === "OWNER" || user?.role === "ADMIN"}
         saving={updateMutation.isPending}
         onClose={() => setEditing(null)}
-        onSave={(product) => updateMutation.mutate(product)}
+        onSave={(product, incluirStock) => updateMutation.mutate({ product, incluirStock })}
       />
       {viewingAllData && (
         <AllDataModal
@@ -683,7 +686,8 @@ function ProductEditModal({
   canCreateCategory: boolean;
   saving: boolean;
   onClose: () => void;
-  onSave: (product: ProductResponse) => void;
+  /** incluirStock=false: el stock no se tocó y NO va en el PATCH. */
+  onSave: (product: ProductResponse, incluirStock: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<ProductResponse | null>(product);
@@ -694,17 +698,25 @@ function ProductEditModal({
   const [errorCategoria, setErrorCategoria] = useState<string | null>(null);
   // La recién creada, hasta que el catálogo refetcheado la traiga.
   const [creada, setCreada] = useState<ProductCategoryOption | null>(null);
+  // El modal queda montado entre aperturas: la respuesta puede llegar con OTRO
+  // producto en el formulario. Sólo se aplica al producto que la pidió.
+  const productoAbierto = useRef<string | null>(product?.id ?? null);
   const crearCategoria = useMutation({
-    mutationFn: (label: string) => productsService.createCategory(label),
-    onSuccess: async (opcion) => {
+    mutationFn: ({ label }: { label: string; productId: string }) =>
+      productsService.createCategory(label),
+    onSuccess: async (opcion, { productId }) => {
       setCreada(opcion);
-      setForm((prev) => (prev ? { ...prev, category: opcion.code } : prev));
-      setCreandoCategoria(false);
-      setNuevaCategoria("");
+      if (productoAbierto.current === productId) {
+        setForm((prev) => (prev && prev.id === productId ? { ...prev, category: opcion.code } : prev));
+        setCreandoCategoria(false);
+        setNuevaCategoria("");
+      }
       await queryClient.invalidateQueries({ queryKey: ["product-categories"] });
     },
-    onError: (e) =>
-      setErrorCategoria(posErrorInfo(e).message ?? "No se pudo crear la categoría."),
+    onError: (e, { productId }) => {
+      if (productoAbierto.current !== productId) return;
+      setErrorCategoria(posErrorInfo(e).message ?? "No se pudo crear la categoría.");
+    },
   });
   const opciones =
     creada && !categories.some((c) => c.code === creada.code)
@@ -715,6 +727,7 @@ function ProductEditModal({
   const [stockText, setStockText] = useState("");
   const [umbralText, setUmbralText] = useState("");
   useEffect(() => {
+    productoAbierto.current = product?.id ?? null;
     setForm(product);
     setCreandoCategoria(false);
     setNuevaCategoria("");
@@ -740,14 +753,25 @@ function ProductEditModal({
   const stockBase = cantidad(stockText);
   const umbralBase = umbralText.trim() === "" ? null : cantidad(umbralText);
   const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
+  // Con el alta de categoría abierta, Guardar mandaría la categoría anterior y
+  // descartaría lo escrito: primero se crea o se cancela.
+  const categoriaAMedias = creandoCategoria || crearCategoria.isPending;
+  const crear = () => {
+    if (!form || !nuevaCategoria.trim() || crearCategoria.isPending) return;
+    setErrorCategoria(null);
+    crearCategoria.mutate({ label: nuevaCategoria.trim(), productId: form.id });
+  };
   return (
     <Modal isOpen={!!product} onClose={onClose} title="Editar producto" size="lg">
       <form
         className="grid gap-4"
         onSubmit={(event) => {
           event.preventDefault();
-          if (invalido) return;
-          onSave({ ...form, stock_units: stockBase ?? 0, low_stock_threshold_units: umbralBase });
+          if (invalido || categoriaAMedias || !product) return;
+          onSave(
+            { ...form, stock_units: stockBase ?? 0, low_stock_threshold_units: umbralBase },
+            stockBase !== product.stock_units,
+          );
         }}
       >
         <label className="grid gap-1 text-sm text-vektor-body">Producto<input className="rounded border border-vk-border-w px-3 py-2" value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
@@ -797,20 +821,14 @@ function ProductEditModal({
                     // Enter crea la categoría; no guarda el producto a medias.
                     if (e.key !== "Enter") return;
                     e.preventDefault();
-                    if (nuevaCategoria.trim() && !crearCategoria.isPending) {
-                      setErrorCategoria(null);
-                      crearCategoria.mutate(nuevaCategoria.trim());
-                    }
+                    crear();
                   }}
                 />
               </label>
               <button
                 type="button"
                 disabled={!nuevaCategoria.trim() || crearCategoria.isPending}
-                onClick={() => {
-                  setErrorCategoria(null);
-                  crearCategoria.mutate(nuevaCategoria.trim());
-                }}
+                onClick={crear}
                 className="rounded bg-vk-blue px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
               >
                 {crearCategoria.isPending ? "Creando..." : "Crear categoría"}
@@ -876,9 +894,12 @@ function ProductEditModal({
         ) : null}
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
         <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
+        {categoriaAMedias ? (
+          <p className="text-xs text-vektor-muted">Creá o cancelá la categoría nueva antes de guardar.</p>
+        ) : null}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
-          <button type="submit" disabled={saving || invalido} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
+          <button type="submit" disabled={saving || invalido || categoriaAMedias} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
         </div>
       </form>
     </Modal>

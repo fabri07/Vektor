@@ -140,6 +140,81 @@ test("crear una categoría la deja seleccionada, invalida el catálogo y se guar
       expect.objectContaining({ category: "CUSTOM_VELAS" }),
     ),
   );
+  // El stock no se tocó: no viaja (el servidor lo asignaría en absoluto y
+  // pisaría con el valor de la fila las ventas hechas desde que se cargó).
+  expect(mockUpdateProduct.mock.calls[0][1]).not.toHaveProperty("stock_units");
+});
+
+test("si el usuario cambia el stock en el editor, sí viaja", async () => {
+  renderizar();
+  const { dialogo } = await abrirEditorDesdeSugerencia();
+  fireEvent.change(within(dialogo).getByLabelText(/^Stock/), { target: { value: "8" } });
+  fireEvent.click(within(dialogo).getByRole("button", { name: "Guardar" }));
+  await waitFor(() =>
+    expect(mockUpdateProduct).toHaveBeenCalledWith("p1", expect.objectContaining({ stock_units: 8 })),
+  );
+});
+
+test("Enter en el nombre crea la categoría y no envía el formulario del producto", async () => {
+  mockCreateCategory.mockResolvedValue({ code: "CUSTOM_VELAS", label: "Velas" });
+  renderizar();
+  const { dialogo, select } = await abrirEditorDesdeSugerencia();
+  fireEvent.change(select, { target: { value: "__nueva_categoria__" } });
+  const input = within(dialogo).getByLabelText("Nombre de la nueva categoría");
+  fireEvent.change(input, { target: { value: "Velas" } });
+
+  // false = se llamó a preventDefault: jsdom no hace el submit implícito,
+  // así que es la única aserción que detecta perder la guarda.
+  expect(fireEvent.keyDown(input, { key: "Enter" })).toBe(false);
+  await waitFor(() => expect(select.value).toBe("CUSTOM_VELAS"));
+  expect(mockCreateCategory).toHaveBeenCalledWith("Velas");
+  expect(mockUpdateProduct).not.toHaveBeenCalled();
+});
+
+test("con el alta de categoría abierta, Guardar queda deshabilitado", async () => {
+  renderizar();
+  const { dialogo, select } = await abrirEditorDesdeSugerencia();
+  fireEvent.change(select, { target: { value: "__nueva_categoria__" } });
+  fireEvent.change(within(dialogo).getByLabelText("Nombre de la nueva categoría"), {
+    target: { value: "Velas" },
+  });
+  const guardar = within(dialogo).getByRole("button", { name: "Guardar" });
+  expect(guardar).toBeDisabled();
+  expect(within(dialogo).getByText(/creá o cancelá la categoría nueva/i)).toBeInTheDocument();
+  fireEvent.submit(guardar.closest("form") as HTMLFormElement);
+  expect(mockUpdateProduct).not.toHaveBeenCalled();
+  expect(mockCreateCategory).not.toHaveBeenCalled();
+});
+
+test("la categoría creada para un producto no se aplica a otro abierto después", async () => {
+  const OTRO = { ...PRODUCT, id: "p2", name: "Mesa ratona" };
+  mockGetAllProducts.mockResolvedValue([PRODUCT, OTRO]);
+  let responder: (v: { code: string; label: string }) => void = () => {};
+  mockCreateCategory.mockReturnValue(new Promise((r) => (responder = r)));
+  renderizar();
+  await waitFor(() => expect(screen.getAllByText("Sugerida: Iluminación")).toHaveLength(2));
+
+  fireEvent.click(screen.getByRole("button", { name: /elegir otra categoría para lámpara/i }));
+  let dialogo = await screen.findByRole("dialog");
+  await crear(dialogo, within(dialogo).getByLabelText("Categoría") as HTMLSelectElement, "Fiambres");
+  expect(mockCreateCategory).toHaveBeenCalledWith("Fiambres");
+  // Antes de la respuesta, cierra y abre otro producto.
+  fireEvent.click(within(dialogo).getByRole("button", { name: "Cancelar" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: /elegir otra categoría para mesa/i }));
+  dialogo = await screen.findByRole("dialog");
+  const select = within(dialogo).getByLabelText("Categoría") as HTMLSelectElement;
+  expect(within(dialogo).getByLabelText("Producto")).toHaveValue("Mesa ratona");
+
+  responder({ code: "CUSTOM_FIAMBRES", label: "Fiambres" });
+  // La respuesta llegó (la creada aparece en el catálogo) pero no se elige sola.
+  await within(select).findByRole("option", { name: "Fiambres" });
+  await waitFor(() => expect(within(dialogo).getByRole("button", { name: "Guardar" })).toBeEnabled());
+  expect(select.value).toBe("");
+
+  fireEvent.click(within(dialogo).getByRole("button", { name: "Guardar" }));
+  await waitFor(() => expect(mockUpdateProduct).toHaveBeenCalled());
+  expect(mockUpdateProduct).toHaveBeenCalledWith("p2", expect.objectContaining({ category: null }));
 });
 
 test("un label que coincide con una canónica deja seleccionada la canónica", async () => {
