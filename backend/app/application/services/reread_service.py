@@ -393,6 +393,7 @@ def _snapshot_sale(s: SaleEntry) -> dict[str, Any]:
         "product_id": str(s.product_id) if s.product_id else None,
         "notes": s.notes,
         "source_row_ref": s.source_row_ref,
+        "source_row_digest": s.source_row_digest,
         "has_user_edits": s.has_user_edits,
     }
 
@@ -426,6 +427,7 @@ def _snapshot_expense(e: ExpenseEntry) -> dict[str, Any]:
         "product_id": str(e.product_id) if e.product_id else None,
         "description": e.description,
         "source_row_ref": e.source_row_ref,
+        "source_row_digest": e.source_row_digest,
         "has_user_edits": e.has_user_edits,
     }
 
@@ -2908,31 +2910,28 @@ def medir_perdida_real(
     # en el nivel 1 (tipo, importe, día), la repetición probada dependía del
     # orden de las filas y la reinserción real de ese anulado quedaba suelta.
     # Primero contra el resto; lo que no encuentra pareja, contra ellas, pero
-    # SÓLO con el contenido entero igual (tipo, importe, día y texto): la gemela
-    # sin editar de la misma huella. Con los niveles de `_emparejar_fotos`, otra
-    # operación del mismo importe y día que perdió su fila se llevaba la fila
-    # original de la edición: se tapaban la pérdida y la repetición probada
-    # (revisión 3). Texto vacío de los dos lados también es contenido igual: no
-    # pedirlo convertía a la gemela sin texto en repetición probada irrechazable.
+    # SÓLO por HUELLA: el anulado cuya huella es la de la edición es su gemela
+    # sin editar (la misma fila cruda) y vuelve en esa fila. Comparar contenido
+    # (tipo, importe, día, texto) dejaba que otra operación igual en eso —otra
+    # hora, otro producto, otro medio de pago, o sin notas como casi toda venta
+    # de kiosco— se llevara la fila original y tapara su pérdida y la repetición
+    # probada; y exigir el día y el importe exactos convertía en pérdida a la
+    # gemela cuya fecha o importe corrigió la relectura (revisión 4). Sin huella
+    # (legacy) no hay prueba de gemela: no empareja, y la compuerta frena.
     exactas = {j: ed for j, f in enumerate(insertadas) if (ed := _probada(f)) is not None}
     resto = [j for j in range(len(insertadas)) if j not in exactas]
     v1, u1 = _emparejar_fotos(anuladas, [insertadas[j] for j in resto])
     vuelven = set(v1)
     usadas = {resto[j] for j in u1}
 
-    def _entera(foto: dict[str, Any]) -> tuple[Any, ...] | None:
-        tipo, monto, dia = _contenido_de_foto(foto)
-        if monto is None or dia is None:
-            return None
-        return (tipo, monto, dia, _texto_de_foto(foto))
-
-    gemelas: dict[tuple[Any, ...], list[int]] = defaultdict(list)
-    for j in exactas:
-        if (k := _entera(insertadas[j])) is not None:
-            gemelas[k].append(j)
+    gemelas: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for j, ed in exactas.items():
+        if huella := ed.get("source_row_digest"):
+            gemelas[(str(ed.get("kind")), str(huella))].append(j)
     for i, foto in enumerate(anuladas):
-        k = _entera(foto) if i not in vuelven else None
-        if k is not None and gemelas.get(k):
+        huella = foto.get("source_row_digest") if i not in vuelven else None
+        k = (str(foto.get("kind")), str(huella))
+        if huella and gemelas.get(k):
             usadas.add(gemelas[k].pop())
             vuelven.add(i)
     perdidas = [f for i, f in enumerate(anuladas) if i not in vuelven]

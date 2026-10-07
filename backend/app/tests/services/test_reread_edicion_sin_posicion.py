@@ -454,19 +454,40 @@ def test_la_fila_original_de_una_edicion_no_se_empareja_con_otro_anulado(al_reve
     )
 
 
-@pytest.mark.parametrize("texto_anulado", ["Pepsi", "B"], ids=["otra-venta", "otro-texto"])
+@pytest.mark.parametrize(
+    ("texto_anulado", "texto_original", "extra_anulado"),
+    [
+        ("Pepsi", "Coca", {}),
+        ("B", "Coca", {}),
+        # Revisión 4: mismo texto, otra fila (otra hora o medio de pago): el
+        # «Venta mostrador» del mismo día y precio de un kiosco.
+        ("Venta mostrador", "Venta mostrador", {"payment_method": "card"}),
+        # Revisión 4: sin notas los dos (casi toda venta de kiosco), otro producto.
+        ("", "", {"product_id": "producto-b", "payment_method": "card"}),
+    ],
+    ids=["otra-venta", "otro-texto", "mismo-texto", "sin-texto"],
+)
 def test_otra_operacion_del_mismo_importe_y_dia_no_se_lleva_la_fila_original(
-    texto_anulado: str,
+    texto_anulado: str, texto_original: str, extra_anulado: dict[str, Any]
 ) -> None:
-    """Revisión 3 del #86 (caso D0): la venta A (sin editar, mismo importe y día
-    que la fila original de la edición E, otro texto) pierde su fila. Si su
-    anulado tomaba la fila original de E en el nivel 1, se tapaban a la vez la
-    pérdida de A y la repetición probada de E: el apply no frenaba."""
+    """Revisiones 3 y 4 del #86 (caso D0): la venta A (sin editar, mismo importe
+    y día que la fila original de la edición E, OTRA huella) pierde su fila. Si
+    su anulado tomaba la fila original de E, se tapaban a la vez la pérdida de A
+    y la repetición probada de E: el apply no frenaba. Con texto igual o vacío
+    el contenido no las distingue; la huella sí."""
     items = [
-        {"action": reread_service.ACTION_VOID, "before": _foto("sale", "100", texto_anulado, "rA")},
-        {"action": reread_service.ACTION_INSERT, "after": _foto("sale", "100", "Coca", "rX")},
+        {
+            "action": reread_service.ACTION_VOID,
+            "before": _foto(
+                "sale", "100", texto_anulado, "rA", source_row_digest="hA", **extra_anulado
+            ),
+        },
+        {
+            "action": reread_service.ACTION_INSERT,
+            "after": _foto("sale", "100", texto_original, "rX", source_row_digest="hE"),
+        },
     ]
-    edicion = _foto("sale", "120", "Coca", "rE", id="e1")
+    edicion = _foto("sale", "120", texto_original, "rE", id="e1", source_row_digest="hE")
     perdida = reread_service.medir_perdida_real(
         items, [edicion], [], filas_de_ediciones={"e1": {"rX"}}
     )
@@ -475,25 +496,61 @@ def test_otra_operacion_del_mismo_importe_y_dia_no_se_lleva_la_fila_original(
     )
 
 
-@pytest.mark.parametrize("texto", ["Coca", ""], ids=["con-texto", "sin-texto"])
+@pytest.mark.parametrize(
+    ("texto", "dia_reinsertado", "monto_reinsertado"),
+    [
+        ("Coca", "2026-10-01", "100"),
+        ("", "2026-10-01", "100"),
+        # Revisión 4: la relectura corrigió la fecha o el importe de la gemela.
+        ("Coca", "2026-01-10", "100"),
+        ("", "2026-10-01", "1000"),
+    ],
+    ids=["con-texto", "sin-texto", "fecha-corregida", "importe-corregido"],
+)
 def test_la_gemela_sin_editar_de_la_misma_huella_vuelve_sobre_la_fila_original(
-    texto: str,
+    texto: str, dia_reinsertado: str, monto_reinsertado: str
 ) -> None:
-    """La gemela T (contenido entero igual al de la fila original de E, texto
-    vacío incluido) se anula y entra una sola fila con esa huella: T vuelve en
-    ella. Sin esta pareja, T contaba como perdida y E como repetida probada, sin
-    salida."""
+    """La gemela T (la misma huella que la fila original de E) se anula y entra
+    una sola fila con esa huella: T vuelve en ella, aunque la relectura le haya
+    corregido la fecha o el importe. Sin esta pareja, T contaba como perdida y E
+    como repetida probada, sin salida."""
     items = [
-        {"action": reread_service.ACTION_VOID, "before": _foto("sale", "100", texto, "rT")},
-        {"action": reread_service.ACTION_INSERT, "after": _foto("sale", "100", texto, "rD")},
+        {
+            "action": reread_service.ACTION_VOID,
+            "before": _foto("sale", "100", texto, "rT", source_row_digest="hE"),
+        },
+        {
+            "action": reread_service.ACTION_INSERT,
+            "after": _foto(
+                "sale", monto_reinsertado, texto, "rD",
+                transaction_date=dia_reinsertado, source_row_digest="hE",
+            ),
+        },
     ]
-    edicion = _foto("sale", "150", "Coca editado", "rE", id="e1")
+    edicion = _foto("sale", "150", "Coca editado", "rE", id="e1", source_row_digest="hE")
     perdida = reread_service.medir_perdida_real(
         items, [edicion], [], filas_de_ediciones={"e1": {"rD"}}
     )
     assert (perdida.to_lose, perdida.edited_at_risk, perdida.edited_repeated_by_digest) == (
         0, 0, 0,
     )
+
+
+def test_un_anulado_sin_huella_no_se_lleva_la_fila_original() -> None:
+    """Revisión 4: sin huella (legacy) no hay prueba de que sea la gemela: no
+    empareja con la fila original de la edición aunque el contenido sea igual."""
+    items = [
+        {"action": reread_service.ACTION_VOID, "before": _foto("sale", "100", "Coca", "rT")},
+        {
+            "action": reread_service.ACTION_INSERT,
+            "after": _foto("sale", "100", "Coca", "rD", source_row_digest="hE"),
+        },
+    ]
+    edicion = _foto("sale", "150", "Coca editado", "rE", id="e1", source_row_digest="hE")
+    perdida = reread_service.medir_perdida_real(
+        items, [edicion], [], filas_de_ediciones={"e1": {"rD"}}
+    )
+    assert (perdida.to_lose, perdida.edited_repeated_by_digest) == (1, 1)
 
 
 async def test_sin_posiciones_por_el_tope_la_repeticion_queda_estimada(
