@@ -130,7 +130,12 @@ from app.domain.numeric_parsing import (
     parsear_monto,
 )
 from app.domain.product_categories import normalize_product_category
-from app.domain.product_category_inference import CategorySuggestion, infer_category
+from app.domain.product_category_inference import (
+    CATEGORIA_INFERIDA_FIELD,
+    CategorySuggestion,
+    categoria_inferida_reemplazable,
+    infer_category,
+)
 from app.domain.purchase_cost import (
     ATRIBUIDO_A_INVENTARIO_FIELD,
     COMPARTIDO_SUBTOTAL,
@@ -2868,7 +2873,10 @@ async def build_incomplete_product(
     lee del perfil del tenant, y un tenant sin rubro reconocible no infiere
     nada en vez de romper una reclasificación. Sólo afecta al producto NUEVO: el
     camino de reuso devuelve al ocupante intacto, así que nunca pisa una
-    categoría ni una edición existente.
+    categoría ni una edición existente. La inferida queda MARCADA
+    (``CATEGORIA_INFERIDA_FIELD``) para que un catálogo posterior que declara su
+    categoría la pueda reemplazar (``_aplicar_categoria_de_catalogo``): sin la
+    marca, el catálogo sólo completa vacíos y la heurística le ganaba al dato.
 
     Si se pasa ``product_cache``, el objeto resultante se cachea por id. Crítico
     con ``autoflush=False`` (prod): ``session.get`` no ve un producto pendiente sin
@@ -2908,6 +2916,9 @@ async def build_incomplete_product(
         suggestion = infer_category(vertical, clean_name)
         if suggestion.confidence == "high":
             category = suggestion.code
+    custom_fields: dict[str, Any] = (
+        {CATEGORIA_INFERIDA_FIELD: category} if category is not None else {}
+    )
 
     new_id = uuid.uuid4()
     product = Product(
@@ -2925,6 +2936,7 @@ async def build_incomplete_product(
         low_stock_threshold_units=None,
         provenance="REAL",
         requires_completion=True,  # falta precio de venta → completar
+        custom_fields=custom_fields,
     )
     # NO ``session.add()`` acá: ``add_product_or_reuse`` exige el objeto TRANSIENT
     # para poder emitir el INSERT DENTRO del savepoint (ver services/_savepoint.py).
@@ -2932,6 +2944,42 @@ async def build_incomplete_product(
     if product_cache is not None:
         product_cache[resolved.id] = resolved
     return resolved.id, created
+
+
+def _aplicar_categoria_de_catalogo(
+    product: Any, categoria: str | None, *, declarada: bool
+) -> None:
+    """Escribe la categoría que trae una fila de catálogo sobre un producto EXISTENTE.
+
+    - Vacía → se completa con lo que haya (declarada o inferida).
+    - Ocupada por una INFERENCIA intacta (``categoria_inferida_reemplazable``) →
+      la pisa sólo una DECLARADA: el dato del archivo le gana a la heurística,
+      nunca otra heurística a la primera.
+    - Ocupada por cualquier otra cosa (declarada antes, editada a mano) → no se
+      toca: completar sin pisar, como el resto de los campos del catálogo.
+
+    La marca de procedencia se escribe o se saca en la MISMA operación que la
+    categoría, por la misma razón que el costo y su base (F-H6.d): una marca que
+    describe otra categoría que la guardada miente.
+    """
+    if not categoria:
+        return
+    if product.category and not (
+        declarada
+        and categoria_inferida_reemplazable(
+            product.category, product.custom_fields, product.has_user_edits
+        )
+    ):
+        return
+    product.category = categoria
+    cf = dict(product.custom_fields or {})
+    if declarada:
+        if CATEGORIA_INFERIDA_FIELD not in cf:
+            return
+        cf.pop(CATEGORIA_INFERIDA_FIELD)
+    else:
+        cf[CATEGORIA_INFERIDA_FIELD] = categoria
+    product.custom_fields = cf
 
 
 def _ledger_item_producto_creado(
@@ -6333,6 +6381,11 @@ async def _insert_confirmed_data_impl(
                             ),
                             "external_code": existing.external_code,
                             "external_source": existing.external_source,
+                            # B·3: vuelve junto con `category` (ver
+                            # CUSTOM_FIELD_RESTORE_KEYS).
+                            CATEGORIA_INFERIDA_FIELD: (existing.custom_fields or {}).get(
+                                CATEGORIA_INFERIDA_FIELD
+                            ),
                         }
                     if price:
                         existing.sale_price_ars = price
@@ -6378,8 +6431,10 @@ async def _insert_confirmed_data_impl(
                     # un barcode ya cargado con el de una fila de reposición).
                     if barcode and not existing.barcode:
                         existing.barcode = barcode
-                    if prod_cat and not existing.category:
-                        existing.category = prod_cat
+                    # B·3: en este camino la categoría sólo sale de la columna
+                    # del archivo (no hay inferencia), así que siempre es
+                    # declarada y puede reemplazar una inferida.
+                    _aplicar_categoria_de_catalogo(existing, prod_cat, declarada=True)
                     if prod_desc and not existing.description:  # completar sin pisar
                         existing.description = prod_desc
                     # F6-B2: acumular fechas de producto salvo edición manual del
@@ -8426,6 +8481,10 @@ async def _insert_multisheet_data(
                     ),
                     "external_code": existing.external_code,
                     "external_source": existing.external_source,
+                    # B·3: vuelve junto con `category` (ver CUSTOM_FIELD_RESTORE_KEYS).
+                    CATEGORIA_INFERIDA_FIELD: (existing.custom_fields or {}).get(
+                        CATEGORIA_INFERIDA_FIELD
+                    ),
                 }
             if price:
                 existing.sale_price_ars = price
@@ -8478,8 +8537,9 @@ async def _insert_multisheet_data(
                 existing.sku = sku
             if barcode and not existing.barcode:  # F2-T5: completar sin pisar
                 existing.barcode = barcode
-            if cat and not existing.category:
-                existing.category = cat
+            # B·3: la declarada (columna con valor) reemplaza una inferida; la
+            # inferida de esta fila sólo completa un vacío, y queda marcada.
+            _aplicar_categoria_de_catalogo(existing, cat, declarada=bool(cat_raw))
             if _desc and not existing.description:  # mismo criterio: completar sin pisar
                 existing.description = _desc
             # F6-B2: acumular fechas de producto salvo edición manual del usuario
@@ -8666,6 +8726,10 @@ async def _insert_multisheet_data(
                         else "Tienda (proveedor no vinculado)",
                     )
                     _ensured_custom_fields.add(("product", _store_field_key))
+            if cat and not cat_raw:
+                # B·3: inferida, no declarada → marcada, para que un catálogo
+                # posterior con su columna Categoría la pueda reemplazar.
+                cf = {**cf, CATEGORIA_INFERIDA_FIELD: cat}
             _new_id = uuid.uuid4()
             new_product = Product(
                 id=_new_id,

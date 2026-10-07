@@ -16,12 +16,14 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
+from app.application.services._ledger_restore import restore_from_before
 from app.application.services.ingestion_import_service import build_incomplete_product
-from app.domain.product_category_inference import CategorySuggestion
+from app.domain.product_category_inference import CATEGORIA_INFERIDA_FIELD, CategorySuggestion
 from app.domain.verticals import Vertical
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
@@ -249,3 +251,195 @@ async def test_import_de_compras_categoriza_solo_lo_inequivoco(
     assert products["Mesa de luz roble"].category is None
     # Sin evidencia: sin categoría.
     assert products["Articulo 4471"].category is None
+
+
+# ── La inferida no le gana a la categoría que un catálogo DECLARA ─────────────
+#
+# Los caminos de catálogo sólo COMPLETAN la categoría cuando está vacía. Antes
+# de B·3 el producto nacido de una compra quedaba en None y el catálogo
+# posterior la completaba con su columna Categoría; con la inferencia, ese dato
+# declarado se descartaba en silencio. La marca de procedencia
+# (``CATEGORIA_INFERIDA_FIELD``) es lo que deja distinguir una de otra.
+
+
+def _catalogo_simple(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Una hoja de stock: camino ``_insert_confirmed_data_impl``."""
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "has_producto": True,
+        "stock_detectado": rows,
+    }
+
+
+def _catalogo_multihoja(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Libro multihoja: camino ``_insert_multisheet_data`` → ``_merge_into_existing``."""
+    headers = sorted({k for row in rows for k in row})
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {
+                "context_id": "sheet:Productos",
+                "entity_type": "product",
+                "source_kind": "sheet",
+                "headers": headers,
+                "fields": None,
+                "preview_rows": [],
+                "row_count": len(rows),
+            }
+        ],
+        "ventas_detectadas": [],
+        "gastos_detectados": [],
+        "stock_detectado": [{**row, "__context__": "sheet:Productos"} for row in rows],
+    }
+
+
+def _fila_catalogo(categoria: str | None) -> dict[str, object]:
+    row: dict[str, object] = {
+        "producto": "Lampara de pie nordica",
+        "sku": "L-1",
+        "precio": "5000",
+        "costo": "1000",
+    }
+    if categoria is not None:
+        row["categoria"] = categoria
+    return row
+
+
+async def _compra_lampara(db_session: AsyncSession, tid: uuid.UUID) -> Product:
+    await importer.insert_confirmed_data(
+        db_session,
+        tid,
+        {
+            "file_type": "spreadsheet",
+            "inferred_type": "gastos",
+            "has_gasto": True,
+            "gastos_detectados": [_compra("Lampara de pie nordica", "L-1")],
+        },
+        {"gastos": True},
+    )
+    product = (
+        await db_session.execute(select(Product).where(Product.tenant_id == tid))
+    ).scalar_one()
+    assert product.category == "ILUMINACION"
+    assert product.custom_fields.get(CATEGORIA_INFERIDA_FIELD) == "ILUMINACION"
+    return product
+
+
+async def _reload(db_session: AsyncSession, product_id: uuid.UUID) -> Product:
+    db_session.expire_all()
+    product = await db_session.get(Product, product_id)
+    assert product is not None
+    return product
+
+
+@pytest.mark.parametrize("armar", [_catalogo_simple, _catalogo_multihoja])
+async def test_catalogo_declarado_reemplaza_la_inferida_de_una_compra(
+    db_session: AsyncSession, sample_tenant: Tenant, armar: Any
+) -> None:
+    tid = sample_tenant.tenant_id
+    await _set_vertical(db_session, tid, Vertical.DECORACION_HOGAR)
+    nacido = await _compra_lampara(db_session, tid)
+
+    await importer.insert_confirmed_data(
+        db_session, tid, armar([_fila_catalogo("Objetos de decoración")]), {"productos": True}
+    )
+
+    product = await _reload(db_session, nacido.id)
+    # Lo declarado gana; y la marca se va con la inferida: una marca que describe
+    # otra categoría que la guardada mentiría.
+    assert product.category == "DECO"
+    assert CATEGORIA_INFERIDA_FIELD not in (product.custom_fields or {})
+
+
+@pytest.mark.parametrize("armar", [_catalogo_simple, _catalogo_multihoja])
+async def test_catalogo_declarado_no_pisa_una_inferida_con_edicion_manual(
+    db_session: AsyncSession, sample_tenant: Tenant, armar: Any
+) -> None:
+    """``has_user_edits`` no dice qué campo se tocó: ante la duda, gana lo que está."""
+    tid = sample_tenant.tenant_id
+    await _set_vertical(db_session, tid, Vertical.DECORACION_HOGAR)
+    nacido = await _compra_lampara(db_session, tid)
+    nacido.has_user_edits = True
+    await db_session.flush()
+
+    await importer.insert_confirmed_data(
+        db_session, tid, armar([_fila_catalogo("Objetos de decoración")]), {"productos": True}
+    )
+
+    product = await _reload(db_session, nacido.id)
+    assert product.category == "ILUMINACION"
+
+
+@pytest.mark.parametrize("armar", [_catalogo_simple, _catalogo_multihoja])
+async def test_catalogo_declarado_no_pisa_una_categoria_declarada(
+    db_session: AsyncSession, sample_tenant: Tenant, armar: Any
+) -> None:
+    """Sin marca, la categoría vigente es dato: el catálogo sigue completando sin pisar."""
+    tid = sample_tenant.tenant_id
+    await _set_vertical(db_session, tid, Vertical.DECORACION_HOGAR)
+    existente = Product(
+        tenant_id=tid,
+        name="Lampara de pie nordica",
+        sku="L-1",
+        sale_price_ars=Decimal("5000"),
+        unit_cost_ars=Decimal("1000"),
+        stock_units=0,
+        category="MUEBLES",
+    )
+    db_session.add(existente)
+    await db_session.flush()
+
+    await importer.insert_confirmed_data(
+        db_session, tid, armar([_fila_catalogo("Objetos de decoración")]), {"productos": True}
+    )
+
+    product = await _reload(db_session, existente.id)
+    assert product.category == "MUEBLES"
+
+
+async def test_catalogo_sin_columna_no_pisa_la_inferida_con_otra_inferencia(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Una heurística no reemplaza a otra: sólo un dato declarado lo hace."""
+    tid = sample_tenant.tenant_id
+    await _set_vertical(db_session, tid, Vertical.DECORACION_HOGAR)
+    nacido = await _compra_lampara(db_session, tid)
+    with patch.object(
+        importer,
+        "infer_category",
+        return_value=CategorySuggestion(
+            code="DECO", confidence="high", matched_text="x", rule="name:x"
+        ),
+    ):
+        await importer.insert_confirmed_data(
+            db_session, tid, _catalogo_multihoja([_fila_catalogo(None)]), {"productos": True}
+        )
+
+    product = await _reload(db_session, nacido.id)
+    assert product.category == "ILUMINACION"
+    assert product.custom_fields.get(CATEGORIA_INFERIDA_FIELD) == "ILUMINACION"
+
+
+def test_la_reversa_devuelve_la_inferida_con_su_marca() -> None:
+    """Si se borra el catálogo que pisó la inferida, vuelve la inferida Y su marca:
+    sin la marca quedaría como declarada y ningún catálogo posterior la reemplazaría."""
+    product = Product(
+        tenant_id=uuid.uuid4(),
+        name="Lampara",
+        sale_price_ars=Decimal("0"),
+        stock_units=0,
+        category="DECO",
+        custom_fields={"marca": "X"},
+    )
+    restaurados = restore_from_before(
+        product,
+        "product",
+        {"category": "ILUMINACION", CATEGORIA_INFERIDA_FIELD: "ILUMINACION"},
+    )
+
+    assert product.category == "ILUMINACION"
+    assert product.custom_fields == {"marca": "X", CATEGORIA_INFERIDA_FIELD: "ILUMINACION"}
+    assert CATEGORIA_INFERIDA_FIELD in restaurados

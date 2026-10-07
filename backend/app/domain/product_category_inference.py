@@ -227,3 +227,33 @@ def infer_category(
         )
 
     return _NO_SUGGESTION
+
+
+#: Procedencia de una categoría INFERIDA, en ``custom_fields`` del producto. Guarda
+#: el código que se infirió, no un booleano: si después alguien cambia la
+#: categoría (a mano, otro import), el valor deja de coincidir y la marca queda
+#: muerta sola, sin que cada escritor de ``category`` tenga que acordarse de
+#: borrarla. Prefijo ``_vektor_`` RESERVADO (ver ``purchase_cost.COSTO_BASE_FIELD``).
+#:
+#: Existe porque una categoría inferida no puede quedar indistinguible de una
+#: declarada: los caminos de catálogo sólo COMPLETAN la categoría cuando está
+#: vacía, así que sin la marca la heurística le ganaba a la columna Categoría que
+#: el archivo declara en un import posterior (paso 3 del cierre del #48, B·3).
+CATEGORIA_INFERIDA_FIELD = "_vektor_categoria_inferida"
+
+
+def categoria_inferida_reemplazable(
+    category: str | None,
+    custom_fields: dict[str, object] | None,
+    has_user_edits: bool,
+) -> bool:
+    """¿La categoría actual es una inferencia que una DECLARADA puede pisar?
+
+    Sólo si la marca coincide con la categoría vigente (nadie la cambió después)
+    y el producto no tiene ediciones manuales: ``has_user_edits`` no distingue qué
+    campo se tocó, y ante la duda gana lo que ya está — el mismo criterio
+    conservador que protege las fechas en el catálogo.
+    """
+    if not category or has_user_edits:
+        return False
+    return (custom_fields or {}).get(CATEGORIA_INFERIDA_FIELD) == category
