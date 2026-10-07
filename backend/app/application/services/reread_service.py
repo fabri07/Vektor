@@ -1460,14 +1460,21 @@ async def _reconcile(
         # de gemelas que no alcanzó, contexto ausente, fila compartida): un alta
         # en una de esas filas es su fila original otra vez — repetición
         # probada, no la estimación de dos de tres (ver `medir_perdida_real`).
+        # Se busca en SU contexto, como el plan: una fila igual en otra hoja es
+        # otra operación. Todas las hojas sólo si su contexto no está (D0).
+        anclas = _anclas_por_huella(tenant_id, file_id, filas_frescas, ignoradas)
+        posicion = _posiciones(tenant_id, file_id, filas_frescas, len(all_existing)) or {}
         refs_por_huella: dict[str, set[str]] = defaultdict(set)
-        for (_ctx, huella), refs in _anclas_por_huella(
-            tenant_id, file_id, filas_frescas, ignoradas
-        ).items():
+        for (_ctx, huella), refs in anclas.items():
             refs_por_huella[huella].update(refs)
         for rec in all_existing:
             if rec.has_user_edits and rec.source_row_digest:
-                suyas = refs_por_huella.get(rec.source_row_digest, set())
+                pos = posicion.get(rec.source_row_ref or "")
+                suyas = (
+                    set(anclas.get((pos[0], rec.source_row_digest), ()))
+                    if pos is not None
+                    else refs_por_huella.get(rec.source_row_digest, set())
+                )
                 if suyas and rec.source_row_ref not in suyas:
                     filas_de_ediciones[str(rec.id)] = suyas
 
@@ -2879,7 +2886,33 @@ def medir_perdida_real(
         and it["after"].get("kind") in _TIPOS_OPERACION
         and it["after"].get("source_row_ref") not in (reemplazos_de_otros or set())
     ]
-    vuelven, usadas = _emparejar_fotos(anuladas, insertadas)
+
+    def _probada(foto: dict[str, Any]) -> dict[str, Any] | None:
+        ref = foto.get("source_row_ref")
+        return next(
+            (
+                ed
+                for ed in editados
+                if ref
+                and ed.get("kind") == foto.get("kind")
+                and ref in (filas_de_ediciones or {}).get(str(ed.get("id")), ())
+            ),
+            None,
+        )
+
+    # La fila original de una edición se empareja ÚLTIMA: si un anulado la tomaba
+    # en el nivel 1 (tipo, importe, día), la repetición probada dependía del
+    # orden de las filas y la reinserción real de ese anulado quedaba suelta.
+    # Primero contra el resto; lo que no encuentra pareja, contra ellas (gemelas
+    # sin editar de la misma huella siguen volviendo).
+    exactas = {j: ed for j, f in enumerate(insertadas) if (ed := _probada(f)) is not None}
+    resto = [j for j in range(len(insertadas)) if j not in exactas]
+    orden = list(exactas)
+    v1, u1 = _emparejar_fotos(anuladas, [insertadas[j] for j in resto])
+    sin_pareja = [i for i in range(len(anuladas)) if i not in v1]
+    v2, u2 = _emparejar_fotos([anuladas[i] for i in sin_pareja], [insertadas[j] for j in orden])
+    vuelven = v1 | {sin_pareja[i] for i in v2}
+    usadas = {resto[j] for j in u1} | {orden[j] for j in u2}
     perdidas = [f for i, f in enumerate(anuladas) if i not in vuelven]
 
     montos_en_otros: dict[Decimal, int] = defaultdict(int)
@@ -2908,17 +2941,7 @@ def medir_perdida_real(
     for j, foto in enumerate(insertadas):
         if j in usadas:
             continue
-        ref = foto.get("source_row_ref")
-        exacta = next(
-            (
-                ed
-                for ed in editados
-                if ref
-                and ed.get("kind") == foto.get("kind")
-                and ref in (filas_de_ediciones or {}).get(str(ed.get("id")), ())
-            ),
-            None,
-        )
+        exacta = exactas.get(j)
         if exacta is not None:
             repetidas += 1
             probadas += 1
@@ -3764,7 +3787,7 @@ def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
         return (
             "La relectura no se aplicó: " + "; ".join(partes) + ". No se guardó "
             "nada, y esto no se puede aplicar igual: la fila original de esa "
-            "edición volvería a entrar. Deshacé la edición y volvé a releerlo."
+            "edición volvería a entrar y quedaría contada dos veces."
         )
     return (
         "La relectura no se aplicó: " + "; ".join(partes) + ". No se guardó "

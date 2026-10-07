@@ -419,6 +419,39 @@ async def test_gemelas_editadas_que_ya_no_alcanzan_quedan_como_hoy_y_frenan(
     assert perdida.edited_at_risk >= 1
     # La gemela que entra es la fila original de una de ellas: probado.
     assert perdida.edited_repeated_by_digest >= 1
+    # El camino real: el worker acepta SIEMPRE con la medición como tope.
+    otra = await _aplicar_frena(
+        db_session, tid, fid, accept_data_loss=True, tope_aceptado=perdida.as_dict()
+    )
+    assert otra.edited_repeated_by_digest >= 1
+
+
+def _foto(kind: str, monto: str, texto: str, ref: str, **extra: Any) -> dict[str, Any]:
+    clave = "notes" if kind == "sale" else "description"
+    return {"kind": kind, "amount": monto, "transaction_date": "2026-10-01",
+            clave: texto, "source_row_ref": ref, **extra}
+
+
+@pytest.mark.parametrize("al_reves", [False, True], ids=["original-al-final", "original-primero"])
+def test_la_fila_original_de_una_edicion_no_se_empareja_con_otro_anulado(al_reves: bool) -> None:
+    """Revisión del #86: la venta N (sin editar, mismo importe y día que la
+    fila original de la edición E) se anula y vuelve. Si el anulado de N tomaba
+    en el nivel 1 la fila original de E, la repetición probada desaparecía según
+    el ORDEN de las filas, y la vuelta real de N quedaba suelta sin frenar."""
+    anulado = _foto("sale", "100", "Pepsi", "rB")
+    vuelta_n = _foto("sale", "100", "Pepsi", "rC")
+    original_e = _foto("sale", "100", "Coca", "rD")
+    insertadas = [original_e, vuelta_n] if al_reves else [vuelta_n, original_e]
+    items = [{"action": reread_service.ACTION_VOID, "before": anulado}] + [
+        {"action": reread_service.ACTION_INSERT, "after": f} for f in insertadas
+    ]
+    edicion = _foto("sale", "150", "Coca editado", "rE", id="e1")
+    perdida = reread_service.medir_perdida_real(
+        items, [edicion], [], filas_de_ediciones={"e1": {"rD"}}
+    )
+    assert (perdida.to_lose, perdida.edited_at_risk, perdida.edited_repeated_by_digest) == (
+        0, 1, 1,
+    )
 
 
 async def test_un_cambio_de_formato_no_casa_y_queda_la_red_de_la_compuerta(
@@ -895,9 +928,86 @@ async def test_un_contexto_que_cambia_de_id_no_se_reubica_y_frena_sin_poder_acep
         )
     await db_session.rollback()
     # Con huella, la fila que entra en la hoja nueva ES su fila original.
-    assert frenado.value.perdida.edited_at_risk == 1
-    assert frenado.value.perdida.edited_repeated_by_digest == 1
+    perdida = frenado.value.perdida
+    assert perdida.edited_at_risk == 1
+    assert perdida.edited_repeated_by_digest == 1
     assert "no se puede aplicar igual" in str(frenado.value)
+    # Ni con el tope que pasa el worker al aceptar.
+    with pytest.raises(reread_service.RereadWouldLoseDataError) as otra_vez:
+        await reread_service.apply_reread(
+            db_session, fid, tid, fresh_override=nuevo, accept_data_loss=True,
+            tope_aceptado=perdida.as_dict(),
+        )
+    await db_session.rollback()
+    assert otra_vez.value.perdida.edited_repeated_by_digest == 1
+
+
+async def test_la_prueba_por_huella_saca_las_columnas_ignoradas(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """D0 con una columna ignorada: la huella fresca se calcula sin ella, como la
+    escribió el importador. Si no, no casa y la repetición probada se degrada a
+    estimada, que se puede aceptar: la edición quedaría duplicada."""
+    tid = tenant.tenant_id
+    fid = await _importar_hojas(
+        db_session, tid, _hojas({"hoja:Vieja": _HOJA}),
+        context_mappings={"hoja:Vieja": {"proveedor": "ignore"}},
+    )
+    await _editar(db_session, fid, "2000")
+    run = DataRepairRun(
+        tenant_id=tid,
+        repair_type=reread_service.REPAIR_TYPE_REREAD,
+        status="APPLYING",
+        dry_run=False,
+        details_json={
+            "file_id": str(fid),
+            "draft": {
+                "column_mappings": [
+                    {"context_id": "hoja:Nueva", "source_column": "proveedor",
+                     "target_field": "ignore"}
+                ]
+            },
+        },
+    )
+    db_session.add(run)
+    await db_session.commit()
+    # Otro proveedor en la hoja nueva: sólo casa si la columna ignorada no entra.
+    nuevo = _hojas({"hoja:Nueva": [
+        {**g, "proveedor": "Otro"} for g in [_gasto(1, "Agua", "500"), *_HOJA]
+    ]})
+    with pytest.raises(reread_service.RereadWouldLoseDataError) as frenado:
+        await reread_service.apply_reread(
+            db_session, fid, tid, run=run, fresh_override=nuevo, accept_data_loss=True
+        )
+    await db_session.rollback()
+    assert frenado.value.perdida.edited_repeated_by_digest == 1
+
+
+async def test_una_fila_igual_en_otra_hoja_es_otra_operacion_y_se_acepta(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """Revisión del #86: la edición sigue con su hoja en la lectura nueva, así que
+    su fila original se busca SÓLO ahí (como el plan). Una fila idéntica que
+    aparece en otra hoja es otra operación: estimada, se acepta."""
+    tid = tenant.tenant_id
+    fid = await _importar_hojas(
+        db_session, tid, _hojas({"hoja:A": _HOJA, "hoja:B": [_gasto(9, "Agua", "500")]})
+    )
+    await _editar(db_session, fid, "2000")
+    nuevo = _hojas({
+        "hoja:A": [_HOJA[0], _gasto(2, "Luz", "2100"), _HOJA[2]],
+        "hoja:B": [_gasto(9, "Agua", "500"), _gasto(2, "Luz", "2000")],
+    })
+    with pytest.raises(reread_service.RereadWouldLoseDataError) as frenado:
+        await reread_service.apply_reread(db_session, fid, tid, fresh_override=nuevo)
+    await db_session.rollback()
+    perdida = frenado.value.perdida
+    assert (perdida.edited_at_risk, perdida.edited_repeated_by_digest) == (1, 0)
+    await reread_service.apply_reread(
+        db_session, fid, tid, fresh_override=nuevo, accept_data_loss=True,
+        tope_aceptado=perdida.as_dict(),
+    )
+    await db_session.commit()
 
 
 # ── La pantalla: una edición repetida probada no se ofrece para aceptar ───────
