@@ -170,7 +170,7 @@ from app.domain.text_norm import (
     normalize_sku,
     normalize_text,
 )
-from app.domain.verticals import Vertical, parse_vertical
+from app.domain.verticals import Vertical, parse_vertical, try_parse_vertical
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1814,6 +1814,23 @@ async def _load_tenant_vertical(session: AsyncSession, tenant_id: uuid.UUID) -> 
     return parse_vertical(result.scalar_one_or_none())
 
 
+async def _try_load_tenant_vertical(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> Vertical | None:
+    """Como ``_load_tenant_vertical`` pero sin levantar: para inferir la categoría
+    de un producto nacido de una compra (B·3) fuera del import, donde un tenant
+    sin perfil o con un rubro no operativo no debe romper la reclasificación —
+    sólo se queda sin inferencia."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
+
+    result = await session.execute(
+        select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+    )
+    return try_parse_vertical(result.scalar_one_or_none())
+
+
 # ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
 
 
@@ -2247,6 +2264,7 @@ async def _resolve_purchase_identity(
     indexes: ProductIdentityIndexes,
     cache: dict[str, Product],
     product_cache: dict[uuid.UUID, Any] | None = None,
+    vertical: Vertical | None = None,
 ) -> tuple[str, uuid.UUID | None, list[dict[str, Any]]]:
     """Resuelve el producto de una COMPRA de mercadería con el motor unificado.
 
@@ -2270,7 +2288,8 @@ async def _resolve_purchase_identity(
         return "otros", None, res.candidates
     try:
         new_id, created = await build_incomplete_product(
-            session, tenant_id, name, sku, unit_cost, product_cache, barcode=barcode
+            session, tenant_id, name, sku, unit_cost, product_cache,
+            barcode=barcode, vertical=vertical,
         )
     except ProductIdentityConflictError as conflict:
         # Ambigüedad detectada por la DB (barcode y sku en productos distintos): mismo
@@ -2828,16 +2847,28 @@ async def build_incomplete_product(
     product_cache: dict[uuid.UUID, Any] | None = None,
     *,
     barcode: str | None = None,
+    vertical: Vertical | None = None,
 ) -> tuple[uuid.UUID | None, bool]:
     """Construye y agrega a la sesión un ``Product`` vendible INCOMPLETO desde una
     compra de mercadería, devolviendo ``(id, creado)``.
 
-    Un producto nacido de una compra no trae precio de venta ni categoría de
-    catálogo: nace ``requires_completion=True``, ``sale_price_ars=0``,
-    ``unit_cost_ars`` del costo si vino, ``stock_units=0`` (el stock lo incrementa
-    quien corresponda después). Único lugar donde se materializa este patrón de
-    "producto desde compra", reusado por el import (``_ensure_product_for_purchase``)
-    y por la reclasificación de gastos a reventa (``RECLASSIFY_EXPENSE``).
+    Un producto nacido de una compra no trae precio de venta: nace
+    ``requires_completion=True``, ``sale_price_ars=0``, ``unit_cost_ars`` del costo
+    si vino, ``stock_units=0`` (el stock lo incrementa quien corresponda después).
+    Único lugar donde se materializa este patrón de "producto desde compra",
+    reusado por el import (``_ensure_product_for_purchase``) y por la
+    reclasificación de gastos a reventa (``RECLASSIFY_EXPENSE``).
+
+    Paso 3 del cierre del #48 (B·3): la categoría se infiere del nombre con
+    ``infer_category`` y se asigna SÓLO con confianza ``high`` — el mismo umbral
+    que el catálogo (``_insert_multisheet_data``). Con ``medium`` o ``low`` el
+    producto nace sin categoría: una categoría equivocada se aplica sola y no se
+    ve, una vacía queda en «Sin categoría» y se corrige. ``vertical`` lo pasan
+    los callers que ya lo cargaron una vez por corrida (el import); sin él se
+    lee del perfil del tenant, y un tenant sin rubro reconocible no infiere
+    nada en vez de romper una reclasificación. Sólo afecta al producto NUEVO: el
+    camino de reuso devuelve al ocupante intacto, así que nunca pisa una
+    categoría ni una edición existente.
 
     Si se pasa ``product_cache``, el objeto resultante se cachea por id. Crítico
     con ``autoflush=False`` (prod): ``session.get`` no ve un producto pendiente sin
@@ -2870,6 +2901,14 @@ async def build_incomplete_product(
     clean_sku = _clean_str(sku, 99)
     clean_barcode = _clean_str(barcode, 64)  # F2-T5
 
+    if vertical is None:
+        vertical = await _try_load_tenant_vertical(session, tenant_id)
+    category: str | None = None
+    if vertical is not None:
+        suggestion = infer_category(vertical, clean_name)
+        if suggestion.confidence == "high":
+            category = suggestion.code
+
     new_id = uuid.uuid4()
     product = Product(
         id=new_id,
@@ -2880,8 +2919,9 @@ async def build_incomplete_product(
         sale_price_ars=Decimal("0"),  # una compra no trae precio de venta
         unit_cost_ars=unit_cost,
         stock_units=0,  # el incremento lo hace quien corresponda después
-        # category de PRODUCTO (vertical) ≠ código de gasto → None (incompleto).
-        category=None,
+        # category de PRODUCTO (vertical) ≠ código de gasto: sólo la inferida con
+        # confianza alta; si no, None (B·3).
+        category=category,
         low_stock_threshold_units=None,
         provenance="REAL",
         requires_completion=True,  # falta precio de venta → completar
@@ -2945,6 +2985,7 @@ async def _ensure_product_for_purchase(
     by_name: dict[str, uuid.UUID | None],
     by_token: dict[str, set[uuid.UUID]] | None = None,
     product_cache: dict[uuid.UUID, Any] | None = None,
+    vertical: Vertical | None = None,
 ) -> uuid.UUID | None:
     """Crea el ``Product`` de una compra de mercadería cuyo SKU/nombre NO está en
     el catálogo, y devuelve su id (o ``None`` si no hay nombre utilizable).
@@ -2961,7 +3002,7 @@ async def _ensure_product_for_purchase(
     mismo SKU/nombre en el mismo archivo reusen el producto (sin duplicar).
     """
     new_id, _created = await build_incomplete_product(
-        session, tenant_id, name, sku, unit_cost, product_cache=product_cache
+        session, tenant_id, name, sku, unit_cost, product_cache=product_cache, vertical=vertical
     )
     if new_id is None:
         return None
@@ -5810,6 +5851,7 @@ async def _insert_confirmed_data_impl(
                             indexes=_identity_indexes,
                             cache=products_by_identity_key,
                             product_cache=_product_cache,
+                            vertical=_vertical,
                         )
                         if _action == "otros":
                             # Review F2 #1/#3: compra con producto ambiguo/en conflicto
@@ -7965,6 +8007,7 @@ async def _insert_multisheet_data(
                 indexes=_identity_indexes,
                 cache=products_by_identity_key,
                 product_cache=product_cache,
+                vertical=_vertical,
             )
             if _action == "otros":
                 # Review F2 #1: compra ambigua/en conflicto NO crea un 3er producto
@@ -9780,6 +9823,8 @@ async def import_receipt(
     by_sku, by_name, by_token = await _load_product_index(session, tenant_id)
     balance_index = await _load_balance_index(session, tenant_id)
     product_cache: dict[uuid.UUID, Any] = {}
+    # B·3: el rubro una vez por remito, no una query por producto nuevo.
+    receipt_vertical = await _try_load_tenant_vertical(session, tenant_id)
 
     created_product_ids: list[str] = []
     expense_ids: list[str] = []
@@ -9799,6 +9844,7 @@ async def import_receipt(
                 by_name,
                 by_token,
                 product_cache=product_cache,
+                vertical=receipt_vertical,
             )
             if product_id is not None:
                 created_product_ids.append(str(product_id))

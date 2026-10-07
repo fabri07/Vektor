@@ -99,7 +99,7 @@ La relectura, además, cambió de modelo: pasó de un run `RUNNING` a sesiones d
    - `4063b33c`: el barcode es vinculable dentro del mismo archivo. Verificar que el índice use la MISMA normalización de barcode que `_resolve_product_identity`.
    - `687dd622`: cambiar el propósito de un archivo ya no borra el mapeo hecho a mano. **No va tal cual** (verificado): conserva en el touched-set una columna tocada cuyo target ya no existe en la entidad nueva. Esa columna recibe la sugerencia nueva, pero viaja como `user_selected: true` (`ColumnMapperPanel.tsx:1991`) y saltea la compuerta de riesgo de F8 como si el usuario la hubiera confirmado. Hay que sacarla del touched-set. **El mismo defecto ya existe hoy en el camino multi-hoja** (`ColumnMapperPanel.tsx:658-668`), así que se arreglan los dos, con un test por camino.
    - `e4558d21`: la tabla scrollea.
-3. **Datos que hoy se pierden (se reescribe):**
+3. **Datos que hoy se pierden (se reescribe):** **Hecho (2026-10-07, rama `fix/ingesta-paso3-categoria-y-codigos`).** Portado desde `e9b9df3d` (categoría) y `5d4eaccd` (códigos) como referencia: el segundo movía `entity_identifiers`, que `main` no tiene, así que se reescribió sobre `products.external_code`. Detalle en `docs/claude/ingesta.md`, «paso 3 (B·3)».
    - `build_incomplete_product` usa `infer_category` con confianza alta, en vez de `None`.
    - `product_dedup_service` conserva el `external_code` del perdedor **sólo si el ganador no tiene uno**. El índice único parcial `(tenant_id, external_code_key)` no admite dos. Si los dos tienen código, gana el del ganador y el del perdedor queda en la auditoría del merge, nunca se descarta en silencio.
 4. **Calidad del import:**
@@ -124,6 +124,14 @@ La relectura, además, cambió de modelo: pasó de un run `RUNNING` a sesiones d
 9. **Acciones masivas inocuas del mapeo:** de `4a2844bf`, sin «Aceptar ambiguas».
 
 Al terminar: cerrar el #48 diciendo qué se portó y en qué PR, y borrar la rama.
+
+### Matriz de portado
+
+| Paso | PR | Commits de la rama #48 | Resultado |
+|------|----|------------------------|-----------|
+| 1. Compuerta de relectura | #81 | F-R (reescrito) | Hecho, rediseñado (el apply mide la pérdida) |
+| 2. Tres arreglos chicos | #84 | `4063b33c`, `687dd622` (corregido), `e4558d21` (sólo `Table`) | Hecho; F-V.2 afuera |
+| 3. Datos que se pierden (B·3) | rama `fix/ingesta-paso3-categoria-y-codigos` | `e9b9df3d`, `5d4eaccd` (como referencia) | Hecho; códigos reescritos sobre `products.external_code` |
 
 ### Reglas para cada paso
 
