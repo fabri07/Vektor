@@ -2,6 +2,8 @@
 
 Plan del 2026-10-05, revisado el 2026-10-06 contra el código (ver «Qué cambió en la revisión» al final). Cierra las dos ramas que quedaron incompletas después de la limpieza de ramas —`feat/ingestion-identity-reread-safety` (el PR #48) y `spike/pos-b1`— y agrega los aportes de capital de los socios (parte D).
 
+> **Desde el 2026-10-07 el orden de lo pendiente (B·3 en adelante, D·2–D·7 y el margen de producto) lo fija [`cierre-ingesta-capital-margen.md`](cierre-ingesta-capital-margen.md).** Este archivo queda como inventario del #48 y como matriz de portado.
+
 
 ## Orden global
 
