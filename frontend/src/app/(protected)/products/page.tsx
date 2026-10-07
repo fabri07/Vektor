@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import { Pencil, Trash2, Eye } from "lucide-react";
@@ -350,6 +350,18 @@ export default function ProductsPage() {
           >
             Aceptar
           </button>
+          {/* B·3b: si la sugerida no sirve, se elige o crea otra en el MISMO editor. */}
+          <button
+            type="button"
+            aria-label={`Elegir otra categoría para ${product.name}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditing(product);
+            }}
+            className="rounded-md border border-vk-border-w px-2 py-0.5 text-xs text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+          >
+            Otra
+          </button>
         </span>
       );
     },
@@ -372,7 +384,7 @@ export default function ProductsPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: (payload: ProductResponse) =>
+    mutationFn: ({ product: payload, incluirStock }: { product: ProductResponse; incluirStock: boolean }) =>
       productsService.updateProduct(payload.id, {
         name: payload.name,
         sku: payload.sku,
@@ -381,7 +393,10 @@ export default function ProductsPage() {
         sale_price_ars: Number(payload.sale_price_ars),
         unit_cost_ars: payload.unit_cost_ars == null ? null : Number(payload.unit_cost_ars),
         list_price_ars: payload.list_price_ars == null ? null : Number(payload.list_price_ars),
-        stock_units: Number(payload.stock_units),
+        // El servidor asigna stock_units en absoluto, sin movimiento: mandar el
+        // valor de una fila vieja pisaría las ventas del medio. Sólo viaja si
+        // el usuario lo cambió en el editor.
+        ...(incluirStock ? { stock_units: Number(payload.stock_units) } : {}),
         // Van juntos (el servidor lo exige). Mandarlos sin cambio no cambia
         // nada; cambiarlos en un producto con historia da 409.
         sale_unit: payload.sale_unit ?? "unit",
@@ -632,9 +647,10 @@ export default function ProductsPage() {
       <ProductEditModal
         product={editing}
         categories={categories}
+        canCreateCategory={user?.role === "OWNER" || user?.role === "ADMIN"}
         saving={updateMutation.isPending}
         onClose={() => setEditing(null)}
-        onSave={(product) => updateMutation.mutate(product)}
+        onSave={(product, incluirStock) => updateMutation.mutate({ product, incluirStock })}
       />
       {viewingAllData && (
         <AllDataModal
@@ -653,26 +669,75 @@ function errorCode(e: unknown): string | null {
   return posErrorInfo(e).code;
 }
 
+// Valor centinela del <select> de categoría: abre el alta inline (B·3b).
+const NUEVA_CATEGORIA = "__nueva_categoria__";
+
 function ProductEditModal({
   product,
   categories,
+  canCreateCategory,
   saving,
   onClose,
   onSave,
 }: {
   product: ProductResponse | null;
   categories: ProductCategoryOption[];
+  /** POST /products/custom-categories es OWNER/ADMIN: el resto no ve la opción. */
+  canCreateCategory: boolean;
   saving: boolean;
   onClose: () => void;
-  onSave: (product: ProductResponse) => void;
+  /** incluirStock=false: el stock no se tocó y NO va en el PATCH. */
+  onSave: (product: ProductResponse, incluirStock: boolean) => void;
 }) {
+  const queryClient = useQueryClient();
   const [form, setForm] = useState<ProductResponse | null>(product);
+  // B·3b: alta de categoría desde el editor. Mismo endpoint que la carga
+  // manual; si el label coincide con una canónica, el servidor devuelve ESA.
+  const [creandoCategoria, setCreandoCategoria] = useState(false);
+  const [nuevaCategoria, setNuevaCategoria] = useState("");
+  const [errorCategoria, setErrorCategoria] = useState<string | null>(null);
+  // La recién creada, hasta que el catálogo refetcheado la traiga.
+  const [creada, setCreada] = useState<ProductCategoryOption | null>(null);
+  // El pedido de alta que el editor abierto todavía espera, o null. Cancelar
+  // el alta, elegir otra categoría, cerrar o reabrir lo descartan: la
+  // respuesta de un pedido descartado no toca el formulario (el modal queda
+  // montado entre aperturas, y la elección explícita del usuario no se pisa).
+  // Se compara por identidad del pedido, no por producto: con dos altas en
+  // vuelo, sólo la última pedida en este editor se aplica.
+  const altaEsperada = useRef<{ label: string; productId: string } | null>(null);
+  const crearCategoria = useMutation({
+    mutationFn: ({ label }: { label: string; productId: string }) =>
+      productsService.createCategory(label),
+    onSuccess: async (opcion, pedido) => {
+      setCreada(opcion);
+      if (altaEsperada.current === pedido) {
+        altaEsperada.current = null;
+        setForm((prev) => (prev && prev.id === pedido.productId ? { ...prev, category: opcion.code } : prev));
+        setCreandoCategoria(false);
+        setNuevaCategoria("");
+      }
+      await queryClient.invalidateQueries({ queryKey: ["product-categories"] });
+    },
+    onError: (e, pedido) => {
+      if (altaEsperada.current !== pedido) return;
+      altaEsperada.current = null;
+      setErrorCategoria(posErrorInfo(e).message ?? "No se pudo crear la categoría.");
+    },
+  });
+  const opciones =
+    creada && !categories.some((c) => c.code === creada.code)
+      ? [...categories, creada]
+      : categories;
   // Stock y umbral se escriben en la unidad de VENTA (kg, L) y se guardan en
   // unidades base: el texto vive aparte para poder tipear "0,750".
   const [stockText, setStockText] = useState("");
   const [umbralText, setUmbralText] = useState("");
   useEffect(() => {
+    altaEsperada.current = null;
     setForm(product);
+    setCreandoCategoria(false);
+    setNuevaCategoria("");
+    setErrorCategoria(null);
     if (product) {
       const f = product.base_units_per_sale_unit ?? 1;
       setStockText(enUnidadDeVenta(product.stock_units, f));
@@ -694,14 +759,34 @@ function ProductEditModal({
   const stockBase = cantidad(stockText);
   const umbralBase = umbralText.trim() === "" ? null : cantidad(umbralText);
   const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
+  // Con el alta de categoría abierta (escribiendo o en vuelo), Guardar mandaría
+  // la categoría anterior y descartaría lo pedido: primero se crea o se
+  // cancela. Cancelada, la respuesta ya no se aplica, así que no hay que esperarla.
+  const altaEnVueloAqui =
+    crearCategoria.isPending && crearCategoria.variables?.productId === form.id;
+  const categoriaAMedias = creandoCategoria;
+  const descartarAlta = () => {
+    altaEsperada.current = null;
+    setCreandoCategoria(false);
+  };
+  const crear = () => {
+    if (!form || !nuevaCategoria.trim() || altaEnVueloAqui) return;
+    setErrorCategoria(null);
+    const pedido = { label: nuevaCategoria.trim(), productId: form.id };
+    altaEsperada.current = pedido;
+    crearCategoria.mutate(pedido);
+  };
   return (
     <Modal isOpen={!!product} onClose={onClose} title="Editar producto" size="lg">
       <form
         className="grid gap-4"
         onSubmit={(event) => {
           event.preventDefault();
-          if (invalido) return;
-          onSave({ ...form, stock_units: stockBase ?? 0, low_stock_threshold_units: umbralBase });
+          if (invalido || categoriaAMedias || !product) return;
+          onSave(
+            { ...form, stock_units: stockBase ?? 0, low_stock_threshold_units: umbralBase },
+            stockBase !== product.stock_units,
+          );
         }}
       >
         <label className="grid gap-1 text-sm text-vektor-body">Producto<input className="rounded border border-vk-border-w px-3 py-2" value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
@@ -710,22 +795,76 @@ function ProductEditModal({
           <label className="grid gap-1 text-sm text-vektor-body">Categoría
             <select
               className="rounded border border-vk-border-w px-3 py-2"
-              value={form.category ?? ""}
-              onChange={(e) => set("category", e.target.value || null)}
+              value={creandoCategoria ? NUEVA_CATEGORIA : form.category ?? ""}
+              onChange={(e) => {
+                if (e.target.value === NUEVA_CATEGORIA) {
+                  setErrorCategoria(null);
+                  setCreandoCategoria(true);
+                  return;
+                }
+                descartarAlta();
+                set("category", e.target.value || null);
+              }}
             >
               <option value="">Sin categoría</option>
-              {categories.map((c) => (
+              {opciones.map((c) => (
                 <option key={c.code} value={c.code}>
                   {c.label}
                 </option>
               ))}
               {/* Valor actual fuera del catálogo (legacy/raw): conservarlo como opción */}
-              {form.category && !categories.some((c) => c.code === form.category) ? (
+              {form.category && !opciones.some((c) => c.code === form.category) ? (
                 <option value={form.category}>{form.category}</option>
+              ) : null}
+              {canCreateCategory ? (
+                <option value={NUEVA_CATEGORIA}>+ Nueva categoría</option>
               ) : null}
             </select>
           </label>
         </div>
+        {creandoCategoria ? (
+          <div className="grid gap-1">
+            <div className="flex items-end gap-2">
+              <label className="grid flex-1 gap-1 text-sm text-vektor-body">
+                Nombre de la nueva categoría
+                <input
+                  className="rounded border border-vk-border-w px-3 py-2"
+                  maxLength={100}
+                  value={nuevaCategoria}
+                  onChange={(e) => setNuevaCategoria(e.target.value)}
+                  onKeyDown={(e) => {
+                    // Enter crea la categoría; no guarda el producto a medias.
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    crear();
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                disabled={!nuevaCategoria.trim() || altaEnVueloAqui}
+                onClick={crear}
+                className="rounded bg-vk-blue px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {altaEnVueloAqui ? "Creando..." : "Crear categoría"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  descartarAlta();
+                  setErrorCategoria(null);
+                }}
+                aria-label="Cancelar nueva categoría"
+                className="rounded border border-vk-border-w px-3 py-2 text-sm"
+              >
+                Cancelar
+              </button>
+            </div>
+            {errorCategoria ? (
+              <p role="alert" className="text-xs text-vk-danger">{errorCategoria}</p>
+            ) : null}
+          </div>
+        ) : null}
         <label className="grid gap-1 text-sm text-vektor-body">
           Se vende por
           <select
@@ -770,9 +909,12 @@ function ProductEditModal({
         ) : null}
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
         <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
+        {categoriaAMedias ? (
+          <p className="text-xs text-vektor-muted">Creá o cancelá la categoría nueva antes de guardar.</p>
+        ) : null}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
-          <button type="submit" disabled={saving || invalido} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
+          <button type="submit" disabled={saving || invalido || categoriaAMedias} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
         </div>
       </form>
     </Modal>

@@ -79,6 +79,9 @@ Este plan consolida mi v2 con el plan consolidado que trajo el dueño. Tomo de e
   - rollback;
   - **`-m postgres` antes del merge**, por unicidad y concurrencia.
 
+### 2b. B·3b: «+ Nueva categoría» en `/products` — HECHO
+- Sólo frontend, sin endpoint nuevo: el editor de producto crea la categoría con `POST /products/custom-categories` (OWNER/ADMIN), la deja seleccionada e invalida el catálogo. «Otra» junto a la sugerida abre el mismo editor. Rama `feat/productos-nueva-categoria`, PR propio, separado de B·nuevo.
+
 ### 2. B·nuevo: preservar la edición sin depender de la posición
 Primero se diseña la correspondencia (con revisión), y recién después se toca `_split_records` / `_reconcile` (`reread_service.py:766`, `:1213`).
 - **Tres cosas separadas:** el identificador lógico, los **datos originales importados** (la edición manual no los modifica, y son los que se usan para reconciliar) y el localizador hoja/fila.
