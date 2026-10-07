@@ -38,6 +38,10 @@ export interface ProductResponse {
   internal_sku?: string | null;
   description: string | null;
   category: string | null;
+  /** B·3: categoría SUGERIDA por el nombre (sólo si `category` está vacía y la
+   *  inferencia es de confianza alta). No está guardada: se fija aceptándola con
+   *  el PATCH de siempre. Ausente en servidores viejos. */
+  category_suggestion?: { code: string; label: string } | null;
   sale_price_ars: number;
   unit_cost_ars: number | null;
   /** Precio de lista/sugerido por proveedor. Informativo: no entra al margen. */

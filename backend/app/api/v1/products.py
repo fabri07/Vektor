@@ -35,10 +35,11 @@ from app.domain.product_categories import (
     normalize_product_category,
     product_category_catalog,
 )
+from app.domain.product_category_inference import infer_category
 from app.domain.product_completion import recompute_requires_completion
 from app.domain.scan_code import TipoDeCodigo, clasificar, variantes_gtin
 from app.domain.text_norm import normalize_barcode, normalize_sku
-from app.domain.verticals import Vertical, parse_vertical
+from app.domain.verticals import Vertical, parse_vertical, try_parse_vertical
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -51,6 +52,7 @@ from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
 from app.schemas.pos import PosProductResponse, a_pos_product
 from app.schemas.product import (
+    CategorySuggestionResponse,
     CreateProductRequest,
     LearnBarcodeRequest,
     ProductResponse,
@@ -78,6 +80,40 @@ async def _tenant_vertical(session: AsyncSession, tenant_id: UUID) -> Vertical:
             status_code=status.HTTP_404_NOT_FOUND, detail="business_profile_not_found"
         )
     return parse_vertical(code)
+
+
+async def _con_sugerencias(
+    session: AsyncSession, tenant_id: UUID, products: list[Product]
+) -> list[ProductResponse]:
+    """Serializa productos y les agrega ``category_suggestion`` (B·3).
+
+    La categoría inferida del nombre es SÓLO una sugerencia: no se escribe en
+    ``products.category`` (un catálogo posterior, que completa sólo vacíos, no
+    podría corregirla). Se calcula acá, al leer, y únicamente para productos sin
+    categoría con confianza ``high`` — la misma vara que aplica el catálogo. El
+    rubro se lee UNA vez por request; un tenant sin perfil o con un rubro no
+    reconocido se queda sin sugerencias en vez de romper el listado.
+    """
+    result = await session.execute(
+        select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+    )
+    vertical = try_parse_vertical(result.scalar_one_or_none())
+    labels = (
+        {c["code"]: c["label"] for c in product_category_catalog(vertical)}
+        if vertical is not None
+        else {}
+    )
+    out: list[ProductResponse] = []
+    for product in products:
+        response = ProductResponse.model_validate(product)
+        if vertical is not None and not product.category:
+            suggestion = infer_category(vertical, product.name)
+            if suggestion.confidence == "high" and suggestion.code in labels:
+                response.category_suggestion = CategorySuggestionResponse(
+                    code=suggestion.code, label=labels[suggestion.code]
+                )
+        out.append(response)
+    return out
 
 
 async def _resolve_category(
@@ -292,11 +328,12 @@ async def list_products(
     offset: int = Query(default=0, ge=0),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[Product]:
+) -> list[ProductResponse]:
     repo = ProductRepository(session)
-    return await repo.list_by_tenant(
+    products = await repo.list_by_tenant(
         tenant.tenant_id, is_active=is_active, limit=limit, offset=offset
     )
+    return await _con_sugerencias(session, tenant.tenant_id, list(products))
 
 
 @router.get(
@@ -543,12 +580,12 @@ async def get_product(
     product_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> Product:
+) -> ProductResponse:
     repo = ProductRepository(session)
     product = await repo.get_by_id(product_id, tenant.tenant_id)
     if not product:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
-    return product
+    return (await _con_sugerencias(session, tenant.tenant_id, [product]))[0]
 
 
 @router.patch(

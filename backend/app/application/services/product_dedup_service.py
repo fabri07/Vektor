@@ -1171,6 +1171,74 @@ def _json_scalar(value: Any) -> Any:
     return value
 
 
+def _external_code_entry(product: Any) -> dict[str, Any]:
+    return {
+        "duplicate_id": str(product.id),
+        "external_code": product.external_code,
+        "external_source": product.external_source,
+    }
+
+
+def _plan_external_code_transfer(
+    canonical: Any, ordered_dups: list[Any]
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """B·3 — qué pasa con el código externo de cada duplicado al fusionar.
+
+    Devuelve ``(transferencia, conflictos)``. El canónico SIN código recibe el
+    del primer duplicado que lo tenga (mismo orden determinístico que
+    ``_MERGE_COMPLETABLE_FIELDS``), con su fuente: el código y el sistema que lo
+    emitió viajan juntos, porque la clave (``clave_de_codigo_externo``) es el
+    par. Cualquier otro código —el canónico ya tenía uno, o ya recibió el de otro
+    duplicado— NO se pisa: queda en su producto desactivado y se registra como
+    conflicto en el ``after_json`` del ``MERGE_PRODUCT``, para que alguien lo
+    resuelva a mano. Nunca se elige entre dos códigos por el negocio.
+
+    "Sin código" en el canónico es ``external_code`` vacío, no clave nula: un
+    código crudo que no normaliza a nada sigue siendo un dato que alguien
+    escribió, y pisarlo lo perdería. En el duplicado sí manda la clave: un
+    código que no normaliza no identifica nada y no vale la pena transferirlo.
+    """
+    from app.domain.external_code import clave_de_codigo_externo  # noqa: PLC0415
+
+    canonical_has_code = not _is_empty(canonical.external_code)
+    transfer: dict[str, Any] | None = None
+    conflicts: list[dict[str, Any]] = []
+    for dup in ordered_dups:
+        if clave_de_codigo_externo(dup.external_code, dup.external_source) is None:
+            continue
+        if not canonical_has_code and transfer is None:
+            transfer = _external_code_entry(dup)
+        else:
+            conflicts.append(_external_code_entry(dup))
+    return transfer, conflicts
+
+
+async def _move_external_code(
+    session: AsyncSession,
+    from_product: Any,
+    to_product: Any,
+    external_code: str | None,
+    external_source: str | None,
+) -> None:
+    """Mueve un código externo de un producto a otro sin pasar por un estado que
+    viole ``uq_products_tenant_external_code``. Lo usan el apply (del duplicado
+    al canónico) y la reversa (de vuelta al duplicado).
+
+    El índice es parcial sobre ACTIVOS y Postgres lo chequea fila por fila, no al
+    final de la transacción. Si los dos UPDATE fueran en el mismo flush,
+    SQLAlchemy los ordena por clave primaria —no por intención— y el que escribe
+    podía salir antes que el que libera. Por eso dos flushes: primero se libera,
+    después se escribe. Todo dentro de la transacción del grupo: si algo falla
+    después, el rollback deshace los dos.
+    """
+    from_product.external_code = None
+    from_product.external_source = None
+    await session.flush()
+    to_product.external_code = external_code
+    to_product.external_source = external_source
+    await session.flush()
+
+
 async def _lease_still_ours(
     session: AsyncSession, tenant_id: uuid.UUID, lease_id: uuid.UUID | None
 ) -> bool:
@@ -1342,6 +1410,16 @@ async def _apply_one_group(
     if cf_added:
         canonical_obj.custom_fields = new_cf
 
+    # B·3 — el código externo del descartado no se pierde: se decide acá (queda
+    # en el MERGE_PRODUCT) y se mueve al final, con los duplicados ya inactivos.
+    ext_transfer, ext_conflicts = _plan_external_code_transfer(
+        canonical_obj, [dup_objs[d] for d in ordered_dups if d in dup_objs]
+    )
+    ext_prev = {
+        "external_code": canonical_obj.external_code,
+        "external_source": canonical_obj.external_source,
+    }
+
     # Delta de stock group-level: UNA vez a stock_units (y más abajo a current_qty).
     canonical_obj.stock_units = stock_before + delta
     recompute_requires_completion(canonical_obj)
@@ -1361,6 +1439,7 @@ async def _apply_one_group(
                     "requires_completion": rc_before,
                     "custom_fields": prev_cf,
                     "fk_count_3t": canonical_fk_3t_before,
+                    **ext_prev,
                 },
             },
             after_json={
@@ -1371,6 +1450,8 @@ async def _apply_one_group(
                 "stock_units_after": canonical_obj.stock_units,
                 "stock_delta_applied": delta,
                 "requires_completion_after": canonical_obj.requires_completion,
+                "external_code_transferred": ext_transfer,
+                "external_code_conflicts": ext_conflicts,
             },
             confidence="HIGH",
         )
@@ -1552,6 +1633,21 @@ async def _apply_one_group(
                 },
                 confidence="HIGH",
             )
+        )
+
+    # 6) B·3 — TRANSFER_EXTERNAL_CODE. Al final y no en el paso 1: con los
+    # duplicados ya inactivos, el flush que necesita la transferencia no puede
+    # chocar con las claves que el MERGE completó en el canónico (barcode/sku
+    # copiados de un duplicado que hasta el paso 5 seguía activo). Va registrado
+    # en el MERGE_PRODUCT; no toca stock ni precio.
+    if ext_transfer is not None:
+        source = dup_objs[uuid.UUID(ext_transfer["duplicate_id"])]
+        await _move_external_code(
+            session,
+            source,
+            canonical_obj,
+            ext_transfer["external_code"],
+            ext_transfer["external_source"],
         )
 
     return ("applied", str(stock_dec.get("kind") or ""))
@@ -1830,6 +1926,52 @@ def _log_revert_collision(
     )
 
 
+async def _external_code_revert_collision(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    dup: Any,
+    transfer: dict[str, Any] | None,
+    canonical_id: uuid.UUID,
+    claimed_keys: dict[tuple[str, str], uuid.UUID],
+) -> tuple[str, uuid.UUID] | None:
+    """B·3 — ¿reactivar este duplicado violaría ``uq_products_tenant_external_code``?
+
+    Misma lógica que las claves de F5 en ``_revert_one_group``, sobre el código
+    externo PROYECTADO del duplicado: el que le devuelve la reversa si fue la
+    fuente de la transferencia, o el que conservó (un conflicto) si no. Que el
+    canónico tenga el código transferido no es colisión: la reversa se lo saca.
+    Devuelve ``(scope, owner_id)`` o ``None``.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.domain.external_code import clave_de_codigo_externo  # noqa: PLC0415
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    if transfer is not None:
+        key = clave_de_codigo_externo(transfer["external_code"], transfer["external_source"])
+    else:
+        key = clave_de_codigo_externo(dup.external_code, dup.external_source)
+    if key is None:
+        return None
+    prior = claimed_keys.get(("external_code", key))
+    if prior is not None:
+        return ("intra_group", prior)
+    claimed_keys[("external_code", key)] = dup.id
+    owner_id = (
+        await session.execute(
+            select(Product.id).where(
+                Product.tenant_id == tenant_id,
+                Product.is_active.is_(True),
+                Product.external_code_key == key,
+                Product.id != dup.id,
+            )
+        )
+    ).scalars().first()
+    if owner_id is None or (owner_id == canonical_id and transfer is not None):
+        return None
+    return ("canonical_persistent" if owner_id == canonical_id else "third_product", owner_id)
+
+
 @dataclass
 class RevertResult:
     """Resumen de un ``revert_dedup_run``: estado + conteo por grupo. ``status`` es a
@@ -1983,6 +2125,16 @@ async def _revert_one_group(
     for k, v in (m_after.get("custom_fields_added") or {}).items():
         if canon_cf.get(k) != v:
             return ("skipped", _REVERT_STATE_DIVERGED)
+    # B·3: el código transferido tiene que seguir siendo el que dejó el apply.
+    # Si alguien lo cambió o lo borró después, devolvérselo al duplicado pisaría
+    # esa edición (o reviviría un código que el usuario sacó): no se revierte.
+    ext_transfer: dict[str, Any] | None = m_after.get("external_code_transferred")
+    ext_source_id = uuid.UUID(ext_transfer["duplicate_id"]) if ext_transfer else None
+    if ext_transfer is not None and (
+        canon.external_code != ext_transfer["external_code"]
+        or canon.external_source != ext_transfer["external_source"]
+    ):
+        return ("skipped", _REVERT_STATE_DIVERGED)
 
     # FK baseline: el canónico debe tener exactamente `baseline + Σ filas re-apuntadas`.
     fk_before = canonical_prev.get("fk_count_3t")
@@ -2081,10 +2233,34 @@ async def _revert_one_group(
         if dup is None:
             return ("skipped", _REVERT_DUP_MISSING)
         dup_objs[dup_id] = dup
+        if dup_id == ext_source_id and not _is_empty(dup.external_code):
+            # El apply le liberó el código; si hoy tiene otro, alguien lo editó
+            # (aunque lo hayan reactivado a mano): devolverle el viejo lo pisaría.
+            return ("skipped", _REVERT_STATE_DIVERGED)
         if dup.is_active:
             continue  # tolerancia: reactivación previa → no-op idempotente
         if dup.deactivation_reason != da["after"].get("deactivation_reason"):
             return ("skipped", _REVERT_STATE_DIVERGED)
+        ext_collision = await _external_code_revert_collision(
+            session,
+            tenant_id,
+            dup,
+            ext_transfer if dup_id == ext_source_id else None,
+            canonical_id,
+            claimed_keys,
+        )
+        if ext_collision is not None:
+            scope, owner_id = ext_collision
+            _log_revert_collision(
+                kind="external_code",
+                scope=scope,
+                group_id=group_id,
+                run_id=run_id,
+                canonical_id=canonical_id,
+                duplicate_id=dup_id,
+                owner_id=owner_id,
+            )
+            return ("skipped", _REVERT_IDENTITY_COLLISION)
         for kind in _IDENTITY_KEY_KINDS:
             owner, normalized = await product_identity.find_active_owner_of_key(
                 session, tenant_id, kind, getattr(dup, kind), exclude_id=dup_id
@@ -2205,6 +2381,18 @@ async def _revert_one_group(
     canon.custom_fields = new_cf
     if "requires_completion" in canonical_prev:
         canon.requires_completion = bool(canonical_prev["requires_completion"])
+
+    # 6⁻¹) B·3 — el código vuelve al duplicado, que a esta altura ya está
+    # reactivado: primero se libera en el canónico, después se escribe en él.
+    # El canónico no tenía código antes del merge (por eso lo recibió): queda vacío.
+    if ext_transfer is not None and ext_source_id is not None:
+        await _move_external_code(
+            session,
+            canon,
+            dup_objs[ext_source_id],
+            ext_transfer["external_code"],
+            ext_transfer["external_source"],
+        )
 
     return ("reverted", "")
 
