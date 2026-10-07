@@ -454,6 +454,80 @@ def test_la_fila_original_de_una_edicion_no_se_empareja_con_otro_anulado(al_reve
     )
 
 
+@pytest.mark.parametrize("texto_anulado", ["Pepsi", "B"], ids=["otra-venta", "otro-texto"])
+def test_otra_operacion_del_mismo_importe_y_dia_no_se_lleva_la_fila_original(
+    texto_anulado: str,
+) -> None:
+    """Revisión 3 del #86 (caso D0): la venta A (sin editar, mismo importe y día
+    que la fila original de la edición E, otro texto) pierde su fila. Si su
+    anulado tomaba la fila original de E en el nivel 1, se tapaban a la vez la
+    pérdida de A y la repetición probada de E: el apply no frenaba."""
+    items = [
+        {"action": reread_service.ACTION_VOID, "before": _foto("sale", "100", texto_anulado, "rA")},
+        {"action": reread_service.ACTION_INSERT, "after": _foto("sale", "100", "Coca", "rX")},
+    ]
+    edicion = _foto("sale", "120", "Coca", "rE", id="e1")
+    perdida = reread_service.medir_perdida_real(
+        items, [edicion], [], filas_de_ediciones={"e1": {"rX"}}
+    )
+    assert (perdida.to_lose, perdida.edited_at_risk, perdida.edited_repeated_by_digest) == (
+        1, 1, 1,
+    )
+
+
+@pytest.mark.parametrize("texto", ["Coca", ""], ids=["con-texto", "sin-texto"])
+def test_la_gemela_sin_editar_de_la_misma_huella_vuelve_sobre_la_fila_original(
+    texto: str,
+) -> None:
+    """La gemela T (contenido entero igual al de la fila original de E, texto
+    vacío incluido) se anula y entra una sola fila con esa huella: T vuelve en
+    ella. Sin esta pareja, T contaba como perdida y E como repetida probada, sin
+    salida."""
+    items = [
+        {"action": reread_service.ACTION_VOID, "before": _foto("sale", "100", texto, "rT")},
+        {"action": reread_service.ACTION_INSERT, "after": _foto("sale", "100", texto, "rD")},
+    ]
+    edicion = _foto("sale", "150", "Coca editado", "rE", id="e1")
+    perdida = reread_service.medir_perdida_real(
+        items, [edicion], [], filas_de_ediciones={"e1": {"rD"}}
+    )
+    assert (perdida.to_lose, perdida.edited_at_risk, perdida.edited_repeated_by_digest) == (
+        0, 0, 0,
+    )
+
+
+async def test_sin_posiciones_por_el_tope_la_repeticion_queda_estimada(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revisión 3: con el tope de anclas no se sabe el contexto de la edición.
+    Buscar su huella en todas las hojas contaba como probada (irrechazable) una
+    fila igual de otra hoja; ahora queda estimada y se puede aceptar."""
+    gemela = ("2026-01-06", "Pan Lactal", "800")
+    filas = [_CUATRO[0], gemela, gemela]
+    file = await _subir_e_importar(db_session, tenant.tenant_id, _csv(filas), "text/csv", "g.csv")
+    tid, fid = tenant.tenant_id, file.id
+    for rec in (
+        await db_session.execute(
+            select(ExpenseEntry).where(
+                ExpenseEntry.source_upload_id == fid, ExpenseEntry.amount == Decimal("800")
+            )
+        )
+    ).scalars():
+        rec.has_user_edits = True
+        rec.description = "corregido a mano"
+    await db_session.commit()
+
+    monkeypatch.setattr(reread_service, "_MAX_ANCLAS_DE_EDICIONES", 0)
+    _patch_s3(monkeypatch, _csv([gemela, _CUATRO[0]]))
+    perdida = await _aplicar_frena(db_session, tid, fid)
+    assert perdida.edited_at_risk >= 1
+    assert perdida.edited_repeated_by_digest == 0
+    await reread_service.apply_reread(
+        db_session, fid, tid, accept_data_loss=True, tope_aceptado=perdida.as_dict()
+    )
+    await db_session.commit()
+
+
 async def test_un_cambio_de_formato_no_casa_y_queda_la_red_de_la_compuerta(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:

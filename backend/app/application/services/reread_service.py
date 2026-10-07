@@ -1462,13 +1462,17 @@ async def _reconcile(
         # probada, no la estimación de dos de tres (ver `medir_perdida_real`).
         # Se busca en SU contexto, como el plan: una fila igual en otra hoja es
         # otra operación. Todas las hojas sólo si su contexto no está (D0).
+        # Sin posiciones (tope de anclas) no se sabe el contexto de ninguna: no
+        # hay prueba, queda la estimación de dos de tres (aceptable), como el
+        # plan, que tampoco reubica. Buscar en todas las hojas acá volvía a
+        # contar como probada una fila igual de otra hoja (revisión 3).
         anclas = _anclas_por_huella(tenant_id, file_id, filas_frescas, ignoradas)
-        posicion = _posiciones(tenant_id, file_id, filas_frescas, len(all_existing)) or {}
+        posicion = _posiciones(tenant_id, file_id, filas_frescas, len(all_existing))
         refs_por_huella: dict[str, set[str]] = defaultdict(set)
         for (_ctx, huella), refs in anclas.items():
             refs_por_huella[huella].update(refs)
         for rec in all_existing:
-            if rec.has_user_edits and rec.source_row_digest:
+            if posicion is not None and rec.has_user_edits and rec.source_row_digest:
                 pos = posicion.get(rec.source_row_ref or "")
                 suyas = (
                     set(anclas.get((pos[0], rec.source_row_digest), ()))
@@ -2903,16 +2907,34 @@ def medir_perdida_real(
     # La fila original de una edición se empareja ÚLTIMA: si un anulado la tomaba
     # en el nivel 1 (tipo, importe, día), la repetición probada dependía del
     # orden de las filas y la reinserción real de ese anulado quedaba suelta.
-    # Primero contra el resto; lo que no encuentra pareja, contra ellas (gemelas
-    # sin editar de la misma huella siguen volviendo).
+    # Primero contra el resto; lo que no encuentra pareja, contra ellas, pero
+    # SÓLO con el contenido entero igual (tipo, importe, día y texto): la gemela
+    # sin editar de la misma huella. Con los niveles de `_emparejar_fotos`, otra
+    # operación del mismo importe y día que perdió su fila se llevaba la fila
+    # original de la edición: se tapaban la pérdida y la repetición probada
+    # (revisión 3). Texto vacío de los dos lados también es contenido igual: no
+    # pedirlo convertía a la gemela sin texto en repetición probada irrechazable.
     exactas = {j: ed for j, f in enumerate(insertadas) if (ed := _probada(f)) is not None}
     resto = [j for j in range(len(insertadas)) if j not in exactas]
-    orden = list(exactas)
     v1, u1 = _emparejar_fotos(anuladas, [insertadas[j] for j in resto])
-    sin_pareja = [i for i in range(len(anuladas)) if i not in v1]
-    v2, u2 = _emparejar_fotos([anuladas[i] for i in sin_pareja], [insertadas[j] for j in orden])
-    vuelven = v1 | {sin_pareja[i] for i in v2}
-    usadas = {resto[j] for j in u1} | {orden[j] for j in u2}
+    vuelven = set(v1)
+    usadas = {resto[j] for j in u1}
+
+    def _entera(foto: dict[str, Any]) -> tuple[Any, ...] | None:
+        tipo, monto, dia = _contenido_de_foto(foto)
+        if monto is None or dia is None:
+            return None
+        return (tipo, monto, dia, _texto_de_foto(foto))
+
+    gemelas: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+    for j in exactas:
+        if (k := _entera(insertadas[j])) is not None:
+            gemelas[k].append(j)
+    for i, foto in enumerate(anuladas):
+        k = _entera(foto) if i not in vuelven else None
+        if k is not None and gemelas.get(k):
+            usadas.add(gemelas[k].pop())
+            vuelven.add(i)
     perdidas = [f for i, f in enumerate(anuladas) if i not in vuelven]
 
     montos_en_otros: dict[Decimal, int] = defaultdict(int)
