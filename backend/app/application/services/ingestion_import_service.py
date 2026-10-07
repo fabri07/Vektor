@@ -2946,6 +2946,11 @@ async def build_incomplete_product(
     return resolved.id, created
 
 
+#: Código que devuelve ``normalize_product_category`` cuando el texto no coincide
+#: con ninguna categoría del rubro (ver ``product_categories``).
+_CATEGORIA_DE_RESPALDO = "OTHER"
+
+
 def _aplicar_categoria_de_catalogo(
     product: Any, categoria: str | None, *, declarada: bool
 ) -> None:
@@ -2953,8 +2958,9 @@ def _aplicar_categoria_de_catalogo(
 
     - Vacía → se completa con lo que haya (declarada o inferida).
     - Ocupada por una INFERENCIA intacta (``categoria_inferida_reemplazable``) →
-      la pisa sólo una DECLARADA: el dato del archivo le gana a la heurística,
-      nunca otra heurística a la primera.
+      la pisa sólo una DECLARADA y RECONOCIDA (código ≠ ``OTHER``): el dato del
+      archivo le gana a la heurística, nunca otra heurística a la primera ni una
+      celda que el rubro no reconoce ("-", "varios") y cae al respaldo.
     - Ocupada por cualquier otra cosa (declarada antes, editada a mano) → no se
       toca: completar sin pisar, como el resto de los campos del catálogo.
 
@@ -2966,6 +2972,11 @@ def _aplicar_categoria_de_catalogo(
         return
     if product.category and not (
         declarada
+        # ``OTHER`` es el RESPALDO de ``normalize_product_category`` cuando el
+        # texto de la celda no coincide con nada del rubro ("-", "varios", un
+        # nombre de colección): no es un dato declarado sino una normalización
+        # que falló, y no le gana a una inferencia específica.
+        and categoria != _CATEGORIA_DE_RESPALDO
         and categoria_inferida_reemplazable(
             product.category, product.custom_fields, product.has_user_edits
         )

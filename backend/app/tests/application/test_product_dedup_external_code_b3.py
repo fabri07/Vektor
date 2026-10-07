@@ -28,6 +28,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.application.services import product_dedup_service as svc
+from app.application.services.ingestion_import_service import _aplicar_categoria_de_catalogo
+from app.domain.product_category_inference import CATEGORIA_INFERIDA_FIELD
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem
 from app.persistence.models.tenant import Tenant
@@ -376,3 +378,126 @@ async def test_revert_no_pisa_un_codigo_puesto_despues_al_duplicado_fuente(
     assert dup.external_code == "B-777"  # la edición sobrevive
     assert dup.is_active is reactivado
     assert (canonical.external_code, canonical.external_source) == ("A-001", "tango")
+
+
+# ── La categoría inferida viaja con su marca ──────────────────────────────────
+#
+# El merge completa ``category`` en el canónico desde el duplicado, pero el merge
+# de ``custom_fields`` saltea las claves internas (``_``): sin llevar la marca
+# explícitamente, una inferida quedaba como declarada en el canónico y un
+# catálogo posterior ya no la podía reemplazar.
+
+
+async def _seed_par_con_categoria(
+    session: AsyncSession, tenant_id: uuid.UUID, *, dup_marca: str | None, dup_editado: bool
+) -> tuple[uuid.UUID, uuid.UUID]:
+    canonical = await _add_product(
+        session, tenant_id, name="Lampara", sku="LAMP1", barcode="7790088880008"
+    )
+    dup = await _add_product(session, tenant_id, name="Lampara x", sku="LAMP1")
+    dup.category = "ILUMINACION"
+    dup.custom_fields = (
+        {CATEGORIA_INFERIDA_FIELD: dup_marca} if dup_marca is not None else {}
+    )
+    dup.has_user_edits = dup_editado
+    await session.commit()
+    return canonical.id, dup.id
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_la_inferida_del_duplicado_llega_al_canonico_con_su_marca(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    canonical_id, _ = await _seed_par_con_categoria(
+        db_session, tid, dup_marca="ILUMINACION", dup_editado=False
+    )
+
+    result = await _plan_apply(db_session, tid)
+    assert result.status == "APPLIED"
+
+    db_session.expunge_all()
+    canonical = await db_session.get(Product, canonical_id)
+    assert canonical is not None
+    assert canonical.category == "ILUMINACION"
+    assert canonical.custom_fields.get(CATEGORIA_INFERIDA_FIELD) == "ILUMINACION"
+
+    # Y por eso un catálogo que DECLARA la suya la puede reemplazar después.
+    _aplicar_categoria_de_catalogo(canonical, "DECO", declarada=True)
+    assert canonical.category == "DECO"
+    assert CATEGORIA_INFERIDA_FIELD not in canonical.custom_fields
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+@pytest.mark.parametrize(
+    ("dup_marca", "dup_editado"),
+    [(None, False), ("DECO", False)],
+    ids=["declarada", "marca_muerta"],
+)
+async def test_una_categoria_que_no_es_inferida_intacta_no_lleva_marca(
+    db_session: AsyncSession, sample_tenant: Tenant, dup_marca: str | None, dup_editado: bool
+) -> None:
+    tid = sample_tenant.tenant_id
+    canonical_id, _ = await _seed_par_con_categoria(
+        db_session, tid, dup_marca=dup_marca, dup_editado=dup_editado
+    )
+
+    result = await _plan_apply(db_session, tid)
+    assert result.status == "APPLIED"
+
+    db_session.expunge_all()
+    canonical = await db_session.get(Product, canonical_id)
+    assert canonical is not None
+    assert canonical.category == "ILUMINACION"
+    assert CATEGORIA_INFERIDA_FIELD not in (canonical.custom_fields or {})
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_revert_saca_la_categoria_y_la_marca_que_llevo_el_merge(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    canonical_id, _ = await _seed_par_con_categoria(
+        db_session, tid, dup_marca="ILUMINACION", dup_editado=False
+    )
+    applied = await _plan_apply(db_session, tid)
+    assert applied.status == "APPLIED"
+
+    await _free_shared_sku(db_session, canonical_id)
+    reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert reverted.status == "REVERTED", reverted.group_results
+
+    db_session.expunge_all()
+    canonical = await db_session.get(Product, canonical_id)
+    assert canonical is not None
+    assert canonical.category is None
+    assert CATEGORIA_INFERIDA_FIELD not in (canonical.custom_fields or {})
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_revert_devuelve_la_marca_previa_que_piso_el_merge(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Un canónico sin categoría puede tener una marca muerta (alguien vació la
+    categoría a mano): el merge la pisa con la del duplicado y la reversa la
+    devuelve tal cual estaba, no la borra."""
+    tid = sample_tenant.tenant_id
+    canonical_id, _ = await _seed_par_con_categoria(
+        db_session, tid, dup_marca="ILUMINACION", dup_editado=False
+    )
+    canonical = await db_session.get(Product, canonical_id)
+    assert canonical is not None
+    canonical.custom_fields = {CATEGORIA_INFERIDA_FIELD: "MUEBLES", "color": "negro"}
+    await db_session.commit()
+
+    applied = await _plan_apply(db_session, tid)
+    assert applied.status == "APPLIED"
+    await _free_shared_sku(db_session, canonical_id)
+    reverted = await svc.revert_dedup_run(db_session, tid, applied.run_id, lease_id=None)
+    assert reverted.status == "REVERTED", reverted.group_results
+
+    db_session.expunge_all()
+    canonical = await db_session.get(Product, canonical_id)
+    assert canonical is not None
+    assert canonical.category is None
+    assert canonical.custom_fields == {CATEGORIA_INFERIDA_FIELD: "MUEBLES", "color": "negro"}

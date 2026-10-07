@@ -22,10 +22,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
 from app.application.services._ledger_restore import restore_from_before
+from app.application.services.file_deletion_service import (
+    record_import_ledger,
+    revert_file_data,
+)
 from app.application.services.ingestion_import_service import build_incomplete_product
+from app.domain.ingestion_version import INGESTION_VERSION
 from app.domain.product_category_inference import CATEGORIA_INFERIDA_FIELD, CategorySuggestion
 from app.domain.verticals import Vertical
 from app.persistence.models.business import BusinessProfile
+from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 
@@ -443,3 +449,105 @@ def test_la_reversa_devuelve_la_inferida_con_su_marca() -> None:
     assert product.category == "ILUMINACION"
     assert product.custom_fields == {"marca": "X", CATEGORIA_INFERIDA_FIELD: "ILUMINACION"}
     assert CATEGORIA_INFERIDA_FIELD in restaurados
+
+
+@pytest.mark.parametrize("armar", [_catalogo_simple, _catalogo_multihoja])
+@pytest.mark.parametrize("celda", ["varios", "Colgantes LED", "Línea Premium"])
+async def test_celda_que_el_rubro_no_reconoce_no_pisa_la_inferida(
+    db_session: AsyncSession, sample_tenant: Tenant, armar: Any, celda: str
+) -> None:
+    """``normalize_product_category`` devuelve el respaldo ``OTHER`` cuando la
+    celda no coincide con nada del rubro: eso es una normalización que falló, no
+    un dato declarado, y no tira una inferida específica a «Otros»."""
+    tid = sample_tenant.tenant_id
+    await _set_vertical(db_session, tid, Vertical.DECORACION_HOGAR)
+    nacido = await _compra_lampara(db_session, tid)
+
+    await importer.insert_confirmed_data(
+        db_session, tid, armar([_fila_catalogo(celda)]), {"productos": True}
+    )
+
+    product = await _reload(db_session, nacido.id)
+    assert product.category == "ILUMINACION"
+    assert product.custom_fields.get(CATEGORIA_INFERIDA_FIELD) == "ILUMINACION"
+
+
+async def test_alta_multihoja_sin_columna_marca_la_inferida(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El alta multihoja sin columna Categoría infiere y MARCA: un catálogo
+    posterior que la declara la reemplaza. Sin la marca la tomaría por declarada
+    y descartaría la columna en silencio."""
+    tid = sample_tenant.tenant_id
+    await _set_vertical(db_session, tid, Vertical.DECORACION_HOGAR)
+
+    await importer.insert_confirmed_data(
+        db_session, tid, _catalogo_multihoja([_fila_catalogo(None)]), {"productos": True}
+    )
+    nacido = (
+        await db_session.execute(select(Product).where(Product.tenant_id == tid))
+    ).scalar_one()
+    assert nacido.category == "ILUMINACION"
+    assert nacido.custom_fields.get(CATEGORIA_INFERIDA_FIELD) == "ILUMINACION"
+
+    await importer.insert_confirmed_data(
+        db_session,
+        tid,
+        _catalogo_multihoja([_fila_catalogo("Objetos de decoración")]),
+        {"productos": True},
+    )
+
+    product = await _reload(db_session, nacido.id)
+    assert product.category == "DECO"
+    assert CATEGORIA_INFERIDA_FIELD not in (product.custom_fields or {})
+
+
+@pytest.mark.parametrize("armar", [_catalogo_simple, _catalogo_multihoja])
+async def test_borrar_el_catalogo_devuelve_la_inferida_y_su_marca(
+    db_session: AsyncSession, sample_tenant: Tenant, armar: Any
+) -> None:
+    """E2E con el ``before`` REAL del ledger (no uno armado a mano): compra que
+    infiere → catálogo que declara → borrado del archivo del catálogo (F11)."""
+    tid = sample_tenant.tenant_id
+    await _set_vertical(db_session, tid, Vertical.DECORACION_HOGAR)
+    nacido = await _compra_lampara(db_session, tid)
+    archivo = UploadedFile(
+        tenant_id=tid,
+        uploaded_by=None,
+        original_filename="catalogo.xlsx",
+        s3_key=f"uploads/test/{uuid.uuid4()}/catalogo.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=1024,
+        purpose="general",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={},
+        ingestion_version=INGESTION_VERSION,
+    )
+    db_session.add(archivo)
+    await db_session.flush()
+
+    counts = await importer.insert_confirmed_data(
+        db_session,
+        tid,
+        armar([_fila_catalogo("Objetos de decoración")]),
+        {"productos": True},
+        return_details=True,
+        uploaded_file_id=archivo.id,
+    )
+    await db_session.flush()
+    await db_session.refresh(nacido)
+    assert nacido.category == "DECO"
+
+    await record_import_ledger(
+        db_session,
+        tenant_id=tid,
+        file_id=archivo.id,
+        product_details=counts.pop("product_details", []) or [],
+    )
+    contadores = await revert_file_data(db_session, archivo.id, tid)
+
+    product = await _reload(db_session, nacido.id)
+    assert contadores["productos_restaurados"] == 1
+    assert product.category == "ILUMINACION"
+    assert product.custom_fields.get(CATEGORIA_INFERIDA_FIELD) == "ILUMINACION"
