@@ -374,6 +374,9 @@ class RereadApplyResult:
     #: B·nuevo: ediciones a mano llevadas a su fila nueva (``planear_reubicaciones``),
     #: ``{tipo, id, ref_antes, ref_despues, movimientos}``. El undo las revierte.
     reubicaciones: list[dict[str, Any]] = field(default_factory=list)
+    #: B·nuevo: ``{id de la edición: refs de las filas frescas con su huella}``,
+    #: sólo de las que no quedaron sobre una de ellas. Lo usa la compuerta.
+    filas_de_ediciones: dict[str, set[str]] = field(default_factory=dict)
 
 
 # ── snapshots para auditoría ───────────────────────────────────────────────────
@@ -1414,8 +1417,10 @@ async def _reconcile(
     # arriba ya preservaron su movimiento con la ref vieja) y antes del reimport,
     # que saltea la fila nueva e importa la que quedó en la posición vieja.
     reubicaciones: list[dict[str, Any]] = []
+    filas_de_ediciones: dict[str, set[str]] = {}
     if any(r.has_user_edits and r.source_row_digest for r in all_existing):
         filas_frescas = _iter_importable_fresh_rows(fresh, confirmed_fields, exigir_monto=False)
+        ignoradas = _ignoradas_por_contexto(fresh, draft)
         plan = planear_reubicaciones(
             tenant_id,
             file_id,
@@ -1430,7 +1435,7 @@ async def _reconcile(
                 },
             ),
             {r for r in refs_de_otros.values() if r},
-            _ignoradas_por_contexto(fresh, draft),
+            ignoradas,
         )
         nuevas = {d for _, d in plan.values()}
         await _delete_fingerprints(session, tenant_id, {a for a, _ in plan.values()} - nuevas)
@@ -1451,6 +1456,20 @@ async def _reconcile(
                     "movimientos": [str(m.id) for m in movs_por_ref.get(antes, [])],
                 }
             )
+        # La edición con huella que no quedó sobre una fila con su huella (grupo
+        # de gemelas que no alcanzó, contexto ausente, fila compartida): un alta
+        # en una de esas filas es su fila original otra vez — repetición
+        # probada, no la estimación de dos de tres (ver `medir_perdida_real`).
+        refs_por_huella: dict[str, set[str]] = defaultdict(set)
+        for (_ctx, huella), refs in _anclas_por_huella(
+            tenant_id, file_id, filas_frescas, ignoradas
+        ).items():
+            refs_por_huella[huella].update(refs)
+        for rec in all_existing:
+            if rec.has_user_edits and rec.source_row_digest:
+                suyas = refs_por_huella.get(rec.source_row_digest, set())
+                if suyas and rec.source_row_ref not in suyas:
+                    filas_de_ediciones[str(rec.id)] = suyas
 
     # Re-importar: re-crea no-editados corregidos + filas nuevas; saltea editados
     # (los fingerprints de las filas editadas siguen presentes → insert los omite).
@@ -1698,6 +1717,7 @@ async def _reconcile(
         ],
         reemplazos_de_otros={r for r in refs_de_otros.values() if r in _refs_reimportadas},
         reubicaciones=reubicaciones,
+        filas_de_ediciones=filas_de_ediciones,
     )
 
 
@@ -2449,6 +2469,24 @@ def _ignoradas_por_contexto(
     return {}
 
 
+def _anclas_por_huella(
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    filas: list[tuple[str | None, int, dict[str, Any], str]],
+    ignoradas: dict[str | None, set[str]],
+) -> dict[tuple[str | None, str], list[str]]:
+    """``{(contexto, huella): [ref, ...]}`` de las filas frescas, en orden, con
+    la huella que les escribiría el importador (sin las columnas ignoradas)."""
+    anclas: dict[tuple[str | None, str], list[str]] = defaultdict(list)
+    for ctx, idx, row, _kind in filas:
+        sin = ignoradas.get(ctx)
+        fila = {k: v for k, v in row.items() if k not in sin} if sin else row
+        ref = _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))
+        for tipo in _TIPOS_OPERACION:
+            anclas[(ctx, huella_de_fila(fila, tipo))].append(ref)
+    return anclas
+
+
 def planear_reubicaciones(
     tenant_id: uuid.UUID,
     file_id: uuid.UUID,
@@ -2494,13 +2532,7 @@ def planear_reubicaciones(
     posicion = _posiciones(tenant_id, file_id, filas, len(registros))
     if posicion is None:
         return {}
-    anclas: dict[tuple[str | None, str], list[str]] = defaultdict(list)
-    for ctx, idx, row, _kind in filas:
-        sin = ignoradas.get(ctx)
-        fila = {k: v for k, v in row.items() if k not in sin} if sin else row
-        ref = _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))
-        for tipo in _TIPOS_OPERACION:
-            anclas[(ctx, huella_de_fila(fila, tipo))].append(ref)
+    anclas = _anclas_por_huella(tenant_id, file_id, filas, ignoradas)
     grupos: dict[tuple[str | None, str], list[SaleEntry | ExpenseEntry]] = defaultdict(list)
     for r in sorted(candidatos, key=lambda r: posicion.get(r.source_row_ref or "", (None, -1))[1]):
         pos = posicion.get(r.source_row_ref or "")
@@ -2782,6 +2814,9 @@ class PerdidaDeRelectura:
     to_lose: int = 0
     to_lose_to_others: int = 0
     edited_at_risk: int = 0
+    #: De ``edited_at_risk``, las probadas por la huella de la fila original:
+    #: ésas no se pueden aceptar. El resto es estimación y se acepta como antes.
+    edited_repeated_by_digest: int = 0
     samples: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -2793,6 +2828,7 @@ class PerdidaDeRelectura:
             "to_lose": self.to_lose,
             "to_lose_to_others": self.to_lose_to_others,
             "edited_at_risk": self.edited_at_risk,
+            "edited_repeated_by_digest": self.edited_repeated_by_digest,
             "samples": self.samples,
         }
 
@@ -2802,6 +2838,7 @@ def medir_perdida_real(
     editados: list[dict[str, Any]],
     otros_nuevos: list[dict[str, Any]],
     reemplazos_de_otros: set[str] | None = None,
+    filas_de_ediciones: dict[str, set[str]] | None = None,
 ) -> PerdidaDeRelectura:
     """Compara lo anulado contra lo vuelto a crear por ESTA relectura.
 
@@ -2817,6 +2854,11 @@ def medir_perdida_real(
       fila de la edición que volvió a entrar porque su posición se corrió: quedan
       dos. Conservador a propósito: un alta nueva igual en dos de tres también
       frena, y eso sólo cuesta una confirmación.
+    - **Edición repetida probada:** el insertado está en una fila cuya huella es
+      la de la fila original de una edición que no quedó sobre ninguna fila con
+      esa huella (``filas_de_ediciones``, de ``_reconcile``). No es estimación:
+      es su fila. Cuenta en ``edited_at_risk`` y además en
+      ``edited_repeated_by_digest``, que no se puede aceptar.
 
     ``reemplazos_de_otros``: refs de los insertados que reemplazan un registro
     clasificado desde «Otros» (F-O.2). Ese anulado no está entre los ``items``,
@@ -2862,8 +2904,26 @@ def medir_perdida_real(
             )
 
     repetidas = 0
+    probadas = 0
     for j, foto in enumerate(insertadas):
         if j in usadas:
+            continue
+        ref = foto.get("source_row_ref")
+        exacta = next(
+            (
+                ed
+                for ed in editados
+                if ref
+                and ed.get("kind") == foto.get("kind")
+                and ref in (filas_de_ediciones or {}).get(str(ed.get("id")), ())
+            ),
+            None,
+        )
+        if exacta is not None:
+            repetidas += 1
+            probadas += 1
+            if len(samples) < 2 * _SAMPLE_PER_KIND:
+                samples.append({"action": "edited_at_risk", "before": exacta, "after": foto})
             continue
         tipo, monto, dia = _contenido_de_foto(foto)
         texto = _texto_de_foto(foto)
@@ -2890,6 +2950,7 @@ def medir_perdida_real(
         to_lose=len(perdidas),
         to_lose_to_others=a_otros,
         edited_at_risk=repetidas,
+        edited_repeated_by_digest=probadas,
         samples=samples,
     )
 
@@ -3666,9 +3727,11 @@ class FileChangedSincePreviewError(ValueError):
 REREAD_WOULD_LOSE_DATA = "REREAD_WOULD_LOSE_DATA"
 
 
-#: El apply se frenó porque repetiría ediciones a mano: eso NO se puede aceptar
-#: (decisión del dueño, 2026-10-07). Un código propio y no el de la pérdida, así un
-#: frontend que no lo conoce no ofrece «Aplicar igual» y muestra el mensaje.
+#: El apply se frenó porque repetiría una edición a mano, PROBADO por la huella de
+#: su fila original (``edited_repeated_by_digest``): eso NO se puede aceptar
+#: (decisión del dueño, 2026-10-07, acotada a lo probado). Un código propio y no el
+#: de la pérdida, así un frontend que no lo conoce no ofrece «Aplicar igual» y
+#: muestra el mensaje. La repetición ESTIMADA sigue en REREAD_WOULD_LOSE_DATA.
 REREAD_EDITS_WOULD_REPEAT = "REREAD_EDITS_WOULD_REPEAT"
 
 
@@ -3697,10 +3760,11 @@ def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
             "las filas del archivo se corrieron de lugar"
             + (f" ({'; '.join(ediciones)})" if ediciones else "")
         )
+    if perdida.edited_repeated_by_digest:
         return (
             "La relectura no se aplicó: " + "; ".join(partes) + ". No se guardó "
-            "nada, y esto no se puede aplicar igual: deshacé esa edición o corregí "
-            "el archivo, y volvé a releerlo."
+            "nada, y esto no se puede aplicar igual: la fila original de esa "
+            "edición volvería a entrar. Deshacé la edición y volvé a releerlo."
         )
     return (
         "La relectura no se aplicó: " + "; ".join(partes) + ". No se guardó "
@@ -3720,9 +3784,9 @@ class RereadWouldLoseDataError(ValueError):
 def _perdida_aceptada(
     perdida: PerdidaDeRelectura, aceptada: bool, tope: dict[str, Any] | None
 ) -> bool:
-    # Una edición a mano repetida no se acepta: se deshace la edición o se corrige
-    # el archivo. Sólo la pérdida de registros sin editar se puede aceptar.
-    if not aceptada or perdida.edited_at_risk:
+    # Una edición a mano repetida PROBADA por la huella de su fila no se acepta.
+    # La estimada (dos de tres, o sin huella) se acepta como cualquier pérdida.
+    if not aceptada or perdida.edited_repeated_by_digest:
         return False
     if tope is None:
         return True
@@ -4204,7 +4268,11 @@ async def apply_reread(
         if r.id not in otros_previos
     ]
     perdida = medir_perdida_real(
-        result.items, result.edited_snapshots, otros_nuevos, result.reemplazos_de_otros
+        result.items,
+        result.edited_snapshots,
+        otros_nuevos,
+        result.reemplazos_de_otros,
+        result.filas_de_ediciones,
     )
     if perdida.hay_perdida and not _perdida_aceptada(perdida, accept_data_loss, tope_aceptado):
         raise RereadWouldLoseDataError(perdida)

@@ -9,8 +9,9 @@ Ahora el importador escribe la huella de la fila original (``source_row_digest``
 y la relectura reubica la edición en la fila fresca con esa huella, dentro de su
 contexto, por conjuntos, con el MISMO plan en el preview y en el apply.
 
-Lo importado antes de esto no tiene huella: queda como hoy, bajo la compuerta, y
-una edición repetida ya no se puede aceptar (decisión del dueño).
+Lo importado antes de esto no tiene huella: queda como hoy, bajo la compuerta. Una
+edición repetida PROBADA por la huella de su fila no se puede aceptar (decisión
+del dueño); la estimada (dos de tres, o sin huella) se acepta como antes.
 """
 
 from __future__ import annotations
@@ -186,6 +187,13 @@ def test_el_grupo_que_no_alcanza_ocupa_su_lugar_y_frena_al_que_iba_ahi() -> None
     t1, t2 = _reg(None, 0, "T"), _reg(None, 1, "T")  # quedan sin lugar: una sola T
     u = _reg(None, 2, "U")  # su fila pasó a la posición 1, la de t2
     assert _plan([t1, t2, u], _filas(None, ["X", "U", "T"])) == {}
+
+
+def test_la_que_sigue_en_su_fila_no_se_muda_a_una_gemela_nueva() -> None:
+    """[E', E] con E editada en la fila 1: la 0 es una gemela nueva libre, pero
+    la edición tiene su fila y se queda ahí. Sin la regla, se muda a la 0."""
+    e = _reg(None, 1, "E")
+    assert _plan([e], _filas(None, ["E", "E"])) == {}
 
 
 def test_no_se_cruza_de_contexto_ni_se_reubica_sin_contexto() -> None:
@@ -409,13 +417,16 @@ async def test_gemelas_editadas_que_ya_no_alcanzan_quedan_como_hoy_y_frenan(
     _patch_s3(monkeypatch, _csv([gemela, _CUATRO[0]]))
     perdida = await _aplicar_frena(db_session, tid, fid, accept_data_loss=True)
     assert perdida.edited_at_risk >= 1
+    # La gemela que entra es la fila original de una de ellas: probado.
+    assert perdida.edited_repeated_by_digest >= 1
 
 
 async def test_un_cambio_de_formato_no_casa_y_queda_la_red_de_la_compuerta(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Cambio de parser (o del archivo): la fila de la edición ya no se lee igual,
-    no hay evidencia de cuál es, y no se adivina."""
+    no hay evidencia de cuál es, y no se adivina. La repetición es ESTIMADA (dos
+    de tres): frena y se puede aceptar, como antes de B·nuevo."""
     file = await _subir_e_importar(
         db_session, tenant.tenant_id, _csv(_CUATRO), "text/csv", "g.csv"
     )
@@ -423,15 +434,22 @@ async def test_un_cambio_de_formato_no_casa_y_queda_la_red_de_la_compuerta(
     await _editar(db_session, fid, "2200")
     otra_forma = [(d, p, "2200.00" if m == "2200" else m) for d, p, m in _CUATRO]
     _patch_s3(monkeypatch, _csv([_N, *otra_forma]))
-    perdida = await _aplicar_frena(db_session, tid, fid, accept_data_loss=True)
-    assert perdida.edited_at_risk == 1
+    perdida = await _aplicar_frena(db_session, tid, fid)
+    assert (perdida.edited_at_risk, perdida.edited_repeated_by_digest) == (1, 0)
+    await reread_service.apply_reread(
+        db_session, fid, tid, accept_data_loss=True, tope_aceptado=perdida.as_dict()
+    )
+    await db_session.commit()
 
 
-async def test_lo_importado_antes_no_se_reubica_y_la_edicion_repetida_no_se_acepta(
+async def test_lo_importado_antes_no_se_reubica_y_la_edicion_repetida_se_acepta(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Decisión del dueño: sin huella, como hoy; y aceptar la pérdida (con o sin
-    tope) no habilita repetir una edición a mano. El mensaje dice cuál."""
+    """Sin huella (ASTERIA, todo lo importado antes de B·nuevo): como antes. La
+    repetición es estimada, frena con el mensaje de qué edición, se puede aceptar
+    y el rollback del frenado no deja nada movido. Si no se pudiera aceptar, la
+    relectura de un archivo legacy con una edición quedaría sin salida: borrarlo
+    y volver a subirlo (F11) también descarta la edición."""
     file = await _subir_e_importar(
         db_session, tenant.tenant_id, _csv(_CUATRO), "text/csv", "g.csv"
     )
@@ -446,19 +464,67 @@ async def test_lo_importado_antes_no_se_reubica_y_la_edicion_repetida_no_se_acep
     _patch_s3(monkeypatch, _csv([_N, *_CUATRO]))
 
     with pytest.raises(reread_service.RereadWouldLoseDataError) as frenado:
-        await reread_service.apply_reread(
-            db_session, fid, tid, accept_data_loss=True,
-            tope_aceptado={"to_lose": 99, "edited_at_risk": 99},
-        )
+        await reread_service.apply_reread(db_session, fid, tid)
     await db_session.rollback()
+    perdida = frenado.value.perdida
+    assert (perdida.edited_at_risk, perdida.edited_repeated_by_digest) == (1, 0)
     texto = str(frenado.value)
-    assert "no se puede aplicar igual" in texto
+    assert "no se puede aplicar igual" not in texto
+    assert "confirmá si querés aplicarla igual" in texto
     assert "corregido a mano 2200" in texto
     # Rollback completo: nada se movió.
     rec = await db_session.get(ExpenseEntry, editado)
     assert rec is not None and rec.source_row_ref == ref_antes
     assert await _huellas_del_archivo(db_session, tid, fid) == huellas_antes
     assert len(await _vivos(db_session, fid)) == 4
+
+    await reread_service.apply_reread(
+        db_session, fid, tid, accept_data_loss=True, tope_aceptado=perdida.as_dict()
+    )
+    await db_session.commit()
+    rec = await db_session.get(ExpenseEntry, editado)
+    assert rec is not None and rec.voided_at is None
+
+
+@pytest.mark.parametrize(
+    "nueva",
+    [
+        pytest.param(("2026-01-07", "Mate cocido", "2200"), id="mismo-dia-e-importe"),
+        # Idéntica a la fila original de la edición: la huella es la misma, pero
+        # la edición sigue sobre SU fila, así que ésta es otra operación.
+        pytest.param(_CUATRO[2], id="gemela-identica"),
+    ],
+)
+async def test_un_alta_nueva_parecida_a_una_edicion_se_puede_aceptar(
+    db_session: AsyncSession,
+    tenant: Tenant,
+    monkeypatch: pytest.MonkeyPatch,
+    nueva: tuple[str, str, str],
+) -> None:
+    """Falso positivo de la heurística de dos de tres: la edición sigue en su
+    fila (su huella lo prueba) y al final entra OTRA operación del mismo día y el
+    mismo importe (un kiosco: «Venta mostrador»). Frena (estimado) y se acepta:
+    no hay que tirar la edición ni dejar afuera una fila legítima del archivo."""
+    file = await _subir_e_importar(
+        db_session, tenant.tenant_id, _csv(_CUATRO), "text/csv", "g.csv"
+    )
+    tid, fid = tenant.tenant_id, file.id
+    editado = await _editar(db_session, fid, "2200")
+    _patch_s3(monkeypatch, _csv([*_CUATRO, nueva]))
+
+    perdida = await _aplicar_frena(db_session, tid, fid)
+    assert (perdida.to_lose, perdida.edited_at_risk) == (0, 1)
+    assert perdida.edited_repeated_by_digest == 0
+    await reread_service.apply_reread(
+        db_session, fid, tid, accept_data_loss=True, tope_aceptado=perdida.as_dict()
+    )
+    await db_session.commit()
+    assert await _vivos(db_session, fid) == sorted(
+        [(m, p) for _d, p, m in _CUATRO if m != "2200"]
+        + [("2200", "corregido a mano 2200"), ("2200", nueva[1])]
+    )
+    rec = await db_session.get(ExpenseEntry, editado)
+    assert rec is not None and rec.voided_at is None
 
 
 async def test_si_frena_por_otra_perdida_la_reubicacion_tambien_se_revierte(
@@ -828,22 +894,28 @@ async def test_un_contexto_que_cambia_de_id_no_se_reubica_y_frena_sin_poder_acep
             db_session, fid, tid, fresh_override=nuevo, accept_data_loss=True
         )
     await db_session.rollback()
+    # Con huella, la fila que entra en la hoja nueva ES su fila original.
     assert frenado.value.perdida.edited_at_risk == 1
+    assert frenado.value.perdida.edited_repeated_by_digest == 1
+    assert "no se puede aplicar igual" in str(frenado.value)
 
 
-# ── La pantalla: una edición repetida no se ofrece para aceptar ────────────────
+# ── La pantalla: una edición repetida probada no se ofrece para aceptar ───────
 
 
+@pytest.mark.parametrize("probada", [True, False], ids=["por-huella", "estimada"])
 async def test_el_estado_del_run_frenado_por_una_edicion_es_un_error_con_el_motivo(
     client: Any,
     auth_headers: dict[str, Any],
     db_session: AsyncSession,
     sample_tenant: Tenant,
     monkeypatch: pytest.MonkeyPatch,
+    probada: bool,
 ) -> None:
-    """Un frontend que no conoce el código nuevo lo trata como cualquier FAILED:
-    deja de consultar y muestra `error`, que es el mensaje del servidor. Sin
-    `data_loss`, ni el viejo ni el nuevo ofrecen «Aplicar igual»."""
+    """Probada por la huella: un frontend que no conoce el código nuevo lo trata
+    como cualquier FAILED: deja de consultar y muestra `error`, que es el mensaje
+    del servidor. Sin `data_loss`, ni el viejo ni el nuevo ofrecen «Aplicar
+    igual». Estimada (dos de tres, sin huella): se ofrece aceptar, como antes."""
     import unittest.mock
 
     from app.jobs import reread_worker
@@ -875,7 +947,9 @@ async def test_el_estado_del_run_frenado_por_una_edicion_es_un_error_con_el_moti
     reread_service.volver_a_confirmar(
         run,
         reread_service.PerdidaDeRelectura(
-            edited_at_risk=1, samples=[{"action": "edited_at_risk", "before": foto}]
+            edited_at_risk=1,
+            edited_repeated_by_digest=int(probada),
+            samples=[{"action": "edited_at_risk", "before": foto}],
         ),
     )
     await db_session.commit()
@@ -884,7 +958,7 @@ async def test_el_estado_del_run_frenado_por_una_edicion_es_un_error_con_el_moti
         f"/api/v1/ingestion/files/{fid}/reread/preview", headers=auth_headers
     )
     assert retomado.status_code == 200, retomado.text
-    assert retomado.json()["data_loss"] is None
+    assert (retomado.json()["data_loss"] is None) is probada
 
     estado = await client.get(
         f"/api/v1/ingestion/files/{fid}/reread/runs/{run_id}", headers=auth_headers
@@ -892,10 +966,15 @@ async def test_el_estado_del_run_frenado_por_una_edicion_es_un_error_con_el_moti
     assert estado.status_code == 200, estado.text
     e = estado.json()
     assert e["status"] == "FAILED"
-    assert e["error_code"] == reread_service.REREAD_EDITS_WOULD_REPEAT
-    assert e["data_loss"] is None
-    assert "no se puede aplicar igual" in e["error"]
     assert "gasto del 2026-01-07 por $2200.00" in e["error"]
+    if probada:
+        assert e["error_code"] == reread_service.REREAD_EDITS_WOULD_REPEAT
+        assert e["data_loss"] is None
+        assert "no se puede aplicar igual" in e["error"]
+    else:
+        assert e["error_code"] == reread_service.REREAD_WOULD_LOSE_DATA
+        assert e["data_loss"]["edited_at_risk"] == 1
+        assert "confirmá si querés aplicarla igual" in e["error"]
 
 
 @pytest.mark.parametrize(
@@ -935,3 +1014,142 @@ async def test_deshacer_una_reubicacion_deja_las_huellas_como_estaban(
     await db_session.commit()
     assert await _huellas_del_archivo(db_session, tid, fid) == huellas_antes
     assert await _refs_vivas(db_session, fid) == huellas_antes
+
+
+# ── Coberturas que pidió la revisión ────────────────────────────────────────────
+
+
+def _venta_hoja(dia: int, producto: str, monto: str) -> dict[str, str]:
+    return {"fecha": f"2026-04-{dia:02d}", "producto": producto, "monto": monto, "cliente": "Ana"}
+
+
+def _hoja_de_ventas(ctx: str, filas: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {
+                "context_id": ctx,
+                "entity_type": "sale",
+                "source_kind": "sheet",
+                "label": ctx,
+                "headers": ["fecha", "producto", "monto", "cliente"],
+                "row_count": len(filas),
+            }
+        ],
+        "ventas_detectadas": [{**r, "__context__": ctx} for r in filas],
+        "gastos_detectados": [],
+        "row_count": len(filas),
+    }
+
+
+async def test_multi_hoja_la_venta_editada_tiene_huella_y_se_reubica(
+    db_session: AsyncSession, tenant: Tenant
+) -> None:
+    """La huella de una venta de un libro multihoja la escribe `_add_sale` (la
+    forma de ASTERIA). Sin ella, la venta editada no se reubica y vuelve repetida."""
+    from app.application.services.ingestion_import_service import insert_confirmed_data
+    from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
+
+    tid, fid, ctx = tenant.tenant_id, uuid.uuid4(), "hoja:Ventas"
+    filas = [_venta_hoja(1, "Vela", "1000"), _venta_hoja(2, "Jabon", "2000")]
+    db_session.add(
+        UploadedFile(
+            id=fid, tenant_id=tid, original_filename="libro.xlsx", s3_key="k",
+            content_type="application/vnd.ms-excel", size_bytes=1, purpose="ventas",
+            processing_status=PROCESSING_STATUS_DONE,
+            parsed_summary_json={"inferred_type": "mixed", "confirmed_fields": {"ventas": True}},
+        )
+    )
+    await db_session.commit()
+    await insert_confirmed_data(
+        db_session, tid, _hoja_de_ventas(ctx, filas), {"ventas": True}, uploaded_file_id=fid
+    )
+    await db_session.commit()
+    venta = (
+        await db_session.execute(
+            select(SaleEntry).where(
+                SaleEntry.source_upload_id == fid, SaleEntry.amount == Decimal("2000")
+            )
+        )
+    ).scalar_one()
+    assert venta.source_row_digest, "la venta multihoja nace con la huella de su fila"
+    venta.has_user_edits = True
+    venta.notes = "corregida"
+    editada = venta.id
+    await db_session.commit()
+
+    nuevo = _hoja_de_ventas(ctx, [_venta_hoja(1, "Vela", "500"), *filas])
+    resultado = await reread_service.apply_reread(db_session, fid, tid, fresh_override=nuevo)
+    await db_session.commit()
+    assert [r["id"] for r in resultado.reubicaciones] == [str(editada)]
+    movida = await db_session.get(SaleEntry, editada)
+    assert movida is not None and movida.voided_at is None
+    assert movida.source_row_ref == reread_service._hash_anchor(
+        reread_service._row_anchor(tid, fid, ctx, 2)
+    )
+    vivas = (
+        await db_session.execute(
+            select(SaleEntry).where(
+                SaleEntry.source_upload_id == fid, SaleEntry.voided_at.is_(None)
+            )
+        )
+    ).scalars().all()
+    assert sorted(str(Decimal(v.amount).quantize(Decimal("1"))) for v in vivas) == [
+        "1000", "2000", "500"
+    ]
+
+
+async def test_la_edicion_no_se_reubica_sobre_la_fila_clasificada_desde_otros(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-O.2 reimporta por POSICIÓN la fila de un registro clasificado desde
+    «Otros»; la edición cuya fila se corrió a esa posición no la toma (ni en el
+    preview ni en el apply), o quedarían dos registros para una misma fila."""
+    from app.persistence.models.unclassified_record import (
+        UNCLASSIFIED_STATUS_IMPORTED,
+        UnclassifiedRecord,
+        unclassified_row_ref,
+    )
+
+    a, mala, c = _CUATRO[0], ("cuando pueda", "Pan Lactal", "800"), _CUATRO[2]
+    file = await _subir_e_importar(
+        db_session, tenant.tenant_id, _csv([a, mala, c]), "text/csv", "g.csv"
+    )
+    tid, fid = tenant.tenant_id, file.id
+    pendiente = (
+        await db_session.execute(
+            select(UnclassifiedRecord).where(UnclassifiedRecord.uploaded_file_id == fid)
+        )
+    ).scalars().one()
+    db_session.add(
+        ExpenseEntry(
+            tenant_id=tid, amount=Decimal("800"), transaction_date=datetime(2026, 1, 6),
+            category="Otros", description="Pan Lactal", provenance="REAL",
+            source_upload_id=fid, source_row_ref=unclassified_row_ref(pendiente.id),
+        )
+    )
+    pendiente.status = UNCLASSIFIED_STATUS_IMPORTED
+    await db_session.commit()
+    editado = await _editar(db_session, fid, "2200")
+    rec = await db_session.get(ExpenseEntry, editado)
+    assert rec is not None
+    ref_antes = rec.source_row_ref
+    assert ref_antes == _ref_de(tid, fid, 2)
+
+    # La fila de la edición pasa a la posición 1, la de la fila clasificada. En
+    # el apply la huella de esa fila ya se soltó (F-O.2 la reimporta): lo único
+    # que impide tomarla es `refs_de_otros`. En el preview la huella sigue
+    # registrada y la frena también `vivas`.
+    _patch_s3(monkeypatch, _csv([a, c, mala]))
+    preview = await reread_service.preview_reread(db_session, fid, tid)
+    assert (preview.to_lose, preview.edited_at_risk) == (0, 0)
+    resultado = await reread_service.apply_reread(db_session, fid, tid)
+    await db_session.commit()
+    assert resultado.reubicaciones == []
+    rec = await db_session.get(ExpenseEntry, editado)
+    assert rec is not None and rec.voided_at is None and rec.source_row_ref == ref_antes
+    # Lo que F-O.2 hace después con esa posición (la reimporta y reemplaza a la
+    # clasificada, por POSICIÓN) es su límite declarado (c), previo a B·nuevo, y
+    # no se afirma acá.

@@ -4446,10 +4446,11 @@ def _perdida_de_la_sesion(run: Any) -> RereadDataLoss | None:
     perdida = (run.details_json or {}).get("data_loss")
     if run.status != "READY_TO_APPLY" or not isinstance(perdida, dict):
         return None
-    # Una edición a mano repetida no se ofrece para aceptar (no se puede): sin
-    # medición acá, la pantalla no muestra «Aplicar igual»; el estado del run
-    # trae el motivo como error (ver `reread_run_status`).
-    if int(perdida.get("edited_at_risk") or 0) > 0:
+    # Una edición a mano repetida PROBADA (por la huella de su fila) no se ofrece
+    # para aceptar (no se puede): sin medición acá, la pantalla no muestra
+    # «Aplicar igual»; el estado del run trae el motivo como error (ver
+    # `reread_run_status`). La estimada (dos de tres, sin huella) sí se ofrece.
+    if int(perdida.get("edited_repeated_by_digest") or 0) > 0:
         return None
     return RereadDataLoss(
         to_lose=int(perdida.get("to_lose") or 0),
@@ -4656,12 +4657,13 @@ async def reread_run_status(
     # viejo sólo deja de consultar con APPLIED/FAILED (con otro estado quedaría
     # girando para siempre) y muestra `error`. El nuevo mira `data_loss`.
     _perdida = _perdida_de_la_sesion(run)
-    # B·nuevo: frenado por una edición a mano que quedaría repetida. Va con un
-    # código propio y sin `data_loss`: cualquier frontend lo muestra como error,
-    # con el mensaje del servidor, y no ofrece aceptarlo.
+    # B·nuevo: frenado por una edición a mano que volvería repetida, probado por
+    # la huella de su fila. Va con un código propio y sin `data_loss`: el frontend
+    # nuevo lo muestra como error, con el mensaje del servidor, y no ofrece
+    # aceptarlo.
     _frenado = d.get("data_loss") if run.status == "READY_TO_APPLY" else None
     _ediciones_repetidas = isinstance(_frenado, dict) and int(
-        _frenado.get("edited_at_risk") or 0
+        _frenado.get("edited_repeated_by_digest") or 0
     ) > 0
     if _perdida is not None or _ediciones_repetidas:
         return RereadRunStatusResponse(
