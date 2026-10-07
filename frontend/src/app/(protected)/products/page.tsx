@@ -754,10 +754,14 @@ function ProductEditModal({
   const umbralBase = umbralText.trim() === "" ? null : cantidad(umbralText);
   const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
   // Con el alta de categoría abierta, Guardar mandaría la categoría anterior y
-  // descartaría lo escrito: primero se crea o se cancela.
-  const categoriaAMedias = creandoCategoria || crearCategoria.isPending;
+  // descartaría lo escrito: primero se crea o se cancela. Durante el vuelo
+  // `creandoCategoria` sigue en true (sólo onSuccess lo baja); un alta en vuelo
+  // pedida por OTRO producto no bloquea a éste.
+  const categoriaAMedias = creandoCategoria;
+  const altaEnVueloAqui =
+    crearCategoria.isPending && crearCategoria.variables?.productId === form.id;
   const crear = () => {
-    if (!form || !nuevaCategoria.trim() || crearCategoria.isPending) return;
+    if (!form || !nuevaCategoria.trim() || altaEnVueloAqui) return;
     setErrorCategoria(null);
     crearCategoria.mutate({ label: nuevaCategoria.trim(), productId: form.id });
   };
@@ -827,11 +831,11 @@ function ProductEditModal({
               </label>
               <button
                 type="button"
-                disabled={!nuevaCategoria.trim() || crearCategoria.isPending}
+                disabled={!nuevaCategoria.trim() || altaEnVueloAqui}
                 onClick={crear}
                 className="rounded bg-vk-blue px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
               >
-                {crearCategoria.isPending ? "Creando..." : "Crear categoría"}
+                {altaEnVueloAqui ? "Creando..." : "Crear categoría"}
               </button>
               <button
                 type="button"

@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom";
-import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AxiosError, AxiosHeaders } from "axios";
 
@@ -205,6 +205,9 @@ test("la categoría creada para un producto no se aplica a otro abierto después
   dialogo = await screen.findByRole("dialog");
   const select = within(dialogo).getByLabelText("Categoría") as HTMLSelectElement;
   expect(within(dialogo).getByLabelText("Producto")).toHaveValue("Mesa ratona");
+  // El alta en vuelo es de OTRO producto: no bloquea a éste.
+  expect(within(dialogo).getByRole("button", { name: "Guardar" })).toBeEnabled();
+  expect(within(dialogo).queryByText(/creá o cancelá la categoría nueva/i)).not.toBeInTheDocument();
 
   responder({ code: "CUSTOM_FIAMBRES", label: "Fiambres" });
   // La respuesta llegó (la creada aparece en el catálogo) pero no se elige sola.
@@ -256,4 +259,64 @@ test("el error del servidor se muestra con su mensaje y no cambia la selección"
   );
   fireEvent.click(within(dialogo).getByRole("button", { name: "Cancelar nueva categoría" }));
   expect(select.value).toBe("");
+});
+
+/** Pide «Fiambres» para Lámpara, deja el alta en vuelo y abre Mesa ratona. */
+async function altaEnVueloYAbrirOtro() {
+  const OTRO = { ...PRODUCT, id: "p2", name: "Mesa ratona" };
+  mockGetAllProducts.mockResolvedValue([PRODUCT, OTRO]);
+  renderizar();
+  await waitFor(() => expect(screen.getAllByText("Sugerida: Iluminación")).toHaveLength(2));
+  fireEvent.click(screen.getByRole("button", { name: /elegir otra categoría para lámpara/i }));
+  let dialogo = await screen.findByRole("dialog");
+  await crear(dialogo, within(dialogo).getByLabelText("Categoría") as HTMLSelectElement, "Fiambres");
+  expect(mockCreateCategory).toHaveBeenCalledWith("Fiambres");
+  fireEvent.click(within(dialogo).getByRole("button", { name: "Cancelar" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: /elegir otra categoría para mesa/i }));
+  dialogo = await screen.findByRole("dialog");
+  const select = within(dialogo).getByLabelText("Categoría") as HTMLSelectElement;
+  // Mesa ratona arranca su propia alta y escribe un nombre.
+  fireEvent.change(select, { target: { value: "__nueva_categoria__" } });
+  const input = within(dialogo).getByLabelText("Nombre de la nueva categoría");
+  fireEvent.change(input, { target: { value: "Velas" } });
+  return { dialogo, select, input };
+}
+
+test("la respuesta del alta de otro producto no cierra ni borra el alta a medio escribir", async () => {
+  let responder: (v: { code: string; label: string }) => void = () => {};
+  mockCreateCategory.mockReturnValue(new Promise((r) => (responder = r)));
+  const { dialogo, select, input } = await altaEnVueloYAbrirOtro();
+  // Con el alta de OTRO producto en vuelo, el botón de éste no queda bloqueado.
+  expect(within(dialogo).getByRole("button", { name: "Crear categoría" })).toBeEnabled();
+
+  responder({ code: "CUSTOM_FIAMBRES", label: "Fiambres" });
+  await within(select).findByRole("option", { name: "Fiambres" });
+  expect(within(dialogo).getByLabelText("Nombre de la nueva categoría")).toBe(input);
+  expect(input).toHaveValue("Velas");
+  expect(select.value).toBe("__nueva_categoria__");
+});
+
+test("el error del alta de otro producto no aparece en el editor abierto", async () => {
+  let rechazar: (e: unknown) => void = () => {};
+  const pendiente = new Promise((_, r) => (rechazar = r));
+  mockCreateCategory.mockReturnValue(pendiente);
+  const { dialogo, input } = await altaEnVueloYAbrirOtro();
+
+  await act(async () => {
+    rechazar(
+      new AxiosError("Conflict", "ERR_BAD_REQUEST", undefined, undefined, {
+        status: 409,
+        statusText: "Conflict",
+        data: { detail: "La categoría ya existe." },
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+      }),
+    );
+    await pendiente.catch(() => {});
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  expect(within(dialogo).queryByRole("alert")).not.toBeInTheDocument();
+  expect(input).toHaveValue("Velas");
 });
