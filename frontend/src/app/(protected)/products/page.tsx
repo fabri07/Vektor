@@ -350,6 +350,18 @@ export default function ProductsPage() {
           >
             Aceptar
           </button>
+          {/* B·3b: si la sugerida no sirve, se elige o crea otra en el MISMO editor. */}
+          <button
+            type="button"
+            aria-label={`Elegir otra categoría para ${product.name}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditing(product);
+            }}
+            className="rounded-md border border-vk-border-w px-2 py-0.5 text-xs text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary"
+          >
+            Otra
+          </button>
         </span>
       );
     },
@@ -632,6 +644,7 @@ export default function ProductsPage() {
       <ProductEditModal
         product={editing}
         categories={categories}
+        canCreateCategory={user?.role === "OWNER" || user?.role === "ADMIN"}
         saving={updateMutation.isPending}
         onClose={() => setEditing(null)}
         onSave={(product) => updateMutation.mutate(product)}
@@ -653,26 +666,59 @@ function errorCode(e: unknown): string | null {
   return posErrorInfo(e).code;
 }
 
+// Valor centinela del <select> de categoría: abre el alta inline (B·3b).
+const NUEVA_CATEGORIA = "__nueva_categoria__";
+
 function ProductEditModal({
   product,
   categories,
+  canCreateCategory,
   saving,
   onClose,
   onSave,
 }: {
   product: ProductResponse | null;
   categories: ProductCategoryOption[];
+  /** POST /products/custom-categories es OWNER/ADMIN: el resto no ve la opción. */
+  canCreateCategory: boolean;
   saving: boolean;
   onClose: () => void;
   onSave: (product: ProductResponse) => void;
 }) {
+  const queryClient = useQueryClient();
   const [form, setForm] = useState<ProductResponse | null>(product);
+  // B·3b: alta de categoría desde el editor. Mismo endpoint que la carga
+  // manual; si el label coincide con una canónica, el servidor devuelve ESA.
+  const [creandoCategoria, setCreandoCategoria] = useState(false);
+  const [nuevaCategoria, setNuevaCategoria] = useState("");
+  const [errorCategoria, setErrorCategoria] = useState<string | null>(null);
+  // La recién creada, hasta que el catálogo refetcheado la traiga.
+  const [creada, setCreada] = useState<ProductCategoryOption | null>(null);
+  const crearCategoria = useMutation({
+    mutationFn: (label: string) => productsService.createCategory(label),
+    onSuccess: async (opcion) => {
+      setCreada(opcion);
+      setForm((prev) => (prev ? { ...prev, category: opcion.code } : prev));
+      setCreandoCategoria(false);
+      setNuevaCategoria("");
+      await queryClient.invalidateQueries({ queryKey: ["product-categories"] });
+    },
+    onError: (e) =>
+      setErrorCategoria(posErrorInfo(e).message ?? "No se pudo crear la categoría."),
+  });
+  const opciones =
+    creada && !categories.some((c) => c.code === creada.code)
+      ? [...categories, creada]
+      : categories;
   // Stock y umbral se escriben en la unidad de VENTA (kg, L) y se guardan en
   // unidades base: el texto vive aparte para poder tipear "0,750".
   const [stockText, setStockText] = useState("");
   const [umbralText, setUmbralText] = useState("");
   useEffect(() => {
     setForm(product);
+    setCreandoCategoria(false);
+    setNuevaCategoria("");
+    setErrorCategoria(null);
     if (product) {
       const f = product.base_units_per_sale_unit ?? 1;
       setStockText(enUnidadDeVenta(product.stock_units, f));
@@ -710,22 +756,82 @@ function ProductEditModal({
           <label className="grid gap-1 text-sm text-vektor-body">Categoría
             <select
               className="rounded border border-vk-border-w px-3 py-2"
-              value={form.category ?? ""}
-              onChange={(e) => set("category", e.target.value || null)}
+              value={creandoCategoria ? NUEVA_CATEGORIA : form.category ?? ""}
+              onChange={(e) => {
+                if (e.target.value === NUEVA_CATEGORIA) {
+                  setErrorCategoria(null);
+                  setCreandoCategoria(true);
+                  return;
+                }
+                setCreandoCategoria(false);
+                set("category", e.target.value || null);
+              }}
             >
               <option value="">Sin categoría</option>
-              {categories.map((c) => (
+              {opciones.map((c) => (
                 <option key={c.code} value={c.code}>
                   {c.label}
                 </option>
               ))}
               {/* Valor actual fuera del catálogo (legacy/raw): conservarlo como opción */}
-              {form.category && !categories.some((c) => c.code === form.category) ? (
+              {form.category && !opciones.some((c) => c.code === form.category) ? (
                 <option value={form.category}>{form.category}</option>
+              ) : null}
+              {canCreateCategory ? (
+                <option value={NUEVA_CATEGORIA}>+ Nueva categoría</option>
               ) : null}
             </select>
           </label>
         </div>
+        {creandoCategoria ? (
+          <div className="grid gap-1">
+            <div className="flex items-end gap-2">
+              <label className="grid flex-1 gap-1 text-sm text-vektor-body">
+                Nombre de la nueva categoría
+                <input
+                  className="rounded border border-vk-border-w px-3 py-2"
+                  maxLength={100}
+                  value={nuevaCategoria}
+                  onChange={(e) => setNuevaCategoria(e.target.value)}
+                  onKeyDown={(e) => {
+                    // Enter crea la categoría; no guarda el producto a medias.
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    if (nuevaCategoria.trim() && !crearCategoria.isPending) {
+                      setErrorCategoria(null);
+                      crearCategoria.mutate(nuevaCategoria.trim());
+                    }
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                disabled={!nuevaCategoria.trim() || crearCategoria.isPending}
+                onClick={() => {
+                  setErrorCategoria(null);
+                  crearCategoria.mutate(nuevaCategoria.trim());
+                }}
+                className="rounded bg-vk-blue px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {crearCategoria.isPending ? "Creando..." : "Crear categoría"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreandoCategoria(false);
+                  setErrorCategoria(null);
+                }}
+                aria-label="Cancelar nueva categoría"
+                className="rounded border border-vk-border-w px-3 py-2 text-sm"
+              >
+                Cancelar
+              </button>
+            </div>
+            {errorCategoria ? (
+              <p role="alert" className="text-xs text-vk-danger">{errorCategoria}</p>
+            ) : null}
+          </div>
+        ) : null}
         <label className="grid gap-1 text-sm text-vektor-body">
           Se vende por
           <select
