@@ -32,7 +32,6 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from app.domain.product_category_inference import CATEGORIA_INFERIDA_FIELD
 from app.domain.purchase_cost import COSTO_BASE_FIELD
 
 # Campos editables de un maestro que se serializan al snapshot y se restauran.
@@ -76,15 +75,11 @@ RESTORE_FIELDS: dict[str, tuple[str, ...]] = {
 # ``custom_fields`` y se restauran ahí, sin pisar el resto del dict (que puede
 # tener campos propios que cargó el usuario y no son de este archivo).
 #
-# Son procedencias, y no es un capricho: la del costo se ESCRIBE junto con
-# ``unit_cost_ars`` (F-H6.d), así que tiene que VOLVER junto con él. Restaurar el
-# costo y dejar la procedencia vieja deja al guard de V5 decidiendo con un dato
-# que ya no describe el número que está guardado. La de la categoría (B·3) igual:
-# si un catálogo pisó una inferida y se borra el archivo, vuelve la inferida Y su
-# marca — sin la marca quedaría como declarada y ningún catálogo la reemplazaría.
-CUSTOM_FIELD_RESTORE_KEYS: frozenset[str] = frozenset(
-    {COSTO_BASE_FIELD, CATEGORIA_INFERIDA_FIELD}
-)
+# Hoy hay una sola y no es un capricho: la procedencia del costo se ESCRIBE junto
+# con ``unit_cost_ars`` (F-H6.d), así que tiene que VOLVER junto con él. Restaurar
+# el costo y dejar la procedencia vieja deja al guard de V5 decidiendo con un dato
+# que ya no describe el número que está guardado.
+CUSTOM_FIELD_RESTORE_KEYS: frozenset[str] = frozenset({COSTO_BASE_FIELD})
 
 
 def snapshot_master(entity: Any, kind: str) -> dict[str, Any]:

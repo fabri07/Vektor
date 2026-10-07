@@ -313,12 +313,46 @@ export default function ProductsPage() {
   });
   const catalogLabels = Object.fromEntries(categories.map((c) => [c.code, c.label]));
 
+  // B·3: la categoría inferida es SÓLO sugerencia. Aceptarla es el mismo PATCH
+  // de producto que usa la edición, mandando nada más que la categoría.
+  const acceptSuggestionMutation = useMutation({
+    mutationFn: (payload: { id: string; category: string }) =>
+      productsService.updateProduct(payload.id, { category: payload.category }),
+    onSuccess: async () => {
+      toast("Categoría asignada.", "success");
+      await queryClient.invalidateQueries({ queryKey: ["products-list"] });
+    },
+    onError: () => toast("No se pudo asignar la categoría.", "error"),
+  });
+
   const categoryColumn = {
     key: "category",
     header: "Categoría",
     hideable: true,
-    render: (_: unknown, row: Record<string, unknown>) =>
-      categoryDisplay(row as unknown as ProductResponse, catalogLabels),
+    render: (_: unknown, row: Record<string, unknown>) => {
+      const product = row as unknown as ProductResponse;
+      const suggestion = product.category_suggestion;
+      if ((product.category ?? "").trim() || !suggestion) {
+        return categoryDisplay(product, catalogLabels);
+      }
+      return (
+        <span className="flex items-center gap-2">
+          <span className="text-vk-text-secondary">Sugerida: {suggestion.label}</span>
+          <button
+            type="button"
+            aria-label={`Aceptar categoría sugerida ${suggestion.label} para ${product.name}`}
+            disabled={acceptSuggestionMutation.isPending}
+            onClick={(e) => {
+              e.stopPropagation();
+              acceptSuggestionMutation.mutate({ id: product.id, category: suggestion.code });
+            }}
+            className="rounded-md border border-vk-border-w px-2 py-0.5 text-xs text-vk-text-secondary transition-colors hover:bg-vk-bg-light hover:text-vk-text-primary disabled:opacity-50"
+          >
+            Aceptar
+          </button>
+        </span>
+      );
+    },
     csvValue: (_: unknown, row: Record<string, unknown>) =>
       categoryDisplay(row as unknown as ProductResponse, catalogLabels),
   };

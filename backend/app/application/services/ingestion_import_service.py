@@ -130,12 +130,7 @@ from app.domain.numeric_parsing import (
     parsear_monto,
 )
 from app.domain.product_categories import normalize_product_category
-from app.domain.product_category_inference import (
-    CATEGORIA_INFERIDA_FIELD,
-    CategorySuggestion,
-    categoria_inferida_reemplazable,
-    infer_category,
-)
+from app.domain.product_category_inference import CategorySuggestion, infer_category
 from app.domain.purchase_cost import (
     ATRIBUIDO_A_INVENTARIO_FIELD,
     COMPARTIDO_SUBTOTAL,
@@ -175,7 +170,7 @@ from app.domain.text_norm import (
     normalize_sku,
     normalize_text,
 )
-from app.domain.verticals import Vertical, parse_vertical, try_parse_vertical
+from app.domain.verticals import Vertical, parse_vertical
 from app.observability.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1819,23 +1814,6 @@ async def _load_tenant_vertical(session: AsyncSession, tenant_id: uuid.UUID) -> 
     return parse_vertical(result.scalar_one_or_none())
 
 
-async def _try_load_tenant_vertical(
-    session: AsyncSession, tenant_id: uuid.UUID
-) -> Vertical | None:
-    """Como ``_load_tenant_vertical`` pero sin levantar: para inferir la categoría
-    de un producto nacido de una compra (B·3) fuera del import, donde un tenant
-    sin perfil o con un rubro no operativo no debe romper la reclasificación —
-    sólo se queda sin inferencia."""
-    from sqlalchemy import select  # noqa: PLC0415
-
-    from app.persistence.models.business import BusinessProfile  # noqa: PLC0415
-
-    result = await session.execute(
-        select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
-    )
-    return try_parse_vertical(result.scalar_one_or_none())
-
-
 # ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
 
 
@@ -2269,7 +2247,6 @@ async def _resolve_purchase_identity(
     indexes: ProductIdentityIndexes,
     cache: dict[str, Product],
     product_cache: dict[uuid.UUID, Any] | None = None,
-    vertical: Vertical | None = None,
 ) -> tuple[str, uuid.UUID | None, list[dict[str, Any]]]:
     """Resuelve el producto de una COMPRA de mercadería con el motor unificado.
 
@@ -2293,8 +2270,7 @@ async def _resolve_purchase_identity(
         return "otros", None, res.candidates
     try:
         new_id, created = await build_incomplete_product(
-            session, tenant_id, name, sku, unit_cost, product_cache,
-            barcode=barcode, vertical=vertical,
+            session, tenant_id, name, sku, unit_cost, product_cache, barcode=barcode
         )
     except ProductIdentityConflictError as conflict:
         # Ambigüedad detectada por la DB (barcode y sku en productos distintos): mismo
@@ -2852,31 +2828,16 @@ async def build_incomplete_product(
     product_cache: dict[uuid.UUID, Any] | None = None,
     *,
     barcode: str | None = None,
-    vertical: Vertical | None = None,
 ) -> tuple[uuid.UUID | None, bool]:
     """Construye y agrega a la sesión un ``Product`` vendible INCOMPLETO desde una
     compra de mercadería, devolviendo ``(id, creado)``.
 
-    Un producto nacido de una compra no trae precio de venta: nace
-    ``requires_completion=True``, ``sale_price_ars=0``, ``unit_cost_ars`` del costo
-    si vino, ``stock_units=0`` (el stock lo incrementa quien corresponda después).
-    Único lugar donde se materializa este patrón de "producto desde compra",
-    reusado por el import (``_ensure_product_for_purchase``) y por la
-    reclasificación de gastos a reventa (``RECLASSIFY_EXPENSE``).
-
-    Paso 3 del cierre del #48 (B·3): la categoría se infiere del nombre con
-    ``infer_category`` y se asigna SÓLO con confianza ``high`` — el mismo umbral
-    que el catálogo (``_insert_multisheet_data``). Con ``medium`` o ``low`` el
-    producto nace sin categoría: una categoría equivocada se aplica sola y no se
-    ve, una vacía queda en «Sin categoría» y se corrige. ``vertical`` lo pasan
-    los callers que ya lo cargaron una vez por corrida (el import); sin él se
-    lee del perfil del tenant, y un tenant sin rubro reconocible no infiere
-    nada en vez de romper una reclasificación. Sólo afecta al producto NUEVO: el
-    camino de reuso devuelve al ocupante intacto, así que nunca pisa una
-    categoría ni una edición existente. La inferida queda MARCADA
-    (``CATEGORIA_INFERIDA_FIELD``) para que un catálogo posterior que declara su
-    categoría la pueda reemplazar (``_aplicar_categoria_de_catalogo``): sin la
-    marca, el catálogo sólo completa vacíos y la heurística le ganaba al dato.
+    Un producto nacido de una compra no trae precio de venta ni categoría de
+    catálogo: nace ``requires_completion=True``, ``sale_price_ars=0``,
+    ``unit_cost_ars`` del costo si vino, ``stock_units=0`` (el stock lo incrementa
+    quien corresponda después). Único lugar donde se materializa este patrón de
+    "producto desde compra", reusado por el import (``_ensure_product_for_purchase``)
+    y por la reclasificación de gastos a reventa (``RECLASSIFY_EXPENSE``).
 
     Si se pasa ``product_cache``, el objeto resultante se cachea por id. Crítico
     con ``autoflush=False`` (prod): ``session.get`` no ve un producto pendiente sin
@@ -2909,17 +2870,6 @@ async def build_incomplete_product(
     clean_sku = _clean_str(sku, 99)
     clean_barcode = _clean_str(barcode, 64)  # F2-T5
 
-    if vertical is None:
-        vertical = await _try_load_tenant_vertical(session, tenant_id)
-    category: str | None = None
-    if vertical is not None:
-        suggestion = infer_category(vertical, clean_name)
-        if suggestion.confidence == "high":
-            category = suggestion.code
-    custom_fields: dict[str, Any] = (
-        {CATEGORIA_INFERIDA_FIELD: category} if category is not None else {}
-    )
-
     new_id = uuid.uuid4()
     product = Product(
         id=new_id,
@@ -2930,13 +2880,11 @@ async def build_incomplete_product(
         sale_price_ars=Decimal("0"),  # una compra no trae precio de venta
         unit_cost_ars=unit_cost,
         stock_units=0,  # el incremento lo hace quien corresponda después
-        # category de PRODUCTO (vertical) ≠ código de gasto: sólo la inferida con
-        # confianza alta; si no, None (B·3).
-        category=category,
+        # category de PRODUCTO (vertical) ≠ código de gasto → None (incompleto).
+        category=None,
         low_stock_threshold_units=None,
         provenance="REAL",
         requires_completion=True,  # falta precio de venta → completar
-        custom_fields=custom_fields,
     )
     # NO ``session.add()`` acá: ``add_product_or_reuse`` exige el objeto TRANSIENT
     # para poder emitir el INSERT DENTRO del savepoint (ver services/_savepoint.py).
@@ -2944,55 +2892,6 @@ async def build_incomplete_product(
     if product_cache is not None:
         product_cache[resolved.id] = resolved
     return resolved.id, created
-
-
-def _aplicar_categoria_de_catalogo(
-    product: Any, categoria: str | None, *, declarada: bool, reconocida: bool = True
-) -> None:
-    """Escribe la categoría que trae una fila de catálogo sobre un producto EXISTENTE.
-
-    - Vacía → se completa con lo que haya (declarada o inferida).
-    - Ocupada por una INFERENCIA intacta (``categoria_inferida_reemplazable``) →
-      la pisa sólo una DECLARADA y RECONOCIDA: el dato del archivo le gana a la
-      heurística, nunca otra heurística a la primera ni una celda que el rubro no
-      reconoce ("-", "varios") y cae al respaldo ``OTHER``.
-
-    ``reconocida`` = ``normalize_product_category`` no devolvió etiqueta (la celda
-    coincidió con un rótulo o sinónimo del rubro). Se mira la etiqueta y no el
-    código porque «Otros» escrito en la columna también normaliza a ``OTHER``,
-    pero coincidió: es un dato declarado —típicamente para corregir una inferida—
-    y gana como cualquier otro. Sólo el respaldo de una normalización que falló
-    (etiqueta = texto original) no.
-    - Ocupada por cualquier otra cosa (declarada antes, editada a mano) → no se
-      toca: completar sin pisar, como el resto de los campos del catálogo.
-
-    La marca de procedencia se escribe o se saca en la MISMA operación que la
-    categoría, por la misma razón que el costo y su base (F-H6.d): una marca que
-    describe otra categoría que la guardada miente.
-    """
-    if not categoria:
-        return
-    if product.category and not (
-        declarada
-        # Una celda que no coincide con nada del rubro ("-", "varios", un
-        # nombre de colección) cae al RESPALDO ``OTHER`` con etiqueta: no es un
-        # dato declarado sino una normalización que falló, y no le gana a una
-        # inferencia específica. Un «Otros» reconocido sí (ver docstring).
-        and reconocida
-        and categoria_inferida_reemplazable(
-            product.category, product.custom_fields, product.has_user_edits
-        )
-    ):
-        return
-    product.category = categoria
-    cf = dict(product.custom_fields or {})
-    if declarada:
-        if CATEGORIA_INFERIDA_FIELD not in cf:
-            return
-        cf.pop(CATEGORIA_INFERIDA_FIELD)
-    else:
-        cf[CATEGORIA_INFERIDA_FIELD] = categoria
-    product.custom_fields = cf
 
 
 def _ledger_item_producto_creado(
@@ -3046,7 +2945,6 @@ async def _ensure_product_for_purchase(
     by_name: dict[str, uuid.UUID | None],
     by_token: dict[str, set[uuid.UUID]] | None = None,
     product_cache: dict[uuid.UUID, Any] | None = None,
-    vertical: Vertical | None = None,
 ) -> uuid.UUID | None:
     """Crea el ``Product`` de una compra de mercadería cuyo SKU/nombre NO está en
     el catálogo, y devuelve su id (o ``None`` si no hay nombre utilizable).
@@ -3063,7 +2961,7 @@ async def _ensure_product_for_purchase(
     mismo SKU/nombre en el mismo archivo reusen el producto (sin duplicar).
     """
     new_id, _created = await build_incomplete_product(
-        session, tenant_id, name, sku, unit_cost, product_cache=product_cache, vertical=vertical
+        session, tenant_id, name, sku, unit_cost, product_cache=product_cache
     )
     if new_id is None:
         return None
@@ -5912,7 +5810,6 @@ async def _insert_confirmed_data_impl(
                             indexes=_identity_indexes,
                             cache=products_by_identity_key,
                             product_cache=_product_cache,
-                            vertical=_vertical,
                         )
                         if _action == "otros":
                             # Review F2 #1/#3: compra con producto ambiguo/en conflicto
@@ -6324,7 +6221,6 @@ async def _insert_confirmed_data_impl(
                     # La celda cruda: un producto por peso la lee con decimales.
                     _stock_raw: Any = row.get(stock_col) if stock_col else None,
                     prod_cat: str | None = prod_cat,
-                    prod_cat_label: str | None = prod_cat_label,
                     prod_desc: str | None = prod_desc,
                     store_name: str | None = store_name,
                     _prod_row_ref: str | None = _prod_row_ref,
@@ -6395,11 +6291,6 @@ async def _insert_confirmed_data_impl(
                             ),
                             "external_code": existing.external_code,
                             "external_source": existing.external_source,
-                            # B·3: vuelve junto con `category` (ver
-                            # CUSTOM_FIELD_RESTORE_KEYS).
-                            CATEGORIA_INFERIDA_FIELD: (existing.custom_fields or {}).get(
-                                CATEGORIA_INFERIDA_FIELD
-                            ),
                         }
                     if price:
                         existing.sale_price_ars = price
@@ -6445,15 +6336,8 @@ async def _insert_confirmed_data_impl(
                     # un barcode ya cargado con el de una fila de reposición).
                     if barcode and not existing.barcode:
                         existing.barcode = barcode
-                    # B·3: en este camino la categoría sólo sale de la columna
-                    # del archivo (no hay inferencia), así que siempre es
-                    # declarada y puede reemplazar una inferida.
-                    _aplicar_categoria_de_catalogo(
-                        existing,
-                        prod_cat,
-                        declarada=True,
-                        reconocida=prod_cat_label is None,
-                    )
+                    if prod_cat and not existing.category:
+                        existing.category = prod_cat
                     if prod_desc and not existing.description:  # completar sin pisar
                         existing.description = prod_desc
                     # F6-B2: acumular fechas de producto salvo edición manual del
@@ -8081,7 +7965,6 @@ async def _insert_multisheet_data(
                 indexes=_identity_indexes,
                 cache=products_by_identity_key,
                 product_cache=product_cache,
-                vertical=_vertical,
             )
             if _action == "otros":
                 # Review F2 #1: compra ambigua/en conflicto NO crea un 3er producto
@@ -8500,10 +8383,6 @@ async def _insert_multisheet_data(
                     ),
                     "external_code": existing.external_code,
                     "external_source": existing.external_source,
-                    # B·3: vuelve junto con `category` (ver CUSTOM_FIELD_RESTORE_KEYS).
-                    CATEGORIA_INFERIDA_FIELD: (existing.custom_fields or {}).get(
-                        CATEGORIA_INFERIDA_FIELD
-                    ),
                 }
             if price:
                 existing.sale_price_ars = price
@@ -8556,11 +8435,8 @@ async def _insert_multisheet_data(
                 existing.sku = sku
             if barcode and not existing.barcode:  # F2-T5: completar sin pisar
                 existing.barcode = barcode
-            # B·3: la declarada (columna con valor) reemplaza una inferida; la
-            # inferida de esta fila sólo completa un vacío, y queda marcada.
-            _aplicar_categoria_de_catalogo(
-                existing, cat, declarada=bool(cat_raw), reconocida=cat_label is None
-            )
+            if cat and not existing.category:
+                existing.category = cat
             if _desc and not existing.description:  # mismo criterio: completar sin pisar
                 existing.description = _desc
             # F6-B2: acumular fechas de producto salvo edición manual del usuario
@@ -8747,10 +8623,6 @@ async def _insert_multisheet_data(
                         else "Tienda (proveedor no vinculado)",
                     )
                     _ensured_custom_fields.add(("product", _store_field_key))
-            if cat and not cat_raw:
-                # B·3: inferida, no declarada → marcada, para que un catálogo
-                # posterior con su columna Categoría la pueda reemplazar.
-                cf = {**cf, CATEGORIA_INFERIDA_FIELD: cat}
             _new_id = uuid.uuid4()
             new_product = Product(
                 id=_new_id,
@@ -9908,8 +9780,6 @@ async def import_receipt(
     by_sku, by_name, by_token = await _load_product_index(session, tenant_id)
     balance_index = await _load_balance_index(session, tenant_id)
     product_cache: dict[uuid.UUID, Any] = {}
-    # B·3: el rubro una vez por remito, no una query por producto nuevo.
-    receipt_vertical = await _try_load_tenant_vertical(session, tenant_id)
 
     created_product_ids: list[str] = []
     expense_ids: list[str] = []
@@ -9929,7 +9799,6 @@ async def import_receipt(
                 by_name,
                 by_token,
                 product_cache=product_cache,
-                vertical=receipt_vertical,
             )
             if product_id is not None:
                 created_product_ids.append(str(product_id))

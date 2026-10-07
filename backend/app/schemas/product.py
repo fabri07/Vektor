@@ -16,6 +16,15 @@ from app.schemas.pos import PosProductResponse
 EXPIRY_WARNING_DAYS = 30
 
 
+class CategorySuggestionResponse(BaseModel):
+    """Categoría SUGERIDA para un producto sin categoría (B·3). No se persiste:
+    la calcula el endpoint en cada lectura y sólo se fija si el usuario la acepta
+    con el PATCH de siempre."""
+
+    code: str
+    label: str
+
+
 class ProductResponse(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -54,6 +63,9 @@ class ProductResponse(BaseModel):
     created_at: datetime
     deactivated_at: datetime | None = None
     deactivation_reason: str | None = None
+    # B·3: sólo con categoría vacía y confianza alta; si no, null. La llena el
+    # endpoint (``products._con_sugerencias``), no el ORM: un frontend viejo la ignora.
+    category_suggestion: CategorySuggestionResponse | None = None
 
     @field_validator("custom_fields", mode="before")
     @classmethod

@@ -1318,10 +1318,6 @@ async def _apply_one_group(
     from sqlalchemy.engine import CursorResult  # noqa: PLC0415
 
     from app.application.services import maintenance_lock_service as mls  # noqa: PLC0415
-    from app.domain.product_category_inference import (  # noqa: PLC0415
-        CATEGORIA_INFERIDA_FIELD,
-        categoria_inferida_reemplazable,
-    )
     from app.domain.product_completion import recompute_requires_completion  # noqa: PLC0415
     from app.persistence.models.inventory import (  # noqa: PLC0415
         InventoryBalance,
@@ -1383,7 +1379,6 @@ async def _apply_one_group(
     canonical_fk_3t_before = await _count_fk_3t(session, tenant_id, canonical_id)
 
     fields_completed: dict[str, Any] = {}
-    category_source: Product | None = None
     for f in _MERGE_COMPLETABLE_FIELDS:
         if not _is_empty(getattr(canonical_obj, f)):
             continue
@@ -1395,8 +1390,6 @@ async def _apply_one_group(
             if not _is_empty(val):
                 setattr(canonical_obj, f, val)
                 fields_completed[f] = _json_scalar(val)
-                if f == "category":
-                    category_source = dup
                 break
 
     # custom_fields: shallow merge, canónico gana, excluí claves internas ("_"-prefijo).
@@ -1414,18 +1407,6 @@ async def _apply_one_group(
                 continue
             new_cf[k] = v
             cf_added[k] = v
-    # B·3 — una categoría INFERIDA viaja con su marca de procedencia. Sin ella
-    # el canónico la tendría como declarada y un catálogo posterior que declara
-    # la suya no la podría reemplazar (la heurística le ganaría al dato). Sólo si
-    # en el duplicado era una inferida intacta (``categoria_inferida_reemplazable``):
-    # una marca muerta o un producto editado a mano no se propagan.
-    if category_source is not None and categoria_inferida_reemplazable(
-        category_source.category,
-        category_source.custom_fields,
-        category_source.has_user_edits,
-    ):
-        new_cf[CATEGORIA_INFERIDA_FIELD] = category_source.category
-        cf_added[CATEGORIA_INFERIDA_FIELD] = category_source.category
     if cf_added:
         canonical_obj.custom_fields = new_cf
 
@@ -2395,13 +2376,8 @@ async def _revert_one_group(
     for f in m_after.get("fields_completed") or {}:
         setattr(canon, f, None)  # el campo completado (estaba vacío) vuelve a NULL
     new_cf = dict(canon.custom_fields or {})
-    prev_cf_snapshot = canonical_prev.get("custom_fields") or {}
     for k in m_after.get("custom_fields_added") or {}:
         new_cf.pop(k, None)
-        # Una clave agregada pudo PISAR una previa (la marca de categoría inferida
-        # sobre una marca muerta, B·3): vuelve el valor previo, no la ausencia.
-        if isinstance(prev_cf_snapshot, dict) and k in prev_cf_snapshot:
-            new_cf[k] = prev_cf_snapshot[k]
     canon.custom_fields = new_cf
     if "requires_completion" in canonical_prev:
         canon.requires_completion = bool(canonical_prev["requires_completion"])
