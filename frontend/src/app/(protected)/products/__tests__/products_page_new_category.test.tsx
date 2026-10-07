@@ -321,30 +321,32 @@ test("el error del alta de otro producto no aparece en el editor abierto", async
   expect(input).toHaveValue("Velas");
 });
 
-test("con el alta propia en vuelo, cambiar el select o cancelar el alta no habilita Guardar", async () => {
+test("cancelar el alta en vuelo y elegir otra categoría: la respuesta no pisa la elección", async () => {
   let responder: (v: { code: string; label: string }) => void = () => {};
   mockCreateCategory.mockReturnValue(new Promise((r) => (responder = r)));
   renderizar();
   const { dialogo, select } = await abrirEditorDesdeSugerencia();
   await crear(dialogo, select, "Fiambres");
   const guardar = within(dialogo).getByRole("button", { name: "Guardar" });
+  // En vuelo y con el alta abierta, Guardar espera.
+  expect(guardar).toBeDisabled();
 
-  // Cancelar el alta en vuelo: la respuesta igual se va a aplicar a este producto.
   fireEvent.click(within(dialogo).getByRole("button", { name: "Cancelar nueva categoría" }));
-  expect(guardar).toBeDisabled();
-  // Elegir otra categoría tampoco destraba Guardar mientras vuela el alta propia.
   fireEvent.change(select, { target: { value: "ILUMINACION" } });
-  expect(guardar).toBeDisabled();
-  expect(within(dialogo).getByText(/esperá a que termine de crearse/i)).toBeInTheDocument();
-  fireEvent.submit(guardar.closest("form") as HTMLFormElement);
-  expect(mockUpdateProduct).not.toHaveBeenCalled();
+  // Cancelada, no hay nada que esperar: la respuesta ya no se aplica.
+  expect(guardar).toBeEnabled();
 
   responder({ code: "CUSTOM_FIAMBRES", label: "Fiambres" });
-  await waitFor(() => expect(guardar).toBeEnabled());
-  expect(select.value).toBe("CUSTOM_FIAMBRES");
+  await within(select).findByRole("option", { name: "Fiambres" });
+  expect(select.value).toBe("ILUMINACION");
+
+  fireEvent.click(guardar);
+  await waitFor(() =>
+    expect(mockUpdateProduct).toHaveBeenCalledWith("p1", expect.objectContaining({ category: "ILUMINACION" })),
+  );
 });
 
-test("reabrir el mismo producto con su alta en vuelo deja Guardar deshabilitado hasta la respuesta", async () => {
+test("reabrir el producto descarta su alta en vuelo: la respuesta no reemplaza la categoría", async () => {
   let responder: (v: { code: string; label: string }) => void = () => {};
   mockCreateCategory.mockReturnValue(new Promise((r) => (responder = r)));
   renderizar();
@@ -355,15 +357,53 @@ test("reabrir el mismo producto con su alta en vuelo deja Guardar deshabilitado 
 
   ({ dialogo, select } = await abrirEditorDesdeSugerencia());
   const guardar = within(dialogo).getByRole("button", { name: "Guardar" });
-  expect(guardar).toBeDisabled();
-  fireEvent.submit(guardar.closest("form") as HTMLFormElement);
-  expect(mockUpdateProduct).not.toHaveBeenCalled();
+  expect(guardar).toBeEnabled();
 
   responder({ code: "CUSTOM_FIAMBRES", label: "Fiambres" });
-  await waitFor(() => expect(guardar).toBeEnabled());
-  expect(select.value).toBe("CUSTOM_FIAMBRES");
+  await within(select).findByRole("option", { name: "Fiambres" });
+  expect(select.value).toBe("");
   fireEvent.click(guardar);
   await waitFor(() =>
-    expect(mockUpdateProduct).toHaveBeenCalledWith("p1", expect.objectContaining({ category: "CUSTOM_FIAMBRES" })),
+    expect(mockUpdateProduct).toHaveBeenCalledWith("p1", expect.objectContaining({ category: null })),
   );
+});
+
+test("con dos altas del mismo producto en vuelo, sólo se aplica la última pedida", async () => {
+  const OTRO = { ...PRODUCT, id: "p2", name: "Mesa ratona" };
+  mockGetAllProducts.mockResolvedValue([PRODUCT, OTRO]);
+  const respuestas: Array<(v: { code: string; label: string }) => void> = [];
+  mockCreateCategory.mockImplementation(() => new Promise((r) => respuestas.push(r)));
+  renderizar();
+  await waitFor(() => expect(screen.getAllByText("Sugerida: Iluminación")).toHaveLength(2));
+  const abrir = async (nombre: RegExp) => {
+    fireEvent.click(screen.getByRole("button", { name: nombre }));
+    const dialogo = await screen.findByRole("dialog");
+    return { dialogo, select: within(dialogo).getByLabelText("Categoría") as HTMLSelectElement };
+  };
+  const cerrar = async (dialogo: HTMLElement) => {
+    fireEvent.click(within(dialogo).getByRole("button", { name: "Cancelar" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  };
+
+  // Lámpara pide «Fiambres»; Mesa pide «Velas» (ahora la mutación apunta a Mesa).
+  let { dialogo, select } = await abrir(/elegir otra categoría para lámpara/i);
+  await crear(dialogo, select, "Fiambres");
+  await cerrar(dialogo);
+  ({ dialogo, select } = await abrir(/elegir otra categoría para mesa/i));
+  await crear(dialogo, select, "Velas");
+  await cerrar(dialogo);
+  // Lámpara reabre y pide «Embutidos» con «Fiambres» todavía en vuelo.
+  ({ dialogo, select } = await abrir(/elegir otra categoría para lámpara/i));
+  await crear(dialogo, select, "Embutidos");
+  expect(mockCreateCategory).toHaveBeenCalledTimes(3);
+
+  respuestas[0]!({ code: "CUSTOM_FIAMBRES", label: "Fiambres" });
+  await within(select).findByRole("option", { name: "Fiambres" });
+  // La vieja no cierra el alta ni elige «Fiambres»; Guardar sigue esperando.
+  expect(select.value).toBe("__nueva_categoria__");
+  expect(within(dialogo).getByRole("button", { name: "Guardar" })).toBeDisabled();
+
+  respuestas[2]!({ code: "CUSTOM_EMBUTIDOS", label: "Embutidos" });
+  await waitFor(() => expect(select.value).toBe("CUSTOM_EMBUTIDOS"));
+  expect(within(dialogo).getByRole("button", { name: "Guardar" })).toBeEnabled();
 });

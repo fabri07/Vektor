@@ -698,23 +698,29 @@ function ProductEditModal({
   const [errorCategoria, setErrorCategoria] = useState<string | null>(null);
   // La recién creada, hasta que el catálogo refetcheado la traiga.
   const [creada, setCreada] = useState<ProductCategoryOption | null>(null);
-  // El modal queda montado entre aperturas: la respuesta puede llegar con OTRO
-  // producto en el formulario. Sólo se aplica al producto que la pidió.
-  const productoAbierto = useRef<string | null>(product?.id ?? null);
+  // El pedido de alta que el editor abierto todavía espera, o null. Cancelar
+  // el alta, elegir otra categoría, cerrar o reabrir lo descartan: la
+  // respuesta de un pedido descartado no toca el formulario (el modal queda
+  // montado entre aperturas, y la elección explícita del usuario no se pisa).
+  // Se compara por identidad del pedido, no por producto: con dos altas en
+  // vuelo, sólo la última pedida en este editor se aplica.
+  const altaEsperada = useRef<{ label: string; productId: string } | null>(null);
   const crearCategoria = useMutation({
     mutationFn: ({ label }: { label: string; productId: string }) =>
       productsService.createCategory(label),
-    onSuccess: async (opcion, { productId }) => {
+    onSuccess: async (opcion, pedido) => {
       setCreada(opcion);
-      if (productoAbierto.current === productId) {
-        setForm((prev) => (prev && prev.id === productId ? { ...prev, category: opcion.code } : prev));
+      if (altaEsperada.current === pedido) {
+        altaEsperada.current = null;
+        setForm((prev) => (prev && prev.id === pedido.productId ? { ...prev, category: opcion.code } : prev));
         setCreandoCategoria(false);
         setNuevaCategoria("");
       }
       await queryClient.invalidateQueries({ queryKey: ["product-categories"] });
     },
-    onError: (e, { productId }) => {
-      if (productoAbierto.current !== productId) return;
+    onError: (e, pedido) => {
+      if (altaEsperada.current !== pedido) return;
+      altaEsperada.current = null;
       setErrorCategoria(posErrorInfo(e).message ?? "No se pudo crear la categoría.");
     },
   });
@@ -727,7 +733,7 @@ function ProductEditModal({
   const [stockText, setStockText] = useState("");
   const [umbralText, setUmbralText] = useState("");
   useEffect(() => {
-    productoAbierto.current = product?.id ?? null;
+    altaEsperada.current = null;
     setForm(product);
     setCreandoCategoria(false);
     setNuevaCategoria("");
@@ -753,18 +759,22 @@ function ProductEditModal({
   const stockBase = cantidad(stockText);
   const umbralBase = umbralText.trim() === "" ? null : cantidad(umbralText);
   const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
-  // Con el alta de categoría abierta, Guardar mandaría la categoría anterior y
-  // descartaría lo escrito: primero se crea o se cancela. Con el alta de ESTE
-  // producto en vuelo también se espera: `creandoCategoria` baja al cambiar el
-  // select, al cancelar el alta o al reabrir el producto, pero la respuesta
-  // igual se le aplica. Un alta en vuelo pedida por OTRO producto no bloquea.
+  // Con el alta de categoría abierta (escribiendo o en vuelo), Guardar mandaría
+  // la categoría anterior y descartaría lo pedido: primero se crea o se
+  // cancela. Cancelada, la respuesta ya no se aplica, así que no hay que esperarla.
   const altaEnVueloAqui =
     crearCategoria.isPending && crearCategoria.variables?.productId === form.id;
-  const categoriaAMedias = creandoCategoria || altaEnVueloAqui;
+  const categoriaAMedias = creandoCategoria;
+  const descartarAlta = () => {
+    altaEsperada.current = null;
+    setCreandoCategoria(false);
+  };
   const crear = () => {
     if (!form || !nuevaCategoria.trim() || altaEnVueloAqui) return;
     setErrorCategoria(null);
-    crearCategoria.mutate({ label: nuevaCategoria.trim(), productId: form.id });
+    const pedido = { label: nuevaCategoria.trim(), productId: form.id };
+    altaEsperada.current = pedido;
+    crearCategoria.mutate(pedido);
   };
   return (
     <Modal isOpen={!!product} onClose={onClose} title="Editar producto" size="lg">
@@ -792,7 +802,7 @@ function ProductEditModal({
                   setCreandoCategoria(true);
                   return;
                 }
-                setCreandoCategoria(false);
+                descartarAlta();
                 set("category", e.target.value || null);
               }}
             >
@@ -841,7 +851,7 @@ function ProductEditModal({
               <button
                 type="button"
                 onClick={() => {
-                  setCreandoCategoria(false);
+                  descartarAlta();
                   setErrorCategoria(null);
                 }}
                 aria-label="Cancelar nueva categoría"
@@ -900,11 +910,7 @@ function ProductEditModal({
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
         <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
         {categoriaAMedias ? (
-          <p className="text-xs text-vektor-muted">
-            {creandoCategoria
-              ? "Creá o cancelá la categoría nueva antes de guardar."
-              : "Esperá a que termine de crearse la categoría nueva para guardar."}
-          </p>
+          <p className="text-xs text-vektor-muted">Creá o cancelá la categoría nueva antes de guardar.</p>
         ) : null}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
