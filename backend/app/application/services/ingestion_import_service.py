@@ -2946,21 +2946,23 @@ async def build_incomplete_product(
     return resolved.id, created
 
 
-#: Código que devuelve ``normalize_product_category`` cuando el texto no coincide
-#: con ninguna categoría del rubro (ver ``product_categories``).
-_CATEGORIA_DE_RESPALDO = "OTHER"
-
-
 def _aplicar_categoria_de_catalogo(
-    product: Any, categoria: str | None, *, declarada: bool
+    product: Any, categoria: str | None, *, declarada: bool, reconocida: bool = True
 ) -> None:
     """Escribe la categoría que trae una fila de catálogo sobre un producto EXISTENTE.
 
     - Vacía → se completa con lo que haya (declarada o inferida).
     - Ocupada por una INFERENCIA intacta (``categoria_inferida_reemplazable``) →
-      la pisa sólo una DECLARADA y RECONOCIDA (código ≠ ``OTHER``): el dato del
-      archivo le gana a la heurística, nunca otra heurística a la primera ni una
-      celda que el rubro no reconoce ("-", "varios") y cae al respaldo.
+      la pisa sólo una DECLARADA y RECONOCIDA: el dato del archivo le gana a la
+      heurística, nunca otra heurística a la primera ni una celda que el rubro no
+      reconoce ("-", "varios") y cae al respaldo ``OTHER``.
+
+    ``reconocida`` = ``normalize_product_category`` no devolvió etiqueta (la celda
+    coincidió con un rótulo o sinónimo del rubro). Se mira la etiqueta y no el
+    código porque «Otros» escrito en la columna también normaliza a ``OTHER``,
+    pero coincidió: es un dato declarado —típicamente para corregir una inferida—
+    y gana como cualquier otro. Sólo el respaldo de una normalización que falló
+    (etiqueta = texto original) no.
     - Ocupada por cualquier otra cosa (declarada antes, editada a mano) → no se
       toca: completar sin pisar, como el resto de los campos del catálogo.
 
@@ -2972,11 +2974,11 @@ def _aplicar_categoria_de_catalogo(
         return
     if product.category and not (
         declarada
-        # ``OTHER`` es el RESPALDO de ``normalize_product_category`` cuando el
-        # texto de la celda no coincide con nada del rubro ("-", "varios", un
-        # nombre de colección): no es un dato declarado sino una normalización
-        # que falló, y no le gana a una inferencia específica.
-        and categoria != _CATEGORIA_DE_RESPALDO
+        # Una celda que no coincide con nada del rubro ("-", "varios", un
+        # nombre de colección) cae al RESPALDO ``OTHER`` con etiqueta: no es un
+        # dato declarado sino una normalización que falló, y no le gana a una
+        # inferencia específica. Un «Otros» reconocido sí (ver docstring).
+        and reconocida
         and categoria_inferida_reemplazable(
             product.category, product.custom_fields, product.has_user_edits
         )
@@ -6322,6 +6324,7 @@ async def _insert_confirmed_data_impl(
                     # La celda cruda: un producto por peso la lee con decimales.
                     _stock_raw: Any = row.get(stock_col) if stock_col else None,
                     prod_cat: str | None = prod_cat,
+                    prod_cat_label: str | None = prod_cat_label,
                     prod_desc: str | None = prod_desc,
                     store_name: str | None = store_name,
                     _prod_row_ref: str | None = _prod_row_ref,
@@ -6445,7 +6448,12 @@ async def _insert_confirmed_data_impl(
                     # B·3: en este camino la categoría sólo sale de la columna
                     # del archivo (no hay inferencia), así que siempre es
                     # declarada y puede reemplazar una inferida.
-                    _aplicar_categoria_de_catalogo(existing, prod_cat, declarada=True)
+                    _aplicar_categoria_de_catalogo(
+                        existing,
+                        prod_cat,
+                        declarada=True,
+                        reconocida=prod_cat_label is None,
+                    )
                     if prod_desc and not existing.description:  # completar sin pisar
                         existing.description = prod_desc
                     # F6-B2: acumular fechas de producto salvo edición manual del
@@ -8550,7 +8558,9 @@ async def _insert_multisheet_data(
                 existing.barcode = barcode
             # B·3: la declarada (columna con valor) reemplaza una inferida; la
             # inferida de esta fila sólo completa un vacío, y queda marcada.
-            _aplicar_categoria_de_catalogo(existing, cat, declarada=bool(cat_raw))
+            _aplicar_categoria_de_catalogo(
+                existing, cat, declarada=bool(cat_raw), reconocida=cat_label is None
+            )
             if _desc and not existing.description:  # mismo criterio: completar sin pisar
                 existing.description = _desc
             # F6-B2: acumular fechas de producto salvo edición manual del usuario

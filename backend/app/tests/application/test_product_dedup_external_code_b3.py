@@ -431,8 +431,8 @@ async def test_la_inferida_del_duplicado_llega_al_canonico_con_su_marca(
 @pytest.mark.usefixtures("legacy_pre_f5_schema")
 @pytest.mark.parametrize(
     ("dup_marca", "dup_editado"),
-    [(None, False), ("DECO", False)],
-    ids=["declarada", "marca_muerta"],
+    [(None, False), ("DECO", False), ("ILUMINACION", True)],
+    ids=["declarada", "marca_muerta", "editado"],
 )
 async def test_una_categoria_que_no_es_inferida_intacta_no_lleva_marca(
     db_session: AsyncSession, sample_tenant: Tenant, dup_marca: str | None, dup_editado: bool
@@ -441,6 +441,14 @@ async def test_una_categoria_que_no_es_inferida_intacta_no_lleva_marca(
     canonical_id, _ = await _seed_par_con_categoria(
         db_session, tid, dup_marca=dup_marca, dup_editado=dup_editado
     )
+    if dup_editado:
+        # ``has_user_edits`` es el primer criterio para elegir canónico: si sólo
+        # el duplicado lo tuviera, pasaría a ser el canónico y la rama de la
+        # marca nunca se ejercitaría. Con los dos editados decide el barcode.
+        canonical = await db_session.get(Product, canonical_id)
+        assert canonical is not None
+        canonical.has_user_edits = True
+        await db_session.commit()
 
     result = await _plan_apply(db_session, tid)
     assert result.status == "APPLIED"

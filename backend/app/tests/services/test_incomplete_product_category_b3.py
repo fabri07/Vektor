@@ -472,6 +472,29 @@ async def test_celda_que_el_rubro_no_reconoce_no_pisa_la_inferida(
     assert product.custom_fields.get(CATEGORIA_INFERIDA_FIELD) == "ILUMINACION"
 
 
+@pytest.mark.parametrize("armar", [_catalogo_simple, _catalogo_multihoja])
+@pytest.mark.parametrize("celda", ["Otros", "otro", "OTHER"])
+async def test_otros_declarado_y_reconocido_pisa_la_inferida(
+    db_session: AsyncSession, sample_tenant: Tenant, armar: Any, celda: str
+) -> None:
+    """«Otros» escrito en la columna SÍ coincide con el rubro (es el rótulo de
+    ``OTHER``): ``normalize_product_category`` lo reconoce y no devuelve etiqueta.
+    Es un dato declarado —típicamente para corregir una inferida— y le gana como
+    cualquier otra categoría reconocida. Sólo el respaldo de una celda que no
+    coincidió con nada (test de arriba) queda afuera."""
+    tid = sample_tenant.tenant_id
+    await _set_vertical(db_session, tid, Vertical.DECORACION_HOGAR)
+    nacido = await _compra_lampara(db_session, tid)
+
+    await importer.insert_confirmed_data(
+        db_session, tid, armar([_fila_catalogo(celda)]), {"productos": True}
+    )
+
+    product = await _reload(db_session, nacido.id)
+    assert product.category == "OTHER"
+    assert CATEGORIA_INFERIDA_FIELD not in (product.custom_fields or {})
+
+
 async def test_alta_multihoja_sin_columna_marca_la_inferida(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
