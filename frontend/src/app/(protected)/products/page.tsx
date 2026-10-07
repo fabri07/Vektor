@@ -754,12 +754,13 @@ function ProductEditModal({
   const umbralBase = umbralText.trim() === "" ? null : cantidad(umbralText);
   const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
   // Con el alta de categoría abierta, Guardar mandaría la categoría anterior y
-  // descartaría lo escrito: primero se crea o se cancela. Durante el vuelo
-  // `creandoCategoria` sigue en true (sólo onSuccess lo baja); un alta en vuelo
-  // pedida por OTRO producto no bloquea a éste.
-  const categoriaAMedias = creandoCategoria;
+  // descartaría lo escrito: primero se crea o se cancela. Con el alta de ESTE
+  // producto en vuelo también se espera: `creandoCategoria` baja al cambiar el
+  // select, al cancelar el alta o al reabrir el producto, pero la respuesta
+  // igual se le aplica. Un alta en vuelo pedida por OTRO producto no bloquea.
   const altaEnVueloAqui =
     crearCategoria.isPending && crearCategoria.variables?.productId === form.id;
+  const categoriaAMedias = creandoCategoria || altaEnVueloAqui;
   const crear = () => {
     if (!form || !nuevaCategoria.trim() || altaEnVueloAqui) return;
     setErrorCategoria(null);
@@ -899,7 +900,11 @@ function ProductEditModal({
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
         <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
         {categoriaAMedias ? (
-          <p className="text-xs text-vektor-muted">Creá o cancelá la categoría nueva antes de guardar.</p>
+          <p className="text-xs text-vektor-muted">
+            {creandoCategoria
+              ? "Creá o cancelá la categoría nueva antes de guardar."
+              : "Esperá a que termine de crearse la categoría nueva para guardar."}
+          </p>
         ) : null}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>

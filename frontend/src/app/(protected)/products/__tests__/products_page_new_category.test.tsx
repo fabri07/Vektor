@@ -320,3 +320,50 @@ test("el error del alta de otro producto no aparece en el editor abierto", async
   expect(within(dialogo).queryByRole("alert")).not.toBeInTheDocument();
   expect(input).toHaveValue("Velas");
 });
+
+test("con el alta propia en vuelo, cambiar el select o cancelar el alta no habilita Guardar", async () => {
+  let responder: (v: { code: string; label: string }) => void = () => {};
+  mockCreateCategory.mockReturnValue(new Promise((r) => (responder = r)));
+  renderizar();
+  const { dialogo, select } = await abrirEditorDesdeSugerencia();
+  await crear(dialogo, select, "Fiambres");
+  const guardar = within(dialogo).getByRole("button", { name: "Guardar" });
+
+  // Cancelar el alta en vuelo: la respuesta igual se va a aplicar a este producto.
+  fireEvent.click(within(dialogo).getByRole("button", { name: "Cancelar nueva categoría" }));
+  expect(guardar).toBeDisabled();
+  // Elegir otra categoría tampoco destraba Guardar mientras vuela el alta propia.
+  fireEvent.change(select, { target: { value: "ILUMINACION" } });
+  expect(guardar).toBeDisabled();
+  expect(within(dialogo).getByText(/esperá a que termine de crearse/i)).toBeInTheDocument();
+  fireEvent.submit(guardar.closest("form") as HTMLFormElement);
+  expect(mockUpdateProduct).not.toHaveBeenCalled();
+
+  responder({ code: "CUSTOM_FIAMBRES", label: "Fiambres" });
+  await waitFor(() => expect(guardar).toBeEnabled());
+  expect(select.value).toBe("CUSTOM_FIAMBRES");
+});
+
+test("reabrir el mismo producto con su alta en vuelo deja Guardar deshabilitado hasta la respuesta", async () => {
+  let responder: (v: { code: string; label: string }) => void = () => {};
+  mockCreateCategory.mockReturnValue(new Promise((r) => (responder = r)));
+  renderizar();
+  let { dialogo, select } = await abrirEditorDesdeSugerencia();
+  await crear(dialogo, select, "Fiambres");
+  fireEvent.click(within(dialogo).getByRole("button", { name: "Cancelar" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+  ({ dialogo, select } = await abrirEditorDesdeSugerencia());
+  const guardar = within(dialogo).getByRole("button", { name: "Guardar" });
+  expect(guardar).toBeDisabled();
+  fireEvent.submit(guardar.closest("form") as HTMLFormElement);
+  expect(mockUpdateProduct).not.toHaveBeenCalled();
+
+  responder({ code: "CUSTOM_FIAMBRES", label: "Fiambres" });
+  await waitFor(() => expect(guardar).toBeEnabled());
+  expect(select.value).toBe("CUSTOM_FIAMBRES");
+  fireEvent.click(guardar);
+  await waitFor(() =>
+    expect(mockUpdateProduct).toHaveBeenCalledWith("p1", expect.objectContaining({ category: "CUSTOM_FIAMBRES" })),
+  );
+});
