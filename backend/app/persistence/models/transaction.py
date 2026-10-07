@@ -79,6 +79,9 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, nullable=False, server_default="false", default=False
     )
     source_row_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Huella del contenido de la fila original (`domain/fila_original`), escrita
+    # al importar; la edición manual no la toca. Ver `20261007_0001`.
+    source_row_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )
@@ -165,6 +168,9 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, nullable=False, server_default="false", default=False
     )
     source_row_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Huella del contenido de la fila original (`domain/fila_original`), escrita
+    # al importar; la edición manual no la toca. Ver `20261007_0001`.
+    source_row_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
     custom_fields: Mapped[dict[str, Any]] = mapped_column(
         PGJSONB, nullable=False, server_default="'{}'::jsonb", default=dict
     )

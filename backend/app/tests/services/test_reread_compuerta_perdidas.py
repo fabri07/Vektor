@@ -349,7 +349,11 @@ async def test_precio_por_cantidad_releido_igual_no_pierde_nada(
 # ── Ediciones a mano cuya fila se corrió ───────────────────────────────────────
 
 
-async def _editar(session: AsyncSession, file: UploadedFile, monto: str) -> None:
+async def _editar(
+    session: AsyncSession, file: UploadedFile, monto: str, *, legacy: bool = False
+) -> None:
+    """``legacy``: sin la huella de su fila original, como lo importado antes de
+    B·nuevo — la edición no se puede reubicar y queda la red de la compuerta."""
     rec = (
         await session.execute(
             select(ExpenseEntry).where(
@@ -360,6 +364,8 @@ async def _editar(session: AsyncSession, file: UploadedFile, monto: str) -> None
     ).scalar_one()
     rec.has_user_edits = True
     rec.description = "corregido a mano"
+    if legacy:
+        rec.source_row_digest = None
     await session.commit()
 
 
@@ -369,7 +375,7 @@ async def test_una_edicion_despues_del_corrimiento_queda_en_riesgo(
     file = await _subir_e_importar(
         db_session, tenant.tenant_id, _csv(_CUATRO), "text/csv", "gastos.csv"
     )
-    await _editar(db_session, file, "950")  # la última
+    await _editar(db_session, file, "950", legacy=True)  # la última
     _patch_s3(monkeypatch, _csv(_CUATRO[1:]))  # se va la primera: todo se corre
     preview = await reread_service.preview_reread(db_session, file.id, tenant.tenant_id)
 
@@ -486,10 +492,11 @@ async def test_una_edicion_que_vuelve_a_entrar_repetida_frena(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Falso negativo del estimado (revisión): [A, B, C editado] → [A, B, N, C].
-    La huella de la edición ahora apunta a N, que se saltea; C entra de nuevo."""
+    La huella de la edición ahora apunta a N, que se saltea; C entra de nuevo.
+    Importado antes de B·nuevo (sin huella): con huella, C se reubica."""
     tres = _CUATRO[:3]
     file = await _subir_e_importar(db_session, tenant.tenant_id, _csv(tres), "text/csv", "g.csv")
-    await _editar(db_session, file, "2200")
+    await _editar(db_session, file, "2200", legacy=True)
     tid, fid = tenant.tenant_id, file.id
     _patch_s3(monkeypatch, _csv([tres[0], tres[1], ("2026-01-06", "Azúcar", "333"), tres[2]]))
 
@@ -538,6 +545,7 @@ async def test_una_edicion_de_fecha_que_vuelve_a_entrar_frena(
 
     rec.has_user_edits = True
     rec.transaction_date = datetime(2026, 1, 9)
+    rec.source_row_digest = None  # importado antes de B·nuevo
     await db_session.commit()
     _patch_s3(monkeypatch, _csv([("2026-01-02", "Azúcar", "800"), *tres]))
 

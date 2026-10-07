@@ -88,6 +88,7 @@ from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
 )
+from app.domain.fila_original import huella_de_fila
 from app.domain.ingestion_limits import (
     TEXTO_FORMULA_SIN_RESULTADO,
     es_formula_sin_resultado,
@@ -1500,6 +1501,13 @@ def _source_row_ref(anchor: str | None) -> str | None:
     if anchor is None:
         return None
     return hashlib.sha256(anchor.encode()).hexdigest()
+
+
+def _huella_de(row: dict[str, Any], tipo: str) -> str:
+    """B·nuevo: la huella de la fila como vino en el archivo (ver
+    ``domain/fila_original``), con las celdas ya interpretadas devueltas a su
+    original."""
+    return huella_de_fila(row, tipo, row.get(ORIGINALES_KEY))
 
 
 def _registrar_monto_derivado(
@@ -5617,6 +5625,7 @@ async def _insert_confirmed_data_impl(
                     # Mejora D: trazabilidad import → fila origen.
                     if _row_anchor is not None:
                         entry.source_row_ref = _source_row_ref(_row_anchor)
+                        entry.source_row_digest = _huella_de(row, "sale")
                     session.add(entry)
                     counts["ventas"] += 1
                     _efectos_de_la_fila_plano.append(("sale", entry.id))
@@ -5939,6 +5948,7 @@ async def _insert_confirmed_data_impl(
                         # Mejora D: trazabilidad import → fila origen.
                         if _row_anchor is not None:
                             expense.source_row_ref = _source_row_ref(_row_anchor)
+                            expense.source_row_digest = _huella_de(row, "expense")
                         session.add(expense)
                         counts["gastos"] += 1
                         _efectos_de_la_fila_plano.append(("expense", expense.id))
@@ -7717,6 +7727,7 @@ async def _insert_multisheet_data(
             entry.custom_fields = cf
         if row_ref is not None:
             entry.source_row_ref = row_ref  # Mejora D
+            entry.source_row_digest = _huella_de(row, "sale")
         session.add(entry)
         counts["ventas"] += 1
         # E6b: el efecto que produjo esta fila, para colgárselo a su identidad.
@@ -8073,6 +8084,7 @@ async def _insert_multisheet_data(
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D
+            expense.source_row_digest = _huella_de(row, "expense")
         session.add(expense)
         counts["gastos"] += 1
         _efectos_de_la_fila.append(("expense", expense.id))

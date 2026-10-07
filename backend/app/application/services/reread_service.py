@@ -117,6 +117,7 @@ from app.application.services.stock_service import (
     void_movement,
 )
 from app.domain.expense_categories import classify_expense_with_vertical
+from app.domain.fila_original import huella_de_fila
 from app.domain.import_receipt import build_import_receipt
 from app.domain.ingestion_version import INGESTION_VERSION
 from app.domain.inventory_effect import (
@@ -370,6 +371,9 @@ class RereadApplyResult:
     #: Cambio 4: comprobante columna por columna de esta relectura — mismo
     #: contrato que `pipeline_events.detail.receipt.columns` del confirm.
     receipt: list[dict[str, Any]] = field(default_factory=list)
+    #: B·nuevo: ediciones a mano llevadas a su fila nueva (``planear_reubicaciones``),
+    #: ``{tipo, id, ref_antes, ref_despues, movimientos}``. El undo las revierte.
+    reubicaciones: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── snapshots para auditoría ───────────────────────────────────────────────────
@@ -1372,6 +1376,7 @@ async def _reconcile(
         )
     )
     movimientos_preservados: set[uuid.UUID] = set()
+    movs_por_ref: dict[str, list[InventoryMovement]] = defaultdict(list)
     for mov in prev_movements_res.scalars().all():
         # No voidear el movimiento de una fila editada preservada: el reimport la saltea,
         # así que su stock debe quedar intacto (si no, se subestimaría). Las dos
@@ -1379,6 +1384,7 @@ async def _reconcile(
         # por la fila que la trajo, el descuento de venta por su `source_event_id`.
         if mov.source_row_ref and mov.source_row_ref in preserved_refs:
             movimientos_preservados.add(mov.id)
+            movs_por_ref[mov.source_row_ref].append(mov)
             continue
         if mov.source_event_id and mov.source_event_id in preserved_sale_events:
             movimientos_preservados.add(mov.id)
@@ -1401,6 +1407,49 @@ async def _reconcile(
                     after_json=None,
                     confidence="HIGH",
                 )
+            )
+
+    # B·nuevo: la edición cuya fila se corrió va a su fila nueva, con su
+    # movimiento. Va acá: después de anular y de soltar las huellas (las refs de
+    # arriba ya preservaron su movimiento con la ref vieja) y antes del reimport,
+    # que saltea la fila nueva e importa la que quedó en la posición vieja.
+    reubicaciones: list[dict[str, Any]] = []
+    if any(r.has_user_edits and r.source_row_digest for r in all_existing):
+        filas_frescas = _iter_importable_fresh_rows(fresh, confirmed_fields, exigir_monto=False)
+        plan = planear_reubicaciones(
+            tenant_id,
+            file_id,
+            all_existing,
+            filas_frescas,
+            await huellas_presentes(
+                session,
+                tenant_id,
+                {
+                    _hash_anchor(_row_anchor(tenant_id, file_id, c, i))
+                    for c, i, _, _ in filas_frescas
+                },
+            ),
+            {r for r in refs_de_otros.values() if r},
+            _ignoradas_por_contexto(fresh, draft),
+        )
+        nuevas = {d for _, d in plan.values()}
+        await _delete_fingerprints(session, tenant_id, {a for a, _ in plan.values()} - nuevas)
+        await _restore_fingerprints(session, tenant_id, nuevas)
+        for rec in all_existing:
+            if rec.id not in plan:
+                continue
+            antes, despues = plan[rec.id]
+            rec.source_row_ref = despues
+            for mov in movs_por_ref.get(antes, []):
+                mov.source_row_ref = despues
+            reubicaciones.append(
+                {
+                    "tipo": "sale" if isinstance(rec, SaleEntry) else "expense",
+                    "id": str(rec.id),
+                    "ref_antes": antes,
+                    "ref_despues": despues,
+                    "movimientos": [str(m.id) for m in movs_por_ref.get(antes, [])],
+                }
             )
 
     # Re-importar: re-crea no-editados corregidos + filas nuevas; saltea editados
@@ -1648,6 +1697,7 @@ async def _reconcile(
             if r.has_user_edits
         ],
         reemplazos_de_otros={r for r in refs_de_otros.values() if r in _refs_reimportadas},
+        reubicaciones=reubicaciones,
     )
 
 
@@ -2361,6 +2411,149 @@ class _Perdidas:
     samples: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _posiciones(
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    filas: list[tuple[str | None, int, dict[str, Any], str]],
+    extension: int,
+) -> dict[str, tuple[str | None, int]] | None:
+    """``{ref: (contexto, índice)}`` de las anclas de los contextos del parse
+    fresco, ``extension`` posiciones más allá de la última fila (el archivo pudo
+    acortarse). ``None`` si superaría ``_MAX_ANCLAS_DE_EDICIONES``."""
+    ultimo: dict[str | None, int] = {}
+    for ctx, idx, _row, _kind in filas:
+        ultimo[ctx] = max(ultimo.get(ctx, -1), idx)
+    if sum(n + 1 + extension for n in ultimo.values()) > _MAX_ANCLAS_DE_EDICIONES:
+        return None
+    return {
+        _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx)): (ctx, idx)
+        for ctx, n in ultimo.items()
+        for idx in range(n + 1 + extension)
+    }
+
+
+def _ignoradas_por_contexto(
+    fresh: dict[str, Any], draft: dict[str, Any] | None
+) -> dict[str | None, set[str]]:
+    """Las columnas que el reimport va a sacar de cada contexto (``ignore`` del
+    borrador), con el MISMO despacho que ``insert_confirmed_data``: por hoja con
+    ``mapping_contexts``; en la tabla suelta, el único mapeo si hay uno solo. La
+    huella del importador se calcula sobre la fila ya sin esas columnas."""
+    mapeos = _draft_effective_mappings(draft)[0] or {}
+    if fresh.get("inferred_type") == "mixed" or fresh.get("multi_sheet"):
+        if not fresh.get("mapping_contexts"):
+            return {}
+        return {ctx: _iis._resolve_target_cols(m)[3] for ctx, m in mapeos.items() if m}
+    if len(mapeos) == 1:
+        return {None: _iis._resolve_target_cols(next(iter(mapeos.values())))[3]}
+    return {}
+
+
+def planear_reubicaciones(
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    registros: list[SaleEntry | ExpenseEntry],
+    filas: list[tuple[str | None, int, dict[str, Any], str]],
+    vivas: set[str],
+    refs_de_otros: set[str],
+    ignoradas: dict[str | None, set[str]],
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """B·nuevo: adónde se corrió la fila de cada edición a mano. Puro: el preview
+    y el apply lo usan igual, así muestran lo mismo.
+
+    ``registros``: los vivos del archivo. ``filas``: las frescas, enumeradas como
+    las ancla el importador. ``vivas``: huellas de fila que siguen registradas
+    después de anular lo no editado. Devuelve ``{id: (ref_antes, ref_despues)}``,
+    sólo de las que cambian.
+
+    Candidata: editada, con referencia de fila, con ``source_row_digest`` y sin
+    otro registro vivo en la misma fila. Se reubica sólo dentro de su contexto y
+    hacia una fila fresca con la misma huella. Ninguna ref nueva es la de un
+    registro que se queda, la de una fila de «Otros» o una huella que sigue
+    registrada, y dos no van a la misma fila. Si un grupo de gemelas no alcanza,
+    el grupo entero queda como hoy, y su lugar pasa a estar ocupado (punto fijo).
+    Un archivo con registros sin referencia (legacy) no se reubica.
+    """
+    if any(not r.has_user_edits and not r.source_row_ref for r in registros):
+        return {}
+    por_ref: dict[str, int] = defaultdict(int)
+    for r in registros:
+        if r.source_row_ref:
+            por_ref[r.source_row_ref] += 1
+    candidatos = [
+        r
+        for r in registros
+        if r.has_user_edits
+        and r.source_row_ref
+        and r.source_row_digest
+        and not is_unclassified_row_ref(r.source_row_ref)
+        and por_ref[r.source_row_ref] == 1
+    ]
+    if not candidatos:
+        return {}
+    posicion = _posiciones(tenant_id, file_id, filas, len(registros))
+    if posicion is None:
+        return {}
+    anclas: dict[tuple[str | None, str], list[str]] = defaultdict(list)
+    for ctx, idx, row, _kind in filas:
+        sin = ignoradas.get(ctx)
+        fila = {k: v for k, v in row.items() if k not in sin} if sin else row
+        ref = _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))
+        for tipo in _TIPOS_OPERACION:
+            anclas[(ctx, huella_de_fila(fila, tipo))].append(ref)
+    grupos: dict[tuple[str | None, str], list[SaleEntry | ExpenseEntry]] = defaultdict(list)
+    for r in sorted(candidatos, key=lambda r: posicion.get(r.source_row_ref or "", (None, -1))[1]):
+        pos = posicion.get(r.source_row_ref or "")
+        if pos is not None:  # su contexto no está en el parse fresco: no se reubica
+            grupos[(pos[0], r.source_row_digest or "")].append(r)
+    refs_p = {r.source_row_ref for r in candidatos}
+    preservados = {
+        r.source_row_ref
+        for r in registros
+        if r.source_row_ref and (r.has_user_edits or is_unclassified_row_ref(r.source_row_ref))
+    }
+    ocupadas = (vivas | refs_de_otros | preservados) - refs_p
+    claves = sorted(grupos, key=lambda k: (str(k[0]), k[1]))
+    congelados: set[tuple[str | None, str]] = set()
+    while True:
+        bloqueadas = ocupadas | {
+            r.source_row_ref or "" for k in congelados for r in grupos[k]
+        }
+        destino: dict[uuid.UUID, str] = {}
+        for k in claves:  # primero, la que sigue en su lugar
+            if k not in congelados:
+                for r in grupos[k]:
+                    if r.source_row_ref in anclas.get(k, ()):
+                        destino[r.id] = r.source_row_ref or ""
+        tomadas = set(destino.values())
+        sin_lugar = None
+        for k in claves:
+            if k in congelados:
+                continue
+            libres = (a for a in anclas.get(k, ()) if a not in bloqueadas and a not in tomadas)
+            for r in grupos[k]:
+                if r.id in destino:
+                    continue
+                ancla = next(libres, None)
+                if ancla is None:
+                    sin_lugar = k
+                    break
+                destino[r.id] = ancla
+                tomadas.add(ancla)
+            if sin_lugar is not None:
+                break
+        if sin_lugar is None:
+            break
+        congelados.add(sin_lugar)
+    return {
+        r.id: (r.source_row_ref or "", destino[r.id])
+        for k in claves
+        if k not in congelados
+        for r in grupos[k]
+        if destino[r.id] != r.source_row_ref
+    }
+
+
 def _ediciones_en_riesgo(
     tenant_id: uuid.UUID,
     file_id: uuid.UUID,
@@ -2368,13 +2561,16 @@ def _ediciones_en_riesgo(
     recon: _Reconciliation,
     editados: list[SaleEntry | ExpenseEntry],
     confiable: dict[str, bool],
+    reubicados: set[uuid.UUID] | frozenset[uuid.UUID] = frozenset(),
 ) -> list[SaleEntry | ExpenseEntry]:
     """Las ediciones a mano cuya fila pudo haberse corrido de lugar.
 
     Una edición se preserva por su ``source_row_ref``: la relectura saltea la fila
     fresca con esa referencia. Si las filas se corrieron, esa referencia apunta a
     OTRA fila —que se saltea y se pierde— y la fila original de la edición entra
-    de nuevo: queda duplicada. Corregir eso no es de este paso; acá se detecta.
+    de nuevo: queda duplicada. La que tiene huella de su fila se reubica
+    (``planear_reubicaciones``) y no se cuenta (``reubicados``); acá se detecta
+    el resto.
 
     El corrimiento se ve en los registros NO editados del mismo contexto: el
     primero cuya fila fresca (misma referencia) ya no coincide en contenido marca
@@ -2383,24 +2579,20 @@ def _ediciones_en_riesgo(
     importe del tipo no es confiable (``_importe_confiable``) se compara por día,
     que ve el corrimiento recién cuando cruza a otro día.
     """
-    con_ref = [r for r in editados if r.source_row_ref]
+    # B·nuevo: la que se reubica por su huella no se corre — se sabe dónde está.
+    con_ref = [r for r in editados if r.source_row_ref and r.id not in reubicados]
     if not con_ref:
         return []
     fila_en: dict[tuple[str | None, int], _Contenido] = {
         (ctx, idx): _contenido_de_fila(row, kind) for ctx, idx, row, kind in filas
     }
-    ultimo: dict[str | None, int] = {}
-    for ctx, idx, _row, _kind in filas:
-        ultimo[ctx] = max(ultimo.get(ctx, -1), idx)
     # Un registro puede estar más allá de la última fila fresca (el archivo se
     # acortó), así que el rango se extiende en la cantidad de registros.
-    extension = len(recon.non_edited) + len(editados)
-    if sum(n + 1 + extension for n in ultimo.values()) > _MAX_ANCLAS_DE_EDICIONES:
+    posicion = _posiciones(
+        tenant_id, file_id, filas, len(recon.non_edited) + len(editados)
+    )
+    if posicion is None:
         return con_ref
-    posicion: dict[str, tuple[str | None, int]] = {}
-    for ctx, n in ultimo.items():
-        for idx in range(n + 1 + extension):
-            posicion[_hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx))] = (ctx, idx)
 
     corrido_desde: dict[str | None, int] = {}
     for rec in recon.non_edited_with_ref:
@@ -2433,6 +2625,7 @@ def _medir_perdidas(
     edited_refs: set[str],
     voided_refs: set[str],
     fingerprints: set[str],
+    reubicados: set[uuid.UUID] | frozenset[uuid.UUID] = frozenset(),
 ) -> _Perdidas:
     """Cuántos registros no editados vuelven (``to_replace``) y cuáles no
     (``to_lose``), y adónde va la fila de los que no vuelven como venta/gasto."""
@@ -2470,7 +2663,9 @@ def _medir_perdidas(
         vuelven.update({sueltos[j]: e for j, e in extra.items()})
     perdidos = [r for i, r in enumerate(registros) if i not in vuelven]
     destinos = _emparejar(perdidos, a_otros, (_NIVEL_EXACTO, _NIVEL_IMPORTE), sin_tipo=True)
-    en_riesgo = _ediciones_en_riesgo(tenant_id, file_id, filas, recon, editados, confiable)
+    en_riesgo = _ediciones_en_riesgo(
+        tenant_id, file_id, filas, recon, editados, confiable, reubicados
+    )
 
     samples: list[dict[str, Any]] = []
     for i, rec in enumerate(perdidos[:_SAMPLE_PER_KIND]):
@@ -2708,6 +2903,8 @@ def _estimate_reread(
     expenses: list[ExpenseEntry],
     fingerprints: set[str],
     catalog: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    refs_de_otros: set[str] | None = None,
+    draft: dict[str, Any] | None = None,
 ) -> RereadPreview:
     """Proyecta la relectura **en memoria, sin tocar la DB** (sub-segundo)."""
     file_id = file.id
@@ -2719,7 +2916,23 @@ def _estimate_reread(
     voided_refs = {
         rec.source_row_ref for rec in recon.non_edited_with_ref if rec.source_row_ref
     }
-    edited_refs = recon.edited_refs
+    filas_todas = _iter_importable_fresh_rows(fresh, confirmed_fields, exigir_monto=False)
+    # B·nuevo: el MISMO plan que el apply, aplicado en memoria (nada se escribe):
+    # la edición reubicada se mide en su fila nueva, así el preview no avisa de
+    # una repetición ni de una pérdida que el apply no va a producir.
+    reubicadas = planear_reubicaciones(
+        tenant_id,
+        file_id,
+        all_recs,
+        filas_todas,
+        fingerprints - voided_refs - (refs_de_otros or set()),
+        refs_de_otros or set(),
+        _ignoradas_por_contexto(fresh, draft),
+    )
+    _quitar = {a for a, _ in reubicadas.values()} - {d for _, d in reubicadas.values()}
+    _poner = {d for _, d in reubicadas.values()}
+    edited_refs = (recon.edited_refs - _quitar) | _poner
+    fingerprints = (fingerprints - _quitar) | _poner
 
     update_count = 0
     new_count = 0
@@ -2774,12 +2987,13 @@ def _estimate_reread(
         tenant_id,
         file_id,
         fresh,
-        _iter_importable_fresh_rows(fresh, confirmed_fields, exigir_monto=False),
+        filas_todas,
         recon,
         editados,
         edited_refs,
         voided_refs,
         fingerprints,
+        set(reubicadas),
     )
 
     return RereadPreview(
@@ -3452,6 +3666,19 @@ class FileChangedSincePreviewError(ValueError):
 REREAD_WOULD_LOSE_DATA = "REREAD_WOULD_LOSE_DATA"
 
 
+#: El apply se frenó porque repetiría ediciones a mano: eso NO se puede aceptar
+#: (decisión del dueño, 2026-10-07). Un código propio y no el de la pérdida, así un
+#: frontend que no lo conoce no ofrece «Aplicar igual» y muestra el mensaje.
+REREAD_EDITS_WOULD_REPEAT = "REREAD_EDITS_WOULD_REPEAT"
+
+
+def _describir_edicion(foto: dict[str, Any]) -> str:
+    tipo = "venta" if foto.get("kind") == "sale" else "gasto"
+    fecha = str(foto.get("transaction_date") or "")[:10] or "sin fecha"
+    texto = str(foto.get("notes" if foto.get("kind") == "sale" else "description") or "").strip()
+    return f"{tipo} del {fecha} por ${foto.get('amount')}" + (f" («{texto}»)" if texto else "")
+
+
 def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
     partes: list[str] = []
     if perdida.to_lose:
@@ -3460,9 +3687,20 @@ def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
             texto += f" ({perdida.to_lose_to_others} pasan a «Otros»)"
         partes.append(texto)
     if perdida.edited_at_risk:
+        ediciones = [
+            _describir_edicion(c["before"])
+            for c in perdida.samples
+            if c.get("action") == "edited_at_risk" and isinstance(c.get("before"), dict)
+        ]
         partes.append(
             f"{perdida.edited_at_risk} edición(es) a mano quedarían repetidas, porque "
             "las filas del archivo se corrieron de lugar"
+            + (f" ({'; '.join(ediciones)})" if ediciones else "")
+        )
+        return (
+            "La relectura no se aplicó: " + "; ".join(partes) + ". No se guardó "
+            "nada, y esto no se puede aplicar igual: deshacé esa edición o corregí "
+            "el archivo, y volvé a releerlo."
         )
     return (
         "La relectura no se aplicó: " + "; ".join(partes) + ". No se guardó "
@@ -3482,7 +3720,9 @@ class RereadWouldLoseDataError(ValueError):
 def _perdida_aceptada(
     perdida: PerdidaDeRelectura, aceptada: bool, tope: dict[str, Any] | None
 ) -> bool:
-    if not aceptada:
+    # Una edición a mano repetida no se acepta: se deshace la edición o se corrige
+    # el archivo. Sólo la pérdida de registros sin editar se puede aceptar.
+    if not aceptada or perdida.edited_at_risk:
         return False
     if tope is None:
         return True
@@ -3777,8 +4017,21 @@ async def preview_reread(
         _anclas_candidatas(tenant_id, file_id, _contextos_del_summary(fresh)),
     )
     catalog = await _load_product_index(session, tenant_id)
+    _recon = _split_records(sales, expenses)
+    refs_de_otros = await _refs_de_filas_clasificadas(
+        session, tenant_id, _recon.others_records
+    )
     preview = _estimate_reread(
-        file, tenant_id, fresh, confirmed_fields, sales, expenses, fingerprints, catalog
+        file,
+        tenant_id,
+        fresh,
+        confirmed_fields,
+        sales,
+        expenses,
+        fingerprints,
+        catalog,
+        {r for r in refs_de_otros.values() if r},
+        draft,
     )
     preview.column_risk_outcome = resolved.outcome
     preview.column_risk_ambiguous = resolved.ambiguous_rows
@@ -4077,6 +4330,7 @@ async def apply_reread(
         "receipt": {"version": 1, "columns": result.receipt},
         # Compuerta: lo que se perdió A SABIENDAS (aceptado), para el historial.
         "data_loss": perdida.as_dict() if perdida.hay_perdida else None,
+        "reubicaciones": result.reubicaciones,
     }
     await session.flush()
 
@@ -4579,7 +4833,30 @@ async def undo_reread(
             ref = it.before_json.get("source_row_ref")
             if ref:
                 restored_refs.add(ref)
-    await _restore_fingerprints(session, tenant_id, restored_refs)
+    # B·nuevo: la edición reubicada vuelve a su ref de antes, con su movimiento, y
+    # se suelta la huella de la fila nueva salvo que la use un registro repuesto.
+    reubicaciones = [
+        r for r in (run.details_json or {}).get("reubicaciones") or [] if isinstance(r, dict)
+    ]
+    for reub in reubicaciones:
+        movida: SaleEntry | ExpenseEntry | None = (
+            await session.get(SaleEntry, uuid.UUID(str(reub["id"])))
+            if reub.get("tipo") == "sale"
+            else await session.get(ExpenseEntry, uuid.UUID(str(reub["id"])))
+        )
+        if movida is not None and movida.tenant_id == tenant_id:
+            movida.source_row_ref = reub["ref_antes"]
+        for mov_id in reub.get("movimientos") or []:
+            mov_r = await session.get(InventoryMovement, uuid.UUID(str(mov_id)))
+            if mov_r is not None and mov_r.tenant_id == tenant_id:
+                mov_r.source_row_ref = reub["ref_antes"]
+    _antes = {str(r["ref_antes"]) for r in reubicaciones}
+    await _delete_fingerprints(
+        session,
+        tenant_id,
+        {str(r["ref_despues"]) for r in reubicaciones} - _antes - restored_refs,
+    )
+    await _restore_fingerprints(session, tenant_id, restored_refs | _antes)
 
     # 4. Inventario: revertir el efecto del reread sobre stock. Los movimientos que
     # el reread voideó se auditaron como REREAD_VOID (kind=movement) y los que

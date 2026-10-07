@@ -4446,6 +4446,11 @@ def _perdida_de_la_sesion(run: Any) -> RereadDataLoss | None:
     perdida = (run.details_json or {}).get("data_loss")
     if run.status != "READY_TO_APPLY" or not isinstance(perdida, dict):
         return None
+    # Una edición a mano repetida no se ofrece para aceptar (no se puede): sin
+    # medición acá, la pantalla no muestra «Aplicar igual»; el estado del run
+    # trae el motivo como error (ver `reread_run_status`).
+    if int(perdida.get("edited_at_risk") or 0) > 0:
+        return None
     return RereadDataLoss(
         to_lose=int(perdida.get("to_lose") or 0),
         to_lose_to_others=int(perdida.get("to_lose_to_others") or 0),
@@ -4651,13 +4656,24 @@ async def reread_run_status(
     # viejo sólo deja de consultar con APPLIED/FAILED (con otro estado quedaría
     # girando para siempre) y muestra `error`. El nuevo mira `data_loss`.
     _perdida = _perdida_de_la_sesion(run)
-    if _perdida is not None:
+    # B·nuevo: frenado por una edición a mano que quedaría repetida. Va con un
+    # código propio y sin `data_loss`: cualquier frontend lo muestra como error,
+    # con el mensaje del servidor, y no ofrece aceptarlo.
+    _frenado = d.get("data_loss") if run.status == "READY_TO_APPLY" else None
+    _ediciones_repetidas = isinstance(_frenado, dict) and int(
+        _frenado.get("edited_at_risk") or 0
+    ) > 0
+    if _perdida is not None or _ediciones_repetidas:
         return RereadRunStatusResponse(
             run_id=run.id,
             file_id=file_id,
             status="FAILED",
             error=str((d.get("data_loss") or {}).get("message") or ""),
-            error_code=reread_service.REREAD_WOULD_LOSE_DATA,
+            error_code=(
+                reread_service.REREAD_EDITS_WOULD_REPEAT
+                if _ediciones_repetidas
+                else reread_service.REREAD_WOULD_LOSE_DATA
+            ),
             data_loss=_perdida,
             draft_version=int(d.get("draft_version", 0)),
             total_rows=int(_total_rows) if _total_rows is not None else None,
