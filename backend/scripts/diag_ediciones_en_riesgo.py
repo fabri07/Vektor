@@ -34,6 +34,7 @@ import asyncio
 import os
 import sys
 from typing import Any
+from urllib.parse import urlparse
 
 import asyncpg
 
@@ -146,8 +147,58 @@ _SIN_CONTEXTO = (
 )
 
 
-def _linea(etiqueta: str, valor: Any) -> None:
-    print(f"  {etiqueta:<52}: {valor}")
+def informe(
+    base: str,
+    tenant: str | None,
+    por_tenant: dict[str, Any],
+    todo_editado: dict[str, int],
+    frenos: dict[str, Any],
+) -> list[str]:
+    """Las líneas del reporte. Pura: se prueba sin base.
+
+    Sin ningún tenant con datos igual imprime un bloque entero: los conteos que la
+    base SÍ guarda salen en 0 (cuenta hecha) y lo que no guarda sale «sin medición».
+    Un reporte vacío no puede afirmar «ni relecturas frenadas».
+    """
+    out = [f"Base leída: {base}"]
+
+    def linea(etiqueta: str, valor: Any) -> None:
+        out.append(f"  {etiqueta:<52}: {valor}")
+
+    tenants: list[str | None] = sorted(
+        set(por_tenant) | set(frenos) | ({tenant} if tenant else set())
+    ) or [None]
+    for tid in tenants:
+        titulo = (
+            f"tenant {tid}" if tid else
+            "todos los tenants (ninguno con registros editados ni runs con medición)"
+        )
+        out.append(f"\n{'=' * 78}\n  {titulo}\n{'=' * 78}")
+        r = por_tenant.get(tid) if tid else None
+        if r is None:
+            linea("registros editados a mano de archivos importados", 0)
+        else:
+            linea("registros editados a mano de archivos importados", r["editados"])
+            linea("  con vínculo en operation_identity_links", r["con_vinculo"])
+            linea("    identidad de línea", r["de_linea"])
+            linea("    sólo de documento", r["solo_documento"])
+            linea("    identidad compartida con otros efectos", r["compartida"])
+            linea("  de una fila con más de un efecto vivo", r["fila_con_mas_de_un_efecto"])
+            linea("  legacy: sin source_row_ref", r["sin_huella"])
+            linea("  legacy: archivo sin mapping_contexts", r["sin_mapping_contexts"])
+        linea("contextos totalmente editados", _SIN_CONTEXTO)
+        linea("  archivos con todo lo vivo editado (cota inferior)", todo_editado.get(tid or "", 0))
+        linea("relecturas frenadas por el #81", _SIN_TRAZA_DE_FRENOS)
+        f = (frenos.get(tid) if tid else None) or {}
+        linea("  frenadas vigentes (READY_TO_APPLY con medición)", f.get("frenadas_vigentes", 0))
+        linea("    de ellas, por edición en riesgo", f.get("vigentes_por_edicion", 0))
+        linea("  aplicadas aceptando la pérdida medida", f.get("aplicadas_aceptando", 0))
+        linea("    de ellas, con edición en riesgo", f.get("aceptadas_con_edicion", 0))
+    out.append("")
+    out.append("Lectura: una edición sin vínculo de identidad de LÍNEA sólo se puede ubicar")
+    out.append("por su posición. Un 0 es una cuenta hecha; 'sin medición' es un dato que")
+    out.append("la base no guarda.")
+    return out
 
 
 async def main() -> int:
@@ -164,6 +215,9 @@ async def main() -> int:
     try:
         async with conn.transaction(readonly=True):
             tenant = args.tenant_id
+            # Host y nombre de base, nunca usuario ni contraseña.
+            nombre = await conn.fetchval("SELECT current_database()")
+            base = f"host={urlparse(dsn).hostname} base={nombre}"
             por_tenant = {r["tenant_id"]: r for r in await conn.fetch(_POR_TENANT, tenant)}
             filas = await conn.fetch(_ARCHIVOS_TODO_EDITADO, tenant)
             todo_editado = {r["tenant_id"]: r["archivos"] for r in filas}
@@ -171,36 +225,7 @@ async def main() -> int:
     finally:
         await conn.close()
 
-    tenants = sorted(set(por_tenant) | set(frenos) | ({tenant} if tenant else set()))
-    if not tenants:
-        print("Ningún tenant con ediciones sobre registros importados ni relecturas frenadas.")
-        return 0
-    for tid in tenants:
-        print(f"\n{'=' * 78}\n  tenant {tid}\n{'=' * 78}")
-        r = por_tenant.get(tid)
-        if r is None:
-            _linea("registros editados a mano de archivos importados", 0)
-        else:
-            _linea("registros editados a mano de archivos importados", r["editados"])
-            _linea("  con vínculo en operation_identity_links", r["con_vinculo"])
-            _linea("    identidad de línea", r["de_linea"])
-            _linea("    sólo de documento", r["solo_documento"])
-            _linea("    identidad compartida con otros efectos", r["compartida"])
-            _linea("  de una fila con más de un efecto vivo", r["fila_con_mas_de_un_efecto"])
-            _linea("  legacy: sin source_row_ref", r["sin_huella"])
-            _linea("  legacy: archivo sin mapping_contexts", r["sin_mapping_contexts"])
-        _linea("contextos totalmente editados", _SIN_CONTEXTO)
-        _linea("  archivos con todo lo vivo editado (cota inferior)", todo_editado.get(tid, 0))
-        _linea("relecturas frenadas por el #81", _SIN_TRAZA_DE_FRENOS)
-        f = frenos.get(tid) or {}
-        _linea("  frenadas vigentes (READY_TO_APPLY con medición)", f.get("frenadas_vigentes", 0))
-        _linea("    de ellas, por edición en riesgo", f.get("vigentes_por_edicion", 0))
-        _linea("  aplicadas aceptando la pérdida medida", f.get("aplicadas_aceptando", 0))
-        _linea("    de ellas, con edición en riesgo", f.get("aceptadas_con_edicion", 0))
-    print()
-    print("Lectura: una edición sin vínculo de identidad de LÍNEA sólo se puede ubicar")
-    print("por su posición. Un 0 es una cuenta hecha; 'sin medición' es un dato que")
-    print("la base no guarda.")
+    print("\n".join(informe(base, tenant, por_tenant, todo_editado, frenos)))
     return 0
 
 
