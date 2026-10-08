@@ -70,6 +70,12 @@ La propuesta aportada diagnostica bien la causa: contenido ≠ identidad, la hue
   - **(B)** Construir el paso 1.
   - **(C)** Reconsiderar la confirmación manual por contenido.
 
+- **Decisión del dueño 2026-10-07: opción A — automatización descartada; limitación documentada. Diagnóstico en producción: ningún tenant con ediciones sobre registros importados ni relecturas frenadas. Los defectos (a)(b)(c) se arreglan igual, en orden c → b → a.**
+- **Defectos de `main` que dejó el paso 0** (`xfail(strict=True)` en `test_relectura_freno_escenarios.py`):
+  - (c) `undo_reread` no restauraba `operation_identity_links` — **resuelto** en `fix/relectura-undo-vinculos-identidad` (foto de identidades en el `before_json` del void + `restaurar_vinculos` en el undo; ver `docs/claude/ingesta.md`).
+  - (b) con identidad fuerte, fila nueva en la posición de la edición se pierde en silencio — pendiente.
+  - (a) contexto todo editado con dos de tres campos cambiados — pendiente.
+
 ### 1. Traslado por identidad fuerte (borrador; se reescribe y pide OK después del paso 0)
 Condiciones que tiene que resolver y probar antes de implementar:
 - **Elegibilidad, en una función pura compartida** por `_estimate_reread` y `_reconcile`. Una edición en riesgo es elegible sólo si se cumplen las cuatro:

@@ -542,6 +542,74 @@ async def liberar_identidades_de(
     return len(huerfanas)
 
 
+async def vinculos_de(
+    session: AsyncSession, tenant_id: uuid.UUID, efectos: list[tuple[str, uuid.UUID]]
+) -> dict[tuple[str, uuid.UUID], list[dict[str, str]]]:
+    """La foto de las identidades de estos efectos, para poder volver a colgarlas.
+
+    La toma la relectura ANTES de soltarlas (``liberar_identidades_de``) y la
+    guarda en el snapshot de cada anulado: el undo la necesita porque, al soltarse,
+    una identidad huérfana se borra y con ella su clave y su ``content_hash``.
+    """
+    if not efectos:
+        return {}
+    pedidos = set(efectos)
+    filas = (
+        await session.execute(
+            select(
+                OperationIdentityLink.entity_type,
+                OperationIdentityLink.entity_id,
+                OperationIdentity.identity_key,
+                OperationIdentity.content_hash,
+                OperationIdentity.entity_type,
+            )
+            .join(OperationIdentity, OperationIdentity.id == OperationIdentityLink.identity_id)
+            .where(
+                OperationIdentityLink.tenant_id == tenant_id,
+                OperationIdentityLink.entity_id.in_(sorted({eid for _, eid in efectos})),
+            )
+        )
+    ).all()
+    foto: dict[tuple[str, uuid.UUID], list[dict[str, str]]] = defaultdict(list)
+    for tipo, eid, clave, contenido, entidad in filas:
+        if (tipo, eid) in pedidos:
+            foto[(tipo, eid)].append(
+                {"identity_key": clave, "content_hash": contenido, "entity_type": entidad}
+            )
+    return dict(foto)
+
+
+async def restaurar_vinculos(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID | None,
+    vinculos: list[tuple[str, uuid.UUID, dict[str, str]]],
+) -> None:
+    """Vuelve a colgar de su identidad los efectos que el undo de una relectura
+    des-anula, con la foto de ``vinculos_de``.
+
+    Reclama con el mismo candado que el import: si la clave sigue tomada (la
+    comparte un renglón editado que la relectura conservó) se cuelga de la que
+    está; si se había soltado, vuelve con su ``content_hash`` original.
+    """
+    por_entidad: dict[str, dict[str, str]] = defaultdict(dict)
+    for _, _, ident in vinculos:
+        por_entidad[ident["entity_type"]][ident["identity_key"]] = ident["content_hash"]
+    ids: dict[str, uuid.UUID] = {}
+    for entidad, contenidos in por_entidad.items():
+        _, existentes = await _reclamar(
+            session, tenant_id, file_id, contenidos=contenidos, entity=entidad
+        )
+        ids.update({clave: ident for clave, (ident, _) in existentes.items()})
+    nuevos = [
+        (ids[ident["identity_key"]], tipo, eid)
+        for tipo, eid, ident in vinculos
+        if ident["identity_key"] in ids
+    ]
+    if nuevos:
+        await _persistir_vinculos(session, tenant_id, file_id, nuevos)
+
+
 async def identidad_tomada(
     session: AsyncSession, tenant_id: uuid.UUID, clave: str
 ) -> tuple[uuid.UUID, str] | None:
