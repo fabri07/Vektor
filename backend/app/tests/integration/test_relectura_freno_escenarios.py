@@ -941,20 +941,16 @@ async def test_undo_de_la_relectura_restaura_registros_y_huellas(
     assert despues["huellas"] == antes["huellas"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "defecto de main: undo_reread no restaura operation_identity_links. La "
-        "relectura liberó la identidad de los anulados y la volvió a reclamar para "
-        "los reinsertados; el undo des-anula los originales (sin vínculo) y borra "
-        "los reinsertados, cuyo vínculo queda apuntando a un id que ya no existe"
-    ),
-)
 async def test_undo_de_la_relectura_restaura_los_vinculos_de_identidad(
     db_session: AsyncSession, tid: uuid.UUID
 ) -> None:
+    """Defecto (c), resuelto: la relectura soltó la identidad de los anulados (y se
+    borró al quedar huérfana) y la reclamó para los reinsertados. El undo suelta la
+    de los borrados y vuelve a colgar la de los originales desde su snapshot."""
     antes, despues = await _undo_de_una_relectura_con_identidad(db_session, tid)
     assert despues["vinculos"] == antes["vinculos"]
+    vivos = {r[1] for r in despues["registros"]}
+    assert {e for _, _, e in despues["vinculos"]} <= vivos, "ningún vínculo colgando"
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1024,15 +1020,7 @@ async def test_pg_undo_restaura_registros_y_huellas(
 @pytest.mark.parametrize(
     "_",
     [
-        pytest.param(
-            None,
-            marks=[
-                *_pg,
-                pytest.mark.xfail(
-                    strict=True, reason="defecto de main: undo no restaura vínculos (ver SQLite)"
-                ),
-            ],
-        )
+        pytest.param(None, marks=_pg)
     ],
 )
 async def test_pg_undo_restaura_los_vinculos_de_identidad(
@@ -1044,15 +1032,13 @@ async def test_pg_undo_restaura_los_vinculos_de_identidad(
     assert despues["vinculos"] == antes["vinculos"]
 
 
-async def test_releer_despues_del_undo_frena_por_la_identidad_que_quedo_tomada(
+async def test_releer_despues_del_undo_da_el_resultado_correcto(
     db_session: AsyncSession, tid: uuid.UUID
 ) -> None:
-    """La consecuencia del vínculo que el undo no restaura (xfail de arriba): la
-    identidad de los registros restaurados sigue tomada por el vínculo del
-    reinsertado que el undo borró. Releer el MISMO archivo después del undo manda
-    esas filas a «Otros» (identidad tomada) y la compuerta lo mide como pérdida:
-    frena con rollback. Cumple el criterio, pero el archivo queda frenado para
-    siempre salvo aceptar perder dos registros que en realidad no se pierden."""
+    """Antes del arreglo del defecto (c), la identidad de los restaurados seguía
+    tomada por el vínculo del reinsertado que el undo borró: releer el MISMO
+    archivo mandaba Coca Cola y Pan a «Otros» y frenaba para siempre. Con los
+    vínculos restaurados, la relectura entra y deja cada operación una vez."""
     await _undo_de_una_relectura_con_identidad(db_session, tid)
     fid = (
         await db_session.execute(select(UploadedFile.id).where(UploadedFile.tenant_id == tid))
@@ -1061,12 +1047,12 @@ async def test_releer_despues_del_undo_frena_por_la_identidad_que_quedo_tomada(
 
     salida = await _releer(db_session, tid, fid, _con_comprobante(_FACTURAS), "f.csv", run=run)
 
-    assert salida.frenada and salida.perdida is not None
-    assert (salida.perdida.to_lose, salida.perdida.to_lose_to_others) == (2, 2)
-    assert salida.perdida.motivo is None, "el motivo es sólo de ediciones en riesgo"
-    assert sorted(
-        s["before"]["description"] for s in salida.perdida.samples if s["action"] == "lose"
-    ) == ["Coca Cola", "Pan"]
+    assert not salida.frenada
+    foto = await _foto(db_session, tid, fid)
+    _una_vez(foto, [("1500.00", "Coca Cola"), ("800.00", "Pan"), ("2200.00", "corregido a mano")])
+    vivos = {r[1] for r in foto["registros"] if not r[5]}
+    assert {e for _, _, e in foto["vinculos"]} <= vivos, "ningún vínculo colgando"
+    assert len(foto["vinculos"]) == 3
 
 
 @pytest.mark.xfail(

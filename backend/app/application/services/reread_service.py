@@ -109,6 +109,8 @@ from app.application.services.ingestion_schema_decision_service import (
 from app.application.services.inventory_replay_service import run_inventory_replay
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
+    restaurar_vinculos,
+    vinculos_de,
 )
 from app.application.services.reread_limits import REREAD_STALE_AFTER_SECONDS
 from app.application.services.stock_service import (
@@ -1313,6 +1315,21 @@ async def _reconcile(
             tenant_id, file_id, fresh, edited_content, recon
         )
         fingerprints_to_delete |= legacy_fps
+
+    # Defecto (c) del paso 0 de B·nuevo: la identidad que se suelta más abajo se
+    # BORRA si queda huérfana, y con ella su clave. Se guarda en el snapshot del
+    # anulado para que el undo la vuelva a colgar (`restaurar_vinculos`).
+    if not dry_run:
+        _identidades = await vinculos_de(
+            session,
+            tenant_id,
+            [
+                ("sale" if isinstance(rec, SaleEntry) else "expense", rec.id)
+                for rec in recon.non_edited
+            ],
+        )
+        for (_, eid), idents in _identidades.items():
+            pre_void_snapshots[eid]["identidades"] = idents
 
     # Void de todos los no-editados (soft delete auditado).
     voided = 0
@@ -4649,6 +4666,31 @@ async def undo_reread(
             )
         )
         removed += len(insert_expense_ids)
+
+    # 2b. Identidad fuerte: la relectura soltó la de los anulados y la reclamó
+    # para los reinsertados. Se suelta la de los borrados (si no, su vínculo queda
+    # colgando de un id inexistente y la identidad tomada para siempre) y se
+    # vuelve a colgar la de los des-anulados desde su snapshot. Un run anterior a
+    # este arreglo no la tiene: sus des-anulados quedan sin vínculo, como antes.
+    await liberar_identidades_de(
+        session,
+        tenant_id,
+        [("sale", i) for i in insert_sale_ids] + [("expense", i) for i in insert_expense_ids],
+    )
+    _file_id_del_run = (run.details_json or {}).get("file_id")
+    await restaurar_vinculos(
+        session,
+        tenant_id,
+        uuid.UUID(str(_file_id_del_run)) if _file_id_del_run else None,
+        [
+            (str(it.before_json["kind"]), uuid.UUID(str(it.before_json["id"])), ident)
+            for it in items
+            if it.action == ACTION_VOID
+            and it.before_json
+            and it.before_json.get("kind") in ("sale", "expense")
+            for ident in it.before_json.get("identidades") or []
+        ],
+    )
 
     # 3. Restaurar fingerprints de los registros des-anulados (consistencia: la
     # próxima relectura debe volver a saltearlos si quedan editados). Re-derivamos
