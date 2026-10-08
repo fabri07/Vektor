@@ -1171,7 +1171,7 @@ export function FileListSection() {
                     onClick={closeRereadModal}
                     className="rounded-lg px-3 py-1.5 text-sm font-medium text-vektor-body hover:bg-vektor-surface transition-colors"
                   >
-                    No aplicar
+                    Dejar el archivo como está
                   </button>
                   <button
                     type="button"

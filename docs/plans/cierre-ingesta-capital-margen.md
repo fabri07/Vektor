@@ -83,6 +83,8 @@ Este plan consolida mi v2 con el plan consolidado que trajo el dueño. Tomo de e
 - Sólo frontend, sin endpoint nuevo: el editor de producto crea la categoría con `POST /products/custom-categories` (OWNER/ADMIN), la deja seleccionada e invalida el catálogo. «Otra» junto a la sugerida abre el mismo editor. Rama `feat/productos-nueva-categoria`, PR propio, separado de B·nuevo.
 
 ### 2. B·nuevo: preservar la edición sin depender de la posición
+> **Estado (2026-10-07):** B·nuevo: PR #86 cerrado sin merge (`200ff590`, 9 hallazgos); reducido a paso 0 de evidencia (este PR, rama `fix/relectura-paso0-evidencia`: `diag_ediciones_en_riesgo.py`, `test_relectura_freno_escenarios.py` y el motivo del freno); automatización pendiente de decisión A/B/C del dueño. Plan vigente: [`bnuevo-reemplazo-seguro-pr86.md`](bnuevo-reemplazo-seguro-pr86.md). Lo que sigue abajo queda como diseño de referencia, no como alcance aprobado.
+
 Primero se diseña la correspondencia (con revisión), y recién después se toca `_split_records` / `_reconcile` (`reread_service.py:766`, `:1213`).
 - **Tres cosas separadas:** el identificador lógico, los **datos originales importados** (la edición manual no los modifica, y son los que se usan para reconciliar) y el localizador hoja/fila.
 - **Con clave de operación.** `clave_de_operacion` (`domain/operation_identity.py:333`) identifica la operación. Un comprobante de varias líneas además necesita un discriminador de línea. El `external_code` de un producto, cliente o proveedor **no** identifica una venta.

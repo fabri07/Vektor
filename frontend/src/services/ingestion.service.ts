@@ -683,6 +683,9 @@ export interface RereadDataLoss {
   to_lose_to_others: number;
   edited_at_risk: number;
   samples: RereadItem[];
+  /** Por qué frena una edición a mano (B·nuevo 0c). Un backend viejo no lo manda. */
+  motivo?: string | null;
+  motivo_texto?: string | null;
 }
 
 // F9b (Task 7 backend / Task 8 frontend): clientes/proveedores/productos que

@@ -4451,6 +4451,8 @@ def _perdida_de_la_sesion(run: Any) -> RereadDataLoss | None:
         to_lose_to_others=int(perdida.get("to_lose_to_others") or 0),
         edited_at_risk=int(perdida.get("edited_at_risk") or 0),
         samples=[RereadItem(**it) for it in perdida.get("samples") or [] if isinstance(it, dict)],
+        motivo=perdida.get("motivo"),
+        motivo_texto=perdida.get("motivo_texto"),
     )
 
 
