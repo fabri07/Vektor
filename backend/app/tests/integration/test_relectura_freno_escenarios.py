@@ -576,21 +576,15 @@ async def test_contexto_todo_editado_el_apply_frena_aunque_el_preview_no_lo_vea(
     assert salida.frenada
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "defecto de main: en un contexto todo editado, si cada edición cambió dos de "
-        "tres campos (importe, día, texto) el apply no frena: la fila nueva que cae "
-        "bajo la huella de una edición se pierde en silencio y la fila original de "
-        "la última edición vuelve a entrar repetida (medir_perdida_real empareja "
-        "«dos de tres» y no hay registros no editados que delaten el corrimiento)"
-    ),
-)
 async def test_contexto_todo_editado_con_dos_campos_cambiados(
     db_session: AsyncSession, tid: uuid.UUID
 ) -> None:
-    """La edición cambió importe Y texto: la fila original que vuelve a entrar ya
-    no coincide «dos de tres» con su edición."""
+    """Defecto (a) de B·nuevo, resuelto frenando. La edición cambió importe Y
+    texto: la fila original que vuelve a entrar ya no coincide «dos de tres» con
+    su edición, y no hay registro no editado que delate el corrimiento. Antes: la
+    fila nueva se perdía bajo la huella de la primera edición y la de la última
+    volvía a entrar repetida. Ahora el contexto cambió (esta relectura inserta en
+    él) sin testigo: freno con rollback (``_releer`` exige el estado idéntico)."""
     fid = await _importar(db_session, tid, _csv([A, B, C]), "g.csv")
     for f in (A, B, C):
         await _editar(
@@ -599,15 +593,26 @@ async def test_contexto_todo_editado_con_dos_campos_cambiados(
 
     salida = await _releer(db_session, tid, fid, _csv([N, A, B, C]), "g.csv")
 
-    if salida.frenada:
-        return
-    _una_vez(
-        await _foto(db_session, tid, fid),
-        [
-            (_monto(N[2]), N[1]),
-            *[(f"{Decimal(f[2]) + 1:.2f}", f"{f[1]} (a mano)") for f in (A, B, C)],
-        ],
-    )
+    assert salida.frenada and salida.perdida is not None
+    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (0, 3)
+    assert salida.perdida.motivo == "sin_identificador_de_operacion"
+
+
+async def test_contexto_todo_editado_con_el_archivo_identico_no_frena(
+    db_session: AsyncSession, tid: uuid.UUID
+) -> None:
+    """La otra mitad del defecto (a): sin cambios en el contexto, no hay freno."""
+    fid = await _importar(db_session, tid, _csv([A, B, C]), "g.csv")
+    for f in (A, B, C):
+        await _editar(
+            db_session, fid, f[2], amount=Decimal(f[2]) + 1, description=f"{f[1]} (a mano)"
+        )
+    antes = await _foto(db_session, tid, fid)
+
+    salida = await _releer(db_session, tid, fid, _csv([A, B, C]), "g.csv")
+
+    assert not salida.frenada
+    assert await _foto(db_session, tid, fid) == antes
 
 
 _CTX_PXC = "sheet:Ventas"
