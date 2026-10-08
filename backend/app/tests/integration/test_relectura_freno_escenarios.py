@@ -594,8 +594,49 @@ async def test_contexto_todo_editado_con_dos_campos_cambiados(
     salida = await _releer(db_session, tid, fid, _csv([N, A, B, C]), "g.csv")
 
     assert salida.frenada and salida.perdida is not None
-    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (0, 3)
+    # Lo que hace aceptar (ver el test de abajo): las filas del archivo en la
+    # posición de cada edición (N, A, B) no entran y a lo sumo una edición se
+    # repite (el contexto tuvo una sola alta, C). Sin el contenido original no se
+    # sabe que A y B eran las de las ediciones: cota, nunca menos de lo que pasa.
+    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (3, 1)
     assert salida.perdida.motivo == "sin_identificador_de_operacion"
+    perdidas = {s["before"]["producto"] for s in salida.perdida.samples if s["action"] == "lose"}
+    assert N[1] in perdidas
+    repetidas = [s["before"] for s in salida.perdida.samples if s["action"] == "edited_at_risk"]
+    assert [r["description"] for r in repetidas] == [C[1]], repetidas
+
+
+async def test_contexto_todo_editado_aceptar_aplica_lo_medido(
+    db_session: AsyncSession, tid: uuid.UUID
+) -> None:
+    """Aceptar el freno del defecto (a): N no entra (la tapa la huella de la
+    edición de A) y la fila original de C vuelve repetida. La medición aceptada
+    —la que queda en ``data_loss`` del run— lo cubre: N está entre las pérdidas y
+    la repetida es C."""
+    fid = await _importar(db_session, tid, _csv([A, B, C]), "g.csv")
+    for f in (A, B, C):
+        await _editar(
+            db_session, fid, f[2], amount=Decimal(f[2]) + 1, description=f"{f[1]} (a mano)"
+        )
+
+    salida = await _releer(
+        db_session, tid, fid, _csv([N, A, B, C]), "g.csv", accept_data_loss=True
+    )
+
+    assert not salida.frenada and salida.resultado is not None
+    vivos = sorted((r[0], r[1]) for r in _vivos(await _foto(db_session, tid, fid)))
+    assert vivos == sorted(
+        [
+            *[(f"{Decimal(f[2]) + 1:.2f}", f"{f[1]} (a mano)") for f in (A, B, C)],
+            (_monto(C[2]), C[1]),
+        ]
+    ), vivos
+    run = await db_session.get(DataRepairRun, salida.resultado.run_id)
+    assert run is not None
+    data_loss = (run.details_json or {})["data_loss"]
+    assert (data_loss["to_lose"], data_loss["edited_at_risk"]) == (3, 1)
+    perdidas = {s["before"]["producto"] for s in data_loss["samples"] if s["action"] == "lose"}
+    assert N[1] in perdidas
 
 
 async def test_contexto_todo_editado_con_el_archivo_identico_no_frena(

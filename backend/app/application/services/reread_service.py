@@ -2722,13 +2722,19 @@ def medir_perdida_real(
     )
 
 
+_SIN_POSICION = "\0sin_posicion"
+
+
 def _ediciones_sin_testigo(
     tenant_id: uuid.UUID,
     file_id: uuid.UUID,
     filas: list[tuple[str | None, int, dict[str, Any], str]],
     items: list[dict[str, Any]],
     editados: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[
+    list[tuple[dict[str, Any], str | None, dict[str, Any] | None]],
+    dict[str | None, list[dict[str, Any]]],
+]:
     """Defecto (a) de B·nuevo: las ediciones de un contexto que cambió y no tiene
     testigo.
 
@@ -2737,38 +2743,49 @@ def _ediciones_sin_testigo(
     editado no tiene ninguno, y la fila original de una edición que cambió dos de
     tres campos no la delata tampoco. Sin el contenido original de la fila, lo
     único que se sabe es si el contexto cambió: esta relectura insertó una
-    operación en él, o una edición quedó más allá de su última fila. Entonces
-    toda edición del contexto está en riesgo (conservador: agregar una fila al
-    final también frena; un archivo idéntico, no)."""
+    operación en él, o una edición quedó más allá de su última fila (conservador:
+    agregar una fila al final también frena; un archivo idéntico, no).
+
+    Devuelve cada edición en riesgo con su contexto y la fila del archivo que cae
+    en su posición (``None`` si quedó más allá del final): esa fila NO entra —la
+    tapa la huella de la edición—. Y las altas de cada contexto: las únicas que
+    pueden repetir la fila original de una edición."""
     ultimo: dict[str | None, int] = {}
-    for ctx, idx, _row, _kind in filas:
+    en_su_lugar: dict[tuple[str | None, int], dict[str, Any]] = {}
+    for ctx, idx, row, _kind in filas:
         ultimo[ctx] = max(ultimo.get(ctx, -1), idx)
+        en_su_lugar.setdefault((ctx, idx), row)
     extension = len(editados)
     if sum(n + 1 + extension for n in ultimo.values()) > _MAX_ANCLAS_DE_EDICIONES:
-        return [e for e in editados if e.get("source_row_ref")]
+        sin_pos = [e for e in editados if e.get("source_row_ref")]
+        return [(e, _SIN_POSICION, None) for e in sin_pos], {_SIN_POSICION: sin_pos}
     posicion: dict[str, tuple[str | None, int]] = {
         _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx)): (ctx, idx)
         for ctx, n in ultimo.items()
         for idx in range(n + 1 + extension)
     }
     con_testigo: set[str | None] = set()
-    con_altas: set[str | None] = set()
+    altas: dict[str | None, list[dict[str, Any]]] = {}
     for it in items:
         es_anulado = it.get("action") == ACTION_VOID
         foto = it.get("before") if es_anulado else it.get("after")
         if not isinstance(foto, dict) or foto.get("kind") not in _TIPOS_OPERACION:
             continue
         pos = posicion.get(foto.get("source_row_ref") or "")
-        if pos is not None:
-            (con_testigo if es_anulado else con_altas).add(pos[0])
-    en_riesgo: list[dict[str, Any]] = []
+        if pos is None:
+            continue
+        if es_anulado:
+            con_testigo.add(pos[0])
+        else:
+            altas.setdefault(pos[0], []).append(foto)
+    en_riesgo: list[tuple[dict[str, Any], str | None, dict[str, Any] | None]] = []
     for ed in editados:
         pos = posicion.get(ed.get("source_row_ref") or "")
         if pos is None or pos[0] in con_testigo:
             continue
-        if pos[0] in con_altas or pos[1] > ultimo[pos[0]]:
-            en_riesgo.append(ed)
-    return en_riesgo
+        if pos[0] in altas or pos[1] > ultimo[pos[0]]:
+            en_riesgo.append((ed, pos[0], en_su_lugar.get(pos)))
+    return en_riesgo, altas
 
 
 def _estimate_reread(
@@ -4123,8 +4140,12 @@ async def apply_reread(
                     perdida.samples.append({"action": "lose", "before": t["fila"], "after": None})
     # Defecto (a) de B·nuevo: un contexto todo editado que cambió no tiene
     # registro no editado que delate el corrimiento. Con identidad fuerte lo cubre
-    # el bloque de arriba; sin ella, frena.
-    sin_testigo = _ediciones_sin_testigo(
+    # el bloque de arriba; sin ella, frena con lo que hace aceptar: la fila del
+    # archivo en la posición de cada edición no entra (pérdida, con la fila), y a
+    # lo sumo tantas ediciones como altas tuvo el contexto vuelven repetidas. Sin
+    # el contenido original no se sabe cuál de esas filas era la de la edición:
+    # las dos cuentas son COTAS (nunca menos de lo que pasa).
+    sin_testigo, altas = _ediciones_sin_testigo(
         tenant_id,
         file_id,
         _iter_importable_fresh_rows(summary_for_import, confirmed_fields, exigir_monto=False),
@@ -4132,18 +4153,38 @@ async def apply_reread(
         result.edited_snapshots,
     )
     if sin_testigo:
-        ids = await _con_identidad(session, tenant_id, sin_testigo)
+        ids = await _con_identidad(session, tenant_id, [ed for ed, _c, _f in sin_testigo])
         ids |= {
             str((s.get("before") or {}).get("id"))
             for s in perdida.samples
             if s.get("action") == "edited_at_risk"
         }
-        for ed in sin_testigo:
-            if str(ed.get("id")) not in ids:
-                perdida.edited_at_risk += 1
+        por_contexto: dict[str | None, int] = {}
+        for ed, ctx, fila in sin_testigo:
+            if str(ed.get("id")) in ids:
+                continue
+            por_contexto[ctx] = por_contexto.get(ctx, 0) + 1
+            if fila is not None:
+                perdida.to_lose += 1
                 if len(perdida.samples) < 2 * _SAMPLE_PER_KIND:
                     perdida.samples.append(
-                        {"action": "edited_at_risk", "before": ed, "after": None}
+                        {
+                            "action": "lose",
+                            "before": {
+                                str(k): None if v is None else str(v)
+                                for k, v in fila.items()
+                                if not str(k).startswith("__")
+                            },
+                            "after": None,
+                        }
+                    )
+        for ctx, n in por_contexto.items():
+            repetidas = altas.get(ctx, [])[:n]
+            perdida.edited_at_risk += len(repetidas)
+            for alta in repetidas:
+                if len(perdida.samples) < 2 * _SAMPLE_PER_KIND:
+                    perdida.samples.append(
+                        {"action": "edited_at_risk", "before": alta, "after": None}
                     )
     if perdida.hay_perdida and not _perdida_aceptada(perdida, accept_data_loss, tope_aceptado):
         if perdida.edited_at_risk:
