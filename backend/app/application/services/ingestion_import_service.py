@@ -48,6 +48,7 @@ from app.application.services.inventory_movement_origin import (
 )
 from app.application.services.operation_identity_service import (
     DECISION_CONFLICTO,
+    DECISION_NUEVA,
     DECISION_YA_APLICADA,
     PlanDeIdentidad,
     cerrar_plan,
@@ -1001,6 +1002,20 @@ ROW_REF_KEY = "__row_ref__"
 #: revisión y clasificarlo desde ahí aplicaría el efecto duplicado que el
 #: importador se negó a aplicar.
 IDENTITY_REF_KEY = "__identity_key__"
+
+#: B·nuevo, defecto (b): ``source_row_ref`` de las filas que se saltearon por la
+#: huella de su POSICIÓN aunque su identidad fuerte es NUEVA. La huella dice «esta
+#: fila ya entró» y la identidad dice «esta operación nunca entró»: la posición la
+#: ocupa ahora otra operación. En una relectura es la fila que quedó bajo la huella
+#: de una edición preservada, y se perdería en silencio; la compuerta frena con eso.
+REFS_NUEVAS_BAJO_HUELLA = "refs_nuevas_bajo_huella"
+
+
+def _anotar_nueva_bajo_huella(
+    counts: dict[str, Any], anchor: str, *decisiones: str | None
+) -> None:
+    if DECISION_NUEVA in decisiones and (ref := _source_row_ref(anchor)):
+        counts.setdefault(REFS_NUEVAS_BAJO_HUELLA, []).append(ref)
 
 _ROW_FINGERPRINT_CONFLICT = unique_violation_classifier(
     "fingerprint",
@@ -5366,6 +5381,12 @@ async def _insert_confirmed_data_impl(
             if _row_anchor is not None and await _import_row_seen(
                 session, tenant_id, _row_anchor, seen_fp
             ):
+                _anotar_nueva_bajo_huella(
+                    counts,
+                    _row_anchor,
+                    _plan_ventas.decision.get(row_index),
+                    _plan_gastos.decision.get(row_index),
+                )
                 continue
             _inserted_before = counts["ventas"] + counts["gastos"]
             # Review F2 #4/#6: resultado "captura a Otros" de esta fila. Se trata
@@ -9180,6 +9201,7 @@ async def _insert_multisheet_data(
                 if _ctx_anchor is not None and await _import_row_seen(
                     session, tenant_id, _ctx_anchor, seen_fp
                 ):
+                    _anotar_nueva_bajo_huella(counts, _ctx_anchor, _plan_ident.decision.get(_i))
                     continue
                 # Mejora D: ref de fila origen (incluye productos, que no
                 # fingerprintean pero sí trazan su fila). Usa el mismo ancla por

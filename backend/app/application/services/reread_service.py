@@ -100,6 +100,7 @@ from app.application.services.column_risk import (
 )
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
+    REFS_NUEVAS_BAJO_HUELLA,
     default_confirmed_fields,
     insert_confirmed_data,
 )
@@ -4045,6 +4046,20 @@ async def apply_reread(
     perdida = medir_perdida_real(
         result.items, result.edited_snapshots, otros_nuevos, result.reemplazos_de_otros
     )
+    # Defecto (b) de B·nuevo: con identidad fuerte, la fila original de una edición
+    # que se corrió no vuelve a entrar (su identidad está tomada) y la operación
+    # NUEVA que quedó en su posición se saltea por la huella de la edición. Nada se
+    # anuló sin volver ni se repitió, así que la medición de arriba no lo ve.
+    tapadas = set(result.import_counts.get(REFS_NUEVAS_BAJO_HUELLA) or ())
+    corridas = [e for e in result.edited_snapshots if e.get("source_row_ref") in tapadas]
+    if corridas:
+        # Sólo la edición con identidad: sin vínculo, su propia fila también da
+        # NUEVA (identidad mapeada recién ahora) y no prueba ningún corrimiento.
+        ids = await _con_identidad(session, tenant_id, corridas)
+        for ed in (e for e in corridas if str(e.get("id")) in ids):
+            perdida.edited_at_risk += 1
+            if len(perdida.samples) < 2 * _SAMPLE_PER_KIND:
+                perdida.samples.append({"action": "edited_at_risk", "before": ed, "after": None})
     if perdida.hay_perdida and not _perdida_aceptada(perdida, accept_data_loss, tope_aceptado):
         if perdida.edited_at_risk:
             editados = result.edited_snapshots
