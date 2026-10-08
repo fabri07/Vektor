@@ -1086,6 +1086,7 @@ async def test_identidad_fila_nueva_en_la_posicion_de_la_edicion(
 
     # Aceptar: entra lo anunciado y nada más. Azúcar no entra, la edición no se
     # repite, y lo aceptado registra la pérdida que de verdad ocurrió.
+    await db_session.refresh(run)  # el rollback del freno lo dejó expirado
     aceptada = await _releer(
         db_session,
         tid,
