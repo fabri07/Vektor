@@ -74,7 +74,7 @@ La propuesta aportada diagnostica bien la causa: contenido ≠ identidad, la hue
 - **Defectos de `main` que dejó el paso 0** (`xfail(strict=True)` en `test_relectura_freno_escenarios.py`):
   - (c) `undo_reread` no restauraba `operation_identity_links` — **resuelto** en `fix/relectura-undo-vinculos-identidad` (foto de identidades en el `before_json` del void + `restaurar_vinculos` en el undo; ver `docs/claude/ingesta.md`).
   - (b) con identidad fuerte, fila nueva en la posición de la edición se perdía en silencio — **resuelto frenando** en `fix/relectura-fila-nueva-en-posicion-de-edicion` (el importador anota las filas salteadas por huella con identidad `nueva`; el apply frena con `filas_corridas` si caen bajo una edición con vínculo; ver `docs/claude/ingesta.md`).
-  - (a) contexto todo editado con dos de tres campos cambiados — pendiente.
+  - (a) contexto todo editado con dos de tres campos cambiados — **resuelto frenando** en `fix/relectura-contexto-todo-editado` (`_ediciones_sin_testigo`: un contexto sin registro anulado que delate el corrimiento y que cambió —alta en él o edición más allá de su última fila— frena con las ediciones sin vínculo de identidad en riesgo; límites en `docs/claude/ingesta.md`).
 
 ### 1. Traslado por identidad fuerte (borrador; se reescribe y pide OK después del paso 0)
 Condiciones que tiene que resolver y probar antes de implementar:

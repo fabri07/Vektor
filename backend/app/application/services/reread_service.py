@@ -2722,6 +2722,55 @@ def medir_perdida_real(
     )
 
 
+def _ediciones_sin_testigo(
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    filas: list[tuple[str | None, int, dict[str, Any], str]],
+    items: list[dict[str, Any]],
+    editados: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Defecto (a) de B·nuevo: las ediciones de un contexto que cambió y no tiene
+    testigo.
+
+    El corrimiento se delata por un registro NO editado del contexto (se anula y
+    vuelve, o se pierde: ``medir_perdida_real``). Un contexto donde todo está
+    editado no tiene ninguno, y la fila original de una edición que cambió dos de
+    tres campos no la delata tampoco. Sin el contenido original de la fila, lo
+    único que se sabe es si el contexto cambió: esta relectura insertó una
+    operación en él, o una edición quedó más allá de su última fila. Entonces
+    toda edición del contexto está en riesgo (conservador: agregar una fila al
+    final también frena; un archivo idéntico, no)."""
+    ultimo: dict[str | None, int] = {}
+    for ctx, idx, _row, _kind in filas:
+        ultimo[ctx] = max(ultimo.get(ctx, -1), idx)
+    extension = len(editados)
+    if sum(n + 1 + extension for n in ultimo.values()) > _MAX_ANCLAS_DE_EDICIONES:
+        return [e for e in editados if e.get("source_row_ref")]
+    posicion: dict[str, tuple[str | None, int]] = {
+        _hash_anchor(_row_anchor(tenant_id, file_id, ctx, idx)): (ctx, idx)
+        for ctx, n in ultimo.items()
+        for idx in range(n + 1 + extension)
+    }
+    con_testigo: set[str | None] = set()
+    con_altas: set[str | None] = set()
+    for it in items:
+        es_anulado = it.get("action") == ACTION_VOID
+        foto = it.get("before") if es_anulado else it.get("after")
+        if not isinstance(foto, dict) or foto.get("kind") not in _TIPOS_OPERACION:
+            continue
+        pos = posicion.get(foto.get("source_row_ref") or "")
+        if pos is not None:
+            (con_testigo if es_anulado else con_altas).add(pos[0])
+    en_riesgo: list[dict[str, Any]] = []
+    for ed in editados:
+        pos = posicion.get(ed.get("source_row_ref") or "")
+        if pos is None or pos[0] in con_testigo:
+            continue
+        if pos[0] in con_altas or pos[1] > ultimo[pos[0]]:
+            en_riesgo.append(ed)
+    return en_riesgo
+
+
 def _estimate_reread(
     file: UploadedFile,
     tenant_id: uuid.UUID,
@@ -4072,6 +4121,30 @@ async def apply_reread(
                 perdida.to_lose += 1
                 if len(perdida.samples) < 2 * _SAMPLE_PER_KIND:
                     perdida.samples.append({"action": "lose", "before": t["fila"], "after": None})
+    # Defecto (a) de B·nuevo: un contexto todo editado que cambió no tiene
+    # registro no editado que delate el corrimiento. Con identidad fuerte lo cubre
+    # el bloque de arriba; sin ella, frena.
+    sin_testigo = _ediciones_sin_testigo(
+        tenant_id,
+        file_id,
+        _iter_importable_fresh_rows(summary_for_import, confirmed_fields, exigir_monto=False),
+        result.items,
+        result.edited_snapshots,
+    )
+    if sin_testigo:
+        ids = await _con_identidad(session, tenant_id, sin_testigo)
+        ids |= {
+            str((s.get("before") or {}).get("id"))
+            for s in perdida.samples
+            if s.get("action") == "edited_at_risk"
+        }
+        for ed in sin_testigo:
+            if str(ed.get("id")) not in ids:
+                perdida.edited_at_risk += 1
+                if len(perdida.samples) < 2 * _SAMPLE_PER_KIND:
+                    perdida.samples.append(
+                        {"action": "edited_at_risk", "before": ed, "after": None}
+                    )
     if perdida.hay_perdida and not _perdida_aceptada(perdida, accept_data_loss, tope_aceptado):
         if perdida.edited_at_risk:
             editados = result.edited_snapshots
