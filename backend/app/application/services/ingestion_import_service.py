@@ -1003,19 +1003,38 @@ ROW_REF_KEY = "__row_ref__"
 #: importador se negó a aplicar.
 IDENTITY_REF_KEY = "__identity_key__"
 
-#: B·nuevo, defecto (b): ``source_row_ref`` de las filas que se saltearon por la
-#: huella de su POSICIÓN aunque su identidad fuerte es NUEVA. La huella dice «esta
-#: fila ya entró» y la identidad dice «esta operación nunca entró»: la posición la
-#: ocupa ahora otra operación. En una relectura es la fila que quedó bajo la huella
-#: de una edición preservada, y se perdería en silencio; la compuerta frena con eso.
-REFS_NUEVAS_BAJO_HUELLA = "refs_nuevas_bajo_huella"
+#: B·nuevo, defecto (b): las filas que se saltearon por la huella de su POSICIÓN
+#: aunque su identidad fuerte es NUEVA. La huella dice «esta fila ya entró» y la
+#: identidad dice «esta operación nunca entró»: la posición la ocupa ahora otra
+#: operación, que no se inserta. Cada una: ``source_row_ref``, ``identity_key`` y
+#: la ``fila`` del archivo, para que la relectura la cuente como PÉRDIDA y la
+#: muestre (no hay registro que la nombre).
+FILAS_NUEVAS_BAJO_HUELLA = "filas_nuevas_bajo_huella"
 
 
 def _anotar_nueva_bajo_huella(
-    counts: dict[str, Any], anchor: str, *decisiones: str | None
+    counts: dict[str, Any],
+    anchor: str,
+    row: dict[str, Any],
+    row_index: int,
+    *planes: PlanDeIdentidad,
 ) -> None:
-    if DECISION_NUEVA in decisiones and (ref := _source_row_ref(anchor)):
-        counts.setdefault(REFS_NUEVAS_BAJO_HUELLA, []).append(ref)
+    ref = _source_row_ref(anchor)
+    for plan in planes:
+        if ref and plan.decision.get(row_index) == DECISION_NUEVA:
+            counts.setdefault(FILAS_NUEVAS_BAJO_HUELLA, []).append(
+                {
+                    "source_row_ref": ref,
+                    "identity_key": plan.clave.get(row_index),
+                    "fila": {
+                        str(k): None if v is None else str(v)
+                        for k, v in row.items()
+                        if not str(k).startswith("__")
+                    },
+                }
+            )
+            return
+
 
 _ROW_FINGERPRINT_CONFLICT = unique_violation_classifier(
     "fingerprint",
@@ -5382,10 +5401,7 @@ async def _insert_confirmed_data_impl(
                 session, tenant_id, _row_anchor, seen_fp
             ):
                 _anotar_nueva_bajo_huella(
-                    counts,
-                    _row_anchor,
-                    _plan_ventas.decision.get(row_index),
-                    _plan_gastos.decision.get(row_index),
+                    counts, _row_anchor, row, row_index, _plan_ventas, _plan_gastos
                 )
                 continue
             _inserted_before = counts["ventas"] + counts["gastos"]
@@ -9201,7 +9217,7 @@ async def _insert_multisheet_data(
                 if _ctx_anchor is not None and await _import_row_seen(
                     session, tenant_id, _ctx_anchor, seen_fp
                 ):
-                    _anotar_nueva_bajo_huella(counts, _ctx_anchor, _plan_ident.decision.get(_i))
+                    _anotar_nueva_bajo_huella(counts, _ctx_anchor, row, _i, _plan_ident)
                     continue
                 # Mejora D: ref de fila origen (incluye productos, que no
                 # fingerprintean pero sí trazan su fila). Usa el mismo ancla por

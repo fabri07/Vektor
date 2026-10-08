@@ -100,7 +100,7 @@ from app.application.services.column_risk import (
 )
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
-    REFS_NUEVAS_BAJO_HUELLA,
+    FILAS_NUEVAS_BAJO_HUELLA,
     default_confirmed_fields,
     insert_confirmed_data,
 )
@@ -4048,18 +4048,30 @@ async def apply_reread(
     )
     # Defecto (b) de B·nuevo: con identidad fuerte, la fila original de una edición
     # que se corrió no vuelve a entrar (su identidad está tomada) y la operación
-    # NUEVA que quedó en su posición se saltea por la huella de la edición. Nada se
-    # anuló sin volver ni se repitió, así que la medición de arriba no lo ve.
-    tapadas = set(result.import_counts.get(REFS_NUEVAS_BAJO_HUELLA) or ())
-    corridas = [e for e in result.edited_snapshots if e.get("source_row_ref") in tapadas]
+    # NUEVA que quedó en su posición se saltea por la huella de la edición. No hay
+    # registro anulado que la nombre: se cuenta como PÉRDIDA con la fila del
+    # archivo, que es lo que de verdad no entra (la edición no se repite).
+    tapadas = result.import_counts.get(FILAS_NUEVAS_BAJO_HUELLA) or []
+    refs = {t["source_row_ref"] for t in tapadas}
+    corridas = [e for e in result.edited_snapshots if e.get("source_row_ref") in refs]
     if corridas:
-        # Sólo la edición con identidad: sin vínculo, su propia fila también da
-        # NUEVA (identidad mapeada recién ahora) y no prueba ningún corrimiento.
+        # Sólo bajo una edición con identidad: sin vínculo, su propia fila también
+        # da NUEVA (identidad mapeada recién ahora) y no se pierde nada.
         ids = await _con_identidad(session, tenant_id, corridas)
-        for ed in (e for e in corridas if str(e.get("id")) in ids):
-            perdida.edited_at_risk += 1
-            if len(perdida.samples) < 2 * _SAMPLE_PER_KIND:
-                perdida.samples.append({"action": "edited_at_risk", "before": ed, "after": None})
+        bajo_edicion = {e["source_row_ref"] for e in corridas if str(e.get("id")) in ids}
+        # Una fila tapada que era un registro anulado por esta relectura ya la
+        # cuenta `medir_perdida_real` (su clave está en el snapshot del anulado).
+        ya_medidas = {
+            ident.get("identity_key")
+            for it in result.items
+            if it.get("action") == ACTION_VOID
+            for ident in (it.get("before") or {}).get("identidades") or ()
+        }
+        for t in tapadas:
+            if t["source_row_ref"] in bajo_edicion and t["identity_key"] not in ya_medidas:
+                perdida.to_lose += 1
+                if len(perdida.samples) < 2 * _SAMPLE_PER_KIND:
+                    perdida.samples.append({"action": "lose", "before": t["fila"], "after": None})
     if perdida.hay_perdida and not _perdida_aceptada(perdida, accept_data_loss, tope_aceptado):
         if perdida.edited_at_risk:
             editados = result.edited_snapshots
