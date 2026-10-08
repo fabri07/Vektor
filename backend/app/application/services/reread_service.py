@@ -134,6 +134,7 @@ from app.persistence.models.file import (
 )
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.memory import OperationFingerprint
+from app.persistence.models.operation_identity import OperationIdentityLink
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -2588,6 +2589,8 @@ class PerdidaDeRelectura:
     to_lose_to_others: int = 0
     edited_at_risk: int = 0
     samples: list[dict[str, Any]] = field(default_factory=list)
+    #: Por qué frena una edición a mano (``MOTIVOS_DEL_FRENO``); ``None`` si no hay.
+    motivo: str | None = None
 
     @property
     def hay_perdida(self) -> bool:
@@ -2599,6 +2602,8 @@ class PerdidaDeRelectura:
             "to_lose_to_others": self.to_lose_to_others,
             "edited_at_risk": self.edited_at_risk,
             "samples": self.samples,
+            "motivo": self.motivo,
+            "motivo_texto": MOTIVOS_DEL_FRENO.get(self.motivo or ""),
         }
 
 
@@ -3452,6 +3457,68 @@ class FileChangedSincePreviewError(ValueError):
 REREAD_WOULD_LOSE_DATA = "REREAD_WOULD_LOSE_DATA"
 
 
+#: B·nuevo paso 0 (0c): por qué una edición a mano frena la relectura. Viaja en
+#: ``data_loss.motivo`` (aditivo: un frontend viejo lo ignora). Hoy ninguno tiene
+#: salida automática: la edición se ubica por su posición en el archivo.
+MOTIVOS_DEL_FRENO: dict[str, str] = {
+    "archivo_anterior_a_huellas": (
+        "El archivo se importó antes de que Véktor guardara de qué fila salió cada "
+        "registro: no hay forma de ubicar tu edición en el archivo nuevo."
+    ),
+    "fila_con_venta_y_gasto": (
+        "Tu edición es de una fila que trae una venta y un gasto a la vez: releerla "
+        "vuelve a cargar la fila entera, también la parte que corregiste."
+    ),
+    "sin_identificador_de_operacion": (
+        "El archivo no trae un número de comprobante o ID de operación por fila, así "
+        "que tu edición se ubica por su posición, y las filas se corrieron."
+    ),
+    "filas_corridas": (
+        "Las filas del archivo se corrieron de lugar desde que corregiste el registro, "
+        "y la edición se ubica por su posición."
+    ),
+}
+
+
+def motivo_del_freno(
+    editados: list[dict[str, Any]], items: list[dict[str, Any]], con_identidad: set[str]
+) -> str:
+    """El motivo más específico de una edición en riesgo, en este orden.
+
+    ``editados``: fotos de las ediciones preservadas; ``items``: los del apply;
+    ``con_identidad``: ids de las ediciones con vínculo en
+    ``operation_identity_links``."""
+    if any(not e.get("source_row_ref") for e in editados):
+        return "archivo_anterior_a_huellas"
+    efectos = {
+        (f.get("kind"), f.get("source_row_ref"))
+        for it in items
+        for f in (it.get("before"), it.get("after"))
+        if isinstance(f, dict)
+    }
+    otro = {"sale": "expense", "expense": "sale"}
+    if any((otro.get(str(e.get("kind"))), e.get("source_row_ref")) in efectos for e in editados):
+        return "fila_con_venta_y_gasto"
+    if any(str(e.get("id")) not in con_identidad for e in editados):
+        return "sin_identificador_de_operacion"
+    return "filas_corridas"
+
+
+async def _con_identidad(
+    session: AsyncSession, tenant_id: uuid.UUID, editados: list[dict[str, Any]]
+) -> set[str]:
+    ids = [uuid.UUID(str(e["id"])) for e in editados if e.get("id")]
+    if not ids:
+        return set()
+    filas = await session.execute(
+        select(OperationIdentityLink.entity_id).where(
+            OperationIdentityLink.tenant_id == tenant_id,
+            OperationIdentityLink.entity_id.in_(ids),
+        )
+    )
+    return {str(i) for i in filas.scalars()}
+
+
 def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
     partes: list[str] = []
     if perdida.to_lose:
@@ -3464,10 +3531,18 @@ def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
             f"{perdida.edited_at_risk} edición(es) a mano quedarían repetidas, porque "
             "las filas del archivo se corrieron de lugar"
         )
-    return (
+    texto = (
         "La relectura no se aplicó: " + "; ".join(partes) + ". No se guardó "
         "nada. Revisá lo que se pierde y confirmá si querés aplicarla igual."
     )
+    if perdida.motivo in MOTIVOS_DEL_FRENO:
+        # Aplicar igual NO descarta la edición (`_split_records` la conserva).
+        texto += (
+            f" {MOTIVOS_DEL_FRENO[perdida.motivo]} Aplicarla igual no borra tu "
+            "edición: queda junto a la fila original. Si no, dejá el archivo como "
+            "está y revisá el conflicto."
+        )
+    return texto
 
 
 class RereadWouldLoseDataError(ValueError):
@@ -3954,6 +4029,11 @@ async def apply_reread(
         result.items, result.edited_snapshots, otros_nuevos, result.reemplazos_de_otros
     )
     if perdida.hay_perdida and not _perdida_aceptada(perdida, accept_data_loss, tope_aceptado):
+        if perdida.edited_at_risk:
+            editados = result.edited_snapshots
+            perdida.motivo = motivo_del_freno(
+                editados, result.items, await _con_identidad(session, tenant_id, editados)
+            )
         raise RereadWouldLoseDataError(perdida)
 
     # Cambio 4: comprobante de importación de ESTA relectura — mismo criterio

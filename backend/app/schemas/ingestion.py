@@ -1002,6 +1002,10 @@ class RereadDataLoss(BaseModel):
     to_lose_to_others: int = 0
     edited_at_risk: int = 0
     samples: list[RereadItem] = Field(default_factory=list)
+    #: B·nuevo paso 0 (0c): por qué frena una edición a mano
+    #: (``reread_service.MOTIVOS_DEL_FRENO``). Aditivos: ``None`` si no aplica.
+    motivo: str | None = None
+    motivo_texto: str | None = None
 
 
 RereadPreviewResponse.model_rebuild()

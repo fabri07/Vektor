@@ -132,6 +132,7 @@ Al terminar: cerrar el #48 diciendo qué se portó y en qué PR, y borrar la ram
 | 1. Compuerta de relectura | #81 | F-R (reescrito) | Hecho, rediseñado (el apply mide la pérdida) |
 | 2. Tres arreglos chicos | #84 | `4063b33c`, `687dd622` (corregido), `e4558d21` (sólo `Table`) | Hecho; F-V.2 afuera |
 | 3. Datos que se pierden (B·3) | rama `fix/ingesta-paso3-categoria-y-codigos` | `e9b9df3d`, `5d4eaccd` (como referencia) | Hecho; códigos reescritos sobre `products.external_code`; la categoría inferida quedó como sugerencia que el usuario acepta (decisión del dueño 2026-10-07) |
+| B·nuevo (edición que sobrevive al corrimiento) | #86 cerrado; paso 0 en rama `fix/relectura-paso0-evidencia` | ninguno (no se porta nada del #86) | B·nuevo: PR #86 cerrado sin merge (`200ff590`, 9 hallazgos); reducido a paso 0 de evidencia (este PR); automatización pendiente de decisión A/B/C del dueño |
 
 ### Reglas para cada paso
 

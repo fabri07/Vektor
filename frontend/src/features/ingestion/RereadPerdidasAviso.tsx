@@ -48,11 +48,21 @@ export function RereadPerdidasAviso({
         )}
         {enRiesgo > 0 && (
           <li>
-            {enRiesgo} edición(es) a mano quedarían repetidas: las filas del
-            archivo se corrieron de lugar desde que las corregiste.
+            {enRiesgo} edición(es) a mano quedarían repetidas:{" "}
+            {perdida.motivo_texto ??
+              "las filas del archivo se corrieron de lugar desde que las corregiste."}
           </li>
         )}
       </ul>
+      {enRiesgo > 0 && (
+        // `accept_data_loss` NO descarta la edición: la conserva y la fila
+        // original vuelve a entrar. No se promete una salida que no existe.
+        <p className="mt-1 text-xs leading-snug text-vk-text-primary">
+          Aplicar igual no borra tu edición: queda junto a la fila original,
+          repetida. Si no querés eso, dejá el archivo como está y revisá el
+          conflicto.
+        </p>
+      )}
       <label className="mt-2 flex items-start gap-2 text-xs text-vk-text-primary">
         <input
           type="checkbox"
