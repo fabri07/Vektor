@@ -999,15 +999,11 @@ async def test_pg_freno_con_rollback_real(
     assert salida.frenada and salida.perdida is not None  # foto idéntica: `_releer`
     # Con identidad, la fila original de la edición NO vuelve a entrar (su
     # identidad sigue tomada por la edición: «ya aplicada»), así que no hay edición
-    # repetida. La fila que quedó bajo la huella de la edición (Pan) se saltea: se
-    # mide como pérdida y, desde el arreglo del defecto (b), su identidad soltada
-    # —NUEVA bajo la huella de la edición— marca además el corrimiento.
-    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (1, 1)
-    assert [x["before"]["description"] for x in salida.perdida.samples] == [
-        "Pan",
-        "corregido a mano",
-    ]
-    assert salida.perdida.motivo == "filas_corridas"
+    # repetida. La fila que quedó bajo la huella de la edición (Pan) se saltea y se
+    # mide como pérdida UNA vez: era un registro anulado, no una operación nueva.
+    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (1, 0)
+    assert [x["before"]["description"] for x in salida.perdida.samples] == ["Pan"]
+    assert salida.perdida.motivo is None
 
 
 @pytest.mark.parametrize("_", [pytest.param(None, marks=_pg)])
@@ -1080,12 +1076,36 @@ async def test_identidad_fila_nueva_en_la_posicion_de_la_edicion(
 
     # Defecto (b), resuelto frenando (decisión A: no se traslada la edición). La
     # fila de Azúcar cae bajo la huella de la edición con una identidad que nunca
-    # entró: es un corrimiento. Antes nada se anulaba sin volver ni se repetía y
-    # Azúcar se perdía en silencio; ahora frena y `_releer` exige la foto idéntica.
+    # entró: se saltea. Lo que se pierde es Azúcar —no hay edición repetida, la
+    # original no vuelve—, y eso es lo que se mide y se muestra.
     assert salida.frenada and salida.perdida is not None
-    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (0, 1)
-    assert salida.perdida.motivo == "filas_corridas"
-    assert [x["before"]["description"] for x in salida.perdida.samples] == ["corregido a mano"]
+    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (1, 0)
+    assert salida.perdida.motivo is None
+    assert [x["before"]["detalle"] for x in salida.perdida.samples] == ["Azúcar"]
+    assert "edición" not in reread_service.texto_de_perdida(salida.perdida)
+
+    # Aceptar: entra lo anunciado y nada más. Azúcar no entra, la edición no se
+    # repite, y lo aceptado registra la pérdida que de verdad ocurrió.
+    await db_session.refresh(run)  # el rollback del freno lo dejó expirado
+    aceptada = await _releer(
+        db_session,
+        tid,
+        fid,
+        _con_comprobante([_FACTURAS[0], _FACTURAS[1], nueva, _FACTURAS[2]]),
+        "f.csv",
+        run=run,
+        accept_data_loss=True,
+    )
+    assert not aceptada.frenada and aceptada.resultado is not None
+    _una_vez(
+        await _foto(db_session, tid, fid),
+        [("1500.00", "Coca Cola"), ("800.00", "Pan"), ("2200.00", "corregido a mano")],
+    )
+    aplicado = await db_session.get(DataRepairRun, aceptada.resultado.run_id)
+    assert aplicado is not None
+    registrada = (aplicado.details_json or {})["data_loss"]
+    assert (registrada["to_lose"], registrada["edited_at_risk"]) == (1, 0)
+    assert [x["before"]["detalle"] for x in registrada["samples"]] == ["Azúcar"]
 
 
 @pytest.mark.parametrize(
