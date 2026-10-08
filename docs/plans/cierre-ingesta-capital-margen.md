@@ -83,7 +83,7 @@ Este plan consolida mi v2 con el plan consolidado que trajo el dueño. Tomo de e
 - Sólo frontend, sin endpoint nuevo: el editor de producto crea la categoría con `POST /products/custom-categories` (OWNER/ADMIN), la deja seleccionada e invalida el catálogo. «Otra» junto a la sugerida abre el mismo editor. Rama `feat/productos-nueva-categoria`, PR propio, separado de B·nuevo.
 
 ### 2. B·nuevo: preservar la edición sin depender de la posición
-> **Estado (2026-10-07):** B·nuevo: PR #86 cerrado sin merge (`200ff590`, 9 hallazgos); reducido a paso 0 de evidencia (este PR, rama `fix/relectura-paso0-evidencia`: `diag_ediciones_en_riesgo.py`, `test_relectura_freno_escenarios.py` y el motivo del freno); automatización pendiente de decisión A/B/C del dueño. Plan vigente: [`bnuevo-reemplazo-seguro-pr86.md`](bnuevo-reemplazo-seguro-pr86.md). Lo que sigue abajo queda como diseño de referencia, no como alcance aprobado.
+> **Estado (2026-10-08):** B·nuevo: PR #86 cerrado sin merge (`200ff590`, 9 hallazgos); reducido a paso 0 de evidencia (#88: `diag_ediciones_en_riesgo.py`, `test_relectura_freno_escenarios.py` y el motivo del freno). **Decisión A** del dueño con el diagnóstico de producción (0 registros editados de archivos importados): automatización descartada, limitación documentada. Los tres defectos del freno que mostró el paso 0 se arreglaron igual: (c) #89, (b) #90 + #91, (a) #92 + #94. Plan vigente: [`bnuevo-reemplazo-seguro-pr86.md`](bnuevo-reemplazo-seguro-pr86.md). Lo que sigue abajo queda como diseño de referencia, no como alcance aprobado.
 
 Primero se diseña la correspondencia (con revisión), y recién después se toca `_split_records` / `_reconcile` (`reread_service.py:766`, `:1213`).
 - **Tres cosas separadas:** el identificador lógico, los **datos originales importados** (la edición manual no los modifica, y son los que se usan para reconciliar) y el localizador hoja/fila.
@@ -111,6 +111,22 @@ Primero se diseña la correspondencia (con revisión), y recién después se toc
 - un ensayo con un fixture tipo ASTERIA con filas corridas: no duplica la edición y no saltea ninguna fila.
 
 Se registran el SHA, los comandos, las cantidades y los skips.
+
+#### Registro del cierre de la fase 1 (2026-10-08) — CERRADA
+
+SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuses `success`). Entraron: B·3, B·3b (#87), paso 0 de B·nuevo (#88) y los defectos c/b/a (#89, #90, #91, #92, #94).
+
+| Prueba | Comando | Resultado |
+|---|---|---|
+| Backend completo | `pytest --cov-fail-under=60` con el bloque `env:` de `ci-backend.yml` | 5.847 passed, 1 failed, 201 skipped; cobertura 80,14% |
+| Postgres | `pytest -m postgres -n 0 -p no:randomly` con `TEST_PG_DSN`, `DATABASE_URL` y `DATABASE_URL_SYNC` en `localhost:5432/vektor_pgtest` (alembic en head `20261002_0001`) | 201 passed, 0 skipped, 0 failed |
+| Frontend | `npx jest --runInBand` | 913 passed, 3 failed de 916 (101 de 102 suites) |
+| Ensayo tipo ASTERIA | `pytest app/tests/integration/test_relectura_freno_escenarios.py` con `TEST_PG_DSN` | 28 passed, 0 xfail, 0 skip |
+
+- **Skips:** los 201 del backend son los `-m postgres` de la corrida SQLite (sin `TEST_PG_DSN`, por diseño) y corrieron todos en la segunda fila. No queda ningún `xfail` en `app/tests`. Hay skips condicionales que no se dispararon: el schema sin migrar en 4 tests `_pg`, `test_auto_custom_field_proposal` y `test_product_scan:275`.
+- **Ensayo:** en cada escenario de filas corridas (fila insertada antes de la edición, gemelas, compra con stock, corrimiento en el mismo día, fila nueva en la posición de la edición) el resultado es correcto, o frena con rollback, y `_releer` exige que la foto completa quede idéntica: ids, importes, `source_row_ref`, huellas, stock, movimientos y vínculos.
+- **Falla del backend, ambiental y preexistente:** `test_limites_todos_los_caminos.py::test_el_fallback_sincronico_deja_el_archivo_rechazado_no_fallado` necesita el broker de Celery caído. En local, con Redis arriba, el archivo queda `PENDING`. Con `CELERY_BROKER_URL=redis://localhost:6390/1` (inalcanzable, como en CI, que no tiene Redis) pasa. Viene de E6c-2 (`65cc7585`), y el CI backend dio verde en `4abdd0d4`. Deuda: forzar el broker caído dentro del test.
+- **Fallas de jest, preexistentes:** 3 tests de `src/features/pos/__tests__/pos_screen.test.tsx`, por estado que se filtra del test anterior. El archivo solo pasa 21 de 21. La fase 1 no tocó el frontend del POS (último commit ahí: #83). Deuda: limpiar el estado entre tests.
 
 ## Fase 2: costo, margen y capital en dinero
 
