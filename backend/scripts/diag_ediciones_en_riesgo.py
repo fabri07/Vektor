@@ -165,9 +165,9 @@ def informe(
     def linea(etiqueta: str, valor: Any) -> None:
         out.append(f"  {etiqueta:<52}: {valor}")
 
-    tenants: list[str | None] = sorted(
-        set(por_tenant) | set(frenos) | ({tenant} if tenant else set())
-    ) or [None]
+    tenants: list[str | None] = [
+        *sorted(set(por_tenant) | set(frenos) | ({tenant} if tenant else set()))
+    ] or [None]
     for tid in tenants:
         titulo = (
             f"tenant {tid}" if tid else
