@@ -999,11 +999,15 @@ async def test_pg_freno_con_rollback_real(
     assert salida.frenada and salida.perdida is not None  # foto idéntica: `_releer`
     # Con identidad, la fila original de la edición NO vuelve a entrar (su
     # identidad sigue tomada por la edición: «ya aplicada»), así que no hay edición
-    # repetida. Lo que frena es la fila que quedó bajo la huella de la edición
-    # (Pan): se saltea y se mide como pérdida.
-    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (1, 0)
-    assert [x["before"]["description"] for x in salida.perdida.samples] == ["Pan"]
-    assert salida.perdida.motivo is None
+    # repetida. La fila que quedó bajo la huella de la edición (Pan) se saltea: se
+    # mide como pérdida y, desde el arreglo del defecto (b), su identidad soltada
+    # —NUEVA bajo la huella de la edición— marca además el corrimiento.
+    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (1, 1)
+    assert [x["before"]["description"] for x in salida.perdida.samples] == [
+        "Pan",
+        "corregido a mano",
+    ]
+    assert salida.perdida.motivo == "filas_corridas"
 
 
 @pytest.mark.parametrize("_", [pytest.param(None, marks=_pg)])
@@ -1055,16 +1059,6 @@ async def test_releer_despues_del_undo_da_el_resultado_correcto(
     assert len(foto["vinculos"]) == 3
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "defecto de main: con identidad fuerte, una fila NUEVA insertada justo en la "
-        "posición de la edición se saltea (la huella de la edición la tapa) y la "
-        "fila original de la edición no vuelve (su identidad está tomada): nada se "
-        "anuló sin volver ni se repitió, así que la compuerta no ve nada y la fila "
-        "nueva se pierde en silencio"
-    ),
-)
 async def test_identidad_fila_nueva_en_la_posicion_de_la_edicion(
     db_session: AsyncSession, tid: uuid.UUID
 ) -> None:
@@ -1084,18 +1078,14 @@ async def test_identidad_fila_nueva_en_la_posicion_de_la_edicion(
         run=run,
     )
 
-    if salida.frenada:
-        return
-    _una_vez(
-        await _foto(db_session, tid, fid),
-        [
-            ("1500.00", "Coca Cola"),
-            ("800.00", "Pan"),
-            ("333.00", "Azúcar"),
-            ("2200.00", "corregido a mano"),
-        ],
-    )
-
+    # Defecto (b), resuelto frenando (decisión A: no se traslada la edición). La
+    # fila de Azúcar cae bajo la huella de la edición con una identidad que nunca
+    # entró: es un corrimiento. Antes nada se anulaba sin volver ni se repetía y
+    # Azúcar se perdía en silencio; ahora frena y `_releer` exige la foto idéntica.
+    assert salida.frenada and salida.perdida is not None
+    assert (salida.perdida.to_lose, salida.perdida.edited_at_risk) == (0, 1)
+    assert salida.perdida.motivo == "filas_corridas"
+    assert [x["before"]["description"] for x in salida.perdida.samples] == ["corregido a mano"]
 
 
 @pytest.mark.parametrize(
