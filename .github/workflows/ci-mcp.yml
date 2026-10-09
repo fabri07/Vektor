@@ -93,8 +93,17 @@ jobs:
         run: ruff check .
 
       # ── 5. mypy (type checking, strict) ──────────────────────────────────────
+      # En el runner propio la caché va FUERA del workspace: el checkout hace
+      # `git clean -ffdx` y borraba .mypy_cache, así que cada run arrancaba en
+      # frío (9 min en la Mac contra 27 s con caché, medido 2026-10-09). mypy
+      # valida cada entrada por hash, así que compartirla entre ramas es seguro.
       - name: mypy — type check
-        run: mypy app
+        run: |
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            mypy app --cache-dir "$HOME/.cache/vektor-mypy/mcp"
+          else
+            mypy app
+          fi
 
       # ── 6. pytest ────────────────────────────────────────────────────────────
       # El umbral de cobertura es 15%, un piso ANTI-REGRESIÓN, no una meta: hoy

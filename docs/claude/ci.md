@@ -30,6 +30,7 @@ Qué cambia en el runner propio (todo en `ci-backend.yml`):
 - **"Aislar entorno Python"**: venv por job en `$RUNNER_TEMP`, creado con ese intérprete, para que backend y mcp no compartan dependencias.
 - **Sin `actions/cache` en el runner propio** (pip y `node_modules`): los archivos ya quedan en la máquina, y subir `node_modules` a GitHub desde la conexión del dev tardó 5 min.
 - **Sin Redis en los tests, en los dos entornos**: `REDIS_URL`, `CELERY_BROKER_URL` y `CELERY_RESULT_BACKEND` apuntan a `localhost:1` (cerrado). La suite asume que Redis no existe (camino de fallback sincrónico); en la Mac el 6379 es el Redis del compose y con él vivo `test_el_fallback_sincronico_deja_el_archivo_rechazado_no_fallado` falla.
+- **Caché de mypy persistente** en `~/.cache/vektor-mypy/{backend,mcp}`: el checkout borra `.mypy_cache` del workspace y cada run arrancaba en frío (9 min en la Mac; 27 s con caché).
 - El Docker build requiere Docker Desktop abierto. En la Mac construye para la arquitectura local: verifica el Dockerfile, no la imagen de Railway.
 
 Requisitos: `python3.12` instalado, la Mac prendida con el runner corriendo (si no, los jobs quedan en cola) y Docker Desktop abierto.
