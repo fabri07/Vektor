@@ -18,10 +18,10 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import pytest
-from sqlalchemy import Connection, insert, text
+from sqlalchemy import Connection, Table, insert, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, create_async_engine
 from sqlalchemy.inspection import inspect as sa_inspect
@@ -70,7 +70,7 @@ def _tablas(sync_conn: Connection) -> list[str]:
 
 
 def _indices(sync_conn: Connection) -> set[str]:
-    return {ix["name"] for ix in sa_inspect(sync_conn).get_indexes(_TABLA)}
+    return {ix["name"] for ix in sa_inspect(sync_conn).get_indexes(_TABLA) if ix["name"]}
 
 
 @contextlib.asynccontextmanager
@@ -163,7 +163,7 @@ async def test_los_check_rechazan(malo: dict[str, Any]) -> None:
         s.add(Tenant(tenant_id=tenant_id, legal_name="T", display_name="T"))
         await s.flush()
 
-        tabla = OwnerCapitalMovement.__table__
+        tabla = cast(Table, OwnerCapitalMovement.__table__)
         await conn.execute(insert(tabla).values(**_fila(tenant_id)))
         await conn.execute(
             insert(tabla).values(**_fila(tenant_id, form="especie", payment_method=None))
