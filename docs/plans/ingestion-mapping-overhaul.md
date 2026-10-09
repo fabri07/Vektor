@@ -95,7 +95,7 @@ F-A y F-B quedan entre F-F y F-I porque tocan la misma pantalla que F-F acaba de
 hacerlo al revés es pintarla dos veces.
 
 **F-M** se insertó a mitad de F-H6.c y no estaba en el plan original: su plan propio
-vive en `docs/plans/header-recognition-fm.md`.
+vive en `docs/plans/archive/header-recognition-fm.md`.
 
 **F-H6.d sale detrás de una compuerta por tenant.** `PURCHASE_COST_ROLLOUT_TENANT_IDS`
 (csv de UUIDs, default vacío = nadie) habilita el motor de costos —el reparto y los
