@@ -80,7 +80,12 @@ jobs:
         uses: actions/checkout@v4
 
       # ── 2. Python 3.12 ───────────────────────────────────────────────────────
+      # En el runner propio NO: el Python que baja setup-python para macOS
+      # trae fija la ruta /Users/runner/hostedtoolcache (sólo existe en las
+      # máquinas de GitHub) y falla con "mkdir: /Users/runner: Permission
+      # denied". Ahí se usa el python3.12 de la máquina (paso siguiente).
       - name: Set up Python 3.12
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -91,7 +96,12 @@ jobs:
       # al terminar cada job. En el runner de GitHub es inocuo (~2 s).
       - name: Aislar entorno Python
         run: |
-          python -m venv "$RUNNER_TEMP/venv"
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            PY="$(command -v python3.12 || echo "$HOME/.local/bin/python3.12")"
+          else
+            PY=python
+          fi
+          "$PY" -m venv "$RUNNER_TEMP/venv"
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
 
       # Sólo runner propio: reemplaza al service `postgres` (ver arriba).
@@ -113,7 +123,10 @@ jobs:
           exit 1
 
       # ── 3. Install dependencies (cached) ─────────────────────────────────────
+      # Sólo en GitHub: en el runner propio pip ya conserva su caché local, y
+      # subirla a GitHub desde la conexión del dev cuesta más de lo que ahorra.
       - name: Cache pip
+        if: runner.environment != 'self-hosted'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip

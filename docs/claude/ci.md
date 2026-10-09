@@ -26,10 +26,12 @@ Qué cambia en el runner propio (todo en `ci-backend.yml`):
 
 - Los `services:` sólo existen en runners Linux. Con `CI_RUNNER=self-hosted` la imagen del service `postgres` evalúa a `''` y GitHub no lo crea; el paso **"Postgres descartable"** levanta el mismo `postgres:16` con `docker run` y el paso final lo borra (`if: always()`).
 - Postgres va en el puerto **55432** en los dos entornos, nunca en 5432: en la Mac el 5432 es el compose local, y los tests PG hacen downgrade/upgrade de migraciones reales.
-- **"Aislar entorno Python"**: venv por job en `$RUNNER_TEMP`. En el runner propio el intérprete de `setup-python` es persistente y lo comparten backend y mcp.
+- **`setup-python` no corre en el runner propio**: el Python que baja para macOS trae fija la ruta `/Users/runner/hostedtoolcache` y falla con `mkdir: /Users/runner: Permission denied`. Se usa el `python3.12` de la máquina (PATH o `~/.local/bin`).
+- **"Aislar entorno Python"**: venv por job en `$RUNNER_TEMP`, creado con ese intérprete, para que backend y mcp no compartan dependencias.
+- **Sin `actions/cache` en el runner propio** (pip y `node_modules`): los archivos ya quedan en la máquina, y subir `node_modules` a GitHub desde la conexión del dev tardó 5 min.
 - El Docker build requiere Docker Desktop abierto. En la Mac construye para la arquitectura local: verifica el Dockerfile, no la imagen de Railway.
 
-Requisitos: la Mac prendida con el runner corriendo (si no, los jobs quedan en cola) y Docker Desktop abierto.
+Requisitos: `python3.12` instalado, la Mac prendida con el runner corriendo (si no, los jobs quedan en cola) y Docker Desktop abierto.
 
 **Arrancar el runner desde una terminal limpia.** Los jobs heredan el entorno del proceso del runner: si el shell exportó el `DATABASE_URL` de Neon, cualquier paso que no fije el suyo lo vería. Los pasos de pytest y Alembic fijan el suyo, pero no hay que depender de eso.
 

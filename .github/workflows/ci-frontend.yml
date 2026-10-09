@@ -55,7 +55,10 @@ jobs:
           node-version: "20"
 
       # ── 3. npm ci (cached) ───────────────────────────────────────────────────
+      # Sólo en GitHub: en el runner propio subir node_modules a la caché tardó
+      # 5 min (conexión del dev) y la carpeta ya queda entre corridas.
       - name: Cache node_modules
+        if: runner.environment != 'self-hosted'
         uses: actions/cache@v4
         with:
           path: frontend/node_modules
