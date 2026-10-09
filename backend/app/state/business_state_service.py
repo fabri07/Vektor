@@ -46,6 +46,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._pos_tender_scope import tenders_mixtos
 from app.persistence.repositories.business_profile_repository import BusinessProfileRepository
+from app.persistence.repositories.owner_capital_repository import flujo_de_dinero
 
 logger = get_logger(__name__)
 
@@ -130,10 +131,11 @@ def _make_fingerprint(
     product_count: int,
     profile_updated_at: datetime,
     prev_sales_amount: str = "0",
+    capital_liquid_out: str = "0",
 ) -> str:
     raw = (
         f"{sale_count}:{expense_count}:{product_count}:"
-        f"{profile_updated_at.isoformat()}:{prev_sales_amount}"
+        f"{profile_updated_at.isoformat()}:{prev_sales_amount}:{capital_liquid_out}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -449,6 +451,18 @@ async def compute_business_state(
         )
     )
     liquid_outflow_est: Decimal = Decimal(str(liquid_out_result.scalar_one() or 0))
+    # Capital de socios (D·2): un retiro en dinero líquido sale de la caja igual
+    # que cuando era un gasto PAYROLL. Los aportes NO entran: la liquidez no se
+    # infla por declaración, sólo por la caja contada.
+    capital_liquid_out = sum(
+        (
+            f.salidas
+            for f in await flujo_de_dinero(session, tenant_id, window_start, window_end)
+            if f.medio in _LIQUID_METHODS
+        ),
+        Decimal("0"),
+    )
+    liquid_outflow_est += capital_liquid_out
 
     # ── 3c. Último arqueo (CashClose) — saldo medido si existe ──────────────────
     cash_close_result = await session.execute(
@@ -516,6 +530,7 @@ async def compute_business_state(
         product_count=real_product_count,
         profile_updated_at=profile.updated_at,
         prev_sales_amount=str(prev_real_sales),
+        capital_liquid_out=str(capital_liquid_out),
     )
     cached_hash: str | None = await redis.get(_hash_key(tenant_id))
     if cached_hash == fingerprint:

@@ -73,7 +73,7 @@ export const expensesService = {
     return res.data;
   },
 
-  /** Retiro de ganancias anticipadas (sueldo/retiro del dueño) → gasto PAYROLL/OPEX. */
+  /** Retiro de ganancias anticipadas → movimiento de capital `retiro` (ya no es gasto; la respuesta conserva la forma de gasto). */
   async profitWithdrawal(payload: {
     amount: number;
     withdrawal_date: string; // YYYY-MM-DD

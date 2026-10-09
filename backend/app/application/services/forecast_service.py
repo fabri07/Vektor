@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.observability.logger import get_logger
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.repositories.owner_capital_repository import flujo_de_dinero
 
 logger = get_logger(__name__)
 
@@ -114,6 +115,12 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
 
     daily_income: dict[date, float] = {_day(r.day): float(r.total or 0) for r in income_rows}
     daily_expense: dict[date, float] = {_day(r.day): float(r.total or 0) for r in expense_rows}
+    # Capital de socios (D·2): la proyección es de CAJA, y un retiro en dinero
+    # sale de la caja igual que cuando era un gasto PAYROLL. Los aportes no se
+    # proyectan: son plata del socio, no ingreso del negocio.
+    for f in await flujo_de_dinero(db, tenant_id, window_start, today):
+        if f.salidas:
+            daily_expense[f.dia] = daily_expense.get(f.dia, 0.0) + float(f.salidas)
 
     all_dates = sorted(set(list(daily_income.keys()) + list(daily_expense.keys())))
 

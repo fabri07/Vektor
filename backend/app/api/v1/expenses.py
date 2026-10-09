@@ -14,12 +14,14 @@ from app.api.v1.deps import (
     require_modify_access,
     require_role,
 )
-from app.application.services import tenant_categories_service
+from app.application.services import owner_capital_service, tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.domain.business_time import fecha_de_negocio
 from app.domain.expense_categories import infer_expense_type
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.owner_capital import KIND_RETIRO
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 from app.persistence.models.user import User
@@ -236,7 +238,7 @@ async def create_expense(
     "/profit-withdrawal",
     response_model=ExpenseEntryResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Register an early profit withdrawal (owner salary) as a PAYROLL expense",
+    summary="Register an early profit withdrawal as an owner capital movement (retiro)",
 )
 async def create_profit_withdrawal(
     body: ProfitWithdrawalRequest,
@@ -244,37 +246,47 @@ async def create_profit_withdrawal(
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> ExpenseEntry:
-    """Retiro de ganancias anticipadas: gasto categoría PAYROLL/OPEX. El monto lo
-    fija el usuario (no se calcula). Protegido por PIN."""
+) -> ExpenseEntryResponse:
+    """Retiro de ganancias anticipadas (D·2): ya NO es un gasto PAYROLL.
+
+    Repartir ganancia no es un costo del negocio. Escribe un
+    ``owner_capital_movements`` tipo ``retiro`` en dinero, y devuelve la MISMA
+    forma que antes (``ExpenseEntryResponse``) para que un frontend viejo —el
+    deploy es en paralelo— no se rompa. El ``id`` de la respuesta es ahora el
+    del movimiento de capital, no el de un gasto. El monto lo fija el usuario
+    (no se calcula). Protegido por PIN, como siempre.
+    """
     if idempotency_key is not None and not await claim_idempotency_key(
         session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_PROFIT_WITHDRAWAL"
     ):
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
-    repo = ExpenseRepository(session)
-    entry = ExpenseEntry(
+    mov = await owner_capital_service.registrar_movimiento(
+        session,
         tenant_id=tenant.tenant_id,
+        user_id=user.user_id,
+        kind=KIND_RETIRO,
         amount=body.amount,
+        occurred_on=fecha_de_negocio(body.withdrawal_date),
+        payment_method=body.payment_method,
+        notes=body.notes,
+        endpoint="expenses/profit-withdrawal",
+    )
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "profit_withdrawal_created")
+    return ExpenseEntryResponse(
+        id=mov.id,
+        tenant_id=tenant.tenant_id,
+        amount=mov.amount_ars,
         category="PAYROLL",
         expense_type="OPEX",
         transaction_date=body.withdrawal_date,
         description="Retiro de ganancias anticipadas",
         is_recurring=False,
         payment_method=body.payment_method,
+        supplier_name=None,
         notes=body.notes,
         custom_fields={"profit_withdrawal": True},
+        created_at=mov.created_at,
     )
-    saved = await repo.save(entry)
-    _audit_data_change(
-        session,
-        tenant_id=tenant.tenant_id,
-        user_id=user.user_id,
-        decision_type="DATA_RECORD_CREATED",
-        before=_expense_snapshot(saved),
-        after=_expense_snapshot(saved),
-    )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "profit_withdrawal_created")
-    return saved
 
 
 @router.get(

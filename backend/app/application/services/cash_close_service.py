@@ -28,6 +28,7 @@ from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.cash_close import CashClose
 from app.persistence.repositories.cash_close_repository import CashCloseRepository
+from app.persistence.repositories.owner_capital_repository import flujo_de_dinero
 from app.persistence.repositories.transaction_repository import (
     ExpenseRepository,
     SaleRepository,
@@ -75,6 +76,17 @@ class CashCloseService:
         )
         if cash_expenses:
             by_method[_CASH_METHOD] = by_method.get(_CASH_METHOD, 0.0) - cash_expenses
+
+        # Capital de socios en efectivo (D·2): un retiro sale del cajón y un aporte
+        # entra, aunque no sean gasto ni venta. Sin esto, el retiro que antes era
+        # un gasto en efectivo dejaría un faltante falso en el arqueo.
+        capital_cash = sum(
+            float(f.entradas - f.salidas)
+            for f in await flujo_de_dinero(self._session, tenant_id, close_date, close_date)
+            if f.medio == _CASH_METHOD
+        )
+        if capital_cash:
+            by_method[_CASH_METHOD] = by_method.get(_CASH_METHOD, 0.0) + capital_cash
 
         total = round(sum(by_method.values()), 2)
         return total, {m: round(v, 2) for m, v in by_method.items()}

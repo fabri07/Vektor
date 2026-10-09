@@ -98,8 +98,9 @@ export function ProfitWithdrawalModal({
     <Modal isOpen={isOpen} onClose={onClose} title="Retirar ganancias anticipadas" size="md">
       <form className="space-y-4" onSubmit={handleSubmit}>
         <p className="text-sm text-vk-text-secondary">
-          Registra el retiro/sueldo que te pagás como dueño. Se carga como gasto
-          (categoría Sueldos) y descuenta del resultado.
+          Registra la plata que retirás del negocio como dueño. Es un retiro de
+          capital, no un gasto: no baja el resultado ni el margen. Si fue en
+          efectivo, se descuenta de la caja esperada del arqueo.
         </p>
 
         <Input
