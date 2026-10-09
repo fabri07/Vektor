@@ -184,7 +184,7 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
   - **Cobertura por importe:** lo vendido que entra en el cálculo dividido por todo lo vendido, sobre el mismo universo.
   - **Lo que acompaña al número:** la ganancia conocida, el monto excluido y la metodología («costo de última compra»). «X de N productos con costo» es un dato secundario.
   - La **cobertura de costo no es completeness**. Se respeta la compuerta LOW que ya existe.
-  - Un **umbral mínimo de cobertura del 50%** va como política propia, con tests de borde en 49,99 / 50 / 50,01. **Necesita tu OK.**
+  - Un **umbral mínimo de cobertura del 50%** va como política propia, con tests de borde en 49,99 / 50 / 50,01. **Aprobado por el dueño el 2026-10-09.** Es cobertura de DATOS (importe vendido con costo cargado sobre el total vendido), no un piso del margen: el margen se muestra sea cual sea su valor, incluso negativo.
   - Un resultado parcial siempre dice su cobertura.
   - Quedan afuera las anuladas, las demo y el capital. Una venta mixta no se duplica por tener varios pagos.
 - **Productos:** columna de margen estimado visible, con el motivo cuando no hay.
@@ -315,7 +315,7 @@ Al cierre de la fase, un agente corre las suites completas y deja el registro. *
 ## Lo que queda de tu lado
 - Aprobar cada fase.
 - Aprobar los ejemplos de M·0.
-- Decidir el umbral del 50%.
+- ~~Decidir el umbral del 50%~~ (aprobado 2026-10-09).
 - Correr `diag_margen.py` y la consulta de D0.
 - Autorizar el `--apply` de D·3.
 - Los smokes en producción.
