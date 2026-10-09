@@ -29,6 +29,7 @@ Qué cambia en el runner propio (todo en `ci-backend.yml`):
 - **`setup-python` no corre en el runner propio**: el Python que baja para macOS trae fija la ruta `/Users/runner/hostedtoolcache` y falla con `mkdir: /Users/runner: Permission denied`. Se usa el `python3.12` de la máquina (PATH o `~/.local/bin`).
 - **"Aislar entorno Python"**: venv por job en `$RUNNER_TEMP`, creado con ese intérprete, para que backend y mcp no compartan dependencias.
 - **Sin `actions/cache` en el runner propio** (pip y `node_modules`): los archivos ya quedan en la máquina, y subir `node_modules` a GitHub desde la conexión del dev tardó 5 min.
+- **Sin Redis en los tests, en los dos entornos**: `REDIS_URL`, `CELERY_BROKER_URL` y `CELERY_RESULT_BACKEND` apuntan a `localhost:1` (cerrado). La suite asume que Redis no existe (camino de fallback sincrónico); en la Mac el 6379 es el Redis del compose y con él vivo `test_el_fallback_sincronico_deja_el_archivo_rechazado_no_fallado` falla.
 - El Docker build requiere Docker Desktop abierto. En la Mac construye para la arquitectura local: verifica el Dockerfile, no la imagen de Railway.
 
 Requisitos: `python3.12` instalado, la Mac prendida con el runner corriendo (si no, los jobs quedan en cola) y Docker Desktop abierto.

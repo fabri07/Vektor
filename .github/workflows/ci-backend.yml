@@ -153,7 +153,15 @@ jobs:
         env:
           # SQLite in-memory — no external services required
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-          REDIS_URL: "redis://localhost:6379/0"
+          # Puerto cerrado A PROPÓSITO, también las URLs de Celery (sus defaults
+          # apuntan al 6379): la suite corre sin Redis y hay tests del camino
+          # "Celery no encola → fallback sincrónico". En el runner propio el
+          # 6379 es el Redis del compose del dev; con él vivo, Celery encola y
+          # test_el_fallback_sincronico_deja_el_archivo_rechazado_no_fallado
+          # falla (queda PENDING). En GitHub da lo mismo que antes: nada escucha.
+          REDIS_URL: "redis://localhost:1/0"
+          CELERY_BROKER_URL: "redis://localhost:1/1"
+          CELERY_RESULT_BACKEND: "redis://localhost:1/2"
           SECRET_KEY: "ci-test-secret-key-not-for-production"
           ENVIRONMENT: "test"
           ALLOWED_ORIGINS: "http://localhost:3000"
@@ -216,7 +224,15 @@ jobs:
           # Settings) sigue usando SQLite; los tests PG abren su propio engine.
           TEST_PG_DSN: "postgresql+asyncpg://vektor:vektor@localhost:55432/vektor"
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-          REDIS_URL: "redis://localhost:6379/0"
+          # Puerto cerrado A PROPÓSITO, también las URLs de Celery (sus defaults
+          # apuntan al 6379): la suite corre sin Redis y hay tests del camino
+          # "Celery no encola → fallback sincrónico". En el runner propio el
+          # 6379 es el Redis del compose del dev; con él vivo, Celery encola y
+          # test_el_fallback_sincronico_deja_el_archivo_rechazado_no_fallado
+          # falla (queda PENDING). En GitHub da lo mismo que antes: nada escucha.
+          REDIS_URL: "redis://localhost:1/0"
+          CELERY_BROKER_URL: "redis://localhost:1/1"
+          CELERY_RESULT_BACKEND: "redis://localhost:1/2"
           SECRET_KEY: "ci-test-secret-key-not-for-production"
           ENVIRONMENT: "test"
           ALLOWED_ORIGINS: "http://localhost:3000"
