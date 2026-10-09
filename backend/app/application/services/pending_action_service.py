@@ -793,9 +793,17 @@ async def execute_pending_action(
                 # Solo recalcular score cuando cambian campos que afectan métricas financieras
                 _score_relevant = {"sale_price_ars", "unit_cost_ars", "stock_units"}
                 if update_fields.keys() & _score_relevant:
-                    from app.jobs.score_trigger import trigger_score_recalculation  # noqa: PLC0415
+                    # Antes importaba `app.jobs.score_trigger`, que no existe: la
+                    # acción reventaba con ModuleNotFoundError después de guardar.
+                    # Se agenda para después del commit (el worker lee la base
+                    # con su propia sesión) y un broker caído no rompe la acción.
+                    from app.application.services import (  # noqa: PLC0415
+                        score_trigger_service,
+                    )
 
-                    trigger_score_recalculation.delay(str(action.tenant_id), "product_updated")
+                    score_trigger_service.trigger_score_recalculation_after_commit(
+                        db, str(action.tenant_id), "product_updated"
+                    )
             else:
                 logger.warning(
                     "execute_pending_action: UPDATE_PRODUCT product not found",
