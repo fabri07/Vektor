@@ -337,6 +337,7 @@ El historial de sprints (1–21), los proyectos mergeados post-Sprint-21 y la ca
 
 - `ci-backend.yml`: ruff + mypy + pytest (cov ≥ 60%) + Docker build. Triggers `backend/**` → `main/develop`.
 - `ci-frontend.yml`: tsc + ESLint + `next build`. Triggers `frontend/**` → `main/develop`.
+- Cupo de minutos agotado = jobs en `failure` en 3-4 s sin correr nada. Variable `CI_RUNNER=self-hosted` → runner propio en la Mac (gratis). Detalle: [`docs/claude/ci.md`](docs/claude/ci.md).
 
 ## Deploy (Railway + Vercel — beta)
 

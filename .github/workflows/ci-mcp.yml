@@ -18,10 +18,25 @@ on:
       - "mcp_server/**"
       - ".github/workflows/ci-mcp.yml"
 
+# Un solo run vivo por rama: si llega otro push al mismo PR, el run anterior
+# se cancela en lugar de correr completo al lado del nuevo (en el PR #97 se
+# pagaron 3 runs de ~30 min para verificar un único estado del código, y el
+# cupo gratuito de Actions se agotó el 2026-10-09).
+#
+# Acotado a pull_request a propósito: en push a main cada commit tiene que
+# quedar verificado por sí mismo (main despliega solo), así que ahí NO se
+# cancela nada.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     name: Lint · Type-check · Test · Docker build
-    runs-on: ubuntu-latest
+    # `vars.CI_RUNNER` (variable del repo) elige dónde corre: vacía → runner
+    # de GitHub; `self-hosted` → el runner propio (no consume minutos del
+    # cupo). Ver "Runner propio" en docs/claude/ci.md.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: mcp_server
@@ -33,13 +48,33 @@ jobs:
 
       # ── 2. Python 3.12 ───────────────────────────────────────────────────────
       # Misma versión que el Dockerfile del servicio (python:3.12-slim).
+      # En el runner propio NO: el Python que baja setup-python para macOS
+      # trae fija la ruta /Users/runner/hostedtoolcache (sólo existe en las
+      # máquinas de GitHub) y falla con "mkdir: /Users/runner: Permission
+      # denied". Ahí se usa el python3.12 de la máquina (paso siguiente).
       - name: Set up Python 3.12
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # venv por job: en el runner propio el intérprete de setup-python es
+      # persistente y compartido con ci-backend.yml (ver el comentario allá).
+      - name: Aislar entorno Python
+        run: |
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            PY="$(command -v python3.12 || echo "$HOME/.local/bin/python3.12")"
+          else
+            PY=python
+          fi
+          "$PY" -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
       # ── 3. Install dependencies (cached) ─────────────────────────────────────
+      # Sólo en GitHub: en el runner propio pip ya conserva su caché local, y
+      # subirla a GitHub desde la conexión del dev cuesta más de lo que ahorra.
       - name: Cache pip
+        if: runner.environment != 'self-hosted'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip

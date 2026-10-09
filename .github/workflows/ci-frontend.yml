@@ -20,10 +20,25 @@ on:
       - "shared/**"
       - ".github/workflows/ci-frontend.yml"
 
+# Un solo run vivo por rama: si llega otro push al mismo PR, el run anterior
+# se cancela en lugar de correr completo al lado del nuevo (en el PR #97 se
+# pagaron 3 runs de ~30 min para verificar un único estado del código, y el
+# cupo gratuito de Actions se agotó el 2026-10-09).
+#
+# Acotado a pull_request a propósito: en push a main cada commit tiene que
+# quedar verificado por sí mismo (main despliega solo), así que ahí NO se
+# cancela nada.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     name: Type-check · Lint · Test · Build
-    runs-on: ubuntu-latest
+    # `vars.CI_RUNNER` (variable del repo) elige dónde corre: vacía → runner
+    # de GitHub; `self-hosted` → el runner propio (no consume minutos del
+    # cupo). Ver "Runner propio" en docs/claude/ci.md.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: frontend
@@ -40,7 +55,10 @@ jobs:
           node-version: "20"
 
       # ── 3. npm ci (cached) ───────────────────────────────────────────────────
+      # Sólo en GitHub: en el runner propio subir node_modules a la caché tardó
+      # 5 min (conexión del dev) y la carpeta ya queda entre corridas.
       - name: Cache node_modules
+        if: runner.environment != 'self-hosted'
         uses: actions/cache@v4
         with:
           path: frontend/node_modules

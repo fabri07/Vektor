@@ -26,10 +26,25 @@ on:
       - "docs/claude/**"
       - ".github/workflows/ci-backend.yml"
 
+# Un solo run vivo por rama: si llega otro push al mismo PR, el run anterior
+# se cancela en lugar de correr completo al lado del nuevo (en el PR #97 se
+# pagaron 3 runs de ~30 min para verificar un único estado del código, y el
+# cupo gratuito de Actions se agotó el 2026-10-09).
+#
+# Acotado a pull_request a propósito: en push a main cada commit tiene que
+# quedar verificado por sí mismo (main despliega solo), así que ahí NO se
+# cancela nada.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     name: Lint · Type-check · Test · Docker build
-    runs-on: ubuntu-latest
+    # `vars.CI_RUNNER` (variable del repo) elige dónde corre: vacía → runner
+    # de GitHub; `self-hosted` → el runner propio (no consume minutos del
+    # cupo). Ver "Runner propio" en docs/claude/ci.md.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: backend
@@ -38,15 +53,21 @@ jobs:
     # los primitivos que hacen la exclusión mutua sólo existen en Postgres, en
     # SQLite son no-op. Sin esto la garantía de concurrencia no queda cubierta
     # contra regresiones (ver test_maintenance_lock_pg.py / test_ingestion_lease_pg.py).
+    #
+    # Puerto 55432 y no 5432: en el runner propio el 5432 es el compose local
+    # del dev, y los tests PG hacen downgrade/upgrade de migraciones reales.
+    # Los services sólo existen en runners Linux: en el runner propio la imagen
+    # vacía apaga el service (GitHub no lo crea) y el paso "Postgres
+    # descartable" levanta el mismo contenedor a mano en el mismo puerto.
     services:
       postgres:
-        image: postgres:16
+        image: ${{ vars.CI_RUNNER != 'self-hosted' && 'postgres:16' || '' }}
         env:
           POSTGRES_USER: vektor
           POSTGRES_PASSWORD: vektor
           POSTGRES_DB: vektor
         ports:
-          - 5432:5432
+          - 55432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -59,13 +80,53 @@ jobs:
         uses: actions/checkout@v4
 
       # ── 2. Python 3.12 ───────────────────────────────────────────────────────
+      # En el runner propio NO: el Python que baja setup-python para macOS
+      # trae fija la ruta /Users/runner/hostedtoolcache (sólo existe en las
+      # máquinas de GitHub) y falla con "mkdir: /Users/runner: Permission
+      # denied". Ahí se usa el python3.12 de la máquina (paso siguiente).
       - name: Set up Python 3.12
+        if: runner.environment != 'self-hosted'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # venv por job: en el runner propio el intérprete de setup-python es
+      # persistente y compartido con ci-mcp.yml; sin esto las dependencias de
+      # un workflow quedarían instaladas para el otro. RUNNER_TEMP se borra
+      # al terminar cada job. En el runner de GitHub es inocuo (~2 s).
+      - name: Aislar entorno Python
+        run: |
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            PY="$(command -v python3.12 || echo "$HOME/.local/bin/python3.12")"
+          else
+            PY=python
+          fi
+          "$PY" -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      # Sólo runner propio: reemplaza al service `postgres` (ver arriba).
+      # El `rm -f` limpia el de un run cancelado a mitad. `-h 127.0.0.1`: durante
+      # el init, la imagen levanta un servidor temporal sólo por socket; por TCP
+      # recién responde el definitivo.
+      - name: Postgres descartable (runner propio)
+        if: runner.environment == 'self-hosted'
+        run: |
+          docker rm -f vektor-ci-pg >/dev/null 2>&1 || true
+          docker run -d --name vektor-ci-pg \
+            -e POSTGRES_USER=vektor -e POSTGRES_PASSWORD=vektor -e POSTGRES_DB=vektor \
+            -p 55432:5432 postgres:16
+          for _ in $(seq 1 30); do
+            docker exec vektor-ci-pg pg_isready -h 127.0.0.1 -U vektor && exit 0
+            sleep 2
+          done
+          echo "Postgres no respondió en 60 s" >&2
+          exit 1
+
       # ── 3. Install dependencies (cached) ─────────────────────────────────────
+      # Sólo en GitHub: en el runner propio pip ya conserva su caché local, y
+      # subirla a GitHub desde la conexión del dev cuesta más de lo que ahorra.
       - name: Cache pip
+        if: runner.environment != 'self-hosted'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -92,7 +153,15 @@ jobs:
         env:
           # SQLite in-memory — no external services required
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-          REDIS_URL: "redis://localhost:6379/0"
+          # Puerto cerrado A PROPÓSITO, también las URLs de Celery (sus defaults
+          # apuntan al 6379): la suite corre sin Redis y hay tests del camino
+          # "Celery no encola → fallback sincrónico". En el runner propio el
+          # 6379 es el Redis del compose del dev; con él vivo, Celery encola y
+          # test_el_fallback_sincronico_deja_el_archivo_rechazado_no_fallado
+          # falla (queda PENDING). En GitHub da lo mismo que antes: nada escucha.
+          REDIS_URL: "redis://localhost:1/0"
+          CELERY_BROKER_URL: "redis://localhost:1/1"
+          CELERY_RESULT_BACKEND: "redis://localhost:1/2"
           SECRET_KEY: "ci-test-secret-key-not-for-production"
           ENVIRONMENT: "test"
           ALLOWED_ORIGINS: "http://localhost:3000"
@@ -125,7 +194,7 @@ jobs:
         env:
           # DATABASE_URL (postgresql://) → env.py lo convierte a psycopg2 (sync).
           # El resto es por si algún módulo importado carga Settings (CI sin .env).
-          DATABASE_URL: "postgresql://vektor:vektor@localhost:5432/vektor"
+          DATABASE_URL: "postgresql://vektor:vektor@localhost:55432/vektor"
           SECRET_KEY: "ci-test-secret-key-not-for-production"
           ENVIRONMENT: "test"
           ALLOWED_ORIGINS: "http://localhost:3000"
@@ -153,9 +222,17 @@ jobs:
           # TEST_PG_DSN activa los tests marcados `postgres` (apunta al service).
           # El resto del env es el MISMO que el paso SQLite: el app (conftest →
           # Settings) sigue usando SQLite; los tests PG abren su propio engine.
-          TEST_PG_DSN: "postgresql+asyncpg://vektor:vektor@localhost:5432/vektor"
+          TEST_PG_DSN: "postgresql+asyncpg://vektor:vektor@localhost:55432/vektor"
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-          REDIS_URL: "redis://localhost:6379/0"
+          # Puerto cerrado A PROPÓSITO, también las URLs de Celery (sus defaults
+          # apuntan al 6379): la suite corre sin Redis y hay tests del camino
+          # "Celery no encola → fallback sincrónico". En el runner propio el
+          # 6379 es el Redis del compose del dev; con él vivo, Celery encola y
+          # test_el_fallback_sincronico_deja_el_archivo_rechazado_no_fallado
+          # falla (queda PENDING). En GitHub da lo mismo que antes: nada escucha.
+          REDIS_URL: "redis://localhost:1/0"
+          CELERY_BROKER_URL: "redis://localhost:1/1"
+          CELERY_RESULT_BACKEND: "redis://localhost:1/2"
           SECRET_KEY: "ci-test-secret-key-not-for-production"
           ENVIRONMENT: "test"
           ALLOWED_ORIGINS: "http://localhost:3000"
@@ -193,3 +270,8 @@ jobs:
           file: ./backend/Dockerfile
           push: false
           tags: vektor-backend:ci
+
+      # Sólo runner propio: el contenedor no lo borra nadie más.
+      - name: Borrar Postgres descartable (runner propio)
+        if: always() && runner.environment == 'self-hosted'
+        run: docker rm -f vektor-ci-pg >/dev/null 2>&1 || true
