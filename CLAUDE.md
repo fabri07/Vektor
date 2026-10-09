@@ -260,7 +260,7 @@ Beat schedule: momentum update + weekly email (lunes 08:00 ART).
 | `/expenses` | Analytics + lista de gastos |
 | `/products` | Catálogo; query param `?stock=ok|low|out` |
 | `/apps` | Integraciones Google |
-| `/settings` | Cuenta, configuración, panel de custom fields (`FieldDefinitionsPanel` + `SchemaERDView`), config de margen (`HealthConfigPanel`) y horarios laborales |
+| `/settings` | Cuenta, configuración, panel de custom fields (`FieldDefinitionsPanel`), config de margen (`HealthConfigPanel`) y horarios laborales |
 | `/help` | Chat de ayuda de plataforma — `HelpChat.tsx`, endpoint `/agent/help/chat` |
 | `/ingestion` | Pipeline de ingestión de archivos con preview/confirm |
 | `/otros` | Registros sin clasificar (`unclassified_records`) — clasificación manual + importación masiva de sugeridos |
