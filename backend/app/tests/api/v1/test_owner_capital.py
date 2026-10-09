@@ -355,6 +355,37 @@ async def test_profit_withdrawal_sigue_pidiendo_pin(
     assert resp.status_code == 428
 
 
+@pytest.mark.parametrize("role", ["VIEWER", "CASHIER"])
+async def test_profit_withdrawal_mismo_permiso_que_capital(
+    client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant,
+    fake_redis: Any, role: str,
+) -> None:
+    """La ruta vieja escribe capital: no puede dejar pasar a quien la nueva frena."""
+    headers = await _headers_de(db_session, sample_tenant, fake_redis, role,
+                                can_modify_sensitive=True)
+    resp = await client.post(
+        WITHDRAWAL_URL,
+        json={"amount": "30000.00", "withdrawal_date": today_ar().isoformat(),
+              "payment_method": "cash"},
+        headers=headers,
+    )
+    assert resp.status_code == 403
+    assert await _count(db_session, OwnerCapitalMovement) == 0
+
+
+async def test_profit_withdrawal_admin_con_permiso_puede(
+    client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant, fake_redis: Any,
+) -> None:
+    admin = await _headers_de(db_session, sample_tenant, fake_redis, "ADMIN",
+                              can_modify_sensitive=True)
+    resp = await client.post(
+        WITHDRAWAL_URL,
+        json={"amount": "10.00", "withdrawal_date": today_ar().isoformat()},
+        headers=admin,
+    )
+    assert resp.status_code == 201
+
+
 async def test_ejemplo_del_plan_aporte_y_retiro(
     client: AsyncClient, auth_headers: dict[str, str], sample_tenant: Tenant,
     db_session: AsyncSession,

@@ -11,6 +11,7 @@ from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
     require_active_subscription,
+    require_capital_write,
     require_modify_access,
     require_role,
 )
@@ -243,7 +244,7 @@ async def create_expense(
 async def create_profit_withdrawal(
     body: ProfitWithdrawalRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_modify_access),
+    user: User = Depends(require_capital_write),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ExpenseEntryResponse:
@@ -254,7 +255,8 @@ async def create_profit_withdrawal(
     forma que antes (``ExpenseEntryResponse``) para que un frontend viejo —el
     deploy es en paralelo— no se rompa. El ``id`` de la respuesta es ahora el
     del movimiento de capital, no el de un gasto. El monto lo fija el usuario
-    (no se calcula). Protegido por PIN, como siempre.
+    (no se calcula). Protegido por PIN y, como escribe capital, con la misma
+    compuerta que ``/capital-movements`` (OWNER/ADMIN; VIEWER nunca).
     """
     if idempotency_key is not None and not await claim_idempotency_key(
         session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_PROFIT_WITHDRAWAL"

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import (
     get_current_tenant,
     require_active_subscription,
-    require_modify_access,
+    require_capital_write,
     require_role,
 )
 from app.application.services import owner_capital_service as capital
@@ -38,16 +38,6 @@ router = APIRouter()
 _ROLES = ("OWNER", "ADMIN")
 
 
-async def _require_capital_write(user: User = Depends(require_modify_access)) -> User:
-    """PIN + permiso de modificar, y además rol OWNER/ADMIN."""
-    if user.role_code not in _ROLES:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Sólo el dueño o un administrador pueden registrar capital.",
-        )
-    return user
-
-
 @router.post(
     "",
     response_model=CapitalMovementResponse,
@@ -60,7 +50,7 @@ async def create_capital_movement(
     # de pedir el PIN (mismo orden que el resto de las altas).
     _gate: None = Depends(require_active_subscription),
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(_require_capital_write),
+    user: User = Depends(require_capital_write),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> OwnerCapitalMovement:
@@ -121,7 +111,7 @@ async def void_capital_movement(
     movement_id: UUID,
     body: VoidCapitalMovementRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(_require_capital_write),
+    user: User = Depends(require_capital_write),
     session: AsyncSession = Depends(get_db_session),
 ) -> OwnerCapitalMovement:
     try:

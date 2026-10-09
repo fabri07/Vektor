@@ -376,6 +376,19 @@ async def require_modify_access(
     return current_user
 
 
+async def require_capital_write(user: User = Depends(require_modify_access)) -> User:
+    """Gate para escribir capital de los socios (D·2): PIN + permiso de modificar
+    y además rol OWNER/ADMIN. CASHIER y VIEWER nunca, ni con ``can_modify_sensitive``.
+    Lo usan ``/capital-movements`` y ``/expenses/profit-withdrawal``, que también
+    escribe un movimiento de capital."""
+    if user.role_code not in ("OWNER", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Sólo el dueño o un administrador pueden registrar capital.",
+        )
+    return user
+
+
 async def require_owner_stepup(
     current_user: User = Depends(get_current_user),
     redis: Redis = Depends(get_redis),
