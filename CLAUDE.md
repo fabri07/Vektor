@@ -142,7 +142,7 @@ HTTP Request
   → Celery task (score recalculation async, post-write)
 ```
 
-**Regla crítica:** Datos crudos NUNCA llegan al Health Engine directamente. Todo pasa por `BusinessStateLayer.compute()` → `BusinessState` con 5 scores (0–100): `liquidity`, `profitability`, `cost_control`, `sales_momentum`, `debt_coverage`.
+**Regla crítica:** Datos crudos NUNCA llegan al Health Engine directamente. Todo pasa por `compute_business_state()` (`app/state/business_state_service.py`) → `BusinessState`, que consumen `health_score_service` y `heuristics/health_engine.py`.
 
 ### Capas y responsabilidades
 
@@ -151,12 +151,10 @@ HTTP Request
 | API | `app/api/v1/` | Routing, validación Pydantic, auth deps |
 | Deps | `app/api/v1/deps.py` | JWT decode, `get_current_user`, `get_current_tenant`, `require_role()` |
 | Application | `app/application/services/` | Orquestación: auth, cash, cash_close, conversation, google_oauth, health_score, health_config, onboarding, pending_action, score_trigger, stock, supplier, business_memory, agent_memory, forecast, analytics, deterministic_finance, validation_gate, chat_memory, field_definition, automation, data_intent_extractor, ingestion_import, data_repair, report_export, team_plan_executor, help_documentation, column_mapping, llm_column_mapper, llm_file_type_detector, pipeline_event, economic_summary, work_schedule, mcp_diagnostics |
-| Commands/Queries | `app/application/commands/` `app/application/queries/` | CQRS writes/reads |
-| DTOs | `app/application/dto/` | Objetos de transferencia entre capas |
-| DB middleware | `app/application/db/tenant_context.py` | Inyecta tenant_id en SQLAlchemy |
+| DB middleware | `app/application/db/tenant_context.py` | `set_tenant_context()` para las políticas RLS — **hoy no lo llama nadie**: el aislamiento real es el `tenant_id` del JWT en cada query (pendiente de decidir) |
 | **Agents** | `app/application/agents/` | Capa multiagente LLM |
 | Domain | `app/domain/` | Entidades puras Python |
-| BSL | `app/state/business_state_layer.py` | Agrega revenue/expenses 30 días → 5 scores |
+| BSL | `app/state/business_state_service.py` | `compute_business_state()`: 30 días de transacciones (fallback a estimaciones del onboarding) → `BusinessState` |
 | Heuristics | `app/heuristics/` | Reglas por vertical |
 | Persistence | `app/persistence/` | SQLAlchemy async, repositories, Alembic |
 | Jobs | `app/jobs/` | Celery: scores, notifications, reports, ingestion |
