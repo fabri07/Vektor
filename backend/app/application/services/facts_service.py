@@ -680,3 +680,152 @@ class FactsService:
         }
         resolved = self._CHAT_DOMAIN_ALIASES.get(domain, domain)
         return packs.get(resolved, [base["ventas"], base["margen_neto"]])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. CAPITAL DE LOS SOCIOS (D·4) — fuera del flujo operativo
+# ─────────────────────────────────────────────────────────────────────────────
+# Aportes, retiros, préstamos de socio y devoluciones NO son ventas ni gastos:
+# nada de esto toca ingresos, egresos, resultado ni margen (ver
+# owner_capital.py). Acá sólo se agrupan, para la vista de capital del Balance.
+# No va en `dashboard_snapshot` a propósito: el snapshot se calcula en cada
+# request del dashboard y el capital lo pide una sola pantalla.
+#
+# Frame de entrada (facts_provider.load_capital_frame): movimientos VIVOS del
+# tenant con occurred_on <= fin, historia completa (el préstamo pendiente es
+# acumulado). Columnas: occurred_on, kind, form, amount_ars, partner_name.
+
+_CAPITAL_KINDS_ENTRADA = ("aporte", "prestamo_socio")
+_CAPITAL_KINDS_SALIDA = ("retiro", "devolucion_prestamo")
+
+
+@dataclass(frozen=True)
+class MontoPorForma:
+    """Un monto del período partido en dinero y especie."""
+
+    dinero: float
+    especie: float
+
+
+@dataclass(frozen=True)
+class CapitalDeSocio:
+    """Lo de un socio. ``socio`` None = movimientos sin socio identificado."""
+
+    socio: str | None
+    aportes: MontoPorForma
+    retiros: MontoPorForma
+    prestamos_recibidos: MontoPorForma
+    devoluciones: MontoPorForma
+    # Préstamos − devoluciones de TODA la historia hasta el fin del período.
+    # Negativo = se devolvió más de lo que figura prestado: no se recorta a 0
+    # (sería esconder un error de carga), se devuelve y se marca.
+    prestamo_pendiente: float
+    prestamo_pendiente_inconsistente: bool
+
+
+@dataclass(frozen=True)
+class FlujoDeCapitalEnDinero:
+    """Plata de capital que entró y salió en DINERO durante el período."""
+
+    entradas: float  # aportes + préstamos recibidos
+    salidas: float   # retiros + devoluciones
+    neto: float      # entradas − salidas
+
+
+@dataclass(frozen=True)
+class CapitalDeSocios:
+    start: date
+    end: date
+    # False = ni movimientos en el período ni préstamos pendientes: vacío
+    # explícito, sin ceros inventados (``socios`` vacío, totales None).
+    has_data: bool
+    hay_especie: bool
+    socios: list[CapitalDeSocio]
+    totales: CapitalDeSocio | None
+    flujo_dinero: FlujoDeCapitalEnDinero | None
+
+
+def _ars0(x: float) -> float:
+    """Redondeo de una suma de capital (nunca NaN: la suma de nada es 0)."""
+    return round(float(x), ARS_DECIMALS)
+
+
+def _socio_key(value: object) -> str | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _montos(df: pd.DataFrame, kind: str) -> MontoPorForma:
+    sel = df[df["kind"] == kind]
+    dinero = sel.loc[sel["form"] == "dinero", "amount_ars"].sum()
+    especie = sel.loc[sel["form"] == "especie", "amount_ars"].sum()
+    return MontoPorForma(dinero=_ars0(dinero), especie=_ars0(especie))
+
+
+def _capital_de(socio: str | None, periodo: pd.DataFrame,
+                historia: pd.DataFrame) -> CapitalDeSocio:
+    prestado = historia.loc[historia["kind"] == "prestamo_socio", "amount_ars"].sum()
+    devuelto = historia.loc[historia["kind"] == "devolucion_prestamo", "amount_ars"].sum()
+    pendiente = _ars0(float(prestado) - float(devuelto))
+    return CapitalDeSocio(
+        socio=socio,
+        aportes=_montos(periodo, "aporte"),
+        retiros=_montos(periodo, "retiro"),
+        prestamos_recibidos=_montos(periodo, "prestamo_socio"),
+        devoluciones=_montos(periodo, "devolucion_prestamo"),
+        prestamo_pendiente=pendiente,
+        prestamo_pendiente_inconsistente=pendiente < 0,
+    )
+
+
+def capital_de_socios(frame: pd.DataFrame, p: Period) -> CapitalDeSocios:
+    """Aportes, retiros y préstamos por socio en ``p``, más el pendiente a ``p.end``.
+
+    Puro: no conoce el ORM ni el tenant (el provider ya filtró tenant y
+    anulados). Redondeo a ``ARS_DECIMALS`` como el resto del servicio.
+    """
+    vacio = CapitalDeSocios(start=p.start, end=p.end, has_data=False, hay_especie=False,
+                            socios=[], totales=None, flujo_dinero=None)
+    if frame.empty:
+        return vacio
+    df = frame.copy()
+    df["amount_ars"] = df["amount_ars"].astype(float)
+    df["_socio"] = [_socio_key(v) for v in df["partner_name"]]
+    historia = df[pd.to_datetime(df["occurred_on"]).dt.date <= p.end]
+    periodo = historia[p.contains(historia["occurred_on"])]
+
+    def del_socio(d: pd.DataFrame, socio: str | None) -> pd.DataFrame:
+        return d[d["_socio"].isna()] if socio is None else d[d["_socio"] == socio]
+
+    socios: list[CapitalDeSocio] = []
+    # Con nombre primero (alfabético); «sin socio identificado» al final.
+    claves = sorted(set(historia["_socio"]), key=lambda s: (s is None, (s or "").casefold()))
+    for socio in claves:
+        del_periodo = del_socio(periodo, socio)
+        c = _capital_de(socio, del_periodo, del_socio(historia, socio))
+        # Aparece si se movió en el período o si arrastra un préstamo pendiente.
+        if not del_periodo.empty or c.prestamo_pendiente != 0:
+            socios.append(c)
+    if not socios:
+        return vacio
+
+    en_dinero = periodo[periodo["form"] == "dinero"]
+    entradas = float(en_dinero.loc[en_dinero["kind"].isin(_CAPITAL_KINDS_ENTRADA),
+                                   "amount_ars"].sum())
+    salidas = float(en_dinero.loc[en_dinero["kind"].isin(_CAPITAL_KINDS_SALIDA),
+                                  "amount_ars"].sum())
+    return CapitalDeSocios(
+        start=p.start,
+        end=p.end,
+        has_data=True,
+        hay_especie=bool((periodo["form"] == "especie").any()),
+        socios=socios,
+        totales=_capital_de(None, periodo, historia),
+        flujo_dinero=FlujoDeCapitalEnDinero(
+            entradas=_ars0(entradas),
+            salidas=_ars0(salidas),
+            neto=_ars0(entradas - salidas),
+        ),
+    )

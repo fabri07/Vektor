@@ -19,6 +19,13 @@ from app.api.v1.deps import (
     require_role,
 )
 from app.application.services import owner_capital_service as capital
+from app.application.services.facts_provider import load_capital_frame
+from app.application.services.facts_service import (
+    CapitalDeSocio,
+    MontoPorForma,
+    Period,
+    capital_de_socios,
+)
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
@@ -28,9 +35,13 @@ from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.schemas.owner_capital import (
+    CapitalAmountsByForm,
+    CapitalCashFlow,
     CapitalKind,
     CapitalMovementListResponse,
     CapitalMovementResponse,
+    CapitalPartnerSummary,
+    CapitalSummaryResponse,
     CreateCapitalMovementRequest,
     VoidCapitalMovementRequest,
 )
@@ -109,6 +120,61 @@ async def list_capital_movements(
     )
     return CapitalMovementListResponse(
         items=[CapitalMovementResponse.model_validate(m) for m in items]
+    )
+
+
+def _por_forma(m: MontoPorForma) -> CapitalAmountsByForm:
+    return CapitalAmountsByForm(dinero=m.dinero, especie=m.especie)
+
+
+def _socio(c: CapitalDeSocio) -> CapitalPartnerSummary:
+    return CapitalPartnerSummary(
+        partner_name=c.socio,
+        aportes=_por_forma(c.aportes),
+        retiros=_por_forma(c.retiros),
+        prestamos_recibidos=_por_forma(c.prestamos_recibidos),
+        devoluciones=_por_forma(c.devoluciones),
+        prestamo_pendiente=c.prestamo_pendiente,
+        prestamo_pendiente_inconsistente=c.prestamo_pendiente_inconsistente,
+    )
+
+
+@router.get(
+    "/summary",
+    response_model=CapitalSummaryResponse,
+    summary="Capital por socio del período y préstamos pendientes (D·4)",
+)
+async def capital_summary(
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    tenant: Tenant = Depends(get_current_tenant),
+    _user: User = Depends(require_role(*_ROLES)),
+    session: AsyncSession = Depends(get_db_session),
+) -> CapitalSummaryResponse:
+    """Aportes, retiros y préstamos por socio. No es parte del resultado ni de la caja."""
+    if from_date > to_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="from_date must be <= to_date.",
+        )
+    frame = await load_capital_frame(session, tenant.tenant_id, to_date)
+    r = capital_de_socios(frame, Period(start=from_date, end=to_date, label="capital"))
+    return CapitalSummaryResponse(
+        from_date=r.start,
+        to_date=r.end,
+        has_data=r.has_data,
+        has_in_kind=r.hay_especie,
+        partners=[_socio(c) for c in r.socios],
+        totals=_socio(r.totales) if r.totales is not None else None,
+        cash_flow=(
+            CapitalCashFlow(
+                entradas=r.flujo_dinero.entradas,
+                salidas=r.flujo_dinero.salidas,
+                neto=r.flujo_dinero.neto,
+            )
+            if r.flujo_dinero is not None
+            else None
+        ),
     )
 
 

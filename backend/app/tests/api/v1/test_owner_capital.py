@@ -553,3 +553,112 @@ async def test_proyeccion_de_caja_igual_que_con_el_gasto_viejo(
 
     assert con_gasto.points, con_gasto.message
     assert con_capital == con_gasto
+
+
+# ── D·4: vista de capital por socio ──────────────────────────────────────────
+
+SUMMARY_URL = f"{URL}/summary"
+
+
+def _rango(desde: date | None = None, hasta: date | None = None) -> dict[str, str]:
+    hoy = today_ar()
+    return {"from_date": (desde or hoy - timedelta(days=29)).isoformat(),
+            "to_date": (hasta or hoy).isoformat()}
+
+
+async def test_summary_ejemplo_del_plan_y_anulado_no_suma(
+    client: AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    hoy = today_ar()
+    hace_40 = (hoy - timedelta(days=40)).isoformat()
+    for payload in (
+        _mov("aporte", "100000.00", partner_name="Juan"),
+        _mov("retiro", "10000.00", partner_name="Juan"),
+        _mov("prestamo_socio", "50000.00", partner_name="Ana", occurred_on=hace_40),
+        _mov("devolucion_prestamo", "20000.00", partner_name="Ana"),
+        _mov("aporte", "700.00"),
+    ):
+        assert (await client.post(URL, json=payload, headers=auth_headers)).status_code == 201
+    anulado = (await client.post(URL, json=_mov("aporte", "999999.00", partner_name="Juan"),
+                                 headers=auth_headers)).json()["id"]
+    assert (await client.post(f"{URL}/{anulado}/void", json={"reason": "error"},
+                              headers=auth_headers)).status_code == 200
+
+    resp = await client.get(SUMMARY_URL, params=_rango(), headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["has_data"] is True
+    assert body["has_in_kind"] is False
+    socios = {p["partner_name"]: p for p in body["partners"]}
+    assert list(socios) == ["Ana", "Juan", None]
+    assert socios["Juan"]["aportes"] == {"dinero": 100000.0, "especie": 0.0}
+    assert socios["Juan"]["retiros"]["dinero"] == 10000.0
+    assert socios["Ana"]["prestamo_pendiente"] == 30000.0
+    assert socios[None]["aportes"]["dinero"] == 700.0
+    assert body["cash_flow"] == {"entradas": 100700.0, "salidas": 30000.0, "neto": 70700.0}
+    assert body["totals"]["prestamo_pendiente"] == 30000.0
+
+
+async def test_summary_sin_movimientos_es_vacio(
+    client: AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    body = (await client.get(SUMMARY_URL, params=_rango(), headers=auth_headers)).json()
+    assert body["has_data"] is False
+    assert body["partners"] == [] and body["totals"] is None and body["cash_flow"] is None
+
+
+async def test_summary_rango_invertido_422(
+    client: AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    hoy = today_ar()
+    resp = await client.get(SUMMARY_URL, params=_rango(hoy, hoy - timedelta(days=1)),
+                            headers=auth_headers)
+    assert resp.status_code == 422
+
+
+async def test_summary_aislado_por_tenant(
+    client: AsyncClient, auth_headers: dict[str, str], second_auth_headers: dict[str, str],
+) -> None:
+    assert (await client.post(URL, json=_mov("aporte", "5000.00", partner_name="Juan"),
+                              headers=auth_headers)).status_code == 201
+    ajeno = (await client.get(SUMMARY_URL, params=_rango(), headers=second_auth_headers)).json()
+    assert ajeno["has_data"] is False and ajeno["partners"] == []
+
+
+async def test_summary_admin_puede_sin_permiso_de_modificar(
+    client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant, fake_redis: Any,
+) -> None:
+    admin = await _headers_de(db_session, sample_tenant, fake_redis, "ADMIN")
+    assert (await client.get(SUMMARY_URL, params=_rango(), headers=admin)).status_code == 200
+
+
+@pytest.mark.parametrize("role", ["VIEWER", "CASHIER"])
+async def test_summary_viewer_y_cajero_nunca(
+    client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant, fake_redis: Any,
+    role: str,
+) -> None:
+    h = await _headers_de(db_session, sample_tenant, fake_redis, role, can_modify_sensitive=True)
+    assert (await client.get(SUMMARY_URL, params=_rango(), headers=h)).status_code == 403
+
+
+# ── Deuda de la revisión de D·2: flujo_de_dinero ─────────────────────────────
+
+
+async def test_flujo_de_dinero_excluye_anulados_y_aisla_por_tenant(
+    client: AsyncClient, auth_headers: dict[str, str], second_auth_headers: dict[str, str],
+    sample_tenant: Tenant, db_session: AsyncSession,
+) -> None:
+    hoy = today_ar()
+    assert (await client.post(URL, json=_mov("aporte", "1000.00"),
+                              headers=auth_headers)).status_code == 201
+    anulado = (await client.post(URL, json=_mov("retiro", "400.00"),
+                                 headers=auth_headers)).json()["id"]
+    assert (await client.post(f"{URL}/{anulado}/void", json={"reason": "error"},
+                              headers=auth_headers)).status_code == 200
+    # Otro tenant carga lo suyo el mismo día: no tiene que aparecer.
+    assert (await client.post(URL, json=_mov("retiro", "7777.00"),
+                              headers=second_auth_headers)).status_code == 201
+
+    flujo = await flujo_de_dinero(db_session, sample_tenant.tenant_id, hoy, hoy)
+    assert sum((f.entradas for f in flujo), Decimal("0")) == Decimal("1000.00")
+    assert sum((f.salidas for f in flujo), Decimal("0")) == Decimal("0")
