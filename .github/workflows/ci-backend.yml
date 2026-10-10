@@ -193,6 +193,7 @@ jobs:
             --cov=app \
             --cov-report=term-missing \
             --cov-fail-under=60 \
+            --durations=25 \
             -v
 
       # ── 6b. Alembic — validar la MIGRACIÓN sobre Postgres real ────────────────

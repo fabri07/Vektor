@@ -24,7 +24,13 @@ settings = get_settings()
 celery_app = Celery(
     "vektor",
     broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND,
+    # SIN backend de resultados, a propósito: la app nunca lee el resultado de
+    # un job (ni AsyncResult, ni chord/chain). Con un backend Redis, cada
+    # `send_task`/`.delay()` se suscribía a él para esperar una respuesta que
+    # nadie pide, y con Redis caído kombu reintentaba ~19 s antes de rendirse:
+    # un request que encola algo quedaba colgado ese tiempo (y la suite de
+    # tests perdía 19 s por encolado — medido 2026-10-10). Sin backend Celery
+    # usa DisabledBackend: guardar el resultado es no-op y pedirlo falla.
     include=[
         "app.jobs.score_worker",
         "app.jobs.recalculate_health_score",
@@ -46,12 +52,16 @@ celery_app = Celery(
     ],
 )
 
+# `backend_cls` y no `backend=`/`conf.result_backend`: Celery le da prioridad a
+# la variable de entorno CELERY_RESULT_BACKEND por encima de la configuración
+# (`celery/app/utils.py`, propiedad `result_backend`), y Railway la tiene
+# seteada. `_get_backend` mira `backend_cls` antes que todo lo demás.
+celery_app.backend_cls = "disabled://"
+
 # ── SSL for rediss:// (Upstash / TLS-enabled Redis) ──────────────────────────
 _ssl_opts = {"ssl_cert_reqs": ssl.CERT_NONE}
 if settings.CELERY_BROKER_URL.startswith("rediss://"):
     celery_app.conf.broker_use_ssl = _ssl_opts
-if settings.CELERY_RESULT_BACKEND.startswith("rediss://"):
-    celery_app.conf.redis_backend_use_ssl = _ssl_opts
 
 celery_app.conf.update(
     task_serializer="json",
@@ -59,7 +69,6 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="America/Argentina/Buenos_Aires",
     enable_utc=True,
-    task_track_started=True,
     task_acks_late=True,  # re-queue on worker crash
     task_time_limit=300,
     task_soft_time_limit=240,
