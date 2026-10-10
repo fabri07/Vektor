@@ -180,6 +180,41 @@ async def test_anulacion_no_borra_audita_y_no_se_repite(
     assert [i["id"] for i in con_anulados.json()["items"]] == [mid]
 
 
+async def test_el_recalculo_del_score_sale_despues_del_commit(
+    client: AsyncClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alta, anulación y profit-withdrawal agendan el recálculo para DESPUÉS del
+    commit, sacándolo del camino de la respuesta. Con ``.delay()`` directo el
+    worker podía leer la base antes del commit y persistir un score sin el
+    movimiento, y un broker caído hacía rollback de un movimiento válido."""
+    from app.api.v1 import expenses as expenses_api
+    from app.api.v1 import owner_capital as capital_api
+
+    llamadas: list[tuple[str, bool]] = []
+
+    def _registrar(_db: Any, _tenant: str, triggered_by: str, background: Any = None) -> None:
+        llamadas.append((triggered_by, background is not None))
+
+    monkeypatch.setattr(capital_api, "trigger_score_recalculation_after_commit", _registrar)
+    monkeypatch.setattr(expenses_api, "trigger_score_recalculation_after_commit", _registrar)
+
+    mid = (await client.post(URL, json=_mov(), headers=auth_headers)).json()["id"]
+    await client.post(f"{URL}/{mid}/void", json={"reason": "x"}, headers=auth_headers)
+    retiro = await client.post(
+        WITHDRAWAL_URL,
+        json={"amount": "500.00", "withdrawal_date": today_ar().isoformat(),
+              "payment_method": "cash"},
+        headers=auth_headers,
+    )
+    assert retiro.status_code == 201, retiro.text
+
+    assert llamadas == [
+        ("owner_capital_movement_created", True),
+        ("owner_capital_movement_voided", True),
+        ("profit_withdrawal_created", True),
+    ]
+
+
 async def test_anular_exige_motivo(client: AsyncClient, auth_headers: dict[str, str]) -> None:
     mid = (await client.post(URL, json=_mov(), headers=auth_headers)).json()["id"]
     resp = await client.post(f"{URL}/{mid}/void", json={"reason": "   "}, headers=auth_headers)

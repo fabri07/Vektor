@@ -9,7 +9,7 @@ ventana del PIN). El ``tenant_id`` sale del JWT; un id de otro tenant da 404.
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
@@ -20,7 +20,9 @@ from app.api.v1.deps import (
 )
 from app.application.services import owner_capital_service as capital
 from app.application.services.idempotency import claim_idempotency_key
-from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation_after_commit,
+)
 from app.persistence.db.session import get_db_session
 from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.tenant import Tenant
@@ -46,6 +48,7 @@ _ROLES = ("OWNER", "ADMIN")
 )
 async def create_capital_movement(
     body: CreateCapitalMovementRequest,
+    background_tasks: BackgroundTasks,
     # El gate de suscripción va PRIMERO: una alta bloqueada corta con 402 antes
     # de pedir el PIN (mismo orden que el resto de las altas).
     _gate: None = Depends(require_active_subscription),
@@ -69,7 +72,14 @@ async def create_capital_movement(
         partner_name=body.partner_name,
         notes=body.notes,
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "owner_capital_movement_created")
+    # Después del commit: el worker lee con su propia sesión, y encolarlo antes
+    # lo haría recalcular sin este movimiento (o con uno que un rollback descarta).
+    trigger_score_recalculation_after_commit(
+        session,
+        str(tenant.tenant_id),
+        "owner_capital_movement_created",
+        background=background_tasks,
+    )
     return mov
 
 
@@ -110,6 +120,7 @@ async def list_capital_movements(
 async def void_capital_movement(
     movement_id: UUID,
     body: VoidCapitalMovementRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_capital_write),
     session: AsyncSession = Depends(get_db_session),
@@ -131,5 +142,10 @@ async def void_capital_movement(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "CAPITAL_MOVEMENT_ALREADY_VOIDED"},
         ) from exc
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "owner_capital_movement_voided")
+    trigger_score_recalculation_after_commit(
+        session,
+        str(tenant.tenant_id),
+        "owner_capital_movement_voided",
+        background=background_tasks,
+    )
     return mov

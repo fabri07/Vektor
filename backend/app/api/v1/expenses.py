@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
@@ -17,7 +17,10 @@ from app.api.v1.deps import (
 )
 from app.application.services import owner_capital_service, tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
-from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation,
+    trigger_score_recalculation_after_commit,
+)
 from app.domain.business_time import fecha_de_negocio
 from app.domain.expense_categories import infer_expense_type
 from app.persistence.db.session import get_db_session
@@ -243,6 +246,7 @@ async def create_expense(
 )
 async def create_profit_withdrawal(
     body: ProfitWithdrawalRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_capital_write),
     session: AsyncSession = Depends(get_db_session),
@@ -273,7 +277,12 @@ async def create_profit_withdrawal(
         notes=body.notes,
         endpoint="expenses/profit-withdrawal",
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "profit_withdrawal_created")
+    trigger_score_recalculation_after_commit(
+        session,
+        str(tenant.tenant_id),
+        "profit_withdrawal_created",
+        background=background_tasks,
+    )
     return ExpenseEntryResponse(
         id=mov.id,
         tenant_id=tenant.tenant_id,
