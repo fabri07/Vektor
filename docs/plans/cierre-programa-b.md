@@ -7,7 +7,7 @@ B0–B13 están en producción y B14 (suscripción vencida ≠ caja bloqueada) e
 1. **Terminal reemplazada.** Las ventas pendientes de una caja dada de baja quedan trabadas para siempre: `pendientesSincronizables` exige `o.terminalId === terminalId` (`frontend/src/lib/offline/posDb.ts:265`). «Reintentar» no lo arregla, y el runbook dice lo contrario (`docs/runbooks/pos.md:201`).
 2. **Venta por peso/volumen (B3).** No hay manera de configurar `sale_unit` ni el factor. Varias cuentas no dividen por el factor (detalle en la PR 3), las compras no conocen el factor y la caja pide gramos enteros.
 3. **Aprendizaje de códigos sin red (B4).** Hoy necesita servidor. Además, sin red el buscador por nombre tampoco funciona.
-4. **Alcance de B5.** Faltan el permiso de cambio manual de precio y el permiso delegable para resolver diferencias de stock (`b5-rol-cajero.md:38` los dejó para «cuando exista la acción»).
+4. **Alcance de B5.** Faltan el permiso de cambio manual de precio y el permiso delegable para resolver diferencias de stock (`archive/b5-rol-cajero.md:38` los dejó para «cuando exista la acción»).
 5. **B1 y B15.** No hay evidencia. El runbook y el acta están sin commitear en `Vektor-b14`.
 
 ### Revisión externa de origen (2026-10-02) y dónde se resuelve cada punto
