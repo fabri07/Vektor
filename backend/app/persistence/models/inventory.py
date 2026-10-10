@@ -6,12 +6,14 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     ColumnElement,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     func,
@@ -126,6 +128,24 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     occurred_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # M·1a — contrato del costo de una COMPRA (mig 20261010_0001). Todas nullable:
+    # NULL = «no se sabe / no se confirmó», nunca un default. Los movimientos
+    # anteriores quedan en NULL y NO se marcan confirmados retroactivamente.
+    # ``unit_cost`` sigue siendo el precio FACTURADO; ``unit_cost_final`` es el
+    # costo por unidad con los ajustes aplicados (envío, descuento, impuesto según
+    # su tratamiento), el comparable. Tratamientos: incluido | adicional |
+    # no_aplica | desconocido (CHECK en Postgres). ``tax_recoverable`` NULL = no
+    # confirmado: el régimen del negocio no lo decide por sí solo. La lectura es
+    # ``domain/costo_de_referencia.py`` + ``costo_de_referencia_repository``.
+    unit_cost_final: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    shipping_treatment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    tax_treatment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    tax_rate: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    tax_recoverable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    document_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    cost_contract_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
     def __repr__(self) -> str:
         return (
