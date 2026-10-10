@@ -56,14 +56,20 @@ export interface CreateCapitalMovementPayload {
   notes?: string | null;
 }
 
+export const CAPITAL_LIST_LIMIT = 500;
+
 export const ownerCapitalService = {
   async getSummary(params: { from_date: string; to_date: string }): Promise<CapitalSummaryResponse> {
     const res = await api.get<CapitalSummaryResponse>("/capital-movements/summary", { params });
     return res.data;
   },
 
+  // Tope del backend (`limit` ≤ 500). El listado viene del más nuevo al más
+  // viejo: si llegan exactamente estos, puede haber más y la pantalla lo avisa.
   async list(params: { from_date: string; to_date: string }): Promise<CapitalMovement[]> {
-    const res = await api.get<{ items: CapitalMovement[] }>("/capital-movements", { params });
+    const res = await api.get<{ items: CapitalMovement[] }>("/capital-movements", {
+      params: { ...params, limit: CAPITAL_LIST_LIMIT },
+    });
     return res.data.items;
   },
 

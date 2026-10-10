@@ -12,6 +12,8 @@ jest.mock("@/services/economic-summary.service", () => ({
   economicSummaryService: { getSummary: jest.fn() },
 }));
 jest.mock("@/services/owner-capital.service", () => ({
+  // Tope chico para poder probar el aviso de listado incompleto con 2 filas.
+  CAPITAL_LIST_LIMIT: 2,
   ownerCapitalService: {
     getSummary: jest.fn(),
     list: jest.fn(),
@@ -154,6 +156,24 @@ describe("Capital de los socios (D·4)", () => {
     expect(screen.queryByText("Capital de los socios")).not.toBeInTheDocument();
     expect(svc.getSummary).not.toHaveBeenCalled();
     expect(svc.list).not.toHaveBeenCalled();
+  });
+
+  test("avisa cuando el listado llega al tope y puede haber más", async () => {
+    setRole("OWNER");
+    svc.list.mockResolvedValue([MOVIMIENTO, { ...MOVIMIENTO, id: "otro" }]);
+    renderScreen();
+
+    await waitFor(() =>
+      expect(screen.getByText(/Se muestran los 2 más recientes; puede haber más/)).toBeInTheDocument(),
+    );
+  });
+
+  test("con menos filas que el tope no hay aviso", async () => {
+    setRole("OWNER");
+    renderScreen();
+
+    await waitFor(() => expect(screen.getByText("Movimientos del período")).toBeInTheDocument());
+    expect(screen.queryByText(/puede haber más/)).not.toBeInTheDocument();
   });
 
   test("anular pide motivo y llama al endpoint", async () => {

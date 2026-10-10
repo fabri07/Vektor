@@ -10,6 +10,7 @@ import { StatCard } from "@/components/ui/StatCard";
 import { paymentLabel } from "@/lib/payment";
 import { useToastStore } from "@/stores/toastStore";
 import {
+  CAPITAL_LIST_LIMIT,
   ownerCapitalService,
   type CapitalAmountsByForm,
   type CapitalMovement,
@@ -281,6 +282,12 @@ export function CapitalSection({ from, to }: { from: string; to: string }) {
           <table className="w-full text-sm text-vk-text-primary">
             <caption className="px-3 pt-2 text-left text-xs font-medium text-vk-text-secondary">
               Movimientos del período
+              {movements.data.length >= CAPITAL_LIST_LIMIT && (
+                <span className="block font-normal">
+                  Se muestran los {CAPITAL_LIST_LIMIT} más recientes; puede haber más. Los totales de
+                  arriba incluyen todos los movimientos del período.
+                </span>
+              )}
             </caption>
             <thead className="text-xs text-vk-text-secondary">
               <tr>
