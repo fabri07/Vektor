@@ -25,6 +25,14 @@ module = ["celery.*", "jose.*", "passlib.*", "boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# El `ignore_missing_imports = true` global es para librerías sin stubs; para
+# el código PROPIO un import que no resuelve es un bug, no un stub faltante.
+# Sin esto, `from app.jobs.score_trigger import ...` (un módulo que no existía)
+# pasó mypy durante meses y reventaba en producción (pending_action_service).
+module = ["app.*"]
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
 module = ["app.tests.*"]
 # Tests exentos de tipado estricto: las firmas usan fixtures sin tipar y los
 # cuerpos usan MagicMock/AsyncMock (tipo Any) extensamente. Relajar estas flags
