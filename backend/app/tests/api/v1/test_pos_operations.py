@@ -21,6 +21,11 @@ from app.persistence.models.pos_operation import PosOperationLine, PosTender
 from app.persistence.models.transaction import SaleEntry
 
 _FECHA = f"{today_ar().isoformat()}T10:00:00"
+# El cierre se pide por el día de la VENTA, no por `today_ar()` al momento de
+# consultar: `_FECHA` se calcula al importar el módulo, y una suite que cruza
+# la medianoche argentina (el CI nocturno) registraba la venta el día 9 y
+# pedía el cierre del 10 → desglose vacío (falló así el 2026-10-10).
+_DIA_DE_LA_VENTA = _FECHA[:10]
 
 
 async def _crear_producto(
@@ -591,7 +596,7 @@ class TestPagoMixto:
         assert await _metodos_de_linea(db_session, data["id"]) == {MIXED_PAYMENT_METHOD}
 
         preview = await client.get(
-            f"/api/v1/cash-closes/preview?close_date={today_ar().isoformat()}",
+            f"/api/v1/cash-closes/preview?close_date={_DIA_DE_LA_VENTA}",
             headers=auth_headers,
         )
         desglose = {b["payment_method"]: b["expected_ars"] for b in preview.json()["breakdown"]}
@@ -659,7 +664,7 @@ class TestPagoMixto:
         saldo = (await client.get(f"/api/v1/customers/{cliente}/balance", headers=auth_headers))
         assert saldo.json()["balance"] == 0.0
         preview = await client.get(
-            f"/api/v1/cash-closes/preview?close_date={today_ar().isoformat()}",
+            f"/api/v1/cash-closes/preview?close_date={_DIA_DE_LA_VENTA}",
             headers=auth_headers,
         )
         assert preview.json()["breakdown"] == []
