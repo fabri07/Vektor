@@ -50,6 +50,8 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
         # está acá (B14, ver `RUTAS_DE_CAJA_SIN_GATE`).
         ("POST", f"{P}/sales/manual-batch"),
         ("POST", f"{P}/expenses"),
+        # Alta de capital de socios (D·2). La anulación es una baja: sin gate.
+        ("POST", f"{P}/capital-movements"),
         ("POST", f"{P}/products"),
         ("POST", f"{P}/products/custom-categories"),
         ("POST", f"{P}/customers"),

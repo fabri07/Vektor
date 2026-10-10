@@ -41,6 +41,7 @@ from app.persistence.models.operation_identity import (
     OperationIdentity,
     OperationIdentityLink,
 )
+from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.pos_cash_session import (
@@ -103,6 +104,7 @@ __all__ = [
     "UnclassifiedRecord",
     "UploadedFile",
     "Notification",
+    "OwnerCapitalMovement",
     "EmailVerificationToken",
     "PasswordResetToken",
     "BusinessHeuristicOverride",

@@ -82,5 +82,6 @@
 | `20260720_0003` | `suppliers` + `last_name`/`cuil`/`payment_method` (nullable) + índice único parcial del sentinela (`WHERE custom_fields->>'_sentinel' = 'true'`) |
 | `20260720_0004` | `inventory_movements.supplier_id` (FK `suppliers` SET NULL) + índice `(tenant_id, supplier_id)` — base de `GET /suppliers/{id}/products` |
 | `20260721_0001` | campos fiscales en `customers` (`customer_type`/`last_name`/`doc_type`/`dni`/`cuit`/`iva_condition`/`address`/`locality`/`province`/`postal_code`/`birthday`, nullable) + índice único parcial del centinela "Local" + índices únicos parciales anti-duplicado por `dni`/`cuit` (excluyen sentinela y soft-deleted) — Reforma de Clientes |
+| `20261009_0001` | `owner_capital_movements` (ORM: `OwnerCapitalMovement`) — capital de los socios (D·2), ver `docs/claude/plataforma.md` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
