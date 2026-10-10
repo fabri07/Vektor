@@ -105,10 +105,12 @@ async def test_compra_real_antes_que_stock_inicial_y_este_antes_que_lo_cargado(
 ) -> None:
     con_compra = await _producto(db_session, sample_tenant.tenant_id, costo="70")
     await _mov(db_session, con_compra, "100", dias_atras=20)
-    await _mov(db_session, con_compra, "80", dias_atras=1, source_type=SOURCE_CATALOG_INITIAL_STOCK)
+    # Saldo de APERTURA (adjustment + catalog_initial_stock): pierde contra una compra.
+    await _mov(db_session, con_compra, "80", dias_atras=1, tipo="adjustment",
+               source_type=SOURCE_CATALOG_INITIAL_STOCK)
 
     solo_inicial = await _producto(db_session, sample_tenant.tenant_id, costo="70")
-    await _mov(db_session, solo_inicial, "80", dias_atras=1,
+    await _mov(db_session, solo_inicial, "80", dias_atras=1, tipo="adjustment",
                source_type=SOURCE_CATALOG_INITIAL_STOCK)
 
     solo_cargado = await _producto(db_session, sample_tenant.tenant_id, costo="70")
@@ -124,6 +126,19 @@ async def test_compra_real_antes_que_stock_inicial_y_este_antes_que_lo_cargado(
     assert (r[solo_cargado.id].origen, r[solo_cargado.id].costo_unitario) == (
         "costo_cargado", Decimal("70"))
     assert (r[sin_nada.id].origen, r[sin_nada.id].costo_unitario) == ("sin_costo", None)
+
+
+async def test_la_compra_declarada_en_un_catalogo_es_una_compra(
+    db_session: AsyncSession, sample_tenant: Tenant,
+) -> None:
+    # catalog_initial_stock + purchase = mercadería que el catálogo declaró como
+    # COMPRA (genera COGS): compite como compra por fecha, no queda relegada.
+    p = await _producto(db_session, sample_tenant.tenant_id)
+    await _mov(db_session, p, "100", dias_atras=40)
+    declarada = await _mov(db_session, p, "120", dias_atras=5,
+                           source_type=SOURCE_CATALOG_INITIAL_STOCK)
+    r = (await costos_de_referencia(db_session, sample_tenant.tenant_id, [p.id], HOY))[p.id]
+    assert (r.origen, r.costo_unitario, r.movement_id) == ("compra", Decimal("120"), declarada.id)
 
 
 async def test_otro_tenant_no_aparece_ni_presta_sus_compras(

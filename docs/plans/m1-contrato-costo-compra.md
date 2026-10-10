@@ -31,7 +31,11 @@ Una sola respuesta a «¿cuál es el costo de referencia de este producto a la f
 - **Dominio puro** `domain/costo_de_referencia.py`:
   - `elegir_ultima_compra(candidatas, fecha_corte)` toma las compras con `voided_at IS NULL` y fecha de negocio `COALESCE(occurred_at, created_at) <= fecha_corte`.
   - **Desempate estable:** fecha de negocio desc → `created_at` desc → `id` desc.
-  - **Precedencia sin compra:** costo manual confirmado → stock inicial/aportado. Siempre devuelve el **origen**: `compra` | `manual` | `stock_inicial` | `catalogo` | `sin_costo`. Un costo 0 de un producto incompleto da `sin_costo` (pendiente), nunca 0 confirmado.
+  - **Precedencia (como quedó implementada):** `compra` → `stock_inicial` → `costo_cargado` → `sin_costo`, siempre con el origen. Un costo 0 de un producto incompleto da `sin_costo` (pendiente), nunca 0 confirmado.
+    - `compra` es todo `purchase` vivo, incluida la mercadería que un catálogo declaró como compra (`purchase` + `catalog_initial_stock`, con COGS).
+    - `stock_inicial` es el saldo de **apertura** valorizado (`adjustment` + `catalog_initial_stock`). Corrección de la revisión: la primera versión tomaba como «stock inicial» a la compra declarada.
+    - `costo_cargado` es `products.unit_cost_ars` sin compra. Hoy no se puede distinguir si vino de una edición manual o del catálogo, por eso se marca como **estimación**. Separar `manual` de `catalogo` depende de las decisiones 2 y 3 y va en M·1c.
+  - **Repositorio:** sólo existe la versión por lote, `costos_de_referencia(session, tenant_id, product_ids, corte)`; un solo producto es una lista de uno.
 - **Repositorio:** `costo_de_referencia(session, tenant_id, product_id, fecha)`, con el tenant del JWT, más su versión por lote para varios productos.
 - **Tests:**
   - compra atrasada (comprobante viejo cargado hoy);
@@ -43,6 +47,7 @@ Una sola respuesta a «¿cuál es el costo de referencia de este producto a la f
   - `-m postgres` por la migración.
 
 ### M·1b — las rutas de compra escriben el contrato
+- **Primero, la fecha.** `stock_service.increment_stock` y las rutas del chat guardan `occurred_at = datetime.now(UTC)` real, mientras que la ingesta guarda hora AR rotulada UTC. Una compra manual cargada de 21 a 24 AR cae en el día siguiente del corte. Se unifica a hora AR rotulada (`fecha_de_negocio()`) antes de M·1c. Lo encontró la revisión de M·1a.
 - `increment_stock` y `_apply_purchase_to_stock` reciben el contrato y lo guardan en el movimiento.
 - **Ingesta:** `unit_cost_final` sale de `build_line_costs` (motor existente, sin calculadora nueva). El envío se calcula al registrar y sobre el mismo comprobante. Con la decisión `monto_incluye` el envío queda `incluido` y el impuesto `desconocido`: **`monto_incluye` no prueba IVA**.
 - **Compra manual / Otros / chat / remito:** lo que el usuario declara; lo no declarado queda `desconocido`.

@@ -12,10 +12,17 @@ Reglas (``docs/plans/m1-contrato-costo-compra.md``):
   haya cargado antes. Desempate estable: fecha de negocio → ``created_at`` →
   ``id``, todo descendente.
 - Una compra sin costo (NULL o 0) no es fuente: se sigue con la anterior.
-- **Precedencia:** compra real → stock inicial de catálogo (que en el ledger
-  también es ``purchase``, con ``source_type=catalog_initial_stock``) → el costo
-  cargado en el producto, que no tiene fecha ni comprobante y por eso es sólo
-  una estimación → sin costo. Siempre se devuelve el ORIGEN.
+- **Precedencia:** compra (todo ``purchase`` vivo, incluida la mercadería que un
+  catálogo declaró como compra) → stock inicial (el saldo de APERTURA valorizado:
+  ``adjustment`` + ``catalog_initial_stock``) → el costo cargado en el producto,
+  que no tiene fecha ni comprobante y por eso es sólo una estimación → sin costo.
+  Siempre se devuelve el ORIGEN.
+- **Fecha:** se compara ``fecha_negocio.date()`` del valor en UTC. La ingesta
+  guarda ``occurred_at`` como hora AR rotulada UTC, pero ``stock_service`` (compra
+  manual, Otros, chat) guarda ``datetime.now(UTC)`` real, y el fallback a
+  ``created_at`` también es UTC real: una compra de esas cargada entre las 21 y
+  las 24 AR cae en el día siguiente. Unificar a los escritores es M·1b, antes de
+  que M·1c use esto para fijar ``unit_cost_ars``.
 - El costo de una candidata es ``unit_cost_final`` si existe; si no, el
   ``unit_cost`` facturado de un movimiento anterior al contrato, que queda con
   envío e impuesto ``desconocido``.

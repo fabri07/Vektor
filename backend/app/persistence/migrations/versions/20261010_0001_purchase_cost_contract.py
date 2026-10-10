@@ -13,9 +13,12 @@ Más un índice parcial para elegir la última compra viva de un producto.
 
 Aditiva e idempotente (convención E8c; el lock de ``migrations/env.py``
 serializa a la API y al worker). Comprueba PRESENCIA, no forma. Los CHECK van
-en Postgres con el patrón zero-lock de ``20260804_0001``: ``NOT VALID`` no
-escanea y ``VALIDATE`` sólo toma SHARE UPDATE EXCLUSIVE. SQLite ignora los
-CHECK de todas formas.
+``NOT VALID`` → ``VALIDATE`` como en ``20260804_0001``, pero acá NO es
+zero-lock: ``env.py`` corre todo en una transacción y el ``ADD COLUMN`` ya tomó
+ACCESS EXCLUSIVE hasta el commit, así que el ``VALIDATE`` y el ``CREATE INDEX``
+corren bajo ese lock. Es barato igual: las columnas nuevas están en NULL (el
+``VALIDATE`` no tiene nada que rechazar) y ``inventory_movements`` es chica (decenas
+de miles de filas). SQLite ignora los CHECK.
 """
 
 from __future__ import annotations
