@@ -83,3 +83,44 @@ class CapitalMovementResponse(BaseModel):
 
 class CapitalMovementListResponse(BaseModel):
     items: list[CapitalMovementResponse]
+
+
+# ── Vista de capital por socio (D·4) ─────────────────────────────────────────
+# Los números salen de FactsService (``capital_de_socios``) tal cual: el
+# frontend los muestra sin sumar ni restar.
+
+
+class CapitalAmountsByForm(BaseModel):
+    dinero: float
+    especie: float
+
+
+class CapitalPartnerSummary(BaseModel):
+    #: None = movimientos sin socio identificado (nunca se inventa un nombre).
+    partner_name: str | None
+    aportes: CapitalAmountsByForm
+    retiros: CapitalAmountsByForm
+    prestamos_recibidos: CapitalAmountsByForm
+    devoluciones: CapitalAmountsByForm
+    #: Acumulado a ``to_date`` (toda la historia). Puede ser negativo.
+    prestamo_pendiente: float
+    prestamo_pendiente_inconsistente: bool
+
+
+class CapitalCashFlow(BaseModel):
+    entradas: float
+    salidas: float
+    neto: float
+
+
+class CapitalSummaryResponse(BaseModel):
+    from_date: date
+    to_date: date
+    has_data: bool
+    #: True si algún monto del período es en especie (la UI muestra esa columna).
+    has_in_kind: bool
+    partners: list[CapitalPartnerSummary]
+    #: None cuando ``has_data`` es False.
+    totals: CapitalPartnerSummary | None
+    #: Flujo de capital en DINERO del período; None cuando ``has_data`` es False.
+    cash_flow: CapitalCashFlow | None

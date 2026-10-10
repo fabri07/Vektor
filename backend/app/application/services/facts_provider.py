@@ -38,6 +38,7 @@ from app.application.services.facts_service import (
 )
 from app.domain.business_time import AR_TZ
 from app.domain.verticals import Vertical
+from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._expense_scope import gasto_de_resultado
@@ -58,6 +59,8 @@ _PRODUCTS_COLS = [
     "product_id", "stock_units", "base_units_per_sale_unit", "unit_cost_ars", "last_sold_date",
     "first_seen_date", "provenance",
 ]
+
+_CAPITAL_COLS = ["occurred_on", "kind", "form", "amount_ars", "partner_name"]
 
 
 @dataclass(frozen=True)
@@ -229,6 +232,40 @@ async def load_facts_frames(
         mixed_tenders=mixed_df,
         coverage_start=start,
         coverage_end=end,
+    )
+
+
+async def load_capital_frame(
+    session: AsyncSession, tenant_id: uuid.UUID, hasta: date
+) -> pd.DataFrame:
+    """Movimientos de capital VIVOS del tenant con fecha de negocio <= ``hasta`` (D·4).
+
+    Historia completa, sin piso: el préstamo pendiente es acumulado. Lo consume
+    ``facts_service.capital_de_socios``; no va en ``load_facts_frames`` porque el
+    capital no es parte del snapshot del dashboard.
+    """
+    m = OwnerCapitalMovement
+    rows = (
+        await session.execute(
+            select(m.occurred_on, m.kind, m.form, m.amount_ars, m.partner_name).where(
+                m.tenant_id == tenant_id,
+                m.voided_at.is_(None),
+                m.occurred_on <= hasta,
+            )
+        )
+    ).all()
+    return pd.DataFrame(
+        [
+            {
+                "occurred_on": row.occurred_on,
+                "kind": row.kind,
+                "form": row.form,
+                "amount_ars": float(row.amount_ars),
+                "partner_name": row.partner_name,
+            }
+            for row in rows
+        ],
+        columns=_CAPITAL_COLS,
     )
 
 
