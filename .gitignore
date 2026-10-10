@@ -17,6 +17,10 @@ ENV/
 .pgsql16/
 .pgsql*/
 
+# Almacenamiento local de uploads (S3Client sin bucket, ver integrations/s3.py):
+# son archivos de clientes, nunca van al repo.
+.local_uploads/
+
 # ── Environment & Secrets ─────────────────────────────────────────────────────
 .env
 .env.*

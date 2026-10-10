@@ -1,4 +1,8 @@
-.venv/
+# `.venv*/` y no sólo `.venv/`: `.venv312/` estuvo versionado de 2026-03 a
+# 2026-10 y, como esto sólo excluía `.venv/`, viajaba en la imagen de Railway
+# (`COPY . .` de la etapa runtime).
+.venv*/
+.local_uploads/
 __pycache__/
 *.py[cod]
 .pytest_cache/
