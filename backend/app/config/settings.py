@@ -103,6 +103,8 @@ class Settings(BaseSettings):
 
     # ── Celery ────────────────────────────────────────────────────────────────
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
+    # Ya no se usa: celery_app no configura backend de resultados (ver ahí).
+    # Se conserva para que la variable ya seteada en Railway no rompa nada.
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
     # ── JWT ───────────────────────────────────────────────────────────────────
