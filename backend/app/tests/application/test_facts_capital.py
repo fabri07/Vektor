@@ -132,3 +132,18 @@ def test_sin_movimientos_es_vacio_explicito() -> None:
     assert r.totales is None
     assert r.flujo_dinero is None
     assert (r.start, r.end) == (PERIODO.start, PERIODO.end)
+
+
+def test_el_mismo_socio_con_otra_grafia_es_uno_solo() -> None:
+    # Texto libre: «Ana» y « ana » son la misma persona. Si se separaran, «Ana»
+    # quedaría debiendo 50.000 y «ana» con −50.000 marcado como inconsistente.
+    r = capital_de_socios(
+        _frame((ANTES, "prestamo_socio", "dinero", 50000.0, "Ana"),
+               (HOY, "devolucion_prestamo", "dinero", 50000.0, " ana ")),
+        PERIODO,
+    )
+    (ana,) = r.socios
+    assert ana.socio == "Ana"  # la grafía del primer movimiento
+    assert ana.devoluciones.dinero == 50000.0
+    assert ana.prestamo_pendiente == 0.0
+    assert not ana.prestamo_pendiente_inconsistente

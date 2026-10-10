@@ -792,19 +792,30 @@ def capital_de_socios(frame: pd.DataFrame, p: Period) -> CapitalDeSocios:
         return vacio
     df = frame.copy()
     df["amount_ars"] = df["amount_ars"].astype(float)
+    # El socio es texto libre (no hay maestro): «Ana» y «ana » son la misma
+    # persona. Se agrupa sin mayúsculas ni espacios de más y se muestra la
+    # grafía de su primer movimiento; si no, un préstamo cargado a «Ana» y
+    # devuelto a «ana» quedaría como dos socios, uno con pendiente negativo.
     df["_socio"] = [_socio_key(v) for v in df["partner_name"]]
+    df["_socio_k"] = [None if s is None else " ".join(s.split()).casefold() for s in df["_socio"]]
     historia = df[pd.to_datetime(df["occurred_on"]).dt.date <= p.end]
     periodo = historia[p.contains(historia["occurred_on"])]
+    grafia: dict[str, str] = {}
+    en_orden = historia.sort_values("occurred_on", kind="stable")
+    for k, nombre in en_orden[["_socio_k", "_socio"]].itertuples(index=False):
+        if k is not None:
+            grafia.setdefault(k, nombre)
 
-    def del_socio(d: pd.DataFrame, socio: str | None) -> pd.DataFrame:
-        return d[d["_socio"].isna()] if socio is None else d[d["_socio"] == socio]
+    def del_socio(d: pd.DataFrame, clave: str | None) -> pd.DataFrame:
+        return d[d["_socio_k"].isna()] if clave is None else d[d["_socio_k"] == clave]
 
     socios: list[CapitalDeSocio] = []
     # Con nombre primero (alfabético); «sin socio identificado» al final.
-    claves = sorted(set(historia["_socio"]), key=lambda s: (s is None, (s or "").casefold()))
-    for socio in claves:
-        del_periodo = del_socio(periodo, socio)
-        c = _capital_de(socio, del_periodo, del_socio(historia, socio))
+    claves = sorted(set(historia["_socio_k"]), key=lambda k: (k is None, k or ""))
+    for clave in claves:
+        del_periodo = del_socio(periodo, clave)
+        socio = None if clave is None else grafia[clave]
+        c = _capital_de(socio, del_periodo, del_socio(historia, clave))
         # Aparece si se movió en el período o si arrastra un préstamo pendiente.
         if not del_periodo.empty or c.prestamo_pendiente != 0:
             socios.append(c)

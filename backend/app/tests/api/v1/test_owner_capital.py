@@ -180,13 +180,14 @@ async def test_anulacion_no_borra_audita_y_no_se_repite(
     assert [i["id"] for i in con_anulados.json()["items"]] == [mid]
 
 
-async def test_el_recalculo_del_score_sale_despues_del_commit(
+async def test_el_recalculo_del_score_se_agenda_con_el_helper_post_commit(
     client: AsyncClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Alta, anulación y profit-withdrawal agendan el recálculo para DESPUÉS del
-    commit, sacándolo del camino de la respuesta. Con ``.delay()`` directo el
-    worker podía leer la base antes del commit y persistir un score sin el
-    movimiento, y un broker caído hacía rollback de un movimiento válido."""
+    """Alta, anulación y profit-withdrawal piden el recálculo por
+    ``trigger_score_recalculation_after_commit`` con las ``BackgroundTasks``
+    del endpoint. Que ese helper espere al commit, no encole tras un rollback y
+    aguante un broker caído lo fija ``test_score_trigger_after_commit.py``;
+    acá se prueba que las tres rutas lo usan en vez de ``.delay()`` directo."""
     from app.api.v1 import expenses as expenses_api
     from app.api.v1 import owner_capital as capital_api
 
