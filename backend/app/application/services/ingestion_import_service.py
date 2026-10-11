@@ -6481,8 +6481,10 @@ async def _insert_confirmed_data_impl(
                                 else None
                             ),
                             "unit_cost_ars": (
-                                str(cost or existing.unit_cost_ars)
-                                if (cost or existing.unit_cost_ars) is not None
+                                # M·1c: lo que QUEDÓ (el catálogo puede no mandar);
+                                # si no, la reversa lo vería «editado» y no restauraría.
+                                str(existing.unit_cost_ars)
+                                if existing.unit_cost_ars is not None
                                 else None
                             ),
                             "stock_units": stock_val or existing.stock_units,
@@ -8600,8 +8602,10 @@ async def _insert_multisheet_data(
                         else None
                     ),
                     "unit_cost_ars": (
-                        str(cost or existing.unit_cost_ars)
-                        if (cost or existing.unit_cost_ars) is not None
+                        # M·1c: lo que QUEDÓ (el catálogo puede no mandar);
+                        # si no, la reversa lo vería «editado» y no restauraría.
+                        str(existing.unit_cost_ars)
+                        if existing.unit_cost_ars is not None
                         else None
                     ),
                     # Ya en unidades base (si el archivo traía stock, ya se aplicó).

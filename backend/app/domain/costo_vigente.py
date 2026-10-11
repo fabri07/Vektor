@@ -50,6 +50,9 @@ OrigenVigente = Literal["compra", "stock_inicial", "manual", "catalogo"]
 #: Origen y fecha del costo que quedó en ``unit_cost_ars`` (para mostrarlo).
 ORIGEN_FIELD: Final = "_vektor_costo_origen"
 FECHA_FIELD: Final = "_vektor_costo_fecha"
+#: Cuándo se registró el costo vigente: con la fecha, el MISMO orden que usa
+#: ``decidir_costo_vigente``, para que el catálogo decida igual.
+REGISTRADO_FIELD: Final = "_vektor_costo_registrado"
 #: Última edición manual y última carga de catálogo: ``{"costo", "fecha"}``.
 MANUAL_FIELD: Final = "_vektor_costo_manual"
 CATALOGO_FIELD: Final = "_vektor_costo_catalogo"
@@ -60,6 +63,7 @@ CLAVES_DEL_COSTO: Final[tuple[str, ...]] = (
     COSTO_BASE_FIELD,
     ORIGEN_FIELD,
     FECHA_FIELD,
+    REGISTRADO_FIELD,
     MANUAL_FIELD,
     CATALOGO_FIELD,
 )
@@ -78,6 +82,13 @@ class CostoVigente:
     fecha: datetime
     #: ``con_flete`` / ``sin_flete``, o ``None`` = no se sabe (se borra la clave).
     base: str | None
+    #: Cuándo se registró (hora AR). En una compra es su ``created_at``, distinto
+    #: de la fecha de negocio; en una edición, su propia hora. Es la segunda
+    #: mitad del orden (día de negocio, registro) que usan TODAS las decisiones.
+    registrado: datetime | None = None
+
+    def orden(self) -> tuple[date, datetime]:
+        return self.fecha.date(), self.registrado or self.fecha
 
 
 def _sin_zona(dt: datetime) -> datetime:
@@ -155,15 +166,17 @@ def decidir_costo_vigente(
         and referencia.fecha is not None
     ):
         fecha = _sin_zona(referencia.fecha)
+        orden = _orden_de_la_compra(referencia, fecha)
         candidatos.append(
             (
-                _orden_de_la_compra(referencia, fecha),
+                orden,
                 0,
                 CostoVigente(
                     costo=referencia.costo_unitario,
                     origen=origen_compra,
                     fecha=fecha,
                     base=_base_de_la_compra(referencia.envio),
+                    registrado=orden[1],
                 ),
             )
         )
@@ -200,6 +213,7 @@ def sellar(custom_fields: Mapping[str, Any] | None, vigente: CostoVigente) -> di
     nuevos = {**(custom_fields or {})}
     nuevos[ORIGEN_FIELD] = vigente.origen
     nuevos[FECHA_FIELD] = vigente.fecha.isoformat()
+    nuevos[REGISTRADO_FIELD] = (vigente.registrado or vigente.fecha).isoformat()
     if vigente.base is None:
         nuevos.pop(COSTO_BASE_FIELD, None)
     else:
@@ -260,7 +274,7 @@ def quitar_edicion_manual(custom_fields: Mapping[str, Any] | None) -> dict[str, 
     Sin edición guardada, el próximo recálculo vuelve a la compra si la hay.
     """
     nuevos = {**(custom_fields or {})}
-    for clave in (MANUAL_FIELD, ORIGEN_FIELD, FECHA_FIELD, COSTO_BASE_FIELD):
+    for clave in (MANUAL_FIELD, ORIGEN_FIELD, FECHA_FIELD, REGISTRADO_FIELD, COSTO_BASE_FIELD):
         nuevos.pop(clave, None)
     return nuevos
 
@@ -302,12 +316,21 @@ def aplicar_costo_de_catalogo(
     fecha = _sin_zona(fecha)
     nuevos = {**(custom_fields or {})}
     nuevos[CATALOGO_FIELD] = {"costo": str(costo), "fecha": fecha.isoformat()}
-    vigente_desde: datetime | None = None
+    vigente: tuple[date, datetime] | None = None
     if ORIGEN_FIELD in nuevos and FECHA_FIELD in nuevos:
         try:
-            vigente_desde = _sin_zona(datetime.fromisoformat(str(nuevos[FECHA_FIELD])))
+            dia = _sin_zona(datetime.fromisoformat(str(nuevos[FECHA_FIELD])))
+            registrado = _sin_zona(
+                datetime.fromisoformat(str(nuevos.get(REGISTRADO_FIELD) or nuevos[FECHA_FIELD]))
+            )
+            vigente = (dia.date(), registrado)
         except ValueError:
-            vigente_desde = None
-    if vigente_desde is not None and fecha < vigente_desde:
+            vigente = None
+    # Mismo orden que `decidir_costo_vigente`: (día, registro); empate → catálogo
+    # le gana a una compra y pierde contra una edición manual.
+    if vigente is not None and (
+        (fecha.date(), fecha) < vigente
+        or ((fecha.date(), fecha) == vigente and nuevos.get(ORIGEN_FIELD) == "manual")
+    ):
         return costo_actual, nuevos
     return costo, sellar(nuevos, CostoVigente(costo, "catalogo", fecha, None))

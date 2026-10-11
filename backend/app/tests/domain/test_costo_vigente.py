@@ -219,3 +219,22 @@ class TestRevisionCatalogo:
             {}, Decimal("150"), Decimal("100"), datetime(2026, 1, 5)
         )
         assert costo == Decimal("100") and nuevo[ORIGEN_FIELD] == "catalogo"
+
+    def test_catalogo_y_compra_del_mismo_dia_deciden_igual_que_el_recalculo(self) -> None:
+        """Revisión M·1c-1 (2ª vuelta): catálogo cargado a las 14:00 y compra con
+        fecha del mismo día REGISTRADA a las 16:00. El recálculo elige la compra;
+        el catálogo releído no puede elegir otra cosa."""
+        ref = CostoDeReferencia(
+            origen="compra",
+            costo_unitario=Decimal("150"),
+            fecha=datetime(2026, 1, 10, tzinfo=UTC),
+            movement_id=uuid.uuid4(),
+            cargada_en=datetime(2026, 1, 10, 19, 0, tzinfo=UTC),  # 16:00 AR
+        )
+        catalogo = CostoFechado(Decimal("100"), datetime(2026, 1, 10, 14, 0))
+        elegido = decidir_costo_vigente(ref, None, catalogo)
+        assert elegido is not None and elegido.origen == "compra"
+
+        cf = sellar({}, elegido)
+        costo, _ = aplicar_costo_de_catalogo(cf, Decimal("150"), Decimal("100"), catalogo.fecha)
+        assert costo == Decimal("150")

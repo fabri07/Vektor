@@ -66,7 +66,13 @@ async def recalcular_costo_vigente(
             referencia,
             leer_costo_fechado(producto.custom_fields, MANUAL_FIELD),
             leer_costo_fechado(producto.custom_fields, CATALOGO_FIELD),
-            sin_procedencia=ORIGEN_FIELD not in (producto.custom_fields or {}),
+            # Sin procedencia Y con costo: un costo vacío o 0 no se protege
+            # (antes de M·1c una compra lo llenaba igual).
+            sin_procedencia=(
+                ORIGEN_FIELD not in (producto.custom_fields or {})
+                and producto.unit_cost_ars is not None
+                and producto.unit_cost_ars > 0
+            ),
             movimiento_nuevo=movimiento_nuevo,
         )
         if vigente is None:

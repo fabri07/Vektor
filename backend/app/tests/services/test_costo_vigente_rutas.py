@@ -280,3 +280,75 @@ async def test_releer_un_catalogo_viejo_no_le_gana_a_una_compra_posterior(
     assert p.unit_cost_ars == Decimal("150.00")
     assert (p.custom_fields or {})[ORIGEN_FIELD] == "compra"
     assert (p.custom_fields or {})[CATALOGO_FIELD]["fecha"].startswith("2026-01-05")
+
+
+async def test_un_producto_legado_sin_costo_se_llena_aunque_la_compra_sea_atrasada(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión M·1c-1 (2ª vuelta): la protección de un costo legado no aplica si
+    no hay costo que proteger (antes de M·1c una compra lo llenaba igual)."""
+    p = await _producto(db_session, sample_tenant)
+    await _comprar(db_session, sample_tenant, p, "100", datetime(2026, 9, 10, 10))
+    p.unit_cost_ars = None
+    p.custom_fields = {}
+    await db_session.flush()
+    await _comprar(db_session, sample_tenant, p, "80", datetime(2026, 9, 1, 10))
+    assert p.unit_cost_ars == Decimal("100.00")
+
+
+async def test_borrar_un_catalogo_que_no_mando_lo_revierte_entero(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión M·1c-1 (2ª vuelta, P1): el catálogo viejo sólo GUARDÓ su carga (la
+    compra posterior mandaba). El `after` del ledger tiene que decir el costo que
+    quedó; si dijera el del catálogo, la reversa lo vería «editado», no
+    restauraría y dejaría la carga de un archivo borrado en el producto."""
+    archivo = UploadedFile(
+        tenant_id=sample_tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="lista_enero.xlsx",
+        s3_key=f"uploads/test/{uuid.uuid4()}/lista_enero.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=1024,
+        purpose="general",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={},
+        ingestion_version=INGESTION_VERSION,
+        created_at=datetime(2026, 1, 5, 12, tzinfo=UTC),
+    )
+    db_session.add(archivo)
+    p = await _producto(db_session, sample_tenant, "Azucar 1kg")
+    await _comprar(db_session, sample_tenant, p, "150", datetime(2026, 9, 10, 10))
+
+    counts = await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        {
+            "file_type": "spreadsheet",
+            "inferred_type": "stock",
+            "has_producto": True,
+            "stock_detectado": [
+                {"producto": "Azucar 1kg", "precio_venta": "200", "costo_unitario": "100"}
+            ],
+        },
+        {"productos": True},
+        return_details=True,
+        uploaded_file_id=archivo.id,
+    )
+    await db_session.flush()
+    await db_session.refresh(p)
+    assert p.unit_cost_ars == Decimal("150.00")
+    assert CATALOGO_FIELD in (p.custom_fields or {})
+
+    await record_import_ledger(
+        db_session,
+        tenant_id=sample_tenant.tenant_id,
+        file_id=archivo.id,
+        product_details=counts.pop("product_details", []) or [],
+    )
+    contadores = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+    await db_session.refresh(p)
+    assert contadores["productos_restaurados"] == 1
+    assert CATALOGO_FIELD not in (p.custom_fields or {})
+    assert p.unit_cost_ars == Decimal("150.00")
