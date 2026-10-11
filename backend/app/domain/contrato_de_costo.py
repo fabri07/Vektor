@@ -23,6 +23,14 @@ parezca dato.
 ``tax_amount`` es el impuesto **por unidad**, en la misma unidad que
 ``unit_cost_final``, para que M·1d compare costos unitarios sin dividir de nuevo.
 
+Qué significa cada tratamiento respecto de ``unit_cost_final`` (M·1d lo lee así):
+
+- ``incluido``: el envío / impuesto YA está dentro de ``unit_cost_final``;
+- ``adicional``: existió pero está FUERA de ``unit_cost_final`` (el envío como
+  gasto aparte; el impuesto sin sumar). Quien escriba ``adicional`` no puede
+  haberlo sumado al costo, o M·1d lo contaría dos veces;
+- ``no_aplica``: no hubo; ``desconocido``: no se sabe.
+
 La versión (``CONTRATO_VERSION``) marca que el movimiento se escribió con el
 contrato; no dice que envío o impuesto estén confirmados.
 """

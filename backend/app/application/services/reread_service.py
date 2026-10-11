@@ -4320,7 +4320,10 @@ async def apply_reread(
     # M·1c-2: red de seguridad. Hoy no queda nada en la cola: las compras que
     # anula `_reconcile` las drena el reimport (antes de sellar `updated_at`), y
     # lo que anula después (`_superseder_clasificados_de_otros`) son ventas. Si
-    # algún día anulara compras acá, el recálculo correría DESPUÉS del sello.
+    # algún día anulara compras acá, el recálculo correría DESPUÉS del sello, y
+    # una compra del reimport que no cambió el costo ya no tendría entrada de
+    # ledger (`cerrar_costos_del_lote` la descarta): el `before` para revertir
+    # habría que tomarlo antes de anular.
     await recalcular_pendientes(session, tenant_id)
     await session.flush()
 
