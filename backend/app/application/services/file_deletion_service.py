@@ -49,6 +49,7 @@ from app.application.services._ledger_restore import (
     restore_from_before,
     snapshot_master,
 )
+from app.application.services.costo_vigente_service import recalcular_pendientes
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
 )
@@ -1185,6 +1186,10 @@ async def revert_file_data(
             created_at=ahora,
         )
     )
+    # M·1c-2: las compras anuladas del archivo pudieron ser las que fijaban el
+    # costo vigente. Recién ACÁ, con los productos ya restaurados desde el
+    # ledger: el recálculo ve las fuentes que quedan vivas.
+    await recalcular_pendientes(session, tenant_id)
     logger.info(
         "ingestion.delete.reverted",
         file_id=str(file_id),

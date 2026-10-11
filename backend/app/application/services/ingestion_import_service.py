@@ -26,6 +26,10 @@ from app.application.services._savepoint import (
     unique_violation_classifier,
 )
 from app.application.services.cash_service import normalize_payment_method
+from app.application.services.costo_vigente_service import (
+    marcar_para_recalcular,
+    recalcular_pendientes,
+)
 from app.application.services.field_definition_service import ensure_custom_field_exists
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
@@ -146,14 +150,10 @@ from app.domain.product_category_inference import CategorySuggestion, infer_cate
 from app.domain.purchase_cost import (
     ATRIBUIDO_A_INVENTARIO_FIELD,
     COMPARTIDO_SUBTOTAL,
-    CON_FLETE,
-    COSTO_BASE_FIELD,
     LINEA_AL_COSTO,
-    SIN_FLETE,
     CostLine,
     LineCost,
     build_line_costs,
-    debe_pisar_costo_de_referencia,
 )
 from app.domain.purchase_cost_decision import (
     AJUSTE_ILEGIBLE,
@@ -2562,6 +2562,7 @@ async def _record_stock_movement(
     source_row_hash: str | None = None,
     occurred_at: datetime | None = None,
     contrato: ContratoDeCosto | None = None,
+    movement_id: uuid.UUID | None = None,
 ) -> None:
     """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
     `InventoryBalance` por el import, dentro de la misma transacción.
@@ -2606,6 +2607,9 @@ async def _record_stock_movement(
 
     session.add(
         InventoryMovement(
+            # M·1c-2: el caller que necesita reconocer la compra recién creada
+            # (costo de un producto sin procedencia) fija el id.
+            **({"id": movement_id} if movement_id is not None else {}),
             tenant_id=tenant_id,
             product_id=product_id,
             supplier_id=supplier_id,
@@ -3070,7 +3074,6 @@ async def _apply_purchase_to_stock(
     source_type: str = SOURCE_PURCHASE_IMPORT,
     source_row_ref: str | None = None,
     costo_final: Decimal | None = None,
-    costo_incluye_flete: bool | None = None,
     product_details: list[dict[str, Any]] | None = None,
     contrato: ContratoDeCosto | None = None,
 ) -> None:
@@ -3133,61 +3136,43 @@ async def _apply_purchase_to_stock(
     # que hay sobre esa compra.
     _costo_de_referencia = costo_final if costo_final is not None else unit_cost
     _costo_facturado = unit_cost if unit_cost is not None else costo_final
-    # V5: una compra nueva no pisa un costo que incluía flete con uno que no lo
-    # incluye. Si no se pisa el costo, TAMPOCO se pisa la procedencia: quedarían
-    # describiendo cosas distintas.
-    _base_guardada = (product.custom_fields or {}).get(COSTO_BASE_FIELD)
-    if _costo_de_referencia is not None and debe_pisar_costo_de_referencia(
-        entrante_incluye_flete=costo_incluye_flete,
-        guardado_incluye_flete=_base_guardada,
-        costo_guardado=(
-            Decimal(str(product.unit_cost_ars))
-            if product.unit_cost_ars is not None
-            else None
-        ),
-    ):
-        # F11/h3: una compra que pisa el costo tiene que dejar cómo estaba antes.
-        # `product_details` sólo lo poblaba el camino de CATÁLOGO, así que un
-        # producto tocado únicamente por una hoja de compras quedaba con el costo
-        # pisado para siempre — y el DELETE respondía `fully_reverted: true`.
-        # Varios items del mismo archivo sobre el mismo producto no son un
-        # problema: la reversa restaura el `before` del PRIMERO (el estado previo
-        # al archivo) y compara el `after` del último.
-        if product_details is not None:
-            product_details.append(
-                {
-                    "action": "UPDATED",
-                    "product_id": str(product.id),
-                    "name": product.name,
-                    "before": {
-                        "unit_cost_ars": (
-                            str(product.unit_cost_ars)
-                            if product.unit_cost_ars is not None
-                            else None
-                        ),
-                        COSTO_BASE_FIELD: _base_guardada,
-                    },
-                    "after": {
-                        "unit_cost_ars": str(_costo_de_referencia),
-                        COSTO_BASE_FIELD: (
-                            (CON_FLETE if costo_incluye_flete else SIN_FLETE)
-                            if costo_incluye_flete is not None
-                            else _base_guardada
-                        ),
-                    },
-                }
-            )
-        product.unit_cost_ars = _costo_de_referencia
-        # F-H6.d: la procedencia se escribe en la MISMA operación que el costo.
-        # Separarlas deja que un costo y su procedencia se desincronicen, y una
-        # procedencia que miente es peor que ninguna: el guard de V5 decide con
-        # ella si una compra nueva puede pisar el costo guardado.
-        if costo_incluye_flete is not None:
-            product.custom_fields = {
-                **(product.custom_fields or {}),
-                COSTO_BASE_FIELD: CON_FLETE if costo_incluye_flete else SIN_FLETE,
+    # M·1c-2: la compra ya NO escribe el costo del producto — ni por llegar
+    # última ni con la guarda con flete / sin flete, reemplazada por un rótulo
+    # (decisión del dueño 2026-10-11). Se marca el producto y el dueño del lote
+    # (`insert_confirmed_data`, `import_receipt`) recalcula UNA vez al final con
+    # la regla de M·1c (`costo_vigente_service`): un comprobante atrasado no le
+    # gana a una compra más nueva ni a una edición posterior.
+    #
+    # F11/h3: la reversa necesita cómo estaba ANTES del archivo. Una entrada por
+    # producto y por import (no por fila: un libro de compras de miles de filas
+    # multiplicaría el ledger); su `after` lo completa quien recalcula, con el
+    # costo que QUEDÓ.
+    if product_details is not None and _primera_compra_del_import(session, product.id):
+        product_details.append(
+            {
+                "action": "UPDATED",
+                "product_id": str(product.id),
+                "name": product.name,
+                "before": {
+                    "unit_cost_ars": (
+                        str(product.unit_cost_ars)
+                        if product.unit_cost_ars is not None
+                        else None
+                    ),
+                    **snapshot_claves_del_costo(product.custom_fields),
+                },
+                "after": {
+                    "unit_cost_ars": (
+                        str(product.unit_cost_ars)
+                        if product.unit_cost_ars is not None
+                        else None
+                    ),
+                },
+                COMPRA_DEL_IMPORT_KEY: True,
             }
+        )
     # A2: identidad lógica estable de la fila de origen (idempotencia + reconciliación).
+    _movimiento_id = uuid.uuid4()
     _row_hash = compute_source_row_hash(
         product_key=product.name,
         qty=qty,
@@ -3224,7 +3209,9 @@ async def _apply_purchase_to_stock(
         source_row_hash=_row_hash,
         occurred_at=getattr(expense, "transaction_date", None),
         contrato=contrato,
+        movement_id=_movimiento_id,
     )
+    marcar_para_recalcular(session, tenant_id, product.id, _movimiento_id)
 
 
 def _add_catalog_initial_stock_cogs(
@@ -3606,6 +3593,50 @@ def _accumulate_expiry_date(
         return None
     future = [d for d in candidates if d >= today]
     return min(future) if future else max(candidates)
+
+
+#: Marca de las entradas de `product_details` que deja una COMPRA importada:
+#: su `after` lo completa quien recalcula el costo al final del lote.
+COMPRA_DEL_IMPORT_KEY = "_m1c_compra"
+_LEDGER_COMPRAS = "m1c_ledger_compras"
+
+
+def _primera_compra_del_import(session: AsyncSession, product_id: uuid.UUID) -> bool:
+    """¿Es la primera compra de este producto en el lote? (una entrada de ledger)."""
+    vistos: set[uuid.UUID] = session.info.setdefault(_LEDGER_COMPRAS, set())
+    if product_id in vistos:
+        return False
+    vistos.add(product_id)
+    return True
+
+
+async def cerrar_costos_del_lote(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_details: list[dict[str, Any]] | None,
+) -> None:
+    """M·1c-2: recalcula el costo de lo que el lote marcó y completa el ledger.
+
+    El `after` de cada entrada de un producto recalculado pasa a decir el costo
+    que QUEDÓ: si dijera otro, la reversa F11 lo vería «editado» y no restauraría.
+    """
+    session.info.pop(_LEDGER_COMPRAS, None)
+    recalculados = await recalcular_pendientes(session, tenant_id)
+    if not product_details or not recalculados:
+        return
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    finales: dict[str, str | None] = {}
+    for pid in recalculados:
+        producto = await session.get(Product, pid)
+        if producto is not None:
+            finales[str(pid)] = (
+                str(producto.unit_cost_ars) if producto.unit_cost_ars is not None else None
+            )
+    for detalle in product_details:
+        clave = str(detalle.get("product_id"))
+        if clave in finales and isinstance(detalle.get("after"), dict):
+            detalle["after"]["unit_cost_ars"] = finales[clave]
 
 
 async def _fecha_de_carga_del_archivo(
@@ -4548,6 +4579,11 @@ async def insert_confirmed_data(
         purchase_cost_decisions=purchase_cost_decisions,
     )
     await session.flush()
+    # M·1c-2: red de seguridad por si algún camino del import salió antes de
+    # cerrar sus costos. Vacía = no-op.
+    await cerrar_costos_del_lote(
+        session, tenant_id, counts.get("product_details") if return_details else None
+    )
     await assign_orphan_sales_to_local(session, tenant_id)
     # Bloque 5: persistir las decisiones EXPLÍCITAS de esta corrida por huella
     # de esquema — nunca sugerencias. `context_mappings`/`context_entity`/
@@ -5865,14 +5901,8 @@ async def _insert_confirmed_data_impl(
                     # cantidad: sin divisor no se inventa un costo unitario.
                     _costo_calculado = _costos_por_fila.get(row_index)
                     _costo_final_fila: Decimal | None = None
-                    _incluye_flete_fila: bool | None = None
-                    if _costo_calculado is not None:
-                        _incluye_flete_fila = bool(
-                            _costo_calculado.shipping_allocated
-                            or _costo_calculado.shipping_line_applied
-                        )
-                        if _costo_calculado.unit_cost_final:
-                            _costo_final_fila = _costo_calculado.unit_cost_final
+                    if _costo_calculado is not None and _costo_calculado.unit_cost_final:
+                        _costo_final_fila = _costo_calculado.unit_cost_final
                     # Compra de mercadería = gasto COGS+caja Y alta/reposición de
                     # producto. Señal a nivel de fila: nombre de producto + cantidad>0
                     # (un libro de compras con esas columnas). Se CREA el producto
@@ -6018,7 +6048,6 @@ async def _insert_confirmed_data_impl(
                             product_cache=_product_cache,
                             source_row_ref=_source_row_ref(_row_anchor),
                             costo_final=_costo_final_fila,
-                            costo_incluye_flete=_incluye_flete_fila,
                             product_details=(
                                 product_details if return_details else None
                             ),
@@ -6968,6 +6997,12 @@ async def _insert_confirmed_data_impl(
     # Persistir en lote (idempotente) las huellas nuevas del camino batch.
     if seen_fp is not None:
         await _persist_import_fingerprints(session, tenant_id, seen_fp.nuevas)
+    # M·1c-2: el costo de lo que el lote compró se recalcula ACÁ, antes de sellar
+    # `after["updated_at"]`: recalcular después movería `updated_at` y el undo de
+    # relectura vería el producto «tocado».
+    await cerrar_costos_del_lote(
+        session, tenant_id, product_details if return_details else None
+    )
     if return_details:
         if stamp_product_updated_at:
             await _stamp_updated_at_on_product_details(session, product_details)
@@ -8053,16 +8088,8 @@ async def _insert_multisheet_data(
         # `unit_cost_final` es None cuando la fila no trae cantidad: sin divisor
         # no se inventa un costo unitario.
         _costo_final: Decimal | None = None
-        _incluye_flete: bool | None = None
-        if costo_calculado is not None:
-            # Sin plan de costos no se declara procedencia: la ausencia de la
-            # clave significa «no sé», que no es lo mismo que «sin flete».
-            _incluye_flete = bool(
-                costo_calculado.shipping_allocated
-                or costo_calculado.shipping_line_applied
-            )
-            if costo_calculado.unit_cost_final:
-                _costo_final = costo_calculado.unit_cost_final
+        if costo_calculado is not None and costo_calculado.unit_cost_final:
+            _costo_final = costo_calculado.unit_cost_final
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
         # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
         # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el
@@ -8190,7 +8217,6 @@ async def _insert_multisheet_data(
             product_cache=product_cache,
             source_row_ref=row_ref,
             costo_final=_costo_final,
-            costo_incluye_flete=_incluye_flete,
             product_details=product_details if return_details else None,
             contrato=contrato_de_linea_importada(
                 unit_cost,
@@ -9675,6 +9701,12 @@ async def _insert_multisheet_data(
         )
     if _avisos_costo:
         counts["avisos"] = _avisos_costo
+    # M·1c-2: el costo de lo que el lote compró se recalcula ACÁ, antes de sellar
+    # `after["updated_at"]`: recalcular después movería `updated_at` y el undo de
+    # relectura vería el producto «tocado».
+    await cerrar_costos_del_lote(
+        session, tenant_id, product_details if return_details else None
+    )
     if return_details:
         if stamp_product_updated_at:
             await _stamp_updated_at_on_product_details(session, product_details)
@@ -10006,6 +10038,9 @@ async def import_receipt(
         await session.flush()
         shipping_expense_id = str(shipping.id)
 
+    # M·1c-2: el costo de lo que entró por el remito, una vez y con la regla
+    # de M·1c (el envío del remito va aparte: rótulo `sin_flete`).
+    await cerrar_costos_del_lote(session, tenant_id, None)
     return {
         "lines": len(lines),
         "products_created": created_product_ids,

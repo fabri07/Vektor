@@ -16,7 +16,10 @@ from app.application.services._savepoint import (
     guarded_savepoint,
     unique_violation_classifier,
 )
-from app.application.services.costo_vigente_service import recalcular_costo_vigente
+from app.application.services.costo_vigente_service import (
+    marcar_para_recalcular,
+    recalcular_costo_vigente,
+)
 from app.application.services.inventory_movement_origin import (
     SOURCE_RECONCILIATION,
     ensure_utc,
@@ -577,7 +580,7 @@ async def increment_stock(
     )
     db.add(movement)
     await db.flush()
-    await recalcular_costo_vigente(db, tenant_id, [product_id], movimiento_nuevo=movement.id)
+    await recalcular_costo_vigente(db, tenant_id, [product_id], movimientos_nuevos={movement.id})
 
     event_payload = {
         "tenant_id": str(tenant_id),
@@ -759,6 +762,10 @@ async def void_movement(
         balance.current_qty -= movement.qty
     movement.voided_at = datetime.now(UTC)
     await db.flush()
+    # M·1c-2: anular una compra puede cambiar el costo vigente (si era la que
+    # había ganado). Se recalcula al final del lote que la anuló.
+    if movement.movement_type == "purchase":
+        marcar_para_recalcular(db, movement.tenant_id, movement.product_id)
 
 
 async def unvoid_movement(
@@ -781,6 +788,8 @@ async def unvoid_movement(
         balance.current_qty += movement.qty
     movement.voided_at = None
     await db.flush()
+    if movement.movement_type == "purchase":
+        marcar_para_recalcular(db, movement.tenant_id, movement.product_id)
 
 
 async def _live_sale_movement(

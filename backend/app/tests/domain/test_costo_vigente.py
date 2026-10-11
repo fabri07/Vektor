@@ -172,9 +172,10 @@ class TestRevisionSinProcedencia:
 
     def test_solo_la_compra_recien_registrada_y_mas_reciente_lo_reemplaza(self) -> None:
         ref = _compra("100", _SEP_10)
+        assert ref.movement_id is not None
         assert (
             decidir_costo_vigente(
-                ref, None, None, sin_procedencia=True, movimiento_nuevo=ref.movement_id
+                ref, None, None, sin_procedencia=True, movimientos_nuevos={ref.movement_id}
             )
             is not None
         )
@@ -185,7 +186,7 @@ class TestRevisionSinProcedencia:
         ref = _compra("30", datetime(2026, 6, 1))
         assert (
             decidir_costo_vigente(
-                ref, None, None, sin_procedencia=True, movimiento_nuevo=uuid.uuid4()
+                ref, None, None, sin_procedencia=True, movimientos_nuevos={uuid.uuid4()}
             )
             is None
         )
