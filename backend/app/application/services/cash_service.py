@@ -16,6 +16,7 @@ from app.domain.expense_categories import (
     strip_accents,
 )
 from app.observability.logger import get_logger
+from app.persistence.costeo_de_ventas import marcar_unidad_no_confirmada
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
@@ -139,6 +140,8 @@ async def save_sale(
     )
     db.add(audit)
     await db.flush()
+    # M·2a: el chat guarda la cantidad tal cual: costo pendiente si es fraccionado.
+    marcar_unidad_no_confirmada(db.info, [sale.id])
     logger.info("sale_registered", tenant_id=str(tenant_id), amount=str(entities["amount"]))
     return sale
 

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
 )
@@ -87,6 +88,19 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     voided_by_repair_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    # M·2a — costo CONGELADO al confirmar la venta (mig 20261011_0001). Lo escribe
+    # el servidor (``persistence/costeo_de_ventas.py``), nunca el cliente: la fuente
+    # elegible a la fecha de negocio de la venta y su base comparable según el
+    # régimen (``domain/costo_de_venta.py``). Una compra posterior no lo cambia.
+    # NULL = sin costear (ventas anteriores a M·2a o sin producto). ``cost_unit_ars``
+    # es por UNIDAD DE VENTA y ``cost_ars`` el de la línea (``quantity`` en unidades
+    # base / factor). ``cost_confirmed`` False = estimación, con ``cost_reason``.
+    cost_unit_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    cost_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    cost_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    cost_origin: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cost_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cost_snapshot_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_sales_entries_provenance"),

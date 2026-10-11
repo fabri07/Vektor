@@ -145,3 +145,8 @@ __all__ = [
     "AccessRequest",
     "AccessRequestToken",
 ]
+
+# M·2a: registra los listeners que costean cada venta al confirmarla. Va acá
+# porque todo lo que abre una sesión importa los modelos (API, worker, scripts,
+# tests): una venta creada por cualquier camino queda costeada.
+from app.persistence import costeo_de_ventas as _costeo_de_ventas  # noqa: E402,F401
