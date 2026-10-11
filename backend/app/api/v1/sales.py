@@ -41,6 +41,7 @@ from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
 from app.domain.sale_unit import importe
+from app.persistence.costeo_de_ventas import marcar_unidad_no_confirmada
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.pos_operation import PosOperationLine
@@ -323,6 +324,8 @@ async def bulk_create_sales(
             pid, tenant.tenant_id, qty_by_product[pid], session
         )
     saved = await repo.bulk_save(entries)
+    # M·2a: la cantidad llega tal cual (sin factor): costo pendiente si es fraccionado.
+    marcar_unidad_no_confirmada(session.info, (e.id for e in saved))
     # Descontar stock por línea con producto (idempotente). Las entries de agregado sin
     # product_id no-opean. Ya validado arriba: el descuento no puede dejar stock negativo.
     for e in saved:
@@ -560,6 +563,8 @@ async def create_sale(
             body.product_id, tenant.tenant_id, body.quantity, session
         )
     saved = await repo.save(entry)
+    # M·2a: la cantidad llega tal cual (sin factor): costo pendiente si es fraccionado.
+    marcar_unidad_no_confirmada(session.info, [saved.id])
     # Venta EN VIVO con producto → descontar stock (idempotente). Ya validado arriba, así
     # que no puede dejar stock negativo. Sin product_id → no-op. El import histórico NO
     # pasa por acá.

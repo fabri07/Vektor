@@ -1,7 +1,8 @@
 """M·2a — el costo congelado contra las rutas reales que crean ventas.
 
-El listener costea en el commit de ``get_db_session``: acá se prueba que cada
-ruta llega costeada sin llamar a nada, que el reintento idempotente del POS no
+El listener costea en el commit de ``get_db_session`` (que el fixture ``client``
+no hace: ``_ventas`` lo hace en su lugar). Acá se prueba que cada ruta llega
+costeada sin llamar a nada, que el reintento idempotente del POS no
 recalcula y que el costo no sale en las respuestas.
 """
 
@@ -38,6 +39,9 @@ async def _producto(client: AsyncClient, headers: dict[str, Any], costo: str = "
 
 
 async def _ventas(db: AsyncSession, product_id: str) -> list[SaleEntry]:
+    # El fixture ``client`` comparte la sesión del test y NO confirma: el commit
+    # de ``get_db_session`` en producción es este.
+    await db.commit()
     db.expire_all()
     return list(
         (
@@ -113,6 +117,26 @@ class TestRutas:
         [venta] = await _ventas(db_session, pid)
         assert venta.cost_ars == 80
         assert venta.cost_snapshot_version == 1
+
+    async def test_sales_bulk_queda_costeada(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        """``period_date`` es un ``date``: el costeo no puede romperse con eso."""
+        pid = await _producto(client, auth_headers, costo="40.00")
+        resp = await client.post(
+            "/api/v1/sales/bulk",
+            json={
+                "period_type": "daily",
+                "period_date": today_ar().isoformat(),
+                "total_amount_ars": "300.00",
+                "entries": [{"product_id": pid, "quantity": 3, "amount_ars": "300.00"}],
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201, resp.text
+        [venta] = await _ventas(db_session, pid)
+        assert venta.cost_snapshot_version == 1
+        assert venta.cost_ars == 120
 
     async def test_el_cliente_no_puede_mandar_el_costo(
         self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession

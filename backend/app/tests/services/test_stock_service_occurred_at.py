@@ -91,16 +91,14 @@ async def test_decrement_stock_without_occurred_at_falls_back_to_now(
     tid = sample_tenant.tenant_id
     product = await _make_product(db_session, tid, stock_units=10)
 
-    before = datetime.now(UTC) - timedelta(seconds=5)
+    # M·2a: sin fecha, AHORA en hora argentina rotulada UTC (como las compras).
+    before = now_ar_naive() - timedelta(seconds=5)
     with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
         movement = await decrement_stock(product.id, tid, 2, "src", db_session)
-    after = datetime.now(UTC) + timedelta(seconds=5)
+    after = now_ar_naive() + timedelta(seconds=5)
 
     assert movement.occurred_at is not None
-    occurred = movement.occurred_at
-    if occurred.tzinfo is None:
-        occurred = occurred.replace(tzinfo=UTC)
-    assert before <= occurred <= after
+    assert before <= movement.occurred_at.replace(tzinfo=None) <= after
 
 
 async def test_increment_stock_persists_explicit_occurred_at(
@@ -190,14 +188,13 @@ async def test_register_stock_loss_sets_occurred_at_to_now(
     tid = sample_tenant.tenant_id
     product = await _make_product(db_session, tid, stock_units=10)
 
-    before = datetime.now(UTC) - timedelta(seconds=5)
+    # M·2a: en hora argentina rotulada UTC, como todo el ledger.
+    before = now_ar_naive() - timedelta(seconds=5)
     movement = await register_stock_loss(product.id, tid, 3, "merma", None, db_session)
-    after = datetime.now(UTC) + timedelta(seconds=5)
+    after = now_ar_naive() + timedelta(seconds=5)
 
     assert movement.occurred_at is not None
-    occurred = movement.occurred_at
-    if occurred.tzinfo is None:
-        occurred = occurred.replace(tzinfo=UTC)
+    occurred = movement.occurred_at.replace(tzinfo=None)
     assert before <= occurred <= after
 
 

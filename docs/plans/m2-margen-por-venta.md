@@ -70,7 +70,13 @@ La pantalla (dashboard, columna de productos, margen por operación, permisos de
 - **Cómo quedó (2026-10-11):**
   - **Enganche:** en vez de llamar a un servicio desde cada ruta, dos listeners globales de `Session` (`persistence/costeo_de_ventas.py`). `after_flush` anota las ventas nuevas con producto y las que cambian de producto o cantidad. `before_commit` hace flush y las costea por lote en la misma transacción, dentro de un SAVEPOINT; si falla, la venta se guarda sin snapshot. Cubre todas las rutas, incluidas las que se agreguen.
   - **Fuente a la fecha:** la regla del costo vigente (M·1c) restringida al día de la venta. Las ediciones manuales y de catálogo posteriores a la venta no son elegibles. `cost_origin` distingue `manual` y `catalogo`.
-  - **Unidad:** `quantity` está en unidades base en todas las rutas, porque es lo mismo que descuenta el stock. No hizo falta la salida `sin_costo` por unidad que preveía el plan.
+  - **Unidad:** `POST /sales`, `/sales/bulk` y el chat guardan la cantidad tal como llega. Con un producto fraccionado, esas ventas quedan `sin_costo` con su motivo, como preveía el plan. El POS, `manual-batch`, la ingesta y Otros guardan unidades base.
+  - **Revisión (P1 y P2 corregidos):**
+    - `/sales/bulk` guardaba la fecha como `date` y el costeo fallaba en silencio;
+    - el costeo corría también al liberar savepoints, y ahora sólo corre en el commit de nivel superior;
+    - sacarle el producto a una venta dejaba su costo;
+    - el costo cargado posterior a la venta servía de respaldo;
+    - cambiar la fecha ahora vuelve a elegir la fuente.
   - **Fechas:** las ventas sin fecha, las mermas, los ajustes y `UPDATE_STOCK` negativo pasan a hora AR rotulada UTC.
 
 ### M·2b — una sola definición del margen bruto
