@@ -1,6 +1,7 @@
 """Resolución transaccional de compras ambiguas desde Otros."""
 
 import uuid
+from datetime import datetime, time
 from decimal import Decimal
 from typing import Any
 
@@ -119,6 +120,18 @@ async def test_resolve_purchase_creates_expense_movement_and_sentinel_once(
     assert movement.movement_type == "purchase"
     assert movement.qty == 4
     assert movement.unit_cost == Decimal("150.00")
+    # M·1b: el contrato del costo declarado; envío e impuesto, desconocidos.
+    assert movement.cost_contract_version == 1
+    assert movement.unit_cost_final == Decimal("150.00")
+    assert (movement.shipping_treatment, movement.tax_treatment) == (
+        "desconocido",
+        "desconocido",
+    )
+    # Fecha de negocio en hora AR rotulada: el mediodía tipeado queda mediodía.
+    assert movement.occurred_at is not None
+    assert movement.occurred_at.replace(tzinfo=None) == datetime.combine(
+        today_ar(), time(12)
+    )
     assert target.stock_units == 7
     assert target.unit_cost_ars == Decimal("150.00")
     assert supplier is not None and supplier.name == "No identificado"

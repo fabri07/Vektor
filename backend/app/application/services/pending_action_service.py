@@ -34,6 +34,7 @@ from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
     insert_confirmed_data,
 )
+from app.domain.contrato_de_costo import contrato_declarado
 from app.domain.ingestion_version import INGESTION_VERSION
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
@@ -692,6 +693,15 @@ async def execute_pending_action(
                 # Fecha de negocio de la compra: la misma que quedó en el gasto
                 # COGS recién creado (ya coercionada por cash_service).
                 occurred_at=purchase_expense.transaction_date,
+                # M·1b: compra declarada por chat; envío e impuesto, desconocidos.
+                # (UPDATE_STOCK, más abajo, no es una compra declarada: sin contrato.)
+                # Un costo negativo (payload del LLM) no es un costo: sin
+                # contrato, en vez de un ValueError después de crear el gasto.
+                contrato=(
+                    contrato_declarado(unit_cost)
+                    if unit_cost is None or unit_cost >= 0
+                    else None
+                ),
             )
 
     elif action.action_type == ActionType.REGISTER_CASH_OUTFLOW:

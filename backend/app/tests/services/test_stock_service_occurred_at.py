@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import unittest.mock
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -28,6 +28,7 @@ from app.application.services.stock_service import (
     unvoid_movement,
     void_movement,
 )
+from app.domain.business_time import now_ar_naive
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -120,8 +121,48 @@ async def test_increment_stock_persists_explicit_occurred_at(
             occurred_at=purchase_date,
         )
 
+    # M·1b: un instante CON zona se lleva a hora argentina antes de rotularlo UTC,
+    # igual que guarda la ingesta (09:30 UTC = 06:30 AR).
     assert movement.occurred_at is not None
-    assert movement.occurred_at.replace(tzinfo=None) == purchase_date.replace(tzinfo=None)
+    assert movement.occurred_at.replace(tzinfo=None) == datetime(2026, 1, 15, 6, 30)
+
+
+async def test_increment_stock_compra_de_noche_queda_en_su_dia_argentino(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """M·1b: una compra de las 22:30 AR (01:30 UTC del día siguiente) cae en su día.
+
+    Con ``now(UTC)``/el instante crudo caía en el día siguiente, y el costo de
+    referencia de M·1a (que corta por ``occurred_at.date()``) la tomaba un día tarde.
+    """
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=0)
+    noche_ar_en_utc = datetime(2026, 9, 16, 1, 30, tzinfo=UTC)
+
+    with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+        movement = await increment_stock(
+            product.id, tid, 1, Decimal("10"), "src", db_session,
+            occurred_at=noche_ar_en_utc,
+        )
+
+    assert movement.occurred_at is not None
+    assert movement.occurred_at.date() == date(2026, 9, 15)
+
+
+async def test_increment_stock_naive_se_rotula_sin_reinterpretar(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    product = await _make_product(db_session, tid, stock_units=0)
+    local = datetime(2026, 9, 15, 22, 30)
+
+    with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+        movement = await increment_stock(
+            product.id, tid, 1, Decimal("10"), "src", db_session, occurred_at=local
+        )
+
+    assert movement.occurred_at is not None
+    assert movement.occurred_at.replace(tzinfo=None) == local
 
 
 async def test_increment_stock_without_occurred_at_falls_back_to_now(
@@ -130,18 +171,16 @@ async def test_increment_stock_without_occurred_at_falls_back_to_now(
     tid = sample_tenant.tenant_id
     product = await _make_product(db_session, tid, stock_units=0)
 
-    before = datetime.now(UTC) - timedelta(seconds=5)
+    # M·1b: el default es AHORA en hora argentina rotulada UTC, no now(UTC).
+    before = now_ar_naive() - timedelta(seconds=5)
     with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
         movement = await increment_stock(
             product.id, tid, 5, Decimal("1000"), "src", db_session
         )
-    after = datetime.now(UTC) + timedelta(seconds=5)
+    after = now_ar_naive() + timedelta(seconds=5)
 
     assert movement.occurred_at is not None
-    occurred = movement.occurred_at
-    if occurred.tzinfo is None:
-        occurred = occurred.replace(tzinfo=UTC)
-    assert before <= occurred <= after
+    assert before <= movement.occurred_at.replace(tzinfo=None) <= after
 
 
 async def test_register_stock_loss_sets_occurred_at_to_now(

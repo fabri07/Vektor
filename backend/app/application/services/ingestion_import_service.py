@@ -77,6 +77,11 @@ from app.config.ingestion_schema_decisions_rollout import (
 from app.config.product_supplier_links_rollout import product_supplier_links_enabled_for
 from app.config.settings import get_settings
 from app.domain.business_time import now_ar_naive
+from app.domain.contrato_de_costo import (
+    ContratoDeCosto,
+    contrato_de_linea_importada,
+    contrato_declarado,
+)
 from app.domain.date_parsing import (
     CAMPOS_DE_FECHA,
     MOTIVO_FECHA_FUTURA,
@@ -2550,6 +2555,7 @@ async def _record_stock_movement(
     source_row_ref: str | None = None,
     source_row_hash: str | None = None,
     occurred_at: datetime | None = None,
+    contrato: ContratoDeCosto | None = None,
 ) -> None:
     """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
     `InventoryBalance` por el import, dentro de la misma transacción.
@@ -2608,6 +2614,9 @@ async def _record_stock_movement(
             source_row_ref=source_row_ref,
             source_row_hash=source_row_hash,
             occurred_at=ensure_utc(occurred_at),
+            # M·1b: el contrato del costo, sólo en las compras que lo declaran.
+            # Sin contrato las columnas quedan NULL = desconocido.
+            **(contrato.columnas() if contrato is not None else {}),
         )
     )
 
@@ -3057,8 +3066,13 @@ async def _apply_purchase_to_stock(
     costo_final: Decimal | None = None,
     costo_incluye_flete: bool | None = None,
     product_details: list[dict[str, Any]] | None = None,
+    contrato: ContratoDeCosto | None = None,
 ) -> None:
     """FASE D: una compra de mercadería importada suma stock.
+
+    ``contrato`` (M·1b): el contrato del costo que arma el caller (ingesta:
+    ``contrato_de_linea_importada``; remito: ``contrato_declarado``). Se guarda
+    en el movimiento ``purchase`` tal cual.
 
     Gate doble contra falsos positivos / doble conteo:
       - el gasto debe tener producto del catálogo resuelto (`product_id`); y
@@ -3203,6 +3217,7 @@ async def _apply_purchase_to_stock(
         source_row_ref=source_row_ref,
         source_row_hash=_row_hash,
         occurred_at=getattr(expense, "transaction_date", None),
+        contrato=contrato,
     )
 
 
@@ -3585,6 +3600,12 @@ def _accumulate_expiry_date(
         return None
     future = [d for d in candidates if d >= today]
     return min(future) if future else max(candidates)
+
+
+def _comprobante_de_la_fila(row: dict[str, Any], cols: dict[str, str]) -> str | None:
+    """M·1b: el número de comprobante que la fila declara, si se mapeó."""
+    col = cols.get("invoice_number")
+    return _clean_str(row.get(col), 199) if col else None
 
 
 def _planificar_costos_de_la_hoja(
@@ -5966,6 +5987,11 @@ async def _insert_confirmed_data_impl(
                             product_details=(
                                 product_details if return_details else None
                             ),
+                            contrato=contrato_de_linea_importada(
+                                exp_unit_cost,
+                                _costo_calculado,
+                                document_ref=_comprobante_de_la_fila(row, target_to_col),
+                            ),
                         )
                         # A4 (RC2): si esta fila fue una compra de mercadería que aplicó
                         # stock (producto ligado + cantidad>0), marcarla para que el
@@ -8107,6 +8133,11 @@ async def _insert_multisheet_data(
             costo_final=_costo_final,
             costo_incluye_flete=_incluye_flete,
             product_details=product_details if return_details else None,
+            contrato=contrato_de_linea_importada(
+                unit_cost,
+                costo_calculado,
+                document_ref=_comprobante_de_la_fila(row, cols),
+            ),
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D
@@ -9870,6 +9901,16 @@ async def import_receipt(
             product_cache=product_cache,
             # A2: el movimiento de un remito lleva origen ``receipt`` (no import).
             source_type=SOURCE_RECEIPT,
+            # M·1b: el costo es el que se declaró; el envío del remito, si lo
+            # hay, va como gasto de logística aparte (no entra al costo).
+            contrato=contrato_declarado(
+                line.unit_price,
+                envio=(
+                    "adicional"
+                    if shipping_cost is not None and shipping_cost > 0
+                    else "desconocido"
+                ),
+            ),
         )
 
     shipping_expense_id: str | None = None

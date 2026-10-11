@@ -175,6 +175,14 @@ class LineCost:
     #: vez de negativa, y el import lo reporta: un costo negativo no existe, y
     #: silenciarlo dejaría al producto valuado en cualquier cosa.
     descuento_mayor_que_monto: bool = False
+    #: M·1b: impuesto que se SUMÓ al costo, por unidad. Sólo con
+    #: ``monto_sin_ajustes`` y cantidad: con ``monto_incluye`` el monto ya «trae
+    #: adentro» lo que sea, y eso no prueba que haya impuesto ni cuánto.
+    impuesto_unitario: Decimal | None = None
+    #: M·1b: había envío para esta línea (propio o compartido) y quedó FUERA del
+    #: costo, como gasto aparte o porque no se pudo repartir. Sin esto el contrato
+    #: no distingue «el envío va aparte» de «no se sabe si hubo envío».
+    envio_fuera_del_costo: bool = False
 
 
 @dataclass
@@ -279,6 +287,12 @@ def build_line_costs(
         asignado = shares.get(row_index, Decimal("0"))
         propio = line.shipping_line if line_mode == LINEA_AL_COSTO else Decimal("0")
         total = (base + propio + asignado).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+        impuesto_sumado = (
+            basis == BASE_APLICAR
+            and not comidas[row_index]
+            and line.taxes > 0
+            and line.quantity > 0
+        )
         plan.lines.append(
             LineCost(
                 row_index=row_index,
@@ -292,6 +306,19 @@ def build_line_costs(
                     else None
                 ),
                 descuento_mayor_que_monto=comidas[row_index],
+                impuesto_unitario=(
+                    (line.taxes / line.quantity).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+                    if impuesto_sumado
+                    else None
+                ),
+                # El compartido queda fuera sólo si NO se repartió (o quedó algo
+                # sin repartir): una línea a la que el reparto le tocó 0,00 por
+                # redondeo o por base comida no tiene envío aparte — se
+                # capitalizó entero en las otras.
+                envio_fuera_del_costo=(
+                    (line.shipping_line > 0 and propio == 0)
+                    or (shared_shipping > 0 and (not reparte or sin_repartir > 0))
+                ),
             )
         )
     plan.repartido = sum(shares.values(), Decimal("0"))

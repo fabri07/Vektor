@@ -125,6 +125,27 @@ def ensure_utc(dt: datetime | None) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+def momento_de_negocio_rotulado(dt: datetime | None) -> datetime:
+    """``occurred_at`` de una COMPRA: hora argentina rotulada UTC, como la ingesta.
+
+    M·1b. La ingesta guarda la fecha de negocio como hora AR con rótulo UTC
+    (``ensure_utc`` de un ``transaction_date`` naive), y el costo de referencia
+    (M·1a) corta por ``fecha_negocio.date()`` de ese valor. Una compra que guardara
+    el instante UTC real caería en el día siguiente si se cargó de 21 a 24 AR. Por
+    eso, a diferencia de ``ensure_utc``:
+
+    - sin fecha, el default es AHORA en hora argentina (no ``now(UTC)``);
+    - una fecha CON zona es un instante absoluto: se lleva a hora argentina antes
+      de rotularla (``…T02:00Z`` es el día anterior a las 23:00).
+
+    Una fecha sin zona ya es hora local y sólo se rotula, igual que antes.
+    """
+    from app.domain.business_time import a_hora_de_negocio, now_ar_naive  # noqa: PLC0415
+
+    local = now_ar_naive() if dt is None else a_hora_de_negocio(dt)
+    return local.replace(tzinfo=UTC)
+
+
 def _norm_date(value: object) -> str:
     """Normaliza una fecha a ISO YYYY-MM-DD (solo el día); None → ''."""
     if value is None or value == "":

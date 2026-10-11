@@ -19,7 +19,9 @@ from app.application.services._savepoint import (
 from app.application.services.inventory_movement_origin import (
     SOURCE_RECONCILIATION,
     ensure_utc,
+    momento_de_negocio_rotulado,
 )
+from app.domain.contrato_de_costo import ContratoDeCosto
 from app.domain.product import effective_threshold
 from app.domain.verticals import Vertical
 from app.persistence.models.audit import DecisionAuditLog
@@ -524,7 +526,16 @@ async def increment_stock(
     update_product_cost: bool = True,
     occurred_at: datetime | None = None,
     defer_event: bool = False,
+    contrato: ContratoDeCosto | None = None,
 ) -> InventoryMovement:
+    """Suma stock por una compra y deja su movimiento ``purchase``.
+
+    ``contrato`` (M·1b): lo que la ruta sabe del costo de esta compra. ``None``
+    deja el contrato vacío (NULL = desconocido), que es lo que corresponde a un
+    alta de stock que no es una compra declarada (``UPDATE_STOCK`` del chat).
+    ``occurred_at`` se guarda en hora argentina rotulada UTC, igual que la ingesta
+    (``momento_de_negocio_rotulado``).
+    """
     # F3-T3 review: advisory shared ANTES del FOR UPDATE de fila (orden fijo, evita
     # deadlock AB-BA contra el exclusive del dedup).
     await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
@@ -561,8 +572,9 @@ async def increment_stock(
         source_event_id=source_event_id,
         supplier_id=supplier_id,
         # Fecha de NEGOCIO de la compra: si el caller la conoce, se usa esa; si no,
-        # el momento del registro.
-        occurred_at=ensure_utc(occurred_at) or datetime.now(UTC),
+        # el momento del registro. En hora AR rotulada UTC, como la ingesta (M·1b).
+        occurred_at=momento_de_negocio_rotulado(occurred_at),
+        **(contrato.columnas() if contrato is not None else {}),
     )
     db.add(movement)
     await db.flush()
