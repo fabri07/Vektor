@@ -155,8 +155,8 @@ async def register_manual_purchase(
             source_event,
             session,
             supplier_id=body.supplier_id,
-            # Producto nuevo o con confirmación → actualizar costo de catálogo.
-            update_product_cost=created or line.update_price,
+            # M·1c: el costo lo decide `recalcular_costo_vigente` (la fuente más
+            # reciente por fecha); `update_price` gobierna sólo el precio de venta.
             occurred_at=body.transaction_date,
             # M·1b: el costo por unidad que se declaró en el comprobante; envío e
             # impuesto quedan desconocidos hasta que la pantalla los pida (M·3/B·5).

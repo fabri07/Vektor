@@ -59,6 +59,10 @@ Una sola respuesta a «¿cuál es el costo de referencia de este producto a la f
   - **Hallazgos registrados, fuera de M·1b:** ventas, mermas y ajustes siguen con `now(UTC)` (lo necesita M·2); el camino de tabla suelta no lee el mapeo explícito a `unit_price` en compras.
 
 ### M·1c — el costo de referencia deja de ser «el último que escribió»
+
+**Cómo se ejecuta (2026-10-11):** en dos PRs, por el riesgo de cascada (son ~16 escritores).
+- **M·1c-1:** compras por `increment_stock` (manual, «Otros», chat) recalculan; ediciones manuales y de catálogo quedan guardadas con su fecha; undo devuelve también la procedencia. **La guarda con flete / sin flete se reemplaza por un rótulo** (decisión del dueño 2026-10-11): el costo es el de la última compra y `_vektor_costo_base` dice si incluye envío.
+- **M·1c-2:** ingesta de compras y remito recalculan (sale la guarda vieja de `_apply_purchase_to_stock`); anulación y reversas (borrado, relectura) recalculan en vez de restaurar el `before`; dedup.
 - Después de registrar o anular una compra, `unit_cost_ars` = `costo_de_referencia(hoy)`. Una compra atrasada ya no pisa a una más nueva, y anular la elegida hace volver a la anterior.
 - Se conserva la guarda con flete / sin flete en la comparación.
 - Los dos caminos del import de catálogo, el dedup y el PATCH manual escriben un costo de origen `catalogo` / `manual`, con fecha. Su precedencia frente a una compra es la **decisión abierta 2**.

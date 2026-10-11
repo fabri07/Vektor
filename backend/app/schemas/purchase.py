@@ -38,7 +38,9 @@ class PurchaseLine(BaseModel):
     unit_cost: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
     quantity: int = Field(ge=1)
     sale_price_ars: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
-    # Solo aplica a producto existente: actualizar costo/precio del catálogo.
+    # Solo aplica a producto existente: actualizar el precio de VENTA del catálogo.
+    # M·1c: el costo ya no depende de esto — lo fija la fuente más reciente por
+    # fecha (`costo_vigente_service`), y esta compra es una de ellas.
     update_price: bool = False
 
     @field_validator("unit_cost", "sale_price_ars")

@@ -82,6 +82,11 @@ from app.domain.contrato_de_costo import (
     contrato_de_linea_importada,
     contrato_declarado,
 )
+from app.domain.costo_vigente import (
+    CATALOGO_FIELD,
+    registrar_edicion,
+    snapshot_claves_del_costo,
+)
 from app.domain.date_parsing import (
     CAMPOS_DE_FECHA,
     MOTIVO_FECHA_FUTURA,
@@ -6354,11 +6359,18 @@ async def _insert_confirmed_data_impl(
                             ),
                             "external_code": existing.external_code,
                             "external_source": existing.external_source,
+                            # M·1c: la procedencia del costo vuelve con el costo.
+                            **snapshot_claves_del_costo(existing.custom_fields),
                         }
                     if price:
                         existing.sale_price_ars = price
                     if cost:
                         existing.unit_cost_ars = cost
+                        # M·1c (decisión 3): costo de catálogo = estimación con la
+                        # fecha de la carga; una compra posterior lo reemplaza.
+                        existing.custom_fields = registrar_edicion(
+                            existing.custom_fields, CATALOGO_FIELD, cost, now_ar_naive()
+                        )
                     if list_price:
                         existing.list_price_ars = list_price
                     # Un producto por peso o volumen: el archivo habla en su
@@ -6572,7 +6584,14 @@ async def _insert_confirmed_data_impl(
                         # `{}` y no `None`: la columna es JSONB nullable=False, pero
                         # un `None` explícito persiste como JSON `null` ('null'::jsonb)
                         # y rompe `GET /products` (ProductResponse exige dict → 503).
-                        custom_fields=cf_product if cf_product else {},
+                        # M·1c: el costo de catálogo nace con su fecha de carga.
+                        custom_fields=(
+                            registrar_edicion(
+                                cf_product, CATALOGO_FIELD, cost, now_ar_naive()
+                            )
+                            if cost
+                            else (cf_product if cf_product else {})
+                        ),
                         source_row_ref=_prod_row_ref,  # Mejora D
                     )
                     # F5-A: sin ``session.add`` — el helper exige el objeto TRANSIENT
@@ -8451,11 +8470,18 @@ async def _insert_multisheet_data(
                     ),
                     "external_code": existing.external_code,
                     "external_source": existing.external_source,
+                    # M·1c: la procedencia del costo vuelve con el costo.
+                    **snapshot_claves_del_costo(existing.custom_fields),
                 }
             if price:
                 existing.sale_price_ars = price
             if cost:
                 existing.unit_cost_ars = cost
+                # M·1c (decisión 3): costo de catálogo = estimación con la fecha
+                # de la carga; una compra posterior lo reemplaza.
+                existing.custom_fields = registrar_edicion(
+                    existing.custom_fields, CATALOGO_FIELD, cost, now_ar_naive()
+                )
             if list_price:
                 existing.list_price_ars = list_price
             # Un producto por peso o volumen: el archivo habla en su unidad de
@@ -8714,7 +8740,12 @@ async def _insert_multisheet_data(
                 expiry_date=_expiry,
                 # `{}` y no `None`: un `None` explícito persiste como JSON `null`
                 # ('null'::jsonb) y rompe `GET /products` con 503 (ver arriba).
-                custom_fields=cf or {},
+                # M·1c: el costo de catálogo nace con su fecha de carga.
+                custom_fields=(
+                    registrar_edicion(cf, CATALOGO_FIELD, cost, now_ar_naive())
+                    if cost
+                    else (cf or {})
+                ),
                 source_row_ref=row_ref,  # Mejora D
             )
             # F5-A: sin ``session.add`` — el objeto tiene que llegar TRANSIENT al

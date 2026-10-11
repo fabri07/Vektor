@@ -1060,7 +1060,7 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
                       onChange={(e) => setLine(l.id, { update_price: e.target.checked })}
                       className="h-3.5 w-3.5 rounded border-vk-border-w accent-vk-blue"
                     />
-                    Actualizar costo y precio del catálogo
+                    Actualizar precio de venta del catálogo
                   </label>
                 ) : (
                   <span />

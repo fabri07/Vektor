@@ -118,6 +118,9 @@ class TestManualPurchase:
         # sin update_price → el precio de venta NO cambia
         prod = await client.get(f"/api/v1/products/{pid}", headers=auth_headers)
         assert float(prod.json()["sale_price_ars"]) == 500.0
+        # M·1c: el costo SÍ sigue a la compra (la fuente más reciente por fecha);
+        # `update_price` gobierna sólo el precio de venta.
+        assert float(prod.json()["unit_cost_ars"]) == 300.0
 
     async def test_duplicate_existing_product_rejected(
         self, client: AsyncClient, auth_headers: dict[str, Any]
