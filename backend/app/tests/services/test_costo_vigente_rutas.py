@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,6 +85,12 @@ async def test_compra_anterior_a_la_edicion_manual_no_la_pisa(
 
 
 class TestPatch:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger: Any) -> Any:
+        # El alta y el PATCH agendan el recálculo del score; el CI no tiene broker.
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            yield
+
     async def _crear(self, client: AsyncClient, headers: dict[str, Any]) -> str:
         r = await client.post(
             "/api/v1/products",
