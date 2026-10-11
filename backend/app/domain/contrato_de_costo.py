@@ -114,6 +114,17 @@ def contrato_de_linea_importada(
         return ContratoDeCosto(
             unit_cost_final=costo_facturado, document_ref=_documento(document_ref)
         )
+    if not linea.unit_cost_final:
+        # El motor no dio un unitario (sin cantidad legible: p. ej. «2,5» kg de un
+        # producto por peso) y el costo cae al FACTURADO, que no lleva el envío
+        # ni el impuesto que el motor haya sumado al total. Decir `incluido` sería
+        # mentir sobre ese número; `adicional` (envío fuera del costo) sigue
+        # siendo cierto.
+        return ContratoDeCosto(
+            unit_cost_final=costo_facturado,
+            shipping_treatment="adicional" if linea.envio_fuera_del_costo else "desconocido",
+            document_ref=_documento(document_ref),
+        )
     envio: Tratamiento
     if linea.shipping_allocated or linea.shipping_line_applied:
         envio = "incluido"
@@ -123,7 +134,7 @@ def contrato_de_linea_importada(
         envio = "desconocido"
     con_impuesto = linea.impuesto_unitario is not None and linea.impuesto_unitario > 0
     return ContratoDeCosto(
-        unit_cost_final=linea.unit_cost_final or costo_facturado,
+        unit_cost_final=linea.unit_cost_final,
         shipping_treatment=envio,
         tax_treatment="incluido" if con_impuesto else "desconocido",
         tax_amount=linea.impuesto_unitario if con_impuesto else None,

@@ -252,3 +252,24 @@ async def test_alta_de_stock_por_chat_no_es_una_compra_declarada(
     ).scalar_one()
     assert mov.cost_contract_version is None
     assert mov.shipping_treatment is None and mov.unit_cost_final is None
+
+
+async def test_compra_por_chat_con_costo_negativo_no_rompe_ni_inventa_contrato(
+    db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
+) -> None:
+    """Revisión M·1b: un ``unit_cost`` negativo del LLM no es un costo. Antes de
+    M·1b se guardaba igual; ahora no puede convertirse en un 500 a mitad de la
+    acción (con el gasto ya creado) ni en un contrato: queda sin contrato."""
+    p = await _producto(db_session, sample_tenant)
+    await _accion(
+        db_session, sample_tenant, sample_user, "REGISTER_PURCHASE",
+        {"amount": 1600, "product_id": str(p.id), "qty": 1, "unit_cost": -5,
+         "transaction_date": today_ar().isoformat()},
+    )
+    mov = (
+        await db_session.execute(
+            select(InventoryMovement).where(InventoryMovement.product_id == p.id)
+        )
+    ).scalar_one()
+    assert mov.cost_contract_version is None
+    assert mov.unit_cost_final is None

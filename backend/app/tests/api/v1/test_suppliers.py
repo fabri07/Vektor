@@ -8,6 +8,7 @@ Cubre:
 """
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -411,6 +412,37 @@ class TestSupplierReceipts:
         assert {(m.shipping_treatment, m.tax_treatment, m.cost_contract_version) for m in movs} == {
             ("adicional", "desconocido", 1)
         }
+
+    async def test_receipt_con_fecha_con_zona_se_guarda_en_hora_argentina(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+    ) -> None:
+        """Revisión M·1b: 01:30 UTC del 16 es 22:30 AR del 15. Guardar el instante
+        crudo rotulado UTC dejaba la compra en el día siguiente."""
+        sid = await self._make_supplier(client, auth_headers)
+        resp = await client.post(
+            f"/api/v1/suppliers/{sid}/receipts",
+            json={**_RECEIPT_PAYLOAD, "transaction_date": "2026-09-16T01:30:00Z"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201, resp.text
+        movs = (
+            (
+                await db_session.execute(
+                    select(InventoryMovement).where(
+                        InventoryMovement.movement_type == "purchase"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert movs
+        assert {
+            m.occurred_at.replace(tzinfo=None) for m in movs if m.occurred_at is not None
+        } == {datetime(2026, 9, 15, 22, 30)}
 
     async def test_receipt_idempotent(
         self, client: AsyncClient, auth_headers: dict[str, Any]

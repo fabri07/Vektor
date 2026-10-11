@@ -8,6 +8,8 @@ from uuid import UUID
 from pydantic import BaseModel, Field, computed_field, field_serializer, field_validator
 from pydantic_core import PydanticCustomError
 
+from app.domain.business_time import a_hora_de_negocio
+
 # Validador de CUIT/CUIL (formato + dígito verificador módulo 11) ahora compartido
 # con clientes en schemas/_ar_fiscal. NULL/vacío se aceptan: la obligatoriedad la
 # aplica el formulario manual, no el schema.
@@ -214,6 +216,14 @@ class CreateReceiptRequest(BaseModel):
                 "currency_unsupported", "Solo se soporta moneda ARS (explícita)."
             )
         return v
+
+    @field_validator("transaction_date")
+    @classmethod
+    def _hora_de_negocio(cls, v: datetime | None) -> datetime | None:
+        # M·1b: una fecha con zona es un instante absoluto; se guarda como hora
+        # argentina (como la compra manual), o una compra de 21 a 24 AR caería
+        # en el día siguiente del costo de referencia.
+        return a_hora_de_negocio(v) if v is not None else None
 
     @field_validator("shipping_cost")
     @classmethod

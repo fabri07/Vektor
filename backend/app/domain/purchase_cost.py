@@ -311,9 +311,13 @@ def build_line_costs(
                     if impuesto_sumado
                     else None
                 ),
+                # El compartido queda fuera sólo si NO se repartió (o quedó algo
+                # sin repartir): una línea a la que el reparto le tocó 0,00 por
+                # redondeo o por base comida no tiene envío aparte — se
+                # capitalizó entero en las otras.
                 envio_fuera_del_costo=(
                     (line.shipping_line > 0 and propio == 0)
-                    or (shared_shipping > 0 and asignado == 0)
+                    or (shared_shipping > 0 and (not reparte or sin_repartir > 0))
                 ),
             )
         )

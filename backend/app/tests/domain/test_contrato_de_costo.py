@@ -60,6 +60,24 @@ class TestElMotorDiceLoQueElContratoNecesita:
         assert sin.lines[0].envio_fuera_del_costo is True
         assert con.lines[0].envio_fuera_del_costo is False
 
+    def test_linea_a_la_que_el_reparto_le_toco_cero_no_es_adicional(self) -> None:
+        """Revisión M·1b: $1 repartido entre $1000 y $0,01 → la chica recibe 0,00,
+        pero el envío se capitalizó entero en la otra: no hay envío aparte."""
+        plan = build_line_costs(
+            [_linea(), _linea(row_index=1, amount=Decimal("0.01"))],
+            shared_shipping=Decimal("1"),
+            shared_mode=COMPARTIDO_SUBTOTAL,
+        )
+        assert [ln.envio_fuera_del_costo for ln in plan.lines] == [False, False]
+
+    def test_reparto_pedido_sin_base_queda_fuera(self) -> None:
+        plan = build_line_costs(
+            [_linea(amount=Decimal("0"))],
+            shared_shipping=Decimal("100"),
+            shared_mode=COMPARTIDO_SUBTOTAL,
+        )
+        assert plan.lines[0].envio_fuera_del_costo is True
+
     def test_sin_envio_no_hay_nada_fuera(self) -> None:
         assert build_line_costs([_linea()]).lines[0].envio_fuera_del_costo is False
 
@@ -109,6 +127,26 @@ class TestContratoDeLineaImportada:
         plan = build_line_costs([_linea(quantity=0)])
         c = contrato_de_linea_importada(Decimal("100"), plan.lines[0])
         assert c.unit_cost_final == Decimal("100")
+
+    def test_sin_unitario_el_envio_repartido_no_se_declara_incluido(self) -> None:
+        """Revisión M·1b (P2): cantidad ilegible («2,5» kg) y envío repartido. El
+        costo cae al facturado, que NO lleva ese envío ni el impuesto sumado."""
+        plan = build_line_costs(
+            [_linea(quantity=0, taxes=Decimal("210"))],
+            shared_shipping=Decimal("100"),
+            shared_mode=COMPARTIDO_SUBTOTAL,
+            basis=BASE_APLICAR,
+        )
+        assert plan.lines[0].shipping_allocated > 0
+        c = contrato_de_linea_importada(Decimal("400"), plan.lines[0])
+        assert c.unit_cost_final == Decimal("400")
+        assert c.shipping_treatment == "desconocido"
+        assert c.tax_treatment == "desconocido"
+
+    def test_sin_unitario_el_envio_aparte_sigue_siendo_adicional(self) -> None:
+        plan = build_line_costs([_linea(quantity=0, shipping_line=Decimal("50"))])
+        c = contrato_de_linea_importada(Decimal("400"), plan.lines[0])
+        assert c.shipping_treatment == "adicional"
 
 
 class TestContratoDeclarado:

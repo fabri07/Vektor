@@ -695,7 +695,13 @@ async def execute_pending_action(
                 occurred_at=purchase_expense.transaction_date,
                 # M·1b: compra declarada por chat; envío e impuesto, desconocidos.
                 # (UPDATE_STOCK, más abajo, no es una compra declarada: sin contrato.)
-                contrato=contrato_declarado(unit_cost),
+                # Un costo negativo (payload del LLM) no es un costo: sin
+                # contrato, en vez de un ValueError después de crear el gasto.
+                contrato=(
+                    contrato_declarado(unit_cost)
+                    if unit_cost is None or unit_cost >= 0
+                    else None
+                ),
             )
 
     elif action.action_type == ActionType.REGISTER_CASH_OUTFLOW:
