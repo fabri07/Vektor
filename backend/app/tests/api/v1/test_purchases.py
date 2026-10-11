@@ -1,12 +1,16 @@
 """Tests for /api/v1/purchases/manual — compra de mercadería transaccional."""
 
 import unittest.mock
+from decimal import Decimal
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import today_ar
+from app.persistence.models.inventory import InventoryMovement
 
 _TODAY = str(today_ar())
 
@@ -36,7 +40,10 @@ class TestManualPurchase:
             yield
 
     async def test_new_product_creates_stock_and_cogs(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
     ) -> None:
         sup = await _create_supplier(client, auth_headers, "Distribuidora Norte")
         payload = {
@@ -66,6 +73,17 @@ class TestManualPurchase:
         assert r["created"] is True
         assert r["new_stock_units"] == 12
         assert r["margin_pct"] == pytest.approx(33.3, abs=0.2)
+        # M·1b: el movimiento lleva el contrato del costo declarado.
+        mov = (
+            await db_session.execute(
+                select(InventoryMovement).where(
+                    InventoryMovement.movement_type == "purchase"
+                )
+            )
+        ).scalar_one()
+        assert mov.cost_contract_version == 1
+        assert mov.unit_cost_final == Decimal("1000.00")
+        assert (mov.shipping_treatment, mov.tax_treatment) == ("desconocido", "desconocido")
         # el gasto es COGS/INVENTORY
         exp = await client.get(
             f"/api/v1/expenses/{data['expense_ids'][0]}", headers=auth_headers

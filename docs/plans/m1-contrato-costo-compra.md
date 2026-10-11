@@ -52,6 +52,11 @@ Una sola respuesta a «¿cuál es el costo de referencia de este producto a la f
 - **Ingesta:** `unit_cost_final` sale de `build_line_costs` (motor existente, sin calculadora nueva). El envío se calcula al registrar y sobre el mismo comprobante. Con la decisión `monto_incluye` el envío queda `incluido` y el impuesto `desconocido`: **`monto_incluye` no prueba IVA**.
 - **Compra manual / Otros / chat / remito:** lo que el usuario declara; lo no declarado queda `desconocido`.
 - No se pide nada nuevo en pantalla todavía: los campos de envío e IVA en el formulario de compra van con M·3 / B·5.
+- **Cómo quedó (2026-10-11):**
+  - **Corrección al texto de arriba:** `monto_incluye` habla de descuento e impuestos, no del envío. El envío sale del motor: `incluido` si se capitalizó, `adicional` si había envío y quedó como gasto aparte, `desconocido` si la hoja no dice nada. El impuesto queda `desconocido` con `monto_incluye`, como decía el plan.
+  - `UPDATE_STOCK` del chat y el stock de catálogo declarado compra quedan **sin** contrato (decisión 3: el catálogo no cuenta como compra confirmada).
+  - `tax_amount` es por unidad.
+  - **Hallazgos registrados, fuera de M·1b:** ventas, mermas y ajustes siguen con `now(UTC)` (lo necesita M·2); el camino de tabla suelta no lee el mapeo explícito a `unit_price` en compras.
 
 ### M·1c — el costo de referencia deja de ser «el último que escribió»
 - Después de registrar o anular una compra, `unit_cost_ars` = `costo_de_referencia(hoy)`. Una compra atrasada ya no pisa a una más nueva, y anular la elegida hace volver a la anterior.

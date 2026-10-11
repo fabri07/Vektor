@@ -12,8 +12,11 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import today_ar
+from app.persistence.models.inventory import InventoryMovement
 
 _TODAY = str(today_ar())
 
@@ -359,7 +362,10 @@ class TestSupplierReceipts:
         return str(resp.json()["id"])
 
     async def test_receipt_creates_products_stock_cogs_and_logistics(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
     ) -> None:
         sid = await self._make_supplier(client, auth_headers)
         resp = await client.post(
@@ -387,6 +393,24 @@ class TestSupplierReceipts:
         cats = {e["category"] for e in expenses.json()}
         assert "LOGISTICS" in cats
         assert "INVENTORY" in cats
+
+        # M·1b: cada línea deja el contrato del costo declarado. El envío del
+        # remito va como gasto de logística aparte: ``adicional``, no incluido.
+        movs = (
+            (
+                await db_session.execute(
+                    select(InventoryMovement).where(
+                        InventoryMovement.movement_type == "purchase"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert sorted(str(m.unit_cost_final) for m in movs) == ["600.00", "800.00"]
+        assert {(m.shipping_treatment, m.tax_treatment, m.cost_contract_version) for m in movs} == {
+            ("adicional", "desconocido", 1)
+        }
 
     async def test_receipt_idempotent(
         self, client: AsyncClient, auth_headers: dict[str, Any]

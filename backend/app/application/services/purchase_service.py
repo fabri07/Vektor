@@ -27,6 +27,7 @@ from app.application.services.product_identity import (
     ProductIdentityConflictError,
     add_product_or_reuse,
 )
+from app.domain.contrato_de_costo import contrato_declarado
 from app.domain.product_categories import normalize_product_category
 from app.domain.sale_unit import a_unidades_base
 from app.domain.verticals import Vertical, parse_vertical
@@ -157,6 +158,9 @@ async def register_manual_purchase(
             # Producto nuevo o con confirmación → actualizar costo de catálogo.
             update_product_cost=created or line.update_price,
             occurred_at=body.transaction_date,
+            # M·1b: el costo por unidad que se declaró en el comprobante; envío e
+            # impuesto quedan desconocidos hasta que la pantalla los pida (M·3/B·5).
+            contrato=contrato_declarado(line.unit_cost),
         )
         # Precio de venta: nuevo siempre; existente solo si lo confirma.
         if (created or line.update_price) and line.sale_price_ars > 0:

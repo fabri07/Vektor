@@ -51,6 +51,7 @@ from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
 from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
+from app.domain.contrato_de_costo import contrato_declarado
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     classify_expense_with_vertical,
@@ -749,6 +750,8 @@ async def resolve_purchase(
         update_product_cost=True,
         occurred_at=body.transaction_date,
         defer_event=True,
+        # M·1b: el costo que el usuario declaró; envío e impuesto, desconocidos.
+        contrato=contrato_declarado(unit_cost),
     )
     recompute_requires_completion(target)
     return MessageResponse(message="Compra registrada y vinculada al producto.")
