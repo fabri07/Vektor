@@ -84,5 +84,6 @@
 | `20260721_0001` | campos fiscales en `customers` (`customer_type`/`last_name`/`doc_type`/`dni`/`cuit`/`iva_condition`/`address`/`locality`/`province`/`postal_code`/`birthday`, nullable) + índice único parcial del centinela "Local" + índices únicos parciales anti-duplicado por `dni`/`cuit` (excluyen sentinela y soft-deleted) — Reforma de Clientes |
 | `20261009_0001` | `owner_capital_movements` (ORM: `OwnerCapitalMovement`) — capital de los socios (D·2), ver `docs/claude/plataforma.md` |
 | `20261010_0001` | contrato del costo de compra en `inventory_movements` (`unit_cost_final`, tratamientos de envío/impuesto, `tax_*`, `document_ref`, `cost_contract_version`, todo nullable + CHECK zero-lock) + índice parcial `ix_inventory_movements_live_purchases` (M·1a), ver `docs/claude/plataforma.md` |
+| `20261011_0001` | costo congelado por línea de venta en `sales_entries` (`cost_unit_ars`, `cost_ars`, `cost_confirmed`, `cost_origin`, `cost_reason`, `cost_snapshot_version`, todo nullable + CHECK) (M·2a), ver `docs/claude/plataforma.md` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.

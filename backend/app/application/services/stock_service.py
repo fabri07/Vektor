@@ -272,7 +272,9 @@ async def decrement_stock(
         source_type=source_type,
         # Fecha de NEGOCIO del movimiento (venta): si el caller la conoce (fecha de
         # la venta), se usa esa; si no, el momento del registro.
-        occurred_at=ensure_utc(occurred_at) or datetime.now(UTC),
+        # Sin fecha del caller: AHORA en hora AR rotulada UTC, como todo el ledger
+        # (M·2a; antes ``now(UTC)`` real corría al día siguiente de 21 a 24 AR).
+        occurred_at=ensure_utc(occurred_at) or momento_de_negocio_rotulado(None),
     )
     db.add(movement)
     await db.flush()
@@ -385,7 +387,7 @@ def _movimiento_de_venta(
         source_event_id=item.source_event_id,
         source_upload_id=source_upload_id,
         source_type=source_type,
-        occurred_at=ensure_utc(item.occurred_at) or datetime.now(UTC),
+        occurred_at=ensure_utc(item.occurred_at) or momento_de_negocio_rotulado(None),
     )
 
 
@@ -658,7 +660,9 @@ async def register_reconciliation_adjustment(
         reason=reason,
         source_event_id=source_event_id,
         source_type=SOURCE_RECONCILIATION,
-        occurred_at=ensure_utc(occurred_at) or datetime.now(UTC),
+        # Sin fecha del caller: AHORA en hora AR rotulada UTC, como todo el ledger
+        # (M·2a; antes ``now(UTC)`` real corría al día siguiente de 21 a 24 AR).
+        occurred_at=ensure_utc(occurred_at) or momento_de_negocio_rotulado(None),
     )
     db.add(movement)
     await db.flush()
@@ -692,8 +696,8 @@ async def register_stock_loss(
         qty=-qty,
         reason=reason,
         # La merma se registra cuando se DESCUBRE, no tiene fecha de negocio propia
-        # distinta del momento del registro.
-        occurred_at=datetime.now(UTC),
+        # distinta del momento del registro (en hora AR rotulada UTC, M·2a).
+        occurred_at=momento_de_negocio_rotulado(None),
     )
     db.add(movement)
     await db.flush()

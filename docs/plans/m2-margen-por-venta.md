@@ -67,6 +67,12 @@ La pantalla (dashboard, columna de productos, margen por operación, permisos de
   - otro tenant;
   - `-m postgres` por la migración.
 
+- **Cómo quedó (2026-10-11):**
+  - **Enganche:** en vez de llamar a un servicio desde cada ruta, dos listeners globales de `Session` (`persistence/costeo_de_ventas.py`). `after_flush` anota las ventas nuevas con producto y las que cambian de producto o cantidad. `before_commit` hace flush y las costea por lote en la misma transacción, dentro de un SAVEPOINT; si falla, la venta se guarda sin snapshot. Cubre todas las rutas, incluidas las que se agreguen.
+  - **Fuente a la fecha:** la regla del costo vigente (M·1c) restringida al día de la venta. Las ediciones manuales y de catálogo posteriores a la venta no son elegibles. `cost_origin` distingue `manual` y `catalogo`.
+  - **Unidad:** `quantity` está en unidades base en todas las rutas, porque es lo mismo que descuenta el stock. No hizo falta la salida `sin_costo` por unidad que preveía el plan.
+  - **Fechas:** las ventas sin fecha, las mermas, los ajustes y `UPDATE_STOCK` negativo pasan a hora AR rotulada UTC.
+
 ### M·2b — una sola definición del margen bruto
 - **Dominio puro `domain/margen.py`.**
   - `ganancia = ingreso − costo vendido`.

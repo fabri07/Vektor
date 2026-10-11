@@ -28,8 +28,9 @@ import uuid
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
@@ -48,6 +49,72 @@ def _aware(v: object) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+def _filtro_candidatas(
+    tenant_id: uuid.UUID, ids: list[uuid.UUID], corte: date
+) -> list[ColumnElement[bool]]:
+    """Movimientos vivos con costo > 0 que pueden ser fuente a ``corte``."""
+    m = InventoryMovement
+    es_apertura = and_(
+        m.movement_type == "adjustment", m.source_type == SOURCE_CATALOG_INITIAL_STOCK
+    )
+    fin_del_corte = datetime.combine(corte + timedelta(days=1), time.min, tzinfo=UTC)
+    return [
+        m.tenant_id == tenant_id,
+        m.product_id.in_(ids),
+        or_(m.movement_type == "purchase", es_apertura),
+        m.voided_at.is_(None),
+        func.coalesce(m.unit_cost_final, m.unit_cost) > 0,
+        movement_business_time(m) < fin_del_corte,
+    ]
+
+
+def _columnas_candidata() -> list[Any]:
+    m = InventoryMovement
+    return [
+        m.id,
+        m.product_id,
+        movement_business_time(m).label("fecha_negocio"),
+        m.created_at,
+        m.unit_cost,
+        m.unit_cost_final,
+        m.movement_type,
+        m.shipping_treatment,
+        m.tax_treatment,
+        m.tax_rate,
+        m.tax_amount,
+        m.tax_recoverable,
+        m.document_ref,
+        m.cost_contract_version,
+    ]
+
+
+def consulta_todas_las_candidatas(
+    tenant_id: uuid.UUID, product_ids: Iterable[uuid.UUID], corte: date
+) -> Select[Any]:
+    """TODAS las candidatas hasta ``corte`` (no sólo la última): para elegir la
+    fuente de varias fechas con una sola consulta (costeo de ventas, M·2a)."""
+    ids = list(dict.fromkeys(product_ids))
+    return select(*_columnas_candidata()).where(*_filtro_candidatas(tenant_id, ids, corte))
+
+
+def candidata_de_fila(f: Any) -> CompraCandidata:
+    return CompraCandidata(
+        movement_id=f.id,
+        fecha_negocio=_aware(f.fecha_negocio),
+        cargada_en=_aware(f.created_at),
+        costo_facturado=f.unit_cost,
+        costo_final=f.unit_cost_final,
+        es_stock_inicial=f.movement_type == "adjustment",
+        shipping_treatment=f.shipping_treatment,
+        tax_treatment=f.tax_treatment,
+        tax_rate=f.tax_rate,
+        tax_amount=f.tax_amount,
+        tax_recoverable=f.tax_recoverable,
+        document_ref=f.document_ref,
+        contract_version=f.cost_contract_version,
+    )
+
+
 async def costos_de_referencia(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -61,27 +128,9 @@ async def costos_de_referencia(
 
     m = InventoryMovement
     negocio = movement_business_time(m)
-    es_apertura = and_(
-        m.movement_type == "adjustment", m.source_type == SOURCE_CATALOG_INITIAL_STOCK
-    )
-    costo = func.coalesce(m.unit_cost_final, m.unit_cost)
-    fin_del_corte = datetime.combine(corte + timedelta(days=1), time.min, tzinfo=UTC)
     ranked = (
         select(
-            m.id,
-            m.product_id,
-            negocio.label("fecha_negocio"),
-            m.created_at,
-            m.unit_cost,
-            m.unit_cost_final,
-            m.movement_type,
-            m.shipping_treatment,
-            m.tax_treatment,
-            m.tax_rate,
-            m.tax_amount,
-            m.tax_recoverable,
-            m.document_ref,
-            m.cost_contract_version,
+            *_columnas_candidata(),
             func.row_number()
             .over(
                 partition_by=[m.product_id, m.movement_type],
@@ -89,37 +138,14 @@ async def costos_de_referencia(
             )
             .label("rn"),
         )
-        .where(
-            m.tenant_id == tenant_id,
-            m.product_id.in_(ids),
-            or_(m.movement_type == "purchase", es_apertura),
-            m.voided_at.is_(None),
-            costo > 0,
-            negocio < fin_del_corte,
-        )
+        .where(*_filtro_candidatas(tenant_id, ids, corte))
         .subquery()
     )
     filas = (await session.execute(select(ranked).where(ranked.c.rn == 1))).all()
 
     candidatas: dict[uuid.UUID, list[CompraCandidata]] = {}
     for f in filas:
-        candidatas.setdefault(f.product_id, []).append(
-            CompraCandidata(
-                movement_id=f.id,
-                fecha_negocio=_aware(f.fecha_negocio),
-                cargada_en=_aware(f.created_at),
-                costo_facturado=f.unit_cost,
-                costo_final=f.unit_cost_final,
-                es_stock_inicial=f.movement_type == "adjustment",
-                shipping_treatment=f.shipping_treatment,
-                tax_treatment=f.tax_treatment,
-                tax_rate=f.tax_rate,
-                tax_amount=f.tax_amount,
-                tax_recoverable=f.tax_recoverable,
-                document_ref=f.document_ref,
-                contract_version=f.cost_contract_version,
-            )
-        )
+        candidatas.setdefault(f.product_id, []).append(candidata_de_fila(f))
 
     cargados: dict[uuid.UUID, Decimal | None] = dict(
         (
