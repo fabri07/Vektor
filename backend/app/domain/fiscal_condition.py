@@ -9,9 +9,10 @@ Valores canónicos (3) + ``None`` = no configurado:
     - ``responsable_inscripto`` → IVA responsable inscripto
     - ``informal``              → sin inscripción / venta informal
 
-El régimen fiscal es **SOLO INFORMATIVO**: mejora heurísticas de impuestos y
-márgenes y adapta la guía del arqueo en la UI. NUNCA bloquea el uso de la
-plataforma ni cambia ningún cálculo determinístico.
+El régimen fiscal NUNCA bloquea el uso de la plataforma. Mejora heurísticas y
+adapta la guía del arqueo en la UI, y desde M·1d **guía la base comparable del
+margen** (``domain/base_comparable.py``): un responsable inscripto con IVA
+recuperable confirmado compara neto contra neto. No se usa para nada más.
 
 Compatibilidad legacy: el valor viejo ``registered`` (monotributo/RI juntos)
 debe seguir leyéndose sin romper. ``normalize_fiscal_condition`` lo mapea a
@@ -108,3 +109,13 @@ def is_registered(value: str | None) -> bool:
     """
     canonical = normalize_fiscal_condition(value)
     return canonical in _REGISTERED
+
+
+def es_registrado_legacy(value: str | None) -> bool:
+    """¿Es el alias legacy ``registered`` (monotributo y RI sin distinguir)?
+
+    ``normalize_fiscal_condition`` lo lleva a monotributo, que alcanza para
+    «está registrado o no», pero NO para la base comparable del margen (M·1d):
+    podría ser un RI que recupera el IVA. Ahí no habilita un cálculo confirmado.
+    """
+    return value is not None and _norm_key(value) == "registered"

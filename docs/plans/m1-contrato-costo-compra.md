@@ -69,6 +69,8 @@ Una sola respuesta a «¿cuál es el costo de referencia de este producto a la f
 - Snapshots y undo: la reversa de relectura y de borrado (F11) restaura `unit_cost_ars` recalculando la referencia, no con `setattr` del valor viejo.
 
 ### M·1d — régimen y base comparable (sólo el contrato; el margen lo usa M·2)
+
+**Cómo quedó (2026-10-11):** `domain/base_comparable.py`. El envío también decide: la base es comparable sólo con envío `incluido` o `no_aplica` (consecuencia del rótulo que reemplazó a la guarda con flete / sin flete). El IVA de un régimen que no lo recupera (monotributo, informal) se trata como no recuperable aunque la compra no lo confirme; una compra que diga «recuperable» en ese régimen es inconsistente y queda afuera.
 - `comparable_unit_cost(costo, regimen)`:
   - **RI con `tax_recoverable=true` confirmado:** neto. Un IVA `incluido` se extrae por importe o por base y tasa confirmados, una sola vez.
   - **Otros casos:** el IVA no recuperable confirmado integra el costo.
