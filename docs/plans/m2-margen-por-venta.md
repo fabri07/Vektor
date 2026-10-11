@@ -1,6 +1,6 @@
 # M·2 — margen por producto y por venta (mini-plan)
 
-Fecha: 2026-10-11. Paso 5 de la fase 2 de `docs/plans/cierre-ingesta-capital-margen.md` (v3). Baja ese punto al código actual (`main` `dbf60ec0`) sin cambiar sus decisiones. El OK de la fase 2 (mergear con verde) cubre la ejecución, salvo las **decisiones abiertas** de abajo, que son del dueño.
+Fecha: 2026-10-11. Paso 5 de la fase 2 de `docs/plans/cierre-ingesta-capital-margen.md` (v3). Baja ese punto al código actual (`main` `dbf60ec0`) sin cambiar sus decisiones. El OK de la fase 2 (mergear con verde) cubre la ejecución, y las decisiones del dueño están registradas abajo.
 
 ## Qué hay hoy (verificado contra `main` 2026-10-11)
 
@@ -75,7 +75,7 @@ La pantalla (dashboard, columna de productos, margen por operación, permisos de
   - El resultado trae el ingreso total, el ingreso cubierto, el costo, la ganancia, el %, la cobertura y lo excluido con su motivo.
 - **FactsService:** `_cogs` y `margen_bruto` leen el snapshot y ya no usan `Product.unit_cost_ars` actual. Las líneas sin snapshot o sin confirmar quedan fuera del margen confirmado y se informan como cobertura.
 - **`deterministic_finance.calcular_margen_bruto`** delega en la definición única. La fórmula de hoy, `ventas − todos los gastos`, se renombra a lo que es (resultado operativo de 30 días) para el punto de equilibrio, y se excluyen los cobros de fiado y el demo.
-- **Subscore de salud:** deja de restar la mercadería **comprada**. Ver la decisión abierta 1.
+- **Subscore de salud:** deja de restar la mercadería **comprada** y usa el costo vendido, con la regla de cobertura de las decisiones de abajo. El motor tiene que soportar un componente ausente (repartir su peso) y un componente estimado (rótulo); si no lo soporta, se agrega.
 - **Tests de reconciliación:** FactsService, el chat y la salud dan el mismo número sobre el mismo universo. Se actualizan las líneas base de salud (`v1_formula.json`) con el motivo del cambio.
 
 ### M·2c — ventas históricas (script, fuera de Alembic)
@@ -88,10 +88,10 @@ La pantalla (dashboard, columna de productos, margen por operación, permisos de
 - El `computed_field` sigue puro, sin consultas ni tenant.
 - La columna visible y los permisos van con M·3. En M·2b sólo se agrega el servicio, si los agentes lo necesitan para no seguir mezclando estimación con confirmado.
 
-## Decisiones abiertas (del dueño)
+## Decisiones del dueño (2026-10-11)
 
-1. **Qué mide el subscore de salud.** Los benchmarks del rubro son de margen neto: deco declara neto 12-22% y bruto 55-70%.
-   - **(a) Recomendada.** El subscore sigue midiendo margen **neto**, pero con el costo **de lo vendido** de la definición única en lugar de la mercadería comprada: `(ventas − costo vendido − fijos)/ventas`. Las bandas no cambian y el −776% de ASTERIA desaparece sin esperar a M·R.
-   - **(b)** El subscore pasa a margen **bruto** y hay que cargar bandas brutas nuevas por rubro: un dato nuevo por rubro, con fuente.
-2. **Subscore de salud con poca cobertura de costo.** Con menos del 50% de lo vendido con costo confirmado (el umbral de M·3), el subscore no tiene base. La regla de no inventar prohíbe el 50 neutral y prohíbe el 0. **Recomendación:** el componente queda **ausente** y baja la confianza, con el motivo «cobertura de costo X%», igual que la tarjeta de M·3. Hay que ver en M·2b cómo reparte el motor el peso de un componente ausente. Si no lo soporta, se agrega.
-   - Consecuencia: con las reglas estrictas de M·1d, hoy casi ninguna venta sale confirmada (envío desconocido), así que **el subscore de margen va a quedar ausente en casi todos los tenants** hasta que la compra pida envío e IVA (M·3 / B·5). Es coherente con la decisión del 2026-10-11, pero conviene que lo sepas.
+1. **El subscore de salud sigue midiendo margen NETO, con el costo de lo vendido:** `(ventas − costo vendido − fijos)/ventas`. Deja de restar la mercadería comprada. Las bandas netas del rubro no cambian. (Se descartó pasar a margen bruto con bandas nuevas.)
+2. **Con poca cobertura confirmada se usan las estimaciones, rotuladas como tales.**
+   - Con el 50% o más de lo vendido con costo **confirmado**, el subscore es confirmado.
+   - Si no llega, se calcula con los costos estimados (catálogo, stock inicial, envío desconocido) y el subscore, su explicación y el snapshot quedan rotulados **«estimado»**, con la cobertura confirmada a la vista.
+   - **Piso (no inventar):** si ni contando las estimaciones el 50% de lo vendido tiene costo, el componente queda **ausente** y baja la confianza, con el motivo «cobertura de costo X%». Nunca 0 ni 50 neutral. Ese mismo piso reemplaza el 50 que hoy devuelve el motor sin ventas.
