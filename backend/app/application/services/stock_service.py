@@ -16,6 +16,7 @@ from app.application.services._savepoint import (
     guarded_savepoint,
     unique_violation_classifier,
 )
+from app.application.services.costo_vigente_service import recalcular_costo_vigente
 from app.application.services.inventory_movement_origin import (
     SOURCE_RECONCILIATION,
     ensure_utc,
@@ -523,7 +524,6 @@ async def increment_stock(
     db: AsyncSession,
     *,
     supplier_id: uuid.UUID | None = None,
-    update_product_cost: bool = True,
     occurred_at: datetime | None = None,
     defer_event: bool = False,
     contrato: ContratoDeCosto | None = None,
@@ -535,6 +535,11 @@ async def increment_stock(
     alta de stock que no es una compra declarada (``UPDATE_STOCK`` del chat).
     ``occurred_at`` se guarda en hora argentina rotulada UTC, igual que la ingesta
     (``momento_de_negocio_rotulado``).
+
+    M·1c: el costo del producto ya no lo pisa esta compra por llegar última. Se
+    recalcula con ``recalcular_costo_vigente``: gana la fuente más reciente POR
+    FECHA (compra, edición manual o catálogo), así que un comprobante atrasado no
+    le gana a una compra más nueva ni a una edición posterior.
     """
     # F3-T3 review: advisory shared ANTES del FOR UPDATE de fila (orden fijo, evita
     # deadlock AB-BA contra el exclusive del dedup).
@@ -556,12 +561,6 @@ async def increment_stock(
     # Product.stock_units es la representación canónica que lee la UI: sin esto,
     # una compra confirmada subía el balance pero el stock visible no cambiaba.
     product.stock_units += qty
-    # El costo histórico SIEMPRE queda en el movimiento (unit_cost abajo). El costo
-    # del catálogo (product.unit_cost_ars) solo se pisa si update_product_cost: una
-    # compra de un producto existente no debe cambiar el costo de referencia salvo
-    # que el usuario lo confirme.
-    if unit_cost is not None and update_product_cost:
-        product.unit_cost_ars = unit_cost
 
     movement = InventoryMovement(
         tenant_id=tenant_id,
@@ -578,6 +577,7 @@ async def increment_stock(
     )
     db.add(movement)
     await db.flush()
+    await recalcular_costo_vigente(db, tenant_id, [product_id], movimiento_nuevo=movement.id)
 
     event_payload = {
         "tenant_id": str(tenant_id),

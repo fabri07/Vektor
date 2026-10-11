@@ -9,7 +9,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -76,11 +76,17 @@ from app.config.ingestion_schema_decisions_rollout import (
 )
 from app.config.product_supplier_links_rollout import product_supplier_links_enabled_for
 from app.config.settings import get_settings
-from app.domain.business_time import now_ar_naive
+from app.domain.business_time import a_hora_de_negocio, now_ar_naive
 from app.domain.contrato_de_costo import (
     ContratoDeCosto,
     contrato_de_linea_importada,
     contrato_declarado,
+)
+from app.domain.costo_vigente import (
+    CATALOGO_FIELD,
+    aplicar_costo_de_catalogo,
+    registrar_edicion,
+    snapshot_claves_del_costo,
 )
 from app.domain.date_parsing import (
     CAMPOS_DE_FECHA,
@@ -3602,6 +3608,31 @@ def _accumulate_expiry_date(
     return min(future) if future else max(candidates)
 
 
+async def _fecha_de_carga_del_archivo(
+    session: AsyncSession, uploaded_file_id: uuid.UUID | None, defecto: datetime
+) -> datetime:
+    """M·1c: cuándo se CARGÓ el archivo, en hora argentina sin zona.
+
+    Fecha de la edición de catálogo (decisión 3). Una relectura reimporta el
+    mismo archivo: con «ahora» un catálogo de enero releído en octubre le
+    ganaría a todas las compras del medio.
+    """
+    if uploaded_file_id is None:
+        return defecto
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+
+    creado = (
+        await session.execute(
+            select(UploadedFile.created_at).where(UploadedFile.id == uploaded_file_id)
+        )
+    ).scalar_one_or_none()
+    if creado is None:
+        return defecto
+    return a_hora_de_negocio(creado if creado.tzinfo is not None else creado.replace(tzinfo=UTC))
+
+
 def _comprobante_de_la_fila(row: dict[str, Any], cols: dict[str, str]) -> str | None:
     """M·1b: el número de comprobante que la fila declara, si se mapeó."""
     col = cols.get("invoice_number")
@@ -4653,6 +4684,10 @@ async def _insert_confirmed_data_impl(
         return _purchase_by_ctx.get(context_id or "", stock_is_purchase)
     # Fallback de fecha para filas sin fecha: ahora (captura hora del import).
     today = now_ar_naive()
+    # M·1c (decisión 3): el costo de catálogo se fecha con la CARGA del archivo,
+    # no con «ahora»: una relectura de un catálogo viejo no puede ganarle a las
+    # compras que vinieron después.
+    _fecha_de_carga = await _fecha_de_carga_del_archivo(session, uploaded_file_id, today)
     counts: dict[str, Any] = {
         "ventas": 0,
         "gastos": 0,
@@ -6354,11 +6389,24 @@ async def _insert_confirmed_data_impl(
                             ),
                             "external_code": existing.external_code,
                             "external_source": existing.external_source,
+                            # M·1c: la procedencia del costo vuelve con el costo.
+                            **snapshot_claves_del_costo(existing.custom_fields),
                         }
                     if price:
                         existing.sale_price_ars = price
                     if cost:
-                        existing.unit_cost_ars = cost
+                        # M·1c (decisión 3): costo de catálogo = estimación con la
+                        # fecha de la carga. Se guarda siempre; manda sólo si es lo
+                        # más reciente (una compra posterior lo reemplaza).
+                        (
+                            existing.unit_cost_ars,
+                            existing.custom_fields,
+                        ) = aplicar_costo_de_catalogo(
+                            existing.custom_fields,
+                            existing.unit_cost_ars,
+                            cost,
+                            _fecha_de_carga,
+                        )
                     if list_price:
                         existing.list_price_ars = list_price
                     # Un producto por peso o volumen: el archivo habla en su
@@ -6433,8 +6481,10 @@ async def _insert_confirmed_data_impl(
                                 else None
                             ),
                             "unit_cost_ars": (
-                                str(cost or existing.unit_cost_ars)
-                                if (cost or existing.unit_cost_ars) is not None
+                                # M·1c: lo que QUEDÓ (el catálogo puede no mandar);
+                                # si no, la reversa lo vería «editado» y no restauraría.
+                                str(existing.unit_cost_ars)
+                                if existing.unit_cost_ars is not None
                                 else None
                             ),
                             "stock_units": stock_val or existing.stock_units,
@@ -6572,7 +6622,14 @@ async def _insert_confirmed_data_impl(
                         # `{}` y no `None`: la columna es JSONB nullable=False, pero
                         # un `None` explícito persiste como JSON `null` ('null'::jsonb)
                         # y rompe `GET /products` (ProductResponse exige dict → 503).
-                        custom_fields=cf_product if cf_product else {},
+                        # M·1c: el costo de catálogo nace con su fecha de carga.
+                        custom_fields=(
+                            registrar_edicion(
+                                cf_product, CATALOGO_FIELD, cost, _fecha_de_carga
+                            )
+                            if cost
+                            else (cf_product if cf_product else {})
+                        ),
                         source_row_ref=_prod_row_ref,  # Mejora D
                     )
                     # F5-A: sin ``session.add`` — el helper exige el objeto TRANSIENT
@@ -7263,6 +7320,8 @@ async def _insert_multisheet_data(
     (`_row_val`). Si no hay `mapping_contexts` (summaries viejos), cae al path
     legacy por tipo con detección por keyword. Sin límite de filas.
     """
+    # M·1c (decisión 3): fecha de la carga del archivo para el costo de catálogo.
+    _fecha_de_carga = await _fecha_de_carga_del_archivo(session, uploaded_file_id, today)
     from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
 
@@ -8451,11 +8510,17 @@ async def _insert_multisheet_data(
                     ),
                     "external_code": existing.external_code,
                     "external_source": existing.external_source,
+                    # M·1c: la procedencia del costo vuelve con el costo.
+                    **snapshot_claves_del_costo(existing.custom_fields),
                 }
             if price:
                 existing.sale_price_ars = price
             if cost:
-                existing.unit_cost_ars = cost
+                # M·1c (decisión 3): costo de catálogo = estimación con la fecha
+                # de la carga. Se guarda siempre; manda sólo si es lo más reciente.
+                existing.unit_cost_ars, existing.custom_fields = aplicar_costo_de_catalogo(
+                    existing.custom_fields, existing.unit_cost_ars, cost, _fecha_de_carga
+                )
             if list_price:
                 existing.list_price_ars = list_price
             # Un producto por peso o volumen: el archivo habla en su unidad de
@@ -8537,8 +8602,10 @@ async def _insert_multisheet_data(
                         else None
                     ),
                     "unit_cost_ars": (
-                        str(cost or existing.unit_cost_ars)
-                        if (cost or existing.unit_cost_ars) is not None
+                        # M·1c: lo que QUEDÓ (el catálogo puede no mandar);
+                        # si no, la reversa lo vería «editado» y no restauraría.
+                        str(existing.unit_cost_ars)
+                        if existing.unit_cost_ars is not None
                         else None
                     ),
                     # Ya en unidades base (si el archivo traía stock, ya se aplicó).
@@ -8714,7 +8781,12 @@ async def _insert_multisheet_data(
                 expiry_date=_expiry,
                 # `{}` y no `None`: un `None` explícito persiste como JSON `null`
                 # ('null'::jsonb) y rompe `GET /products` con 503 (ver arriba).
-                custom_fields=cf or {},
+                # M·1c: el costo de catálogo nace con su fecha de carga.
+                custom_fields=(
+                    registrar_edicion(cf, CATALOGO_FIELD, cost, _fecha_de_carga)
+                    if cost
+                    else (cf or {})
+                ),
                 source_row_ref=row_ref,  # Mejora D
             )
             # F5-A: sin ``session.add`` — el objeto tiene que llegar TRANSIENT al

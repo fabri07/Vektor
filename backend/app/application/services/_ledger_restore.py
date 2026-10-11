@@ -32,6 +32,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from app.domain.costo_vigente import CLAVES_DEL_COSTO
 from app.domain.purchase_cost import COSTO_BASE_FIELD
 
 # Campos editables de un maestro que se serializan al snapshot y se restauran.
@@ -79,7 +80,12 @@ RESTORE_FIELDS: dict[str, tuple[str, ...]] = {
 # con ``unit_cost_ars`` (F-H6.d), así que tiene que VOLVER junto con él. Restaurar
 # el costo y dejar la procedencia vieja deja al guard de V5 decidiendo con un dato
 # que ya no describe el número que está guardado.
-CUSTOM_FIELD_RESTORE_KEYS: frozenset[str] = frozenset({COSTO_BASE_FIELD})
+#
+# M·1c suma el resto de la procedencia del costo (origen, fecha y las ediciones
+# manual y de catálogo guardadas): si el undo devolviera el costo y dejara una
+# edición de catálogo de un archivo borrado, el próximo recálculo la volvería a
+# elegir.
+CUSTOM_FIELD_RESTORE_KEYS: frozenset[str] = frozenset({COSTO_BASE_FIELD, *CLAVES_DEL_COSTO})
 
 
 def snapshot_master(entity: Any, kind: str) -> dict[str, Any]:

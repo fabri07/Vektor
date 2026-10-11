@@ -28,6 +28,11 @@ from app.application.services.product_identity import (
     product_identity_guard,
 )
 from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.domain.business_time import now_ar_naive
+from app.domain.costo_vigente import (
+    conservar_claves_del_costo,
+    custom_fields_tras_editar_costo,
+)
 from app.domain.pos_permissions import PosPermission
 from app.domain.pos_terminal import OFFLINE_HEADER, TERMINAL_HEADER, es_offline
 from app.domain.product import DEFAULT_LOW_STOCK_THRESHOLD_UNITS
@@ -483,6 +488,17 @@ async def create_product(
                 **(data.get("custom_fields") or {}),
                 "category_label": label,
             }
+    # M·1c: las claves del costo las escribe sólo el servidor; un alta con costo
+    # lo deja como edición manual con su hora (decisión 2).
+    data["custom_fields"] = (
+        custom_fields_tras_editar_costo(
+            conservar_claves_del_costo(None, data.get("custom_fields")),
+            None,
+            data.get("unit_cost_ars"),
+            now_ar_naive(),
+        )
+        or conservar_claves_del_costo(None, data.get("custom_fields"))
+    )
     product = Product(tenant_id=tenant.tenant_id, **data)
     # F5-A: el pre-check de arriba tiene ventana TOCTOU. El guard abre el savepoint,
     # emite el INSERT adentro y traduce la violación del índice único al mismo 409
@@ -680,6 +696,22 @@ async def update_product(
                 **(updates.get("custom_fields") or product.custom_fields or {}),
                 "category_label": label,
             }
+    # M·1c: un PATCH que manda `custom_fields` completo no borra la procedencia del
+    # costo, y una edición del costo queda guardada con su hora (decisión 2: vale
+    # hasta que llegue una compra con fecha de negocio posterior).
+    if "custom_fields" in updates:
+        updates["custom_fields"] = conservar_claves_del_costo(
+            product.custom_fields, updates["custom_fields"]
+        )
+    if "unit_cost_ars" in updates:
+        _cf_costo = custom_fields_tras_editar_costo(
+            updates.get("custom_fields", product.custom_fields),
+            product.unit_cost_ars,
+            updates["unit_cost_ars"],
+            now_ar_naive(),
+        )
+        if _cf_costo is not None:
+            updates["custom_fields"] = _cf_costo
     # F5-A: los ``setattr`` van DENTRO del guard. Mutar antes deja el objeto ``dirty``
     # y el flush incondicional de ``begin_nested()`` emitiría el UPDATE FUERA del
     # savepoint — exactamente el defecto que el guard existe para evitar.

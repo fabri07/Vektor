@@ -50,8 +50,18 @@ from app.application.services.product_identity import (
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
-from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
+from app.domain.business_time import (
+    a_hora_de_negocio,
+    fecha_de_negocio,
+    now_ar_naive,
+    today_ar,
+)
 from app.domain.contrato_de_costo import contrato_declarado
+from app.domain.costo_vigente import (
+    conservar_claves_del_costo,
+    custom_fields_tras_editar_costo,
+    snapshot_claves_del_costo,
+)
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     classify_expense_with_vertical,
@@ -270,6 +280,8 @@ def _snapshot_producto(producto: Product) -> dict[str, Any]:
         "barcode": producto.barcode,
         "category": producto.category,
         "updated_at": producto.updated_at.isoformat() if producto.updated_at else None,
+        # M·1c: la procedencia del costo vuelve junto con el costo.
+        **snapshot_claves_del_costo(producto.custom_fields),
     }
 
 
@@ -571,6 +583,16 @@ async def reclassify_record(
             # PREEXISTENTE y hasta acá no dejaba ningún rastro, así que borrar el
             # archivo no podía devolverle su valor.
             _before_target = _snapshot_producto(target)
+            # M·1c: un costo tipeado acá es una edición manual con su hora.
+            if "unit_cost_ars" in link_updates:
+                _cf_costo = custom_fields_tras_editar_costo(
+                    target.custom_fields,
+                    target.unit_cost_ars,
+                    link_updates["unit_cost_ars"],
+                    now_ar_naive(),
+                )
+                if _cf_costo is not None:
+                    target.custom_fields = _cf_costo
             for field_name, value in link_updates.items():
                 setattr(target, field_name, value)
             recompute_requires_completion(target)
@@ -620,6 +642,15 @@ async def reclassify_record(
                     barcode=data.get("barcode"),
                     sku=data.get("sku"),
                 ):
+                    # M·1c: las claves del costo las escribe el servidor; el
+                    # costo tipeado queda como edición manual con su hora.
+                    _cf_nuevo = conservar_claves_del_costo(None, data.get("custom_fields"))
+                    data["custom_fields"] = (
+                        custom_fields_tras_editar_costo(
+                            _cf_nuevo, None, data.get("unit_cost_ars"), now_ar_naive()
+                        )
+                        or _cf_nuevo
+                    )
                     _nuevo_producto = Product(tenant_id=tenant.tenant_id, **data)
                     session.add(_nuevo_producto)
             except ProductIdentityConflictError as conflict:
@@ -747,7 +778,6 @@ async def resolve_purchase(
         source_event_id=f"others:{record_id}",
         db=session,
         supplier_id=supplier_id,
-        update_product_cost=True,
         occurred_at=body.transaction_date,
         defer_event=True,
         # M·1b: el costo que el usuario declaró; envío e impuesto, desconocidos.

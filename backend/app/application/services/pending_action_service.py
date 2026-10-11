@@ -34,7 +34,12 @@ from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
     insert_confirmed_data,
 )
+from app.domain.business_time import now_ar_naive
 from app.domain.contrato_de_costo import contrato_declarado
+from app.domain.costo_vigente import (
+    conservar_claves_del_costo,
+    custom_fields_tras_editar_costo,
+)
 from app.domain.ingestion_version import INGESTION_VERSION
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
@@ -794,7 +799,22 @@ async def execute_pending_action(
             repo = ProductRepository(db)
             product = await repo.get_by_id(product_uuid, action.tenant_id)
             if product:
+                # M·1c: un costo cambiado por chat es una edición manual con su
+                # hora (decisión 2). Antes del setattr: compara con el anterior.
+                if "unit_cost_ars" in update_fields:
+                    _nuevo = update_fields["unit_cost_ars"]
+                    _cf_costo = custom_fields_tras_editar_costo(
+                        product.custom_fields,
+                        product.unit_cost_ars,
+                        Decimal(str(_nuevo)) if _nuevo is not None else None,
+                        now_ar_naive(),
+                    )
+                    if _cf_costo is not None:
+                        product.custom_fields = _cf_costo
                 for field, value in update_fields.items():
+                    if field == "custom_fields":
+                        # Las claves del costo las escribe sólo el servidor.
+                        value = conservar_claves_del_costo(product.custom_fields, value)
                     if field in ("sale_price_ars", "unit_cost_ars") and value is not None:
                         setattr(product, field, Decimal(str(value)))
                     else:
