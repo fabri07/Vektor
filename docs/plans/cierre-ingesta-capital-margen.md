@@ -39,6 +39,13 @@ Este plan consolida mi v2 con el plan consolidado que trajo el dueño. Tomo de e
 - No se corre la suite completa local en cada paso; sí al cerrar cada fase.
 - Hay por lo menos tres fases (este plan tiene cuatro).
 
+### Decisiones del dueño (2026-10-10), después del diagnóstico M·0
+- **Costo manual frente a compra:** la edición manual vale hasta que llega una compra con fecha de negocio **posterior** a la edición. Una compra atrasada no pisa una edición más nueva.
+- **Costo de catálogo sin compra:** origen `catalogo`, estimación rotulada. Una compra posterior lo reemplaza y no cuenta como compra confirmada.
+- **El margen del health score usa la definición única de M·2** (se agrega a M·2).
+- **Se agrega la reparación M·R** del stock inicial importado como compra (abajo). El `--apply` lo autoriza el dueño aparte.
+- **El stock de apertura queda sólo como saldo inicial de inventario.** Contarlo además como aporte de capital en especie es opcional y va en D·6, con confirmación del dueño de que lo aportaron los socios.
+
 ## Contrato de ejecución (vale para todos los pasos)
 
 - **Autorización por fase.** Antes de cada fase muestro su lista de pasos con lo que cambia y cómo se acepta. Tu OK de la fase cubre sus pasos y sus merges. Si un paso cambia de alcance o necesita una decisión nueva, el workflow se detiene y te pregunta.
@@ -133,6 +140,11 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
 ### 3. M·0: diagnóstico y ejemplos
 - `scripts/diag_margen.py` es sólo SELECT y no imprime la URL. Revisa el «margen en 0» de ASTERIA: precio contra costo, unidad, fuente, marcas de envío e impuestos, régimen y la diferencia entre catálogo, Facts y dashboard.
 - Antes de construir la pantalla te muestro **los ejemplos de aceptación (abajo) para aprobar**.
+- **Resultado en producción (2026-10-10), ASTERIA:**
+  - el subscore de margen del health score es 0 porque el 100% de la mercadería de la ventana de 90 días ($7.538.005) son gastos «Stock inicial: …»: el catálogo importado como **compra** (`purchase` + `catalog_initial_stock`, con COGS). El health score lo resta como inventario del mes contra $323.500 de ventas y da −776%;
+  - sólo el 9% de lo vendido tiene costo: FactsService toma el resto como costo 0 y muestra 96,2% (lo corrige la cobertura mínima de M·3);
+  - 375 de 380 productos con costo lo tienen sólo del catálogo; 5 tienen costo mayor que el precio; 8 empates de fecha con costos distintos;
+  - la cuenta deco de prueba de producción está vacía y no sirve de contraste: el contraste se hace con el demo deco en la base local.
 
 ### 4. M·1: el contrato de costo de compra
 - **«Última compra»** es la última compra confirmada y válida **por fecha de negocio**, no la última fila procesada.
@@ -176,7 +188,7 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
   - `margen % = ganancia / ingreso × 100`, sólo si el ingreso es mayor que 0.
   - El margen negativo es válido. No es recargo sobre costo.
   - En la venta por peso, la cantidad se normaliza a la unidad de venta.
-- **Una sola definición** compartida por la API, FactsService, `deterministic_finance` y el chat. Se corrige `calcular_margen_bruto`, que hoy resta todos los gastos.
+- **Una sola definición** compartida por la API, FactsService, `deterministic_finance`, el chat **y el subscore de margen del health score**. Se corrige `calcular_margen_bruto`, que hoy resta todos los gastos, y el health score deja de calcular `(ventas − inventario − fijos) / ventas`: comprar mercadería no es costo de lo vendido (agregado 2026-10-10 por el diagnóstico M·0).
 
 ### 6. M·3: dashboard, productos y ventas
 - **Dashboard.** Un fact canónico en FactsService, «Margen bruto de ventas» del período, con un endpoint con schema Pydantic y los filtros comunes. Alimenta la tarjeta, la serie histórica y el desglose por categoría, **sin ninguna fórmula en React**. Se borra `buildMarginBreakdown`.
@@ -191,6 +203,16 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
 - **Ventas:** margen aplicado por operación, sólo para dueño o admin.
 - **Permisos en el backend.** Al CASHIER no le llega el costo ni el margen por la API, ni siquiera en las respuestas en caché. No alcanza con ocultar la columna. Tampoco va nunca en el ticket.
 - **Compra en «Otros»:** se resuelve con el mismo comando del contrato M·1. Se hace dentro de B·5.
+
+### 6b. M·R: reparar el stock inicial importado como compra (agregado 2026-10-10)
+- **Qué repara:** los gastos «Stock inicial: …» (`expense_entries` COGS/INVENTORY) y sus movimientos `purchase` + `catalog_initial_stock` que un import de catálogo registró como compra del período. Pasan a ser el **saldo de apertura**: `adjustment` + `catalog_initial_stock`, con su costo unitario y sin gasto ni salida de dinero.
+- El stock y el costo unitario de cada producto no cambian; al venderse, ese costo entra en el costo de lo vendido como cualquier otro.
+- **Script fuera de Alembic**, con la mecánica de D·3:
+  - dry-run por tenant que lista cuántos gastos y movimientos toca y el efecto en el margen y el score;
+  - guarda el vínculo con el gasto y el movimiento originales, se puede reejecutar sin duplicar y es reversible;
+  - **el `--apply` lo autoriza el dueño aparte.**
+- **Hacia adelante:** el import de catálogo deja de registrar la existencia inicial como compra salvo que la hoja la declare compra del período explícitamente. Se verifica primero qué decisión de la hoja la generó en ASTERIA.
+- **Aceptación:** en ASTERIA, después del `--apply`, la mercadería de la ventana deja de incluir los $7,5 M y el subscore de margen sale de la definición de M·2, con su cobertura.
 
 ### 7–10. D·2 a D·5: capital en dinero
 7. **D·2**: tabla `owner_capital_movements`.
@@ -257,6 +279,7 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
     - Sin gasto ni salida de dinero. Al venderse entra en el costo vendido.
     - El equipamiento es informativo y no se amortiza.
     - Hay una política definida para revertir cuando ese stock ya se vendió.
+    - Opcional: valorizar como aporte en especie un stock de apertura ya reparado por M·R (por ejemplo ASTERIA), sólo si el dueño confirma que lo aportaron los socios.
 19. **D·7**: destinos importables en el libro mixto, el Libro Diario y en hojas sueltas.
     - Con la identidad de la fase 1, procedencia, ledger y F11.
     - Un préstamo bancario o sin socio identificado sigue en «Otros».
@@ -316,8 +339,8 @@ Al cierre de la fase, un agente corre las suites completas y deja el registro. *
 - Aprobar cada fase.
 - Aprobar los ejemplos de M·0.
 - ~~Decidir el umbral del 50%~~ (aprobado 2026-10-09).
-- Correr `diag_margen.py` y la consulta de D0.
-- Autorizar el `--apply` de D·3.
+- ~~Correr `diag_margen.py`~~ (corrido 2026-10-10) y la consulta de D0.
+- Autorizar el `--apply` de D·3 y el de M·R.
 - Los smokes en producción.
 - B1 del POS.
 

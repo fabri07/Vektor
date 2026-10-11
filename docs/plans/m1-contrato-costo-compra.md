@@ -71,21 +71,19 @@ Una sola respuesta a «¿cuál es el costo de referencia de este producto a la f
   - RI: $605 con IVA 21% recuperable → base **$500**.
   - Además: `no_aplica` y tasas distintas por componente.
 
-## Decisiones abiertas (del dueño)
+## Decisiones del dueño (cerradas el 2026-10-10)
 
-1. **Dónde vive el contrato:** columnas en `inventory_movements` (lo que propongo: es la fila que ya tiene fecha de negocio, anulación y procedencia) o una tabla aparte 1:1. Recomiendo columnas.
-2. **Costo manual frente a compra:**
-   - **Propuesta:** la edición manual gana hasta que llega una compra con fecha de negocio **posterior** a la edición. Una compra atrasada no pisa una edición más nueva.
+1. **Dónde vive el contrato — RESUELTA: columnas** (se aplicó la recomendación en M·1a). Planteo original: columnas en `inventory_movements` (lo que propongo: es la fila que ya tiene fecha de negocio, anulación y procedencia) o una tabla aparte 1:1. Recomiendo columnas.
+2. **Costo manual frente a compra — APROBADA la propuesta:**
+   - **Propuesta (aprobada):** la edición manual gana hasta que llega una compra con fecha de negocio **posterior** a la edición. Una compra atrasada no pisa una edición más nueva.
    - **Alternativa:** que lo manual gane siempre hasta que el usuario lo suelte. Esto obliga a agregar un control en la pantalla.
-3. **Costo de catálogo** (hoja de precios, sin compra): entra como origen `catalogo`, con la fecha de la carga, y una compra posterior lo reemplaza. **No cuenta como compra para el margen confirmado.** Propongo que sí sirva de estimación etiquetada.
+3. **Costo de catálogo — APROBADA la propuesta** (hoja de precios, sin compra): entra como origen `catalogo`, con la fecha de la carga, y una compra posterior lo reemplaza. **No cuenta como compra para el margen confirmado.** Propongo que sí sirva de estimación etiquetada.
 
-## Lo que M·1 necesita del dueño
+## Diagnóstico (corrido en producción el 2026-10-10)
 
-- **Correr el diagnóstico en Neon y pasarme la salida.** No bloquea M·1a/M·1b, pero sí que M·1c se dé por bueno en ASTERIA: si el margen 0 viene del «Stock inicial» leído como compra, M·1c lo tiene que resolver o dejar a la vista.
-  ```
-  cd backend && .venv/bin/python scripts/diag_margen.py --email agustinalahora4@gmail.com --dias 90
-  ```
-- **Las tres decisiones de arriba.** Hasta tenerlas se avanza con M·1a, que no depende de ellas.
+- En ASTERIA el margen 0 **sí** viene del «Stock inicial» leído como compra: $7.538.005 de mercadería en la ventana, todo catálogo importado como `purchase` + `catalog_initial_stock`. M·1 no lo resuelve: lo resuelven la reparación **M·R** y el health score con la definición de M·2 (los dos agregados al plan v3).
+- Hasta la reparación, M·1a clasifica esos movimientos como origen `compra`, sin contrato confirmado. Después de M·R pasan a `stock_inicial`, que es lo que son.
+- 375 de 380 productos con costo lo tienen sólo del catálogo: la decisión 3 define que en ASTERIA se vea un margen **estimado y rotulado**.
 
 ## Riesgos
 
