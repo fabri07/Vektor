@@ -3617,26 +3617,54 @@ async def cerrar_costos_del_lote(
 ) -> None:
     """M·1c-2: recalcula el costo de lo que el lote marcó y completa el ledger.
 
-    El `after` de cada entrada de un producto recalculado pasa a decir el costo
-    que QUEDÓ: si dijera otro, la reversa F11 lo vería «editado» y no restauraría.
+    - El `after` de cada entrada de un producto recalculado pasa a decir el costo
+      que QUEDÓ: si dijera otro, la reversa F11 lo vería «editado» y no restauraría.
+    - La entrada de una COMPRA que no cambió el costo (un libro atrasado que no
+      ganó) se descarta: no hay nada que revertir, y dejarla haría que una compra
+      posterior por otra ruta se leyera como «edición manual posterior» al borrar
+      el archivo.
     """
     session.info.pop(_LEDGER_COMPRAS, None)
     recalculados = await recalcular_pendientes(session, tenant_id)
-    if not product_details or not recalculados:
+    if not product_details:
         return
     from app.persistence.models.product import Product  # noqa: PLC0415
 
-    finales: dict[str, str | None] = {}
-    for pid in recalculados:
+    en_ledger = {
+        uuid.UUID(str(d["product_id"]))
+        for d in product_details
+        if d.get(COMPRA_DEL_IMPORT_KEY) or uuid.UUID(str(d["product_id"])) in recalculados
+    }
+    finales: dict[str, tuple[str | None, dict[str, Any]]] = {}
+    for pid in en_ledger:
         producto = await session.get(Product, pid)
         if producto is not None:
             finales[str(pid)] = (
-                str(producto.unit_cost_ars) if producto.unit_cost_ars is not None else None
+                str(producto.unit_cost_ars) if producto.unit_cost_ars is not None else None,
+                snapshot_claves_del_costo(producto.custom_fields),
             )
+    conservados: list[dict[str, Any]] = []
     for detalle in product_details:
         clave = str(detalle.get("product_id"))
+        es_compra = bool(detalle.pop(COMPRA_DEL_IMPORT_KEY, False))
         if clave in finales and isinstance(detalle.get("after"), dict):
-            detalle["after"]["unit_cost_ars"] = finales[clave]
+            costo, claves = finales[clave]
+            detalle["after"]["unit_cost_ars"] = costo
+            before = detalle.get("before") or {}
+            if (
+                es_compra
+                and _mismo_costo(before.get("unit_cost_ars"), costo)
+                and all(before.get(k) == v for k, v in claves.items())
+            ):
+                continue
+        conservados.append(detalle)
+    product_details[:] = conservados
+
+
+def _mismo_costo(a: str | None, b: str | None) -> bool:
+    if a is None or b is None:
+        return a is b
+    return Decimal(a) == Decimal(b)
 
 
 async def _fecha_de_carga_del_archivo(

@@ -236,3 +236,79 @@ async def test_el_remito_recalcula_y_rotula_el_envio_aparte(
     await db_session.refresh(p)
     assert p.unit_cost_ars == Decimal("110.00")
     assert (p.custom_fields or {})[COSTO_BASE_FIELD] == "sin_flete"
+
+
+async def test_el_costo_se_recalcula_antes_de_sellar_updated_at(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: Any
+) -> None:
+    """Revisión M·1c-2 (P2). El undo de relectura compara `after["updated_at"]`
+    con el del producto: si el recálculo corriera DESPUÉS del sello, movería
+    `updated_at` y el undo vería el producto «editado» y no lo restauraría."""
+    from app.application.services import ingestion_import_service as iis
+
+    original = iis._stamp_updated_at_on_product_details
+    pendientes_al_sellar: list[Any] = []
+
+    async def _espia(session: AsyncSession, product_details: list[dict[str, Any]]) -> None:
+        pendientes_al_sellar.append(
+            (session.info.get("m1c_costos_pendientes") or {}).get(sample_tenant.tenant_id)
+        )
+        await original(session, product_details)
+
+    monkeypatch.setattr(iis, "_stamp_updated_at_on_product_details", _espia)
+    p = await _producto(db_session, sample_tenant)
+    archivo = await _archivo(db_session, sample_tenant)
+    fila = {
+        "fecha": "2026-09-10", "proveedor": "Sur", "articulo": "Vela", "cantidad": "10",
+        "precio_compra": "120", "total": "1200", "__context__": _CTX,
+    }
+    await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        {
+            "file_type": "spreadsheet", "inferred_type": "gastos", "multi_sheet": False,
+            "row_count": 1,
+            "mapping_contexts": [
+                {"context_id": _CTX, "entity_type": "expense", "source_kind": "sheet",
+                 "headers": list(_COLS), "row_count": 1}
+            ],
+            "gastos_detectados": [fila],
+        },
+        {},
+        return_details=True,
+        stamp_product_updated_at=True,
+        context_mappings={_CTX: dict(_COLS)},
+        context_entity={_CTX: "expense"},
+        context_confirmed={_CTX: True},
+        source="reread",
+        uploaded_file_id=archivo.id,
+    )
+    await db_session.refresh(p)
+    assert p.unit_cost_ars == Decimal("120.00")
+    assert pendientes_al_sellar and not any(pendientes_al_sellar)
+
+
+async def test_borrar_un_libro_atrasado_que_no_gano_no_reporta_ediciones(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión M·1c-2 (P3): el libro no cambió el costo, así que no deja entrada
+    de ledger; una compra posterior por otra ruta no se lee como «edición manual
+    posterior» al borrarlo."""
+    p = await _producto(db_session, sample_tenant)
+    await _comprar(db_session, sample_tenant, p, "100", datetime(2026, 9, 10, 10))
+    archivo = await _archivo(db_session, sample_tenant)
+    counts = await _importar_compra(
+        db_session, sample_tenant, archivo, fecha="2024-03-05", costo="120"
+    )
+    detalles = counts.pop("product_details", []) or []
+    assert not [d for d in detalles if d.get("product_id") == str(p.id)]
+    await record_import_ledger(
+        db_session, tenant_id=sample_tenant.tenant_id, file_id=archivo.id,
+        product_details=detalles,
+    )
+    await _comprar(db_session, sample_tenant, p, "130", datetime(2026, 9, 20, 10))
+
+    contadores = await revert_file_data(db_session, archivo.id, sample_tenant.tenant_id)
+    await db_session.refresh(p)
+    assert contadores["conservados"] == []
+    assert p.unit_cost_ars == Decimal("130.00")

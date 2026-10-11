@@ -4317,9 +4317,10 @@ async def apply_reread(
         # Compuerta: lo que se perdió A SABIENDAS (aceptado), para el historial.
         "data_loss": perdida.as_dict() if perdida.hay_perdida else None,
     }
-    # M·1c-2: lo que anuló la relectura DESPUÉS del reimport (p. ej. compras
-    # clasificadas desde «Otros» que la nueva lectura reemplaza) también puede
-    # cambiar el costo vigente; el reimport ya cerró lo suyo.
+    # M·1c-2: red de seguridad. Hoy no queda nada en la cola: las compras que
+    # anula `_reconcile` las drena el reimport (antes de sellar `updated_at`), y
+    # lo que anula después (`_superseder_clasificados_de_otros`) son ventas. Si
+    # algún día anulara compras acá, el recálculo correría DESPUÉS del sello.
     await recalcular_pendientes(session, tenant_id)
     await session.flush()
 
