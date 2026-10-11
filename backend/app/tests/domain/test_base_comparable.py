@@ -17,6 +17,7 @@ from app.domain.base_comparable import (
     MOTIVO_ENVIO_DESCONOCIDO,
     MOTIVO_ESTIMACION,
     MOTIVO_IMPUESTO_DESCONOCIDO,
+    MOTIVO_IVA_MAYOR_QUE_COSTO,
     MOTIVO_RECUPERABLE_SIN_CONFIRMAR,
     MOTIVO_RECUPERABLE_SIN_RI,
     MOTIVO_REGIMEN_LEGACY,
@@ -80,7 +81,11 @@ class TestEjemplosDeAceptacion:
             "605", impuesto="incluido", tax_amount=Decimal("105"), tax_recoverable=True
         )
         por_tasa = _ref(
-            "605", impuesto="incluido", tax_rate=Decimal("0.21"), tax_recoverable=True
+            "605",
+            envio="no_aplica",
+            impuesto="incluido",
+            tax_rate=Decimal("0.21"),
+            tax_recoverable=True,
         )
         assert base_comparable(por_importe, "responsable_inscripto") == BaseComparable(
             Decimal("500.00"), True
@@ -97,7 +102,11 @@ class TestEjemplosDeAceptacion:
     def test_tasas_distintas(self) -> None:
         """10,5% (alícuota reducida): $552,50 con IVA recuperable → $500."""
         ref = _ref(
-            "552.50", impuesto="incluido", tax_rate=Decimal("0.105"), tax_recoverable=True
+            "552.50",
+            envio="no_aplica",
+            impuesto="incluido",
+            tax_rate=Decimal("0.105"),
+            tax_recoverable=True,
         )
         assert base_comparable(ref, "responsable_inscripto").costo == Decimal("500.00")
 
@@ -194,3 +203,42 @@ class TestRegimen:
     )
     def test_aliases(self, crudo: str, esperado: str) -> None:
         assert regimen_para_base(crudo) == esperado
+
+
+class TestRevision:
+    """Revisión de M·1d."""
+
+    def test_con_envio_incluido_la_tasa_no_alcanza(self) -> None:
+        """P2: $500 + IVA $105 + envío $100 sin IVA = $705. Aplicar el 21% a todo
+        daría 582,64 «confirmado»; el neto real es 600. Sin importe, estimación."""
+        ref = _ref(
+            "705", impuesto="incluido", tax_rate=Decimal("0.21"), tax_recoverable=True
+        )
+        r = base_comparable(ref, "responsable_inscripto")
+        assert (r.confirmada, r.motivo) == (False, MOTIVO_SIN_IMPORTE_NI_TASA)
+        con_importe = _ref(
+            "705", impuesto="incluido", tax_amount=Decimal("105"), tax_recoverable=True
+        )
+        assert base_comparable(con_importe, "responsable_inscripto") == BaseComparable(
+            Decimal("600.00"), True
+        )
+
+    def test_la_tasa_vale_sin_envio(self) -> None:
+        ref = _ref(
+            "605",
+            envio="no_aplica",
+            impuesto="incluido",
+            tax_rate=Decimal("0.21"),
+            tax_recoverable=True,
+        )
+        assert base_comparable(ref, "responsable_inscripto").costo == Decimal("500.00")
+
+    def test_iva_mayor_que_el_costo_no_se_confirma(self) -> None:
+        ref = _ref("100", impuesto="incluido", tax_amount=Decimal("150"), tax_recoverable=True)
+        r = base_comparable(ref, "responsable_inscripto")
+        assert (r.confirmada, r.motivo) == (False, MOTIVO_IVA_MAYOR_QUE_COSTO)
+
+    def test_el_stock_inicial_es_estimacion(self) -> None:
+        """Valoriza la apertura con el costo del catálogo (decisión 3)."""
+        r = base_comparable(_ref("100", origen="stock_inicial"), "monotributo")
+        assert (r.confirmada, r.motivo) == (False, MOTIVO_ESTIMACION)

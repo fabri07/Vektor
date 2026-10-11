@@ -43,7 +43,9 @@ CENTAVO: Final = Decimal("0.01")
 RegimenParaBase = Literal["ri", "no_recupera"]
 
 MOTIVO_SIN_COSTO: Final = "sin costo de compra"
-MOTIVO_ESTIMACION: Final = "el costo no sale de una compra: es una estimación"
+MOTIVO_ESTIMACION: Final = (
+    "el costo no sale de una compra (stock inicial, catálogo o carga manual): es una estimación"
+)
 MOTIVO_SIN_REGIMEN: Final = "régimen fiscal no configurado"
 MOTIVO_REGIMEN_LEGACY: Final = (
     "régimen «registrado» sin distinguir monotributo de responsable inscripto"
@@ -52,7 +54,10 @@ MOTIVO_ENVIO_ADICIONAL: Final = "el costo no incluye el envío"
 MOTIVO_ENVIO_DESCONOCIDO: Final = "no se sabe si el costo incluye el envío"
 MOTIVO_IMPUESTO_DESCONOCIDO: Final = "no se sabe si el costo incluye impuestos"
 MOTIVO_RECUPERABLE_SIN_CONFIRMAR: Final = "no se confirmó si el IVA de la compra es recuperable"
-MOTIVO_SIN_IMPORTE_NI_TASA: Final = "el IVA de la compra no tiene importe ni tasa confirmados"
+MOTIVO_SIN_IMPORTE_NI_TASA: Final = (
+    "el IVA de la compra no tiene importe confirmado (ni tasa aplicable sin envío)"
+)
+MOTIVO_IVA_MAYOR_QUE_COSTO: Final = "el IVA confirmado no es menor que el costo"
 MOTIVO_RECUPERABLE_SIN_RI: Final = (
     "la compra dice IVA recuperable pero el régimen no lo recupera"
 )
@@ -83,10 +88,15 @@ def regimen_para_base(fiscal_condition_crudo: str | None) -> RegimenParaBase | s
 
 
 def _impuesto_unitario(costo: Decimal, ref: CostoDeReferencia, *, incluido: bool) -> Decimal | None:
-    """El IVA por unidad: por importe confirmado o, si no, por base y tasa."""
+    """El IVA por unidad: por importe confirmado o, si no, por base y tasa.
+
+    Por TASA sólo si no hubo envío (``no_aplica``): con el envío dentro del
+    costo, aplicar la alícuota a todo gravaría también el flete, que puede no
+    llevar IVA o llevar otra. Ahí hace falta el importe.
+    """
     if ref.tax_amount is not None:
         return ref.tax_amount
-    if ref.tax_rate is None:
+    if ref.tax_rate is None or ref.envio != "no_aplica":
         return None
     if incluido:
         # costo = base × (1 + tasa) → impuesto = costo − costo / (1 + tasa).
@@ -105,7 +115,9 @@ def base_comparable(
     def estimacion(motivo: str) -> BaseComparable:
         return BaseComparable(costo, False, motivo)
 
-    if referencia.origen not in ("compra", "stock_inicial"):
+    # Sólo una COMPRA confirma. El stock inicial valoriza la apertura con el
+    # costo que declaró el catálogo (decisión 3: estimación, no compra).
+    if referencia.origen != "compra":
         return estimacion(MOTIVO_ESTIMACION)
     regimen = regimen_para_base(fiscal_condition_crudo)
     if regimen not in ("ri", "no_recupera"):
@@ -139,6 +151,8 @@ def base_comparable(
         iva = _impuesto_unitario(costo, referencia, incluido=True)
         if iva is None:
             return estimacion(MOTIVO_SIN_IMPORTE_NI_TASA)
+        if iva >= costo:
+            return estimacion(MOTIVO_IVA_MAYOR_QUE_COSTO)
         return BaseComparable((costo - iva).quantize(CENTAVO, rounding=ROUND_HALF_UP), True)
 
     # No recuperable: integra el costo. Incluido → ya está; adicional → se suma.
