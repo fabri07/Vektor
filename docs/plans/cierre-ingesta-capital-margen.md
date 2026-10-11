@@ -46,6 +46,10 @@ Este plan consolida mi v2 con el plan consolidado que trajo el dueño. Tomo de e
 - **Se agrega la reparación M·R** del stock inicial importado como compra (abajo). El `--apply` lo autoriza el dueño aparte.
 - **El stock de apertura queda sólo como saldo inicial de inventario.** Contarlo además como aporte de capital en especie es opcional y va en D·6, con confirmación del dueño de que lo aportaron los socios.
 
+### Decisiones del dueño (2026-10-11), al cerrar M·1
+- **IVA en monotributo e informal:** se trata como no recuperable por régimen, sin confirmarlo compra por compra (así quedó en `base_comparable` de M·1d).
+- **Envío desconocido:** se mantiene estricto. Un costo con envío `desconocido` no da margen confirmado: sale como estimación con su motivo hasta que la compra pida envío e IVA (M·3 / B·5). No se toma «desconocido» como «no hubo envío» en ninguna ruta.
+
 ## Contrato de ejecución (vale para todos los pasos)
 
 - **Autorización por fase.** Antes de cada fase muestro su lista de pasos con lo que cambia y cómo se acepta. Tu OK de la fase cubre sus pasos y sus merges. Si un paso cambia de alcance o necesita una decisión nueva, el workflow se detiene y te pregunta.
