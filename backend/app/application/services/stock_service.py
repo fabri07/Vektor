@@ -577,7 +577,7 @@ async def increment_stock(
     )
     db.add(movement)
     await db.flush()
-    await recalcular_costo_vigente(db, tenant_id, [product_id])
+    await recalcular_costo_vigente(db, tenant_id, [product_id], movimiento_nuevo=movement.id)
 
     event_payload = {
         "tenant_id": str(tenant_id),

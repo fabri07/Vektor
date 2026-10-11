@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest.mock
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -202,3 +202,74 @@ async def test_borrar_el_catalogo_no_deja_su_costo_para_el_proximo_recalculo(
 
     await _comprar(db_session, sample_tenant, p, "50", datetime(2026, 1, 10, 10))
     assert p.unit_cost_ars == Decimal("50.00")
+
+
+async def test_alta_de_stock_sin_costo_no_pisa_un_costo_legado_con_una_compra_vieja(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión M·1c-1 (P1). Un costo anterior a M·1c (sin procedencia) puede ser
+    más nuevo que cualquier compra: un `UPDATE_STOCK` sin costo o un comprobante
+    atrasado no lo pueden reemplazar por el de una compra de junio."""
+    p = await _producto(db_session, sample_tenant)
+    await _comprar(db_session, sample_tenant, p, "30", datetime(2026, 6, 1, 10))
+    # Costo legado, posterior y sin procedencia (catálogo/PATCH previos al deploy).
+    p.unit_cost_ars = Decimal("500")
+    p.custom_fields = {}
+    await db_session.flush()
+
+    with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+        await increment_stock(p.id, sample_tenant.tenant_id, 3, None, "chat", db_session)
+    await db_session.refresh(p)
+    assert p.unit_cost_ars == Decimal("500")
+
+    await _comprar(db_session, sample_tenant, p, "40", datetime(2026, 5, 1, 10))
+    assert p.unit_cost_ars == Decimal("500")
+
+    # Una compra nueva y más reciente sí lo actualiza, como antes de M·1c.
+    await _comprar(db_session, sample_tenant, p, "520", datetime(2026, 9, 30, 10))
+    assert p.unit_cost_ars == Decimal("520.00")
+
+
+async def test_releer_un_catalogo_viejo_no_le_gana_a_una_compra_posterior(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión M·1c-1 (P2): la fecha del catálogo es la de la CARGA del archivo
+    (`UploadedFile.created_at`), no la de la relectura."""
+    archivo = UploadedFile(
+        tenant_id=sample_tenant.tenant_id,
+        uploaded_by=None,
+        original_filename="lista_enero.xlsx",
+        s3_key=f"uploads/test/{uuid.uuid4()}/lista_enero.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=1024,
+        purpose="general",
+        status="uploaded",
+        processing_status=PROCESSING_STATUS_DONE,
+        parsed_summary_json={},
+        ingestion_version=INGESTION_VERSION,
+        created_at=datetime(2026, 1, 5, 12, tzinfo=UTC),
+    )
+    db_session.add(archivo)
+    p = await _producto(db_session, sample_tenant, "Azucar 1kg")
+    await _comprar(db_session, sample_tenant, p, "150", datetime(2026, 9, 10, 10))
+    assert p.unit_cost_ars == Decimal("150.00")
+
+    await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        {
+            "file_type": "spreadsheet",
+            "inferred_type": "stock",
+            "has_producto": True,
+            "stock_detectado": [
+                {"producto": "Azucar 1kg", "precio_venta": "300", "costo_unitario": "100"}
+            ],
+        },
+        {"productos": True},
+        uploaded_file_id=archivo.id,
+    )
+    await db_session.flush()
+    await db_session.refresh(p)
+    assert p.unit_cost_ars == Decimal("150.00")
+    assert (p.custom_fields or {})[ORIGEN_FIELD] == "compra"
+    assert (p.custom_fields or {})[CATALOGO_FIELD]["fecha"].startswith("2026-01-05")

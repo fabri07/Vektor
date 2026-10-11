@@ -13,6 +13,7 @@ from app.domain.costo_vigente import (
     MANUAL_FIELD,
     ORIGEN_FIELD,
     CostoFechado,
+    aplicar_costo_de_catalogo,
     conservar_claves_del_costo,
     custom_fields_tras_editar_costo,
     decidir_costo_vigente,
@@ -130,3 +131,91 @@ class TestEdiciones:
         assert r["propio"] == "ok"
         assert MANUAL_FIELD not in r
         assert r[CATALOGO_FIELD] == anteriores[CATALOGO_FIELD]
+
+
+class TestRevisionMismoDia:
+    """Revisión M·1c-1 (P2): una compra «de hoy» trae sólo la fecha (00:00)."""
+
+    def _compra_de_hoy(self, cargada_utc: datetime) -> CostoDeReferencia:
+        return CostoDeReferencia(
+            origen="compra",
+            costo_unitario=Decimal("100"),
+            fecha=datetime(2026, 9, 10, tzinfo=UTC),
+            movement_id=uuid.uuid4(),
+            cargada_en=cargada_utc,
+        )
+
+    def test_compra_cargada_despues_de_la_edicion_del_mismo_dia_gana(self) -> None:
+        manual = CostoFechado(Decimal("90"), datetime(2026, 9, 10, 10, 0))
+        # 18:00 UTC = 15:00 AR, después de la edición de las 10:00.
+        ref = self._compra_de_hoy(datetime(2026, 9, 10, 18, 0, tzinfo=UTC))
+        v = decidir_costo_vigente(ref, manual, None)
+        assert v is not None and v.origen == "compra"
+
+    def test_compra_cargada_antes_de_la_edicion_del_mismo_dia_pierde(self) -> None:
+        manual = CostoFechado(Decimal("90"), datetime(2026, 9, 10, 10, 0))
+        ref = self._compra_de_hoy(datetime(2026, 9, 10, 11, 0, tzinfo=UTC))  # 08:00 AR
+        v = decidir_costo_vigente(ref, manual, None)
+        assert v is not None and v.origen == "manual"
+
+    def test_compra_de_un_dia_anterior_cargada_hoy_no_le_gana_a_la_edicion_de_hoy(
+        self,
+    ) -> None:
+        manual = CostoFechado(Decimal("90"), datetime(2026, 9, 11, 10, 0))
+        ref = self._compra_de_hoy(datetime(2026, 9, 11, 20, 0, tzinfo=UTC))
+        v = decidir_costo_vigente(ref, manual, None)
+        assert v is not None and v.origen == "manual"
+
+
+class TestRevisionSinProcedencia:
+    """Revisión M·1c-1 (P1): costo anterior a M·1c, sin fecha conocida."""
+
+    def test_solo_la_compra_recien_registrada_y_mas_reciente_lo_reemplaza(self) -> None:
+        ref = _compra("100", _SEP_10)
+        assert (
+            decidir_costo_vigente(
+                ref, None, None, sin_procedencia=True, movimiento_nuevo=ref.movement_id
+            )
+            is not None
+        )
+
+    def test_una_compra_vieja_no_lo_pisa(self) -> None:
+        """Comprobante atrasado o alta de stock sin costo: la referencia es otra
+        compra, no la recién registrada."""
+        ref = _compra("30", datetime(2026, 6, 1))
+        assert (
+            decidir_costo_vigente(
+                ref, None, None, sin_procedencia=True, movimiento_nuevo=uuid.uuid4()
+            )
+            is None
+        )
+        assert decidir_costo_vigente(ref, None, None, sin_procedencia=True) is None
+
+
+class TestRevisionCatalogo:
+    """Revisión M·1c-1 (P2): el catálogo se fecha con la CARGA del archivo."""
+
+    def test_releer_un_catalogo_viejo_no_le_gana_a_una_compra_posterior(self) -> None:
+        cf = {ORIGEN_FIELD: "compra", FECHA_FIELD: "2026-09-10T00:00:00"}
+        costo, nuevo = aplicar_costo_de_catalogo(
+            cf, Decimal("150"), Decimal("100"), datetime(2026, 1, 5, 9, 0)
+        )
+        assert costo == Decimal("150")
+        assert nuevo[ORIGEN_FIELD] == "compra"
+        # La carga queda guardada igual (si se anula la compra, cuenta).
+        assert leer_costo_fechado(nuevo, CATALOGO_FIELD) == CostoFechado(
+            Decimal("100"), datetime(2026, 1, 5, 9, 0)
+        )
+
+    def test_catalogo_mas_nuevo_manda(self) -> None:
+        cf = {ORIGEN_FIELD: "compra", FECHA_FIELD: "2026-09-10T00:00:00"}
+        costo, nuevo = aplicar_costo_de_catalogo(
+            cf, Decimal("150"), Decimal("100"), datetime(2026, 9, 20, 9, 0)
+        )
+        assert costo == Decimal("100") and nuevo[ORIGEN_FIELD] == "catalogo"
+
+    def test_producto_sin_procedencia_toma_el_catalogo_como_antes(self) -> None:
+        costo, nuevo = aplicar_costo_de_catalogo(
+            {}, Decimal("150"), Decimal("100"), datetime(2026, 1, 5)
+        )
+        assert costo == Decimal("100") and nuevo[ORIGEN_FIELD] == "catalogo"

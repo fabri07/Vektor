@@ -91,6 +91,9 @@ class CostoDeReferencia:
     # Un movimiento viejo NO se considera confirmado aunque tenga costo.
     contrato_confirmado: bool = False
     motivo: str | None = None
+    #: Cuándo se REGISTRÓ la compra elegida (``created_at``, UTC real). M·1c lo
+    #: usa para desempatar dentro del mismo día de negocio contra una edición.
+    cargada_en: datetime | None = None
 
     @property
     def es_estimacion(self) -> bool:
@@ -135,6 +138,7 @@ def _desde_compra(c: CompraCandidata, origen: Origen) -> CostoDeReferencia:
         tax_recoverable=c.tax_recoverable,
         document_ref=c.document_ref,
         contrato_confirmado=c.contract_version is not None and c.contract_version >= 1,
+        cargada_en=c.cargada_en,
     )
 
 

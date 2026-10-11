@@ -25,6 +25,7 @@ from app.domain.business_time import today_ar
 from app.domain.costo_vigente import (
     CATALOGO_FIELD,
     MANUAL_FIELD,
+    ORIGEN_FIELD,
     decidir_costo_vigente,
     leer_costo_fechado,
     sellar,
@@ -37,7 +38,12 @@ async def recalcular_costo_vigente(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     product_ids: Iterable[uuid.UUID],
+    *,
+    movimiento_nuevo: uuid.UUID | None = None,
 ) -> None:
+    """``movimiento_nuevo``: la compra que se acaba de registrar. Un producto sin
+    procedencia (costo anterior a M·1c) sólo cambia si ESA compra es la más
+    reciente (ver ``decidir_costo_vigente``)."""
     ids = list(dict.fromkeys(product_ids))
     if not ids:
         return
@@ -60,6 +66,8 @@ async def recalcular_costo_vigente(
             referencia,
             leer_costo_fechado(producto.custom_fields, MANUAL_FIELD),
             leer_costo_fechado(producto.custom_fields, CATALOGO_FIELD),
+            sin_procedencia=ORIGEN_FIELD not in (producto.custom_fields or {}),
+            movimiento_nuevo=movimiento_nuevo,
         )
         if vigente is None:
             continue

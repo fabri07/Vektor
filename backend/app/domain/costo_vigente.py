@@ -36,10 +36,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal
+from uuid import UUID
 
+from app.domain.business_time import AR_TZ
 from app.domain.costo_de_referencia import CostoDeReferencia
 from app.domain.purchase_cost import CON_FLETE, COSTO_BASE_FIELD, SIN_FLETE
 
@@ -105,18 +107,41 @@ def _base_de_la_compra(envio: str) -> str | None:
     return None
 
 
+def _orden_de_la_compra(referencia: CostoDeReferencia, fecha: datetime) -> tuple[date, datetime]:
+    """Día de negocio de la compra y, para desempatar dentro del día, cuándo se
+    REGISTRÓ (en hora argentina). Una compra «de hoy» suele traer sólo la fecha
+    (00:00): compararla por hora contra una edición de las 10:00 la haría perder
+    aunque se haya cargado a las 15:00."""
+    if referencia.cargada_en is None:
+        return fecha.date(), fecha
+    cargada = referencia.cargada_en
+    if cargada.tzinfo is None:
+        cargada = cargada.replace(tzinfo=UTC)
+    return fecha.date(), cargada.astimezone(AR_TZ).replace(tzinfo=None)
+
+
 def decidir_costo_vigente(
     referencia: CostoDeReferencia,
     manual: CostoFechado | None,
     catalogo: CostoFechado | None,
+    *,
+    sin_procedencia: bool = False,
+    movimiento_nuevo: UUID | None = None,
 ) -> CostoVigente | None:
-    """La fuente más reciente por fecha, o ``None`` si no hay ninguna fechada.
+    """La fuente más reciente, o ``None`` = «no tocar».
 
-    ``None`` significa «no tocar»: un producto sin compra, sin edición y sin
-    catálogo registrados conserva el costo que tenga (dato previo a M·1c).
-    Empates: manual > catálogo > compra.
+    **Orden:** primero el DÍA de negocio; dentro del mismo día, la hora en que se
+    registró cada cosa (la compra, por su ``created_at``; una edición, por su
+    hora). Empate exacto: manual > catálogo > compra.
+
+    **Producto sin procedencia** (``sin_procedencia``: su costo es anterior a
+    M·1c y no se sabe de cuándo es). Su costo cargado puede ser más nuevo que
+    cualquier compra, así que una compra sólo lo reemplaza si es la que se ACABA
+    de registrar (``movimiento_nuevo``) y además es la más reciente: el
+    comportamiento de antes («la compra nueva actualiza el costo») sin que un
+    comprobante atrasado o un alta de stock sin costo lo pisen con uno viejo.
     """
-    candidatos: list[tuple[datetime, int, CostoVigente]] = []
+    candidatos: list[tuple[tuple[date, datetime], int, CostoVigente]] = []
     origen_compra: OrigenVigente | None = (
         "compra"
         if referencia.origen == "compra"
@@ -132,7 +157,7 @@ def decidir_costo_vigente(
         fecha = _sin_zona(referencia.fecha)
         candidatos.append(
             (
-                fecha,
+                _orden_de_la_compra(referencia, fecha),
                 0,
                 CostoVigente(
                     costo=referencia.costo_unitario,
@@ -144,15 +169,30 @@ def decidir_costo_vigente(
         )
     if catalogo is not None:
         candidatos.append(
-            (catalogo.fecha, 1, CostoVigente(catalogo.costo, "catalogo", catalogo.fecha, None))
+            (
+                (catalogo.fecha.date(), catalogo.fecha),
+                1,
+                CostoVigente(catalogo.costo, "catalogo", catalogo.fecha, None),
+            )
         )
     if manual is not None:
         candidatos.append(
-            (manual.fecha, 2, CostoVigente(manual.costo, "manual", manual.fecha, None))
+            (
+                (manual.fecha.date(), manual.fecha),
+                2,
+                CostoVigente(manual.costo, "manual", manual.fecha, None),
+            )
         )
     if not candidatos:
         return None
-    return max(candidatos, key=lambda c: (c[0], c[1]))[2]
+    elegido = max(candidatos, key=lambda c: (c[0], c[1]))[2]
+    if (
+        sin_procedencia
+        and elegido.origen in ("compra", "stock_inicial")
+        and (movimiento_nuevo is None or referencia.movement_id != movimiento_nuevo)
+    ):
+        return None
+    return elegido
 
 
 def sellar(custom_fields: Mapping[str, Any] | None, vigente: CostoVigente) -> dict[str, Any]:
@@ -242,3 +282,32 @@ def custom_fields_tras_editar_costo(
     if costo_nuevo is None or costo_nuevo <= 0:
         return quitar_edicion_manual(custom_fields)
     return registrar_edicion(custom_fields, MANUAL_FIELD, costo_nuevo, ahora)
+
+
+def aplicar_costo_de_catalogo(
+    custom_fields: Mapping[str, Any] | None,
+    costo_actual: Decimal | None,
+    costo: Decimal,
+    fecha: datetime,
+) -> tuple[Decimal | None, dict[str, Any]]:
+    """Una carga de catálogo: SIEMPRE se guarda; manda sólo si es la más reciente.
+
+    ``fecha`` es la de la CARGA del archivo (``UploadedFile.created_at``), no la
+    de hoy: volver a leer en octubre un catálogo de enero no puede ganarle a las
+    compras de febrero a septiembre. Devuelve ``(costo_que_queda, custom_fields)``.
+
+    Un producto sin procedencia (costo anterior a M·1c, fecha desconocida) toma
+    el del catálogo, como antes de M·1c.
+    """
+    fecha = _sin_zona(fecha)
+    nuevos = {**(custom_fields or {})}
+    nuevos[CATALOGO_FIELD] = {"costo": str(costo), "fecha": fecha.isoformat()}
+    vigente_desde: datetime | None = None
+    if ORIGEN_FIELD in nuevos and FECHA_FIELD in nuevos:
+        try:
+            vigente_desde = _sin_zona(datetime.fromisoformat(str(nuevos[FECHA_FIELD])))
+        except ValueError:
+            vigente_desde = None
+    if vigente_desde is not None and fecha < vigente_desde:
+        return costo_actual, nuevos
+    return costo, sellar(nuevos, CostoVigente(costo, "catalogo", fecha, None))
