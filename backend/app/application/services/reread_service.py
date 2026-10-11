@@ -98,6 +98,7 @@ from app.application.services.column_risk import (
     resolve_contexts,
     split_derivable_decisions,
 )
+from app.application.services.costo_vigente_service import recalcular_pendientes
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     FILAS_NUEVAS_BAJO_HUELLA,
@@ -4316,6 +4317,11 @@ async def apply_reread(
         # Compuerta: lo que se perdió A SABIENDAS (aceptado), para el historial.
         "data_loss": perdida.as_dict() if perdida.hay_perdida else None,
     }
+    # M·1c-2: red de seguridad. Hoy no queda nada en la cola: las compras que
+    # anula `_reconcile` las drena el reimport (antes de sellar `updated_at`), y
+    # lo que anula después (`_superseder_clasificados_de_otros`) son ventas. Si
+    # algún día anulara compras acá, el recálculo correría DESPUÉS del sello.
+    await recalcular_pendientes(session, tenant_id)
     await session.flush()
 
     _trigger_score(session, tenant_id)
@@ -4896,6 +4902,8 @@ async def undo_reread(
     # 5. Maestros (clientes/proveedores) + productos: restaurar los no tocados
     # después de la relectura, saltear (y reportar) los editados después.
     not_reverted_entities = await _undo_master_and_product_items(session, tenant_id, items)
+    # M·1c-2: con los movimientos ya revertidos y los productos restaurados.
+    await recalcular_pendientes(session, tenant_id)
 
     run.status = "REVERTED"
     run.completed_at = datetime.now(UTC)

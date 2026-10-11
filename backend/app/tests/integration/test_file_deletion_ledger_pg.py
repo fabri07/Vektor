@@ -161,11 +161,10 @@ async def test_un_producto_preexistente_editado_despues_se_conserva_y_se_informa
                 tenant_id=tenant_id,
                 name=esc.PRODUCTO,
                 sale_price_ars=Decimal("2100"),
-                # Costo en 0 a propósito: una compra facturada NO pisa un costo de
-                # referencia ya cargado (`debe_pisar_costo_de_referencia`, F-H6.d),
-                # justamente para no perder un costo que incluía flete. Con 0 sí lo
-                # recibe — si no, el stock quedaría valuado en cero. Es la única
-                # forma de que este escenario tenga un costo que RESTAURAR.
+                # Costo en 0 a propósito: desde M·1c un producto con costo previo
+                # y sin procedencia no lo cambia una compra que no sea la más
+                # reciente; con 0 no hay nada que proteger y la compra lo llena.
+                # Así el escenario tiene un costo que RESTAURAR.
                 unit_cost_ars=Decimal("0"),
                 stock_units=10,
             )

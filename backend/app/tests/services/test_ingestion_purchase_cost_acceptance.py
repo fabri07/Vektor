@@ -633,11 +633,16 @@ class TestUnaCompraNuevaNoPisaUnCostoQueIncluiaFlete:
     """V5, end-to-end. El mismo producto entra dos veces con formatos distintos.
 
     Primero con el flete capitalizado (1230) y después con una factura que sólo
-    declara el renglón (1100). Antes la segunda pisaba a la primera y el costo
-    "bajaba" sin que nada se abaratara: cambió el formato de la planilla.
+    declara el renglón (1100).
+
+    **M·1c-2 (decisión del dueño 2026-10-11):** la guarda que conservaba el 1230
+    se reemplazó por un RÓTULO. Conservarlo dejaba el costo viejo para siempre si
+    las compras siguientes traían el flete aparte. Ahora manda la compra más
+    reciente y `_vektor_costo_base` dice qué incluye; el margen (M·1d/M·2) trata
+    una base distinta como no comparable en vez de esconderla.
     """
 
-    async def test_el_costo_con_flete_sobrevive_a_una_factura_sin_flete(
+    async def test_la_compra_mas_nueva_manda_y_el_rotulo_dice_que_no_trae_flete(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
         await _importar(
@@ -661,10 +666,10 @@ class TestUnaCompraNuevaNoPisaUnCostoQueIncluiaFlete:
             ],
         )
 
-        # No se pisó: 1100 facturado no es más barato que 1230 con flete adentro.
-        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1230.00")
-        # …y la procedencia tampoco, que si no describirían cosas distintas.
-        assert await _procedencia_del_costo(db_session, sample_tenant) == "con_flete"
+        # Manda la compra de abril; el rótulo ya no dice «con flete»: esta
+        # factura no declara si lo trae (envío desconocido → sin rótulo).
+        assert await _costo_del_producto(db_session, sample_tenant) == Decimal("1100.00")
+        assert await _procedencia_del_costo(db_session, sample_tenant) is None
         # El precio de ESTA compra no se perdió: vive en su movimiento.
         movs = (
             (

@@ -34,7 +34,7 @@ hora argentina (M·1b).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -87,9 +87,6 @@ class CostoVigente:
     #: mitad del orden (día de negocio, registro) que usan TODAS las decisiones.
     registrado: datetime | None = None
 
-    def orden(self) -> tuple[date, datetime]:
-        return self.fecha.date(), self.registrado or self.fecha
-
 
 def _sin_zona(dt: datetime) -> datetime:
     return dt.replace(tzinfo=None)
@@ -137,7 +134,7 @@ def decidir_costo_vigente(
     catalogo: CostoFechado | None,
     *,
     sin_procedencia: bool = False,
-    movimiento_nuevo: UUID | None = None,
+    movimientos_nuevos: Collection[UUID] = (),
 ) -> CostoVigente | None:
     """La fuente más reciente, o ``None`` = «no tocar».
 
@@ -147,8 +144,8 @@ def decidir_costo_vigente(
 
     **Producto sin procedencia** (``sin_procedencia``: su costo es anterior a
     M·1c y no se sabe de cuándo es). Su costo cargado puede ser más nuevo que
-    cualquier compra, así que una compra sólo lo reemplaza si es la que se ACABA
-    de registrar (``movimiento_nuevo``) y además es la más reciente: el
+    cualquier compra, así que una compra sólo lo reemplaza si es una de las que
+    se ACABAN de registrar (``movimientos_nuevos``) y además es la más reciente: el
     comportamiento de antes («la compra nueva actualiza el costo») sin que un
     comprobante atrasado o un alta de stock sin costo lo pisen con uno viejo.
     """
@@ -202,7 +199,7 @@ def decidir_costo_vigente(
     if (
         sin_procedencia
         and elegido.origen in ("compra", "stock_inicial")
-        and (movimiento_nuevo is None or referencia.movement_id != movimiento_nuevo)
+        and referencia.movement_id not in movimientos_nuevos
     ):
         return None
     return elegido
