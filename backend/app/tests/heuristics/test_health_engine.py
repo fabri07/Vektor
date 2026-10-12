@@ -56,6 +56,7 @@ def _make_state(
     cash_source: str = "onboarding",
     liquid_inflow_est: Decimal = Decimal("0"),
     liquid_outflow_est: Decimal = Decimal("0"),
+    margin_status: str | None = None,
 ) -> BusinessState:
     return BusinessState(
         snapshot_id=uuid.uuid4(),
@@ -75,6 +76,11 @@ def _make_state(
         cash_source=cash_source,
         liquid_inflow_est=liquid_inflow_est,
         liquid_outflow_est=liquid_outflow_est,
+        # M·2b-3: el margen sale de FactsService; acá se fija el MISMO costo
+        # vendido que la fórmula vieja restaba, para conservar los números.
+        margin_status=margin_status or ("confirmado" if monthly_sales_est > 0 else "ausente"),
+        margin_sales_base=monthly_sales_est,
+        cogs_sold_est=monthly_inventory_cost_est if monthly_sales_est > 0 else None,
     )
 
 
@@ -104,6 +110,7 @@ def test_kiosco_healthy_margin_scores_high() -> None:
     )
     result: HealthScoreResult = calculate_health_score(state)
 
+    assert result.score_margin is not None
     assert (
         70 <= result.score_margin <= 89
     ), f"Expected score_margin in [70, 89], got {result.score_margin}"
@@ -233,12 +240,16 @@ def test_score_cap_with_low_completeness() -> None:
     assert result.score_total == 60
 
 
-def test_health_engine_margin_no_sales_neutral() -> None:
+def test_health_engine_margin_sin_ventas_es_ausente() -> None:
+    """M·2b-3: sin ventas no hay margen. Antes daba 50 «neutral», un número
+    inventado que entraba al total con su peso."""
     state = _make_state(monthly_sales_est=Decimal("0"))
 
     result = calculate_health_score(state)
 
-    assert result.score_margin == 50
+    assert result.score_margin is None
+    assert result.margin_status == "ausente"
+    assert result.margin_net_ratio is None
 
 
 # ── Test 5: cash wins tie-break over margin ───────────────────────────────────
@@ -269,6 +280,7 @@ def test_primary_risk_cash_wins_when_cash_is_lower_than_margin() -> None:
     )
     result: HealthScoreResult = calculate_health_score(state)
 
+    assert result.score_margin is not None
     assert result.score_cash < result.score_margin
     assert result.primary_risk_code == "CASH_LOW"
 
@@ -381,6 +393,7 @@ def test_unknown_cash_excluded_from_total_and_risk() -> None:
         liquid_outflow_est=Decimal("0"),
     )
     result = calculate_health_score(state)
+    assert result.score_margin is not None
     assert result.cash_source == "desconocido"
     assert result.primary_risk_code != "CASH_LOW"
     # El total se computa solo con las dimensiones conocidas (sin caja=50 arrastrando).
@@ -395,3 +408,78 @@ def test_unknown_cash_excluded_from_total_and_risk() -> None:
         / 0.70
     )
     assert result.score_total == expected, f"total={result.score_total} expected={expected}"
+
+
+# ── M·2b-3: el margen sale del costo VENDIDO (FactsService) ───────────────────
+
+
+def test_margen_usa_el_costo_vendido_y_no_la_mercaderia_comprada() -> None:
+    """El caso ASTERIA: un stock inicial importado como compra (mercadería del mes
+    ≫ ventas) daba −776%. El subscore resta lo VENDIDO, no lo comprado."""
+    state = _make_state(
+        monthly_sales_est=Decimal("100000"),
+        monthly_inventory_cost_est=Decimal("876000"),  # la compra del mes
+        monthly_fixed_expenses_est=Decimal("10000"),
+    )
+    state.cogs_sold_est = Decimal("60000")  # lo que costó lo vendido
+    result = calculate_health_score(state)
+    assert result.margin_net_ratio == pytest.approx(0.30)
+    assert result.score_margin is not None and result.score_margin >= 70
+
+
+def test_margen_ausente_sale_del_total_y_del_riesgo() -> None:
+    """Sin costo suficiente: subscore None, su peso se reparte (igual que la caja
+    desconocida) y no puede ser el riesgo principal."""
+    state = _make_state(margin_status="ausente")
+    state.cogs_sold_est = None
+    state.margin_reason = "cobertura de costo 9,0%"
+    result = calculate_health_score(state)
+    assert result.score_margin is None
+    assert result.margin_status == "ausente"
+    assert result.margin_reason == "cobertura de costo 9,0%"
+    assert result.primary_risk_code != "MARGIN_LOW"
+    expected = round(
+        (
+            result.score_cash * 0.30
+            + result.score_stock * 0.20
+            + result.score_supplier * 0.10
+            + result.score_growth * 0.20
+        )
+        / 0.80
+    )
+    assert result.score_total == expected
+
+
+@pytest.mark.parametrize(
+    ("data_confidence", "esperado"),
+    [("HIGH", "MEDIUM"), ("MEDIUM", "MEDIUM"), ("LOW", "LOW")],
+)
+def test_margen_ausente_baja_la_confianza_un_nivel_sin_llegar_a_low(
+    data_confidence: str, esperado: str
+) -> None:
+    """Decisión del 2026-10-11: un margen ausente baja la confianza un nivel, pero
+    LOW es la compuerta de no-invención y la fija la completitud, no el costo."""
+    from app.heuristics.verticals import (  # noqa: PLC0415
+        BenchmarkProvenance,
+        MarginBenchmark,
+    )
+
+    validado = MarginBenchmark(
+        critical_below=0.05, warning_below=0.10, healthy_min=0.10, healthy_max=0.30,
+        provenance=BenchmarkProvenance.TENANT_OVERRIDE,
+    )
+    state = _make_state(confidence_level=data_confidence, margin_status="ausente")
+    state.cogs_sold_est = None
+    assert calculate_health_score(state, benchmark=validado).confidence_level == esperado
+
+    con_margen = _make_state(confidence_level=data_confidence)
+    assert calculate_health_score(con_margen, benchmark=validado).confidence_level == (
+        data_confidence
+    )
+
+
+def test_margen_estimado_puntua_y_conserva_el_rotulo() -> None:
+    state = _make_state(margin_status="estimado")
+    result = calculate_health_score(state)
+    assert result.score_margin is not None
+    assert result.margin_status == "estimado"

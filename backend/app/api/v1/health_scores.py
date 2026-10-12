@@ -26,11 +26,64 @@ router = APIRouter(dependencies=[Depends(require_active_subscription_for_insight
 
 class MarginHistoryItem(BaseModel):
     snapshot_date: str
-    score_margin: int
+    #: ``None`` = margen ausente (sin costo suficiente), nunca 0.
+    score_margin: int | None
     revenue_est: float
-    cogs_est: float
+    cogs_est: float | None
     fixed_expenses_est: float
-    margin_pct: float
+    margin_pct: float | None
+    #: confirmado | estimado | ausente; ``None`` en snapshots anteriores a M·2b-3.
+    margin_status: str | None = None
+    #: "costo_vendido" (M·2b-3, FactsService) | "mercaderia_comprada" (fórmula
+    #: vieja de los snapshots anteriores: restaba lo COMPRADO, no lo vendido).
+    margin_basis: str
+
+
+def _margin_history_item(snap: Any) -> MarginHistoryItem:
+    inputs: dict[str, Any] = snap.score_inputs_json or {}
+    fixed = float(str(inputs.get("monthly_fixed_expenses_est") or 0))
+    if "margin_status" in inputs:
+        revenue = float(str(inputs.get("margin_sales_base") or 0))
+        cogs_raw = inputs.get("cogs_sold_est")
+        cogs = None if cogs_raw is None else float(str(cogs_raw))
+        margin_pct = (
+            round((revenue - cogs - fixed) / revenue * 100, 1)
+            if cogs is not None and revenue > 0
+            else None
+        )
+        return MarginHistoryItem(
+            snapshot_date=snap.snapshot_date.isoformat(),
+            score_margin=snap.score_margin,
+            revenue_est=revenue,
+            cogs_est=cogs,
+            fixed_expenses_est=fixed,
+            margin_pct=margin_pct,
+            margin_status=inputs["margin_status"],
+            margin_basis="costo_vendido",
+        )
+    revenue = float(str(inputs.get("monthly_sales_est") or 0))
+    cogs_old = float(str(inputs.get("monthly_inventory_cost_est") or 0))
+    return MarginHistoryItem(
+        snapshot_date=snap.snapshot_date.isoformat(),
+        score_margin=snap.score_margin,
+        revenue_est=revenue,
+        cogs_est=cogs_old,
+        fixed_expenses_est=fixed,
+        margin_pct=(
+            round((revenue - cogs_old - fixed) / revenue * 100, 1) if revenue > 0 else None
+        ),
+        margin_basis="mercaderia_comprada",
+    )
+
+
+def _margin_fields(inputs: dict[str, Any] | None) -> dict[str, Any]:
+    """Estado del margen persistido en el snapshot (M·2b-3); vacío si es viejo."""
+    data = inputs or {}
+    return {
+        "margin_status": data.get("margin_status"),
+        "margin_reason": data.get("margin_reason"),
+        "cost_coverage_total_pct": data.get("cost_coverage_total_pct"),
+    }
 
 
 @router.get(
@@ -207,6 +260,7 @@ async def get_latest_score(
         created_at=snapshot.created_at,
         is_demo_data=tenant.is_demo,
         cash_source=(snapshot.score_inputs_json or {}).get("cash_source"),
+        **_margin_fields(snapshot.score_inputs_json),
     )
 
 
@@ -222,30 +276,15 @@ async def get_margin_history(
 ) -> list[MarginHistoryItem]:
     """
     Retorna los últimos N snapshots con composición del margen.
-    Lee monthly_sales_est / cogs_est / fixed_expenses_est desde score_inputs_json.
+    Desde M·2b-3 lee el ingreso y el costo VENDIDO que midió FactsService
+    (``margin_sales_base`` / ``cogs_sold_est``); los snapshots anteriores, la
+    fórmula vieja rotulada ``margin_basis="mercaderia_comprada"``.
     No requiere tabla nueva — los datos ya están en el snapshot.
     """
     repo = HealthScoreRepository(session)
     snapshots = await repo.list_by_tenant(tenant.tenant_id, limit=limit)
 
-    result = []
-    for snap in snapshots:
-        inputs: dict[str, Any] = snap.score_inputs_json or {}
-        revenue = float(str(inputs.get("monthly_sales_est") or 0))
-        cogs = float(str(inputs.get("monthly_inventory_cost_est") or 0))
-        fixed = float(str(inputs.get("monthly_fixed_expenses_est") or 0))
-        margin_pct = round((revenue - cogs - fixed) / revenue * 100, 1) if revenue > 0 else 0.0
-        result.append(
-            MarginHistoryItem(
-                snapshot_date=snap.snapshot_date.isoformat(),
-                score_margin=snap.score_margin or 0,
-                revenue_est=revenue,
-                cogs_est=cogs,
-                fixed_expenses_est=fixed,
-                margin_pct=margin_pct,
-            )
-        )
-    return result
+    return [_margin_history_item(snap) for snap in snapshots]
 
 
 @router.get(
@@ -266,7 +305,7 @@ async def get_score_history_v2(
             tenant_id=s.tenant_id,
             score_total=int(s.total_score),
             score_cash=s.score_cash or 0,
-            score_margin=s.score_margin or 0,
+            score_margin=s.score_margin,
             score_stock=s.score_stock or 0,
             score_supplier=s.score_supplier or 0,
             score_growth=s.score_growth,  # None si es snapshot v1
@@ -276,6 +315,7 @@ async def get_score_history_v2(
             level=s.level,
             created_at=s.created_at,
             cash_source=(s.score_inputs_json or {}).get("cash_source"),
+            **_margin_fields(s.score_inputs_json),
         )
         for s in snapshots
         if s.score_cash is not None  # only F1-01 snapshots

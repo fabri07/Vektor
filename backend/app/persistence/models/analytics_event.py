@@ -26,7 +26,13 @@ from app.persistence.db.base import Base
 #: Es el reemplazo de un corte por fecha, que dependía de cuándo ocurriera el
 #: deploy. Esto no depende de nada: lo escribe el mismo commit que cambia la
 #: semántica. Los lectores filtran por versión mínima (ver AnalyticsRepository).
-EVENT_SCHEMA_VERSION = 2
+#:
+#: v2 → v3 (M·2b-3): ``margin_ratio`` pasó a ser el margen neto sobre el costo
+#: VENDIDO (FactsService, costo congelado por venta) y sólo se escribe con margen
+#: CONFIRMADO. El v2 restaba la mercadería COMPRADA en el mes: con un stock
+#: inicial importado como compra daba −776%. ``score_margin`` puede ser NULL
+#: (margen ausente).
+EVENT_SCHEMA_VERSION = 3
 
 
 class AnalyticsEvent(Base):

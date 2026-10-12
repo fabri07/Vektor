@@ -37,6 +37,7 @@ def _state(
     products: list[Any] | None = None,
     completeness: float = 75.0,
     confidence: str = "MEDIUM",
+    margin_status: str | None = None,
 ) -> BusinessState:
     return BusinessState(
         snapshot_id=uuid.uuid4(),
@@ -53,6 +54,11 @@ def _state(
         supplier_count=supplier_count,
         products=products or [],
         main_concern=None,
+        # M·2b-3: el margen sale de FactsService; acá se fija el MISMO costo
+        # vendido que la fórmula vieja restaba, para conservar los números.
+        margin_status=margin_status or ("confirmado" if monthly_sales_est > 0 else "ausente"),
+        margin_sales_base=monthly_sales_est,
+        cogs_sold_est=monthly_inventory_cost_est if monthly_sales_est > 0 else None,
     )
 
 
@@ -171,4 +177,6 @@ class TestMarginBenchmarkOverride:
         strict_result = calculate_health_score(state, benchmark=strict_benchmark)
         relaxed_result = calculate_health_score(state, benchmark=relaxed_benchmark)
 
+        assert strict_result.score_margin is not None
+        assert relaxed_result.score_margin is not None
         assert strict_result.score_margin < relaxed_result.score_margin

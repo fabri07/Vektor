@@ -15,6 +15,7 @@ from typing import Any
 
 from app.domain.product import effective_threshold
 from app.domain.verticals import VERTICAL_LABELS, Vertical, parse_vertical
+from app.heuristics.health_engine import margin_net_ratio
 from app.heuristics.verticals.loader import load_margin_benchmark
 
 
@@ -140,26 +141,30 @@ def render_insight(
             )
 
     elif risk_code == "MARGIN_LOW":
+        # El margen del subscore (M·2b-3): costo VENDIDO de FactsService, no la
+        # mercadería comprada. «Estimamos» sólo si el margen es estimado.
         vertical = parse_vertical(state.vertical_code)
-        sales = state.monthly_sales_est
-        if sales > 0:
-            margin_raw = float(
-                (sales - state.monthly_inventory_cost_est - state.monthly_fixed_expenses_est)
-                / sales
-            )
-        else:
-            margin_raw = 0.0
-        margin_pct = round(margin_raw * 100, 1)
+        ratio = margin_net_ratio(state)
         min_pct, max_pct = margin_range_pct(vertical)
+        sales = state.margin_sales_base
         # impact: 5% price increase on monthly sales
-        impacto = state.monthly_sales_est * Decimal("0.05")
+        impacto = sales * Decimal("0.05")
+        margin_pct = "" if ratio is None else str(round(ratio * 100, 1))
         vars_ = {
             "vertical": VERTICAL_LABELS[vertical],
-            "margin_pct": str(margin_pct),
+            "margin_pct": margin_pct,
             "min": str(min_pct),
             "max": str(max_pct),
             "impacto_ars": _fmt_ars(impacto),
         }
+        rango = f"El rango saludable para tu rubro es {min_pct}% – {max_pct}%."
+        if ratio is None:
+            # El snapshot marcó MARGIN_LOW pero el estado de hoy ya no tiene costo
+            # suficiente: se dice eso, nunca un 0%.
+            motivo = state.margin_reason or "sin costo de lo vendido"
+            description_override = f"Hoy no podemos medir tu margen ({motivo}). {rango}"
+        elif state.margin_status != "estimado":
+            description_override = f"Tu margen es de {margin_pct}%. {rango}"
 
     elif risk_code == "STOCK_CRITICAL":
         critical_products = [

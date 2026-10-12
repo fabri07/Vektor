@@ -223,7 +223,9 @@ async def test_validate_job_persists_score(
     snap = result.scalar_one()
 
     assert snap.score_cash is not None, "score_cash debe estar persistido"
-    assert snap.score_margin is not None, "score_margin debe estar persistido"
+    # M·2b-3: sólo onboarding, sin ventas costeadas → margen ausente (NULL).
+    assert snap.score_margin is None, "sin costo vendido el margen es ausente, no un número"
+    assert (snap.score_inputs_json or {}).get("margin_status") == "ausente"
     assert snap.score_stock is not None, "score_stock debe estar persistido"
     assert snap.score_supplier is not None, "score_supplier debe estar persistido"
     assert 0 <= int(snap.total_score) <= 100, f"score_total fuera de rango: {snap.total_score}"

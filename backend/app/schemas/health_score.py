@@ -8,7 +8,8 @@ from pydantic import BaseModel
 
 class DimensionScoreResponse(BaseModel):
     dimension: str
-    value: float
+    #: ``None`` = dimensión ausente (M·2b-3: margen sin costo suficiente).
+    value: float | None
     weight: float
     weighted_value: float
     explanation: str
@@ -59,7 +60,8 @@ class HealthScoreV2Response(BaseModel):
     tenant_id: UUID
     score_total: int
     score_cash: int
-    score_margin: int
+    #: ``None`` = margen ausente (M·2b-3): sin costo suficiente no hay subscore.
+    score_margin: int | None
     score_stock: int
     score_supplier: int
     score_growth: int | None = None  # None → snapshot v1 (pre-Stage-5a)
@@ -72,6 +74,12 @@ class HealthScoreV2Response(BaseModel):
     # Fuente de la caja: "arqueo" | "onboarding" | "flujo" | "desconocido".
     # "flujo" → el frontend muestra el recordatorio de arqueo. None en snapshots viejos.
     cash_source: str | None = None
+    #: Estado del margen: confirmado | estimado | ausente. ``None`` en snapshots
+    #: anteriores a M·2b-3.
+    margin_status: str | None = None
+    #: Motivo de un margen ausente o estimado («cobertura de costo 9,0%»).
+    margin_reason: str | None = None
+    cost_coverage_total_pct: float | None = None
 
 
 class CalculatingResponse(BaseModel):

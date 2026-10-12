@@ -107,7 +107,7 @@ class AgentHealth(BaseAgent):
             )
         if scores.stock_score < 60:
             suggestions.append("Hay productos con quiebre — generá un pedido a tus proveedores.")
-        if scores.margin_score < 50:
+        if scores.margin_score is not None and scores.margin_score < 50:
             suggestions.append("El margen está bajo el umbral saludable — revisá precios y costos.")
         if scores.growth_score < 40:
             suggestions.append("Las ventas cayeron vs el período anterior — analizá la tendencia.")
@@ -497,7 +497,7 @@ class AgentHealth(BaseAgent):
                     "component": "stock",
                 }
             )
-        if scores.margin_score < 40:
+        if scores.margin_score is not None and scores.margin_score < 40:
             alerts.append(
                 {
                     "type": "WARNING",

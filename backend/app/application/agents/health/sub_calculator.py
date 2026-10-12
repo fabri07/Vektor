@@ -24,7 +24,8 @@ class ComponentScoresV2(BaseModel):
     cash_score: int
     stock_score: int
     supplier_score: int
-    margin_score: int
+    #: ``None`` = margen ausente (M·2b-3): sin costo suficiente no hay subscore.
+    margin_score: int | None
     growth_score: int
     total_score: int
     primary_risk_code: str

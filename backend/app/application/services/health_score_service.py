@@ -75,6 +75,15 @@ def _state_to_dict(state: BusinessState) -> dict[str, Any]:
         "cash_source": getattr(state, "cash_source", "desconocido"),
         "liquid_inflow_est": str(getattr(state, "liquid_inflow_est", "0")),
         "liquid_outflow_est": str(getattr(state, "liquid_outflow_est", "0")),
+        # M·2b-3: el margen tal como lo midió FactsService (lo lee /margin-history).
+        "margin_status": state.margin_status,
+        "fixed_expenses_observed": state.fixed_expenses_observed,
+        "margin_reason": state.margin_reason,
+        "margin_sales_base": str(state.margin_sales_base),
+        "cogs_sold_est": None if state.cogs_sold_est is None else str(state.cogs_sold_est),
+        "margin_gross_pct": state.margin_gross_pct,
+        "cost_coverage_confirmed_pct": state.cost_coverage_confirmed_pct,
+        "cost_coverage_total_pct": state.cost_coverage_total_pct,
         "product_count": state.product_count,
         "supplier_count": state.supplier_count,
         "main_concern": state.main_concern,
@@ -91,10 +100,28 @@ def _state_to_dict(state: BusinessState) -> dict[str, Any]:
     }
 
 
+def margin_explanation_for(state: BusinessState, result: HealthScoreResult) -> str:
+    """El margen del subscore dicho con su estado (M·2b-3); nunca un 0 inventado."""
+    if result.margin_net_ratio is None:
+        motivo = state.margin_reason or "sin costo de lo vendido"
+        return f"Sin costo suficiente para medir el margen ({motivo}); no entra en el total."
+    # «Después de fijos» y no «neto»: el margen neto de FactsService es ventas −
+    # TODOS los gastos, otra cuenta (revisión de M·2b-3).
+    neto = result.margin_net_ratio * 100
+    bruto = state.margin_gross_pct
+    if result.margin_status == "estimado":
+        return (
+            f"Margen después de gastos fijos estimado en {neto:.1f}% (bruto {bruto}%; "
+            f"cobertura de costo confirmada {state.cost_coverage_confirmed_pct}%, "
+            f"con estimaciones {state.cost_coverage_total_pct}%)."
+        )
+    return f"Margen después de gastos fijos de {neto:.1f}% (bruto {bruto}%)."
+
+
 def _build_dimensions(
     state: BusinessState,
     result: HealthScoreResult,
-) -> list[dict[str, str]]:
+) -> list[dict[str, str | None]]:
     if state.monthly_fixed_expenses_est > 0:
         cash_ratio = state.cash_on_hand_est / state.monthly_fixed_expenses_est
         cash_explanation = (
@@ -104,18 +131,7 @@ def _build_dimensions(
     else:
         cash_explanation = "Sin gastos fijos cargados; score de caja neutral."
 
-    if state.monthly_sales_est > 0:
-        margin_pct = (
-            (
-                state.monthly_sales_est
-                - state.monthly_inventory_cost_est
-                - state.monthly_fixed_expenses_est
-            )
-            / state.monthly_sales_est
-        ) * Decimal("100")
-        margin_explanation = f"Margen estimado mensual de {margin_pct:.1f}%."
-    else:
-        margin_explanation = "Sin ventas estimadas; score de margen en mínimo."
+    margin_explanation = margin_explanation_for(state, result)
 
     if state.products:
         low_stock_count = sum(
@@ -172,9 +188,14 @@ def _build_dimensions(
         },
         {
             "dimension": "margin",
-            "value": str(result.score_margin),
-            "weight": "0.20",
-            "weighted_value": f"{Decimal(result.score_margin) * Decimal('0.20'):.3f}",
+            # Ausente: sin valor ni peso (el motor lo excluyó del total).
+            "value": None if result.score_margin is None else str(result.score_margin),
+            "weight": "0.00" if result.score_margin is None else "0.20",
+            "weighted_value": (
+                "0.000"
+                if result.score_margin is None
+                else f"{Decimal(result.score_margin) * Decimal('0.20'):.3f}"
+            ),
             "explanation": margin_explanation,
         },
         {
@@ -262,16 +283,15 @@ class HealthScoreService:
         # `None`, no 0.0, cuando el ratio no se puede calcular: un negocio sin
         # ventas no tiene margen 0%, no tiene margen. El cero era una observación
         # fabricada que entraba a los percentiles del rubro como si fuera real.
-        margin_ratio: float | None = None
-        if state.monthly_sales_est > 0:
-            margin_ratio = float(
-                (
-                    state.monthly_sales_est
-                    - state.monthly_inventory_cost_est
-                    - state.monthly_fixed_expenses_est
-                )
-                / state.monthly_sales_est
-            )
+        # M·2b-3: sólo un margen CONFIRMADO alimenta la muestra del rubro; uno
+        # estimado es un supuesto del negocio, no una observación.
+        # Y sólo con gastos fijos OBSERVADOS: con los declarados en el onboarding
+        # una respuesta de formulario entraría como observación (invariante 5b).
+        margin_ratio: float | None = (
+            result.margin_net_ratio
+            if result.margin_status == "confirmado" and state.fixed_expenses_observed
+            else None
+        )
         cash_ratio: float | None = None
         if state.monthly_fixed_expenses_est > 0:
             cash_ratio = float(state.cash_on_hand_est / state.monthly_fixed_expenses_est)

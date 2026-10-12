@@ -23,7 +23,11 @@ _LOOKBACK_DAYS = 90
 #: distintas: un v3 futuro que agregue un campo no invalida a los v2, y atarlas a
 #: la misma constante haría que ese bump descartara en silencio dos años de
 #: observación válida.
-_MIN_TRUSTED_SCHEMA_VERSION = 2
+#:
+#: v3 (M·2b-3): el ``margin_ratio`` v2 restaba la mercadería COMPRADA, no la
+#: vendida (el −776% de ASTERIA). Es otra magnitud: mezclarla con el v3 en los
+#: percentiles del rubro los rompe, así que este bump sí invalida a los v2.
+_MIN_TRUSTED_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)

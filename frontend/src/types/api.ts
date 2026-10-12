@@ -149,7 +149,8 @@ export interface HealthScoreV2Response {
   tenant_id: string;
   score_total: number;
   score_cash: number;
-  score_margin: number;
+  // null = margen ausente (sin costo suficiente de lo vendido): no es 0.
+  score_margin: number | null;
   score_stock: number;
   score_supplier: number;
   score_growth: number | null;   // null = snapshot v1 (pre-Stage-5a)
@@ -162,6 +163,10 @@ export interface HealthScoreV2Response {
   // Fuente de la caja: "arqueo" | "onboarding" | "flujo" | "desconocido" | null.
   // "flujo" → mostrar recordatorio de arqueo. null = snapshot viejo.
   cash_source?: "arqueo" | "onboarding" | "flujo" | "desconocido" | null;
+  // Estado del margen (M·2b-3). null/ausente en snapshots viejos.
+  margin_status?: "confirmado" | "estimado" | "ausente" | null;
+  margin_reason?: string | null;
+  cost_coverage_total_pct?: number | null;
 }
 
 export interface CalculatingResponse {

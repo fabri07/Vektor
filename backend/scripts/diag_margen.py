@@ -116,6 +116,11 @@ class Salud:
     ventas_est: Decimal | None
     inventario_est: Decimal | None
     fijos_est: Decimal | None
+    #: M·2b-3: snapshots nuevos. ``None`` en los anteriores (fórmula vieja).
+    margen_estado: str | None = None
+    margen_motivo: str | None = None
+    ingreso_margen: Decimal | None = None
+    costo_vendido: Decimal | None = None
 
 
 @dataclass
@@ -239,8 +244,20 @@ def margen_neto_det(ventas: Decimal, gastos: Decimal) -> Decimal | None:
 
 
 def margen_salud(s: Salud) -> Decimal | None:
-    """El margen que usa ``health_engine._score_margin``:
-    ``(ventas − inventario − fijos) / ventas`` con los estimados del snapshot."""
+    """El margen del subscore de salud según el snapshot.
+
+    Desde M·2b-3: ``(ingreso − costo vendido − fijos) / ingreso`` con lo que midió
+    FactsService (``None`` si el margen está ausente). Los snapshots anteriores:
+    ``(ventas − inventario − fijos) / ventas``, con la mercadería COMPRADA.
+    """
+    if s.margen_estado is not None:
+        if s.costo_vendido is None or s.ingreso_margen is None or s.ingreso_margen <= 0:
+            return None
+        return (
+            (s.ingreso_margen - s.costo_vendido - (s.fijos_est or Decimal("0")))
+            / s.ingreso_margen
+            * CIEN
+        )
     if s.ventas_est is None or s.ventas_est <= 0:
         return None
     return (
@@ -276,7 +293,7 @@ def explicar_margen_en_cero(d: DatosTenant) -> list[str]:
     """Lo que los datos dicen de un margen que se ve en 0. Sólo afirma lo medido."""
     out: list[str] = []
     s = d.salud
-    if s is not None and s.score_margin == 0:
+    if s is not None and s.margen_estado is None and s.score_margin == 0:
         m = margen_salud(s)
         out.append(
             "- El subscore «Margen» del health score es 0 "
@@ -431,7 +448,16 @@ def informe_tenant(d: DatosTenant, desde: date, hasta: date, ejemplos: int = 3) 
             f"health score {s.fecha.isoformat()}: score_margin",
             s.score_margin if s.score_margin is not None else "sin medición (columna nula)",
         )
-        linea("  (ventas − inventario − fijos) / ventas", pct(margen_salud(s), "ventas est. 0"))
+        if s.margen_estado is None:
+            linea(
+                "  (ventas − inventario − fijos) / ventas (antes de M·2b-3)",
+                pct(margen_salud(s), "ventas est. 0"),
+            )
+        else:
+            linea(
+                f"  (ingreso − costo vendido − fijos) / ingreso [{s.margen_estado}]",
+                pct(margen_salud(s), s.margen_motivo or "margen ausente"),
+            )
     linea("gastos de mercadería en la ventana (criterio BSL)", ars(d.inventario_bsl))
     linea("  de ellos «Stock inicial: …» (catálogo como compra)", ars(d.inventario_stock_inicial))
 
@@ -554,7 +580,11 @@ _SALUD = f"""
 SELECT DISTINCT ON (tenant_id) tenant_id::text AS tenant_id, snapshot_date, score_margin,
        score_inputs_json->>'monthly_sales_est' AS ventas,
        score_inputs_json->>'monthly_inventory_cost_est' AS inventario,
-       score_inputs_json->>'monthly_fixed_expenses_est' AS fijos
+       score_inputs_json->>'monthly_fixed_expenses_est' AS fijos,
+       score_inputs_json->>'margin_status' AS margen_estado,
+       score_inputs_json->>'margin_reason' AS margen_motivo,
+       score_inputs_json->>'margin_sales_base' AS ingreso_margen,
+       score_inputs_json->>'cogs_sold_est' AS costo_vendido
   FROM health_score_snapshots
  WHERE {_FILTRO.format(col="tenant_id")}
  ORDER BY tenant_id, snapshot_date DESC
@@ -624,6 +654,10 @@ async def leer(conn: Any, tenant: str | None, desde: date, hasta: date) -> list[
                 ventas_est=_dec(s["ventas"]),
                 inventario_est=_dec(s["inventario"]),
                 fijos_est=_dec(s["fijos"]),
+                margen_estado=s["margen_estado"],
+                margen_motivo=s["margen_motivo"],
+                ingreso_margen=_dec(s["ingreso_margen"]),
+                costo_vendido=_dec(s["costo_vendido"]),
             )
     return [datos[k] for k in sorted(datos)]
 

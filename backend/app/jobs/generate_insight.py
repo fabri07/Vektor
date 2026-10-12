@@ -167,6 +167,12 @@ async def _run(tenant_id_str: str) -> None:
                         )
                         business_name = name_res.scalar_one_or_none() or "tu negocio"
 
+                        # M·2b-3: margen ausente = «sin medir», nunca 0/100.
+                        margen_txt = (
+                            "sin medir (falta costo de lo vendido)"
+                            if snapshot.score_margin is None
+                            else f"{snapshot.score_margin}/100"
+                        )
                         _client = get_anthropic_async_client(_anthropic.AsyncAnthropic)
                         _resp = await _client.messages.create(
                             model="claude-haiku-4-5",
@@ -193,7 +199,7 @@ async def _run(tenant_id_str: str) -> None:
                                         f"  - Liquidez/Caja: {snapshot.score_cash or 0}/100\n"
                                         f"  - Inventario: {snapshot.score_stock or 0}/100\n"
                                         f"  - Proveedores: {snapshot.score_supplier or 0}/100\n"
-                                        f"  - Margen comercial: {snapshot.score_margin or 0}/100\n"
+                                        f"  - Margen comercial: {margen_txt}\n"
                                         f"Riesgo principal: {risk_code}\n"
                                         f"Confianza de datos: {confidence}"
                                     ),

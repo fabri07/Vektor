@@ -49,6 +49,9 @@ def _state(confidence_level: str = "HIGH", completeness: float = 90.0) -> Busine
         products=[],
         main_concern=None,
         cash_source="onboarding",
+        margin_status="confirmado",
+        margin_sales_base=Decimal("100000"),
+        cogs_sold_est=Decimal("60000"),
     )
 
 

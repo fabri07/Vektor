@@ -10,16 +10,17 @@ reaches score computation directly.
 
 Cache strategy
 --------------
-  Redis key  : business_state:v4:{tenant_id}     — JSON blob, TTL 24 h
-  Redis key  : last_inputs_hash:v4:{tenant_id}   — SHA-256 of input fingerprint, TTL 24 h
+  Redis key  : business_state:v5:{tenant_id}     — JSON blob, TTL 24 h
+  Redis key  : last_inputs_hash:v5:{tenant_id}   — SHA-256 of input fingerprint, TTL 24 h
 
-  El prefijo de versión (`v4:`) se bumpea cuando cambia el FORMATO del blob **o el
+  El prefijo de versión (`v5:`) se bumpea cuando cambia el FORMATO del blob **o el
   SIGNIFICADO de alguno de sus campos**, para no leer con el código nuevo lo que
   escribió el viejo. El segundo caso es el más traicionero: el blob deserializa
   sin error y sirve números calculados con otras reglas. Ver `_cache_key`.
 
 On every call:
-  1. Compute inputs fingerprint (sale_count, expense_count, product_count, profile.updated_at).
+  1. Compute inputs fingerprint (sale_count, expense_count, product_count, profile.updated_at,
+     y el costo congelado de las ventas: M·2c costea sin cambiar ningún conteo).
   2. If cached state exists AND fingerprint matches → return deserialized cached state.
   3. Otherwise recompute, persist snapshot, update both Redis keys, return.
 """
@@ -32,12 +33,19 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from redis.asyncio import Redis
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.facts_provider import (
+    MOTIVO_ERROR,
+    LecturaDeMargenes,
+    leer_margenes,
+)
+from app.domain.business_time import today_ar
 from app.domain.verticals import try_parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessSnapshot
@@ -100,11 +108,30 @@ class BusinessState:
     # Flujos líquidos en la ventana (cash+transfer+qr+debit). Usados en modo "flujo".
     liquid_inflow_est: Decimal = Decimal("0")
     liquid_outflow_est: Decimal = Decimal("0")
+    # ── Margen (M·2b-3): lo mide FactsService, no el BSL (invariante 2c) ─────
+    # Estado de `domain/margen.py`: "confirmado" | "estimado" | "ausente". El
+    # default es "ausente": sin medición no hay margen, nunca uno neutral.
+    margin_status: str = "ausente"
+    # ¿Los gastos fijos salen de gastos registrados (True) o del onboarding?
+    fixed_expenses_observed: bool = False
+    margin_reason: str | None = None
+    # Ingreso comparable de las ventas de la ventana (neto de IVA para un RI) y
+    # costo de lo vendido proyectado con el ratio del cubierto. `None` si ausente.
+    margin_sales_base: Decimal = Decimal("0")
+    cogs_sold_est: Decimal | None = None
+    # Margen bruto % tal cual lo devuelve FactsService (el mismo número del chat).
+    margin_gross_pct: float | None = None
+    cost_coverage_confirmed_pct: float | None = None
+    cost_coverage_total_pct: float | None = None
 
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 
+# v5: el margen (M·2b-3) sale de FactsService sobre el costo congelado por
+# venta. Un blob v4 deserializaría con `margin_status="ausente"` por default y
+# borraría el margen de todos los tenants hasta el siguiente cambio de datos.
+#
 # v4: `data_completeness_score` cambió de SIGNIFICADO — ahora pondera por
 # procedencia (observado vs declarado). El blob v3 se deserializa sin error, que
 # es lo que lo hace peor que un cambio de formato: el fingerprint no depende del
@@ -118,11 +145,11 @@ class BusinessState:
 # `_deserialize_state`. v2: los rulesets pasaron del código corto "kiosco" al
 # canónico "kiosco_almacen".)
 def _cache_key(tenant_id: UUID) -> str:
-    return f"business_state:v4:{tenant_id}"
+    return f"business_state:v5:{tenant_id}"
 
 
 def _hash_key(tenant_id: UUID) -> str:
-    return f"last_inputs_hash:v4:{tenant_id}"
+    return f"last_inputs_hash:v5:{tenant_id}"
 
 
 def _make_fingerprint(
@@ -132,10 +159,14 @@ def _make_fingerprint(
     profile_updated_at: datetime,
     prev_sales_amount: str = "0",
     capital_liquid_out: str = "0",
+    sold_cost: str = "0",
+    confirmed_cost_count: int = 0,
+    dia_ar: str = "",
 ) -> str:
     raw = (
         f"{sale_count}:{expense_count}:{product_count}:"
-        f"{profile_updated_at.isoformat()}:{prev_sales_amount}:{capital_liquid_out}"
+        f"{profile_updated_at.isoformat()}:{prev_sales_amount}:{capital_liquid_out}:"
+        f"{sold_cost}:{confirmed_cost_count}:{dia_ar}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -153,6 +184,8 @@ def _serialize_state(state: BusinessState) -> str:
     d["prev_monthly_sales_est"] = str(state.prev_monthly_sales_est)
     d["liquid_inflow_est"] = str(state.liquid_inflow_est)
     d["liquid_outflow_est"] = str(state.liquid_outflow_est)
+    d["margin_sales_base"] = str(state.margin_sales_base)
+    d["cogs_sold_est"] = None if state.cogs_sold_est is None else str(state.cogs_sold_est)
     # `vertical_code` NO necesita línea propia: es un campo del dataclass y
     # `asdict()` ya lo trae. La asignación explícita que había acá era herencia
     # del patrón viejo, donde el vertical viajaba dentro de `ruleset` porque el
@@ -206,6 +239,14 @@ def _deserialize_state(raw: str) -> BusinessState:
         cash_source=d.get("cash_source", "desconocido"),
         liquid_inflow_est=Decimal(d.get("liquid_inflow_est", "0")),
         liquid_outflow_est=Decimal(d.get("liquid_outflow_est", "0")),
+        margin_status=d["margin_status"],
+        fixed_expenses_observed=d["fixed_expenses_observed"],
+        margin_reason=d.get("margin_reason"),
+        margin_sales_base=Decimal(d["margin_sales_base"]),
+        cogs_sold_est=None if d.get("cogs_sold_est") is None else Decimal(d["cogs_sold_est"]),
+        margin_gross_pct=d.get("margin_gross_pct"),
+        cost_coverage_confirmed_pct=d.get("cost_coverage_confirmed_pct"),
+        cost_coverage_total_pct=d.get("cost_coverage_total_pct"),
     )
 
 
@@ -312,6 +353,33 @@ def _derive_main_concern(
     return None
 
 
+# ── Margen (M·2b-3) ────────────────────────────────────────────────────────────
+
+
+def _margen_del_estado(lectura: LecturaDeMargenes) -> dict[str, Any]:
+    """Los campos de margen del estado, copiados del ``BusinessFact`` de Facts.
+
+    Sin lectura (sin rubro o error) el margen es ausente con su motivo. El costo
+    vendido es el que proyectó ``domain/margen.py``; el ingreso, el comparable
+    (neto de IVA para un RI) sobre el que se calculó.
+    """
+    if lectura.margenes is None:
+        return {"margin_status": "ausente", "margin_reason": lectura.motivo}
+    bruto = lectura.margenes.bruto
+    d = bruto.detail or {}
+    costo = d.get("costo_vendido_ars")
+    ingreso = d.get("ingreso_ars")
+    return {
+        "margin_status": d.get("estado") or "ausente",
+        "margin_reason": d.get("motivo"),
+        "margin_sales_base": Decimal(str(ingreso)) if ingreso is not None else Decimal("0"),
+        "cogs_sold_est": Decimal(str(costo)) if costo is not None else None,
+        "margin_gross_pct": bruto.value,
+        "cost_coverage_confirmed_pct": d.get("cobertura_confirmada_pct"),
+        "cost_coverage_total_pct": d.get("cobertura_total_pct"),
+    }
+
+
 # ── Main function ──────────────────────────────────────────────────────────────
 
 
@@ -348,6 +416,9 @@ async def compute_business_state(
             func.count(SaleEntry.id),
             func.min(SaleEntry.transaction_date),
             func.max(SaleEntry.transaction_date),
+            # Para el fingerprint: M·2c costea ventas viejas sin cambiar conteos.
+            func.sum(SaleEntry.cost_ars),
+            func.sum(case((SaleEntry.cost_confirmed.is_(True), 1), else_=0)),
         ).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.voided_at.is_(None),
@@ -360,6 +431,8 @@ async def compute_business_state(
     sale_count: int = int(sale_sum_row[1] or 0)
     first_sale_date = sale_sum_row[2]
     last_sale_date = sale_sum_row[3]
+    sold_cost = str(Decimal(str(sale_sum_row[4] or 0)))
+    confirmed_cost_count = int(sale_sum_row[5] or 0)
 
     # ── 2b. Previous 30-day sales (days 31–60 ago) — para score de crecimiento ─
     prev_window_start = (now - timedelta(days=60)).date()
@@ -405,7 +478,9 @@ async def compute_business_state(
     inv_row = inv_sum_result.one()
     real_inventory_cost: Decimal = Decimal(str(inv_row[0] or 0))
 
-    # fixed expenses = is_recurring = True
+    # fixed expenses = is_recurring = True, SIN la mercadería: una compra a
+    # proveedor marcada recurrente ya está en el costo de lo vendido del margen
+    # (M·2b-3) y restarla de nuevo como fijo la contaba dos veces.
     fixed_sum_result = await session.execute(
         select(func.sum(ExpenseEntry.amount), func.count(ExpenseEntry.id)).where(
             ExpenseEntry.tenant_id == tenant_id,
@@ -413,6 +488,8 @@ async def compute_business_state(
             ExpenseEntry.transaction_date >= window_start,
             func.date(ExpenseEntry.transaction_date) <= window_end,
             ExpenseEntry.is_recurring.is_(True),
+            ExpenseEntry.expense_type != "COGS",
+            ExpenseEntry.category.not_in(("INVENTORY", "mercaderia")),
         )
     )
     fixed_row = fixed_sum_result.one()
@@ -531,6 +608,11 @@ async def compute_business_state(
         profile_updated_at=profile.updated_at,
         prev_sales_amount=str(prev_real_sales),
         capital_liquid_out=str(capital_liquid_out),
+        sold_cost=sold_cost,
+        confirmed_cost_count=confirmed_cost_count,
+        # FactsService corta su ventana en fecha AR: al cambiar el día AR el
+        # margen cambia aunque no cambie ningún dato.
+        dia_ar=today_ar().isoformat(),
     )
     cached_hash: str | None = await redis.get(_hash_key(tenant_id))
     if cached_hash == fingerprint:
@@ -652,6 +734,12 @@ async def compute_business_state(
         has_fixed_expenses=has_fixed_expenses,
     )
 
+    # ── 7b. Margen: el MISMO BusinessFact que el chat (invariante 2c) ────────
+    # FactsService mide el margen bruto sobre el costo congelado por venta, con
+    # `include_demo` según el tenant. Acá no se agrega nada: sólo se copia.
+    lectura = await leer_margenes(session, tenant_id)
+    margen = _margen_del_estado(lectura)
+
     # ── 8. Persist BusinessSnapshot (immutable) ──────────────────────────────
     snapshot = BusinessSnapshot(
         id=uuid.uuid4(),
@@ -706,12 +794,17 @@ async def compute_business_state(
         cash_source=cash_source,
         liquid_inflow_est=liquid_inflow_est,
         liquid_outflow_est=liquid_outflow_est,
+        fixed_expenses_observed=real_fixed_expenses > 0,
+        **margen,
     )
 
     # ── 10. Update Redis cache ───────────────────────────────────────────────
-    serialized = _serialize_state(state)
-    await redis.set(_cache_key(tenant_id), serialized, ex=CACHE_TTL_SECONDS)
-    await redis.set(_hash_key(tenant_id), fingerprint, ex=CACHE_TTL_SECONDS)
+    # Un margen que no se pudo medir por un error NO se cachea: el fingerprint
+    # no cambiaría y el tenant quedaría 24 h sin margen por un fallo puntual.
+    if lectura.motivo != MOTIVO_ERROR:
+        serialized = _serialize_state(state)
+        await redis.set(_cache_key(tenant_id), serialized, ex=CACHE_TTL_SECONDS)
+        await redis.set(_hash_key(tenant_id), fingerprint, ex=CACHE_TTL_SECONDS)
     logger.info(
         "bsl.computed",
         tenant_id=str(tenant_id),

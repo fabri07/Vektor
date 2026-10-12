@@ -46,37 +46,13 @@ def _score_level(score_total: int) -> str:
 
 
 def _state_to_dict(state: Any) -> dict[str, Any]:
-    """
-    Serialize a BusinessState dataclass to a JSON-safe dict.
-    Converts UUID, Decimal, and nested ProductSummary objects.
-    """
-    return {
-        "snapshot_id": str(state.snapshot_id),
-        "tenant_id": str(state.tenant_id),
-        "vertical_code": state.vertical_code,
-        "data_completeness_score": float(state.data_completeness_score),
-        "confidence_level": state.confidence_level,
-        "monthly_sales_est": str(state.monthly_sales_est),
-        "monthly_inventory_cost_est": str(state.monthly_inventory_cost_est),
-        "monthly_fixed_expenses_est": str(state.monthly_fixed_expenses_est),
-        "cash_on_hand_est": str(state.cash_on_hand_est),
-        "cash_source": getattr(state, "cash_source", "desconocido"),
-        "liquid_inflow_est": str(getattr(state, "liquid_inflow_est", "0")),
-        "liquid_outflow_est": str(getattr(state, "liquid_outflow_est", "0")),
-        "product_count": state.product_count,
-        "supplier_count": state.supplier_count,
-        "main_concern": state.main_concern,
-        "products": [
-            {
-                "product_id": str(p.product_id),
-                "name": p.name,
-                "stock_units": p.stock_units,
-                "low_stock_threshold_units": p.low_stock_threshold_units,
-                "sale_price_ars": str(p.sale_price_ars),
-            }
-            for p in state.products
-        ],
-    }
+    """El MISMO dict que persiste ``HealthScoreService`` (M·2b-3): antes era una
+    copia y el margen de un camino no coincidía con el del otro."""
+    from app.application.services.health_score_service import (  # noqa: PLC0415
+        _state_to_dict as state_to_dict,
+    )
+
+    return state_to_dict(state)
 
 
 # ── HealthScoreResult → JSON-serializable dict ────────────────────────────────
@@ -87,6 +63,7 @@ def _result_to_dict(result: Any) -> dict[str, Any]:
         "score_total": result.score_total,
         "score_cash": result.score_cash,
         "score_margin": result.score_margin,
+        "margin_status": result.margin_status,
         "score_stock": result.score_stock,
         "score_supplier": result.score_supplier,
         "primary_risk_code": result.primary_risk_code,

@@ -123,13 +123,13 @@ async def test_compute_business_state_from_onboarding_only(
 
     # Redis should be populated
     store = redis.snapshot()
-    # Las keys llevan el prefijo de versión v4: `data_completeness_score` cambió
-    # de significado (pondera por procedencia), y un blob v3 deserializa sin
-    # error — serviría la confianza vieja durante las 24 h del TTL.
+    # Las keys llevan el prefijo de versión v5: el margen (M·2b-3) sale de
+    # FactsService, y un blob v4 deserializaría con el margen ausente por
+    # default durante las 24 h del TTL (v4: completeness por procedencia).
     assert _cache_key(sample_tenant.tenant_id) in store
     assert _hash_key(sample_tenant.tenant_id) in store
-    assert "business_state:v4:" in _cache_key(sample_tenant.tenant_id)
-    assert "last_inputs_hash:v4:" in _hash_key(sample_tenant.tenant_id)
+    assert "business_state:v5:" in _cache_key(sample_tenant.tenant_id)
+    assert "last_inputs_hash:v5:" in _hash_key(sample_tenant.tenant_id)
 
 
 # ── Montos del onboarding sin contestar ──────────────────────────────────────
@@ -692,3 +692,142 @@ async def test_la_caja_observada_no_depende_del_calendario(
         recien_dado_de_alta.data_completeness_score
         == pasada_una_semana.data_completeness_score
     )
+
+
+# ── M·2b-3: el margen de la salud ES el de FactsService ─────────────────────
+
+
+def _venta_costeada(
+    tid: uuid.UUID, dias: int, monto: str, costo: str | None, confirmado: bool
+) -> SaleEntry:
+    from datetime import time  # noqa: PLC0415
+
+    from app.domain.business_time import today_ar  # noqa: PLC0415
+
+    snapshot = (
+        {"cost_unit_ars": Decimal(costo), "cost_ars": Decimal(costo),
+         "cost_confirmed": confirmado, "cost_origin": "compra" if confirmado else "catalogo",
+         "cost_snapshot_version": 1}
+        if costo is not None else {}
+    )
+    return SaleEntry(
+        tenant_id=tid, amount=Decimal(monto), quantity=1, payment_method="cash",
+        transaction_date=datetime.combine(today_ar() - timedelta(days=dias), time(12)),
+        **snapshot,
+    )
+
+
+async def test_el_margen_del_estado_es_el_de_facts(
+    db_session: AsyncSession, sample_tenant, kiosco_profile: BusinessProfile
+) -> None:
+    """Invariante 2c: salud y chat leen el MISMO BusinessFact. Una compra de
+    mercadería del mes no entra al margen (antes daba −776% en ASTERIA)."""
+    from app.application.services.facts_provider import margenes_del_tenant  # noqa: PLC0415
+
+    tid = sample_tenant.tenant_id
+    db_session.add_all([
+        _venta_costeada(tid, 1, "6000", "3000", confirmado=True),
+        _venta_costeada(tid, 2, "2000", "1200", confirmado=False),
+        _venta_costeada(tid, 3, "2000", None, confirmado=False),
+        ExpenseEntry(
+            tenant_id=tid, amount=Decimal("500000"), category="INVENTORY",
+            description="Compra de mercadería",
+            expense_type="COGS", transaction_date=datetime.now(UTC) - timedelta(days=1),
+        ),
+    ])
+    await db_session.commit()
+
+    margenes = await margenes_del_tenant(db_session, tid)
+    assert margenes is not None
+    bruto = margenes.bruto
+    state = await compute_business_state(tid, db_session, FakeRedis())  # type: ignore[arg-type]
+
+    assert bruto.detail is not None
+    assert state.margin_status == bruto.detail["estado"] == "confirmado"
+    assert state.margin_gross_pct == bruto.value == 50.0
+    assert state.margin_sales_base == Decimal(str(bruto.detail["ingreso_ars"]))
+    assert state.cogs_sold_est == Decimal(str(bruto.detail["costo_vendido_ars"]))
+    assert state.cost_coverage_total_pct == bruto.detail["cobertura_total_pct"] == 80.0
+
+    from app.heuristics.health_engine import calculate_health_score  # noqa: PLC0415
+
+    result = calculate_health_score(state)
+    # 50% bruto − fijos/ventas: el número que entra al subscore sale de Facts.
+    fijos = state.monthly_fixed_expenses_est
+    esperado = float(Decimal("0.5") - fijos / state.margin_sales_base)
+    assert result.margin_net_ratio == pytest.approx(esperado)
+
+
+async def test_sin_costo_suficiente_el_estado_dice_ausente_y_por_que(
+    db_session: AsyncSession, sample_tenant, kiosco_profile: BusinessProfile
+) -> None:
+    tid = sample_tenant.tenant_id
+    db_session.add_all([
+        _venta_costeada(tid, 1, "1000", "500", confirmado=True),
+        _venta_costeada(tid, 1, "9000", None, confirmado=False),
+    ])
+    await db_session.commit()
+
+    state = await compute_business_state(tid, db_session, FakeRedis())  # type: ignore[arg-type]
+    assert state.margin_status == "ausente"
+    assert state.margin_reason == "cobertura de costo 10,0%"
+    assert state.cogs_sold_est is None
+    assert state.margin_gross_pct is None
+
+
+async def test_costear_ventas_viejas_invalida_el_cache(
+    db_session: AsyncSession, sample_tenant, kiosco_profile: BusinessProfile
+) -> None:
+    """M·2c costea sin cambiar ningún conteo: el fingerprint mira el costo."""
+    tid = sample_tenant.tenant_id
+    venta = _venta_costeada(tid, 1, "1000", None, confirmado=False)
+    db_session.add(venta)
+    await db_session.commit()
+    redis = FakeRedis()
+    antes = await compute_business_state(tid, db_session, redis)  # type: ignore[arg-type]
+    assert antes.margin_status == "ausente"
+
+    # Como el `--apply` de M·2c: un UPDATE de las columnas del snapshot, sin
+    # tocar conteos (por Core: el listener de costeo limpia por ORM el snapshot
+    # de una venta sin producto, que es lo correcto en vivo).
+    from sqlalchemy import update  # noqa: PLC0415
+
+    await db_session.execute(
+        update(SaleEntry).where(SaleEntry.id == venta.id).values(
+            cost_unit_ars=Decimal("400"), cost_ars=Decimal("400"), cost_confirmed=True,
+            cost_origin="compra", cost_snapshot_version=1,
+        )
+    )
+    await db_session.commit()
+    despues = await compute_business_state(tid, db_session, redis)  # type: ignore[arg-type]
+    assert despues.margin_status == "confirmado"
+    assert despues.margin_gross_pct == 60.0
+
+
+async def test_un_error_de_facts_no_se_cachea(
+    db_session: AsyncSession, sample_tenant, kiosco_profile: BusinessProfile, monkeypatch
+) -> None:
+    from app.application.services import facts_provider  # noqa: PLC0415
+
+    async def _explota(*_a: object, **_k: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(facts_provider, "margenes_del_tenant", _explota)
+    redis = FakeRedis()
+    state = await compute_business_state(
+        sample_tenant.tenant_id, db_session, redis  # type: ignore[arg-type]
+    )
+    assert (state.margin_status, state.margin_reason) == ("ausente", "no se pudo medir ahora")
+    assert redis.snapshot() == {}
+
+
+def test_el_blob_conserva_el_margen() -> None:
+    state = _estado_de_ejemplo()
+    state.margin_status = "estimado"
+    state.margin_reason = "cobertura de costo confirmada 20,0%"
+    state.margin_sales_base = Decimal("98000.50")
+    state.cogs_sold_est = Decimal("51000.25")
+    state.margin_gross_pct = 47.96
+    state.cost_coverage_confirmed_pct = 20.0
+    state.cost_coverage_total_pct = 75.5
+    assert _deserialize_state(_serialize_state(state)) == state
