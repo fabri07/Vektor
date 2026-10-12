@@ -18,6 +18,26 @@ interface Props {
   isBestScore?: boolean;
 }
 
+type SubscoreTile = { label: string; value: number | null; hint?: string };
+
+/**
+ * El subscore de margen con su estado (M·2b-3). Sin costo suficiente de lo
+ * vendido el margen está AUSENTE: se muestra «—» con el motivo, nunca un 0.
+ */
+export function marginTile(score: HealthScoreV2Response): SubscoreTile {
+  if (score.score_margin == null) {
+    const cobertura =
+      score.cost_coverage_total_pct != null
+        ? ` (cobertura ${String(score.cost_coverage_total_pct).replace(".", ",")}%)`
+        : "";
+    return { label: "Margen", value: null, hint: `sin costo suficiente${cobertura}` };
+  }
+  if (score.margin_status === "estimado") {
+    return { label: "Margen", value: score.score_margin, hint: "estimado" };
+  }
+  return { label: "Margen", value: score.score_margin };
+}
+
 function gaugeTone(score: number) {
   if (score <= 40) return "var(--vektor-red)";
   if (score <= 65) return "var(--vektor-amber)";
@@ -250,13 +270,13 @@ export function HealthScoreCard({
 
           {score.score_growth != null ? (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-              {[
+              {([
                 { label: "Caja", value: score.score_cash },
                 { label: "Stock", value: score.score_stock },
                 { label: "Prov.", value: score.score_supplier },
-                { label: "Margen", value: score.score_margin },
+                marginTile(score),
                 { label: "Crec.", value: score.score_growth },
-              ].map((item) => (
+              ] as SubscoreTile[]).map((item) => (
                 <div
                   key={item.label}
                   className="rounded-xl border border-vektor-border bg-vektor-night/50 px-3 py-3"
@@ -265,18 +285,21 @@ export function HealthScoreCard({
                     {item.label}
                   </p>
                   <p className="mt-1.5 text-xl font-semibold text-vektor-white">
-                    {Math.round(item.value)}
+                    {item.value == null ? "—" : Math.round(item.value)}
                   </p>
+                  {item.hint && (
+                    <p className="mt-0.5 text-[10px] text-vektor-muted">{item.hint}</p>
+                  )}
                 </div>
               ))}
             </div>
           ) : (
             <div className="grid gap-3 sm:grid-cols-3">
-              {[
+              {([
                 { label: "Caja", value: score.score_cash },
-                { label: "Margen", value: score.score_margin },
+                marginTile(score),
                 { label: "Stock", value: score.score_stock },
-              ].map((item) => (
+              ] as SubscoreTile[]).map((item) => (
                 <div
                   key={item.label}
                   className="rounded-2xl border border-vektor-border bg-vektor-night/50 p-4"
@@ -287,8 +310,11 @@ export function HealthScoreCard({
                     </p>
                   </Tooltip>
                   <p className="mt-2 text-2xl font-semibold text-vektor-white">
-                    {Math.round(item.value)}
+                    {item.value == null ? "—" : Math.round(item.value)}
                   </p>
+                  {item.hint && (
+                    <p className="mt-1 text-xs text-vektor-muted">{item.hint}</p>
+                  )}
                 </div>
               ))}
             </div>

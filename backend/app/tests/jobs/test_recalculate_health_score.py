@@ -243,7 +243,10 @@ async def test_job_persists_health_score_snapshot(
     snap = snapshots[0]
 
     assert snap.score_cash is not None
-    assert snap.score_margin is not None
+    # M·2b-3: sólo hay onboarding, ninguna venta costeada → margen AUSENTE
+    # (NULL), nunca el número de la encuesta ni un 50 neutral.
+    assert snap.score_margin is None
+    assert (snap.score_inputs_json or {}).get("margin_status") == "ausente"
     assert snap.score_stock is not None
     assert snap.score_supplier is not None
     assert snap.heuristic_version == "v1"

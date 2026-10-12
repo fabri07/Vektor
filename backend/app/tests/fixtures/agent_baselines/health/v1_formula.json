@@ -5,6 +5,7 @@
     "reason": "Baseline pre-Stage-5a. score_growth IS NULL on snapshots captured before this date.",
     "formula": "total = cash*0.30 + margin*0.30 + stock*0.25 + supplier*0.15",
     "note_score_margin": "In DB column score_margin stores the margin dimension score (from health_engine.py). agents/health/agent.py incorrectly labeled it as discipline_score before Stage 5a — that mapping is fixed in Stage 5a.",
+    "note_m2b3": "Desde M·2b-3 (2026-10-12) el subscore de margen es (ingreso − costo VENDIDO − fijos) / ingreso con el costo congelado por venta (FactsService); antes restaba la mercadería COMPRADA del mes. score_margin puede ser NULL (margen ausente: sin costo suficiente) y entonces se excluye del total repartiendo su peso. Los pesos de esta tabla no cambian.",
     "demo_tenant_scores": {
       "kiosco": 74,
       "limpieza": 51,

@@ -164,27 +164,29 @@ async def test_s2_kiosco_riesgo_caja(session: AsyncSession, fake_redis: FakeRedi
 # ══════════════════════════════════════════════════════════════════════════════
 # SCENARIO 3 — Decoración hogar: margen bajo
 #
-# ventas:    2 000 000 ARS/mes
-# mercadería: 1 590 000 ARS/mes
-# gastos fijos: 250 000 ARS/mes
-# caja:        300 000 ARS
-# proveedores: 3
+# ventas:       20 × 100 000 = 2 000 000 ARS (últimos 30 días)
+# costo vendido: 20 ×  79 500 = 1 590 000 ARS, CONFIRMADO (snapshot de M·2a)
+# gastos fijos: 250 000 ARS/mes (onboarding)
+# caja:         300 000 ARS
+# proveedores:  3
 #
-# margin = (2M - 1.59M - 250k) / 2M = 160k/2M = 8%
+# margen bruto = 20,5%; neto = (2M − 1.59M − 250k) / 2M = 8%
 # deco_benchmark (CAC/INDEC/CACE): critical_below=0.06, warning_below=0.12
 #   → band [0.06, 0.12) → score_margin = int(15 + 0.333*24) = 23 (zona warning)
 # primary_risk = el mínimo de las dimensiones = margin → MARGIN_LOW ✓
 #
-# El escenario tenía 17.5% de margen y esperaba que fuera "bajo", porque el
-# benchmark viejo —sin fuente— exigía 30% neto a una casa de decoración. Contra
-# la fuente sectorial (neto 12-22%), 17.5% está DENTRO del rango sano: el caso
-# no probaba una alerta legítima sino la falsa alarma que la recalibración
-# elimina. Para seguir midiendo lo que dice medir, el negocio tiene que tener un
-# margen realmente bajo PARA SU RUBRO.
+# M·2b-3: el margen sale del costo VENDIDO (FactsService), no de la mercadería
+# declarada en el onboarding. Antes el escenario armaba el 8% con la encuesta;
+# ahora, sin ventas costeadas, el margen sería AUSENTE (no hay subscore).
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 async def test_s3_deco_hogar_margen_bajo(session: AsyncSession, fake_redis: FakeRedis) -> None:
+    from datetime import time  # noqa: PLC0415
+
+    from app.domain.business_time import today_ar  # noqa: PLC0415
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
     # ── Setup ─────────────────────────────────────────────────────────────────
     tenant = await make_tenant(session, legal_name="Deco Hogar Sur")
     await make_profile(
@@ -197,6 +199,15 @@ async def test_s3_deco_hogar_margen_bajo(session: AsyncSession, fake_redis: Fake
         cash_on_hand=Decimal("300000"),
         supplier_count=3,
     )
+    for i in range(20):
+        session.add(SaleEntry(
+            tenant_id=tenant.tenant_id, amount=Decimal("100000"), quantity=1,
+            payment_method="cash",
+            transaction_date=datetime.combine(today_ar() - timedelta(days=1 + i), time(12)),
+            cost_unit_ars=Decimal("79500"), cost_ars=Decimal("79500"), cost_confirmed=True,
+            cost_origin="compra", cost_snapshot_version=1,
+        ))
+    await session.commit()
 
     # ── Execute ───────────────────────────────────────────────────────────────
     snap = await run_pipeline(session, fake_redis, tenant.tenant_id)
@@ -208,6 +219,29 @@ async def test_s3_deco_hogar_margen_bajo(session: AsyncSession, fake_redis: Fake
     assert (
         snap.score_margin is not None and snap.score_margin < 40
     ), f"score_margin esperado < 40 (warning zone), obtenido {snap.score_margin}"
+    assert (snap.score_inputs_json or {}).get("margin_status") == "confirmado"
+
+
+async def test_s3b_sin_ventas_costeadas_el_margen_es_ausente(
+    session: AsyncSession, fake_redis: FakeRedis
+) -> None:
+    """La misma encuesta sin ventas costeadas: no hay margen, ni el 8% de la
+    encuesta ni un 50 neutral. MARGIN_LOW no puede ser el riesgo."""
+    tenant = await make_tenant(session, legal_name="Deco Hogar Norte")
+    await make_profile(
+        session,
+        tenant.tenant_id,
+        "decoracion_hogar",
+        monthly_sales=Decimal("2000000"),
+        monthly_inventory=Decimal("1590000"),
+        monthly_fixed=Decimal("250000"),
+        cash_on_hand=Decimal("300000"),
+        supplier_count=3,
+    )
+    snap = await run_pipeline(session, fake_redis, tenant.tenant_id)
+    assert snap.score_margin is None
+    assert snap.primary_risk_code != "MARGIN_LOW"
+    assert (snap.score_inputs_json or {}).get("margin_status") == "ausente"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

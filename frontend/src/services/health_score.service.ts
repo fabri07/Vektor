@@ -16,7 +16,7 @@ export interface HealthScoreLatest {
   tenant_id: string;
   score_total: number;
   score_cash: number;
-  score_margin: number;
+  score_margin: number | null;   // null = margen ausente (sin costo suficiente)
   score_stock: number;
   score_supplier: number;
   score_growth: number | null;   // null = snapshot v1 (pre-Stage-5a)

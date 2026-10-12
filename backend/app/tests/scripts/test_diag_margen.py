@@ -126,3 +126,25 @@ def test_explica_subscore_cero_por_stock_inicial_como_compra() -> None:
     assert "subscore «Margen» del health score es 0" in lectura
     assert "Stock inicial" in lectura
     assert "No hay ventas REALES en la ventana" in lectura
+
+
+def test_margen_salud_de_un_snapshot_nuevo_usa_el_costo_vendido() -> None:
+    """M·2b-3: el snapshot nuevo trae ingreso y costo VENDIDO de FactsService; la
+    compra de mercadería del mes ya no entra."""
+    from datetime import date  # noqa: PLC0415
+
+    from diag_margen import Salud, margen_salud  # noqa: PLC0415
+
+    s = Salud(
+        fecha=date(2026, 10, 12), score_margin=80, ventas_est=Decimal("100000"),
+        inventario_est=Decimal("876000"), fijos_est=Decimal("10000"),
+        margen_estado="estimado", ingreso_margen=Decimal("100000"),
+        costo_vendido=Decimal("60000"),
+    )
+    assert margen_salud(s) == Decimal("30")
+    ausente = Salud(
+        fecha=date(2026, 10, 12), score_margin=None, ventas_est=Decimal("100000"),
+        inventario_est=Decimal("876000"), fijos_est=Decimal("10000"),
+        margen_estado="ausente", margen_motivo="cobertura de costo 9,0%",
+    )
+    assert margen_salud(ausente) is None

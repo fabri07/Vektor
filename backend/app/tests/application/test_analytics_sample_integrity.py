@@ -23,9 +23,10 @@ se cubre lo que sí es SQL portable — el marcado y el filtro de la ventana.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,7 +78,29 @@ async def test_con_ventas_si_registra_el_margen(
 
     Sin esto, poner `margin_ratio = None` a secas también pasaría el test de
     arriba y el moat se quedaría sin datos para siempre.
+
+    M·2b-3: el ratio sale del costo VENDIDO confirmado y de fijos OBSERVADOS, así
+    que el caso siembra una venta costeada y un gasto fijo real.
     """
+    from datetime import time  # noqa: PLC0415
+
+    from app.domain.business_time import today_ar  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
+    ayer = datetime.combine(today_ar(), time(12)) - timedelta(days=1)
+    db_session.add_all([
+        SaleEntry(
+            tenant_id=sample_tenant.tenant_id, amount=Decimal("100000"), quantity=1,
+            payment_method="cash", transaction_date=ayer,
+            cost_unit_ars=Decimal("60000"), cost_ars=Decimal("60000"), cost_confirmed=True,
+            cost_origin="compra", cost_snapshot_version=1,
+        ),
+        ExpenseEntry(
+            tenant_id=sample_tenant.tenant_id, amount=Decimal("10000"), category="RENT",
+            description="Alquiler", is_recurring=True, transaction_date=ayer,
+            payment_method="cash",
+        ),
+    ])
     sample_business_profile.monthly_sales_estimate_ars = Decimal("150000.00")
     sample_business_profile.monthly_inventory_spend_estimate_ars = Decimal("90000.00")
     sample_business_profile.monthly_fixed_expenses_estimate_ars = Decimal("20000.00")
@@ -91,8 +114,39 @@ async def test_con_ventas_si_registra_el_margen(
     await db_session.commit()
 
     evento = (await db_session.execute(select(AnalyticsEvent))).scalars().one()
-    assert evento.margin_ratio is not None
+    assert evento.margin_ratio == pytest.approx(0.30)  # (100k − 60k − 10k) / 100k
     assert evento.cash_ratio is not None
+
+
+async def test_con_fijos_solo_declarados_no_registra_el_margen(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_business_profile: BusinessProfile,
+) -> None:
+    """Margen confirmado pero fijos sólo del onboarding: una respuesta de
+    formulario no entra a los percentiles del rubro (invariante 5b)."""
+    from datetime import time  # noqa: PLC0415
+
+    from app.domain.business_time import today_ar  # noqa: PLC0415
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    sample_business_profile.monthly_fixed_expenses_estimate_ars = Decimal("20000.00")
+    db_session.add(SaleEntry(
+        tenant_id=sample_tenant.tenant_id, amount=Decimal("100000"), quantity=1,
+        payment_method="cash",
+        transaction_date=datetime.combine(today_ar(), time(12)) - timedelta(days=1),
+        cost_unit_ars=Decimal("60000"), cost_ars=Decimal("60000"), cost_confirmed=True,
+        cost_origin="compra", cost_snapshot_version=1,
+    ))
+    await db_session.commit()
+
+    svc = HealthScoreService(db_session)
+    await svc.recalculate_for_tenant(tenant_id=sample_tenant.tenant_id, triggered_by="test")
+    await db_session.commit()
+
+    evento = (await db_session.execute(select(AnalyticsEvent))).scalars().one()
+    assert evento.score_margin is not None
+    assert evento.margin_ratio is None
 
 
 async def test_el_evento_nace_marcado_con_la_version_vigente(

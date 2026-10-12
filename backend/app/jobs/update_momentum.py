@@ -238,10 +238,13 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
     if latest is not None:
         subscores: dict[str, int] = {
             "cash": latest.score_cash or 0,
-            "margin": latest.score_margin or 0,
             "stock": latest.score_stock or 0,
             "supplier": latest.score_supplier or 0,
         }
+        # Un margen ausente (M·2b-3, sin costo suficiente) no es la dimensión
+        # débil: no tiene número. Antes el `or 0` lo volvía el peor de todos.
+        if latest.score_margin is not None:
+            subscores["margin"] = latest.score_margin
         weak_dim = min(subscores, key=lambda k: subscores[k])
         template = _GOAL_TEMPLATES[weak_dim]
         mp.active_goal_json = {"weak_dimension": weak_dim, **template}
@@ -297,7 +300,9 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
         _unlock("M2", "3 semanas consecutivas mejorando")
 
     # M3: score_margin >= 70 for 14 days continuously
-    if latest is not None and (latest.score_margin or 0) >= 70:
+    # Un snapshot con margen ausente (NULL) no cuenta como «≥ 70» ni corta la
+    # racha: `score_margin < 70` es falso para NULL en SQL.
+    if latest is not None and latest.score_margin is not None and latest.score_margin >= 70:
         cutoff_14 = datetime(today.year, today.month, today.day, tzinfo=UTC) - timedelta(days=14)
         low_margin_q = await session.execute(
             select(func.count())

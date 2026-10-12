@@ -33,13 +33,19 @@ def _build_prompt(scores: ComponentScoresV2, business_name: str) -> str:
     growth_label = (
         "sin historial" if scores.growth_score == 50 else f"{scores.growth_score:.0f}/100"
     )
+    # M·2b-3: un margen ausente se dice «sin medir», nunca como un 0/100.
+    margin_label = (
+        "sin medir (falta costo de lo vendido)"
+        if scores.margin_score is None
+        else f"{scores.margin_score}/100"
+    )
     return (
         f"Negocio: {wrap_user_input(business_name)}\n"
         f"Score de salud: {scores.total_score}/100\n"
         f"- Caja: {scores.cash_score}/100\n"
         f"- Inventario: {scores.stock_score}/100\n"
         f"- Proveedores: {scores.supplier_score}/100\n"
-        f"- Márgenes: {scores.margin_score}/100\n"
+        f"- Márgenes: {margin_label}\n"
         f"- Crecimiento de ventas: {growth_label}\n"
         f"Riesgo principal: {scores.primary_risk_code}\n"
         # `confidence_level` dejó de ser solo la completitud de los datos: ahora

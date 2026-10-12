@@ -40,7 +40,7 @@ from app.state.business_state_service import BusinessState, ProductSummary
 
 _RISK_DESCRIPTIONS: dict[str, str] = {
     "CASH_LOW": "Caja insuficiente para cubrir gastos operativos",
-    "MARGIN_LOW": "Margen estimado por debajo del umbral saludable para el vertical",
+    "MARGIN_LOW": "Margen por debajo del umbral saludable para el vertical",
     "STOCK_CRITICAL": "Más del 30% de productos con stock crítico",
     "SUPPLIER_DEPENDENCY": "Alta dependencia de un único proveedor",
     "GROWTH_STAGNANT": "Las ventas muestran caída o estancamiento respecto al período anterior",
@@ -65,7 +65,9 @@ _DIMENSION_RISK_CODE: dict[str, str] = {
 class HealthScoreResult:
     score_total: int
     score_cash: int
-    score_margin: int
+    #: ``None`` = margen AUSENTE (M·2b-3): sin costo suficiente no hay subscore;
+    #: se excluye del total y del riesgo, igual que la caja desconocida.
+    score_margin: int | None
     score_stock: int
     score_supplier: int
     score_growth: int  # Stage 5a — crecimiento de ventas 0-100
@@ -86,6 +88,11 @@ class HealthScoreResult:
     # Fuente de la caja: "arqueo" (medido) | "onboarding" (estimado) |
     # "flujo" (cobertura líquida, sin saldo) | "desconocido" (sin dato → excluida del total).
     cash_source: str = "desconocido"
+    #: Estado del margen (``domain/margen.py``): confirmado | estimado | ausente.
+    margin_status: str = "ausente"
+    margin_reason: str | None = None
+    #: (ingreso − costo vendido − gastos fijos) / ingreso; ``None`` si ausente.
+    margin_net_ratio: float | None = None
 
 
 # ── Band interpolation ────────────────────────────────────────────────────────
@@ -202,18 +209,38 @@ def _margin_bands(b: MarginBenchmark) -> list[_Band]:
     ]
 
 
-def _score_margin(state: BusinessState, benchmark: MarginBenchmark) -> int:
+def margin_net_ratio(state: BusinessState) -> float | None:
+    """Margen neto del subscore: (ingreso − costo vendido − gastos fijos) / ingreso.
+
+    El ingreso y el costo vendido son los de FactsService (``domain/margen.py``,
+    costo congelado por venta); los fijos, los del estado. ``None`` si el margen
+    está ausente: sin costo suficiente no hay número, ni 0 ni un neutral (antes,
+    sin ventas, daba 50; y restaba la mercadería COMPRADA, no la vendida: el
+    −776% de ASTERIA).
     """
-    estimated_margin = (ventas - inventario - gastos_fijos) / ventas
-    If no sales estimate is available, return 50 as a neutral default.
-    """
-    sales = state.monthly_sales_est
-    if sales <= 0:
-        return 50
-    margin = float(
-        (sales - state.monthly_inventory_cost_est - state.monthly_fixed_expenses_est) / sales
-    )
-    return _band_score(margin, _margin_bands(benchmark))
+    base = state.margin_sales_base
+    if state.margin_status == "ausente" or state.cogs_sold_est is None or base <= 0:
+        return None
+    return float((base - state.cogs_sold_est - state.monthly_fixed_expenses_est) / base)
+
+
+def _score_margin(state: BusinessState, benchmark: MarginBenchmark) -> int | None:
+    ratio = margin_net_ratio(state)
+    if ratio is None:
+        return None
+    return _band_score(ratio, _margin_bands(benchmark))
+
+
+_CONFIDENCE_ORDER = ["LOW", "MEDIUM", "HIGH"]
+
+
+def _bajar_por_margen_ausente(confidence: str) -> str:
+    """Un margen ausente baja la confianza un nivel, pero nunca a LOW por sí solo:
+    LOW es la compuerta de no-invención y la define la completitud de los datos
+    (decisión del 2026-10-11; la cobertura de costo no es completeness)."""
+    if confidence not in _CONFIDENCE_ORDER:
+        return confidence
+    return "MEDIUM" if confidence == "HIGH" else confidence
 
 
 # ── Stock score ───────────────────────────────────────────────────────────────
@@ -364,11 +391,12 @@ def calculate_health_score(
         cash_known = False
 
     s_margin = _score_margin(state, benchmark)
+    net_ratio = margin_net_ratio(state)
     s_stock = _score_stock(state.products, config)
     s_supplier = _score_supplier(state.supplier_count, config)
     s_growth = _score_growth(state.monthly_sales_est, state.prev_monthly_sales_est)
 
-    scores = {
+    scores: dict[str, int | None] = {
         "cash": s_cash,
         "margin": s_margin,
         "stock": s_stock,
@@ -377,22 +405,30 @@ def calculate_health_score(
     }
 
     # Fórmula v2 (Stage 5a): cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20.
-    # Si la caja es desconocida se excluye y se re-normalizan los pesos restantes
-    # (no-invention: no metemos un 0/50 falso que arrastre el total).
+    # Una dimensión AUSENTE (caja desconocida, margen sin costo suficiente) se
+    # excluye y se re-normalizan los pesos restantes (no-invention: no metemos un
+    # 0/50 falso que arrastre el total).
     weights = {"cash": 0.30, "stock": 0.20, "supplier": 0.10, "margin": 0.20, "growth": 0.20}
-    included = [d for d in scores if d != "cash" or cash_known]
-    total_weight = sum(weights[d] for d in included)
-    total = round(sum(scores[d] * weights[d] for d in included) / total_weight)
+    ausentes = {d for d, v in scores.items() if v is None}
+    if not cash_known:
+        ausentes.add("cash")
+    present: dict[str, int] = {
+        d: v for d, v in scores.items() if d not in ausentes and v is not None
+    }
+    total_weight = sum(weights[d] for d in present)
+    total = round(sum(v * weights[d] for d, v in present.items()) / total_weight)
     if state.data_completeness_score < 40:
         total = min(total, 60)
     elif state.data_completeness_score < 60:
         total = min(total, 75)
 
-    risk_scores = {d: scores[d] for d in included}
-    weakest_dim = _primary_risk(risk_scores)
+    weakest_dim = _primary_risk(present)
     risk_code = _DIMENSION_RISK_CODE[weakest_dim]
 
     benchmark_confidence = benchmark.confidence
+    confidence = weakest_confidence(state.confidence_level, benchmark_confidence)
+    if s_margin is None:
+        confidence = _bajar_por_margen_ausente(confidence)
     return HealthScoreResult(
         score_total=total,
         score_cash=s_cash,
@@ -402,10 +438,13 @@ def calculate_health_score(
         score_growth=s_growth,
         primary_risk_code=risk_code,
         risk_description=_RISK_DESCRIPTIONS[risk_code],
-        confidence_level=weakest_confidence(state.confidence_level, benchmark_confidence),
+        confidence_level=confidence,
         data_completeness_score=state.data_completeness_score,
         data_confidence=state.confidence_level,
         benchmark_confidence=benchmark_confidence,
         benchmark_provenance=benchmark.provenance,
         cash_source=cash_source,
+        margin_status=state.margin_status if s_margin is not None else "ausente",
+        margin_reason=state.margin_reason,
+        margin_net_ratio=net_ratio,
     )
