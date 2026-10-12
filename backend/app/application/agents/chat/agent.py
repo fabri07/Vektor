@@ -270,7 +270,7 @@ class AgentChat(BaseAgent):
                 get_financial_summary,
             )
             from app.application.services.facts_provider import (  # noqa: PLC0415
-                margenes_del_tenant,
+                leer_margenes,
             )
 
             fin_data = await get_financial_summary(tenant_id, db)
@@ -292,12 +292,13 @@ class AgentChat(BaseAgent):
                 )
             # El margen sale de FactsService (M·2b-2): la misma definición que el
             # dashboard y la salud. Estimado o sin medir se dice como tal.
-            margenes = await margenes_del_tenant(db, tenant_id)
-            if margenes is not None:
-                lines.append(
-                    f"  Margen bruto (ventas − costo de lo vendido): "
-                    f"{describir_margen_bruto(margenes.bruto)}"
-                )
+            lectura = await leer_margenes(db, tenant_id)
+            margen_txt = (
+                describir_margen_bruto(lectura.margenes.bruto)
+                if lectura.margenes is not None
+                else f"sin medir ({lectura.motivo})"
+            )
+            lines.append(f"  Margen bruto (ventas − costo de lo vendido): {margen_txt}")
             if not ticket.get("sin_datos"):
                 lines.append(
                     f"  Ticket promedio: ${ticket.get('ticket_promedio', 0)} "

@@ -1305,17 +1305,19 @@ def _task_health() -> AgentTask:
 @pytest.fixture(autouse=True)
 def _sin_margenes_de_facts():
     """El margen sale de FactsService (M·2b-2); con un db de mentira no hay
-    perfil: `None`. El test que mira el margen lo parchea con un hecho."""
+    perfil. El test que mira el margen lo parchea con un hecho."""
+    from app.application.services.facts_provider import LecturaDeMargenes
+
     with patch(
-        "app.application.services.facts_provider.margenes_del_tenant",
+        "app.application.services.facts_provider.leer_margenes",
         new_callable=AsyncMock,
-        return_value=None,
+        return_value=LecturaDeMargenes(None, "falta el rubro del negocio"),
     ):
         yield
 
 
 def _margenes(bruto: float | None, estado: str, neto: float | None = 20.0):
-    from app.application.services.facts_provider import MargenesDelPeriodo
+    from app.application.services.facts_provider import LecturaDeMargenes, MargenesDelPeriodo
     from app.application.services.facts_service import BusinessFact
 
     def _f(metric: str, value: float | None, detail: dict | None = None) -> BusinessFact:
@@ -1324,13 +1326,13 @@ def _margenes(bruto: float | None, estado: str, neto: float | None = 20.0):
             value=value, unit="%", period="últimos_30_días", detail=detail,
         )
 
-    return MargenesDelPeriodo(
+    return LecturaDeMargenes(MargenesDelPeriodo(
         bruto=_f("margen_bruto", bruto, {
             "estado": estado, "motivo": "cobertura confirmada 0,0%: incluye costos estimados",
             "cobertura_confirmada_pct": 0.0, "cobertura_total_pct": 80.0,
         }),
         neto=_f("margen_neto", neto),
-    )
+    ))
 
 
 async def test_health_con_datos_llama_narrador() -> None:
@@ -1367,7 +1369,7 @@ async def test_health_con_datos_llama_narrador() -> None:
         new_callable=AsyncMock,
         return_value=financial_summary,
     ), patch(
-        "app.application.services.facts_provider.margenes_del_tenant",
+        "app.application.services.facts_provider.leer_margenes",
         new_callable=AsyncMock,
         return_value=_margenes(32.5, "estimado"),
     ) as mock_margenes, patch(
@@ -1399,7 +1401,8 @@ async def test_health_con_datos_llama_narrador() -> None:
     assert rf["margen_bruto_pct"] == pytest.approx(32.5)
     assert rf["margen_bruto_estado"] == "estimado"
     assert rf["cobertura_costo_total_pct"] == pytest.approx(80.0)
-    assert rf["margen_neto_pct"] == pytest.approx(20.0)
+    # El neto de FactsService no va: no cierra con flujo_neto (otra ventana).
+    assert "margen_neto_pct" not in rf
     assert "margen_pct" not in rf
     mock_margenes.assert_called_once_with(mock_db, UUID(_TENANT_A))
     assert rf["ticket_promedio"] == pytest.approx(5000.0)
@@ -1541,6 +1544,41 @@ async def test_health_structured_data_json_serializable() -> None:
     # No debe lanzar TypeError por Decimal no serializable (incluye `analisis`)
     serialized = json.dumps(resp.result["structured_data"])
     assert serialized
+
+
+async def test_health_sin_margen_dice_por_que() -> None:
+    """Sin perfil (o si FactsService falló) el margen va en None con su motivo,
+    nunca ausente en silencio ni en 0."""
+    from app.application.agents.health.agent import AgentHealth
+
+    mock_db = MagicMock()
+    agent = AgentHealth(db=mock_db)
+    agent.client = _make_client()
+    from decimal import Decimal
+
+    financial_summary = {
+        "estado": "OK",
+        "flujo_neto_30d": {
+            "total_ventas": Decimal("1000.00"), "total_gastos": Decimal("0"),
+            "flujo_neto": Decimal("1000.00"), "periodo_dias": 30,
+            "desde": "2026-05-28", "hasta": "2026-06-27",
+        },
+        "ticket_promedio": {"sin_datos": True},
+        "rotacion": {"sin_datos": True},
+    }
+    with patch(
+        "app.application.services.deterministic_finance.get_financial_summary",
+        new_callable=AsyncMock,
+        return_value=financial_summary,
+    ), patch(
+        "app.persistence.repositories.transaction_repository.get_daily_net_series",
+        new_callable=AsyncMock,
+        return_value=[0.0] * 5,
+    ):
+        resp = await agent.process(_req(message="¿cómo va?"), task=_task_health())
+    rf = resp.result["structured_data"]["resumen_financiero"]
+    assert rf["margen_bruto_pct"] is None
+    assert rf["margen_bruto_motivo"] == "falta el rubro del negocio"
 
 
 def test_health_has_client_property() -> None:

@@ -76,3 +76,27 @@ async def test_chat_dice_sin_medir_con_el_motivo(
     )
     # Nunca un 0 inventado ni el margen viejo (ventas − gastos).
     assert "Margen bruto: 100" not in contexto
+
+
+async def test_un_error_de_facts_no_tumba_la_respuesta(
+    db_session: AsyncSession, sample_tenant, monkeypatch
+) -> None:
+    """Revisión de M·2b-2: si FactsService falla, el margen dice «sin medir»
+    y el resto del contexto (ventas, gastos) sigue."""
+    from app.application.services import facts_provider
+
+    async def _explota(*_a: object, **_k: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(facts_provider, "margenes_del_tenant", _explota)
+    tid = sample_tenant.tenant_id
+    db_session.add(_venta(tid, 1, "1000", "500", confirmado=True))
+    await db_session.commit()
+
+    lectura = await facts_provider.leer_margenes(db_session, tid)
+    assert (lectura.margenes, lectura.motivo) == (None, facts_provider.MOTIVO_ERROR)
+    contexto = await AgentChat()._load_financial_context(tid, db_session)
+    assert "Ventas: $1000" in contexto
+    assert "Margen bruto (ventas − costo de lo vendido): sin medir (no se pudo medir ahora)" in (
+        contexto
+    )

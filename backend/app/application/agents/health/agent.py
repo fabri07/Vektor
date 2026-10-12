@@ -540,7 +540,7 @@ class AgentHealth(BaseAgent):
             get_financial_summary,
         )
         from app.application.services.facts_provider import (  # noqa: PLC0415
-            margenes_del_tenant,
+            leer_margenes,
         )
         from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
             get_daily_net_series,
@@ -626,13 +626,21 @@ class AgentHealth(BaseAgent):
             }
         }
 
-        # Margen: FactsService (M·2b-2), la misma definición que el dashboard y la
-        # salud. «flujo_neto» es el resultado (ventas − todos los gastos), no el
-        # margen bruto; el estado (confirmado/estimado/ausente) viaja con el número.
-        margenes = await margenes_del_tenant(self._db, tenant_id)
-        if margenes is not None:
-            structured_data["resumen_financiero"].update(datos_margen_bruto(margenes.bruto))
-            structured_data["resumen_financiero"]["margen_neto_pct"] = margenes.neto.value
+        # Margen bruto: FactsService (M·2b-2), la misma definición que el
+        # dashboard y la salud; el estado (confirmado/estimado/ausente) viaja con
+        # el número. «flujo_neto» es el resultado (ventas − todos los gastos). El
+        # margen NETO de FactsService no va: su ventana y su procedencia difieren
+        # de las de este flujo y el narrador recibiría dos resultados que no
+        # cierran entre sí.
+        lectura = await leer_margenes(self._db, tenant_id)
+        if lectura.margenes is not None:
+            structured_data["resumen_financiero"].update(
+                datos_margen_bruto(lectura.margenes.bruto)
+            )
+        else:
+            structured_data["resumen_financiero"].update(
+                {"margen_bruto_pct": None, "margen_bruto_motivo": lectura.motivo}
+            )
 
         # Análisis estadístico de la serie diaria de flujo neto (ventas - gastos)
         net_series = await get_daily_net_series(self._db, tenant_id, days=60)

@@ -538,7 +538,7 @@ class AgentExpense(BaseAgent):
 
             from app.application.agents.shared import analytics  # noqa: PLC0415
             from app.application.services.facts_provider import (  # noqa: PLC0415
-                margenes_del_tenant,
+                leer_margenes,
             )
             from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
@@ -556,10 +556,10 @@ class AgentExpense(BaseAgent):
             # después de pagar la mercadería). Antes se dividía por un «margen»
             # que ya había restado todos los gastos, fijos incluidos: los fijos
             # se contaban dos veces (M·2b-2). El margen es el de FactsService.
-            margenes = await margenes_del_tenant(self._db, tenant_id)
-            bruto = margenes.bruto if margenes is not None else None
+            lectura = await leer_margenes(self._db, tenant_id)
+            bruto = lectura.margenes.bruto if lectura.margenes is not None else None
             if bruto is None or bruto.value is None:
-                motivo = (bruto.detail or {}).get("motivo") if bruto is not None else None
+                motivo = (bruto.detail or {}).get("motivo") if bruto is not None else lectura.motivo
                 return self._analysis_response(
                     request,
                     "equilibrio_sin_margen",
@@ -570,6 +570,8 @@ class AgentExpense(BaseAgent):
                 )
             margen_pct = float(bruto.value)
             estimado = (bruto.detail or {}).get("estado") == "estimado"
+            # El motivo real (cobertura o, en un RI, el IVA de venta supuesto).
+            motivo_estimado = (bruto.detail or {}).get("motivo") or "costos sin confirmar"
             be = analytics.breakeven_point(fixed_costs, margen_pct)
             if be is None:
                 return self._analysis_response(
@@ -582,8 +584,7 @@ class AgentExpense(BaseAgent):
                 + (" (estimado)." if estimado else "."),
                 f"Se calcula con tus costos fijos (${fixed_costs:,.0f}/mes) y tu margen "
                 f"bruto ({margen_pct:.0f}%"
-                + (", estimado: parte del costo de lo vendido no está confirmado" if estimado
-                   else "")
+                + (f", estimado: {motivo_estimado}" if estimado else "")
                 + "). Por encima de ese nivel, empezás a ganar.",
             ]
             return self._analysis_response(
