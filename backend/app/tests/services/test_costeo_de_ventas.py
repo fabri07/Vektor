@@ -437,3 +437,19 @@ async def test_si_falla_un_tenant_el_otro_se_costea(
         await db_session.commit()
     assert v1.cost_snapshot_version is None
     assert v2.cost_snapshot_version == 1
+
+
+async def test_la_linea_sale_del_unitario_redondeado(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """``cost_unit_ars × cantidad == cost_ars``: con un costo de 800,567 el unitario
+    se guarda 800,57 y la línea tiene que ser 1601,14, no 1601,13."""
+    p = await _producto(
+        db_session,
+        sample_tenant,
+        unit_cost_ars=Decimal("800.567"),
+        custom_fields={MANUAL_FIELD: {"costo": "800.567", "fecha": _a_las(AYER).isoformat()}},
+    )
+    venta = await _vender(db_session, sample_tenant, p, _a_las(HOY), qty=2)
+    assert venta.cost_unit_ars == Decimal("800.57")
+    assert venta.cost_ars == Decimal("1601.14")

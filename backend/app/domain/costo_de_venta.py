@@ -26,10 +26,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Final, Literal
 
-from app.domain.base_comparable import base_comparable
+from app.domain.base_comparable import CENTAVO, base_comparable
 from app.domain.costo_de_referencia import CostoDeReferencia
 from app.domain.costo_vigente import CostoFechado, decidir_costo_vigente
 from app.domain.sale_unit import importe
@@ -102,9 +102,13 @@ def costo_de_venta(
     motivo = None if base.confirmada else (
         MOTIVO_EDICION if origen in ("manual", "catalogo") else base.motivo
     )
+    # El unitario se guarda en centavos (``Numeric(12, 2)``): la línea sale de ESE
+    # valor, para que ``cost_unit_ars × cantidad`` y ``cost_ars`` no difieran en
+    # un centavo (un costo cargado de 800,567 daba 800,57 y una línea de 1601,13).
+    unitario = base.costo.quantize(CENTAVO, rounding=ROUND_HALF_UP)
     return CostoDeVenta(
-        costo_unitario=base.costo,
-        costo_linea=importe(base.costo, unidades_base, base_units_per_sale_unit),
+        costo_unitario=unitario,
+        costo_linea=importe(unitario, unidades_base, base_units_per_sale_unit),
         confirmado=base.confirmada,
         origen=origen,
         motivo=motivo,

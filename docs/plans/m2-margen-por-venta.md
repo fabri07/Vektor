@@ -95,6 +95,12 @@ La pantalla (dashboard, columna de productos, margen por operación, permisos de
 - Se puede reejecutar sin duplicar, sólo llena NULL y es reversible.
 - **El `--apply` en Neon lo autoriza el dueño aparte**, como D·3 y M·R.
 
+- **Cómo quedó (2026-10-12):** `scripts/costeo_retroactivo_ventas.py`, con la lógica en `costeo_retroactivo_service.py`.
+  - Reusa `costear_ventas` y fuerza `cost_confirmed=false` con el motivo retroactivo.
+  - En un producto fraccionado sólo confía en la cantidad del POS o de un archivo.
+  - La auditoría y la reversa van por `data_repair_runs` y `data_repair_items` (`UPDATE_SALE`).
+  - Probado de punta a punta en una base local con el demo más 165 ventas sin costo: dry-run, apply, reejecución sin efecto y revert.
+
 ### Margen estimado del catálogo (por producto)
 - Un servicio arma el margen estimado con el precio vigente y `base_comparable` (con su motivo).
 - El `computed_field` sigue puro, sin consultas ni tenant.
