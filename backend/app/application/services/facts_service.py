@@ -7,7 +7,10 @@ REGLA DE ORO (invariante del repo, ahora cumplida en TODAS las superficies):
     endpoints de insights. Todos delegan acá.
 
 DECISIONES CANÓNICAS RATIFICADAS (Fabrizio):
-    - margen_bruto = (ventas − COGS) / ventas
+    - margen_bruto = (ventas − costo vendido) / ventas, con el costo CONGELADO por
+      venta (snapshot M·2a/M·2c) y la definición única de domain/margen.py:
+      cobertura sobre TODO lo vendido, piso del 50%, confirmado/estimado/ausente.
+      Nunca el costo actual del producto ni las compras del período (M·2b).
     - margen_neto  = (ventas − TODOS los gastos) / ventas   ← la heurística corre sobre neto
     - caja_liquida excluye fiado (fiado = deuda a cobrar, no efectivo)
     - caja_liquida excluye tarjeta de crédito (se acredita ~30 días → DELAYED_METHODS)
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from enum import Enum
 from typing import Literal, Protocol
 
@@ -37,6 +41,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from app.domain.business_time import AR_TZ
+from app.domain.margen import LineaDeMargen, MedicionDeMargen, medir_margen
 from app.domain.transaction import PaymentMethod
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,6 +144,9 @@ class BusinessFact(BaseModel):
     sample_size: int | None = None  # nº de registros base (drivea EMPTY/low-conf)
     source: str = ""                   # tablas de origen, p/ auditoría
     explanation_key: str | None = None  # clave hacia AgentHelper (docs versionadas)
+    # Metadata estructurada de la métrica (p. ej. el margen: estado, coberturas,
+    # supuestos). Los consumidores la leen en vez de parsear `source`.
+    detail: dict[str, object] | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,7 +193,9 @@ class FactsDataProvider(Protocol):
     sales(tenant_id, start, end) -> DataFrame:
         sale_date:       date/datetime
         amount_ars:      float     # total de la venta
-        cost_ars:        float|NaN # COGS de esa venta (unit_cost_ars × quantity) si existe
+        cost_ars:        float|NaN # costo CONGELADO de la venta (snapshot M·2a/M·2c);
+                                   #   NaN = sin costo (sin producto, sin costear, sin_costo)
+        cost_confirmed:  bool      # el snapshot es confirmado (opcional: sin columna = False)
         payment_method:  str       # cash|debit_card|credit_card|transfer|qr|account|other
                                    #   (+ "inflow" = cobro de fiado, NO es venta)
         provenance:      str       # REAL|DEMO
@@ -259,8 +269,11 @@ class Liquidez:
 
 class FactsService:
     def __init__(self, provider: FactsDataProvider,
-                 thresholds: SeverityThresholds | None = None) -> None:
+                 thresholds: SeverityThresholds | None = None, *,
+                 fiscal_condition_crudo: str | None = None) -> None:
         self.provider = provider
+        # Régimen CRUDO del tenant: el margen de un RI se compara sin IVA.
+        self.fiscal_condition_crudo = fiscal_condition_crudo
         # `None` = el caller no sabe el vertical. Los umbrales independientes del
         # vertical siguen aplicando (constantes de módulo); los de margen NO se
         # inventan: sin benchmark del rubro, margen_neto sale sin severity.
@@ -366,59 +379,72 @@ class FactsService:
     # ═══════════════════════════════════════════════════════════════════════
     # MÉTRICA 2 — MARGEN (bruto Y neto, definiciones separadas y explícitas)
     # ═══════════════════════════════════════════════════════════════════════
-    def _cogs(self, tenant_id: str, p: Period, sales: pd.DataFrame,
-              include_demo: bool) -> tuple[float, str, float]:
-        """Devuelve (cogs_ars, fuente, confidence).
+    def medir_margen(self, tenant_id: str, p: Period, *,
+                     include_demo: bool = False) -> MedicionDeMargen:
+        """El margen bruto del período con la definición única (domain/margen.py).
 
-        Preferencia: COGS por line-items (cost_ars por venta) = matchea lo VENDIDO.
-        Fallback: gastos con expense_type=COGS del período = aproximación por caja
-        (lo COMPRADO). La diferencia importa cuando hay swing de inventario.
-        Decisión abierta: default a line-items si están; si no, proxy con
-        confidence menor.
-
-        HONESTIDAD DE COBERTURA (regla "agregados no engañosos"): la confidence
-        de line-items es la fracción del MONTO vendido que tiene costo conocido.
-        Las ventas sin producto/costo (NaN) suman COGS $0, así que con cobertura
-        parcial el margen se sobreestima — la confidence lo declara en vez de
-        esconderlo. NOTA: cost_ars usa el costo ACTUAL del producto (no el
-        histórico al momento de la venta); la fuente histórica correcta es
-        InventoryMovement.unit_cost — mejora pendiente, decisión del dueño.
+        Universo: ventas reales (sin cobros de fiado, sin anuladas, sin demo salvo
+        ``include_demo``), CON las ventas sin producto: su importe es ingreso sin
+        costo y baja la cobertura. El costo es el snapshot congelado por venta.
         """
-        if "cost_ars" in sales.columns and bool(sales["cost_ars"].notna().any()):
-            covered = sales["cost_ars"].notna()
-            total_amount = float(sales["amount_ars"].sum())
-            covered_amount = float(sales.loc[covered, "amount_ars"].sum())
-            coverage = covered_amount / total_amount if total_amount > 0 else 0.0
-            conf = round(min(1.0, coverage), 2)
-            fuente = f"line_items[cobertura={coverage:.0%}]"
-            return float(sales["cost_ars"].sum(skipna=True)), fuente, conf
-        exp = self._expenses(tenant_id, p, include_demo)
-        if not exp.empty and "expense_type" in exp.columns:
-            # Frontera canónica COGS/OPEX: la columna expense_type de expense_entries
-            # (nunca matchear nombres de categoría — sería re-crear la divergencia).
-            mask = exp["expense_type"].str.upper() == "COGS"
-            if bool(mask.any()):
-                return float(exp.loc[mask, "amount_ars"].sum()), "cogs_expense", 0.7
-        # Sin costo por venta y sin gastos COGS: el margen bruto que salga de acá
-        # es "ventas al 100%" — confidence mínima para que nadie lo tome en serio.
-        return 0.0, "sin_cogs", 0.4
+        sales = self._ventas_reales(tenant_id, p, include_demo)
+        if sales.empty:
+            return medir_margen([], self.fiscal_condition_crudo)
+        costos = sales["cost_ars"] if "cost_ars" in sales.columns else None
+        confirmadas = (
+            sales["cost_confirmed"].astype("boolean").fillna(False).astype(bool)
+            if "cost_confirmed" in sales.columns
+            else None
+        )
+        lineas = []
+        for i, importe in enumerate(sales["amount_ars"]):
+            costo = None if costos is None else costos.iloc[i]
+            con_costo = costo is not None and not pd.isna(costo)
+            lineas.append(LineaDeMargen(
+                importe=Decimal(str(importe)),
+                costo=Decimal(str(costo)) if con_costo else None,
+                confirmado=bool(con_costo and confirmadas is not None
+                                and confirmadas.iloc[i]),
+            ))
+        return medir_margen(lineas, self.fiscal_condition_crudo)
 
     def margen_bruto(self, tenant_id: str, p: Period, *,
                      include_demo: bool = False) -> BusinessFact:
+        """Margen bruto de ventas (M·2b). Ausente → EMPTY con el motivo de cobertura.
+
+        ``confidence`` es la cobertura de las líneas de las que sale el número
+        (``MedicionDeMargen.cobertura_del_estado``). Con margen ausente es la
+        cobertura con estimaciones que no alcanzó el piso (antes: 0.0); el hecho es
+        EMPTY igual. El estado, las coberturas y los supuestos van en ``detail``.
+        """
         sales = self._ventas_reales(tenant_id, p, include_demo)
-        ventas = float(sales["amount_ars"].sum()) if len(sales) else 0.0
-        if ventas <= 0:
-            return BusinessFact(fact_id=f"margen_bruto_{p.label}", domain="rentabilidad",
-                                metric="margen_bruto", value=None, unit="%", period=p.label,
-                                provenance=Provenance.EMPTY, confidence=0.0,
-                                sample_size=len(sales), source="sales,expenses")
-        cogs, fuente, conf = self._cogs(tenant_id, p, sales, include_demo)
-        margen = (ventas - cogs) / ventas * 100.0
+        m = self.medir_margen(tenant_id, p, include_demo=include_demo)
+        detail: dict[str, object] = {
+            "estado": m.estado,
+            "motivo": m.motivo,
+            "cobertura_confirmada_pct": _pct(float(m.cobertura_confirmada * 100)),
+            "cobertura_total_pct": _pct(float(m.cobertura_total * 100)),
+            "ingreso_ars": _ars(float(m.ingreso_total)),
+            "costo_vendido_ars": (
+                _ars(float(m.costo_vendido)) if m.costo_vendido is not None else None
+            ),
+            "supuestos": list(m.supuestos),
+        }
+        if m.margen_pct is None:
+            return BusinessFact(
+                fact_id=f"margen_bruto_{p.label}", domain="rentabilidad",
+                metric="margen_bruto", value=None, unit="%", period=p.label,
+                provenance=Provenance.EMPTY,
+                confidence=round(float(m.cobertura_total), 2),
+                sample_size=len(sales), source="sales[snapshot_costo]",
+                explanation_key="margen_bruto", detail=detail,
+            )
         return BusinessFact(
             fact_id=f"margen_bruto_{p.label}", domain="rentabilidad", metric="margen_bruto",
-            value=_pct(margen), unit="%", period=p.label, confidence=conf,
-            sample_size=len(sales), source=f"sales,expenses[cogs={fuente}]",
-            explanation_key="margen_bruto",
+            value=_pct(float(m.margen_pct)), unit="%", period=p.label,
+            confidence=round(min(1.0, float(m.cobertura_del_estado)), 2),
+            sample_size=len(sales), source=f"sales[snapshot_costo,{m.estado}]",
+            explanation_key="margen_bruto", detail=detail,
         )
 
     def margen_neto(self, tenant_id: str, p: Period, *, include_demo: bool = False,
@@ -437,7 +463,7 @@ class FactsService:
 
         # Cero gastos cargados casi siempre significa "todavía no los cargó", no
         # "no tiene gastos": el 100% resultante sale con confidence mínima
-        # (espejo del path sin_cogs de margen_bruto), nunca como dato pleno.
+        # nunca como dato pleno.
         sin_gastos = exp.empty
         confidence = 0.4 if sin_gastos else 1.0
 

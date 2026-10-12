@@ -169,8 +169,15 @@ class TestContratoDeclarado:
             {"tax_treatment": "sí"},
             {"unit_cost_final": Decimal("-1")},
             {"tax_amount": Decimal("-1")},
+            {"tax_rate": Decimal("-0.01")},
+            {"tax_rate": Decimal("1")},
+            {"tax_rate": Decimal("21")},  # 21 en vez de 0,21
         ],
     )
     def test_valores_invalidos_se_rechazan_antes_de_la_base(self, malo: dict[str, object]) -> None:
         with pytest.raises(ValueError):
             ContratoDeCosto(**{"unit_cost_final": Decimal("1"), **malo})  # type: ignore[arg-type]
+
+    def test_tasa_en_rango_se_acepta(self) -> None:
+        assert ContratoDeCosto(Decimal("1"), tax_rate=Decimal("0")).tax_rate == Decimal("0")
+        assert ContratoDeCosto(Decimal("1"), tax_rate=Decimal("0.21")).tax_rate == Decimal("0.21")

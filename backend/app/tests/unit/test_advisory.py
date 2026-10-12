@@ -1,8 +1,8 @@
 """Tests del módulo advisory (F1) — gate de honestidad, serializador, prompt.
 
 Las confidences usadas espejan las que FactsService realmente emite:
-0.4 (sin_cogs / sin_gastos), 0.7 (cogs_expense fallback), 1.0 (caja/fiado),
-0.5+0.5*n/50 (ventas con muestra chica).
+0.4 (sin_gastos), la cobertura de costo en margen_bruto (M·2b), 1.0
+(caja/fiado), 0.5+0.5*n/50 (ventas con muestra chica).
 """
 
 from __future__ import annotations
@@ -55,16 +55,16 @@ def test_gate_high_confidence_facts_are_grounded() -> None:
     assert suf.usable_facts == facts
 
 
-def test_gate_cogs_expense_fallback_confidence_is_grounded() -> None:
-    """Fallback cogs_expense de margen_bruto: confidence=0.7 ≥ 0.6 → grounded."""
+def test_gate_margen_con_cobertura_suficiente_is_grounded() -> None:
+    """margen_bruto con 70% del ingreso costeado: confidence=0.7 ≥ 0.6 → grounded."""
     facts = [_fact("margen_bruto", 22.5, 0.7, unit="%")]
     suf = assess_data_sufficiency(facts)
     assert suf.mode == "grounded"
 
 
-def test_gate_sin_cogs_confidence_is_general() -> None:
-    """sin_cogs (margen sin costo ni gasto COGS): confidence=0.4 < 0.6 → general."""
-    facts = [_fact("margen_bruto", 100.0, 0.4, unit="%")]
+def test_gate_margen_con_cobertura_baja_is_general() -> None:
+    """margen_bruto sostenido por 55% del ingreso: confidence=0.55 < 0.6 → general."""
+    facts = [_fact("margen_bruto", 30.0, 0.55, unit="%")]
     suf = assess_data_sufficiency(facts)
     assert suf.mode == "general"
     assert "idea general" in suf.reason
@@ -317,3 +317,12 @@ async def test_handle_advice_facts_load_failure_degrades_gracefully(monkeypatch)
     assert response.confidence == Confidence.LOW
     assert response.message is not None
     assert "problema para leer tus datos" in response.message.lower()
+
+
+def test_render_margen_estimado_se_rotula() -> None:
+    """M·2b: un margen estimado le llega al LLM dicho como estimado, con su motivo."""
+    f = _fact("margen_bruto", 40.0, 0.8, unit="%").model_copy(
+        update={"detail": {"estado": "estimado", "motivo": "cobertura confirmada 30,0%"}}
+    )
+    out = render_facts_for_llm([f])
+    assert "ESTIMADO: cobertura confirmada 30,0%" in out

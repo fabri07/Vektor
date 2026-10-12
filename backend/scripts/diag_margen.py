@@ -17,7 +17,8 @@ por tenant,
 - el mismo negocio medido por cada cuenta que existe hoy: catálogo (promedio
   simple de ``margin_pct``), dashboard (``buildMarginBreakdown``: promedio simple
   por categoría), FactsService (``_cogs`` con el costo ACTUAL del producto),
-  ponderado sólo sobre ventas con costo (la definición de M·3),
+  ponderado sólo sobre ventas con costo (la definición de M·3), FactsService
+  (desde M·2b: el costo congelado por venta y la definición única),
   ``deterministic_finance.calcular_margen_bruto`` (ventas − TODOS los gastos) y el
   subscore de margen del health score.
 
@@ -55,6 +56,7 @@ import asyncpg  # noqa: E402
 from _db import normalize_dsn  # noqa: E402
 
 from app.domain.business_time import today_ar  # noqa: E402
+from app.domain.margen import LineaDeMargen, MedicionDeMargen, medir_margen  # noqa: E402
 
 CIEN = Decimal("100")
 
@@ -62,11 +64,6 @@ CIEN = Decimal("100")
 #: estar en OTRA unidad que el precio (por gramo contra kilo, por bulto contra
 #: unidad). Es un indicio para mirar a mano, no una prueba.
 UMBRAL_UNIDAD_CRUZADA = Decimal("50")
-
-#: Fallbacks de ``FactsService._cogs``: mismo texto que la fuente del fact.
-FUENTE_LINE_ITEMS = "line_items"
-FUENTE_COGS_EXPENSE = "cogs_expense"
-FUENTE_SIN_COGS = "sin_cogs"
 
 SIN_IMPUESTO = (
     "sin medición (ninguna compra guarda IVA, tasa ni si es recuperable: "
@@ -105,9 +102,10 @@ class LineaVenta:
     """Una ``sales_entries`` viva y REAL, sin cobros de fiado, en la ventana."""
 
     importe: Decimal
-    #: ``unit_cost_ars × quantity / factor`` con el costo ACTUAL, como el provider
-    #: de FactsService. None = sin producto o sin costo.
+    #: El snapshot congelado de la venta (``sales_entries.cost_ars``, M·2a/M·2c),
+    #: como el provider de FactsService. None = sin producto o sin costo.
     costo: Decimal | None
+    confirmado: bool = False
 
 
 @dataclass(frozen=True)
@@ -127,8 +125,6 @@ class DatosTenant:
     tiene_perfil: bool = False
     productos: list[Producto] = field(default_factory=list)
     lineas: list[LineaVenta] = field(default_factory=list)
-    #: Gastos ``expense_type = COGS`` REAL de la ventana (fallback de Facts).
-    cogs_facts: Decimal = Decimal("0")
     #: Mismo criterio que el BSL (COGS o categoría INVENTORY/mercaderia).
     inventario_bsl: Decimal = Decimal("0")
     #: De lo anterior, lo que es «Stock inicial: …» (catálogo leído como compra).
@@ -225,28 +221,11 @@ def margen_dashboard(productos: Sequence[Producto]) -> list[tuple[str, Decimal]]
     return sorted(filas, key=lambda f: f[1], reverse=True)
 
 
-def margen_facts(
-    lineas: Sequence[LineaVenta], cogs_gastos: Decimal
-) -> tuple[Decimal | None, str, Decimal]:
-    """Réplica de ``FactsService.margen_bruto`` + ``_cogs``: ``(margen, fuente, confianza)``.
-
-    - Si alguna línea tiene costo (¡un costo 0 cuenta como conocido!), COGS = Σ de
-      esos costos y la confianza es la cobertura por importe.
-    - Si no, los gastos COGS del período (confianza 0,7).
-    - Si tampoco, COGS = 0 → margen 100% con confianza 0,4.
-    """
-    ventas = sum((ln.importe for ln in lineas), Decimal("0"))
-    if ventas <= 0:
-        return None, "sin ventas", Decimal("0")
-    con_costo = [ln for ln in lineas if ln.costo is not None]
-    if con_costo:
-        cubierto = sum((ln.importe for ln in con_costo), Decimal("0"))
-        cobertura = min(Decimal("1"), cubierto / ventas)
-        cogs = sum((ln.costo or Decimal("0") for ln in con_costo), Decimal("0"))
-        return (ventas - cogs) / ventas * CIEN, FUENTE_LINE_ITEMS, cobertura
-    if cogs_gastos > 0:
-        return (ventas - cogs_gastos) / ventas * CIEN, FUENTE_COGS_EXPENSE, Decimal("0.7")
-    return CIEN, FUENTE_SIN_COGS, Decimal("0.4")
+def margen_facts(lineas: Sequence[LineaVenta], regimen: str | None) -> MedicionDeMargen:
+    """``FactsService.margen_bruto``: la definición única (``domain/margen.py``, M·2b)."""
+    return medir_margen(
+        (LineaDeMargen(ln.importe, ln.costo, ln.confirmado) for ln in lineas), regimen
+    )
 
 
 def margen_neto_det(ventas: Decimal, gastos: Decimal) -> Decimal | None:
@@ -422,11 +401,16 @@ def informe_tenant(d: DatosTenant, desde: date, hasta: date, ejemplos: int = 3) 
 
     ventas = sum((ln.importe for ln in d.lineas), Decimal("0"))
     linea("ventas REALES en la ventana", f"{len(d.lineas)} líneas, {ars(ventas)}")
-    m_f, fuente, conf = margen_facts(d.lineas, d.cogs_facts)
-    linea(
-        "FactsService.margen_bruto (costo ACTUAL)",
-        f"{pct(m_f, 'sin ventas en la ventana')} fuente={fuente} confianza={conf:.2f}",
-    )
+    m_f = margen_facts(d.lineas, d.regimen)
+    if not d.lineas:
+        valor_f = "sin medición (sin ventas en la ventana)"
+    else:
+        valor_f = (
+            f"{pct(m_f.margen_pct, m_f.motivo or 'sin medición')} estado={m_f.estado} "
+            f"cobertura confirmada={pct(m_f.cobertura_confirmada * CIEN, '')} "
+            f"con estimaciones={pct(m_f.cobertura_total * CIEN, '')}"
+        )
+    linea("FactsService.margen_bruto (costo congelado por venta)", valor_f)
     m_p, cob = margen_ponderado((ln.importe, ln.costo) for ln in d.lineas)
     linea(
         "ponderado sólo ventas con costo > 0 (definición M·3)",
@@ -516,10 +500,8 @@ SELECT f.product_id::text AS product_id, f.unit_cost,
 
 #: Réplica del provider de FactsService: vivas, REAL, sin cobros de fiado.
 _VENTAS = f"""
-SELECT s.tenant_id::text AS tenant_id, s.amount, s.quantity,
-       p.unit_cost_ars, p.base_units_per_sale_unit
+SELECT s.tenant_id::text AS tenant_id, s.amount, s.cost_ars, s.cost_confirmed
   FROM sales_entries s
-  LEFT JOIN products p ON p.id = s.product_id
  WHERE s.voided_at IS NULL AND s.provenance = 'REAL'
    AND lower(s.payment_method) <> 'inflow'
    AND date(s.transaction_date) BETWEEN $2 AND $3
@@ -528,8 +510,6 @@ SELECT s.tenant_id::text AS tenant_id, s.amount, s.quantity,
 
 _GASTOS = f"""
 SELECT tenant_id::text AS tenant_id,
-       coalesce(sum(amount) FILTER (
-           WHERE upper(expense_type) = 'COGS' AND provenance = 'REAL'), 0) AS cogs_facts,
        coalesce(sum(amount) FILTER (
            WHERE expense_type = 'COGS' OR category IN ('INVENTORY', 'mercaderia')), 0)
            AS inventario_bsl,
@@ -608,20 +588,15 @@ async def leer(conn: Any, tenant: str | None, desde: date, hasta: date) -> list[
             )
         )
     for r in await conn.fetch(_VENTAS, tenant, desde, hasta):
-        costo = r["unit_cost_ars"]
         de(r["tenant_id"]).lineas.append(
             LineaVenta(
                 importe=Decimal(str(r["amount"])),
-                costo=(
-                    Decimal(str(costo)) * r["quantity"] / (r["base_units_per_sale_unit"] or 1)
-                    if costo is not None
-                    else None
-                ),
+                costo=_dec(r["cost_ars"]),
+                confirmado=r["cost_confirmed"] is True,
             )
         )
     for r in await conn.fetch(_GASTOS, tenant, desde, hasta):
         d = de(r["tenant_id"])
-        d.cogs_facts = Decimal(str(r["cogs_facts"]))
         d.inventario_bsl = Decimal(str(r["inventario_bsl"]))
         d.inventario_stock_inicial = Decimal(str(r["inventario_stock_inicial"]))
     for r in await conn.fetch(_DET, tenant, hasta - timedelta(days=30)):

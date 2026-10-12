@@ -7,7 +7,8 @@ dejar de agregar en el navegador.
 
 Decisiones cubiertas:
     1. Ventas: borde superior DURO (sin futuras), sin DEMO por default, sin blend.
-    2. Margen bruto ≠ neto; fallback COGS por expense_type (nunca por nombre).
+    2. Margen bruto ≠ neto; el bruto sale del snapshot de costo por venta con la
+       definición única (domain/margen.py): sin respaldo por compras ni costo 0.
     3. Fiado = deuda, NO caja. Tarjeta de crédito = delayed, NO caja (ratificado).
     4. Cobros de fiado ("inflow"): NO son ventas, SÍ son caja.
     5. Stock centralizado + sobrestock.
@@ -88,7 +89,10 @@ class FakeProvider:
 def _service(sales_rows: list[dict], expenses_rows: list[dict] | None = None,
              products_rows: list[dict] | None = None,
              thresholds: SeverityThresholds | None = KIOSCO_THRESHOLDS) -> FactsService:
-    sales = pd.DataFrame(sales_rows, columns=_SALES_COLS)
+    cols = _SALES_COLS + (
+        ["cost_confirmed"] if any("cost_confirmed" in r for r in sales_rows) else []
+    )
+    sales = pd.DataFrame(sales_rows, columns=cols)
     expenses = pd.DataFrame(expenses_rows or [], columns=_EXPENSES_COLS)
     products = pd.DataFrame(products_rows or [], columns=_PRODUCTS_COLS)
     return FactsService(FakeProvider(sales, expenses, products), thresholds)
@@ -191,38 +195,35 @@ def test_heuristica_severity_sobre_neto(svc):
     assert f.severity in ("info", "warning", "critical")
 
 
-def test_cogs_fallback_usa_expense_type_no_categoria():
-    # Sin cost_ars por venta → fallback a gastos expense_type=COGS (frontera canónica).
-    # La categoría se llama INVENTORY pero da igual: lo que manda es expense_type.
+def test_gastos_cogs_no_son_costo_de_lo_vendido():
+    # M·2b: sin costo por venta NO hay respaldo por gastos COGS. Comprar
+    # mercadería no es costo de lo vendido (plan v3; el −776% de ASTERIA salía
+    # de restar las compras). Sin cobertura → EMPTY con el motivo, nunca un número.
     svc = _service(
         sales_rows=[{"sale_date": TODAY, "amount_ars": 10000, "cost_ars": None,
                      "payment_method": "cash", "provenance": "REAL"}],
         expenses_rows=[
             {"expense_date": TODAY, "amount_ars": 4000, "category": "INVENTORY",
              "expense_type": "COGS", "provenance": "REAL"},
-            {"expense_date": TODAY, "amount_ars": 1000, "category": "RENT",
-             "expense_type": "OPEX", "provenance": "REAL"},
         ],
     )
     f = svc.margen_bruto("t", P30)
-    assert f.value == 60.0                    # (10000-4000)/10000 — solo el gasto COGS
-    assert f.confidence == 0.7                # proxy por caja, no line-items
-    assert "cogs_expense" in f.source
+    assert f.value is None
+    assert f.provenance == Provenance.EMPTY
+    assert f.detail is not None
+    assert f.detail["estado"] == "ausente"
+    assert f.detail["motivo"] == "cobertura de costo 0,0%"
 
 
-def test_cogs_solo_opex_cae_a_sin_cogs():
-    # Hay gastos pero NINGUNO es COGS: el "margen 100%" sale con confidence mínima,
-    # nunca etiquetado como proxy válido (cogs_expense).
+def test_sin_costo_no_es_margen_100():
+    # Antes: "sin_cogs" daba 100% con confidence 0.4. Ahora no hay número.
     svc = _service(
         sales_rows=[{"sale_date": TODAY, "amount_ars": 10000, "cost_ars": None,
                      "payment_method": "cash", "provenance": "REAL"}],
         expenses_rows=[{"expense_date": TODAY, "amount_ars": 1000, "category": "RENT",
                         "expense_type": "OPEX", "provenance": "REAL"}],
     )
-    f = svc.margen_bruto("t", P30)
-    assert f.value == 100.0
-    assert f.confidence == 0.4
-    assert "sin_cogs" in f.source
+    assert svc.margen_bruto("t", P30).value is None
 
 
 def test_margen_neto_sin_gastos_degrada_confidence():
@@ -237,33 +238,70 @@ def test_margen_neto_sin_gastos_degrada_confidence():
     assert "sin_gastos" in f.source
 
 
-def test_cogs_parcial_line_items_declara_cobertura():
-    # Con cost_ars en ALGUNAS ventas se usan line-items, pero la confidence es la
-    # COBERTURA por monto (regla "agregados no engañosos"), no un 1.0 pleno.
+def test_cobertura_parcial_proyecta_el_ratio_y_la_declara():
+    # Con costo en ALGUNAS ventas el costo de las demás se proyecta con el ratio
+    # de lo cubierto (no costo 0): 6000/10000 → margen 40%, no el 60% inflado.
     svc = _service(
         sales_rows=[
             {"sale_date": TODAY, "amount_ars": 10000, "cost_ars": 6000,
-             "payment_method": "cash", "provenance": "REAL"},
+             "cost_confirmed": True, "payment_method": "cash", "provenance": "REAL"},
             {"sale_date": TODAY, "amount_ars": 5000, "cost_ars": None,
              "payment_method": "cash", "provenance": "REAL"},
         ],
     )
     f = svc.margen_bruto("t", P30)
-    # ventas 15000, COGS = 6000 (solo la venta con costo) → (15000-6000)/15000 = 60.0
-    assert f.value == 60.0
-    assert f.confidence == 0.67          # cobertura = 10000/15000
-    assert "line_items" in f.source
-    assert "67%" in f.source             # la cobertura queda auditada en source
+    assert f.value == 40.0
+    assert f.confidence == 0.67          # cobertura confirmada = 10000/15000
+    assert f.detail is not None
+    assert f.detail["estado"] == "confirmado"
+    assert f.detail["cobertura_confirmada_pct"] == 66.7
+    assert f.detail["costo_vendido_ars"] == 9000.0
 
 
-def test_cogs_cobertura_infima_no_da_confianza_plena():
-    # 1 venta costeada sobre 10: el margen sale inflado pero la confidence lo grita.
+def test_costos_sin_confirmar_salen_estimados():
+    # Mismo caso con el snapshot sin confirmar (catálogo, envío desconocido…).
+    svc = _service(
+        sales_rows=[
+            {"sale_date": TODAY, "amount_ars": 10000, "cost_ars": 6000,
+             "cost_confirmed": False, "payment_method": "cash", "provenance": "REAL"},
+            {"sale_date": TODAY, "amount_ars": 5000, "cost_ars": None,
+             "payment_method": "cash", "provenance": "REAL"},
+        ],
+    )
+    f = svc.margen_bruto("t", P30)
+    assert f.value == 40.0
+    assert f.detail is not None
+    assert f.detail["estado"] == "estimado"
+    assert f.detail["cobertura_confirmada_pct"] == 0.0
+    assert f.detail["cobertura_total_pct"] == 66.7
+
+
+def test_cobertura_infima_no_da_numero():
+    # 1 venta costeada sobre 10: el 10% no alcanza el piso del 50% → ausente.
     rows = [{"sale_date": TODAY, "amount_ars": 1000, "cost_ars": None,
              "payment_method": "cash", "provenance": "REAL"} for _ in range(9)]
     rows.append({"sale_date": TODAY, "amount_ars": 1000, "cost_ars": 600,
-                 "payment_method": "cash", "provenance": "REAL"})
+                 "cost_confirmed": True, "payment_method": "cash", "provenance": "REAL"})
     f = _service(sales_rows=rows).margen_bruto("t", P30)
-    assert f.confidence == 0.1           # cobertura 1000/10000 — nunca 1.0
+    assert f.value is None
+    assert f.confidence == 0.1
+
+
+def test_ri_compara_sin_iva_y_queda_estimado():
+    sales = pd.DataFrame(
+        [{"sale_date": TODAY, "amount_ars": 1210, "cost_ars": 500, "cost_confirmed": True,
+          "payment_method": "cash", "provenance": "REAL"}],
+        columns=[*_SALES_COLS, "cost_confirmed"],
+    )
+    empty_e = pd.DataFrame(columns=_EXPENSES_COLS)
+    empty_p = pd.DataFrame(columns=_PRODUCTS_COLS)
+    svc = FactsService(FakeProvider(sales, empty_e, empty_p), KIOSCO_THRESHOLDS,
+                       fiscal_condition_crudo="responsable_inscripto")
+    f = svc.margen_bruto("t", P30)
+    assert f.value == 50.0
+    assert f.detail is not None
+    assert f.detail["estado"] == "estimado"
+    assert f.detail["supuestos"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
