@@ -53,13 +53,18 @@ limiter = Limiter(key_func=rate_limit_key, default_limits=["200/minute"])
 #: propio que falte acá no da error en el servidor: el NAVEGADOR corta el
 #: preflight con 400 y el request nunca sale. Así quedó la cola del POS
 #: (`X-POS-Offline`) y toda caja habilitada (`X-POS-Terminal`) hasta 2026-10:
-#: cada reintento parecía un corte de red. Header nuevo del front ⇒ va acá.
+#: cada reintento parecía un corte de red. Header nuevo del front ⇒ va acá
+#: (``test_todo_header_propio_del_front_esta_permitido`` lo exige leyendo el front).
+#: ``Idempotency-Key`` faltó desde que el front lo empezó a mandar (2026-06): la
+#: carga manual, los remitos y el capital nunca llegaban y quedaban «sin conexión»
+#: en la cola del navegador (encontrado al verificar M·2a, 2026-10-11).
 CORS_ALLOW_HEADERS: list[str] = [
     "Authorization",
     "Content-Type",
     "Accept",
     "X-Request-ID",
     "X-Trace-Id",
+    "Idempotency-Key",
     "sentry-trace",
     "baggage",
     TERMINAL_HEADER,
