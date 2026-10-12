@@ -17,10 +17,20 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.business_time import today_ar
+from app.domain.business_time import now_ar_naive, today_ar
 from app.persistence.models.transaction import SaleEntry
 
-_FECHA = f"{today_ar().isoformat()}T10:00:00"
+
+def _ahora() -> str:
+    """El momento de la venta, calculado EN el test y no al importar el módulo.
+
+    Una constante de módulo se fija al recolectar: si la suite cruza la
+    medianoche argentina, la venta queda en el día anterior al alta del producto
+    y su costo (sellado con la hora del alta) es POSTERIOR a la venta, así que
+    —con razón— no se usa y la venta sale ``sin_costo`` (falló así en el CI del
+    2026-10-12 a las 00:08). Tampoco una hora fija: a las 00:05 sería futura.
+    """
+    return now_ar_naive().replace(microsecond=0).isoformat()
 
 
 async def _producto(client: AsyncClient, headers: dict[str, Any], costo: str = "60.00") -> str:
@@ -70,7 +80,7 @@ class TestRutas:
         pid = await _producto(client, auth_headers)
         cuerpo = {
             "client_operation_id": f"op-{uuid.uuid4().hex[:16]}",
-            "operation_date": _FECHA,
+            "operation_date": _ahora(),
             "items": [{"product_id": pid, "quantity": 3}],
             "tenders": [{"payment_method": "cash", "amount_ars": "300.00"}],
         }
@@ -107,7 +117,7 @@ class TestRutas:
                 "amount": "200.00",
                 "quantity": 2,
                 "product_id": pid,
-                "transaction_date": _FECHA,
+                "transaction_date": _ahora(),
                 "payment_method": "cash",
             },
             headers=auth_headers,
@@ -148,7 +158,7 @@ class TestRutas:
                 "amount": "100.00",
                 "quantity": 1,
                 "product_id": pid,
-                "transaction_date": _FECHA,
+                "transaction_date": _ahora(),
                 "payment_method": "cash",
                 "cost_ars": "1.00",
                 "cost_unit_ars": "1.00",

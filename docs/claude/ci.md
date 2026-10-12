@@ -1,6 +1,6 @@
 # CI — GitHub Actions
 
-Tres workflows: `ci-backend.yml` (ruff + mypy + pytest con cov ≥ 60% + Alembic sobre Postgres + tests `-m postgres` + Docker build), `ci-frontend.yml` (jest + tsc + ESLint + `next build`) y `ci-mcp.yml`. Los tres disparan en push y PR contra `main`/`develop`, filtrados por paths.
+Tres workflows: `ci-backend.yml` (ruff + mypy + pytest con cov ≥ 60% + Alembic sobre Postgres + tests `-m postgres` + Docker build), `ci-frontend.yml` (jest + tsc + ESLint + `next build`) y `ci-mcp.yml`. Los tres disparan en push y PR contra `main`/`develop`, filtrados por paths. El backend también dispara con `frontend/src/services/**` y `frontend/src/lib/**`: ahí el front arma sus requests y la compuerta de CORS (`test_todo_header_propio_del_front_esta_permitido`) lee sus headers; sin ese trigger, un header nuevo sólo en el front se desplegaba sin pasar la compuerta (incidente `Idempotency-Key`, #116).
 
 ## Cupo de minutos
 

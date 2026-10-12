@@ -12,6 +12,12 @@ on:
       # El tope de tamaño de CLAUDE.md lo mide un test del backend.
       - "CLAUDE.md"
       - "docs/claude/**"
+      # Donde el front arma sus requests: la compuerta de CORS
+      # (`test_todo_header_propio_del_front_esta_permitido`) lee los headers de
+      # ahí. Sin esto, un header nuevo agregado sólo en el front no corre la
+      # compuerta y se despliega cortado (incidente `Idempotency-Key`, #116).
+      - "frontend/src/services/**"
+      - "frontend/src/lib/**"
       - ".github/workflows/ci-backend.yml"
   pull_request:
     branches: [main, develop]
@@ -24,6 +30,12 @@ on:
       # El tope de tamaño de CLAUDE.md lo mide un test del backend.
       - "CLAUDE.md"
       - "docs/claude/**"
+      # Donde el front arma sus requests: la compuerta de CORS
+      # (`test_todo_header_propio_del_front_esta_permitido`) lee los headers de
+      # ahí. Sin esto, un header nuevo agregado sólo en el front no corre la
+      # compuerta y se despliega cortado (incidente `Idempotency-Key`, #116).
+      - "frontend/src/services/**"
+      - "frontend/src/lib/**"
       - ".github/workflows/ci-backend.yml"
 
 # Un solo run vivo por rama: si llega otro push al mismo PR, el run anterior
