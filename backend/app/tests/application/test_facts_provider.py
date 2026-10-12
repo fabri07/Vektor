@@ -81,7 +81,10 @@ async def test_provenance_llega_crudo(db_session: AsyncSession, sample_tenant) -
     assert set(frames.sales["provenance"]) == {"REAL", "DEMO"}
 
 
-async def test_cost_ars_derivado_de_producto(db_session: AsyncSession, sample_tenant) -> None:
+async def test_cost_ars_sale_del_snapshot_congelado(
+    db_session: AsyncSession, sample_tenant
+) -> None:
+    """M·2b: el costo es el que congeló la venta (M·2a), no el actual del producto."""
     tid = sample_tenant.tenant_id
     con_costo = Product(tenant_id=tid, name="Coca 500", sale_price_ars=Decimal("1500"),
                         unit_cost_ars=Decimal("800"), stock_units=10)
@@ -94,10 +97,15 @@ async def test_cost_ars_derivado_de_producto(db_session: AsyncSession, sample_te
     db_session.add(_sale(tid, _dt(TODAY), 1200))  # sin product_id
     await db_session.commit()
 
+    # Una compra posterior no revalúa la venta: cambia el costo del producto.
+    con_costo.unit_cost_ars = Decimal("5000")
+    await db_session.commit()
+
     frames = await load_facts_frames(db_session, tid, start=P90.start, end=P90.end)
     by_amount = {row["amount_ars"]: row for _, row in frames.sales.iterrows()}
-    assert by_amount[4500.0]["cost_ars"] == 2400.0        # 800 × 3
-    assert pd.isna(by_amount[900.0]["cost_ars"])          # producto sin unit_cost_ars
+    assert by_amount[4500.0]["cost_ars"] == 2400.0        # 800 × 3, congelado
+    assert by_amount[4500.0]["cost_confirmed"] is False   # costo cargado: estimación
+    assert pd.isna(by_amount[900.0]["cost_ars"])          # snapshot sin_costo
     assert pd.isna(by_amount[1200.0]["cost_ars"])         # venta sin producto
 
 
@@ -202,8 +210,10 @@ async def test_aislamiento_de_tenant(db_session: AsyncSession, sample_tenant,
 #   Esperado:
 #     ventas        = 161.000, variación = (161000-20000)/20000 = +705.0%
 #     ticket        = 161000/193 = 834.2
-#     margen_bruto  = (161000-71200)/161000 = 55.8%  [line_items, conf = cobertura
-#                     por monto 89000/161000 = 0.55]
+#     margen_bruto  = el snapshot congela 800 por venta de prod_a (costo cargado:
+#                     ESTIMADO). Cobertura 89000/161000 = 55,3% ≥ 50% → estimado con
+#                     el ratio del cubierto 71200/89000 = 0,8 → 20.0% (M·2b; antes
+#                     55.8% contando como costo 0 lo vendido sin costo)
 #     margen_neto   = (161000-37500)/161000 = 76.7%
 #     caja_liquida  = 161000 − 26000 − 45000 + 10400 = 100.400
 #     fiado         = 26.000
@@ -270,12 +280,13 @@ async def test_reconciliacion_90_dias(db_session: AsyncSession, sample_tenant) -
 
     assert snap["ticket_promedio"].value == round(VENTAS_90D / 193, 2)  # 834.2
 
-    # Margen bruto por line-items; neto por todos los gastos — y son distintos.
-    # La confidence del bruto declara la cobertura de costo por monto: las cash
-    # costeadas son 89.000 sobre 161.000 vendidos → 0.55.
-    assert snap["margen_bruto"].value == 55.8
+    # Margen bruto del snapshot; neto por todos los gastos — y son distintos.
+    # La confidence del bruto es la cobertura que lo sostiene: 89.000 sobre
+    # 161.000 vendidos → 0.55, y sale estimado (costo cargado, no compra).
+    assert snap["margen_bruto"].value == 20.0
     assert snap["margen_bruto"].confidence == 0.55
-    assert "line_items" in snap["margen_bruto"].source
+    assert snap["margen_bruto"].detail is not None
+    assert snap["margen_bruto"].detail["estado"] == "estimado"
     assert snap["margen_neto"].value == 76.7
     assert snap["margen_neto"].confidence == 1.0  # hay gastos cargados
     assert snap["margen_bruto"].value != snap["margen_neto"].value

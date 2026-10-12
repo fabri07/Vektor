@@ -69,6 +69,9 @@ class ContratoDeCosto:
             raise ValueError("unit_cost_final no puede ser negativo")
         if self.tax_amount is not None and self.tax_amount < 0:
             raise ValueError("tax_amount no puede ser negativo")
+        # Mismo rango que el CHECK de la columna (fracción: 0,21 = 21%).
+        if self.tax_rate is not None and not (0 <= self.tax_rate < 1):
+            raise ValueError("tax_rate es una fracción en [0, 1)")
 
     def columnas(self) -> dict[str, Any]:
         """Los valores para las columnas homónimas de ``inventory_movements``."""

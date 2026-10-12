@@ -107,8 +107,9 @@ def render_facts_for_llm(facts: Sequence[BusinessFact]) -> str:
         return "(sin hechos disponibles)"
     lines: list[str] = []
     for f in facts:
+        detail = f.detail or {}
         if f.value is None:
-            val = "sin dato"
+            val = f"sin dato ({detail['motivo']})" if detail.get("motivo") else "sin dato"
         elif f.unit in (None, "ratio"):
             val = f"{f.value}"
         else:
@@ -121,6 +122,9 @@ def render_facts_for_llm(facts: Sequence[BusinessFact]) -> str:
             extra.append(f"cambio: {signo}{f.variation_pct}%")
         if f.severity and f.severity != "info":
             extra.append(f"alerta: {f.severity}")
+        # El margen estimado (M·2b) se dice como tal: no es un dato confirmado.
+        if f.value is not None and detail.get("estado") == "estimado":
+            extra.append(f"ESTIMADO: {detail.get('motivo') or 'incluye costos estimados'}")
         if f.confidence < 1.0:
             extra.append(f"confianza: {int(f.confidence * 100)}%")
         suffix = f"  [{'; '.join(extra)}]" if extra else ""

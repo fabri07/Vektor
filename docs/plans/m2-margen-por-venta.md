@@ -90,6 +90,17 @@ La pantalla (dashboard, columna de productos, margen por operación, permisos de
 - **Subscore de salud:** deja de restar la mercadería **comprada** y usa el costo vendido, con la regla de cobertura de las decisiones de abajo. El motor tiene que soportar un componente ausente (repartir su peso) y un componente estimado (rótulo); si no lo soporta, se agrega.
 - **Tests de reconciliación:** FactsService, el chat y la salud dan el mismo número sobre el mismo universo. Se actualizan las líneas base de salud (`v1_formula.json`) con el motivo del cambio.
 
+- **Ejecución (2026-10-12), tres PRs en serie:**
+  - **M·2b-1, dominio y FactsService:** `domain/margen.py` y `margen_bruto` sobre el snapshot. Salen los respaldos por gasto COGS y por costo 0, y `BusinessFact.detail` lleva el estado, las coberturas y los supuestos.
+  - **M·2b-2, el chat lee FactsService:** el prompt general, la consulta de caja y el punto de equilibrio pasan a usar `fijos / margen bruto`. `deterministic_finance` se queda sin fórmula de margen y excluye el fiado.
+  - **M·2b-3, subscore de salud:**
+    - El BSL toma el margen de FactsService, sin agregar por su cuenta (invariante 2c). El fingerprint suma los costos.
+    - El motor admite componentes ausentes. Las cinco copias de la fórmula leen el resultado del motor.
+    - `score_margin` pasa a ser nullable en los schemas. El frontend sólo deja de mostrar «0».
+    - Un margen estimado no alimenta los benchmarks data-driven.
+  - La completitud no se toca: la cobertura de costo no es completeness (plan v3).
+- **Cómo quedó M·2b-1:** ver `docs/claude/plataforma.md` («Margen bruto de ventas: la definición única»). Con el seed de 90 días de `test_facts_provider.py`, el margen bruto pasó de 55,8% a **20,0% estimado**. Antes, lo vendido sin costo se contaba como costo 0; ahora se proyecta con el ratio del cubierto. El costo cargado es una estimación.
+
 ### M·2c — ventas históricas (script, fuera de Alembic)
 - **Dry-run por tenant.** Costea las ventas viejas con la fuente elegible a la fecha de cada venta, **siempre** con `cost_confirmed=false` y el motivo «costeado después de la venta». Ninguna venta histórica sale como margen realizado confirmado.
 - Se puede reejecutar sin duplicar, sólo llena NULL y es reversible.
@@ -113,3 +124,13 @@ La pantalla (dashboard, columna de productos, margen por operación, permisos de
    - Con el 50% o más de lo vendido con costo **confirmado**, el subscore es confirmado.
    - Si no llega, se calcula con los costos estimados (catálogo, stock inicial, envío desconocido) y el subscore, su explicación y el snapshot quedan rotulados **«estimado»**, con la cobertura confirmada a la vista.
    - **Piso (no inventar):** si ni contando las estimaciones el 50% de lo vendido tiene costo, el componente queda **ausente** y baja la confianza, con el motivo «cobertura de costo X%». Nunca 0 ni 50 neutral. Ese mismo piso reemplaza el 50 que hoy devuelve el motor sin ventas.
+
+## Decisiones del dueño (2026-10-12, al arrancar M·2b)
+
+1. **Cobertura parcial:** se usa el ratio del cubierto. `costo vendido = ventas × (costo cubierto / ingreso cubierto)`. Para el estado confirmado el ratio sale de las líneas confirmadas; para el estimado, de las confirmadas más las estimadas.
+2. **Responsable Inscripto:** costo y precio se comparan sin IVA.
+   - Mientras no se guarde la alícuota de la venta, el importe se divide por 1,21.
+   - Como es un supuesto, el margen de un RI sale como mucho «estimado». M·1d ya fijaba «nunca 21% por defecto» para confirmar.
+   - Guardar el IVA de la venta queda como deuda para M·3/B·5.
+3. **IVA de monotributo e informal:** no es recuperable y forma parte del costo. Ya estaba así desde M·1d; ahora queda confirmado.
+4. **Envío desconocido:** se queda como estimación. Puede ser un olvido, un envío incluido en el precio o un envío gratis, y no se supone ninguno.

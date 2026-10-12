@@ -15,9 +15,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 
 from diag_margen import (  # noqa: E402
-    FUENTE_COGS_EXPENSE,
-    FUENTE_LINE_ITEMS,
-    FUENTE_SIN_COGS,
     SIN_IMPUESTO,
     DatosTenant,
     LineaVenta,
@@ -83,14 +80,14 @@ def test_clasificacion_de_costos() -> None:
     assert clasificar_costo(D("100"), D("100")) == "con_costo"
 
 
-def test_facts_replica_cuenta_costo_cero_como_conocido_y_sus_fallbacks() -> None:
-    lineas = [LineaVenta(D("100"), D("0")), LineaVenta(D("100"), None)]
-    margen, fuente, conf = margen_facts(lineas, D("0"))
-    assert (margen, fuente, conf) == (D("100"), FUENTE_LINE_ITEMS, D("0.5"))
+def test_facts_usa_la_definicion_unica() -> None:
+    """M·2b: el snapshot de la venta, cobertura sobre todo lo vendido, sin fallbacks."""
+    lineas = [LineaVenta(D("100"), D("50"), True), LineaVenta(D("100"), None)]
+    m = margen_facts(lineas, "monotributo")
+    assert (m.estado, m.margen_pct, m.cobertura_total) == ("confirmado", D("50"), D("0.5"))
     sin_costo = [LineaVenta(D("200"), None)]
-    assert margen_facts(sin_costo, D("50"))[:2] == (D("75"), FUENTE_COGS_EXPENSE)
-    assert margen_facts(sin_costo, D("0"))[:2] == (D("100"), FUENTE_SIN_COGS)
-    assert margen_facts([], D("0"))[0] is None
+    assert margen_facts(sin_costo, None).estado == "ausente"
+    assert margen_facts([], None).margen_pct is None
 
 
 def test_sin_medicion_no_es_cero() -> None:

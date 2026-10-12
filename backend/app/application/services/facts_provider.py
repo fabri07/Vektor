@@ -12,8 +12,10 @@ variación %) y arma un `PreloadedFactsProvider` sync que sirve los DataFrames
 desde memoria. Mismo patrón fetch-then-compute que forecast_service.
 
 Mapeos clave (contratos verificados en app/persistence/models/transaction.py):
-    - cost_ars por venta NO existe como columna → se deriva
-      Product.unit_cost_ars × SaleEntry.quantity vía outerjoin (NaN si falta).
+    - cost_ars / cost_confirmed por venta = el snapshot que congeló M·2a (o
+      M·2c para las viejas). NUNCA el costo actual del producto: una compra
+      nueva no revalúa el pasado. Sin snapshot (venta sin producto, sin costear,
+      ``sin_costo``) → NaN y la venta baja la cobertura.
     - last_sold_date NO existe en Product → max(transaction_date) por product_id
       (histórico completo, sin ventana: el sobrestock necesita el máximo real).
     - soft-delete: voided_at IS NULL siempre (deactivated products fuera).
@@ -38,6 +40,7 @@ from app.application.services.facts_service import (
 )
 from app.domain.business_time import AR_TZ
 from app.domain.verticals import Vertical
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -52,7 +55,9 @@ def _naive_ar(value: datetime | None) -> datetime | None:
         return value
     return value.astimezone(AR_TZ).replace(tzinfo=None)
 
-_SALES_COLS = ["sale_date", "amount_ars", "cost_ars", "payment_method", "provenance"]
+_SALES_COLS = [
+    "sale_date", "amount_ars", "cost_ars", "cost_confirmed", "payment_method", "provenance",
+]
 _MIXED_TENDERS_COLS = ["sale_date", "amount_ars", "payment_method", "provenance"]
 _EXPENSES_COLS = ["expense_date", "amount_ars", "category", "expense_type", "provenance"]
 _PRODUCTS_COLS = [
@@ -84,24 +89,19 @@ async def load_facts_frames(
     end: date,
 ) -> FactsFrames:
     """Corre las queries bulk (sin limit) y arma los DataFrames canónicos."""
-    # ── Ventas + costo derivado (outerjoin: product_id es nullable) ──────────
-    sales_q = (
-        select(
-            SaleEntry.transaction_date,
-            SaleEntry.amount,
-            SaleEntry.quantity,
-            SaleEntry.payment_method,
-            SaleEntry.provenance,
-            Product.unit_cost_ars,
-            Product.base_units_per_sale_unit,
-        )
-        .outerjoin(Product, Product.id == SaleEntry.product_id)
-        .where(
-            SaleEntry.tenant_id == tenant_id,
-            SaleEntry.voided_at.is_(None),
-            func.date(SaleEntry.transaction_date) >= start,
-            func.date(SaleEntry.transaction_date) <= end,
-        )
+    # ── Ventas + snapshot de costo congelado (M·2a/M·2c) ────────────────────
+    sales_q = select(
+        SaleEntry.transaction_date,
+        SaleEntry.amount,
+        SaleEntry.cost_ars,
+        SaleEntry.cost_confirmed,
+        SaleEntry.payment_method,
+        SaleEntry.provenance,
+    ).where(
+        SaleEntry.tenant_id == tenant_id,
+        SaleEntry.voided_at.is_(None),
+        func.date(SaleEntry.transaction_date) >= start,
+        func.date(SaleEntry.transaction_date) <= end,
     )
     sales_rows = (await session.execute(sales_q)).all()
     sales_df = pd.DataFrame(
@@ -109,12 +109,9 @@ async def load_facts_frames(
             {
                 "sale_date": row.transaction_date,
                 "amount_ars": float(row.amount),
-                "cost_ars": (
-                    # Costo por unidad de venta × cantidad en unidades base / factor.
-                    float(row.unit_cost_ars) * row.quantity / (row.base_units_per_sale_unit or 1)
-                    if row.unit_cost_ars is not None
-                    else float("nan")
-                ),
+                "cost_ars": float(row.cost_ars) if row.cost_ars is not None else float("nan"),
+                # Sólo True confirma; NULL (sin snapshot) no.
+                "cost_confirmed": row.cost_confirmed is True,
                 "payment_method": row.payment_method,
                 "provenance": row.provenance,
             }
@@ -372,4 +369,15 @@ async def build_facts_service(
         start=period.previous().start,
         end=period.end,
     )
-    return FactsService(PreloadedFactsProvider(frames), thresholds)
+    # CRUDO: el margen de un RI compara sin IVA y el legacy «registered» no
+    # alcanza para saberlo (ver domain/margen.py y base_comparable).
+    fiscal_crudo = (
+        await session.execute(
+            select(BusinessProfile.fiscal_condition)
+            .where(BusinessProfile.tenant_id == tenant_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return FactsService(
+        PreloadedFactsProvider(frames), thresholds, fiscal_condition_crudo=fiscal_crudo
+    )

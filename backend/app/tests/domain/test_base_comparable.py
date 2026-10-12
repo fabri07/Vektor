@@ -233,6 +233,18 @@ class TestRevision:
         )
         assert base_comparable(ref, "responsable_inscripto").costo == Decimal("500.00")
 
+    def test_por_tasa_adicional_no_recuperable(self) -> None:
+        """Rama ``adicional`` no recuperable por TASA: sólo vale sin envío."""
+        sin_envio = _ref("500", envio="no_aplica", impuesto="adicional", tax_rate=Decimal("0.21"))
+        assert base_comparable(sin_envio, "monotributo") == BaseComparable(
+            Decimal("605.00"), True
+        )
+        con_envio = _ref("500", envio="incluido", impuesto="adicional", tax_rate=Decimal("0.21"))
+        r = base_comparable(con_envio, "monotributo")
+        assert (r.confirmada, r.motivo, r.costo) == (
+            False, MOTIVO_SIN_IMPORTE_NI_TASA, Decimal("500")
+        )
+
     def test_iva_mayor_que_el_costo_no_se_confirma(self) -> None:
         ref = _ref("100", impuesto="incluido", tax_amount=Decimal("150"), tax_recoverable=True)
         r = base_comparable(ref, "responsable_inscripto")
