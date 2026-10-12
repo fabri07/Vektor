@@ -392,7 +392,7 @@ class FactsService:
             return medir_margen([], self.fiscal_condition_crudo)
         costos = sales["cost_ars"] if "cost_ars" in sales.columns else None
         confirmadas = (
-            sales["cost_confirmed"].fillna(False).astype(bool)
+            sales["cost_confirmed"].astype("boolean").fillna(False).astype(bool)
             if "cost_confirmed" in sales.columns
             else None
         )
@@ -412,9 +412,10 @@ class FactsService:
                      include_demo: bool = False) -> BusinessFact:
         """Margen bruto de ventas (M·2b). Ausente → EMPTY con el motivo de cobertura.
 
-        ``confidence`` es la cobertura que sostiene el número (la confirmada si es
-        confirmado; la que incluye estimaciones si es estimado). El estado, las dos
-        coberturas y los supuestos van en ``detail``.
+        ``confidence`` es la cobertura de las líneas de las que sale el número
+        (``MedicionDeMargen.cobertura_del_estado``). Con margen ausente es la
+        cobertura con estimaciones que no alcanzó el piso (antes: 0.0); el hecho es
+        EMPTY igual. El estado, las coberturas y los supuestos van en ``detail``.
         """
         sales = self._ventas_reales(tenant_id, p, include_demo)
         m = self.medir_margen(tenant_id, p, include_demo=include_demo)

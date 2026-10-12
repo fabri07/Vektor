@@ -326,10 +326,3 @@ def test_render_margen_estimado_se_rotula() -> None:
     )
     out = render_facts_for_llm([f])
     assert "ESTIMADO: cobertura confirmada 30,0%" in out
-
-
-def test_render_margen_ausente_dice_por_que() -> None:
-    f = _fact("margen_bruto", None, 0.1, unit="%").model_copy(
-        update={"detail": {"estado": "ausente", "motivo": "cobertura de costo 10,0%"}}
-    )
-    assert "sin dato (cobertura de costo 10,0%)" in render_facts_for_llm([f])

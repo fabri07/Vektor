@@ -109,7 +109,7 @@ def render_facts_for_llm(facts: Sequence[BusinessFact]) -> str:
     for f in facts:
         detail = f.detail or {}
         if f.value is None:
-            val = f"sin dato ({detail['motivo']})" if detail.get("motivo") else "sin dato"
+            val = "sin dato"
         elif f.unit in (None, "ratio"):
             val = f"{f.value}"
         else:

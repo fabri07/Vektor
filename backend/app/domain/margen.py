@@ -99,11 +99,16 @@ class MedicionDeMargen:
     costo_vendido: Decimal | None
     ganancia: Decimal | None
     supuestos: tuple[str, ...] = ()
+    #: De qué líneas sale el ratio: sólo las confirmadas, o confirmadas +
+    #: estimadas. No se deduce del estado: un RI confirmado por cobertura queda
+    #: rotulado «estimado» por el supuesto del IVA, pero su ratio sigue saliendo
+    #: de las confirmadas.
+    base_del_ratio: Literal["confirmada", "total"] | None = None
 
     @property
     def cobertura_del_estado(self) -> Decimal:
-        """La cobertura que sostiene el número: confirmada si es confirmado."""
-        if self.estado == "confirmado":
+        """La cobertura de las líneas de las que sale el número."""
+        if self.base_del_ratio == "confirmada":
             return self.cobertura_confirmada
         return self.cobertura_total
 
@@ -146,11 +151,13 @@ def medir_margen(
     cob_total = ingreso_cub / ingreso_total
 
     estado: EstadoDeMargen
+    base: Literal["confirmada", "total"]
     if cob_conf >= COBERTURA_MINIMA:
-        estado, ingreso_base, costo_base = "confirmado", ingreso_conf, costo_conf
-        motivo = None
+        estado, base, motivo = "confirmado", "confirmada", None
+        ingreso_base, costo_base = ingreso_conf, costo_conf
     elif cob_total >= COBERTURA_MINIMA:
-        estado, ingreso_base, costo_base = "estimado", ingreso_cub, costo_cub
+        estado, base = "estimado", "total"
+        ingreso_base, costo_base = ingreso_cub, costo_cub
         motivo = (
             f"cobertura confirmada {_pct_txt(cob_conf)}%: incluye costos estimados"
         )
@@ -161,8 +168,11 @@ def medir_margen(
             supuestos,
         )
 
-    if ri and estado == "confirmado":
-        estado, motivo = "estimado", SUPUESTO_ALICUOTA_RI
+    if ri:
+        # El supuesto del IVA de venta siempre se dice, también si ya era
+        # estimado por cobertura.
+        estado = "estimado"
+        motivo = f"{motivo}; {SUPUESTO_ALICUOTA_RI}" if motivo else SUPUESTO_ALICUOTA_RI
 
     ratio = costo_base / ingreso_base
     costo_vendido = ingreso_total * ratio
@@ -180,4 +190,5 @@ def medir_margen(
         costo_vendido=costo_vendido,
         ganancia=ingreso_total - costo_vendido,
         supuestos=supuestos,
+        base_del_ratio=base,
     )

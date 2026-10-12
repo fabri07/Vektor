@@ -111,3 +111,27 @@ class TestBordes:
         """Un ``confirmado`` sin costo (no debería existir) no suma cobertura."""
         m = medir_margen([LineaDeMargen(D(100), None, True)], None)
         assert m.estado == "ausente"
+
+
+class TestRevision:
+    """Revisión de M·2b-1."""
+
+    def test_ri_confirmado_por_cobertura_declara_la_cobertura_confirmada(self) -> None:
+        """RI con 55% confirmado y 95% con estimadas: el número sale del 55%, y
+        eso declara, aunque el rótulo sea «estimado» por el IVA supuesto."""
+        m = medir_margen(
+            [_l("5500", "2000", True), _l("4000", "3000"), _l("500")],
+            "responsable_inscripto",
+        )
+        assert m.estado == "estimado"
+        assert m.base_del_ratio == "confirmada"
+        assert m.cobertura_del_estado == m.cobertura_confirmada == D("0.55")
+
+    def test_ri_estimado_por_cobertura_tambien_dice_el_supuesto(self) -> None:
+        m = medir_margen(
+            [_l("300", "100", True), _l("500", "300")], "responsable_inscripto"
+        )
+        assert m.estado == "estimado"
+        assert m.motivo is not None
+        assert "incluye costos estimados" in m.motivo
+        assert SUPUESTO_ALICUOTA_RI in m.motivo

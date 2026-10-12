@@ -109,6 +109,31 @@ async def test_cost_ars_sale_del_snapshot_congelado(
     assert pd.isna(by_amount[1200.0]["cost_ars"])         # venta sin producto
 
 
+async def test_snapshot_confirmado_llega_confirmado_al_margen(
+    db_session: AsyncSession, sample_tenant
+) -> None:
+    """Revisión de M·2b-1: un snapshot confirmado se lee como confirmado y el
+    margen sale «confirmado». El snapshot se escribe a mano (venta sin producto:
+    el costeo de M·2a no la toca) para probar sólo el mapeo del provider."""
+    tid = sample_tenant.tenant_id
+    db_session.add(_sale(tid, _dt(TODAY), 1000, cost_unit_ars=Decimal("600"),
+                         cost_ars=Decimal("600"), cost_confirmed=True,
+                         cost_origin="compra", cost_snapshot_version=1))
+    db_session.add(_sale(tid, _dt(TODAY), 500))  # sin costo: baja la cobertura
+    await db_session.commit()
+
+    frames = await load_facts_frames(db_session, tid, start=P90.start, end=P90.end)
+    by_amount = {row["amount_ars"]: row for _, row in frames.sales.iterrows()}
+    assert by_amount[1000.0]["cost_confirmed"] is True
+    assert by_amount[500.0]["cost_confirmed"] is False
+
+    svc = await build_facts_service(db_session, tid, P90, vertical=Vertical.KIOSCO_ALMACEN)
+    f = svc.margen_bruto(str(tid), P90)
+    assert f.value == 40.0
+    assert f.confidence == 0.67  # 1000 de 1500 confirmados
+    assert f.detail is not None and f.detail["estado"] == "confirmado"
+
+
 async def test_last_sold_date_derivado(db_session: AsyncSession, sample_tenant) -> None:
     tid = sample_tenant.tenant_id
     vendido = Product(tenant_id=tid, name="Coca 500", sale_price_ars=Decimal("1500"),
