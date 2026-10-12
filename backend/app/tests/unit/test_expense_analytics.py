@@ -1,7 +1,7 @@
 """Tests de los handlers analíticos de AgentExpense (Sprint 17, Stage 5)."""
 
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest_asyncio
@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.expense.agent import AgentExpense
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentTask
+from app.domain.business_time import today_ar
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.tenant import Tenant
-from app.persistence.models.transaction import ExpenseEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 
 def _task(intent: str) -> AgentTask:
@@ -116,6 +118,34 @@ async def test_punto_equilibrio_sin_ventas(db_session, seeded):
     resp = await agent.process(_req(seeded), task=_task("calcular_punto_equilibrio"))
     # sin ventas → no hay margen bruto → mensaje pidiendo datos
     assert resp.result["summary"] == "equilibrio_sin_margen"
+
+
+async def test_punto_equilibrio_usa_margen_bruto_no_un_neto(db_session, seeded):
+    """M·2b-2: equilibrio = fijos / margen BRUTO de FactsService.
+
+    Ventas $1.000.000 con costo confirmado $600.000 → bruto 40%. Fijos del mes:
+    $450.000 → equilibrio $1.125.000. Con el «margen» viejo (ventas − TODOS los
+    gastos = 1.000.000 − 450.000 − 30.000 − 90.000 = 43%) los fijos se restaban
+    dos veces y daba otro número."""
+    db_session.add(BusinessProfile(tenant_id=seeded, vertical_code="kiosco_almacen"))
+    hoy = today_ar()
+    for i in range(10):
+        db_session.add(SaleEntry(
+            tenant_id=seeded, amount=Decimal("100000"), quantity=1,
+            transaction_date=datetime.combine(hoy - timedelta(days=i), time(12)),
+            payment_method="cash", cost_unit_ars=Decimal("60000"),
+            cost_ars=Decimal("60000"), cost_confirmed=True, cost_origin="compra",
+            cost_snapshot_version=1,
+        ))
+    await db_session.commit()
+
+    agent = AgentExpense(db=db_session)
+    resp = await agent.process(_req(seeded), task=_task("calcular_punto_equilibrio"))
+    assert resp.result["summary"] == "calcular_punto_equilibrio"
+    data = resp.result["structured_data"]
+    assert data["margin_pct"] == 40.0
+    assert data["margin_estimated"] is False
+    assert data["breakeven"] == 450000 / 0.40
 
 
 async def test_empty(db_session):

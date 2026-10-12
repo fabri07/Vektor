@@ -263,8 +263,14 @@ class AgentChat(BaseAgent):
                 "Indicá al usuario que debe cargar sus datos de ventas y gastos."
             )
         try:
+            from app.application.agents.shared.margen_texto import (  # noqa: PLC0415
+                describir_margen_bruto,
+            )
             from app.application.services.deterministic_finance import (  # noqa: PLC0415
                 get_financial_summary,
+            )
+            from app.application.services.facts_provider import (  # noqa: PLC0415
+                leer_margenes,
             )
 
             fin_data = await get_financial_summary(tenant_id, db)
@@ -276,17 +282,23 @@ class AgentChat(BaseAgent):
                 )
 
             flujo = fin_data.get("flujo_neto_30d", {})
-            margen = fin_data.get("margen", {})
             ticket = fin_data.get("ticket_promedio", {})
             lines = ["\n\nDatos financieros del negocio (últimos 30 días):"]
             if flujo:
                 lines.append(
                     f"  Ventas: ${flujo.get('total_ventas', 0)} | "
                     f"Gastos: ${flujo.get('total_gastos', 0)} | "
-                    f"Flujo neto: ${flujo.get('flujo_neto', 0)}"
+                    f"Resultado (ventas − todos los gastos): ${flujo.get('flujo_neto', 0)}"
                 )
-            if not margen.get("sin_datos"):
-                lines.append(f"  Margen bruto: {margen.get('margen_pct', 0)}%")
+            # El margen sale de FactsService (M·2b-2): la misma definición que el
+            # dashboard y la salud. Estimado o sin medir se dice como tal.
+            lectura = await leer_margenes(db, tenant_id)
+            margen_txt = (
+                describir_margen_bruto(lectura.margenes.bruto)
+                if lectura.margenes is not None
+                else f"sin medir ({lectura.motivo})"
+            )
+            lines.append(f"  Margen bruto (ventas − costo de lo vendido): {margen_txt}")
             if not ticket.get("sin_datos"):
                 lines.append(
                     f"  Ticket promedio: ${ticket.get('ticket_promedio', 0)} "

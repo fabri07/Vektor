@@ -101,6 +101,8 @@ La pantalla (dashboard, columna de productos, margen por operación, permisos de
   - La completitud no se toca: la cobertura de costo no es completeness (plan v3).
 - **Cómo quedó M·2b-1:** ver `docs/claude/plataforma.md` («Margen bruto de ventas: la definición única»). Con el seed de 90 días de `test_facts_provider.py`, el margen bruto pasó de 55,8% a **20,0% estimado**. Antes, lo vendido sin costo se contaba como costo 0; ahora se proyecta con el ratio del cubierto. El costo cargado es una estimación.
 
+- **Cómo quedó M·2b-2:** ver `docs/claude/plataforma.md` («El chat lee el margen de FactsService»). Una corrección al plan: `deterministic_finance` **sigue sin filtrar la procedencia**. El plan decía «excluir el demo», pero ahí la procedencia la decide el tenant (un tenant demo ve sus filas demo) y `test_no_filtra_por_provenance` fija justamente eso. El demo se trata en el margen, que pasa por FactsService con `include_demo = tenant.is_demo`. Lo que sí se excluye son los cobros de fiado.
+
 ### M·2c — ventas históricas (script, fuera de Alembic)
 - **Dry-run por tenant.** Costea las ventas viejas con la fuente elegible a la fecha de cada venta, **siempre** con `cost_confirmed=false` y el motivo «costeado después de la venta». Ninguna venta histórica sale como margen realizado confirmado.
 - Se puede reejecutar sin duplicar, sólo llena NULL y es reversible.

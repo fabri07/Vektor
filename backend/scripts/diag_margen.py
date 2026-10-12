@@ -19,7 +19,8 @@ por tenant,
   por categoría), FactsService (``_cogs`` con el costo ACTUAL del producto),
   ponderado sólo sobre ventas con costo (la definición de M·3), FactsService
   (desde M·2b: el costo congelado por venta y la definición única),
-  ``deterministic_finance.calcular_margen_bruto`` (ventas − TODOS los gastos) y el
+  el resultado de ``deterministic_finance.calcular_flujo_neto_30d`` (ventas −
+  TODOS los gastos; hasta M·2b-2 se llamaba «margen bruto») y el
   subscore de margen del health score.
 
 **Ausencia de dato ≠ cero.** Lo que no se puede calcular sale como
@@ -229,7 +230,8 @@ def margen_facts(lineas: Sequence[LineaVenta], regimen: str | None) -> MedicionD
 
 
 def margen_neto_det(ventas: Decimal, gastos: Decimal) -> Decimal | None:
-    """Réplica de ``deterministic_finance.calcular_margen_bruto``: resta TODOS los
+    """Resultado de ``deterministic_finance.calcular_flujo_neto_30d`` sobre ventas
+    (hasta M·2b-2, ``calcular_margen_bruto``): resta TODOS los
     gastos (fijos, mercadería y cualquier otro), así que es un margen neto de caja."""
     if ventas == 0:
         return None
@@ -522,11 +524,12 @@ SELECT tenant_id::text AS tenant_id,
  GROUP BY tenant_id
 """
 
-#: ``calcular_flujo_neto_30d``: todo lo vivo desde hoy − 30, sin otro filtro.
+#: ``calcular_flujo_neto_30d``: todo lo vivo desde hoy − 30, sin cobros de fiado (M·2b-2).
 _DET = f"""
 SELECT t.tenant_id::text AS tenant_id, sum(t.v) AS ventas, sum(t.g) AS gastos FROM (
     SELECT tenant_id, amount AS v, 0 AS g FROM sales_entries
      WHERE voided_at IS NULL AND transaction_date >= $2
+       AND coalesce(lower(payment_method), '') <> 'inflow'
     UNION ALL
     SELECT tenant_id, 0, amount FROM expense_entries
      WHERE voided_at IS NULL AND transaction_date >= $2

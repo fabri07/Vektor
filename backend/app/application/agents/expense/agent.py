@@ -537,8 +537,8 @@ class AgentExpense(BaseAgent):
             from sqlalchemy import func, select  # noqa: PLC0415
 
             from app.application.agents.shared import analytics  # noqa: PLC0415
-            from app.application.services.deterministic_finance import (  # noqa: PLC0415
-                calcular_margen_bruto,
+            from app.application.services.facts_provider import (  # noqa: PLC0415
+                leer_margenes,
             )
             from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
@@ -552,15 +552,26 @@ class AgentExpense(BaseAgent):
                 )
             )
             fixed_costs = float(fixed_q.scalar_one() or 0)
-            margen = await calcular_margen_bruto(tenant_id, self._db)
-            if margen.get("sin_datos") or not margen.get("margen_pct"):
+            # Equilibrio = fijos / margen BRUTO (lo que deja cada peso vendido
+            # después de pagar la mercadería). Antes se dividía por un «margen»
+            # que ya había restado todos los gastos, fijos incluidos: los fijos
+            # se contaban dos veces (M·2b-2). El margen es el de FactsService.
+            lectura = await leer_margenes(self._db, tenant_id)
+            bruto = lectura.margenes.bruto if lectura.margenes is not None else None
+            if bruto is None or bruto.value is None:
+                motivo = (bruto.detail or {}).get("motivo") if bruto is not None else lectura.motivo
                 return self._analysis_response(
                     request,
                     "equilibrio_sin_margen",
                     "Para calcular tu punto de equilibrio necesito tu margen bruto, y todavía "
-                    "no tengo ventas suficientes para calcularlo. Cargá ventas y gastos del mes.",
+                    "no lo puedo medir"
+                    + (f" ({motivo})" if motivo else "")
+                    + ". Cargá el costo de tus productos y tus ventas del mes.",
                 )
-            margen_pct = float(margen["margen_pct"])
+            margen_pct = float(bruto.value)
+            estimado = (bruto.detail or {}).get("estado") == "estimado"
+            # El motivo real (cobertura o, en un RI, el IVA de venta supuesto).
+            motivo_estimado = (bruto.detail or {}).get("motivo") or "costos sin confirmar"
             be = analytics.breakeven_point(fixed_costs, margen_pct)
             if be is None:
                 return self._analysis_response(
@@ -569,15 +580,23 @@ class AgentExpense(BaseAgent):
                     "No puedo calcular el punto de equilibrio sin un margen bruto positivo.",
                 )
             lines = [
-                f"Tu punto de equilibrio mensual es ${be:,.0f} en ventas.",
+                f"Tu punto de equilibrio mensual es ${be:,.0f} en ventas"
+                + (" (estimado)." if estimado else "."),
                 f"Se calcula con tus costos fijos (${fixed_costs:,.0f}/mes) y tu margen "
-                f"bruto ({margen_pct:.0f}%). Por encima de ese nivel, empezás a ganar.",
+                f"bruto ({margen_pct:.0f}%"
+                + (f", estimado: {motivo_estimado}" if estimado else "")
+                + "). Por encima de ese nivel, empezás a ganar.",
             ]
             return self._analysis_response(
                 request,
                 "calcular_punto_equilibrio",
                 "\n".join(lines),
-                {"breakeven": be, "fixed_costs": fixed_costs, "margin_pct": margen_pct},
+                {
+                    "breakeven": be,
+                    "fixed_costs": fixed_costs,
+                    "margin_pct": margen_pct,
+                    "margin_estimated": estimado,
+                },
             )
 
         # ── clasificar_gastos (default) ───────────────────────────────────────
