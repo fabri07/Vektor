@@ -7,6 +7,8 @@ como un error sin respuesta. En los dos casos la caja decía "Sin conexión" con
 la red andando (incidente de 2026-10: ninguna venta encolada podía subir).
 """
 
+import pathlib
+import re
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -15,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.config.settings import get_settings
 from app.domain.pos_terminal import OFFLINE_HEADER, TERMINAL_HEADER
-from app.main import create_app
+from app.main import CORS_ALLOW_HEADERS, create_app
 
 ORIGEN_AJENO = "https://no-es-vektor.example"
 
@@ -51,7 +53,9 @@ def _preflight_headers(origen: str, pedidos: str) -> dict[str, str]:
 
 
 class TestPreflight:
-    @pytest.mark.parametrize("header", [OFFLINE_HEADER, TERMINAL_HEADER, "X-Trace-Id"])
+    @pytest.mark.parametrize(
+        "header", [OFFLINE_HEADER, TERMINAL_HEADER, "X-Trace-Id", "Idempotency-Key"]
+    )
     async def test_los_headers_propios_pasan_el_preflight(
         self, cliente: AsyncClient, header: str
     ) -> None:
@@ -102,3 +106,37 @@ class TestErrorNoManejado:
         )
         assert resp.status_code == 500
         assert "access-control-allow-origin" not in resp.headers
+
+
+# ── El front no puede mandar un header que el preflight rechace ──────────────
+
+_FRONT = pathlib.Path(__file__).resolve().parents[4] / "frontend" / "src"
+#: Un literal con forma de header (``"Idempotency-Key":`` o ``headers["X-Trace-Id"]``).
+_LITERAL_DE_HEADER = re.compile(r"""["']([A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)["']\s*(?::|\])""")
+
+
+def _headers_que_manda_el_front() -> dict[str, str]:
+    encontrados: dict[str, str] = {}
+    for archivo in _FRONT.rglob("*"):
+        if archivo.suffix not in (".ts", ".tsx") or "__tests__" in archivo.parts:
+            continue
+        texto = archivo.read_text(encoding="utf-8")
+        if "headers" not in texto.lower():
+            continue
+        for m in _LITERAL_DE_HEADER.finditer(texto):
+            encontrados.setdefault(m.group(1), str(archivo.relative_to(_FRONT)))
+    return encontrados
+
+
+@pytest.mark.skipif(not _FRONT.is_dir(), reason="sin el código del frontend al lado")
+def test_todo_header_propio_del_front_esta_permitido() -> None:
+    """Compuerta: un header nuevo en el front que no está en ``CORS_ALLOW_HEADERS``
+    hace que el navegador corte el preflight y la operación quede «sin conexión»
+    para siempre. Pasó dos veces (``X-POS-*`` hasta #82 e ``Idempotency-Key`` hasta
+    2026-10-11): se lee del código del front en vez de confiar en la memoria."""
+    encontrados = _headers_que_manda_el_front()
+    # Sanidad: si el patrón deja de encontrar los conocidos, la compuerta no prueba nada.
+    assert {"Idempotency-Key", "X-Trace-Id"} <= set(encontrados), encontrados
+    permitidos = {h.lower() for h in CORS_ALLOW_HEADERS}
+    faltan = {h: f for h, f in encontrados.items() if h.lower() not in permitidos}
+    assert not faltan, f"headers del front fuera de CORS_ALLOW_HEADERS: {faltan}"
