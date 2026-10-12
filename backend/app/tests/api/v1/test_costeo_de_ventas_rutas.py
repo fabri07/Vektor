@@ -21,7 +21,6 @@ from app.domain.business_time import now_ar_naive, today_ar
 from app.persistence.models.transaction import SaleEntry
 
 
-
 def _ahora() -> str:
     """El momento de la venta, calculado EN el test y no al importar el módulo.
 
