@@ -530,11 +530,17 @@ class AgentHealth(BaseAgent):
         from app.application.agents.shared.data_query_narrator import (  # noqa: PLC0415
             answer_data_query,
         )
+        from app.application.agents.shared.margen_texto import (  # noqa: PLC0415
+            datos_margen_bruto,
+        )
         from app.application.agents.shared.stats_enrichment import (  # noqa: PLC0415
             enrich_timeseries,
         )
         from app.application.services.deterministic_finance import (  # noqa: PLC0415
             get_financial_summary,
+        )
+        from app.application.services.facts_provider import (  # noqa: PLC0415
+            margenes_del_tenant,
         )
         from app.persistence.repositories.transaction_repository import (  # noqa: PLC0415
             get_daily_net_series,
@@ -589,7 +595,6 @@ class AgentHealth(BaseAgent):
 
         # Coerción Decimal → float para JSON-serializable
         flujo_raw = summary.get("flujo_neto_30d", {})
-        margen_raw = summary.get("margen", {})
         ticket_raw = summary.get("ticket_promedio", {})
 
         def _to_float(v: Any) -> float | None:
@@ -616,11 +621,18 @@ class AgentHealth(BaseAgent):
                     if hasattr(flujo_raw.get("hasta"), "isoformat")
                     else flujo_raw.get("hasta")
                 ),
-                "margen_pct": _to_float(margen_raw.get("margen_pct")),
                 "ticket_promedio": _to_float(ticket_raw.get("ticket_promedio")),
                 "n_transacciones": ticket_raw.get("n_transacciones"),
             }
         }
+
+        # Margen: FactsService (M·2b-2), la misma definición que el dashboard y la
+        # salud. «flujo_neto» es el resultado (ventas − todos los gastos), no el
+        # margen bruto; el estado (confirmado/estimado/ausente) viaja con el número.
+        margenes = await margenes_del_tenant(self._db, tenant_id)
+        if margenes is not None:
+            structured_data["resumen_financiero"].update(datos_margen_bruto(margenes.bruto))
+            structured_data["resumen_financiero"]["margen_neto_pct"] = margenes.neto.value
 
         # Análisis estadístico de la serie diaria de flujo neto (ventas - gastos)
         net_series = await get_daily_net_series(self._db, tenant_id, days=60)

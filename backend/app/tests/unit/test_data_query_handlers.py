@@ -1302,6 +1302,37 @@ def _task_health() -> AgentTask:
     return AgentTask(agent="agent_health", action_type=ActionType.ANSWER_DATA_QUERY, entities={})
 
 
+@pytest.fixture(autouse=True)
+def _sin_margenes_de_facts():
+    """El margen sale de FactsService (M·2b-2); con un db de mentira no hay
+    perfil: `None`. El test que mira el margen lo parchea con un hecho."""
+    with patch(
+        "app.application.services.facts_provider.margenes_del_tenant",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
+
+
+def _margenes(bruto: float | None, estado: str, neto: float | None = 20.0):
+    from app.application.services.facts_provider import MargenesDelPeriodo
+    from app.application.services.facts_service import BusinessFact
+
+    def _f(metric: str, value: float | None, detail: dict | None = None) -> BusinessFact:
+        return BusinessFact(
+            fact_id=f"{metric}_últimos_30_días", domain="rentabilidad", metric=metric,
+            value=value, unit="%", period="últimos_30_días", detail=detail,
+        )
+
+    return MargenesDelPeriodo(
+        bruto=_f("margen_bruto", bruto, {
+            "estado": estado, "motivo": "cobertura confirmada 0,0%: incluye costos estimados",
+            "cobertura_confirmada_pct": 0.0, "cobertura_total_pct": 80.0,
+        }),
+        neto=_f("margen_neto", neto),
+    )
+
+
 async def test_health_con_datos_llama_narrador() -> None:
     """Con datos financieros → structured_data correcto, 1 LLMCall, message del narrador."""
     from app.application.agents.health.agent import AgentHealth
@@ -1323,11 +1354,6 @@ async def test_health_con_datos_llama_narrador() -> None:
             "desde": "2026-05-28",
             "hasta": "2026-06-27",
         },
-        "margen": {
-            "margen_pct": Decimal("40.00"),
-            "margen_abs": Decimal("60000.00"),
-            "sin_datos": False,
-        },
         "ticket_promedio": {
             "ticket_promedio": Decimal("5000.00"),
             "n_transacciones": 30,
@@ -1341,6 +1367,10 @@ async def test_health_con_datos_llama_narrador() -> None:
         new_callable=AsyncMock,
         return_value=financial_summary,
     ), patch(
+        "app.application.services.facts_provider.margenes_del_tenant",
+        new_callable=AsyncMock,
+        return_value=_margenes(32.5, "estimado"),
+    ) as mock_margenes, patch(
         "app.persistence.repositories.transaction_repository.get_daily_net_series",
         new_callable=AsyncMock,
         return_value=[float(1000 + i * 10) for i in range(60)],
@@ -1364,12 +1394,18 @@ async def test_health_con_datos_llama_narrador() -> None:
     assert rf["total_ventas"] == pytest.approx(150000.0)
     assert rf["total_gastos"] == pytest.approx(90000.0)
     assert rf["flujo_neto"] == pytest.approx(60000.0)
-    assert rf["margen_pct"] == pytest.approx(40.0)
+    # M·2b-2: el margen sale de FactsService con su estado; el «flujo_neto» es el
+    # resultado (ventas − gastos), ya no se rotula margen bruto.
+    assert rf["margen_bruto_pct"] == pytest.approx(32.5)
+    assert rf["margen_bruto_estado"] == "estimado"
+    assert rf["cobertura_costo_total_pct"] == pytest.approx(80.0)
+    assert rf["margen_neto_pct"] == pytest.approx(20.0)
+    assert "margen_pct" not in rf
+    mock_margenes.assert_called_once_with(mock_db, UUID(_TENANT_A))
     assert rf["ticket_promedio"] == pytest.approx(5000.0)
     assert rf["n_transacciones"] == 30
     # Todos float (no Decimal)
     assert isinstance(rf["total_ventas"], float)
-    assert isinstance(rf["margen_pct"], float)
 
     # JSON-serializable (no Decimal)
     assert json.dumps(sd)
@@ -1439,7 +1475,6 @@ async def test_health_cross_tenant_isolation() -> None:
             "desde": "2026-05-28",
             "hasta": "2026-06-27",
         },
-        "margen": {"sin_datos": False, "margen_pct": Decimal("40.00")},
         "ticket_promedio": {
             "sin_datos": False,
             "ticket_promedio": Decimal("1000.00"),
@@ -1483,7 +1518,6 @@ async def test_health_structured_data_json_serializable() -> None:
             "desde": "2026-05-28",
             "hasta": "2026-06-27",
         },
-        "margen": {"margen_pct": Decimal("30.00"), "sin_datos": False},
         "ticket_promedio": {
             "ticket_promedio": Decimal("3333.33"),
             "n_transacciones": 30,

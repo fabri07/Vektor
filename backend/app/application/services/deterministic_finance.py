@@ -6,6 +6,15 @@ un tenant demo debe poder mostrar su funcionamiento con números de muestra y un
 tenant real no debe tener datos demo sembrados.
 
 Usar Decimal para todos los cálculos monetarios; nunca float.
+
+Los cobros de fiado (``payment_method="inflow"``) NO son ventas: la venta fiada
+original ya se contó. Quedan fuera de ventas, ticket y rotación (misma regla que
+FactsService).
+
+**El margen NO vive acá** (M·2b-2): bruto y neto salen de FactsService
+(``facts_provider.margenes_del_tenant``), la única definición. Lo que antes se
+llamaba «margen bruto» acá era ``ventas − TODOS los gastos``: un resultado
+operativo, que es lo que sigue devolviendo ``calcular_flujo_neto_30d``.
 """
 
 from __future__ import annotations
@@ -20,6 +29,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.observability.logger import get_logger
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+
+#: Cobros de fiado: no son ventas (ver docstring del módulo y FactsService).
+_INFLOW = "inflow"
+
+
+def _es_venta() -> Any:
+    """Excluye los cobros de fiado (``payment_method`` puede ser NULL)."""
+    return func.coalesce(func.lower(SaleEntry.payment_method), "") != _INFLOW
 
 logger = get_logger(__name__)
 
@@ -45,6 +62,7 @@ async def calcular_flujo_neto_30d(tenant_id: uuid.UUID, db: AsyncSession) -> dic
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
+        _es_venta(),
     )
     gastos_q = select(func.coalesce(func.sum(ExpenseEntry.amount), Decimal("0"))).where(
         ExpenseEntry.tenant_id == tenant_id,
@@ -66,31 +84,6 @@ async def calcular_flujo_neto_30d(tenant_id: uuid.UUID, db: AsyncSession) -> dic
     }
 
 
-async def calcular_margen_bruto(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
-    """
-    Retorna margen bruto en % y absoluto sobre los últimos 30 días.
-    Si ventas == 0, retorna {"margen_pct": None, "sin_datos": True}.
-    """
-    flujo = await calcular_flujo_neto_30d(tenant_id, db)
-    ventas = flujo["total_ventas"]
-    gastos = flujo["total_gastos"]
-
-    if ventas == Decimal("0"):
-        return {"margen_pct": None, "margen_abs": None, "sin_datos": True}
-
-    margen_abs = ventas - gastos
-    margen_pct = (margen_abs / ventas * Decimal("100")).quantize(
-        _TWO_PLACES, rounding=ROUND_HALF_UP
-    )
-
-    return {
-        "margen_pct": margen_pct,
-        "margen_abs": margen_abs,
-        "base_calculo": ventas,
-        "sin_datos": False,
-    }
-
-
 async def calcular_ticket_promedio(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
     """
     Retorna ticket promedio y número de transacciones de los últimos 30 días.
@@ -101,11 +94,13 @@ async def calcular_ticket_promedio(tenant_id: uuid.UUID, db: AsyncSession) -> di
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
+        _es_venta(),
     )
     sum_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
+        _es_venta(),
     )
 
     n_transacciones = (await db.scalar(count_q)) or 0
@@ -139,6 +134,7 @@ async def calcular_rotacion_inventario(tenant_id: uuid.UUID, db: AsyncSession) -
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.voided_at.is_(None),
         SaleEntry.transaction_date >= desde,
+        _es_venta(),
     )
 
     stock_units = int((await db.scalar(stock_q)) or 0)
@@ -165,7 +161,6 @@ async def get_financial_summary(tenant_id: uuid.UUID, db: AsyncSession) -> dict[
     """
     try:
         flujo = await calcular_flujo_neto_30d(tenant_id, db)
-        margen = await calcular_margen_bruto(tenant_id, db)
         ticket = await calcular_ticket_promedio(tenant_id, db)
         rotacion = await calcular_rotacion_inventario(tenant_id, db)
     except Exception as exc:
@@ -179,7 +174,6 @@ async def get_financial_summary(tenant_id: uuid.UUID, db: AsyncSession) -> dict[
     sin_datos_total = (
         flujo["total_ventas"] == Decimal("0")
         and flujo["total_gastos"] == Decimal("0")
-        and margen.get("sin_datos", True)
         and ticket.get("sin_datos", True)
     )
 
@@ -192,7 +186,6 @@ async def get_financial_summary(tenant_id: uuid.UUID, db: AsyncSession) -> dict[
     return {
         "estado": "OK",
         "flujo_neto_30d": flujo,
-        "margen": margen,
         "ticket_promedio": ticket,
         "rotacion": rotacion,
     }

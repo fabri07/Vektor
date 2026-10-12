@@ -1,15 +1,20 @@
 """Tests para deterministic_finance — cálculos financieros sin LLM."""
 
 import uuid
+from datetime import datetime, time
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.application.services import deterministic_finance
 from app.application.services.deterministic_finance import (
     calcular_flujo_neto_30d,
-    calcular_margen_bruto,
     calcular_ticket_promedio,
     get_financial_summary,
 )
+from app.domain.business_time import today_ar
+from app.persistence.models.transaction import SaleEntry
 
 
 def _fake_session(
@@ -52,22 +57,27 @@ class TestFlujoNeto:
         assert isinstance(result["flujo_neto"], Decimal)
 
 
-class TestMargenBruto:
-    async def test_margen_con_datos(self) -> None:
-        tenant_id = uuid.uuid4()
-        session = AsyncMock()
-        session.scalar.side_effect = [Decimal("100000"), Decimal("70000")]
-        result = await calcular_margen_bruto(tenant_id, session)
-        assert not result.get("sin_datos")
-        assert result["margen_pct"] == Decimal("30.00")
+class TestSinMargen:
+    def test_el_margen_no_vive_aca(self) -> None:
+        """M·2b-2: el margen sale de FactsService (definición única). Lo que se
+        llamaba «margen bruto» acá restaba TODOS los gastos: no vuelve."""
+        assert not hasattr(deterministic_finance, "calcular_margen_bruto")
 
-    async def test_margen_con_ventas_cero(self) -> None:
-        tenant_id = uuid.uuid4()
-        session = AsyncMock()
-        session.scalar.side_effect = [Decimal("0"), Decimal("0")]
-        result = await calcular_margen_bruto(tenant_id, session)
-        assert result.get("sin_datos") is True
-        assert result["margen_pct"] is None
+
+class TestCobrosDeFiado:
+    async def test_cobros_no_son_ventas(
+        self, db_session: AsyncSession, sample_tenant
+    ) -> None:
+        tid = sample_tenant.tenant_id
+        mediodia = datetime.combine(today_ar(), time(12))
+        for metodo, monto in (("cash", "1000"), ("inflow", "800"), ("INFLOW", "200")):
+            db_session.add(SaleEntry(tenant_id=tid, amount=Decimal(monto),
+                                     transaction_date=mediodia, payment_method=metodo))
+        await db_session.commit()
+        flujo = await calcular_flujo_neto_30d(tid, db_session)
+        assert flujo["total_ventas"] == Decimal("1000")
+        ticket = await calcular_ticket_promedio(tid, db_session)
+        assert ticket["n_transacciones"] == 1
 
 
 class TestTicketPromedio:
@@ -97,8 +107,6 @@ class TestFinancialSummary:
         session.scalar.side_effect = [
             Decimal("0"),
             Decimal("0"),  # flujo_neto
-            Decimal("0"),
-            Decimal("0"),  # margen (reutiliza flujo_neto)
             0,
             Decimal("0"),  # ticket_promedio
             0,
@@ -115,8 +123,6 @@ class TestFinancialSummary:
         session.scalar.side_effect = [
             Decimal("100000"),
             Decimal("40000"),  # flujo_neto
-            Decimal("100000"),
-            Decimal("40000"),  # margen
             5,
             Decimal("100000"),  # ticket
             10,
@@ -132,8 +138,6 @@ class TestFinancialSummary:
         session.scalar.side_effect = [
             Decimal("50000"),
             Decimal("10000"),
-            Decimal("50000"),
-            Decimal("10000"),
             4,
             Decimal("50000"),
             20,
@@ -142,6 +146,7 @@ class TestFinancialSummary:
         result = await get_financial_summary(tenant_id, session)
         assert result["estado"] == "OK"
         assert "provenance" not in result
+        assert "margen" not in result  # M·2b-2: el margen es de FactsService
 
     async def test_error_retorna_sin_datos(self) -> None:
         tenant_id = uuid.uuid4()

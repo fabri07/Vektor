@@ -34,15 +34,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.facts_service import (
+    BusinessFact,
     FactsService,
     Period,
     SeverityThresholds,
 )
 from app.domain.business_time import AR_TZ
-from app.domain.verticals import Vertical
+from app.domain.verticals import Vertical, try_parse_vertical
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.product import Product
+from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._expense_scope import gasto_de_resultado
 from app.persistence.repositories._pos_tender_scope import tenders_mixtos
@@ -380,4 +382,47 @@ async def build_facts_service(
     ).scalar_one_or_none()
     return FactsService(
         PreloadedFactsProvider(frames), thresholds, fiscal_condition_crudo=fiscal_crudo
+    )
+
+
+@dataclass(frozen=True)
+class MargenesDelPeriodo:
+    """Los dos márgenes del negocio, del MISMO FactsService (M·2b-2).
+
+    ``bruto`` = ventas − costo vendido (definición única, ``domain/margen.py``);
+    ``neto`` = ventas − TODOS los gastos (el resultado operativo).
+    """
+
+    bruto: BusinessFact
+    neto: BusinessFact
+
+
+async def margenes_del_tenant(
+    session: AsyncSession, tenant_id: uuid.UUID, *, dias: int = 30
+) -> MargenesDelPeriodo | None:
+    """Margen bruto y neto de los últimos ``dias`` para el chat.
+
+    Arma el servicio con el rubro del perfil y ``include_demo`` según el tenant
+    (en un tenant demo todo es ``provenance='DEMO'``; un tenant real no ve filas
+    demo), igual que la explicación de alertas. Sin perfil → ``None``: no hay
+    rubro contra el que medir y el llamador dice que faltan datos.
+    """
+    vertical_code = (
+        await session.execute(
+            select(BusinessProfile.vertical_code)
+            .where(BusinessProfile.tenant_id == tenant_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    vertical = try_parse_vertical(vertical_code)
+    if vertical is None:
+        return None
+    tenant = await session.get(Tenant, tenant_id)
+    include_demo = bool(tenant and tenant.is_demo)
+    period = Period.last_n_days(dias)
+    svc = await build_facts_service(session, tenant_id, period, vertical=vertical)
+    tid = str(tenant_id)
+    return MargenesDelPeriodo(
+        bruto=svc.margen_bruto(tid, period, include_demo=include_demo),
+        neto=svc.margen_neto(tid, period, include_demo=include_demo),
     )
