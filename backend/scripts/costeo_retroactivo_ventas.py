@@ -60,8 +60,8 @@ def _imprimir(r: Resumen, aplicar: bool, nombre: str) -> None:
     )
     if r.sin_costear_por_error:
         print(
-            f"   ⚠ sin costear por error: {r.sin_costear_por_error}"
-            " (buscar costeo_de_ventas_fallo)"
+            f"   ⚠ quedaron sin costear: {r.sin_costear_por_error} (producto que no es del"
+            " negocio, o falla del costeo: buscar costeo_de_ventas_fallo en el log)"
         )
     cobertura = r.cobertura_pct
     margen = r.margen_estimado_pct

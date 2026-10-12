@@ -146,7 +146,25 @@ async def costear_historico(
         resumen.run_id = run.id
 
     for i in range(0, len(ids), LOTE):
-        lote = ids[i : i + LOTE]
+        # Bloquea el lote y vuelve a filtrar: una venta que se costeó, anuló o
+        # perdió el producto desde que se listó (camino en vivo) no se pisa.
+        lote = list(
+            (
+                await session.execute(
+                    select(SaleEntry.id)
+                    .where(
+                        SaleEntry.id.in_(ids[i : i + LOTE]),
+                        SaleEntry.tenant_id == tenant_id,
+                        SaleEntry.product_id.is_not(None),
+                        SaleEntry.voided_at.is_(None),
+                        SaleEntry.cost_snapshot_version.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalars()
+        )
+        if not lote:
+            continue
         dudosas = await _unidad_dudosa(session, tenant_id, lote)
         pendientes = dict.fromkeys(lote, True)
 
@@ -212,12 +230,21 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> tuple[int, int]:
         raise ValueError(f"No es una corrida de {REPAIR_TYPE}: {run_id}")
     if run.status == "REVERTED":
         return 0, 0
-    items = (
-        await session.execute(select(DataRepairItem).where(DataRepairItem.run_id == run_id))
-    ).scalars()
+    items = list(
+        (
+            await session.execute(select(DataRepairItem).where(DataRepairItem.run_id == run_id))
+        ).scalars()
+    )
+    ventas: dict[uuid.UUID, SaleEntry] = {}
+    for i in range(0, len(items), LOTE):
+        ids = [it.sale_entry_id for it in items[i : i + LOTE] if it.sale_entry_id is not None]
+        for v in (
+            await session.execute(select(SaleEntry).where(SaleEntry.id.in_(ids)).with_for_update())
+        ).scalars():
+            ventas[v.id] = v
     revertidas = salteadas = 0
     for item in items:
-        venta = await session.get(SaleEntry, item.sale_entry_id)
+        venta = ventas.get(item.sale_entry_id) if item.sale_entry_id else None
         if (
             venta is None
             or venta.tenant_id != run.tenant_id
