@@ -58,6 +58,7 @@ from app.persistence.models.pos_stock_discrepancy import (
 )
 from app.persistence.models.pos_terminal import PosTerminal
 from app.persistence.models.product import Product
+from app.persistence.models.product_cost import ProductCostHistory, ProductCostState
 from app.persistence.models.product_supplier_link import ProductSupplierLink
 from app.persistence.models.purchase_order import PurchaseOrder
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
@@ -105,6 +106,8 @@ __all__ = [
     "UploadedFile",
     "Notification",
     "OwnerCapitalMovement",
+    "ProductCostHistory",
+    "ProductCostState",
     "EmailVerificationToken",
     "PasswordResetToken",
     "BusinessHeuristicOverride",

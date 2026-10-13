@@ -9,7 +9,6 @@ from decimal import Decimal
 import pytest
 
 from app.application.services import inventory_movement_origin as origen
-from app.application.services.stock_service import sale_source_event_id
 from app.domain import costo_promedio as cp
 from app.domain.costo_promedio import Evento, costo_a, proyectar
 from app.domain.sale_unit import importe
@@ -245,13 +244,11 @@ def test_apertura_y_compra_del_mismo_dia_se_promedian() -> None:
         ("adjustment", None, 3, False, "complejo", None),
         ("return", None, 2, False, "complejo", None),
         ("loss", None, -2, False, "salida", None),
-        # Venta registrada (en vivo, POS o replay histórico): ya está en sales_entries.
-        ("sale", None, -2, False, None, "sale:6f1c0d1e-0000-0000-0000-000000000001"),
-        ("sale", "historical_replay", -2, False, None, "sale:6f1c0d1e-0000-0000-0000-000000000002"),
-        ("sale", None, -2, False, None, "manual_batch:grupo-7"),
-        # «Saqué N» del chat (UPDATE_STOCK): sin venta registrada, es una salida.
+        # El stock sale del ledger: toda venta que movió stock es una salida.
+        ("sale", None, -2, False, "salida", "sale:6f1c0d1e-0000-0000-0000-000000000001"),
+        ("sale", "historical_replay", -2, False, "salida", "sale:6f1c0d1e-0000-0000-0000-2"),
         ("sale", None, -2, False, "salida", "0b6f8a52-1c1e-4f5a-9d0a-1f1f1f1f1f1f"),
-        ("sale", None, -2, False, "salida", None),
+        ("sale", None, 2, False, "complejo", None),
         ("purchase", None, 0, False, None, None),
     ],
 )
@@ -263,16 +260,13 @@ def test_clasificar(
     clase: str | None,
     evento: str | None,
 ) -> None:
-    resultado = cp.clasificar(
-        movement_type, source_type, qty, source_event_id=evento, catalogo_reparado=reparado
-    )
-    assert resultado == clase
+    del evento  # documenta el origen del movimiento; no cambia la clase
+    assert cp.clasificar(movement_type, source_type, qty, catalogo_reparado=reparado) == clase
 
 
 def test_los_literales_son_los_del_ledger() -> None:
     assert cp._CATALOGO == origen.SOURCE_CATALOG_INITIAL_STOCK
     assert cp._AJUSTES_CON_PROCEDENCIA == origen.TAGGED_ADJUSTMENT_SOURCE_TYPES
-    assert sale_source_event_id(uuid.uuid4()).startswith(cp._PREFIJOS_DE_VENTA[0])
 
 
 def test_catalogo_reparado_proyectado_es_apertura() -> None:
@@ -283,6 +277,12 @@ def test_catalogo_reparado_proyectado_es_apertura() -> None:
     p = proyectar([ev(3, "compra", 10, "200", hora=8), ev(3, clase, 10, "100", hora=20)])
     assert [e.clase for e, _ in p] == ["apertura", "compra"]
     assert costo_a(p, d(3)).promedio == Decimal("150")
+
+
+def test_aproximado_viaja_en_cada_estado() -> None:
+    p = proyectar([ev(1, "compra", 10, "100"), ev(2, "salida", 3)], aproximado=True)
+    assert all(e.aproximado for _, e in p)
+    assert not any(e.aproximado for _, e in proyectar([ev(1, "compra", 10, "100")]))
 
 
 def test_fechas_con_y_sin_zona_se_ordenan_juntas() -> None:
@@ -340,10 +340,28 @@ def test_reconstruir_desde_un_checkpoint_da_lo_mismo() -> None:
     assert parcial[-1][1] == completo[-1][1]
 
 
-def test_registros_solo_de_compras_aperturas_y_anclas() -> None:
+def test_registros_de_compras_y_de_lo_que_cambia_el_estado() -> None:
+    """Toda compra, apertura o ancla deja registro; una salida que sólo resta no.
+    Una entrada sin costo sí, porque pasa el estado a «incompleto»."""
     p = proyectar([ev(1, "apertura", 5, "90"), ev(2, "compra", 5, "110"),
                    ev(3, "salida", 2), ev(4, "entrada", 1), ev(5, "ancla", 6, "100")])
-    assert [r.evento.clase for r in cp.registros(p)] == ["apertura", "compra", "ancla"]
+    assert [r.evento.clase for r in cp.registros(p)] == ["apertura", "compra", "entrada", "ancla"]
+
+
+def test_un_complejo_despues_de_la_ultima_compra_queda_registrado() -> None:
+    """Sin este registro, leer el historial después de la devolución seguiría
+    mostrando el promedio «medido» de la compra anterior."""
+    p = proyectar([ev(1, "compra", 10, "100"), ev(2, "complejo", 2), ev(3, "salida", 1)])
+    regs = cp.registros(p)
+    assert [r.evento.clase for r in regs] == ["compra", "complejo"]
+    assert (regs[-1].estado.estado, regs[-1].estado.stock_conocido) == ("sin_medicion", False)
+
+
+def test_la_salida_que_vuelve_a_medido_queda_registrada() -> None:
+    p = proyectar([ev(1, "compra", 5, "100"), ev(2, "compra", 5), ev(3, "salida", 10)])
+    regs = cp.registros(p)
+    assert [r.evento.clase for r in regs] == ["compra", "compra", "salida"]
+    assert regs[-1].estado.estado == "medido"
 
 
 # ── la brecha con inflación ─────────────────────────────────────────────────

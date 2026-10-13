@@ -183,6 +183,34 @@ Todo va detrás de una habilitación para mostrarlo (patrón `config/*_rollout.p
   - checkpoint;
   - brecha con 5% de inflación mensual: menos de 3% con medio mes de stock y más de 15% con 12 meses.
 
+### M·P2a (historial materializado, modo sombra)
+**Decisiones del dueño (2026-10-13):**
+- **El stock sale del ledger** (`inventory_movements`), no de `sales_entries`, para que coincida con el stock del sistema. Una planilla de ventas importada sin descontar stock haría que el stock reconstruido quedara negativo y el promedio se reiniciara a cada rato.
+  - En el dominio, todo `sale` pasa a ser una salida.
+  - Un producto con ventas vivas sin un movimiento que las descuente queda `aproximado`. Las B11 pendientes no cuentan.
+  - Esto reemplaza la regla de M·P1 que ignoraba los `sale:` porque las ventas se tomaban de `sales_entries`.
+- **M·P2 se parte en dos.** M·P2a: tablas, reconstrucción completa, backfill e informe de sombra. M·P2b: disparadores, job, reconstrucción desde una fecha, concurrencia y benchmark.
+
+**Qué quedó:**
+- Migración `20261013_0001`: `product_cost_history` (con `stock_conocido` y `aproximado`) y `product_cost_state`.
+- `costo_promedio_repository.cargar_historias`.
+- `costo_promedio_service.reconstruir` / `costo_a`.
+- `scripts/backfill_costo_promedio.py` con el informe de sombra.
+- **Revisión adversarial:** sin P1. Correcciones:
+  - **Un clamp anterior** (vender de más y después comprar) ya no manda el producto entero a «stock fuera del ledger». Se simula el stock del sistema con el clamp en orden de carga; si cierra así, el producto queda `aproximado`.
+  - **Se materializa todo evento que cambie lo que se lee:** una devolución o un ajuste sin procedencia después de la última compra, o una salida que vuelve de `incompleto` a `medido`. El CHECK de `clase` admite las seis clases.
+  - **Menores:** las ventas con cantidad ≤ 0 no marcan `aproximado`, y la brecha excluye los productos aproximados.
+- **Límites conocidos:**
+  - Las filas del ledger anteriores a M·2a sin `occurred_at` se fechan con `created_at` llevado a hora AR, así que una carga de 21 a 24 hora AR puede quedar en el día siguiente.
+  - El backfill commitea por negocio, no por lotes reanudables dentro de un negocio.
+  - Dos backfills a la vez pueden chocar en el `INSERT` de `product_cost_state`: da error, no corrompe nada. Esto se resuelve en M·P2b.
+- **Decisión pendiente del dueño (antes de M·P3):** `POST /products` y el `PATCH` de stock fijan `stock_units` sin escribir un movimiento. Esos productos quedan con stock fuera del ledger y en `sin_medicion` para siempre: probablemente la mayor fuente de `sin_medicion` en negocios reales. Hay dos opciones:
+  - tratar la diferencia como unidades sin costo al inicio, con lo que el producto queda `incompleto`;
+  - que el alta y la edición de stock escriban un ancla.
+
+  Se decide con el informe de sombra a la vista.
+- **Ensayo sobre una copia de la base local de desarrollo:** los negocios cargados por seed salen con todo su stock fuera del ledger y quedan `sin_medicion`, como corresponde. Uno con compras y ventas reales da 45 productos medidos, con brecha mediana 0% y p90 3%.
+
 ## Doc
 - `docs/plans/mp-costo-promedio-ponderado.md` se reescribe con este plan en el commit de M·P1.
 - `docs/claude/plataforma.md` en cada PR.

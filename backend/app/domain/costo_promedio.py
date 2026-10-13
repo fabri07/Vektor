@@ -34,6 +34,9 @@ Reglas:
   Sólo lo recupera un ``ancla``: un conteo con stock ABSOLUTO. Hoy el ledger no
   guarda ninguno (los movimientos de catálogo son deltas); el tipo existe para
   cuando lo haya.
+- **El stock sale del ledger** (``inventory_movements``), no de
+  ``sales_entries``: así coincide con el stock del sistema. Una venta importada
+  que no descontó stock no cuenta, y el producto queda ``aproximado``.
 - **Apertura:** el stock que el negocio ya tenía, con su costo, EN SU FECHA de
   negocio (no al comienzo de todo, como el chequeo temporal de integridad). Es
   un delta, igual que en el ledger.
@@ -42,7 +45,7 @@ Reglas:
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Final, Literal
@@ -63,7 +66,10 @@ PRIORIDAD: Final[dict[str, int]] = {
     "salida": 5,
 }
 
-#: Clases que dejan un registro en el historial materializado.
+#: Clases que SIEMPRE dejan un registro en el historial materializado. Las demás
+#: lo dejan sólo si cambian el estado, el promedio o si se conoce el stock
+#: (``registros``): una devolución posterior a la última compra tiene que quedar
+#: guardada como ``sin_medicion``, no esconderse detrás del registro anterior.
 CLASES_CON_REGISTRO: Final = frozenset({"ancla", "apertura", "compra"})
 
 CERO: Final = Decimal("0")
@@ -80,11 +86,6 @@ MOTIVO_FUERA_DEL_LEDGER: Final = "hay stock cargado por fuera del registro de mo
 # ``application/services/inventory_movement_origin``; un test los ata).
 _CATALOGO: Final = "catalog_initial_stock"
 _AJUSTES_CON_PROCEDENCIA: Final = frozenset({"reconciliation", "manual_adjustment"})
-#: Prefijos de ``source_event_id`` de un movimiento ``sale`` que descuenta una
-#: venta registrada en ``sales_entries`` (``stock_service.sale_source_event_id``:
-#: venta en vivo, POS y el replay histórico; ``manual_batch:`` es el formato
-#: anterior a la migración 20260729_0001).
-_PREFIJOS_DE_VENTA: Final = ("sale:", "manual_batch:")
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,9 @@ class EstadoCosto:
     motivo: str | None
     #: ``False`` cuando ya no se sabe cuántas unidades hay (``sin_medicion``).
     stock_conocido: bool = True
+    #: El producto tiene ventas importadas que no descontaron stock: el stock
+    #: reconstruido no las ve, así que el promedio es una aproximación.
+    aproximado: bool = False
 
     @property
     def stock(self) -> Decimal:
@@ -160,16 +164,15 @@ def clasificar(
     source_type: str | None,
     qty: int,
     *,
-    source_event_id: str | None = None,
     catalogo_reparado: bool = False,
 ) -> Clase | None:
     """La clase de un movimiento del ledger; ``None`` = no cuenta.
 
-    - Un ``sale`` que descuenta una venta registrada (``source_event_id`` con
-      prefijo ``sale:``, incluido el replay histórico) se ignora: la venta ya
-      entra desde ``sales_entries`` y contarla otra vez la duplicaría. Cualquier
-      otro ``sale`` (el «saqué N» del chat, UPDATE_STOCK) no tiene venta: es una
-      salida.
+    - El stock sale del LEDGER, no de ``sales_entries`` (decisión del dueño,
+      2026-10-13): un ``sale`` es una salida, sea una venta en vivo, del POS, el
+      replay de una venta importada o el «saqué N» del chat. Una venta importada
+      que no descontó stock no movió el stock del sistema y no cuenta; el
+      llamador marca el producto como ``aproximado``.
     - Un ``purchase`` de catálogo cuyo gasto anuló M·R (``catalogo_reparado``) es
       una foto del stock que el negocio ya tenía: apertura, no compra.
     - Un ``return`` o un ajuste sin procedencia no dicen qué pasó con el stock:
@@ -178,8 +181,6 @@ def clasificar(
     if qty == 0:
         return None
     if movement_type == "sale":
-        if source_event_id is not None and source_event_id.startswith(_PREFIJOS_DE_VENTA):
-            return None
         return "salida" if qty < 0 else "complejo"
     if movement_type == "purchase":
         if source_type == _CATALOGO and catalogo_reparado and qty > 0:
@@ -274,13 +275,15 @@ def proyectar(
     *,
     desde: EstadoCosto = INICIAL,
     stock_fuera_del_ledger: bool = False,
+    aproximado: bool = False,
 ) -> list[tuple[Evento, EstadoCosto]]:
     """Cada evento, en orden, con el estado que deja.
 
     ``desde`` permite reconstruir a partir de un registro materializado (el
     checkpoint) sin releer toda la historia. ``stock_fuera_del_ledger`` lo
     detecta el llamador (el stock actual no cierra con el ledger): sin un ancla,
-    no hay medición.
+    no hay medición. ``aproximado`` también lo decide el llamador (ventas
+    importadas sin movimiento de stock) y viaja en cada estado.
     """
     estado = desde
     if stock_fuera_del_ledger:
@@ -288,13 +291,31 @@ def proyectar(
     salida: list[tuple[Evento, EstadoCosto]] = []
     for ev in ordenar(eventos):
         estado = aplicar(estado, ev)
+        if aproximado and not estado.aproximado:
+            estado = replace(estado, aproximado=True)
         salida.append((ev, estado))
     return salida
 
 
-def registros(proyeccion: Sequence[tuple[Evento, EstadoCosto]]) -> list[Registro]:
-    """Lo que se materializa: un registro por cada compra, apertura o ancla."""
-    return [Registro(ev, est) for ev, est in proyeccion if ev.clase in CLASES_CON_REGISTRO]
+def _firma(est: EstadoCosto) -> tuple[object, ...]:
+    return (est.estado, est.promedio, est.stock_conocido, est.aproximado, est.motivo)
+
+
+def registros(
+    proyeccion: Sequence[tuple[Evento, EstadoCosto]], *, desde: EstadoCosto = INICIAL
+) -> list[Registro]:
+    """Lo que se materializa: cada compra, apertura o ancla, y cualquier otro
+    evento que cambie lo que se lee (estado, promedio, ``stock_conocido``,
+    ``aproximado`` o motivo). Una venta que sólo resta unidades no deja registro:
+    el checkpoint siguiente la vuelve a contar desde el ledger."""
+    salida: list[Registro] = []
+    previo = _firma(desde)
+    for ev, est in proyeccion:
+        firma = _firma(est)
+        if ev.clase in CLASES_CON_REGISTRO or firma != previo:
+            salida.append(Registro(ev, est))
+        previo = firma
+    return salida
 
 
 def costo_a(
