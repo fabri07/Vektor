@@ -62,6 +62,7 @@ from app.application.services.reread_service import (
 )
 from app.domain.business_time import today_ar
 from app.domain.sale_unit import importe
+from app.persistence.costo_promedio_pendiente import marcar_todo_el_historial
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.ingestion_schema_decision import IngestionSchemaDecision
@@ -440,6 +441,10 @@ async def reparar(
     await session.flush()
 
     r.flujo_despues = (await calcular_flujo_neto_30d(tenant_id, session))["flujo_neto"]
+    # M·P2b: anular estos gastos convierte su compra de catálogo en apertura en
+    # el costo promedio (``catalogo_reparado``): cambia la clase y el orden de los
+    # registros ya publicados de esos productos.
+    marcar_todo_el_historial(session, tenant_id, {c.product_id for c in r.candidatos})
     run.status = "APPLIED"
     run.completed_at = datetime.now(UTC)
     run.details_json = {
@@ -577,6 +582,8 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
         d.payload = cambio["antes"]
         res.decisiones += 1
 
+    # M·P2b: revivir los gastos vuelve esas aperturas a compras en el promedio.
+    marcar_todo_el_historial(session, tenant_id, {it.product_id for it in items})
     run.status = "REVERTED"
     session.add(
         DecisionAuditLog(

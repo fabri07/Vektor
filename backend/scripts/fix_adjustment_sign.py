@@ -24,7 +24,7 @@ import csv
 import json
 import uuid
 
-from _db import async_engine_config
+from _db import SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE, async_engine_config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -96,6 +96,9 @@ async def main() -> None:
                         "WHERE id = CAST(:mid AS uuid) AND tenant_id = :tid"
                     ),
                     {"new_qty": r["new_qty"], "mid": r["movement_id"], "tid": tid},
+                )
+                await session.execute(
+                    text(SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE), {"mid": r["movement_id"]}
                 )
                 delta = 2 * abs(r["old_qty"])
                 await session.execute(

@@ -49,6 +49,7 @@ celery_app = Celery(
         "app.application.services.score_trigger_service",
         "app.jobs.stock_tasks",
         "app.jobs.inventory_integrity_check",
+        "app.jobs.recalcular_costo_promedio",
     ],
 )
 

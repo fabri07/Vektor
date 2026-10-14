@@ -55,6 +55,7 @@ from app.application.services.inventory_movement_origin import (
     SOURCE_TYPES,
 )
 from app.observability.logger import get_logger
+from app.persistence.costo_promedio_pendiente import marcar_todo_el_historial
 
 logger = get_logger(__name__)
 
@@ -1475,6 +1476,11 @@ async def _apply_one_group(
         )
         return (order, str(rp["product_id"]), int(before.get("chunk_index", 0)))
 
+    # M·P2b: el re-apunte va por Core y el listener no lo ve. El historial del
+    # costo promedio del canónico y de los duplicados queda entero pendiente.
+    marcar_todo_el_historial(
+        session, tenant_id, {canonical_id, *(rp["product_id"] for rp in gdata["repoint"])}
+    )
     for rp in sorted(gdata["repoint"], key=_repoint_sort_key):
         before = rp["before_json"] or {}
         table = before["table"]
@@ -2346,6 +2352,9 @@ async def _revert_one_group(
 
     # 4) REPOINT⁻¹ — mover las filas registradas de vuelta al dup. rowcount ≠ esperado
     # (alguien las tocó entre validación y mutación bajo el lock) → abortar el grupo.
+    marcar_todo_el_historial(
+        session, tenant_id, {canonical_id, *(rp["product_id"] for rp in repoint_items)}
+    )
     for rp in repoint_items:
         b = rp["before"]
         model = model_by_table[b["table"]]

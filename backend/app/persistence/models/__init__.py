@@ -153,3 +153,8 @@ __all__ = [
 # porque todo lo que abre una sesión importa los modelos (API, worker, scripts,
 # tests): una venta creada por cualquier camino queda costeada.
 from app.persistence import costeo_de_ventas as _costeo_de_ventas  # noqa: E402,F401
+
+# M·P2b: registra los listeners que marcan el costo promedio pendiente de
+# recalcular (``product_cost_state``) y encolan el recálculo. Mismo motivo: un
+# movimiento de stock creado por cualquier camino tiene que dejarlo pendiente.
+from app.persistence import costo_promedio_pendiente as _costo_promedio_pendiente  # noqa: E402,F401

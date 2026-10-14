@@ -86,5 +86,6 @@
 | `20261010_0001` | contrato del costo de compra en `inventory_movements` (`unit_cost_final`, tratamientos de envío/impuesto, `tax_*`, `document_ref`, `cost_contract_version`, todo nullable + CHECK zero-lock) + índice parcial `ix_inventory_movements_live_purchases` (M·1a), ver `docs/claude/plataforma.md` |
 | `20261011_0001` | costo congelado por línea de venta en `sales_entries` (`cost_unit_ars`, `cost_ars`, `cost_confirmed`, `cost_origin`, `cost_reason`, `cost_snapshot_version`, todo nullable + CHECK) (M·2a), ver `docs/claude/plataforma.md` |
 | `20261013_0001` | `product_cost_history` + `product_cost_state` (ORM: `ProductCostHistory`/`ProductCostState`) — historial materializado del costo promedio ponderado (M·P2a); tablas DERIVADAS del ledger, se reconstruyen con `scripts/backfill_costo_promedio.py`. Ver `docs/claude/plataforma.md` |
+| `20261013_0002` | `product_cost_state.marcado_en` / `intentos` / `ultimo_error` + índice `(tenant_id, marcado_en)` — seguimiento de los recálculos pendientes del costo promedio (M·P2b) |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.

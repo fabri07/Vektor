@@ -165,7 +165,10 @@ async def cargar_historias(
     suma_ledger: dict[uuid.UUID, int] = defaultdict(int)
     cargas: dict[uuid.UUID, list[tuple[datetime, str, int, bool]]] = defaultdict(list)
     descontadas: set[str] = set()
-    for fila in (await session.execute(consulta)).tuples():
+    # Core directo sobre la conexión: un producto con decenas de miles de
+    # movimientos no paga el armado de filas del ORM (medido: ~0,5 s en 50.000).
+    conexion = await session.connection()
+    for fila in (await conexion.execute(consulta)).tuples():
         (mid, pid, tipo, origen, qty, costo, costo_final, occurred_at, created_at, evento) = fila
         historia = historias.get(pid)
         if historia is None:
@@ -184,7 +187,10 @@ async def cargar_historias(
                 clase=clase,
                 unidades=abs(int(qty)),
                 costo=None if precio is None else Decimal(precio),
-                creado=_carga_en_hora_ar(created_at),
+                # Sólo desempata dentro del mismo día y la hora: no hace falta llevarlo
+                # a hora argentina (el corrimiento no cambia el orden) y ahorra la
+                # conversión de zona en cada fila.
+                creado=created_at.replace(tzinfo=None),
                 id=mid,
                 movement_id=mid,
             )

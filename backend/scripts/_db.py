@@ -93,3 +93,28 @@ async def insert_decision_audit(
         )
     ).first()
     return str(row[0])
+
+
+# M·P2b: una escritura Core sobre ``inventory_movements`` esquiva el listener que
+# marca el costo promedio pendiente. Quien la hace marca TODO el historial del
+# producto (``date.min``): si no, queda un historial viejo que parece válido hasta
+# el próximo recálculo. ``:mid`` (SQLAlchemy) / ``$1`` (asyncpg) = id del
+# movimiento tocado. Sin fila de estado no hay nada publicado que proteger.
+_SQL_MARCAR_COSTO_PROMEDIO = (
+    "UPDATE product_cost_state AS s "
+    "SET pendiente_desde = DATE '0001-01-01', revision = s.revision + 1, "
+    "marcado_en = CASE WHEN s.pendiente_desde IS NULL THEN now() ELSE s.marcado_en END "
+    "FROM inventory_movements AS m "
+    "WHERE m.id = CAST({mid} AS uuid) "
+    "AND s.tenant_id = m.tenant_id AND s.product_id = m.product_id"
+)
+SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE = _SQL_MARCAR_COSTO_PROMEDIO.format(mid=":mid")
+SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE_ASYNCPG = _SQL_MARCAR_COSTO_PROMEDIO.format(mid="$1")
+#: Lo mismo por producto (``:tid``, ``:pid``): para quien corrige ``stock_units`` sin
+#: tocar un movimiento (mueve ``stock_fuera_del_ledger``, copiado en todo el historial).
+SQL_MARCAR_COSTO_PROMEDIO_PRODUCTO = (
+    "UPDATE product_cost_state "
+    "SET pendiente_desde = DATE '0001-01-01', revision = revision + 1, "
+    "marcado_en = CASE WHEN pendiente_desde IS NULL THEN now() ELSE marcado_en END "
+    "WHERE tenant_id = CAST(:tid AS uuid) AND product_id = CAST(:pid AS uuid)"
+)

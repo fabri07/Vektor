@@ -130,6 +130,7 @@ from app.domain.inventory_effect import (
 )
 from app.integrations.s3 import S3Client
 from app.observability.logger import get_logger
+from app.persistence.costo_promedio_pendiente import marcar_todo_el_historial
 from app.persistence.models.file import (
     REREAD_STATUS_APPLIED,
     REREAD_STATUS_AUTO_APPLIED,
@@ -4801,6 +4802,19 @@ async def undo_reread(
             insert_expense_ids.add(rid)
 
     if insert_sale_ids:
+        # M·P2b: un ``delete`` Core esquiva el listener del costo promedio. Una
+        # venta sin movimiento borrada mueve ``aproximado``: todo el historial de
+        # sus productos queda pendiente.
+        productos_de_ventas = (
+            await session.execute(
+                select(SaleEntry.product_id).where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.id.in_(insert_sale_ids),
+                    SaleEntry.product_id.is_not(None),
+                )
+            )
+        ).scalars()
+        marcar_todo_el_historial(session, tenant_id, set(productos_de_ventas))
         await session.execute(
             delete(SaleEntry).where(
                 SaleEntry.tenant_id == tenant_id,

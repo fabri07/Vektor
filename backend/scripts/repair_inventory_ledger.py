@@ -130,7 +130,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _db import async_engine_config  # noqa: E402
+from _db import SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE, async_engine_config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
@@ -384,6 +384,7 @@ async def _apply_b1_dedup(
             ),
             {"tid": tid, "vid": vid},
         )
+        await session.execute(text(SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE), {"mid": vid})
     await _audit(
         session,
         tid,

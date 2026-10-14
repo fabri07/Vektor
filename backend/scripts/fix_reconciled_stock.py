@@ -59,7 +59,11 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _db import async_engine_config  # noqa: E402
+from _db import (  # noqa: E402
+    SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE,
+    SQL_MARCAR_COSTO_PROMEDIO_PRODUCTO,
+    async_engine_config,
+)
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
@@ -141,6 +145,7 @@ async def _apply_product(session: AsyncSession, tid: uuid.UUID, plan: dict[str, 
             ),
             {"tid": tid, "mid": mid},
         )
+        await session.execute(text(SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE), {"mid": mid})
     await session.execute(
         text(
             "UPDATE products SET stock_units = :sq "
@@ -148,6 +153,7 @@ async def _apply_product(session: AsyncSession, tid: uuid.UUID, plan: dict[str, 
         ),
         {"tid": tid, "pid": pid, "sq": plan["stock_esperado"]},
     )
+    await session.execute(text(SQL_MARCAR_COSTO_PROMEDIO_PRODUCTO), {"tid": tid, "pid": pid})
     existing_balance = (
         await session.execute(
             text(

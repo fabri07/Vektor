@@ -49,7 +49,11 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _db import async_engine_config, insert_decision_audit  # noqa: E402
+from _db import (  # noqa: E402
+    SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE,
+    async_engine_config,
+    insert_decision_audit,
+)
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
@@ -194,6 +198,9 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
         # rowcount==0 → ya estaba des-tagueado (corrida ya revertida antes): no-op,
         # no cuenta como mutación real.
         if result.rowcount:
+            await session.execute(
+                text(SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE), {"mid": it["movement_id"]}
+            )
             untagged += 1
         else:
             skipped_untag += 1
@@ -214,6 +221,9 @@ async def _revert_run(session: AsyncSession, run: dict[str, Any]) -> dict[str, A
         # rowcount==0 → ya estaba des-voideado (no-op): no cuenta, y no re-dispara la
         # restauración de stock del producto (ya se restauró en la corrida anterior).
         if result.rowcount:
+            await session.execute(
+                text(SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE), {"mid": it["movement_id"]}
+            )
             unvoided += 1
             products_to_restore.add(it["product_id"])
         else:
