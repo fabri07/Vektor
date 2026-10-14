@@ -215,6 +215,46 @@ Todo va detrás de una habilitación para mostrarlo (patrón `config/*_rollout.p
   Se decide con el informe de sombra a la vista.
 - **Ensayo sobre una copia de la base local de desarrollo:** los negocios cargados por seed salen con todo su stock fuera del ledger y quedan `sin_medicion`, como corresponde. Uno con compras y ventas reales da 45 productos medidos, con brecha mediana 0% y p90 3%.
 
+### M·P2b (el historial al día solo)
+El plan v2, con la revisión externa del 2026-10-13, cambió tres cosas respecto de lo escrito arriba.
+
+**No hay checkpoint.** Se reconstruye el producto entero y se publica:
+- **parcial:** se borran y escriben sólo los registros con día ≥ `pendiente_desde`, cuando el producto ya estaba publicado y la marca no es global;
+- **completa:** con `pendiente_desde = date.min` o sin publicación previa.
+
+Un checkpoint obligaba a guardar el estado intermedio completo (stock conocido, unidades sin costo, marcas globales) y a confiar en él. La proyección entera de 50.000 eventos tarda ~0,5 s, así que el ahorro no paga ese riesgo.
+
+**La omisión es la regla, no los disparadores.** La venta normal del POS es lo único que no marca: queda al final de la línea de tiempo y no cambia nada publicado. Todo lo demás marca, y lo que mueve una marca global (`aproximado`, `stock_fuera_del_ledger`) marca todo el historial. El detalle está en `docs/claude/plataforma.md`.
+
+**El POS sí toca el estado cuando marca.** Hace un upsert de una fila, sin advisory lock. La publicación toma `FOR UPDATE` sobre esa fila recién al final, así que la espera dura lo que dura cerrar la publicación y no el cálculo.
+
+**Topes ajustados por el dueño (2026-10-13).** Dos mediciones quedaron fuera del presupuesto original, con la causa medida:
+- **Venta del POS que marca: p95 ≤ 15 ms** (era 10; la omitida sigue en ≤ 10). Marcar son dos sentencias: el `SELECT` que decide y el upsert. En el Docker de la Mac cada viaje a la base ya cuesta 1,6 ms (un `SELECT 1`).
+  - Se probó decidir y marcar en un solo `INSERT … SELECT … ON CONFLICT … RETURNING` y salió peor: p95 ~14 ms para las dos ventas, también para la omitida.
+- **Rehacer todo el historial de un producto: ≤ 4 s** (era 2; la compra nueva sigue en ≤ 2 s). Con 50.000 eventos se reparte así: carga ~1,0 s, proyección ~0,5 s y escritura ~1,7 s.
+  - De la escritura, ~1,1 s son los chequeos de las dos FK de `product_cost_history` (tenant y producto), uno por fila: 25.000 filas en una sola tanda (medido con un `INSERT` de 25.000 filas, con FK 1,47 s y sin FK 0,37 s).
+  - Se descartó sacar las FK: con ellas, borrar un negocio no deja filas huérfanas.
+  - Corre en el worker y no frena al POS. En esta Mac, SQLAlchemy corre además sin su extensión compilada (`has_compiled_ext() == False`), lo que encarece la carga.
+
+**Cómo mide el benchmark.** Las mediciones 3 y 4 cronometran el tiempo DENTRO de los hooks del listener, con sus consultas incluidas. La primera versión restaba percentiles del commit con y sin listener. Con un fsync de ~25 ms de mediana, esa resta daba entre +8 y +21 ms en dos corridas idénticas: era ruido de la máquina, no costo del listener. La resta sigue en la tabla como referencia.
+
+**Benchmark** (`scripts/bench_costo_promedio.py`, Postgres local en Docker, Mac del dueño, tamaño del plan):
+
+Dos corridas seguidas del mismo código, el 2026-10-14 con la Mac libre (carga ~3–4, mayormente la VM de Docker):
+
+| Medición | Corrida 1 (7:55) | Corrida 2 (8:10) | Tope |
+|---|---|---|---|
+| 1. Reconstrucción completa (10.000 productos, 100.000 registros) | 50,6 s | 44,6 s | ≤ 120 s |
+| 2a. Recálculo de 1 producto (50.000 eventos), compra nueva | **2,29 s** ✗ | 1,50 s | ≤ 2 s |
+| 2b. Ídem, todo el historial | **5,17 s** ✗ | 3,27 s | ≤ 4 s |
+| 3. Venta del POS omitida (en el listener) | p95 9,9 · p99 12,2 ms | p95 7,2 · p99 10,1 ms | p95 ≤ 10 · p99 ≤ 25 |
+| 3. Venta del POS que marca (en el listener) | **p95 17,3** · p99 22,1 ms ✗ | p95 13,8 · p99 19,8 ms | p95 ≤ 15 · p99 ≤ 25 |
+| 4. POS con recálculos concurrentes (normal / incompleto) | p99 20,7 / 19,9 ms | p99 20,5 / 24,9 ms | p99 ≤ 50 |
+| 5. Import de 5.000 ventas + POS + recálculos | 8,8 s · p99 29,7 ms, sin deadlock | 13,1 s · p99 46,3 ms, sin deadlock | sin deadlock · p99 ≤ 50 |
+| Referencia: mediana del commit del POS sin listener | 28,3 ms | 23,0 ms | — |
+
+**La variabilidad de la máquina es del orden de los márgenes.** La referencia, que no toca el código de M·P2b, varió un 23% entre las dos corridas, y el recálculo de un producto un 50%. Las corridas de la noche anterior (con un proceso ajeno al 100% de CPU) dieron 2a ~2,1 s, 2b ~5 s y la venta que marca p95 17,6–19,3 ms. El dueño decidió mergear con la corrida que entra completa (2026-10-14). Para mediciones futuras en esta Mac, el criterio razonable es la mediana de varias corridas, no una suelta.
+
 ## Doc
 - `docs/plans/mp-costo-promedio-ponderado.md` se reescribe con este plan en el commit de M·P1.
 - `docs/claude/plataforma.md` en cada PR.

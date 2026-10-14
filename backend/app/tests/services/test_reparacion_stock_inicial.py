@@ -219,6 +219,40 @@ async def test_facts_deja_de_contar_la_mercaderia(
     assert f"gastos_inventory_{periodo.label}" not in await mercaderia()
 
 
+async def test_reparar_marca_el_costo_promedio_pendiente(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M·P2b: el catálogo reparado pasa a ser apertura en el costo promedio, así
+    que el historial de esos productos queda entero pendiente."""
+    from datetime import date as _date  # noqa: PLC0415
+
+    from app.jobs import recalcular_costo_promedio as job  # noqa: PLC0415
+    from app.persistence import costo_promedio_pendiente as pend  # noqa: PLC0415
+    from app.persistence.models.product_cost import ProductCostState  # noqa: PLC0415
+
+    monkeypatch.setattr(pend, "ENCOLAR_EN_HILO", False)
+    monkeypatch.setattr(job.recalcular_costo_promedio, "apply_async", lambda *_, **__: None)
+    tid = sample_tenant.tenant_id
+    await _importar_como_compra(db_session, sample_tenant, sample_user, monkeypatch)
+    await db_session.commit()
+
+    r = await mr.reparar(db_session, tid, aplicar=True)
+    await db_session.commit()
+
+    productos = {c.product_id for c in r.candidatos}
+    estados = (
+        await db_session.execute(
+            select(ProductCostState)
+            .where(ProductCostState.product_id.in_(productos))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    assert len(estados) == 2 and {e.pendiente_desde for e in estados} == {_date.min}
+
+
 async def test_repetir_no_hace_nada(
     db_session: AsyncSession,
     sample_tenant: Tenant,

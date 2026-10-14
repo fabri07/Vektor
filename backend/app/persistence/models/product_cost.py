@@ -8,9 +8,9 @@ a una fecha es el último registro de ese día o anterior.
 
 ``product_cost_history`` es derivada: se puede borrar y reconstruir desde el
 ledger en cualquier momento (``costo_promedio_service.reconstruir``).
-``product_cost_state`` guarda, por producto, la revisión de la última
-reconstrucción publicada y la fecha mínima pendiente de recalcular (la usa
-M·P2b).
+``product_cost_state`` guarda, por producto, un contador de cambios
+(``revision``: lo suben las marcas y las publicaciones) y el día mínimo pendiente
+de recalcular (``pendiente_desde``; ``date.min`` = todo el historial).
 """
 
 from __future__ import annotations
@@ -107,7 +107,12 @@ class ProductCostState(UUIDPrimaryKeyMixin, Base):
     reconstruido_en: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    #: Cuándo se marcó el pendiente (M·P2b): el drenaje levanta los viejos.
+    marcado_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    intentos: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    ultimo_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "product_id", name="uq_product_cost_state_product"),
+        Index("ix_product_cost_state_pendientes", "tenant_id", "marcado_en"),
     )

@@ -67,7 +67,7 @@ from typing import Any
 import asyncpg
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _db import normalize_dsn  # noqa: E402
+from _db import SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE_ASYNCPG, normalize_dsn  # noqa: E402
 
 # Espejo del valor que usa el endpoint (set cerrado de ck_sales_entries_void_reason).
 VOID_REASON = "USER_CANCELLED"
@@ -173,6 +173,7 @@ async def _aplicar(
                 ahora,
                 mov["id"],
             )
+            await conn.execute(SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE_ASYNCPG, mov["id"])
             if mov["product_id"] is not None:
                 await conn.execute(
                     "UPDATE products SET stock_units = stock_units - $1 WHERE id=$2::uuid",

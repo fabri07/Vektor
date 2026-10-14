@@ -85,6 +85,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _db import (  # noqa: E402
     REPAIR_DECISION_TYPES,
+    SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE,
     async_engine_config,
     insert_decision_audit,
 )
@@ -532,6 +533,7 @@ async def _apply_tenant(
                 "tid": tid,
             },
         )
+        await session.execute(text(SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE), {"mid": it["movement_id"]})
         backfilled += 1
 
     # 2. Voids, agrupados por producto para el ajuste incremental de stock.
@@ -550,6 +552,9 @@ async def _apply_tenant(
                     "AND voided_at IS NULL"
                 ),
                 {"mid": it["movement_id"], "tid": tid},
+            )
+            await session.execute(
+                text(SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE), {"mid": it["movement_id"]}
             )
             voided += 1
 

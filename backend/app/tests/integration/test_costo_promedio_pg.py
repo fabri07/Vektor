@@ -99,7 +99,8 @@ async def test_reconstruir_en_postgres(pg_engine: AsyncEngine) -> None:
             estado = (
                 await s.execute(select(ProductCostState).where(ProductCostState.product_id == pid))
             ).scalar_one()
-            assert estado.revision == 2
+            # La compra del armado marcó (1) y cada reconstrucción publicó (2 y 3).
+            assert estado.revision == 3
             total = len(
                 (
                     await s.execute(
