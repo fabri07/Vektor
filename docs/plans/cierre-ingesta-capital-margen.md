@@ -204,6 +204,10 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
   - Un resultado parcial siempre dice su cobertura.
   - Quedan afuera las anuladas, las demo y el capital. Una venta mixta no se duplica por tener varios pagos.
 - **Productos:** columna de margen estimado visible, con el motivo cuando no hay.
+- **Antigüedad del costo (agregado 2026-10-14, por la inflación).** El costo de reposición es el de la última compra, no el precio de hoy: con ~4% mensual, una compra de hace 3 meses deja el costo ~12% atrasado y el margen inflado sin avisar.
+  - Cada venta con costo lleva la fecha de la compra de la que sale. Si esa compra tiene más de **45 días** a la fecha de la venta (umbral como política propia, con tests de borde en 44/45/46), la venta entra al margen rotulada «costo desactualizado».
+  - El fact del margen informa, junto a la cobertura, el **importe vendido con costo desactualizado** y su porcentaje. La tarjeta y la columna de productos dicen «última compra hace X días» cuando aplica.
+  - Es un dato medido: **no se ajusta ningún costo por inflación** (no-invention). El margen se muestra igual, con el rótulo.
 - **Ventas:** margen aplicado por operación, sólo para dueño o admin.
 - **Permisos en el backend.** Al CASHIER no le llega el costo ni el margen por la API, ni siquiera en las respuestas en caché. No alcanza con ocultar la columna. Tampoco va nunca en el ticket.
 - **Compra en «Otros»:** se resuelve con el mismo comando del contrato M·1. Se hace dentro de B·5.
