@@ -115,6 +115,10 @@ Incluye ventas concurrentes y un producto con mucho historial.
 - El chat (`margen_texto`) y la explicación del margen usan «margen estimado con costo promedio» y «brecha entre costo promedio y reposición», siempre con la cobertura.
 - En la pantalla de productos: «Costo de reposición» (`unit_cost_ars`) y «Costo promedio (estimado)», con el estado si es `incompleto` o `sin_medicion`.
 
+**La brecha es efecto inflación, no otro margen (agregado 2026-10-14).** Con inflación alta, el promedio arrastra compras viejas y la diferencia con la reposición es **ganancia por tenencia**: lo que el negocio «ganó» por tener el stock mientras subían los precios, y que vuelve a pagar al reponer.
+- En el chat y en pantalla, la brecha se rotula «efecto inflación sobre el stock (ganancia por tenencia)», en pesos y en puntos, siempre con la cobertura conjunta. Nunca se presenta como un segundo margen ni se suma al margen principal.
+- El margen principal sigue siendo el de reposición. No se indexa ningún costo por IPC: si más adelante sirve, va como dato aparte y rotulado («costo estimado ajustado por inflación»), nunca como margen.
+
 Todo va detrás de una habilitación para mostrarlo (patrón `config/*_rollout.py`): primero la sombra y el informe al dueño. El score de salud **no cambia**.
 
 ## Lo que no resuelve
