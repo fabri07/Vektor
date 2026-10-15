@@ -692,26 +692,34 @@ async def costos_a_lote(
     """``costo_a`` para varios productos en UNA sentencia (M·P4, la pantalla de
     productos). Lectura CRUDA, igual que ``costo_a``: con un cambio pendiente
     devuelve el último registro publicado, nunca «recalculando» (decisión del
-    dueño 2026-10-14). Un producto sin registro a ``dia`` no aparece."""
+    dueño 2026-10-14). Un producto sin registro a ``dia`` no aparece.
+
+    Top-1 correlacionado por producto (el índice ``(tenant, producto, día)``
+    corta en el primero): un ``row_number()`` sobre la página leía y ordenaba
+    TODO el historial de cada producto (737 ms contra 4,6 ms con 200 productos
+    de 2.500 registros, revisión de M·P4-1)."""
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
     ids = list(dict.fromkeys(product_ids))
     if not ids:
         return {}
     h = ProductCostHistory
-    orden = func.row_number().over(
-        partition_by=h.product_id,
-        order_by=(
+    ultimo = (
+        select(h.id)
+        .where(h.tenant_id == tenant_id, h.product_id == Product.id, h.dia <= dia)
+        .order_by(
             h.dia.desc(), h.clase_orden.desc(), h.fecha.desc(), h.creado.desc(),
             h.evento_id.desc(),
-        ),
-    )
-    ranqueado = (
-        select(h.id.label("id"), orden.label("n"))
-        .where(h.tenant_id == tenant_id, h.product_id.in_(ids), h.dia <= dia)
-        .subquery()
+        )
+        .limit(1)
+        .correlate(Product)
+        .scalar_subquery()
     )
     filas = (
         await session.execute(
-            select(h).join(ranqueado, and_(ranqueado.c.id == h.id, ranqueado.c.n == 1))
+            select(h)
+            .join(Product, h.id == ultimo)
+            .where(Product.tenant_id == tenant_id, Product.id.in_(ids))
         )
     ).scalars().all()
     return {fila.product_id: fila for fila in filas}

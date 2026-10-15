@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 import pytest
@@ -225,17 +225,18 @@ async def test_con_compuerta_muestra_el_promedio_y_nada_mas_cambia(
     assert vigente.costo_promedio is not None
     fila_a = despues[str(a.id)]
     assert fila_a["avg_cost_estado"] == "medido"
-    assert Decimal(fila_a["avg_cost_ars"]) == vigente.costo_promedio.quantize(Decimal("0.01"))
+    assert Decimal(fila_a["avg_cost_ars"]) == vigente.costo_promedio.quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
     assert detalle.status_code == 200
     assert detalle.json()["avg_cost_ars"] == fila_a["avg_cost_ars"]
     # Sin historial: sin dato (no «sin compras»: puede faltar el backfill).
     assert despues[str(c.id)]["avg_cost_estado"] is None
     assert despues[str(c.id)]["avg_cost_ars"] is None
     # Un estado sin medición no trae importe.
+    # Incompleto trae el promedio PARCIAL (sólo las unidades con costo).
     fila_b = despues[str(b.id)]
-    assert fila_b["avg_cost_estado"] in ("incompleto", "sin_medicion", "medido")
-    if fila_b["avg_cost_estado"] == "sin_medicion":
-        assert fila_b["avg_cost_ars"] is None
+    assert (fila_b["avg_cost_estado"], fila_b["avg_cost_ars"]) == ("incompleto", "50.00")
     # Lo demás de la respuesta (costo de reposición, margen) no cambia.
     campos = ("avg_cost_ars", "avg_cost_estado", "avg_cost_motivo")
     for pid, fila in despues.items():
@@ -327,3 +328,23 @@ async def test_el_lote_desempata_igual_que_costo_a(
 
     assert uno is not None and uno.costo_promedio == Decimal("222")
     assert lote[p.id].costo_promedio == Decimal("222")
+
+
+async def test_el_importe_redondea_al_centavo_hacia_arriba(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    habilitar: Any,
+) -> None:
+    """Igual que ``cost_avg_unit_ars`` de las ventas (HALF_UP): 10,125 → 10,13
+    (HALF_EVEN daría 10,12)."""
+    tid = sample_tenant.tenant_id
+    p = await _producto(db_session, tid, "Redondeo")
+    db_session.add(_registro(tid, p.id, costo="10.125"))
+    await db_session.flush()
+    habilitar([str(tid)])
+
+    fila = _por_id(await client.get("/api/v1/products", headers=auth_headers))[str(p.id)]
+
+    assert fila["avg_cost_ars"] == "10.13"
