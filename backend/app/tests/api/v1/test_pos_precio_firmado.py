@@ -37,7 +37,11 @@ async def _crear_producto(
 ) -> str:
     resp = await client.post(
         "/api/v1/products",
-        json={"name": name, "sale_price_ars": price, "stock_units": stock},
+        json={
+            "name": name, "sale_price_ars": price, "stock_units": stock,
+            # M·P2c: el stock cargado a mano lleva precio de compra.
+            **({"unit_cost_ars": "50.00"} if stock else {}),
+        },
         headers=headers,
     )
     assert resp.status_code == 201, resp.text

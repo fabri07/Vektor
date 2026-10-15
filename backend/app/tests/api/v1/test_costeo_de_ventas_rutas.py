@@ -89,8 +89,10 @@ class TestRutas:
         _sin_costo_en(resp.json())
 
         [venta] = await _ventas(db_session, pid)
-        # El alta con costo es una edición manual: estimación, nunca confirmada.
-        assert venta.cost_origin == "manual"
+        # M·P2c: el alta con stock deja una apertura (como un catálogo importado
+        # en «ya la tenía»), así que el costo sale del stock inicial. Envío
+        # desconocido: estimación, nunca confirmada.
+        assert venta.cost_origin == "stock_inicial"
         assert venta.cost_unit_ars == 60
         assert venta.cost_ars == 180
         assert venta.cost_confirmed is False

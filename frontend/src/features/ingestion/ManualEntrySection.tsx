@@ -2,12 +2,17 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { UNIDADES_DE_VENTA, type UnidadDeVenta } from "@/features/products/saleUnitOptions";
+import { COSTO_REQUERIDO_CON_STOCK, EnvioSelect } from "@/features/products/costoManual";
 import { aUnidadesBase } from "@/lib/pos/saleUnit";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { productsService, type ProductResponse } from "@/services/products.service";
+import {
+  productsService,
+  type ProductResponse,
+  type TratamientoEnvio,
+} from "@/services/products.service";
 import { customersService } from "@/services/customers.service";
 import { suppliersService } from "@/services/suppliers.service";
 import { expensesService } from "@/services/expenses.service";
@@ -1110,6 +1115,7 @@ function CatalogProductTab({
   const [category, setCategory] = useState("");
   const [salePrice, setSalePrice] = useState("");
   const [unitCost, setUnitCost] = useState("");
+  const [envio, setEnvio] = useState<TratamientoEnvio | "">("");
   const [stock, setStock] = useState("0");
   const [threshold, setThreshold] = useState("");
   const [sku, setSku] = useState("");
@@ -1118,12 +1124,15 @@ function CatalogProductTab({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const unidad = UNIDADES_DE_VENTA.find((u) => u.key === unidadKey) ?? UNIDADES_DE_VENTA[0]!;
+  // «0,0» o «00» no es stock: se compara el número, no el texto.
+  const hayStock = Number(stock.trim().replace(",", ".")) > 0;
 
   function reset() {
     setName("");
     setCategory("");
     setSalePrice("");
     setUnitCost("");
+    setEnvio("");
     setStock("0");
     setThreshold("");
     setSku("");
@@ -1161,6 +1170,11 @@ function CatalogProductTab({
       );
       return;
     }
+    // M·P2c: lo que se carga a mano tiene costo, igual que un dato importado.
+    if (stockBase > 0 && !unitCost) {
+      setError(COSTO_REQUERIDO_CON_STOCK);
+      return;
+    }
     setSubmitting(true);
     await submit(
       "product",
@@ -1169,6 +1183,7 @@ function CatalogProductTab({
         sale_price_ars: round2(parseFloat(salePrice)),
         unit_cost_ars: unitCost ? round2(parseFloat(unitCost)) : null,
         stock_units: stockBase,
+        ...(stockBase > 0 && envio ? { costo_envio: envio } : {}),
         ...(umbralBase !== null ? { low_stock_threshold_units: umbralBase } : {}),
         sale_unit: unidad.saleUnit,
         base_units_per_sale_unit: unidad.factor,
@@ -1199,8 +1214,9 @@ function CatalogProductTab({
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <p className="rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-2 text-xs text-vk-text-secondary">
-        Alta simple al catálogo (no registra compra ni mueve caja). Para cargar una compra
-        con stock y costo, usá la pestaña <strong>Compra</strong>.
+        Alta al catálogo con la mercadería que <strong>ya tenías</strong>: si cargás stock,
+        poné el precio de compra (no mueve caja). Si la compraste ahora, usá{" "}
+        <strong>Registrar compra</strong>: así quedan el gasto y el proveedor.
       </p>
 
       <Input
@@ -1252,7 +1268,11 @@ function CatalogProductTab({
 
       <div className="grid grid-cols-2 gap-4">
         <Input
-          label={`Costo ($${unidad.sufijo}, opcional)`}
+          label={
+            hayStock
+              ? `Precio de compra ($${unidad.sufijo})`
+              : `Precio de compra ($${unidad.sufijo}, opcional)`
+          }
           type="number"
           min={0}
           step="any"
@@ -1268,6 +1288,8 @@ function CatalogProductTab({
           onChange={(e) => setStock(e.target.value)}
         />
       </div>
+
+      {hayStock && <EnvioSelect value={envio} onChange={setEnvio} />}
 
       <div className="grid grid-cols-2 gap-4">
         <Input

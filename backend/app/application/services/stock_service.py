@@ -21,6 +21,8 @@ from app.application.services.costo_vigente_service import (
     recalcular_costo_vigente,
 )
 from app.application.services.inventory_movement_origin import (
+    SOURCE_CATALOG_INITIAL_STOCK,
+    SOURCE_MANUAL_ADJUSTMENT,
     SOURCE_RECONCILIATION,
     ensure_utc,
     momento_de_negocio_rotulado,
@@ -666,6 +668,170 @@ async def register_reconciliation_adjustment(
     )
     db.add(movement)
     await db.flush()
+    return movement
+
+
+class CostoRequeridoError(Exception):
+    """Se carga stock a mano sin precio de compra (M·P2c)."""
+
+
+COSTO_REQUERIDO_MESSAGE = (
+    "Para cargar stock a mano hace falta el precio de compra (el costo por unidad). "
+    "Si incluye el envío o no, es opcional."
+)
+
+
+def exigir_costo_con_stock(entra_stock: bool, costo: Decimal | None) -> None:
+    """Decisión del dueño (2026-10-14): lo que se carga a mano tiene costo.
+
+    Sólo cuando ENTRA stock (alta con stock o una suba): bajar el stock no lo
+    exige. Un costo 0 no es un costo (igual que ``costo_de_referencia``).
+    """
+    if entra_stock and (costo is None or costo <= 0):
+        raise CostoRequeridoError(COSTO_REQUERIDO_MESSAGE)
+
+
+class StockCambioError(Exception):
+    """El stock que el usuario veía al editar ya no es el actual (M·P2c)."""
+
+    def __init__(self, esperado: int, actual: int) -> None:
+        super().__init__(f"stock esperado {esperado}, actual {actual}")
+        self.esperado = esperado
+        self.actual = actual
+
+
+class StockNegativoError(Exception):
+    """Un ajuste manual dejaría el stock por debajo de 0 (prohibido)."""
+
+
+async def _producto_para_stock_manual(
+    product_id: uuid.UUID, tenant_id: uuid.UUID, db: AsyncSession
+) -> Product:
+    # Mismo orden de locks que ``increment_stock``: advisory shared y después
+    # la fila del producto. ``populate_existing``: la ruta ya cargó el producto
+    # sin lock (PATCH, chat); sin esto el ``FOR UPDATE`` devuelve la instancia
+    # del identity map con el stock VIEJO, el 409 de ``esperado`` no salta en la
+    # carrera y ``stock_units += delta`` pisa una venta commiteada en el medio
+    # (la misma trampa que documenta ``pos_discrepancy_service``).
+    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
+    product = (
+        await db.execute(
+            select(Product)
+            .where(Product.id == product_id, Product.tenant_id == tenant_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if product is None:
+        raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
+    return product
+
+
+async def registrar_apertura_manual(
+    product_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    qty: int,
+    contrato: ContratoDeCosto,
+    db: AsyncSession,
+    *,
+    source_upload_id: uuid.UUID | None = None,
+) -> InventoryMovement:
+    """Stock inicial cargado a mano en el alta de un producto (M·P2c).
+
+    Deja el MISMO movimiento que un catálogo importado en «ya la tenía»:
+    ``adjustment`` + ``catalog_initial_stock`` con su costo. Así el producto no
+    queda distinto de uno importado: tiene ledger, costo de referencia
+    («stock inicial») y costo promedio medido. ``qty`` en unidades base; el
+    costo, por unidad de venta, como en el resto del ledger.
+
+    ``source_upload_id``: el archivo del que vino el registro (alta desde
+    «Otros»). Así borrar ese archivo anula también esta apertura, como pasa con
+    el stock de un catálogo importado.
+    """
+    if qty <= 0:
+        raise ValueError("El stock inicial tiene que ser positivo.")
+    product = await _producto_para_stock_manual(product_id, tenant_id, db)
+    balance = await _get_or_create_balance(product, tenant_id, db)
+    balance.current_qty += qty
+    product.stock_units += qty
+    movement = InventoryMovement(
+        tenant_id=tenant_id,
+        product_id=product_id,
+        movement_type="adjustment",
+        qty=qty,
+        unit_cost=contrato.unit_cost_final,
+        reason="Stock inicial cargado a mano",
+        source_event_id=f"manual:alta:{product_id}",
+        source_type=SOURCE_CATALOG_INITIAL_STOCK,
+        source_upload_id=source_upload_id,
+        occurred_at=momento_de_negocio_rotulado(None),
+        **contrato.columnas(),
+    )
+    db.add(movement)
+    await db.flush()
+    await recalcular_costo_vigente(db, tenant_id, [product_id], movimientos_nuevos={movement.id})
+    return movement
+
+
+async def registrar_ajuste_manual(
+    product_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    nuevo: int | None = None,
+    delta: int | None = None,
+    esperado: int | None = None,
+    contrato: ContratoDeCosto | None,
+    actor: str,
+) -> InventoryMovement | None:
+    """Corrección manual del stock a un valor absoluto (M·P2c).
+
+    Escribe el delta como ``adjustment`` + ``manual_adjustment`` y mueve
+    ``stock_units`` en forma incremental. NO es ``catalog_initial_stock``: ese
+    origen es el saldo de apertura, y el chequeo temporal y la deduplicación lo
+    leen como tal. Una suba lleva el costo declarado (``contrato``), que el costo
+    promedio usa; una baja es una salida.
+
+    Se pasa ``nuevo`` (el valor absoluto que fijó el usuario: pantalla de
+    productos) o ``delta`` (cuánto sube o baja: el chat). ``esperado``: el stock
+    que el usuario veía al editar. Si cambió en el medio (una venta), se rechaza
+    con ``StockCambioError`` en vez de pisarla. Devuelve ``None`` si no hay
+    cambio.
+    """
+    if (nuevo is None) == (delta is None):
+        raise ValueError("Se pasa nuevo o delta, uno de los dos.")
+    product = await _producto_para_stock_manual(product_id, tenant_id, db)
+    actual = product.stock_units
+    if esperado is not None and esperado != actual:
+        raise StockCambioError(esperado, actual)
+    if delta is None:
+        assert nuevo is not None
+        delta = nuevo - actual
+    if actual + delta < 0:
+        raise StockNegativoError("El stock no puede quedar negativo.")
+    if delta == 0:
+        return None
+    balance = await _get_or_create_balance(product, tenant_id, db)
+    balance.current_qty += delta
+    product.stock_units += delta
+    columnas = contrato.columnas() if (contrato is not None and delta > 0) else {}
+    movement = InventoryMovement(
+        tenant_id=tenant_id,
+        product_id=product_id,
+        movement_type="adjustment",
+        qty=delta,
+        unit_cost=columnas.get("unit_cost_final"),
+        reason=f"Ajuste manual de stock ({actor})",
+        source_event_id=f"manual:ajuste:{uuid.uuid4()}",
+        source_type=SOURCE_MANUAL_ADJUSTMENT,
+        occurred_at=momento_de_negocio_rotulado(None),
+        **columnas,
+    )
+    db.add(movement)
+    await db.flush()
+    # Sin ``recalcular_costo_vigente``: un ajuste manual no es fuente del costo
+    # de referencia (sólo compras y apertura lo son); el costo declarado ya es el
+    # del producto o entra como edición manual por la ruta.
     return movement
 
 

@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1._stock_manual import (
+    aplicar_ajuste_manual_http,
+    exigir_costo_con_stock,
+    registrar_apertura_http,
+)
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
@@ -460,6 +465,12 @@ async def create_product(
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     repo = ProductRepository(session)
     data = body.model_dump()
+    # M·P2c: el stock inicial no se fija en la fila: entra como movimiento de
+    # apertura, igual que un catálogo importado en «ya la tenía».
+    stock_inicial = data.pop("stock_units")
+    costo_envio = data.pop("costo_envio")
+    exigir_costo_con_stock(stock_inicial > 0, data.get("unit_cost_ars"))
+    data["stock_units"] = 0
     # Un producto por peso o volumen sin umbral propio: el default (5) contado
     # en unidades base serían 5 gramos, que nunca alerta. Se lo lleva a 5 de la
     # unidad de venta (5 kg) y queda explícito, para que todos los lectores
@@ -515,6 +526,15 @@ async def create_product(
         raise _identity_conflict_from_db(
             conflict, barcode=data.get("barcode"), sku=data.get("sku")
         ) from conflict
+    if stock_inicial > 0:
+        await registrar_apertura_http(
+            session,
+            tenant.tenant_id,
+            saved.id,
+            stock_inicial,
+            costo=data["unit_cost_ars"],
+            envio=costo_envio,
+        )
     trigger_score_recalculation.delay(str(tenant.tenant_id), "product_created")
     return saved
 
@@ -627,6 +647,14 @@ async def update_product(
     # permitiendo limpiar opcionales a null (ej. borrar acquired_at). Los campos no
     # enviados quedan intactos.
     updates = body.model_dump(exclude_unset=True)
+    # M·P2c: el stock no se asigna en absoluto: la diferencia entra al ledger
+    # como ajuste manual, después de guardar el resto.
+    nuevo_stock = updates.pop("stock_units", None)
+    stock_esperado = updates.pop("stock_units_esperado", None)
+    costo_envio = updates.pop("costo_envio", None)
+    costo_ajuste = updates.get("unit_cost_ars", product.unit_cost_ars)
+    if nuevo_stock is not None:
+        exigir_costo_con_stock(nuevo_stock > product.stock_units, costo_ajuste)
     # Cambiar la unidad de venta reinterpreta el stock y el historial: 5000
     # "unidades" pasarían a ser 5 kg. Sólo se permite en un producto sin
     # historia; con historia, cambiarla mentiría sobre lo ya vendido y comprado.
@@ -744,6 +772,17 @@ async def update_product(
         raise _identity_conflict_from_db(
             conflict, barcode=effective_barcode, sku=effective_sku
         ) from conflict
+    if nuevo_stock is not None:
+        await aplicar_ajuste_manual_http(
+            session,
+            tenant.tenant_id,
+            saved.id,
+            nuevo_stock,
+            esperado=stock_esperado,
+            costo=costo_ajuste,
+            envio=costo_envio,
+            actor=f"usuario {user.user_id}",
+        )
     _audit_data_change(
         session,
         tenant_id=tenant.tenant_id,

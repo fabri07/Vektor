@@ -41,6 +41,8 @@ _PRODUCT_PAYLOAD = {
     "sku": "IDEM-001",
     "sale_price_ars": "100.00",
     "stock_units": 5,
+    # M·P2c: el stock cargado a mano lleva precio de compra.
+    "unit_cost_ars": "50.00",
 }
 
 _CUSTOMER_PAYLOAD = {

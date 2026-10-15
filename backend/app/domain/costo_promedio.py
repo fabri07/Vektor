@@ -85,7 +85,10 @@ MOTIVO_FUERA_DEL_LEDGER: Final = "hay stock cargado por fuera del registro de mo
 # Valores de ``source_type`` (los mismos literales que
 # ``application/services/inventory_movement_origin``; un test los ata).
 _CATALOGO: Final = "catalog_initial_stock"
-_AJUSTES_CON_PROCEDENCIA: Final = frozenset({"reconciliation", "manual_adjustment"})
+#: El ajuste manual de stock (M·P2c). Con precio de compra declarado, su
+#: entrada se promedia con ese costo (``Evento.costo_declarado``).
+AJUSTE_MANUAL: Final = "manual_adjustment"
+_AJUSTES_CON_PROCEDENCIA: Final = frozenset({"reconciliation", AJUSTE_MANUAL})
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,10 @@ class Evento:
     creado: datetime
     id: UUID
     movement_id: UUID | None = None
+    #: M·P2c: una ``entrada`` con costo DECLARADO (ajuste manual con precio de
+    #: compra cargado) se promedia con ese costo. Las demás entradas (una
+    #: reconciliación) siguen siendo unidades sin costo.
+    costo_declarado: bool = False
 
     def __post_init__(self) -> None:
         # Las compras llegan rotuladas UTC y las ventas naive: se comparan sin
@@ -247,7 +254,11 @@ def aplicar(estado: EstadoCosto, ev: Evento) -> EstadoCosto:
 
     # apertura, compra o entrada: suman unidades. Un costo 0 no es un costo
     # conocido (igual que ``costo_de_referencia``): promediarlo bajaría el costo.
-    con_costo = ev.costo is not None and ev.costo > 0 and ev.clase != "entrada"
+    con_costo = (
+        ev.costo is not None
+        and ev.costo > 0
+        and (ev.clase != "entrada" or ev.costo_declarado)
+    )
     stock = u_c + u_s
     if stock <= 0:
         # El promedio se reinicia con la compra, pero la cantidad NO se perdona:

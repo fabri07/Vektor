@@ -30,7 +30,9 @@ EAN_B = _ean13("779004000029")
 async def _producto(client: AsyncClient, headers: dict[str, Any], name: str, **extra: Any) -> dict:
     resp = await client.post(
         "/api/v1/products",
-        json={"name": name, "sale_price_ars": "100.00", "stock_units": 10, **extra},
+        # M·P2c: el stock cargado a mano lleva precio de compra.
+        json={"name": name, "sale_price_ars": "100.00", "stock_units": 10,
+              "unit_cost_ars": "50.00", **extra},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text

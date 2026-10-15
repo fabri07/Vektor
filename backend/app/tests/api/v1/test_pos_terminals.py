@@ -46,7 +46,8 @@ async def _producto(client: AsyncClient, headers: dict[str, str]) -> str:
     resp = await client.post(
         "/api/v1/products",
         json={"name": f"Yerba {uuid.uuid4().hex[:4]}", "sale_price_ars": "100.00",
-              "stock_units": 10},
+              # M·P2c: el stock cargado a mano lleva precio de compra.
+              "stock_units": 10, "unit_cost_ars": "50.00"},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text

@@ -149,6 +149,8 @@ test("si el usuario cambia el stock en el editor, sí viaja", async () => {
   renderizar();
   const { dialogo } = await abrirEditorDesdeSugerencia();
   fireEvent.change(within(dialogo).getByLabelText(/^Stock/), { target: { value: "8" } });
+  // M·P2c: una suba pide el motivo; como corrección de conteo, se guarda.
+  fireEvent.click(within(dialogo).getByLabelText(/Corrección de conteo/));
   fireEvent.click(within(dialogo).getByRole("button", { name: "Guardar" }));
   await waitFor(() =>
     expect(mockUpdateProduct).toHaveBeenCalledWith("p1", expect.objectContaining({ stock_units: 8 })),

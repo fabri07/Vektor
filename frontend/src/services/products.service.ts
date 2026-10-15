@@ -1,5 +1,9 @@
 import { api } from "@/lib/api";
 
+/** M·P2c: lo que se declara del envío en un precio de compra cargado a mano.
+ *  Mismo vocabulario que el contrato de costo del backend (M·1). */
+export type TratamientoEnvio = "incluido" | "no_aplica" | "adicional" | "desconocido";
+
 export interface CreateProductPayload {
   name: string;
   sale_price_ars: number;
@@ -7,6 +11,8 @@ export interface CreateProductPayload {
   /** Precio de lista/sugerido por proveedor. Informativo: no entra al margen. */
   list_price_ars?: number | null;
   stock_units?: number;
+  /** M·P2c: opcional; sin respuesta el margen sale estimado. */
+  costo_envio?: TratamientoEnvio;
   // null = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS del servidor; 0 = umbral explícito
   low_stock_threshold_units?: number | null;
   category?: string | null;
@@ -22,6 +28,9 @@ export interface CreateProductPayload {
 
 export type UpdateProductPayload = Partial<CreateProductPayload> & {
   is_active?: boolean;
+  /** M·P2c: el stock que se veía al editar. Si cambió en el medio, el servidor
+   *  responde 409 STOCK_CAMBIO en vez de pisar una venta. */
+  stock_units_esperado?: number;
 };
 
 export interface ProductResponse {
