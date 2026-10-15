@@ -302,6 +302,13 @@ Postgres local en Docker, Mac del dueño, 3 corridas seguidas el 2026-10-15 con 
 
 La medición 5 detectó una regresión antes de mergear: 4–5 s de espera del POS. El `before_commit` de las marcas corría antes que el costeo según el orden de imports del proceso, y el upsert de `product_cost_state` quedaba tomado mientras se costeaban las 5.000 ventas del import. Se arregló con `insert=True` (ver `docs/claude/plataforma.md`): pasó de 4,4–5,7 s a 17–20 ms. El commit del propio import tarda ~12 s (antes ~8 s), porque ahora también escribe el costo promedio de esas ventas.
 
+### M·P4 (mostrarlo), partido en dos PRs (2026-10-15)
+Revisión externa del plan: se parte para verificar cada mitad por separado. **Decisiones del dueño (2026-10-15):** con un recálculo pendiente se muestra el último publicado (ratifica 2026-10-14); la brecha se rotula «efecto inflación sobre el stock (ganancia por tenencia)» (ratifica #127); la comparación de márgenes excluye a los RI porque el promedio promedia el costo crudo y la reposición de la venta pasa por `base_comparable` — pasarlo a neto es **M·P4b**.
+
+**M·P4-1 (Productos), cómo quedó:** compuerta `AVG_COST_DISPLAY_ROLLOUT_TENANT_IDS`; `costos_a_lote` (una sentencia, mismo orden que `costo_a`); `ProductResponse.avg_cost_*` en listado y detalle; «Costo de reposición» en el catálogo de campos; columna «Costo promedio (estimado)» fuera del CSV (el importador la leería como `unit_cost_ars`). Detalle en `docs/claude/plataforma.md`.
+
+**M·P4-2 (sigue):** `margen_promedio_vs_reposicion` en FactsService sobre la intersección (`cost_ars` y `cost_avg_estado = 'medido'`), cobertura conjunta ≥ 50%, RI ausente, y el texto del chat.
+
 ## Doc
 - `docs/plans/mp-costo-promedio-ponderado.md` se reescribe con este plan en el commit de M·P1.
 - `docs/claude/plataforma.md` en cada PR.

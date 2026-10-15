@@ -102,7 +102,7 @@ async def test_valores_exactos_y_formula_safe(factory: async_sessionmaker[AsyncS
     # tiene que sobrevivir el centavo.
     assert by_col["Precio de venta"] == "15000.01"
     # Ausencia real = cadena vacía, no "None" ni "0".
-    assert by_col["Costo unitario"] == ""
+    assert by_col["Costo de reposición"] == ""
     # Evidencia (F-H6.d, catálogo estático — no depende de ninguna definición
     # registrada) también viaja, aunque esté oculta en la tabla por default.
     assert by_col["Precio de compra (costo base, sin envío)"] == "8500.0"

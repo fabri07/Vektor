@@ -103,7 +103,7 @@ beforeEach(() => {
     campo({
       field_id: "product:unit_cost_ars",
       field_key: "unit_cost_ars",
-      label: "Costo unitario",
+      label: "Costo de reposición",
       value_path: "unit_cost_ars",
     }),
     campo({
@@ -137,7 +137,7 @@ function renderizar() {
   );
 }
 
-test("Color y Estilo aparecen en la tabla sin duplicar Costo unitario", async () => {
+test("Color y Estilo aparecen en la tabla sin duplicar el costo", async () => {
   renderizar();
 
   await waitFor(() => expect(screen.getByText("Alfombra nórdica")).toBeInTheDocument());
@@ -147,10 +147,12 @@ test("Color y Estilo aparecen en la tabla sin duplicar Costo unitario", async ()
   await waitFor(() => expect(screen.getByText("Rojo")).toBeInTheDocument());
   expect(screen.getByText("Moderno")).toBeInTheDocument();
 
-  // "Costo unitario" sigue siendo la columna hardcodeada de siempre — una
-  // sola vez, no duplicada por el catálogo dinámico (está en EXCLUDED_FIELD_IDS).
+  // `unit_cost_ars` sigue siendo la columna hardcodeada de siempre (M·P4: con
+  // el rótulo «Costo de reposición», el del catálogo) — una sola vez, no
+  // duplicada por el catálogo dinámico (EXCLUDED_FIELD_IDS).
   const tabla = screen.getByRole("table");
-  expect(within(tabla).getAllByText(/costo unitario/i)).toHaveLength(1);
+  expect(within(tabla).getAllByText(/costo de reposición/i)).toHaveLength(1);
+  expect(within(tabla).queryByText(/costo unitario/i)).not.toBeInTheDocument();
 });
 
 test("«Ver todos los datos» abre el detalle con Marca (adicional)", async () => {
@@ -177,4 +179,47 @@ test("mientras carga no dice que no hay productos", () => {
   renderizar();
   expect(screen.getByLabelText("Cargando productos")).toBeInTheDocument();
   expect(screen.queryByText(/No hay datos para mostrar/)).not.toBeInTheDocument();
+});
+
+describe("M·P4: costo promedio (estimado)", () => {
+  test("sin dato del servidor la columna no aparece", async () => {
+    renderizar();
+    await waitFor(() => expect(screen.getByText("Alfombra nórdica")).toBeInTheDocument());
+    expect(screen.queryByText(/costo promedio/i)).not.toBeInTheDocument();
+  });
+
+  test("con dato aparece al lado del de reposición, con sus estados", async () => {
+    mockGetAllProducts.mockResolvedValue([
+      { ...PRODUCT, avg_cost_ars: "7500.00", avg_cost_estado: "medido", avg_cost_motivo: null },
+      {
+        ...PRODUCT,
+        id: "p2",
+        name: "Velador",
+        avg_cost_ars: "1200.00",
+        avg_cost_estado: "incompleto",
+        avg_cost_motivo: "hay unidades sin costo",
+      },
+      {
+        ...PRODUCT,
+        id: "p3",
+        name: "Espejo",
+        avg_cost_ars: null,
+        avg_cost_estado: "sin_medicion",
+        avg_cost_motivo: "stock fuera del ledger",
+      },
+    ]);
+    renderizar();
+    await waitFor(() => expect(screen.getByText("Alfombra nórdica")).toBeInTheDocument());
+
+    const tabla = screen.getByRole("table");
+    const encabezados = within(tabla)
+      .getAllByRole("columnheader")
+      .map((th) => th.textContent ?? "");
+    const reposicion = encabezados.findIndex((h) => /costo de reposición/i.test(h));
+    expect(encabezados[reposicion + 1]).toMatch(/costo promedio \(estimado\)/i);
+    expect(within(tabla).getByText("(parcial)")).toBeInTheDocument();
+    expect(within(tabla).getByText("Sin medir")).toHaveAttribute("title", "stock fuera del ledger");
+    // El de reposición sigue siendo el de siempre: el promedio no lo reemplaza.
+    expect(within(tabla).getAllByText(/9\.000/).length).toBeGreaterThanOrEqual(3);
+  });
 });
