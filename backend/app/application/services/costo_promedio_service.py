@@ -683,6 +683,40 @@ async def costo_a(
     ).scalar_one_or_none()
 
 
+async def costos_a_lote(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_ids: Iterable[uuid.UUID],
+    dia: date,
+) -> dict[uuid.UUID, ProductCostHistory]:
+    """``costo_a`` para varios productos en UNA sentencia (M·P4, la pantalla de
+    productos). Lectura CRUDA, igual que ``costo_a``: con un cambio pendiente
+    devuelve el último registro publicado, nunca «recalculando» (decisión del
+    dueño 2026-10-14). Un producto sin registro a ``dia`` no aparece."""
+    ids = list(dict.fromkeys(product_ids))
+    if not ids:
+        return {}
+    h = ProductCostHistory
+    orden = func.row_number().over(
+        partition_by=h.product_id,
+        order_by=(
+            h.dia.desc(), h.clase_orden.desc(), h.fecha.desc(), h.creado.desc(),
+            h.evento_id.desc(),
+        ),
+    )
+    ranqueado = (
+        select(h.id.label("id"), orden.label("n"))
+        .where(h.tenant_id == tenant_id, h.product_id.in_(ids), h.dia <= dia)
+        .subquery()
+    )
+    filas = (
+        await session.execute(
+            select(h).join(ranqueado, and_(ranqueado.c.id == h.id, ranqueado.c.n == 1))
+        )
+    ).scalars().all()
+    return {fila.product_id: fila for fila in filas}
+
+
 async def estadisticas_pendientes(session: AsyncSession) -> dict[str, Any]:
     """Para el seguimiento: cuántos pendientes hay, el más viejo y los que fallan."""
     s = ProductCostState

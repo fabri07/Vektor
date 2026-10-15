@@ -53,6 +53,13 @@ export interface ProductResponse {
   category_suggestion?: { code: string; label: string } | null;
   sale_price_ars: number;
   unit_cost_ars: number | null;
+  /** M·P4: costo promedio ponderado. DATO, no el costo principal (el margen y
+   *  el valor de stock siguen con `unit_cost_ars`, el de reposición). `null` en
+   *  cuentas sin habilitar o en productos sin historial. Es el último publicado:
+   *  nunca dice «recalculando». */
+  avg_cost_ars?: number | string | null;
+  avg_cost_estado?: "medido" | "incompleto" | "sin_medicion" | null;
+  avg_cost_motivo?: string | null;
   /** Precio de lista/sugerido por proveedor. Informativo: no entra al margen. */
   list_price_ars: number | null;
   /** Unidad de venta (B3). El stock está en unidades BASE; precio y costo, por

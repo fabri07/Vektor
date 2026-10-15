@@ -108,6 +108,41 @@ function categoryDisplay(
   return catalogLabels[cat] ?? cat;
 }
 
+/** M·P4: el costo promedio ponderado, como DATO al lado del de reposición.
+ *  Sólo existe si el servidor lo manda (cuenta habilitada): sin dato en ningún
+ *  producto la columna no aparece. */
+const AVG_COST_COLUMN = {
+  key: "avg_cost_ars",
+  header: "Costo promedio (estimado)",
+  hideable: true,
+  // Fuera del CSV: el importador lee cualquier «costo …» como unit_cost_ars, y
+  // reimportar el archivo pisaría el costo de reposición con el promedio.
+  exportable: false,
+  render: (v: unknown, row: Record<string, unknown>) => {
+    const product = row as unknown as ProductResponse;
+    if (product.avg_cost_estado === "sin_medicion" || v == null) {
+      return (
+        <span className="text-vk-text-secondary" title={product.avg_cost_motivo ?? undefined}>
+          {product.avg_cost_estado === "sin_medicion" ? "Sin medir" : "—"}
+        </span>
+      );
+    }
+    return (
+      <span title={product.avg_cost_motivo ?? undefined}>
+        {formatARS(Number(v))}
+        {product.avg_cost_estado === "incompleto" && (
+          <span className="ml-1 text-xs text-vk-text-secondary">(parcial)</span>
+        )}
+      </span>
+    );
+  },
+  csvValue: (v: unknown) => (v != null ? String(Number(v)) : ""),
+};
+
+function tieneCostoPromedio(products: ProductResponse[]): boolean {
+  return products.some((p) => p.avg_cost_estado != null);
+}
+
 const COLUMNS = [
   {
     key: "name",
@@ -174,7 +209,10 @@ const COLUMNS = [
   },
   {
     key: "unit_cost_ars",
-    header: "Costo unitario",
+    // M·P4: es el de la última compra (reposición), el que usan el margen y el
+    // valor de stock; el promedio va en su propia columna. El rótulo lo pisa el
+    // catálogo del backend (``business_field_catalog``), que dice lo mismo.
+    header: "Costo de reposición",
     hideable: true,
     render: (v: unknown) => (v != null ? formatARS(Number(v)) : "—"),
     csvValue: (v: unknown) => (v != null ? String(Number(v)) : ""),
@@ -380,7 +418,9 @@ export default function ProductsPage() {
     existingColumns: [
       ...COLUMNS.slice(0, 2),
       categoryColumn,
-      ...COLUMNS.slice(2),
+      ...COLUMNS.slice(2).flatMap((c) =>
+        c.key === "unit_cost_ars" && tieneCostoPromedio(products) ? [c, AVG_COST_COLUMN] : [c],
+      ),
     ],
     onSaveCustomField: saveProductCustomField,
   });

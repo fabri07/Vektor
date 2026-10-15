@@ -338,6 +338,14 @@ class Settings(BaseSettings):
     def parse_async_import_rollout_tenant_ids(cls, v: object) -> list[str]:
         return parse_rollout_tenant_ids(v)
 
+    # M·P4 — quién VE el costo promedio (el cálculo corre para todos).
+    AVG_COST_DISPLAY_ROLLOUT_TENANT_IDS: list[str] = Field(default_factory=list)
+
+    @field_validator("AVG_COST_DISPLAY_ROLLOUT_TENANT_IDS", mode="before")
+    @classmethod
+    def parse_avg_cost_display_rollout_tenant_ids(cls, v: object) -> list[str]:
+        return parse_rollout_tenant_ids(v)
+
     # Auth social
     ENABLE_GOOGLE_LOGIN: bool = False
     ENABLE_FACEBOOK_LOGIN: bool = False  # Diferido — solo abstracción en fase 1

@@ -1,7 +1,8 @@
 """Product catalog endpoints."""
 
 from datetime import UTC, datetime
-from typing import Any
+from decimal import ROUND_HALF_UP
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -23,6 +24,7 @@ from app.api.v1.deps import (
     require_role,
 )
 from app.application.services import maintenance_lock_service, tenant_categories_service
+from app.application.services.costo_promedio_service import costos_a_lote
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.pos_terminal_service import (
     exigir_terminal_si_es_cajero,
@@ -33,7 +35,10 @@ from app.application.services.product_identity import (
     product_identity_guard,
 )
 from app.application.services.score_trigger_service import trigger_score_recalculation
-from app.domain.business_time import now_ar_naive
+from app.config.avg_cost_display_rollout import avg_cost_display_enabled_for
+from app.domain.business_time import now_ar_naive, today_ar
+from app.domain.costo_promedio import Estado as EstadoPromedio
+from app.domain.costo_promedio_de_venta import CENTAVO
 from app.domain.costo_vigente import (
     conservar_claves_del_costo,
     custom_fields_tras_editar_costo,
@@ -113,9 +118,24 @@ async def _con_sugerencias(
         if vertical is not None
         else {}
     )
+    promedios = (
+        await costos_a_lote(session, tenant_id, [p.id for p in products], today_ar())
+        if avg_cost_display_enabled_for(tenant_id)
+        else {}
+    )
     out: list[ProductResponse] = []
     for product in products:
         response = ProductResponse.model_validate(product)
+        registro = promedios.get(product.id)
+        if registro is not None:
+            # Sin registro, los tres quedan en null: un producto todavía sin
+            # historial (p. ej. antes del backfill) no es «sin compras».
+            response.avg_cost_estado = cast(EstadoPromedio, registro.estado)
+            response.avg_cost_motivo = registro.motivo
+            if registro.estado != "sin_medicion" and registro.costo_promedio is not None:
+                response.avg_cost_ars = registro.costo_promedio.quantize(
+                    CENTAVO, rounding=ROUND_HALF_UP
+                )
         if vertical is not None and not product.category:
             suggestion = infer_category(vertical, product.name)
             if suggestion.confidence == "high" and suggestion.code in labels:

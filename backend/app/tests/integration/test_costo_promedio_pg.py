@@ -111,3 +111,41 @@ async def test_reconstruir_en_postgres(pg_engine: AsyncEngine) -> None:
             assert total == 2
     finally:
         await _limpiar(sm, tid)
+
+
+async def test_costos_a_lote_en_postgres_lee_lo_mismo_que_costo_a(pg_engine: AsyncEngine) -> None:
+    """M·P4-1: el ``row_number()`` del lote en Postgres (UUID nativo, ``Numeric(18,6)``)
+    elige el mismo registro que ``costo_a`` para cada producto."""
+    sm = async_sessionmaker(pg_engine, expire_on_commit=False)
+    tid = uuid.uuid4()
+    try:
+        async with sm() as s:
+            s.add(Tenant(tenant_id=tid, legal_name="MP4", display_name="MP4"))
+            await s.flush()
+            ids: list[uuid.UUID] = []
+            for nombre, costos in (("A", ("100", "200")), ("B", ("50",)), ("C", ())):
+                p = Product(
+                    tenant_id=tid, name=nombre, sale_price_ars=Decimal("300"), stock_units=0
+                )
+                s.add(p)
+                await s.flush()
+                ids.append(p.id)
+                for n, costo in enumerate(costos, start=1):
+                    await stock_service.increment_stock(
+                        p.id, tid, 10, Decimal(costo), None, s,
+                        occurred_at=datetime(2026, 3, n, 12),
+                    )
+            await svc.reconstruir(s, tid)
+            await s.commit()
+
+        async with sm() as s:
+            for dia in (date(2026, 2, 28), date(2026, 3, 1), date(2026, 3, 20)):
+                lote = await svc.costos_a_lote(s, tid, ids, dia)
+                for pid in ids:
+                    uno = await svc.costo_a(s, tid, pid, dia)
+                    assert (lote[pid].id if pid in lote else None) == (uno.id if uno else None)
+            final = await svc.costos_a_lote(s, tid, ids, date(2026, 3, 20))
+            assert ids[2] not in final
+            assert final[ids[0]].costo_promedio == Decimal("150")
+    finally:
+        await _limpiar(sm, tid)

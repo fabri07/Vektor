@@ -66,6 +66,14 @@ class ProductResponse(BaseModel):
     # B·3: sólo con categoría vacía y confianza alta; si no, null. La llena el
     # endpoint (``products._con_sugerencias``), no el ORM: un frontend viejo la ignora.
     category_suggestion: CategorySuggestionResponse | None = None
+    # M·P4: costo promedio ponderado (DATO, no el costo principal: el margen y el
+    # valor de stock siguen con unit_cost_ars, el de reposición). Lo llena el
+    # listado/detalle (``products._con_sugerencias``) sólo con la compuerta
+    # ``avg_cost_display_rollout``; si no, null. Es el último publicado: con un
+    # recálculo pendiente no dice «recalculando».
+    avg_cost_ars: Decimal | None = None
+    avg_cost_estado: Literal["medido", "incompleto", "sin_medicion"] | None = None
+    avg_cost_motivo: str | None = None
 
     @field_validator("custom_fields", mode="before")
     @classmethod

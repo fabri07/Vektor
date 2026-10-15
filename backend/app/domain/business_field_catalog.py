@@ -161,7 +161,9 @@ PRODUCT_FIELDS: tuple[FieldDescriptor, ...] = (
         field_id="product:unit_cost_ars",
         entity_type="product",
         field_key="unit_cost_ars",
-        label="Costo unitario",
+        # M·P4: el de la última compra, al lado del costo promedio (dato aparte).
+        # Un CSV exportado con este rótulo se vuelve a leer como unit_cost_ars.
+        label="Costo de reposición",
         data_type="number",
         origin="canonical",
         value_path="unit_cost_ars",
