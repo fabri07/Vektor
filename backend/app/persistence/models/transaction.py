@@ -101,6 +101,18 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     cost_origin: Mapped[str | None] = mapped_column(String(20), nullable=True)
     cost_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     cost_snapshot_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # M·P3 — costo PROMEDIO a la fecha de la venta (mig 20261014_0001). Es un DATO,
+    # no el costo principal (``cost_*`` no se toca): derivado del historial
+    # (``product_cost_history``) y recalculado cuando ese historial se republica.
+    # Misma unidad que ``cost_*``. ``cost_avg_estado`` NULL = nunca se calculó.
+    # ``cost_avg_pendiente`` es INTERNO: el valor es el último publicado y el
+    # worker lo va a actualizar (la UI nunca muestra «recalculando»).
+    cost_avg_unit_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    cost_avg_ars: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    cost_avg_estado: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cost_avg_aproximado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    cost_avg_motivo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cost_avg_pendiente: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     __table_args__ = (
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_sales_entries_provenance"),

@@ -265,6 +265,43 @@ Dos corridas seguidas del mismo código, el 2026-10-14 con la Mac libre (carga ~
 - **Datos viejos:** `scripts/anclar_stock_manual.py` ancla la diferencia positiva en el alta, con el costo conocido a esa fecha (nunca el de hoy: inflación) o sin costo. El `--apply` en Neon lo autoriza el dueño.
 - **Pendiente (fase 3):** el import escribe el delta de una relectura de catálogo como `catalog_initial_stock`; es el mismo problema del lado del import.
 
+### M·P3 (el costo promedio en cada venta)
+**Decisiones del dueño (2026-10-14):**
+- **Nunca se muestra «recalculando»:** «que trabajen de fondo, pero que no muestren el recalculando, porque la gente es muy impaciente para esperar; en todo caso, cuando refresquen la página, que vean los cambios». La venta guarda el último promedio publicado y un `cost_avg_pendiente` interno.
+- **Una venta `incompleto` guarda el promedio parcial** con su estado.
+- **Topes pensados para una ferretería de 10.000+ productos:**
+  - migración completa con 500.000 ventas: ≤ 3 min;
+  - un producto típico con sus ventas: ≤ 200 ms;
+  - las ventas del producto extremo (25.000): ≤ 2 s;
+  - criterio: la mediana de 3 corridas.
+
+  El primer tope que propuse (4 s por producto) se leía como «por producto» y, en una ferretería, era inviable.
+
+**Cómo quedó:**
+- Mig `20261014_0001` agrega `sales_entries.cost_avg_*`; `cost_*` no se toca.
+- La regla pura está en `domain/costo_promedio_de_venta.py`.
+- La venta se costea al confirmarse (listener del costeo, por lote).
+- Cada publicación recalcula sus ventas **dentro de la misma transacción que el historial y antes del `FOR UPDATE` del estado**. La primera versión lo hacía después del commit de la publicación, y la revisión adversarial mostró dos P1: una marca en el medio, o un worker caído, dejaban ventas viejas para siempre.
+- Sin historial publicado, la venta normal del POS ya no se omite.
+
+**Benchmark** (mediana de 3 corridas):
+
+Postgres local en Docker, Mac del dueño, 3 corridas seguidas el 2026-10-15 con la máquina libre:
+
+| Medición | Corrida 1 | Corrida 2 | Corrida 3 | **Mediana** | Tope |
+|---|---|---|---|---|---|
+| 1. Migración: 10.000 productos, 100.000 registros, 500.000 ventas | 70,4 s | 74,6 s | 73,6 s | **73,6 s** | ≤ 180 s |
+| 6. Producto típico con sus 1.000 ventas, todo el historial | 183 ms | 150 ms | 164 ms | **164 ms** | ≤ 200 ms |
+| 7. Ventas del producto extremo (25.000), sin la publicación | 1,65 s | 1,60 s | 1,69 s | **1,65 s** | ≤ 2 s |
+| 2a. Producto de 50.000 eventos, compra nueva | 1,32 s | 1,31 s | 1,45 s | **1,32 s** | ≤ 2 s |
+| 2b. Ídem, todo el historial | 3,04 s | 2,84 s | 3,04 s | **3,04 s** | ≤ 4 s |
+| 3. Venta del POS omitida (p95 / p99) | 4,8 / 6,7 ms | 5,0 / 7,8 ms | 5,3 / 7,8 ms | **5,0 / 7,8 ms** | ≤ 10 / ≤ 25 |
+| 3. Venta del POS que marca (p95 / p99) | 9,3 / 12,0 ms | 9,1 / 11,5 ms | 9,6 / 12,3 ms | **9,3 / 12,0 ms** | ≤ 15 / ≤ 25 |
+| 4. POS con recálculos (normal / incompleto, p99) | 19,0 / 16,0 ms | 13,1 / 14,2 ms | 15,5 / 15,8 ms | **15,5 / 15,8 ms** | ≤ 50 |
+| 5. Import de 5.000 ventas + POS (p99), sin deadlock | 20,3 ms | 17,2 ms | 18,6 ms | **18,6 ms** | ≤ 50 |
+
+La medición 5 detectó una regresión antes de mergear: 4–5 s de espera del POS. El `before_commit` de las marcas corría antes que el costeo según el orden de imports del proceso, y el upsert de `product_cost_state` quedaba tomado mientras se costeaban las 5.000 ventas del import. Se arregló con `insert=True` (ver `docs/claude/plataforma.md`): pasó de 4,4–5,7 s a 17–20 ms. El commit del propio import tarda ~12 s (antes ~8 s), porque ahora también escribe el costo promedio de esas ventas.
+
 ## Doc
 - `docs/plans/mp-costo-promedio-ponderado.md` se reescribe con este plan en el commit de M·P1.
 - `docs/claude/plataforma.md` en cada PR.

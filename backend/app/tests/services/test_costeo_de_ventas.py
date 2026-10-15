@@ -381,10 +381,8 @@ async def test_un_costo_cargado_posterior_a_la_venta_no_es_respaldo(
 async def test_ruta_sin_unidades_base_con_producto_fraccionado_queda_pendiente(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    from app.persistence.costeo_de_ventas import (  # noqa: PLC0415
-        MOTIVO_UNIDAD_DUDOSA,
-        marcar_unidad_no_confirmada,
-    )
+    from app.domain.costo_de_venta import MOTIVO_UNIDAD_DUDOSA  # noqa: PLC0415
+    from app.persistence.costeo_de_ventas import marcar_unidad_no_confirmada  # noqa: PLC0415
 
     await _regimen(db_session, sample_tenant, "monotributo")
     queso = await _producto(

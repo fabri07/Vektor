@@ -22,6 +22,11 @@ publicación.
 ``reconstruir`` hace las dos cosas en la sesión del llamador (backfill, tests).
 ``recalcular`` las hace en transacciones separadas (job, drenaje).
 
+**Ventas (M·P3).** Cada publicación recalcula el costo promedio de las ventas
+afectadas (``sales_entries.cost_avg_*``, un DATO al lado del costo principal)
+en la MISMA transacción que el historial, antes del ``FOR UPDATE`` del estado:
+la guarda de revisión cubre las dos cosas (``actualizar_ventas_en``).
+
 **Lectura.** ``leer_costo_a`` lee el estado y el registro vigente en UNA sentencia:
 con algo pendiente desde ese día devuelve «recalculando», nunca un dato viejo.
 
@@ -37,16 +42,22 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final, cast
 
-from sqlalchemy import Table, and_, delete, func, insert, or_, select, text
+from sqlalchemy import Table, and_, delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.business_time import today_ar
+from app.domain.costo_de_venta import MOTIVO_UNIDAD_DUDOSA
 from app.domain.costo_promedio import PRIORIDAD, Registro, proyectar, registros
+from app.domain.costo_promedio_de_venta import (
+    PuntoDelHistorial,
+    costo_promedio_de_venta,
+    punto_a,
+)
 from app.persistence.models.product_cost import ProductCostHistory, ProductCostState
 from app.persistence.repositories.costo_de_referencia_repository import costos_de_referencia
 from app.persistence.repositories.costo_promedio_repository import (
@@ -83,6 +94,8 @@ class Resumen:
     #: con reposición por compra. Positiva = el promedio está por debajo de lo que
     #: cuesta reponer.
     brechas: list[Decimal] = field(default_factory=list)
+    #: Ventas cuyo costo promedio se recalculó (M·P3).
+    ventas: int = 0
 
 
 @dataclass
@@ -96,6 +109,8 @@ class Calculo:
     #: todo el historial (primera publicación o una marca de ``date.min``). Los
     #: registros anteriores no cambian: dependen sólo de los eventos anteriores.
     desde: dict[uuid.UUID, date | None] = field(default_factory=dict)
+    #: Ventas cuyo costo promedio escribió la última publicación (M·P3).
+    ventas: int = 0
 
 
 @dataclass(frozen=True)
@@ -272,6 +287,11 @@ async def _escribir(
             regs = [r for r in regs if r.evento.fecha.date() >= dia]
         filas.extend(_fila(tenant_id, pid, r, revision) for r in regs)
     await _insertar_registros(session, filas)
+    # M·P3: las ventas en la MISMA transacción que el historial y ANTES del FOR
+    # UPDATE del estado: si la revisión cambió, el savepoint revierte las dos
+    # cosas y el producto sigue pendiente (nunca una venta vieja con el
+    # historial nuevo, ni al revés), y el lock que espera el POS no se alarga.
+    calculo.ventas = await actualizar_ventas_en(session, calculo, ids)
     estados = await _revisiones(session, tenant_id, sorted(ids, key=str), bloquear=True)
     cambiaron = {pid for pid in ids if estados[pid].revision != calculo.revisiones[pid]}
     if cambiaron:
@@ -382,10 +402,143 @@ async def reconstruir(
     resumen = Resumen(tenant_id=tenant_id)
     calculo = await calcular(session, tenant_id, product_ids)
     publicados, descartados = await publicar(session, calculo)
+    resumen.ventas += calculo.ventas
     _sumar(resumen, calculo, publicados, descartados)
     if medir_brecha:
         await _medir_brecha(session, calculo, publicados, resumen)
     return resumen
+
+
+# ── M·P3: el costo promedio de las ventas ───────────────────────────────────
+
+#: Ventas por sentencia al recalcular (Postgres: un ``UPDATE … FROM unnest``).
+TANDA_VENTAS: Final = 5000
+_SEIS: Final = Decimal("0.000001")
+
+
+def _puntos_calculados(regs: list[Registro]) -> tuple[list[PuntoDelHistorial], list[date]]:
+    """Los registros recién calculados como puntos, con el promedio llevado a la
+    precisión con que se guarda (Numeric 18,6): así una venta da lo mismo
+    costeada al confirmarse (lee lo guardado) que recalculada al publicar."""
+    puntos = [
+        PuntoDelHistorial(
+            dia=r.evento.fecha.date(),
+            promedio=(
+                None
+                if r.estado.promedio is None
+                else r.estado.promedio.quantize(_SEIS, rounding=ROUND_HALF_UP)
+            ),
+            estado=r.estado.estado,
+            aproximado=r.estado.aproximado,
+            motivo=None if r.estado.motivo is None else r.estado.motivo[:200],
+        )
+        for r in regs
+    ]
+    return puntos, [p.dia for p in puntos]
+
+
+async def _filas_de_ventas(
+    session: AsyncSession, calculo: Calculo, pids: Sequence[uuid.UUID]
+) -> list[dict[str, Any]]:
+    """Las columnas ``cost_avg_*`` de las ventas vivas de ``pids`` afectadas por la
+    publicación: día ≥ ``desde`` del producto, o todas si es el historial entero."""
+    from app.persistence.models.product import Product  # noqa: PLC0415
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    if not pids:
+        return []
+    tenant_id = calculo.tenant_id
+    factores = dict(
+        (
+            await session.execute(
+                select(Product.id, Product.base_units_per_sale_unit).where(
+                    Product.tenant_id == tenant_id, Product.id.in_(list(pids))
+                )
+            )
+        ).tuples().all()
+    )
+    desdes = [calculo.desde.get(pid) for pid in pids]
+    consulta = select(
+        SaleEntry.id, SaleEntry.product_id, SaleEntry.transaction_date, SaleEntry.quantity,
+        SaleEntry.cost_reason,
+    ).where(
+        SaleEntry.tenant_id == tenant_id,
+        SaleEntry.product_id.in_(list(pids)),
+        SaleEntry.voided_at.is_(None),
+    )
+    if all(d is not None for d in desdes):
+        minimo = min(d for d in desdes if d is not None)
+        consulta = consulta.where(
+            SaleEntry.transaction_date >= datetime.combine(minimo, datetime.min.time())
+        )
+    puntos = {pid: _puntos_calculados(calculo.registros.get(pid, [])) for pid in pids}
+    filas: list[dict[str, Any]] = []
+    for sid, pid, cuando, cantidad, motivo_costo in (await session.execute(consulta)).tuples():
+        if pid is None:
+            continue
+        dia = cuando.date() if isinstance(cuando, datetime) else cuando
+        desde = calculo.desde.get(pid)
+        if desde is not None and dia < desde:
+            continue
+        lista, dias = puntos[pid]
+        valores = costo_promedio_de_venta(
+            punto_a(lista, dias, dia),
+            unidades_base=cantidad,
+            base_units_per_sale_unit=factores.get(pid) or 1,
+            # La ruta que no confirma unidades base la marcó al costear (M·2a).
+            unidad_dudosa=motivo_costo == MOTIVO_UNIDAD_DUDOSA,
+            motivo_dudosa=MOTIVO_UNIDAD_DUDOSA,
+        )
+        filas.append({"id": sid, **valores.columnas(pendiente=False)})
+    return filas
+
+
+_UPDATE_VENTAS_PG: Final = text(
+    "UPDATE sales_entries AS s SET "
+    "cost_avg_unit_ars = v.u, cost_avg_ars = v.a, cost_avg_estado = v.e, "
+    "cost_avg_aproximado = v.ap, cost_avg_motivo = v.m, cost_avg_pendiente = false "
+    "FROM unnest(CAST(:ids AS uuid[]), CAST(:u AS numeric[]), CAST(:a AS numeric[]), "
+    "CAST(:e AS varchar[]), CAST(:ap AS boolean[]), CAST(:m AS varchar[])) "
+    "AS v(id, u, a, e, ap, m) "
+    "WHERE s.id = v.id AND s.tenant_id = :tid"
+)
+
+
+async def _escribir_ventas(
+    session: AsyncSession, tenant_id: uuid.UUID, filas: list[dict[str, Any]]
+) -> None:
+    """Una sentencia por tanda en Postgres; ``executemany`` en otros motores."""
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    es_pg = session.get_bind().dialect.name == "postgresql"
+    for i in range(0, len(filas), TANDA_VENTAS):
+        tanda = filas[i : i + TANDA_VENTAS]
+        if es_pg:
+            await session.execute(
+                _UPDATE_VENTAS_PG,
+                {
+                    "tid": tenant_id,
+                    "ids": [f["id"] for f in tanda],
+                    "u": [f["cost_avg_unit_ars"] for f in tanda],
+                    "a": [f["cost_avg_ars"] for f in tanda],
+                    "e": [f["cost_avg_estado"] for f in tanda],
+                    "ap": [f["cost_avg_aproximado"] for f in tanda],
+                    "m": [f["cost_avg_motivo"] for f in tanda],
+                },
+            )
+        else:
+            await session.execute(update(SaleEntry), tanda)
+
+
+async def actualizar_ventas_en(
+    session: AsyncSession, calculo: Calculo, pids: Iterable[uuid.UUID]
+) -> int:
+    """Recalcula el costo promedio de las ventas de ``pids`` en la sesión del
+    llamador. Lo llama ``_escribir`` dentro de la publicación. Devuelve cuántas
+    escribió."""
+    filas = await _filas_de_ventas(session, calculo, sorted(pids, key=str))
+    await _escribir_ventas(session, calculo.tenant_id, filas)
+    return len(filas)
 
 
 async def productos_pendientes(
@@ -443,6 +596,7 @@ async def recalcular(
             if medir_brecha:
                 await _medir_brecha(s, calculo, publicados, resumen)
             await s.commit()
+        resumen.ventas += calculo.ventas
         _sumar(resumen, calculo, publicados, descartados)
     return resumen
 
