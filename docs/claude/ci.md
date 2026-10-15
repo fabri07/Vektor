@@ -4,7 +4,14 @@ Tres workflows: `ci-backend.yml` (ruff + mypy + pytest con cov ≥ 60% + Alembic
 
 ## Cupo de minutos
 
-El repo es privado y la cuenta es Free: 2.000 minutos/mes de runners de GitHub. Un run de backend dura ~30 min (23 de pytest), así que el cupo da para ~66 runs. El 2026-10-09 se agotó y sin medio de pago GitHub no levanta los jobs: terminan en `failure` en 3-4 s con la anotación *"The job was not started because recent account payments have failed or your spending limit needs to be increased"*. **Ese `failure` no dice nada del código**: no corrió nada.
+El repo es privado. **Desde el 2026-10-14 la cuenta es GitHub Pro: 3.000 minutos/mes** de runners de GitHub, y el CI volvió a `ubuntu-latest` (sin `CI_RUNNER`) para liberar la Mac del dev. Medido ese día en el PR #128:
+
+| Workflow | `ubuntu-latest` (GitHub) | Runner propio (MacBook Air) |
+|---|---|---|
+| Backend | **23:04** (pytest 17:04, Postgres 1:45, Docker 1:16, mypy 1:26) | 29–48 min |
+| Frontend | **3:50** (`next build` 1:30, jest 1:00) | ~5 min |
+
+Un PR con back y front son ~27 min: el cupo da para ~110 por mes (más los runs de `main`, que repiten el del PR). Si se agota, los jobs terminan en `failure` en 3-4 s con la anotación *"The job was not started because recent account payments have failed or your spending limit needs to be increased"* (pasó el 2026-10-09 con la cuenta Free). **Ese `failure` no dice nada del código**: no corrió nada. La salida inmediata es volver al runner propio (`gh variable set CI_RUNNER --body self-hosted`).
 
 - **`concurrency`** en los tres workflows: un push nuevo a un PR cancela el run anterior de la misma rama. En `push` (main) no se cancela nada: cada commit de main tiene que quedar verificado, porque main despliega solo.
 
