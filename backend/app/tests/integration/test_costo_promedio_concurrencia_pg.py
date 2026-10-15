@@ -276,3 +276,39 @@ async def test_ajuste_manual_por_delta_no_pierde_la_venta_del_medio(
         ).scalar_one()
         assert p is not None and p.stock_units == 14
         assert balance.current_qty == 14
+
+
+# ── M·P3: el costo promedio de las ventas, en Postgres ──────────────────────
+
+
+async def test_la_publicacion_recalcula_las_ventas_con_unnest(
+    fabrica: async_sessionmaker[AsyncSession], producto: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """El camino de Postgres (``UPDATE … FROM unnest``): una compra nueva más cara
+    y la publicación deja el promedio nuevo en las ventas posteriores."""
+    tid, pid = producto
+    await _vender(fabrica, tid, pid, 2, 2)
+    async with fabrica() as s:
+        await stock_service.increment_stock(
+            pid, tid, 8, Decimal("200"), None, s, occurred_at=datetime(2026, 3, 3, 12)
+        )
+        await s.commit()
+    await _vender(fabrica, tid, pid, 4, 4)
+    r = await svc.recalcular(fabrica, tid, solo_pendientes=True)
+    # Publicación parcial (desde el día 3): sólo la venta del día 4. La del día 2
+    # quedó costeada al confirmarse, con el historial ya publicado.
+    assert r.ventas == 1
+    async with fabrica() as s:
+        ventas = (
+            await s.execute(
+                select(SaleEntry).where(SaleEntry.product_id == pid).order_by(
+                    SaleEntry.transaction_date
+                )
+            )
+        ).scalars().all()
+    dia2, dia4 = ventas
+    assert (dia2.cost_avg_unit_ars, dia2.cost_avg_estado) == (Decimal("100.00"), "medido")
+    # Día 3: 8 a $100 que quedaban + 8 a $200 → $150; la venta de 4 → $600.
+    assert (dia4.cost_avg_unit_ars, dia4.cost_avg_ars, dia4.cost_avg_pendiente) == (
+        Decimal("150.00"), Decimal("600.00"), False,
+    )

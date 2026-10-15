@@ -41,6 +41,12 @@ OrigenDeVenta = Literal[
     "compra", "stock_inicial", "manual", "catalogo", "costo_cargado", "sin_costo"
 ]
 
+#: Una ruta que no confirma que ``quantity`` esté en unidades base, con un
+#: producto fraccionado: sin costo (ni principal ni promedio). Vive acá para que
+#: el servicio del costo promedio no tenga que importar el listener del costeo.
+MOTIVO_UNIDAD_DUDOSA: Final = (
+    "la cantidad no está confirmada en unidades base para un producto fraccionado"
+)
 MOTIVO_EDICION: Final = "el costo sale de una carga manual o del catálogo, no de una compra"
 
 

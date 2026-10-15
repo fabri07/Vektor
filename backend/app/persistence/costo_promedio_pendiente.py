@@ -112,6 +112,17 @@ def _marcar(session: Session, tenant_id: Any, product_id: Any, desde: date) -> N
     marcas[clave] = desde if actual is None else min(actual, desde)
 
 
+def marcas_en_curso(session: Session) -> dict[tuple[uuid.UUID, uuid.UUID], date]:
+    """Las marcas de la transacción actual que todavía no se escribieron.
+
+    Se escriben en ``before_commit`` de este módulo, que corre DESPUÉS del costeo
+    de ventas (orden de registro en ``models/__init__``; el costeo importa este
+    módulo tarde, dentro de la función, para no cambiarlo): el costeo las
+    consulta acá para saber que el producto se va a recalcular (M·P3).
+    """
+    return dict(session.info.get(_MARCAS, {}))
+
+
 def _uuid(valor: Any) -> uuid.UUID:
     return valor if isinstance(valor, uuid.UUID) else uuid.UUID(str(valor))
 
@@ -273,11 +284,12 @@ def _olvidar(session: Session, previous_transaction: Any) -> None:
 def _no_omitibles(tenant_id: uuid.UUID, items: dict[uuid.UUID, date]) -> Any:
     """La condición de las salidas candidatas que NO se pueden omitir.
 
-    Se marca si hay algo publicado y además un
-    registro con día posterior, el último registro ``incompleto``, el stock en
-    0 (pudo haber clamp) o el estado ya pendiente (no se decide sobre un
-    historial en revisión). Sin nada publicado y sin nada pendiente no hay
-    dato viejo que proteger; con algo pendiente se marca igual.
+    Se marca si hay un registro con día posterior, el último registro
+    ``incompleto``, el stock en 0 (pudo haber clamp) o el estado ya pendiente
+    (no se decide sobre un historial en revisión). **Sin nada publicado
+    también se marca (M·P3):** la venta guarda su costo promedio y, sin
+    historial, sólo una publicación se lo puede dar; omitirla la dejaba sin
+    valor hasta el próximo evento del producto.
     El último registro sale de subconsultas ``ORDER BY … LIMIT 1`` sobre el
     índice ``(tenant_id, product_id, dia)``.
     """
@@ -309,6 +321,7 @@ def _no_omitibles(tenant_id: uuid.UUID, items: dict[uuid.UUID, date]) -> Any:
             # Pendiente aunque no haya nada publicado: puede haber un cálculo en
             # curso, y sin subir la revisión publicaría sin esta salida.
             pendiente,
+            ultimo_dia.is_(None),
             and_(
                 ultimo_dia.is_not(None),
                 or_(

@@ -43,7 +43,17 @@ from sqlalchemy import event, inspect, select
 from sqlalchemy.orm import Session
 
 from app.domain.costo_de_referencia import CompraCandidata, costo_de_referencia
-from app.domain.costo_de_venta import VERSION_SNAPSHOT, CostoDeVenta, costo_de_venta
+from app.domain.costo_de_venta import (
+    MOTIVO_UNIDAD_DUDOSA,
+    VERSION_SNAPSHOT,
+    CostoDeVenta,
+    costo_de_venta,
+)
+from app.domain.costo_promedio_de_venta import (
+    CostoPromedioDeVenta,
+    costo_promedio_de_venta,
+    punto_a,
+)
 from app.domain.costo_vigente import (
     CATALOGO_FIELD,
     FECHA_FIELD,
@@ -59,6 +69,11 @@ from app.persistence.repositories.costo_de_referencia_repository import (
     candidata_de_fila,
     consulta_todas_las_candidatas,
 )
+from app.persistence.repositories.costo_promedio_de_venta_repository import (
+    consulta_estados,
+    consulta_puntos,
+    puntos_de_filas,
+)
 
 logger = get_logger(__name__)
 
@@ -71,13 +86,13 @@ _PENDIENTES: Final = "m2a_ventas_por_costear"
 #: ``quantity`` esté en unidades base (``POST /sales``, ``/sales/bulk``, chat).
 _UNIDAD_DUDOSA: Final = "m2a_ventas_unidad_dudosa"
 
-MOTIVO_UNIDAD_DUDOSA: Final = (
-    "la cantidad no está confirmada en unidades base para un producto fraccionado"
-)
 
 _COLUMNAS_DEL_SNAPSHOT: Final = (
     "cost_unit_ars", "cost_ars", "cost_confirmed", "cost_origin", "cost_reason",
     "cost_snapshot_version",
+    # M·P3: sin producto tampoco hay costo promedio.
+    "cost_avg_unit_ars", "cost_avg_ars", "cost_avg_estado", "cost_avg_aproximado",
+    "cost_avg_motivo", "cost_avg_pendiente",
 )
 
 
@@ -135,7 +150,13 @@ def _olvidar_al_revertir(session: Session, previous_transaction: Any) -> None:
         session.info.pop(_UNIDAD_DUDOSA, None)
 
 
-@event.listens_for(Session, "before_commit")
+# ``insert=True``: este ``before_commit`` corre PRIMERO, se importe este módulo
+# antes o después que ``costo_promedio_pendiente``. Si las marcas se escriben
+# antes, el upsert de ``product_cost_state`` queda tomado mientras se costea (un
+# import de 5.000 ventas: ~4 s) y la venta del POS que marca el mismo producto
+# espera todo eso (bench M·P3, medición 5). El orden de registro dependía del
+# orden de los imports del proceso (API, worker, scripts).
+@event.listens_for(Session, "before_commit", insert=True)
 def _costear_al_confirmar(session: Session) -> None:
     # ``before_commit`` también se despacha al LIBERAR un savepoint
     # (``begin_nested``/``guarded_savepoint``). Ahí no se costea: el snapshot no
@@ -219,9 +240,25 @@ def _costear_del_tenant(
                 )
             continue
         a_elegir.append(venta)
-    if not a_elegir:
-        return
+    if a_elegir:
+        _elegir_fuente(session, tenant_id, a_elegir, productos, dudosas)
+    # M·P3, DESPUÉS del snapshot (usa su motivo) y en su propio SAVEPOINT: si el
+    # costo promedio falla, el costo principal ya calculado no se pierde.
+    try:
+        with session.begin_nested():
+            _costear_promedio(session, tenant_id, ventas, productos, dudosas)
+    except Exception:  # noqa: BLE001 — el costo promedio es un dato: la venta sigue
+        logger.exception("costo_promedio_de_venta_fallo", tenant_id=str(tenant_id))
 
+
+def _elegir_fuente(
+    session: Session,
+    tenant_id: uuid.UUID,
+    a_elegir: list[SaleEntry],
+    productos: dict[uuid.UUID, Product],
+    dudosas: set[uuid.UUID],
+) -> None:
+    """El snapshot de M·2a: elige la fuente del costo principal a la fecha."""
     fiscal_crudo = session.execute(
         select(BusinessProfile.fiscal_condition)
         .where(BusinessProfile.tenant_id == tenant_id)
@@ -258,6 +295,80 @@ def _costear_del_tenant(
         venta.cost_origin = snapshot.origen
         venta.cost_reason = snapshot.motivo[:200] if snapshot.motivo else None
         venta.cost_snapshot_version = VERSION_SNAPSHOT
+
+
+def _costear_promedio(
+    session: Session,
+    tenant_id: uuid.UUID,
+    ventas: list[SaleEntry],
+    productos: dict[uuid.UUID, Product],
+    dudosas: set[uuid.UUID],
+) -> None:
+    """M·P3: el costo PROMEDIO de cada venta, al lado del snapshot (que no toca).
+
+    Lee el historial publicado del día de la venta. Si el producto se va a
+    recalcular (una marca de esta transacción o un ``pendiente_desde`` que
+    alcanza ese día), guarda igual el último publicado con
+    ``cost_avg_pendiente = true``: la publicación lo corrige y la UI nunca
+    muestra «recalculando» (decisión del dueño). Un producto cuyo historial
+    nunca se publicó queda sin valores y pendiente (su venta siempre marca).
+    """
+    # Tarde y no arriba: importarlo al cargar este módulo registraría sus
+    # listeners ANTES que los del costeo y cambiaría el orden de los
+    # ``before_commit`` (``models/__init__`` importa el costeo primero).
+    from app.persistence.costo_promedio_pendiente import marcas_en_curso  # noqa: PLC0415
+
+    con_producto = [v for v in ventas if v.product_id in productos]
+    if not con_producto:
+        return
+    pids = {v.product_id for v in con_producto if v.product_id is not None}
+    dias = [_dia(v) for v in con_producto]
+    desde, hasta = min(dias), max(dias)
+    estados: dict[uuid.UUID, tuple[date | None, bool]] = {}
+    pisos: dict[uuid.UUID, date | None] = {}
+    for pid, pendiente, reconstruido, piso in session.execute(
+        consulta_estados(tenant_id, pids, desde)
+    ).tuples():
+        estados[pid] = (pendiente, reconstruido is not None)
+        if reconstruido is not None:
+            pisos[pid] = piso
+    puntos = (
+        puntos_de_filas(
+            session.execute(consulta_puntos(tenant_id, pisos, desde, hasta)).tuples()
+        )
+        if pisos
+        else {}
+    )
+    marcas = marcas_en_curso(session)
+    for venta in con_producto:
+        pid = venta.product_id
+        assert pid is not None
+        producto = productos[pid]
+        dia = _dia(venta)
+        marca = marcas.get((tenant_id, pid))
+        pendiente_desde, calculado = estados.get(pid, (None, False))
+        pendiente = (
+            not calculado
+            or (pendiente_desde is not None and pendiente_desde <= dia)
+            or (marca is not None and marca <= dia)
+        )
+        if not calculado:
+            valores = CostoPromedioDeVenta(None, None, None, None, None)
+        else:
+            del_producto = puntos.get(pid)
+            valores = costo_promedio_de_venta(
+                punto_a(del_producto.puntos, del_producto.dias, dia) if del_producto else None,
+                unidades_base=venta.quantity,
+                base_units_per_sale_unit=producto.base_units_per_sale_unit,
+                # El MISMO criterio que la publicación: la marca de esta
+                # transacción o el motivo que dejó el snapshot.
+                unidad_dudosa=(
+                    venta.id in dudosas or venta.cost_reason == MOTIVO_UNIDAD_DUDOSA
+                ),
+                motivo_dudosa=MOTIVO_UNIDAD_DUDOSA,
+            )
+        for columna, valor in valores.columnas(pendiente=pendiente).items():
+            setattr(venta, columna, valor)
 
 
 def _costo_cargado_a(producto: Product, dia: date) -> Decimal | None:

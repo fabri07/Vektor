@@ -11,6 +11,13 @@ descartable que borra al final:
 5. Import de ``--ventas-import`` ventas históricas (otro proceso) mientras el POS
    vende uno de los productos que marca, con recálculos de fondo.
 
+M·P3 (costo promedio en las ventas; topes del dueño, 2026-10-14, pensados para
+una ferretería de 10.000+ productos): la medición 1 pasa a ser la migración
+completa CON ``--ventas-por-producto`` ventas por producto (≤ 180 s); 6. un
+producto típico con sus ventas, todo el historial (≤ 200 ms); 7. la parte de
+ventas del producto extremo (``--ventas-grande``, ≤ 2 s). Criterio: la mediana de
+3 corridas (la Mac del dev varía ~25 % entre corridas idénticas).
+
 Presupuestos (plan M·P2b, ajustados por el dueño el 2026-10-13): 1 ≤ 120 s ·
 2a (compra nueva) ≤ 2 s · 2b (todo el historial) ≤ 4 s · 3 venta omitida p95 ≤ 10 ms,
 venta que marca p95 ≤ 15 ms, p99 ≤ 25 ms · 4 p99 ≤ 50 ms · 5 sin deadlocks y
@@ -123,6 +130,37 @@ async def _crear(
             await s.execute(insert(InventoryMovement), filas_m[i : i + 5000])
         await s.commit()
     return ids
+
+
+async def _crear_ventas(
+    fabrica: async_sessionmaker[AsyncSession],
+    tid: uuid.UUID,
+    ids: list[uuid.UUID],
+    por_producto: int,
+    dias: int,
+) -> int:
+    """Ventas históricas por Core (no pasan por el costeo): las que una migración
+    trae y M·P3 tiene que costear con el promedio. Repartidas en ``dias``."""
+    total = 0
+    async with fabrica() as s:
+        filas: list[dict[str, Any]] = []
+        for pid in ids:
+            for j in range(por_producto):
+                filas.append({
+                    "id": uuid.uuid4(), "tenant_id": tid, "product_id": pid,
+                    "amount": Decimal("1000"), "quantity": 1 + j % 3,
+                    "transaction_date": BASE + timedelta(days=(j * dias) // por_producto),
+                    "payment_method": "cash", "provenance": "REAL",
+                })
+            if len(filas) >= 20_000:
+                await s.execute(insert(SaleEntry), filas)
+                total += len(filas)
+                filas = []
+        if filas:
+            await s.execute(insert(SaleEntry), filas)
+            total += len(filas)
+        await s.commit()
+    return total
 
 
 async def _vender(
@@ -290,6 +328,11 @@ async def main() -> None:
     ap.add_argument("--eventos-grande", type=int, default=50_000)
     ap.add_argument("--ventas-pos", type=int, default=300)
     ap.add_argument("--ventas-import", type=int, default=5_000)
+    # M·P3: ventas históricas por producto (10.000 × 50 = 500.000, la migración
+    # de una ferretería grande) y las del producto típico y el extremo.
+    ap.add_argument("--ventas-por-producto", type=int, default=50)
+    ap.add_argument("--ventas-tipico", type=int, default=1_000)
+    ap.add_argument("--ventas-grande", type=int, default=25_000)
     args = ap.parse_args()
 
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
@@ -309,14 +352,36 @@ async def main() -> None:
     try:
         print(f"Cargando {args.productos} productos × {args.movs} movimientos…")
         ids = await _crear(fabrica, tid, args.productos, args.movs)
+        print(f"Cargando {args.productos * args.ventas_por_producto} ventas…")
+        await _crear_ventas(fabrica, tid, ids, args.ventas_por_producto, args.movs)
 
         t0 = time.perf_counter()
         r = await svc.recalcular(fabrica, tid)
         dur = time.perf_counter() - t0
         filas.append((
-            "1. reconstrucción completa",
-            f"{dur:.1f} s ({r.publicados} productos, {r.registros} registros)",
-            "≤ 120 s", dur <= 120,
+            "1. migración: reconstrucción completa con las ventas (M·P3)",
+            f"{dur:.1f} s ({r.publicados} productos, {r.registros} registros,"
+            f" {r.ventas} ventas)",
+            "≤ 180 s", dur <= 180,
+        ))
+
+        # M·P3: un producto típico (200 eventos, sus ventas), todo el historial.
+        tipico = (await _crear(fabrica, tid, 1, 200, con_tenant=False))[0]
+        await _crear_ventas(fabrica, tid, [tipico], args.ventas_tipico, 200)
+        await svc.recalcular(fabrica, tid, [tipico])
+        async with fabrica() as s:
+            await s.execute(
+                update(ProductCostState)
+                .where(ProductCostState.product_id == tipico)
+                .values(pendiente_desde=date.min, revision=ProductCostState.revision + 1)
+            )
+            await s.commit()
+        t0 = time.perf_counter()
+        r = await svc.recalcular(fabrica, tid, [tipico], solo_pendientes=True)
+        dur = (time.perf_counter() - t0) * 1000
+        filas.append((
+            f"6. recálculo de un producto típico con sus {r.ventas} ventas (M·P3)",
+            f"{dur:.0f} ms", "≤ 200 ms", dur <= 200,
         ))
 
         grande = (await _crear(fabrica, tid, 1, args.eventos_grande, con_tenant=False))[0]
@@ -349,6 +414,21 @@ async def main() -> None:
         filas.append((
             f"2b. recálculo de 1 producto ({args.eventos_grande} eventos), todo el historial",
             f"{dur:.2f} s", "≤ 4 s", dur <= 4,
+        ))
+        # M·P3: el mismo producto extremo con sus ventas; sólo la parte de ventas.
+        await _crear_ventas(fabrica, tid, [grande], args.ventas_grande, args.eventos_grande)
+        async with fabrica() as s:
+            calculo = await svc.calcular(s, tid, [grande])
+            await s.rollback()
+        calculo.desde = {grande: None}
+        t0 = time.perf_counter()
+        async with fabrica() as s:
+            n = await svc.actualizar_ventas_en(s, calculo, {grande})
+            await s.commit()
+        dur = time.perf_counter() - t0
+        filas.append((
+            f"7. ventas del producto extremo ({n} ventas, sin la publicación) (M·P3)",
+            f"{dur:.2f} s", "≤ 2 s", dur <= 2 and n == args.ventas_grande,
         ))
 
         normal, marca = ids[0], ids[1]

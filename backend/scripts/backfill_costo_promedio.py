@@ -19,6 +19,9 @@ la reposición. La regla vive en ``app/application/services/costo_promedio_servi
   hay, el más viejo y los que fallan.
 - **``--verificar``:** compara el historial guardado con una proyección fresca,
   sin escribir, y lista los productos que difieren y no están pendientes.
+- **Ventas (M·P3):** cada publicación recalcula el costo promedio de sus ventas
+  (``sales_entries.cost_avg_*``), así que ``--all --apply`` es también el
+  backfill de las ventas anteriores a M·P3.
 
 Desde M·P2b el historial se mantiene al día solo (``persistence/costo_promedio_
 pendiente`` marca y el job ``jobs.recalcular_costo_promedio`` recalcula).
