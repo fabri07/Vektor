@@ -18,6 +18,7 @@ import {
   PRODUCTS_MAX_ACCUMULATED,
   type ProductCategoryOption,
   type ProductResponse,
+  type TratamientoEnvio,
 } from "@/services/products.service";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsButton";
@@ -26,6 +27,7 @@ import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFiel
 import { AllDataModal } from "@/features/customFields/AllDataModal";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { UNIDADES_DE_VENTA, unidadDeVentaDe } from "@/features/products/saleUnitOptions";
+import { COSTO_REQUERIDO_CON_STOCK, EnvioSelect } from "@/features/products/costoManual";
 import { aUnidadesBase, enUnidadDeVenta, valorDeStock } from "@/lib/pos/saleUnit";
 import { posErrorInfo } from "@/lib/pos/errors";
 import { useToastStore } from "@/stores/toastStore";
@@ -384,7 +386,7 @@ export default function ProductsPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ product: payload, incluirStock }: { product: ProductResponse; incluirStock: boolean }) =>
+    mutationFn: ({ product: payload, stock }: { product: ProductResponse; stock: CambioDeStock | null }) =>
       productsService.updateProduct(payload.id, {
         name: payload.name,
         sku: payload.sku,
@@ -393,10 +395,16 @@ export default function ProductsPage() {
         sale_price_ars: Number(payload.sale_price_ars),
         unit_cost_ars: payload.unit_cost_ars == null ? null : Number(payload.unit_cost_ars),
         list_price_ars: payload.list_price_ars == null ? null : Number(payload.list_price_ars),
-        // El servidor asigna stock_units en absoluto, sin movimiento: mandar el
-        // valor de una fila vieja pisaría las ventas del medio. Sólo viaja si
-        // el usuario lo cambió en el editor.
-        ...(incluirStock ? { stock_units: Number(payload.stock_units) } : {}),
+        // M·P2c: el servidor registra la diferencia como ajuste manual en el
+        // ledger. Sólo viaja si el usuario lo cambió, con el stock que veía:
+        // si entró una venta en el medio responde 409 en vez de pisarla.
+        ...(stock
+          ? {
+              stock_units: Number(payload.stock_units),
+              stock_units_esperado: stock.esperado,
+              ...(stock.envio ? { costo_envio: stock.envio } : {}),
+            }
+          : {}),
         // Van juntos (el servidor lo exige). Mandarlos sin cambio no cambia
         // nada; cambiarlos en un producto con historia da 409.
         sale_unit: payload.sale_unit ?? "unit",
@@ -410,13 +418,24 @@ export default function ProductsPage() {
       toast("Producto actualizado.", "success");
       await queryClient.invalidateQueries({ queryKey: ["products-list"] });
     },
-    onError: (e) =>
+    onError: (e) => {
+      const code = errorCode(e);
+      if (code === "STOCK_CAMBIO") {
+        // El stock que se veía quedó viejo: sin refrescar, reabrir el producto
+        // mandaría el mismo `stock_units_esperado` y el 409 se repetiría.
+        void queryClient.invalidateQueries({ queryKey: ["products-list"] });
+      }
       toast(
-        errorCode(e) === "SALE_UNIT_LOCKED"
+        code === "SALE_UNIT_LOCKED"
           ? "No se puede cambiar la unidad de un producto con stock, ventas o movimientos."
-          : "No se pudo actualizar el producto.",
+          : code === "STOCK_CAMBIO"
+            ? "El stock cambió mientras editabas (entró una venta). Cerrá y volvé a abrir el producto."
+            : code === "COSTO_REQUERIDO_CON_STOCK"
+              ? COSTO_REQUERIDO_CON_STOCK
+              : "No se pudo actualizar el producto.",
         "error",
-      ),
+      );
+    },
   });
 
   const deleteMutation = useMutation({
@@ -650,7 +669,7 @@ export default function ProductsPage() {
         canCreateCategory={user?.role === "OWNER" || user?.role === "ADMIN"}
         saving={updateMutation.isPending}
         onClose={() => setEditing(null)}
-        onSave={(product, incluirStock) => updateMutation.mutate({ product, incluirStock })}
+        onSave={(product, stock) => updateMutation.mutate({ product, stock })}
       />
       {viewingAllData && (
         <AllDataModal
@@ -669,6 +688,9 @@ function errorCode(e: unknown): string | null {
   return posErrorInfo(e).code;
 }
 
+/** M·P2c: un cambio de stock editado a mano. `esperado` = lo que se veía. */
+type CambioDeStock = { esperado: number; envio?: TratamientoEnvio };
+
 // Valor centinela del <select> de categoría: abre el alta inline (B·3b).
 const NUEVA_CATEGORIA = "__nueva_categoria__";
 
@@ -686,8 +708,8 @@ function ProductEditModal({
   canCreateCategory: boolean;
   saving: boolean;
   onClose: () => void;
-  /** incluirStock=false: el stock no se tocó y NO va en el PATCH. */
-  onSave: (product: ProductResponse, incluirStock: boolean) => void;
+  /** stock=null: el stock no se tocó y NO va en el PATCH. */
+  onSave: (product: ProductResponse, stock: CambioDeStock | null) => void;
 }) {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<ProductResponse | null>(product);
@@ -732,8 +754,14 @@ function ProductEditModal({
   // unidades base: el texto vive aparte para poder tipear "0,750".
   const [stockText, setStockText] = useState("");
   const [umbralText, setUmbralText] = useState("");
+  // M·P2c: por qué sube el stock. Una compra no se carga acá: va por
+  // «Registrar compra», que deja el gasto y el proveedor.
+  const [motivoSuba, setMotivoSuba] = useState<"" | "correccion" | "compra">("");
+  const [envio, setEnvio] = useState<TratamientoEnvio | "">("");
   useEffect(() => {
     altaEsperada.current = null;
+    setMotivoSuba("");
+    setEnvio("");
     setForm(product);
     setCreandoCategoria(false);
     setNuevaCategoria("");
@@ -759,6 +787,10 @@ function ProductEditModal({
   const stockBase = cantidad(stockText);
   const umbralBase = umbralText.trim() === "" ? null : cantidad(umbralText);
   const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
+  const subeStock = !!product && stockBase !== null && stockBase > product.stock_units;
+  const sinCosto = form.unit_cost_ars == null || Number(form.unit_cost_ars) <= 0;
+  // La suba se guarda sólo como corrección y con precio de compra (M·P2c).
+  const subaBloqueada = subeStock && (motivoSuba !== "correccion" || sinCosto);
   // Con el alta de categoría abierta (escribiendo o en vuelo), Guardar mandaría
   // la categoría anterior y descartaría lo pedido: primero se crea o se
   // cancela. Cancelada, la respuesta ya no se aplica, así que no hay que esperarla.
@@ -782,10 +814,12 @@ function ProductEditModal({
         className="grid gap-4"
         onSubmit={(event) => {
           event.preventDefault();
-          if (invalido || categoriaAMedias || !product) return;
+          if (invalido || categoriaAMedias || subaBloqueada || !product) return;
           onSave(
             { ...form, stock_units: stockBase ?? 0, low_stock_threshold_units: umbralBase },
-            stockBase !== product.stock_units,
+            stockBase !== product.stock_units
+              ? { esperado: product.stock_units, envio: subeStock && envio ? envio : undefined }
+              : null,
           );
         }}
       >
@@ -907,6 +941,29 @@ function ProductEditModal({
             Revisá el stock y el umbral: {unidad.factor > 1 ? "hasta 3 decimales" : "números enteros"}.
           </p>
         ) : null}
+        {subeStock ? (
+          <fieldset className="grid gap-2 rounded border border-vk-border-w p-3 text-sm text-vektor-body">
+            <legend className="px-1 text-xs font-medium">¿Por qué sube el stock?</legend>
+            <label className="flex items-center gap-2">
+              <input type="radio" name="motivo-suba" checked={motivoSuba === "correccion"} onChange={() => setMotivoSuba("correccion")} />
+              Corrección de conteo: la mercadería ya estaba
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="radio" name="motivo-suba" checked={motivoSuba === "compra"} onChange={() => setMotivoSuba("compra")} />
+              La compré ahora
+            </label>
+            {motivoSuba === "compra" ? (
+              <p role="alert" className="text-xs text-vk-danger">
+                Una compra se registra en «Cargar» → Registrar compra: así quedan el gasto, la caja y el
+                proveedor. Volvé el stock a {enUnidadDeVenta(product?.stock_units ?? 0, factor)} para guardar el resto.
+              </p>
+            ) : null}
+            {motivoSuba === "correccion" && sinCosto ? (
+              <p role="alert" className="text-xs text-vk-danger">{COSTO_REQUERIDO_CON_STOCK}</p>
+            ) : null}
+            {motivoSuba === "correccion" ? <EnvioSelect value={envio} onChange={setEnvio} /> : null}
+          </fieldset>
+        ) : null}
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
         <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
         {categoriaAMedias ? (
@@ -914,7 +971,7 @@ function ProductEditModal({
         ) : null}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">Cancelar</button>
-          <button type="submit" disabled={saving || invalido || categoriaAMedias} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
+          <button type="submit" disabled={saving || invalido || categoriaAMedias || subaBloqueada} className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "Guardando..." : "Guardar"}</button>
         </div>
       </form>
     </Modal>

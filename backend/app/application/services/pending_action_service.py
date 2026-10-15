@@ -17,6 +17,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from redis.asyncio import Redis
@@ -45,6 +46,7 @@ from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.pending_action import PendingAction
+from app.persistence.models.product import Product
 
 if TYPE_CHECKING:
     from app.application.agents.google.tool_broker import GoogleToolBroker
@@ -566,6 +568,48 @@ WRITE_EXEMPT_ACTION_TYPES: frozenset[ActionType] = frozenset(
 )
 
 
+def _costo_del_payload(raw: Any) -> Decimal | None:
+    """Costo por unidad del payload del chat; uno negativo o ilegible no es costo."""
+    if raw is None:
+        return None
+    try:
+        costo = Decimal(str(raw))
+    except (ArithmeticError, ValueError):
+        return None
+    return costo if costo > 0 else None
+
+
+async def _ajuste_manual_por_chat(
+    db: AsyncSession,
+    action: PendingAction,
+    product_id: uuid.UUID,
+    *,
+    nuevo: int | None = None,
+    delta: int | None = None,
+    costo: Decimal | None,
+) -> None:
+    """Ajuste manual de stock pedido por chat (M·P2c), con el costo que haya.
+
+    El costo declarado es el del payload o, si no vino, el del producto (igual
+    que la pantalla de productos). No se exige como en la pantalla: la acción ya
+    fue aprobada y fallar acá la perdería. Sin ninguno, la suba entra sin costo
+    y el costo promedio queda `incompleto` (lo mismo que un archivo sin costo).
+    """
+    if costo is None:
+        producto = await db.get(Product, product_id)
+        if producto is not None and producto.tenant_id == action.tenant_id:
+            costo = producto.unit_cost_ars
+    await stock_service.registrar_ajuste_manual(
+        product_id,
+        action.tenant_id,
+        db,
+        nuevo=nuevo,
+        delta=delta,
+        contrato=contrato_declarado(costo) if costo is not None else None,
+        actor=f"chat, acción {action.id}",
+    )
+
+
 async def execute_pending_action(
     action: PendingAction,
     db: AsyncSession,
@@ -717,27 +761,17 @@ async def execute_pending_action(
         product_id_str = payload.get("product_id")
         qty_change: int = int(payload.get("qty_change") or 0)
         if product_id_str and qty_change != 0:
-            product_uuid = uuid.UUID(product_id_str)
-            if qty_change < 0:
-                await stock_service.decrement_stock(
-                    product_id=product_uuid,
-                    tenant_id=action.tenant_id,
-                    qty=abs(qty_change),
-                    source_event_id=str(action.id),
-                    db=db,
-                )
-            else:
-                unit_cost = payload.get("unit_cost")
-                from decimal import Decimal  # noqa: PLC0415
-
-                await stock_service.increment_stock(
-                    product_id=product_uuid,
-                    tenant_id=action.tenant_id,
-                    qty=qty_change,
-                    unit_cost=Decimal(str(unit_cost)) if unit_cost is not None else None,
-                    source_event_id=str(action.id),
-                    db=db,
-                )
+            # M·P2c: fijar el stock por chat es un AJUSTE MANUAL, no una compra
+            # ni una venta: antes una suba quedaba como `purchase` sin contrato
+            # (ensuciaba Proveedores y el costo de referencia) y una baja como
+            # `sale` sin venta. La compra por chat es REGISTER_PURCHASE.
+            await _ajuste_manual_por_chat(
+                db,
+                action,
+                uuid.UUID(product_id_str),
+                delta=qty_change,
+                costo=_costo_del_payload(payload.get("unit_cost")),
+            )
         else:
             logger.warning(
                 "execute_pending_action: UPDATE_STOCK missing product_id or qty_change",
@@ -811,6 +845,10 @@ async def execute_pending_action(
                     )
                     if _cf_costo is not None:
                         product.custom_fields = _cf_costo
+                # M·P2c: el stock no se asigna en absoluto: la diferencia entra
+                # al ledger como ajuste manual (después del resto de los campos,
+                # con el costo ya actualizado).
+                _nuevo_stock = update_fields.pop("stock_units", None)
                 for field, value in update_fields.items():
                     if field == "custom_fields":
                         # Las claves del costo las escribe sólo el servidor.
@@ -820,6 +858,15 @@ async def execute_pending_action(
                     else:
                         setattr(product, field, value)
                 await repo.save(product)
+                if _nuevo_stock is not None:
+                    update_fields["stock_units"] = _nuevo_stock
+                    await _ajuste_manual_por_chat(
+                        db,
+                        action,
+                        product.id,
+                        nuevo=int(_nuevo_stock),
+                        costo=product.unit_cost_ars,
+                    )
                 # Solo recalcular score cuando cambian campos que afectan métricas financieras
                 _score_relevant = {"sale_price_ars", "unit_cost_ars", "stock_units"}
                 if update_fields.keys() & _score_relevant:

@@ -232,3 +232,47 @@ async def test_una_venta_del_pos_durante_la_publicacion_conserva_su_marca(
 
     st = await _estado(fabrica, pid)
     assert st.pendiente_desde == date(2026, 3, 3)
+
+
+# ── M·P2c: el ajuste manual no pisa una venta del medio ─────────────────────
+
+
+async def test_ajuste_manual_ve_la_venta_commiteada_despues_de_cargar_el_producto(
+    fabrica: async_sessionmaker[AsyncSession], producto: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """El PATCH carga el producto sin lock (stock 10); una venta commitea en el
+    medio (9). El ``FOR UPDATE`` del ajuste tiene que releer la fila: con la
+    instancia vieja del identity map, ``esperado=10`` pasaba y el ajuste pisaba
+    la venta. Revisión de M·P2c."""
+    tid, pid = producto
+    async with fabrica() as s:
+        visto = await s.get(Product, pid)
+        assert visto is not None and visto.stock_units == 10
+        await _vender(fabrica, tid, pid, 1, 2)
+        with pytest.raises(stock_service.StockCambioError) as exc:
+            await stock_service.registrar_ajuste_manual(
+                pid, tid, s, nuevo=15, esperado=10, contrato=None, actor="test"
+            )
+        assert exc.value.actual == 9
+        await s.rollback()
+
+
+async def test_ajuste_manual_por_delta_no_pierde_la_venta_del_medio(
+    fabrica: async_sessionmaker[AsyncSession], producto: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tid, pid = producto
+    async with fabrica() as s:
+        visto = await s.get(Product, pid)
+        assert visto is not None and visto.stock_units == 10
+        await _vender(fabrica, tid, pid, 1, 2)
+        await stock_service.registrar_ajuste_manual(
+            pid, tid, s, delta=5, contrato=None, actor="test"
+        )
+        await s.commit()
+    async with fabrica() as s:
+        p = await s.get(Product, pid)
+        balance = (
+            await s.execute(select(InventoryBalance).where(InventoryBalance.product_id == pid))
+        ).scalar_one()
+        assert p is not None and p.stock_units == 14
+        assert balance.current_qty == 14

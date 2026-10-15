@@ -212,7 +212,7 @@ Todo va detrás de una habilitación para mostrarlo (patrón `config/*_rollout.p
   - tratar la diferencia como unidades sin costo al inicio, con lo que el producto queda `incompleto`;
   - que el alta y la edición de stock escriban un ancla.
 
-  Se decide con el informe de sombra a la vista.
+  Se decide con el informe de sombra a la vista. **Decidido el 2026-10-14 y resuelto en M·P2c (ver abajo).**
 - **Ensayo sobre una copia de la base local de desarrollo:** los negocios cargados por seed salen con todo su stock fuera del ledger y quedan `sin_medicion`, como corresponde. Uno con compras y ventas reales da 45 productos medidos, con brecha mediana 0% y p90 3%.
 
 ### M·P2b (el historial al día solo)
@@ -254,6 +254,16 @@ Dos corridas seguidas del mismo código, el 2026-10-14 con la Mac libre (carga ~
 | Referencia: mediana del commit del POS sin listener | 28,3 ms | 23,0 ms | — |
 
 **La variabilidad de la máquina es del orden de los márgenes.** La referencia, que no toca el código de M·P2b, varió un 23% entre las dos corridas, y el recálculo de un producto un 50%. Las corridas de la noche anterior (con un proceso ajeno al 100% de CPU) dieron 2a ~2,1 s, 2b ~5 s y la venta que marca p95 17,6–19,3 ms. El dueño decidió mergear con la corrida que entra completa (2026-10-14). Para mediciones futuras en esta Mac, el criterio razonable es la mediana de varias corridas, no una suelta.
+
+### M·P2c (la carga manual queda igual que un dato importado)
+**Decisión del dueño (2026-10-14):** «lo que se carga a mano también tiene que tener un costo y un margen, y una vez registrado no debería quedar diferente de otro dato importado por un archivo». El precio de compra es obligatorio; si incluye el envío, no.
+
+- **Alta con stock → apertura**, el mismo movimiento que un catálogo importado en «ya la tenía» (`adjustment` + `catalog_initial_stock`, con su costo).
+- **Edición del stock → ajuste manual** (`manual_adjustment`) por la diferencia, incremental. No es una apertura: ese origen lo leen el chequeo temporal y la deduplicación como saldo de apertura, y una corrección de +3 seis meses después los rompía. Una suba pregunta «¿compra o corrección?»; la compra va por «Registrar compra», que deja gasto, caja y proveedor.
+- **Costo promedio:** una entrada de ajuste manual con costo declarado se promedia con ese costo; la de una reconciliación sigue sin costo.
+- **El PATCH no pisa ventas:** `stock_units_esperado` → 409 si cambió.
+- **Datos viejos:** `scripts/anclar_stock_manual.py` ancla la diferencia positiva en el alta, con el costo conocido a esa fecha (nunca el de hoy: inflación) o sin costo. El `--apply` en Neon lo autoriza el dueño.
+- **Pendiente (fase 3):** el import escribe el delta de una relectura de catálogo como `catalog_initial_stock`; es el mismo problema del lado del import.
 
 ## Doc
 - `docs/plans/mp-costo-promedio-ponderado.md` se reescribe con este plan en el commit de M·P1.

@@ -236,10 +236,12 @@ async def test_compra_por_chat_escribe_el_contrato_declarado(
     assert (mov.shipping_treatment, mov.tax_treatment) == ("desconocido", "desconocido")
 
 
-async def test_alta_de_stock_por_chat_no_es_una_compra_declarada(
+async def test_alta_de_stock_por_chat_es_un_ajuste_manual_con_el_costo_del_producto(
     db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
 ) -> None:
-    """``UPDATE_STOCK`` («sumá 5») no declara una compra: sin contrato (todo NULL)."""
+    """M·P2c: ``UPDATE_STOCK`` («sumá 5») no es una compra: deja un ajuste manual
+    (no un ``purchase``), con el costo del producto declarado como contrato, igual
+    que la corrección de stock de la pantalla de productos."""
     p = await _producto(db_session, sample_tenant)
     await _accion(
         db_session, sample_tenant, sample_user, "UPDATE_STOCK",
@@ -250,8 +252,54 @@ async def test_alta_de_stock_por_chat_no_es_una_compra_declarada(
             select(InventoryMovement).where(InventoryMovement.product_id == p.id)
         )
     ).scalar_one()
-    assert mov.cost_contract_version is None
-    assert mov.shipping_treatment is None and mov.unit_cost_final is None
+    assert (mov.movement_type, mov.source_type, mov.qty) == (
+        "adjustment", "manual_adjustment", 5,
+    )
+    assert mov.unit_cost_final == Decimal("1500")
+    assert mov.shipping_treatment == "desconocido"
+    assert p.stock_units == 5
+
+
+async def test_baja_de_stock_por_chat_es_un_ajuste_manual_no_una_venta(
+    db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
+) -> None:
+    p = await _producto(db_session, sample_tenant)
+    await _accion(
+        db_session, sample_tenant, sample_user, "UPDATE_STOCK",
+        {"product_id": str(p.id), "qty_change": 5},
+    )
+    await _accion(
+        db_session, sample_tenant, sample_user, "UPDATE_STOCK",
+        {"product_id": str(p.id), "qty_change": -2},
+    )
+    movs = (
+        await db_session.execute(
+            select(InventoryMovement.movement_type, InventoryMovement.qty).where(
+                InventoryMovement.product_id == p.id
+            )
+        )
+    ).all()
+    assert sorted(m.qty for m in movs) == [-2, 5]
+    assert {m.movement_type for m in movs} == {"adjustment"}
+    assert p.stock_units == 3
+
+
+async def test_stock_fijado_por_chat_con_update_product_deja_el_delta(
+    db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
+) -> None:
+    p = await _producto(db_session, sample_tenant)
+    await _accion(
+        db_session, sample_tenant, sample_user, "UPDATE_PRODUCT",
+        {"product_id": str(p.id), "stock_units": 12, "sale_price_ars": 2600},
+    )
+    mov = (
+        await db_session.execute(
+            select(InventoryMovement).where(InventoryMovement.product_id == p.id)
+        )
+    ).scalar_one()
+    assert (mov.source_type, mov.qty) == ("manual_adjustment", 12)
+    assert p.stock_units == 12
+    assert p.sale_price_ars == Decimal("2600")
 
 
 async def test_compra_por_chat_con_costo_negativo_no_rompe_ni_inventa_contrato(

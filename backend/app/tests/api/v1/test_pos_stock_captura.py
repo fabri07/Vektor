@@ -17,11 +17,9 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import stock_service
 from app.application.services.inventory_integrity_service import (
     check_tenant_inventory_integrity,
-)
-from app.application.services.inventory_movement_origin import (
-    SOURCE_CATALOG_INITIAL_STOCK,
 )
 from app.application.services.inventory_temporal_service import (
     check_products_temporal_divergence,
@@ -68,6 +66,8 @@ async def _producto(
             "name": f"Yerba {uuid.uuid4().hex[:5]}",
             "sale_price_ars": price,
             "stock_units": stock,
+            # M·P2c: el stock cargado a mano lleva precio de compra.
+            **({"unit_cost_ars": "50.00"} if stock else {}),
         },
         headers=headers,
     )
@@ -92,20 +92,6 @@ async def _stock(db_session: AsyncSession, pid: str) -> int:
     ).scalar_one()
     await db_session.refresh(producto)
     return producto.stock_units
-
-
-async def _anclar(db_session: AsyncSession, tenant_id: uuid.UUID, pid: str, qty: int) -> None:
-    """Stock inicial de catálogo: sin ancla, los chequeos saltean el producto."""
-    db_session.add(
-        InventoryMovement(
-            tenant_id=tenant_id,
-            product_id=uuid.UUID(pid),
-            movement_type="adjustment",
-            qty=qty,
-            source_type=SOURCE_CATALOG_INITIAL_STOCK,
-        )
-    )
-    await db_session.flush()
 
 
 class TestCaptura:
@@ -268,8 +254,12 @@ class TestResolucion:
         producto = (
             await db_session.execute(select(Product).where(Product.id == uuid.UUID(pid)))
         ).scalar_one()
-        producto.stock_units = 7
-        await db_session.flush()
+        # Entran 4: una compra de verdad, con su movimiento (M·P2c: el stock ya
+        # no se fija a mano sin ledger).
+        await stock_service.increment_stock(
+            producto.id, producto.tenant_id, 4, Decimal("50.00"), None, db_session
+        )
+        assert producto.stock_units == 7
 
         resp = await client.post(
             f"/api/v1/pos/stock-discrepancies/{deuda}/resolve",
@@ -429,7 +419,8 @@ class TestLosDosChequeos:
     ) -> tuple[str, str]:
         caja = await _caja(client, headers)
         pid = await _producto(client, headers, stock=3)
-        await _anclar(db_session, tenant_id, pid, 3)
+        # M·P2c: el alta con stock ya deja su apertura en el ledger (el ancla
+        # que los chequeos necesitan); antes había que escribirla a mano.
         # 30 y no 5: los dos chequeos ignoran una diferencia de hasta
         # `absolute_floor_units` (5), así que con 5 el test no probaría nada —
         # daría cero divergencias aunque la exclusión no existiera.
@@ -501,7 +492,8 @@ class TestElFaltanteSeMideALaFechaDeLaVenta:
     ) -> tuple[str, str]:
         caja = await _caja(client, headers)
         pid = await _producto(client, headers, stock=3)
-        await _anclar(db_session, tenant_id, pid, 3)
+        # M·P2c: el alta con stock ya deja su apertura en el ledger (el ancla
+        # que los chequeos necesitan); antes había que escribirla a mano.
         resp = await client.post(
             "/api/v1/pos/operations",
             json=_venta([{"product_id": pid, "quantity": 30}], "3000.00"),

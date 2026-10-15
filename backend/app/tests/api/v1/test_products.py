@@ -217,7 +217,8 @@ class TestProductsCRUD:
     async def test_margin_pct_none_when_no_cost(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        payload = {**_PRODUCT_PAYLOAD, "unit_cost_ars": None}
+        # M·P2c: sin costo no se puede cargar stock a mano; sin stock, sí.
+        payload = {**_PRODUCT_PAYLOAD, "unit_cost_ars": None, "stock_units": 0}
         resp = await client.post("/api/v1/products", json=payload, headers=auth_headers)
         assert resp.status_code == 201
         assert resp.json()["margin_pct"] is None

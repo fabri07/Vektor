@@ -40,7 +40,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import a_hora_de_negocio
-from app.domain.costo_promedio import Evento, clasificar
+from app.domain.costo_promedio import AJUSTE_MANUAL, Evento, clasificar
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
@@ -193,6 +193,9 @@ async def cargar_historias(
                 creado=created_at.replace(tzinfo=None),
                 id=mid,
                 movement_id=mid,
+                # M·P2c: el ajuste manual con precio de compra declarado
+                # (contrato escrito) promedia con ese costo.
+                costo_declarado=(origen == AJUSTE_MANUAL and costo_final is not None),
             )
         )
 

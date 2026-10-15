@@ -389,3 +389,34 @@ def test_con_inflacion_la_brecha_crece_con_los_meses_de_stock() -> None:
     baja_rotacion = _brecha_con_inflacion(Decimal("12"))
     assert Decimal("0") < alta_rotacion < Decimal("0.03")
     assert baja_rotacion > Decimal("0.15")
+
+
+# ── M·P2c: la entrada con costo declarado ───────────────────────────────────
+
+
+def test_entrada_con_costo_declarado_se_promedia() -> None:
+    """Una corrección manual con precio de compra cargado (ajuste manual con
+    contrato) promedia con ese costo, como una apertura: no deja unidades sin
+    costo."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    entrada = replace(ev(2, "entrada", 10, "200"), costo_declarado=True)
+    final = proyectar([ev(1, "apertura", 10, "100"), entrada])[-1][1]
+    assert final.estado == "medido"
+    assert (final.u_conocidas, final.u_sin_costo) == (Decimal(20), Decimal(0))
+    assert _q(final.promedio) == Decimal("150.00")
+
+
+def test_entrada_sin_costo_declarado_sigue_sin_costo() -> None:
+    """Una reconciliación (o un ajuste sin contrato) trae unidades sin costo
+    aunque la fila tenga un ``unit_cost``: el comportamiento de M·P1 no cambia."""
+    final = proyectar([ev(1, "apertura", 10, "100"), ev(2, "entrada", 10, "200")])[-1][1]
+    assert final.estado == "incompleto"
+    assert (final.u_conocidas, final.u_sin_costo) == (Decimal(10), Decimal(10))
+    assert _q(final.promedio) == Decimal("100.00")
+
+
+def test_clasificar_ajuste_manual_es_entrada_o_salida() -> None:
+    assert cp.clasificar("adjustment", cp.AJUSTE_MANUAL, 5) == "entrada"
+    assert cp.clasificar("adjustment", cp.AJUSTE_MANUAL, -5) == "salida"
+    assert cp.AJUSTE_MANUAL == origen.SOURCE_MANUAL_ADJUSTMENT

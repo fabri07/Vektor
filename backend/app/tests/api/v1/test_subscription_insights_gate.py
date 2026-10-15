@@ -83,6 +83,8 @@ async def _producto(client: AsyncClient, headers: dict[str, str], *, stock: int 
             "name": f"Yerba {uuid.uuid4().hex[:5]}",
             "sale_price_ars": "100.00",
             "stock_units": stock,
+            # M·P2c: el stock cargado a mano lleva precio de compra.
+            **({"unit_cost_ars": "50.00"} if stock else {}),
         },
         headers=headers,
     )

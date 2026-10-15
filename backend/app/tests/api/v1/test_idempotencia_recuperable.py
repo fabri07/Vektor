@@ -30,7 +30,11 @@ _FECHA = f"{today_ar().isoformat()}T10:00:00"
 async def _producto(client: AsyncClient, headers: dict[str, Any], nombre: str, stock: int) -> str:
     resp = await client.post(
         "/api/v1/products",
-        json={"name": nombre, "sale_price_ars": "1000.00", "stock_units": stock},
+        json={
+            "name": nombre, "sale_price_ars": "1000.00", "stock_units": stock,
+            # M·P2c: el stock cargado a mano lleva precio de compra.
+            **({"unit_cost_ars": "500.00"} if stock else {}),
+        },
         headers=headers,
     )
     assert resp.status_code == 201, resp.text

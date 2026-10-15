@@ -131,6 +131,13 @@ class ProductResponse(BaseModel):
         return "ok"
 
 
+#: M·P2c: lo que el usuario declara del envío en un precio de compra cargado a
+#: mano: lo incluye (``incluido``), no hubo (``no_aplica``), se pagó aparte
+#: (``adicional``) o no sabe (``desconocido``). Mismo vocabulario que el
+#: contrato de M·1 (``domain/contrato_de_costo.py``).
+TratamientoEnvio = Literal["incluido", "no_aplica", "adicional", "desconocido"]
+
+
 class CreateProductRequest(BaseModel):
     name: str = Field(min_length=1, max_length=300)
     category: str | None = Field(default=None, max_length=100)
@@ -138,6 +145,9 @@ class CreateProductRequest(BaseModel):
     sale_price_ars: Decimal = Field(gt=0, decimal_places=2)
     list_price_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
     stock_units: int = Field(default=0, ge=0)
+    #: M·P2c: si el precio de compra (``unit_cost_ars``) incluye el envío. Es
+    #: opcional: sin respuesta queda ``desconocido`` y el margen sale estimado.
+    costo_envio: TratamientoEnvio | None = None
     # None = usar DEFAULT_LOW_STOCK_THRESHOLD_UNITS; 0 = explícito, solo sin-stock aplica
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)
@@ -173,6 +183,10 @@ class UpdateProductRequest(BaseModel):
     sale_price_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
     list_price_ars: Decimal | None = Field(default=None, gt=0, decimal_places=2)
     stock_units: int | None = Field(default=None, ge=0)
+    #: M·P2c: el stock que el usuario veía al editar. Si no coincide con el
+    #: actual (entró una venta en el medio) → 409 en vez de pisarla.
+    stock_units_esperado: int | None = Field(default=None, ge=0)
+    costo_envio: TratamientoEnvio | None = None
     low_stock_threshold_units: int | None = Field(default=None, ge=0)
     sku: str | None = Field(default=None, max_length=100)
     barcode: str | None = Field(default=None, max_length=64)

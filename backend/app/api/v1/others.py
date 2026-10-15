@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1._stock_manual import registrar_apertura_http
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
@@ -615,6 +616,13 @@ async def reclassify_record(
             await maintenance_lock_service.acquire_write_lock_shared(session, tenant.tenant_id)
             prod_req = CreateProductRequest(**body.fields)
             data = prod_req.model_dump()
+            # M·P2c: el stock inicial entra como apertura en el ledger (igual
+            # que POST /products), no fijado en la fila. Acá NO se exige el
+            # costo: la fila viene de un archivo, y una fila importada sin costo
+            # entra igual (queda `incompleto`), como en el import.
+            stock_inicial = data.pop("stock_units")
+            costo_envio = data.pop("costo_envio")
+            data["stock_units"] = 0
             existing_product = await _find_active_product_by_identity(
                 session, tenant.tenant_id, barcode=data.get("barcode"), sku=data.get("sku")
             )
@@ -663,6 +671,16 @@ async def reclassify_record(
                     conflict, barcode=data.get("barcode"), sku=data.get("sku")
                 ) from conflict
             await session.flush()
+            if stock_inicial > 0:
+                await registrar_apertura_http(
+                    session,
+                    tenant.tenant_id,
+                    _nuevo_producto.id,
+                    stock_inicial,
+                    costo=data.get("unit_cost_ars"),
+                    envio=costo_envio,
+                    source_upload_id=_upload_id,
+                )
             await _ledger_producto_creado(
                 session, tenant.tenant_id, _upload_id, _nuevo_producto
             )
