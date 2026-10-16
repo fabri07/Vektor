@@ -39,6 +39,7 @@ from app.application.services.facts_service import (
     Period,
     SeverityThresholds,
 )
+from app.config.avg_cost_display_rollout import avg_cost_display_enabled_for
 from app.domain.business_time import AR_TZ
 from app.domain.verticals import Vertical, try_parse_vertical
 from app.observability.logger import get_logger
@@ -61,7 +62,8 @@ def _naive_ar(value: datetime | None) -> datetime | None:
     return value.astimezone(AR_TZ).replace(tzinfo=None)
 
 _SALES_COLS = [
-    "sale_date", "amount_ars", "cost_ars", "cost_confirmed", "payment_method", "provenance",
+    "sale_date", "amount_ars", "cost_ars", "cost_confirmed", "cost_avg_ars", "cost_avg_estado",
+    "payment_method", "provenance",
 ]
 _MIXED_TENDERS_COLS = ["sale_date", "amount_ars", "payment_method", "provenance"]
 _EXPENSES_COLS = ["expense_date", "amount_ars", "category", "expense_type", "provenance"]
@@ -142,6 +144,8 @@ async def load_facts_frames(
         SaleEntry.amount,
         SaleEntry.cost_ars,
         SaleEntry.cost_confirmed,
+        SaleEntry.cost_avg_ars,
+        SaleEntry.cost_avg_estado,
         SaleEntry.payment_method,
         SaleEntry.provenance,
     ).where(
@@ -159,6 +163,11 @@ async def load_facts_frames(
                 "cost_ars": float(row.cost_ars) if row.cost_ars is not None else float("nan"),
                 # Sólo True confirma; NULL (sin snapshot) no.
                 "cost_confirmed": row.cost_confirmed is True,
+                # M·P3: el costo promedio de la venta (dato, no el costo principal).
+                "cost_avg_ars": (
+                    float(row.cost_avg_ars) if row.cost_avg_ars is not None else float("nan")
+                ),
+                "cost_avg_estado": row.cost_avg_estado,
                 "payment_method": row.payment_method,
                 "provenance": row.provenance,
             }
@@ -427,6 +436,10 @@ class MargenesDelPeriodo:
 
     bruto: BusinessFact
     neto: BusinessFact
+    #: M·P4-2: el margen con costo promedio al lado del de reposición. ``None``
+    #: si la cuenta no está habilitada (``AVG_COST_DISPLAY_ROLLOUT_TENANT_IDS``):
+    #: nadie lo ve hasta que el dueño revise su sombra. Nunca es un 2.º margen.
+    promedio_vs_reposicion: BusinessFact | None = None
 
 
 async def margenes_del_tenant(
@@ -466,7 +479,25 @@ async def margenes_del_tenant(
     return MargenesDelPeriodo(
         bruto=svc.margen_bruto(tid, period, include_demo=include_demo),
         neto=svc.margen_neto(tid, period, include_demo=include_demo),
+        promedio_vs_reposicion=_promedio_vs_reposicion(svc, tid, period, include_demo),
     )
+
+
+def _promedio_vs_reposicion(
+    svc: FactsService, tid: str, period: Period, include_demo: bool
+) -> BusinessFact | None:
+    """El dato de M·P4-2, o ``None`` sin compuerta o si falla.
+
+    Va aparte para que un error suyo nunca tumbe bruto y neto: ``leer_margenes``
+    descartaría los tres, y el score se quedaría sin margen.
+    """
+    if not avg_cost_display_enabled_for(tid):
+        return None
+    try:
+        return svc.margen_promedio_vs_reposicion(tid, period, include_demo=include_demo)
+    except Exception as exc:  # noqa: BLE001 — es un dato accesorio al margen
+        logger.warning("margen_promedio_vs_reposicion_fallo", tenant_id=tid, error=str(exc))
+        return None
 
 
 MOTIVO_SIN_RUBRO = "falta el rubro del negocio"

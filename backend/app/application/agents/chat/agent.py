@@ -265,6 +265,7 @@ class AgentChat(BaseAgent):
         try:
             from app.application.agents.shared.margen_texto import (  # noqa: PLC0415
                 describir_margen_bruto,
+                describir_promedio_vs_reposicion,
             )
             from app.application.services.deterministic_finance import (  # noqa: PLC0415
                 get_financial_summary,
@@ -299,6 +300,14 @@ class AgentChat(BaseAgent):
                 else f"sin medir ({lectura.motivo})"
             )
             lines.append(f"  Margen bruto (ventas − costo de lo vendido): {margen_txt}")
+            # M·P4-2: sólo con la cuenta habilitada y el dato presente.
+            promedio_txt = (
+                describir_promedio_vs_reposicion(lectura.margenes.promedio_vs_reposicion)
+                if lectura.margenes is not None
+                else None
+            )
+            if promedio_txt is not None:
+                lines.append(f"  Dato aparte del margen bruto: {promedio_txt}")
             if not ticket.get("sin_datos"):
                 lines.append(
                     f"  Ticket promedio: ${ticket.get('ticket_promedio', 0)} "

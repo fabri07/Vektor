@@ -41,7 +41,15 @@ import pandas as pd
 from pydantic import BaseModel
 
 from app.domain.business_time import AR_TZ
-from app.domain.margen import LineaDeMargen, MedicionDeMargen, medir_margen
+from app.domain.margen import (
+    ESTADO_PROMEDIO_MEDIDO,
+    ComparacionDeMargenes,
+    LineaDeComparacion,
+    LineaDeMargen,
+    MedicionDeMargen,
+    comparar_promedio_y_reposicion,
+    medir_margen,
+)
 from app.domain.transaction import PaymentMethod
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,6 +204,9 @@ class FactsDataProvider(Protocol):
         cost_ars:        float|NaN # costo CONGELADO de la venta (snapshot M·2a/M·2c);
                                    #   NaN = sin costo (sin producto, sin costear, sin_costo)
         cost_confirmed:  bool      # el snapshot es confirmado (opcional: sin columna = False)
+        cost_avg_ars:    float|NaN # costo PROMEDIO de la venta (M·P3), un dato al lado del
+                                   #   principal (opcional: sin columna = sin promedio)
+        cost_avg_estado: str|None  # medido|incompleto|sin_medicion (opcional)
         payment_method:  str       # cash|debit_card|credit_card|transfer|qr|account|other
                                    #   (+ "inflow" = cobro de fiado, NO es venta)
         provenance:      str       # REAL|DEMO
@@ -445,6 +456,82 @@ class FactsService:
             confidence=round(min(1.0, float(m.cobertura_del_estado)), 2),
             sample_size=len(sales), source=f"sales[snapshot_costo,{m.estado}]",
             explanation_key="margen_bruto", detail=detail,
+        )
+
+    def comparar_promedio_y_reposicion(self, tenant_id: str, p: Period, *,
+                                       include_demo: bool = False) -> ComparacionDeMargenes:
+        """M·P4-2: margen con costo promedio y con reposición, sobre la intersección.
+
+        Mismo universo que ``medir_margen``. No lo toca: es un dato al lado.
+        """
+        return self._comparar(self._ventas_reales(tenant_id, p, include_demo))
+
+    def _comparar(self, sales: pd.DataFrame) -> ComparacionDeMargenes:
+        # Vectorizado: corre en cada turno del chat y en cada recálculo del score
+        # (``leer_margenes``). Las sumas del dominio son lineales, así que pasarle
+        # la intersección y el resto como DOS líneas agregadas da lo mismo que
+        # pasarle cada venta, sin un loop por fila.
+        if sales.empty:
+            return comparar_promedio_y_reposicion([], self.fiscal_condition_crudo)
+        cols = sales.columns
+        if not {"cost_ars", "cost_avg_ars", "cost_avg_estado"} <= set(cols):
+            comun = pd.Series(False, index=sales.index)
+        else:
+            comun = (
+                sales["cost_ars"].notna()
+                & sales["cost_avg_ars"].notna()
+                & (sales["cost_avg_estado"] == ESTADO_PROMEDIO_MEDIDO)
+            )
+
+        def total(serie: pd.Series) -> Decimal:
+            return Decimal(str(float(serie.sum())))
+
+        lineas = [LineaDeComparacion(
+            importe=total(sales.loc[~comun, "amount_ars"]),
+            costo_reposicion=None, costo_promedio=None, estado_promedio=None,
+        )]
+        if comun.any():
+            lineas.append(LineaDeComparacion(
+                importe=total(sales.loc[comun, "amount_ars"]),
+                costo_reposicion=total(sales.loc[comun, "cost_ars"]),
+                costo_promedio=total(sales.loc[comun, "cost_avg_ars"]),
+                estado_promedio=ESTADO_PROMEDIO_MEDIDO,
+            ))
+        return comparar_promedio_y_reposicion(lineas, self.fiscal_condition_crudo)
+
+    def margen_promedio_vs_reposicion(self, tenant_id: str, p: Period, *,
+                                      include_demo: bool = False) -> BusinessFact:
+        """El margen con costo promedio al lado del de reposición (M·P4-2).
+
+        ``value`` es el margen con costo PROMEDIO sobre la intersección; el de
+        reposición común, la brecha (efecto inflación sobre el stock) y la
+        cobertura conjunta van en ``detail``. Nunca reemplaza ni se suma a
+        ``margen_bruto``. Ausente → EMPTY con ``detail["motivo"]``.
+        """
+        sales = self._ventas_reales(tenant_id, p, include_demo)
+        c = self._comparar(sales)
+
+        def pct(x: Decimal | None) -> float | None:
+            return None if x is None else _pct(float(x))
+
+        detail: dict[str, object] = {
+            "motivo": c.motivo_ausente,
+            "cobertura_conjunta_pct": _pct(float(c.cobertura_conjunta * 100)),
+            "ingreso_comun_ars": _ars(float(c.ingreso_comun)),
+            "margen_reposicion_comun_pct": pct(c.margen_reposicion_pct),
+            "margen_promedio_comun_pct": pct(c.margen_promedio_pct),
+            "brecha_pp": pct(c.brecha_pp),
+            "brecha_ars": None if c.brecha_ars is None else _ars(float(c.brecha_ars)),
+        }
+        return BusinessFact(
+            fact_id=f"margen_promedio_vs_reposicion_{p.label}", domain="rentabilidad",
+            metric="margen_promedio_vs_reposicion",
+            value=None if c.ausente else pct(c.margen_promedio_pct),
+            unit="%", period=p.label,
+            provenance=Provenance.EMPTY if c.ausente else Provenance.REAL,
+            confidence=round(min(1.0, float(c.cobertura_conjunta)), 2),
+            sample_size=len(sales), source="sales[snapshot_costo,costo_promedio]",
+            explanation_key="margen_promedio_vs_reposicion", detail=detail,
         )
 
     def margen_neto(self, tenant_id: str, p: Period, *, include_demo: bool = False,

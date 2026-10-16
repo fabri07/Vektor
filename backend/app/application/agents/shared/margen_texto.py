@@ -36,3 +36,27 @@ def datos_margen_bruto(f: BusinessFact) -> dict[str, Any]:
         "cobertura_costo_confirmada_pct": d.get("cobertura_confirmada_pct"),
         "cobertura_costo_total_pct": d.get("cobertura_total_pct"),
     }
+
+
+def describir_promedio_vs_reposicion(f: BusinessFact | None) -> str | None:
+    """El efecto inflación sobre el stock (M·P4-2), o ``None``.
+
+    ``None`` si la cuenta no está habilitada o el dato está ausente: no se dice
+    nada (el margen principal ya se dijo). Arranca por la brecha y no repite el
+    margen de reposición de la intersección (otro universo que el bruto): son
+    datos al lado del margen, nunca un segundo margen.
+    """
+    if f is None or f.value is None:
+        return None
+    d = f.detail or {}
+    brecha_pp = float(d.get("brecha_pp") or 0)  # type: ignore[arg-type]
+    brecha_ars = float(d.get("brecha_ars") or 0)  # type: ignore[arg-type]
+    efecto = (
+        "ganancia por tenencia" if brecha_ars >= 0 else "pérdida por tenencia"
+    )
+    return (
+        f"efecto inflación sobre el stock ({efecto}): {abs(brecha_pp):.1f} puntos, "
+        f"${abs(brecha_ars):.2f}, en las ventas con costo de reposición y costo "
+        f"promedio (cobertura {d.get('cobertura_conjunta_pct')}%); con costo promedio "
+        f"esas ventas darían {f.value}%. NO es otro margen ni se suma al margen bruto"
+    )

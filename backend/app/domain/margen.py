@@ -28,6 +28,9 @@ Reglas (decisiones del dueño, 2026-10-11 y 2026-10-12):
   nunca confirma: el estado queda como mucho en ``estimado`` (si la cobertura
   confirmada alcanzaba, el ratio sigue saliendo de las confirmadas: lo que
   baja es el rótulo, no el dato de costo).
+
+Al final, M·P4-2: ``comparar_promedio_y_reposicion``, el margen con costo
+promedio al lado del de reposición (un dato, no un segundo margen).
 """
 
 from __future__ import annotations
@@ -191,4 +194,106 @@ def medir_margen(
         ganancia=ingreso_total - costo_vendido,
         supuestos=supuestos,
         base_del_ratio=base,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M·P4-2 — margen con costo PROMEDIO vs. margen con costo de REPOSICIÓN
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Es un DATO al lado del margen principal, nunca un segundo margen: el margen del
+# negocio sigue siendo el de ``medir_margen`` (reposición). La brecha entre los
+# dos es el efecto inflación sobre el stock (ganancia por tenencia): lo que el
+# promedio arrastra de compras viejas y el negocio vuelve a pagar al reponer.
+#
+# Las dos cifras salen de la MISMA intersección (venta con costo de reposición y
+# con costo promedio ``medido``) y el mismo denominador; si no, la brecha mezcla
+# universos. ``incompleto`` y ``sin_medicion`` quedan fuera.
+
+ESTADO_PROMEDIO_MEDIDO: Final = "medido"
+
+#: RI (decisión del dueño, 2026-10-15): el promedio promedia el costo CRUDO
+#: (``costo_promedio_repository``) y la reposición de la venta pasa por
+#: ``base_comparable`` (neto). Compararlos daría una brecha falsa del tamaño del
+#: IVA. Pasar el promedio a neto es M·P4b.
+MOTIVO_PROMEDIO_SIN_NETO_IVA: Final = "costo promedio todavía sin neto de IVA"
+
+# Fuera del RI la comparación supone que ``cost_ars`` y el promedio están en la
+# MISMA base cruda. Vale hoy porque ningún escritor de compras emite un impuesto
+# ``adicional`` (``contrato_de_costo`` sólo escribe ``incluido``/``desconocido``):
+# con uno, ``base_comparable`` le sumaría el IVA a la reposición de un
+# monotributista y no al promedio, y la brecha mostraría ~21 puntos de
+# «inflación» falsa. Si M·1d habilita ``adicional``, esto entra en M·P4b.
+
+
+@dataclass(frozen=True)
+class LineaDeComparacion:
+    """Una venta del universo con sus dos costos (``None`` = no tiene)."""
+
+    importe: Decimal
+    costo_reposicion: Decimal | None
+    costo_promedio: Decimal | None
+    estado_promedio: str | None
+
+
+@dataclass(frozen=True)
+class ComparacionDeMargenes:
+    #: ``None`` si el dato está presente; si no, por qué falta.
+    motivo_ausente: str | None
+    ingreso_total: Decimal
+    ingreso_comun: Decimal
+    #: Fracción 0..1 del ingreso total que cae en la intersección.
+    cobertura_conjunta: Decimal
+    margen_reposicion_pct: Decimal | None = None
+    margen_promedio_pct: Decimal | None = None
+    #: margen promedio − margen reposición. Positiva con precios que suben.
+    brecha_pp: Decimal | None = None
+    #: costo reposición − costo promedio de la intersección (en pesos).
+    brecha_ars: Decimal | None = None
+
+    @property
+    def ausente(self) -> bool:
+        return self.motivo_ausente is not None
+
+
+def comparar_promedio_y_reposicion(
+    lineas: Iterable[LineaDeComparacion], fiscal_condition_crudo: str | None
+) -> ComparacionDeMargenes:
+    """Margen con costo promedio y con costo de reposición sobre la intersección."""
+    ingreso_total = ingreso_comun = costo_rep = costo_prom = Decimal(0)
+    for linea in lineas:
+        ingreso_total += linea.importe
+        if (
+            linea.costo_reposicion is None
+            or linea.costo_promedio is None
+            or linea.estado_promedio != ESTADO_PROMEDIO_MEDIDO
+        ):
+            continue
+        ingreso_comun += linea.importe
+        costo_rep += linea.costo_reposicion
+        costo_prom += linea.costo_promedio
+
+    cero = Decimal(0)
+    if ingreso_total <= 0:
+        return ComparacionDeMargenes(MOTIVO_SIN_INGRESO, ingreso_total, ingreso_comun, cero)
+    cobertura = ingreso_comun / ingreso_total
+    if es_responsable_inscripto(fiscal_condition_crudo):
+        return ComparacionDeMargenes(
+            MOTIVO_PROMEDIO_SIN_NETO_IVA, ingreso_total, ingreso_comun, cobertura
+        )
+    if cobertura < COBERTURA_MINIMA:
+        return ComparacionDeMargenes(
+            motivo_cobertura(cobertura), ingreso_total, ingreso_comun, cobertura
+        )
+    margen_rep = (1 - costo_rep / ingreso_comun) * 100
+    margen_prom = (1 - costo_prom / ingreso_comun) * 100
+    return ComparacionDeMargenes(
+        motivo_ausente=None,
+        ingreso_total=ingreso_total,
+        ingreso_comun=ingreso_comun,
+        cobertura_conjunta=cobertura,
+        margen_reposicion_pct=margen_rep,
+        margen_promedio_pct=margen_prom,
+        brecha_pp=margen_prom - margen_rep,
+        brecha_ars=costo_rep - costo_prom,
     )
