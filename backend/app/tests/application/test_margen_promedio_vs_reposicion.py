@@ -297,7 +297,7 @@ def test_con_precios_que_bajan_es_pérdida_por_tenencia() -> None:
 
 
 def test_vectorizado_igual_al_dominio_línea_por_línea() -> None:
-    filas = [
+    filas: list[dict[str, Any]] = [
         {**_FILAS[0], "amount_ars": 1234.56, "cost_ars": 700.11, "cost_avg_ars": 650.07},
         {**_FILAS[0], "amount_ars": 999.99, "cost_ars": 333.33, "cost_avg_ars": 300.01},
         {**_FILAS[1]},
