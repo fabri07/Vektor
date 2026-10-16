@@ -223,6 +223,11 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
 - **Aceptación:** en ASTERIA, después del `--apply`, la mercadería de la ventana deja de incluir los $7,5 M y el subscore de margen sale de la definición de M·2, con su cobertura.
 - **Cómo quedó (2026-10-12, `scripts/reparar_stock_inicial_como_compra.py`):** se anula **sólo el gasto**; el movimiento sigue `purchase` + `catalog_initial_stock`. Decisión del dueño, después de dos revisiones: convertirlo a `adjustment` vaciaba Proveedores (lee sólo `purchase`), cambiaba la precedencia del costo de referencia en el próximo recálculo de M·1c y movía el ancla de la deduplicación. El margen, el flujo, la mercadería y la caja se corrigen igual porque leen gastos. La elección guardada vuelve a «apertura» en `parsed_summary_json` y en todas las decisiones recordadas «compra» del tenant (`ingestion_schema_decisions`), para que una relectura no recree los gastos. «Compras por proveedor» sigue contando esa mercadería, porque el movimiento sigue siendo compra. Los archivos con una relectura aplicada o abierta no se reparan (se informan). Sin migración. **Hacia adelante:** el import ya trae «ya la tenía» por defecto y pregunta por hoja; no se cambia salvo que el dry-run de ASTERIA muestre otro camino. Detalle en `docs/claude/plataforma.md`.
 
+### 6c. M·P4b: el costo promedio neto de IVA para un RI (agregado 2026-10-16)
+- **Qué falta:** el costo promedio (`product_cost_history`) promedia el costo CRUDO de la compra (`costo_promedio_repository`), mientras el costo de reposición de la venta pasa por `base_comparable` y para un Responsable Inscripto llega neto de IVA. Compararlos daría una brecha falsa del tamaño del IVA.
+- **Mientras tanto (M·P4-2):** para un RI, `margen_promedio_vs_reposicion` sale ausente con el motivo «costo promedio todavía sin neto de IVA» y el chat no dice nada. La columna de Productos (M·P4-1) no lo excluye: allí los dos costos están en base cruda.
+- **El paso:** llevar el promedio a la misma base que la reposición de la venta (`base_comparable` por régimen) y recalcular el historial con una publicación completa. Recién entonces se levanta la exclusión. Plan aparte, después de M·3.
+
 ### 7–10. D·2 a D·5: capital en dinero
 7. **D·2**: tabla `owner_capital_movements`.
    - **Tipos:** aporte, retiro, préstamo de socio o devolución.

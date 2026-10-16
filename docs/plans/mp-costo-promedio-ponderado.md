@@ -307,7 +307,7 @@ Revisión externa del plan: se parte para verificar cada mitad por separado. **D
 
 **M·P4-1 (Productos), cómo quedó:** compuerta `AVG_COST_DISPLAY_ROLLOUT_TENANT_IDS`; `costos_a_lote` (una sentencia, mismo orden que `costo_a`); `ProductResponse.avg_cost_*` en listado y detalle; «Costo de reposición» en el catálogo de campos; columna «Costo promedio (estimado)» fuera del CSV (el importador la leería como `unit_cost_ars`). Detalle en `docs/claude/plataforma.md`.
 
-**M·P4-2 (sigue):** `margen_promedio_vs_reposicion` en FactsService sobre la intersección (`cost_ars` y `cost_avg_estado = 'medido'`), cobertura conjunta ≥ 50%, RI ausente, y el texto del chat.
+**M·P4-2 (FactsService y chat), cómo quedó:** `domain/margen.comparar_promedio_y_reposicion` sobre la intersección (`cost_ars` y `cost_avg_estado = 'medido'`) con el mismo denominador; cobertura conjunta ≥ 50%; RI ausente con «costo promedio todavía sin neto de IVA» (M·P4b, anotado en `cierre-ingesta-capital-margen.md`); `FactsService.margen_promedio_vs_reposicion` con la comparación en `detail`; el chat agrega una línea aparte rotulada «efecto inflación sobre el stock (ganancia por tenencia)», sólo con la cuenta habilitada. `margen_bruto` no cambia. Detalle en `docs/claude/plataforma.md`.
 
 ## Doc
 - `docs/plans/mp-costo-promedio-ponderado.md` se reescribe con este plan en el commit de M·P1.
