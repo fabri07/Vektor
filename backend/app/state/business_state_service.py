@@ -439,6 +439,35 @@ async def _marca_del_neto(session: AsyncSession, tenant_id: UUID) -> str:
             )
         ).one()
         partes += [str(fila[0]), str(fila[1] or 0)]
+    # M·3-3: tipar un impuesto como IVA cambia el neto de un RI sin cambiar la
+    # cantidad ni la suma de gastos; también un cambio de categoría.
+    iva = (
+        await session.execute(
+            select(func.sum(ExpenseEntry.amount)).where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.voided_at.is_(None),
+                ExpenseEntry.category == "TAXES",
+                ExpenseEntry.tax_kind == "iva",
+                func.date(ExpenseEntry.transaction_date) >= mes.start,
+                func.date(ExpenseEntry.transaction_date) <= mes.end,
+            )
+        )
+    ).scalar_one()
+    partes.append(f"iva={iva or 0}")
+    por_categoria = (
+        await session.execute(
+            select(ExpenseEntry.category, func.sum(ExpenseEntry.amount))
+            .where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.voided_at.is_(None),
+                func.date(ExpenseEntry.transaction_date) >= mes.start,
+                func.date(ExpenseEntry.transaction_date) <= mes.end,
+            )
+            .group_by(ExpenseEntry.category)
+            .order_by(ExpenseEntry.category)
+        )
+    ).all()
+    partes += [f"{c}={v}" for c, v in por_categoria]
     return ":".join(partes)
 
 

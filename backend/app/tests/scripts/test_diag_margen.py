@@ -164,6 +164,24 @@ def test_sombra_m31_neto_del_mes_cerrado_y_subscore() -> None:
     assert subscore_con_neto(d, neto) is not None
 
 
+def test_sombra_m33_el_iva_de_un_ri_no_resta() -> None:
+    """La sombra espeja ``FactsService._iva_de_ri`` (revisión de M·3-3)."""
+    base = {
+        "tenant_id": "t", "rubro": "kiosco_almacen",
+        "lineas_mes_cerrado": [LineaVenta(Decimal("12100"), Decimal("6000"), True)],
+        "gastos_operativos_mes": Decimal("1500"), "gastos_operativos_mes_n": 2,
+        "iva_mes": Decimal("500"), "iva_mes_n": 1,
+    }
+    ri = margen_neto_mes_cerrado(DatosTenant(**base, regimen="responsable_inscripto"))
+    mono = margen_neto_mes_cerrado(DatosTenant(**base, regimen="monotributo"))
+    assert ri.gastos_operativos == Decimal("1000")
+    assert mono.gastos_operativos == Decimal("1500")
+    # Sólo IVA en el mes de un RI: no hay gastos que restar → sin medir.
+    solo_iva = DatosTenant(**{**base, "gastos_operativos_mes": Decimal("500"),
+                              "gastos_operativos_mes_n": 1}, regimen="responsable_inscripto")
+    assert margen_neto_mes_cerrado(solo_iva).margen_pct is None
+
+
 def test_sombra_m31_sin_gastos_no_inventa() -> None:
     d = DatosTenant(
         tenant_id="t", rubro="kiosco_almacen",

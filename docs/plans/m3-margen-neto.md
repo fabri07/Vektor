@@ -47,6 +47,8 @@ Ya resuelto y reutilizable: `medir_margen` (cobertura, estados, RI sin IVA), `ga
 
 **Tests:** migración (`-m postgres`), cada escritor, import por alias, neto RI con IVA excluido y monotributo con cuota incluida, aviso de sin tipo.
 
+**Cómo quedó (M·3-3):** como el plan, más: el tipo se infiere sin fuzzy y sólo de la categoría cruda (nunca de la descripción); sin alias de categoría de IVA ni «seguridad e higiene» (falsos positivos en la revisión); un `iva` fuera de `TAXES` no excluye nada. Detalle en `docs/claude/plataforma.md`.
+
 ## M·3-4 — antigüedad del costo («costo desactualizado» > 45 días)
 1. Migración aditiva `sales_entries.cost_source_date` (DATE NULL). `costeo_de_ventas` la escribe desde `CostoDeReferencia.fecha` (compra/stock inicial: fecha de negocio del movimiento; manual/catálogo: fecha de la edición; `costo_cargado` sin fecha → NULL = «antigüedad desconocida»).
 2. Backfill de ventas viejas en `scripts/costeo_retroactivo_ventas.py --solo-fecha`: re-elige la fuente a la fecha de la venta y escribe la fecha **sólo si su costo coincide con el `cost_unit_ars` congelado** (nunca revalúa). Dry-run por tenant; **el `--apply` lo autoriza el dueño**.

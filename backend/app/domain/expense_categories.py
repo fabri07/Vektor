@@ -179,6 +179,12 @@ _EXPENSE_ALIASES: dict[str, str] = {
     "abl": "TAXES",
     "municipal": "TAXES",
     "tasas": "TAXES",
+    "tasa municipal": "TAXES",
+    "tasas municipales": "TAXES",
+    # Sin alias de IVA ni «seguridad e higiene» (revisión de M·3-3): «IVA» suelto
+    # está en cualquier factura; «pago (de) IVA» atrapa por fuzzy «pago día» o
+    # «pago de visa»; «seguridad e higiene» es también un artículo de limpieza
+    # (mercadería). Un pago de IVA se carga con categoría Impuestos y tipo IVA.
     # INSURANCE
     "seguros": "INSURANCE",
     "seguro": "INSURANCE",
@@ -278,3 +284,80 @@ def infer_expense_type(
     if explicit in ("OPEX", "COGS"):
         return explicit
     return "COGS" if (product_id is not None or category == "INVENTORY") else "OPEX"
+
+
+# ── Tipo de impuesto (M·3-3) ──────────────────────────────────────────────────
+#
+# Sólo existe para la categoría ``TAXES``. Lo necesita el margen neto: el IVA de
+# un Responsable Inscripto NO es gasto (sus ventas ya entran sin IVA), el resto
+# sí resta. ``None`` = «sin tipo»: resta igual y el margen lo avisa — nunca se
+# adivina un tipo que el texto no dice («afip», «arca» o «impuestos» pueden ser
+# cualquiera).
+
+TAX_KIND_CODES: tuple[str, ...] = ("iibb", "monotributo", "iva", "tasa_municipal", "otro")
+
+TAX_KIND_LABELS_ES: dict[str, str] = {
+    "iibb": "Ingresos Brutos",
+    "monotributo": "Monotributo",
+    "iva": "IVA",
+    "tasa_municipal": "Tasas municipales",
+    "otro": "Otro impuesto",
+}
+
+TAX_KIND_PATTERN = r"^(" + "|".join(TAX_KIND_CODES) + r")$"
+
+_TAX_KIND_ALIASES: dict[str, str] = {
+    "iibb": "iibb",
+    "ingresos brutos": "iibb",
+    "ing brutos": "iibb",
+    "convenio multilateral": "iibb",
+    "monotributo": "monotributo",
+    "iva": "iva",
+    "abl": "tasa_municipal",
+    "municipal": "tasa_municipal",
+    "tasa municipal": "tasa_municipal",
+    "tasas municipales": "tasa_municipal",
+    "seguridad e higiene": "tasa_municipal",
+}
+# Más largo primero: «tasa municipal» gana a «municipal»; desempate alfabético.
+_TAX_KIND_KEYS = sorted(
+    (_norm_key(k) for k in _TAX_KIND_ALIASES), key=lambda k: (-len(k), k)
+)
+_TAX_KIND_BY_KEY = {_norm_key(k): v for k, v in _TAX_KIND_ALIASES.items()}
+
+
+def infer_tax_kind(*textos: str | None) -> str | None:
+    """El tipo de impuesto que DICE el texto, o ``None``.
+
+    Alias exacto o como palabra(s) completa(s), en el orden de los textos (el
+    primero que dice algo gana). Sin fuzzy: con alias de tres letras un typo
+    daría un tipo falso, y un tipo falso de IVA sube el neto de un RI.
+    """
+    for texto in textos:
+        if not texto or not str(texto).strip():
+            continue
+        key = _norm_key(str(texto))
+        hit = _TAX_KIND_BY_KEY.get(key)
+        if hit is not None:
+            return hit
+        for alias_key in _TAX_KIND_KEYS:
+            if re.search(rf"(?:^| ){re.escape(alias_key)}(?: |$)", key):
+                return _TAX_KIND_BY_KEY[alias_key]
+    return None
+
+
+def resolve_tax_kind(
+    category: str, *, explicit: str | None = None, textos: tuple[str | None, ...] = ()
+) -> str | None:
+    """Regla única de TODOS los escritores: el tipo sólo vive en ``TAXES``.
+
+    Un valor explícito válido gana; si no, el que dice la categoría CRUDA (la
+    celda del archivo, la palabra del chat). Nunca la descripción: «Plan de pagos
+    AFIP – IVA y ganancias» sacaría del neto de un RI el plan entero como IVA.
+    Otra categoría → ``None`` siempre.
+    """
+    if category != "TAXES":
+        return None
+    if explicit in TAX_KIND_CODES:
+        return explicit
+    return infer_tax_kind(*textos)

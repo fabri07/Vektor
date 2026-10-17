@@ -53,6 +53,7 @@ from app.domain.margen import (
     MedicionDeMargen,
     MedicionDeMargenNeto,
     comparar_promedio_y_reposicion,
+    es_responsable_inscripto,
     medir_margen,
     medir_margen_neto,
 )
@@ -731,7 +732,39 @@ class FactsService:
         mercaderia = (exp["expense_type"] == "COGS") | exp["category"].map(
             es_categoria_de_mercaderia
         ).astype(bool)
-        return exp[~mercaderia]
+        return exp[~(mercaderia | self._iva_de_ri(exp))]
+
+    def _iva_de_ri(self, exp: pd.DataFrame) -> pd.Series[bool]:
+        """M·3-3: el IVA pagado por un RI no es gasto — sus ventas ya entran sin IVA.
+
+        Sólo con categoría ``TAXES`` y tipo ``iva``: el tipo no vale fuera de esa
+        categoría (una reclasificación lo pudo dejar colgado). Para otro régimen
+        el IVA que paga es costo y resta como cualquier impuesto.
+        """
+        if "tax_kind" not in exp.columns or not es_responsable_inscripto(
+            self.fiscal_condition_crudo
+        ):
+            return pd.Series(False, index=exp.index)
+        return (exp["category"] == "TAXES") & (exp["tax_kind"] == "iva")
+
+    def _impuestos_del_neto(self, tenant_id: str, p: Period,
+                            include_demo: bool) -> dict[str, object]:
+        """Lo que el ``detail`` del neto dice de los impuestos (M·3-3)."""
+        exp = self._expenses(tenant_id, p, include_demo)
+        if exp.empty:
+            return {"impuestos_sin_tipo": 0, "impuestos_sin_tipo_ars": 0.0,
+                    "iva_excluido_ars": 0.0}
+        # «Sin tipo, se restaron igual» cuenta lo que el neto restó (sin COGS).
+        operativos = self._gastos_operativos(tenant_id, p, include_demo)
+        tipo = (operativos["tax_kind"] if "tax_kind" in operativos.columns
+                else pd.Series(None, index=operativos.index, dtype=object))
+        sin_tipo = operativos[(operativos["category"] == "TAXES") & tipo.isna()]
+        iva = exp[(exp["expense_type"] != "COGS") & self._iva_de_ri(exp)]
+        return {
+            "impuestos_sin_tipo": len(sin_tipo),
+            "impuestos_sin_tipo_ars": _ars(float(sin_tipo["amount_ars"].sum())),
+            "iva_excluido_ars": _ars(float(iva["amount_ars"].sum())),
+        }
 
     def medir_margen_neto(self, tenant_id: str, p: Period, *,
                           include_demo: bool = False) -> MedicionDeMargenNeto:
@@ -780,6 +813,7 @@ class FactsService:
             "supuestos": list(m.supuestos),
             "periodo_desde": p.start.isoformat(),
             "periodo_hasta": p.end.isoformat(),
+            **self._impuestos_del_neto(tenant_id, p, include_demo),
         }
         if m.margen_pct is None:
             return BusinessFact(

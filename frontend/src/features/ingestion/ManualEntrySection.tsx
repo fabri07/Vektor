@@ -16,7 +16,13 @@ import {
 import { customersService } from "@/services/customers.service";
 import { suppliersService } from "@/services/suppliers.service";
 import { expensesService } from "@/services/expenses.service";
-import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
+import {
+  ALL_CATEGORIES,
+  CATEGORY_LABELS,
+  TAX_KINDS,
+  TAX_KIND_LABELS,
+  taxKindParaEnviar,
+} from "@/lib/expenseCategories";
 import { FailedQueuePanel } from "./FailedQueuePanel";
 import {
   useOfflineFailedCount,
@@ -478,6 +484,7 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("RENT");
   const [customCategory, setCustomCategory] = useState(""); // label cuando OTHER
+  const [taxKind, setTaxKind] = useState(""); // "" = sin tipo (sólo TAXES)
   const [paymentMethod, setPaymentMethod] = useState("transfer");
   const [expenseDate, setExpenseDate] = useState(nowStr);
   const [supplierId, setSupplierId] = useState("");
@@ -491,6 +498,7 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
     setAmount("");
     setCategory("RENT");
     setCustomCategory("");
+    setTaxKind("");
     setPaymentMethod("transfer");
     setExpenseDate(nowStr());
     setSupplierId("");
@@ -530,6 +538,9 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
         amount: parseFloat(amount),
         category: finalCategory,
         ...(categoryLabel ? { category_label: categoryLabel } : {}),
+        ...(taxKindParaEnviar(finalCategory, taxKind)
+          ? { tax_kind: taxKindParaEnviar(finalCategory, taxKind) }
+          : {}),
         expense_type: "OPEX", // la mercadería va en la pestaña Compra
         payment_method: paymentMethod,
         supplier_id: supplierId,
@@ -594,6 +605,23 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
           </select>
         </Field>
       </div>
+
+      {category === "TAXES" && (
+        <Field label="Tipo de impuesto">
+          <select
+            value={taxKind}
+            onChange={(e) => setTaxKind(e.target.value)}
+            className={selectClass}
+          >
+            <option value="">Sin especificar</option>
+            {TAX_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {TAX_KIND_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
 
       {category === "OTHER" && (
         <Input

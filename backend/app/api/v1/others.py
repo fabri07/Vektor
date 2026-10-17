@@ -68,6 +68,7 @@ from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
     normalize_expense_category,
+    resolve_tax_kind,
 )
 from app.domain.product_categories import (
     PRODUCT_CATEGORY_LABELS,
@@ -502,7 +503,8 @@ async def reclassify_record(
         elif body.entity_type == "expense":
             # Normalizar la categoría libre antes de validar contra el catálogo.
             raw_fields = dict(body.fields)
-            code, cat_label = normalize_expense_category(raw_fields.get("category"))
+            raw_category = raw_fields.get("category")
+            code, cat_label = normalize_expense_category(raw_category)
             raw_fields["category"] = code
             if cat_label and not raw_fields.get("category_label"):
                 raw_fields["category_label"] = cat_label
@@ -519,6 +521,10 @@ async def reclassify_record(
                     # debe quedar COGS); un expense_type explícito del usuario gana.
                     expense_type=infer_expense_type(
                         exp_req.category, explicit=exp_req.expense_type
+                    ),
+                    tax_kind=resolve_tax_kind(
+                        exp_req.category, explicit=exp_req.tax_kind,
+                        textos=(str(raw_category) if raw_category else None,),
                     ),
                     transaction_date=exp_req.expense_date,
                     description=exp_req.description,

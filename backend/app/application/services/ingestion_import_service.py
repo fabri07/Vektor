@@ -103,6 +103,7 @@ from app.domain.date_parsing import (
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
+    resolve_tax_kind,
 )
 from app.domain.ingestion_limits import (
     TEXTO_FORMULA_SIN_RESULTADO,
@@ -5829,6 +5830,9 @@ async def _insert_confirmed_data_impl(
                         tenant_id=tenant_id,
                         amount=amount,
                         category=cat_code,
+                        # M·3-3: por la categoría cruda («IIBB» → iibb); nunca
+                        # por la descripción, que es texto libre de la fila.
+                        tax_kind=resolve_tax_kind(cat_code, textos=(_clean_str(cat_raw),)),
                         transaction_date=tx_date,
                         description=desc,
                         is_recurring=recurring if recurring is not None else False,
@@ -8016,6 +8020,7 @@ async def _insert_multisheet_data(
             tenant_id=tenant_id,
             amount=amount,
             category=cat_code,
+            tax_kind=resolve_tax_kind(cat_code, textos=(cat_raw,)),
             transaction_date=tx_date,
             description=desc or "Gasto importado",
             is_recurring=recurring if recurring is not None else False,
@@ -9884,13 +9889,13 @@ async def bulk_import_unclassified(
             )
             counts["imported_sales"] += 1
         else:
-            cat_code, cat_label, _ = classify_expense_with_vertical(
-                _clean_str(_row_val_categoria(row), 99), _vertical
-            )
+            cat_raw_otros = _clean_str(_row_val_categoria(row), 99)
+            cat_code, cat_label, _ = classify_expense_with_vertical(cat_raw_otros, _vertical)
             expense = ExpenseEntry(
                 tenant_id=tenant_id,
                 amount=amount,
                 category=cat_code,
+                tax_kind=resolve_tax_kind(cat_code, textos=(cat_raw_otros,)),
                 transaction_date=fecha,
                 description=desc or "Gasto importado",
                 is_recurring=False,

@@ -62,6 +62,7 @@ from app.domain.margen import (  # noqa: E402
     LineaDeMargen,
     MedicionDeMargen,
     MedicionDeMargenNeto,
+    es_responsable_inscripto,
     medir_margen,
     medir_margen_neto,
 )
@@ -155,6 +156,9 @@ class DatosTenant:
     lineas_mes_cerrado: list[LineaVenta] = field(default_factory=list)
     gastos_operativos_mes: Decimal = Decimal("0")
     gastos_operativos_mes_n: int = 0
+    #: M·3-3: el IVA tipado del mes; para un RI no resta (``FactsService._iva_de_ri``).
+    iva_mes: Decimal = Decimal("0")
+    iva_mes_n: int = 0
     inicio_mes_cerrado: date | None = None
     #: Primera venta o gasto vivos (¿el mes cerrado está completo?).
     primer_movimiento: date | None = None
@@ -254,10 +258,13 @@ def margen_facts(lineas: Sequence[LineaVenta], regimen: str | None) -> MedicionD
 
 def margen_neto_mes_cerrado(d: DatosTenant) -> MedicionDeMargenNeto:
     """M·3-1: ``FactsService.margen_neto`` del último mes cerrado (la sombra)."""
+    ri = es_responsable_inscripto(d.regimen)
+    gastos = d.gastos_operativos_mes - (d.iva_mes if ri else Decimal("0"))
+    n = d.gastos_operativos_mes_n - (d.iva_mes_n if ri else 0)
     return medir_margen_neto(
         margen_facts(d.lineas_mes_cerrado, d.regimen),
-        d.gastos_operativos_mes,
-        gastos_observados=d.gastos_operativos_mes_n > 0,
+        gastos,
+        gastos_observados=n > 0,
         datos_desde=d.primer_movimiento,
         periodo_desde=d.inicio_mes_cerrado,
     )
@@ -611,7 +618,10 @@ _MERCADERIA_SQL = ", ".join(
 #: M·3-1: los gastos que resta el margen neto (todo lo vivo que NO es
 #: mercadería, sin el flete capitalizado: ``gasto_de_resultado``).
 _GASTOS_OPERATIVOS = f"""
-SELECT tenant_id::text AS tenant_id, coalesce(sum(amount), 0) AS total, count(*) AS n
+SELECT tenant_id::text AS tenant_id, coalesce(sum(amount), 0) AS total, count(*) AS n,
+       coalesce(sum(amount) FILTER (WHERE category = 'TAXES' AND tax_kind = 'iva'), 0)
+           AS iva,
+       count(*) FILTER (WHERE category = 'TAXES' AND tax_kind = 'iva') AS n_iva
   FROM expense_entries
  WHERE voided_at IS NULL AND provenance = 'REAL'
    AND date(transaction_date) BETWEEN $2 AND $3
@@ -728,6 +738,8 @@ async def leer(conn: Any, tenant: str | None, desde: date, hasta: date) -> list[
         d = de(r["tenant_id"])
         d.gastos_operativos_mes = Decimal(str(r["total"]))
         d.gastos_operativos_mes_n = int(r["n"])
+        d.iva_mes = Decimal(str(r["iva"]))
+        d.iva_mes_n = int(r["n_iva"])
     for r in await conn.fetch(_PRIMER_MOVIMIENTO, tenant):
         de(r["tenant_id"]).primer_movimiento = r["primero"]
     for r in await conn.fetch(_DET, tenant, hasta - timedelta(days=30)):
