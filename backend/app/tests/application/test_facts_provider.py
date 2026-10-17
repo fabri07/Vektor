@@ -305,16 +305,25 @@ async def test_reconciliacion_90_dias(db_session: AsyncSession, sample_tenant) -
 
     assert snap["ticket_promedio"].value == round(VENTAS_90D / 193, 2)  # 834.2
 
-    # Margen bruto del snapshot; neto por todos los gastos — y son distintos.
-    # La confidence del bruto es la cobertura que lo sostiene: 89.000 sobre
-    # 161.000 vendidos → 0.55, y sale estimado (costo cargado, no compra).
+    # Margen bruto del snapshot. La confidence del bruto es la cobertura que lo
+    # sostiene: 89.000 sobre 161.000 vendidos → 0.55, y sale estimado (costo
+    # cargado, no compra).
     assert snap["margen_bruto"].value == 20.0
     assert snap["margen_bruto"].confidence == 0.55
     assert snap["margen_bruto"].detail is not None
     assert snap["margen_bruto"].detail["estado"] == "estimado"
-    assert snap["margen_neto"].value == 76.7
-    assert snap["margen_neto"].confidence == 1.0  # hay gastos cargados
-    assert snap["margen_bruto"].value != snap["margen_neto"].value
+    # Neto (M·3-1) del último mes CERRADO, mayo: ventas 31×1.000 + 31×500 +
+    # 4×2.000 fiado = 54.500; costo vendido 54.500 × 0,8 (ratio del cubierto) =
+    # 43.600; gastos operativos = alquiler 31×200 = 6.200 (la mercadería COGS no
+    # se resta: ya está en el costo vendido). (54.500 − 43.600 − 6.200)/54.500.
+    neto = snap["margen_neto"]
+    assert neto.period == "mes_2026_05"
+    assert neto.value == 8.6
+    assert neto.confidence == 0.57  # cobertura 31.000 / 54.500
+    assert neto.detail is not None
+    assert neto.detail["gastos_operativos_ars"] == 6200.0
+    assert neto.detail["gastos_por_categoria"] == {"RENT": 6200.0}
+    assert neto.detail["costo_vendido_ars"] == 43600.0
 
     # Caja: sin fiado, sin tarjeta, con cobros de fiado
     assert snap["caja_liquida"].value == CAJA_90D

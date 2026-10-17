@@ -247,7 +247,7 @@ async def test_sin_habilitar_no_hay_dato_ni_texto(
     assert margenes.promedio_vs_reposicion is None
     contexto = await AgentChat()._load_financial_context(tid, db_session)
     assert "costo promedio" not in contexto
-    assert "Margen bruto (ventas − costo de lo vendido): 35.0%" in contexto
+    assert "Margen bruto del mes en curso (ventas − costo de lo vendido)" in contexto
 
 
 async def test_chat_lo_dice_como_dato_aparte(
@@ -257,12 +257,12 @@ async def test_chat_lo_dice_como_dato_aparte(
     habilitar([str(tid)])
     await _cargar(db_session, tid)
     contexto = await AgentChat()._load_financial_context(tid, db_session)
-    assert "Margen bruto (ventas − costo de lo vendido): 35.0%" in contexto
+    assert "Margen bruto del mes en curso (ventas − costo de lo vendido)" in contexto
     assert (
-        "Dato aparte del margen bruto: efecto inflación sobre el stock (ganancia por "
-        "tenencia): 10.0 puntos, $100.00, en las ventas con costo de reposición y costo "
-        "promedio (cobertura 50.0%); con costo promedio esas ventas darían 50.0%. "
-        "NO es otro margen ni se suma al margen bruto"
+        "Dato aparte del margen bruto (últimos 30 días): efecto inflación sobre el stock "
+        "(ganancia por tenencia): 10.0 puntos, $100.00, en las ventas con costo de "
+        "reposición y costo promedio (cobertura 50.0%); con costo promedio esas ventas "
+        "darían 50.0%. NO es otro margen ni se suma al margen bruto"
     ) in contexto
     # El margen de reposición de la intersección (otro universo) no se imprime.
     assert "40.0%" not in contexto

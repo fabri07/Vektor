@@ -8,7 +8,7 @@ ponderado contra simple, costo 0 como «sin costo» y ausencia de dato ≠ 0.
 from __future__ import annotations
 
 import sys
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -23,12 +23,15 @@ from diag_margen import (  # noqa: E402
     clasificar_costo,
     explicar_margen_en_cero,
     informe,
+    informe_tenant,
     margen_api,
     margen_dashboard,
     margen_facts,
+    margen_neto_mes_cerrado,
     margen_ponderado,
     margen_producto,
     promedio_simple,
+    subscore_con_neto,
 )
 
 from app.domain.business_time import today_ar
@@ -148,3 +151,28 @@ def test_margen_salud_de_un_snapshot_nuevo_usa_el_costo_vendido() -> None:
         margen_estado="ausente", margen_motivo="cobertura de costo 9,0%",
     )
     assert margen_salud(ausente) is None
+
+
+def test_sombra_m31_neto_del_mes_cerrado_y_subscore() -> None:
+    d = DatosTenant(
+        tenant_id="t", rubro="kiosco_almacen",
+        lineas_mes_cerrado=[LineaVenta(Decimal("10000"), Decimal("6000"), True)],
+        gastos_operativos_mes=Decimal("1500"), gastos_operativos_mes_n=2,
+    )
+    neto = margen_neto_mes_cerrado(d)
+    assert neto.margen_pct == Decimal("25")
+    assert subscore_con_neto(d, neto) is not None
+
+
+def test_sombra_m31_sin_gastos_no_inventa() -> None:
+    d = DatosTenant(
+        tenant_id="t", rubro="kiosco_almacen",
+        lineas_mes_cerrado=[LineaVenta(Decimal("10000"), Decimal("6000"), True)],
+    )
+    neto = margen_neto_mes_cerrado(d)
+    assert neto.margen_pct is None
+    assert neto.motivo == "sin gastos cargados en el mes"
+    assert subscore_con_neto(d, neto) is None
+    texto = "\n".join(informe_tenant(d, date(2026, 9, 17), date(2026, 10, 16)))
+    assert "M·3-1 sombra: margen neto del último mes cerrado" in texto
+    assert "sin medición (no entra en el total)" in texto

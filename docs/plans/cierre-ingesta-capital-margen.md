@@ -195,6 +195,8 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
 - **Una sola definición** compartida por la API, FactsService, `deterministic_finance`, el chat **y el subscore de margen del health score**. Se corrige `calcular_margen_bruto`, que hoy resta todos los gastos, y el health score deja de calcular `(ventas − inventario − fijos) / ventas`: comprar mercadería no es costo de lo vendido (agregado 2026-10-10 por el diagnóstico M·0).
 
 ### 6. M·3: dashboard, productos y ventas
+> **Replanteado el 2026-10-16** (decisiones del dueño, plan en `docs/plans/m3-margen-neto.md`): el indicador de salud es el **margen neto** del **mes cerrado** = (ingreso − costo vendido − todo gasto no-mercadería, impuestos incluidos) / ingreso; mientras corre el mes se ve el **bruto del mes en curso**. Tarjeta, chat, alertas y subscore leen el mismo hecho. Los impuestos llevan tipo (el IVA de un RI no resta). Cuatro PRs: M·3-1 (neto, backend), M·3-2 (pantalla), M·3-3 (tipo de impuesto), M·3-4 (antigüedad del costo). Lo que sigue abajo es el texto original; donde choca, manda el plan nuevo (p. ej. «sólo ventas con costo confirmado»: rige la definición de M·2b, confirmado/estimado/ausente).
+
 - **Dashboard.** Un fact canónico en FactsService, «Margen bruto de ventas» del período, con un endpoint con schema Pydantic y los filtros comunes. Alimenta la tarjeta, la serie histórica y el desglose por categoría, **sin ninguna fórmula en React**. Se borra `buildMarginBreakdown`.
   - **Promedio:** `100 × Σ(ingreso comparable − costo) / Σ ingreso comparable`, sólo sobre ventas con costo y base confirmados.
   - **Cobertura por importe:** lo vendido que entra en el cálculo dividido por todo lo vendido, sobre el mismo universo.

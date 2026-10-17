@@ -45,6 +45,8 @@ from app.application.services.facts_provider import (
     LecturaDeMargenes,
     leer_margenes,
 )
+from app.application.services.facts_service import Period
+from app.config.net_margin_rollout import net_margin_enabled_for
 from app.domain.business_time import today_ar
 from app.domain.verticals import try_parse_vertical
 from app.observability.logger import get_logger
@@ -123,6 +125,15 @@ class BusinessState:
     margin_gross_pct: float | None = None
     cost_coverage_confirmed_pct: float | None = None
     cost_coverage_total_pct: float | None = None
+    # ── Margen neto (M·3-1) ──────────────────────────────────────────────────
+    # "fijos" = el subscore sale de ingreso − costo vendido − fijos (fórmula
+    # previa); "mes_cerrado" = del margen neto del último mes cerrado de
+    # FactsService (cuenta en NET_MARGIN_ROLLOUT_TENANT_IDS). Con
+    # "mes_cerrado", ``margin_status``/``margin_reason`` y las coberturas son
+    # los del neto.
+    margin_net_source: str = "fijos"
+    margin_net_pct: float | None = None
+    margin_net_period: str | None = None
 
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
@@ -162,11 +173,12 @@ def _make_fingerprint(
     sold_cost: str = "0",
     confirmed_cost_count: int = 0,
     dia_ar: str = "",
+    neto_marca: str = "",
 ) -> str:
     raw = (
         f"{sale_count}:{expense_count}:{product_count}:"
         f"{profile_updated_at.isoformat()}:{prev_sales_amount}:{capital_liquid_out}:"
-        f"{sold_cost}:{confirmed_cost_count}:{dia_ar}"
+        f"{sold_cost}:{confirmed_cost_count}:{dia_ar}:{neto_marca}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -247,6 +259,9 @@ def _deserialize_state(raw: str) -> BusinessState:
         margin_gross_pct=d.get("margin_gross_pct"),
         cost_coverage_confirmed_pct=d.get("cost_coverage_confirmed_pct"),
         cost_coverage_total_pct=d.get("cost_coverage_total_pct"),
+        margin_net_source=d.get("margin_net_source", "fijos"),
+        margin_net_pct=d.get("margin_net_pct"),
+        margin_net_period=d.get("margin_net_period"),
     )
 
 
@@ -356,20 +371,28 @@ def _derive_main_concern(
 # ── Margen (M·2b-3) ────────────────────────────────────────────────────────────
 
 
-def _margen_del_estado(lectura: LecturaDeMargenes) -> dict[str, Any]:
+def _margen_del_estado(
+    lectura: LecturaDeMargenes, *, neto_habilitado: bool = False
+) -> dict[str, Any]:
     """Los campos de margen del estado, copiados del ``BusinessFact`` de Facts.
 
     Sin lectura (sin rubro o error) el margen es ausente con su motivo. El costo
     vendido es el que proyectó ``domain/margen.py``; el ingreso, el comparable
     (neto de IVA para un RI) sobre el que se calculó.
+
+    Con ``neto_habilitado`` (M·3-1) el subscore lee el margen NETO del último
+    mes cerrado: el estado, el motivo y las coberturas son los suyos.
     """
     if lectura.margenes is None:
-        return {"margin_status": "ausente", "margin_reason": lectura.motivo}
+        base: dict[str, Any] = {"margin_status": "ausente", "margin_reason": lectura.motivo}
+        if neto_habilitado:
+            base["margin_net_source"] = "mes_cerrado"
+        return base
     bruto = lectura.margenes.bruto
     d = bruto.detail or {}
     costo = d.get("costo_vendido_ars")
     ingreso = d.get("ingreso_ars")
-    return {
+    campos: dict[str, Any] = {
         "margin_status": d.get("estado") or "ausente",
         "margin_reason": d.get("motivo"),
         "margin_sales_base": Decimal(str(ingreso)) if ingreso is not None else Decimal("0"),
@@ -378,6 +401,45 @@ def _margen_del_estado(lectura: LecturaDeMargenes) -> dict[str, Any]:
         "cost_coverage_confirmed_pct": d.get("cobertura_confirmada_pct"),
         "cost_coverage_total_pct": d.get("cobertura_total_pct"),
     }
+    if neto_habilitado:
+        neto = lectura.margenes.neto
+        n = neto.detail or {}
+        campos.update({
+            "margin_net_source": "mes_cerrado",
+            "margin_net_pct": neto.value,
+            "margin_net_period": neto.period,
+            "margin_status": n.get("estado") or "ausente",
+            "margin_reason": n.get("motivo"),
+            "cost_coverage_confirmed_pct": n.get("cobertura_confirmada_pct"),
+            "cost_coverage_total_pct": n.get("cobertura_total_pct"),
+        })
+    return campos
+
+
+async def _marca_del_neto(session: AsyncSession, tenant_id: UUID) -> str:
+    """M·3-1: lo que cambia el neto del mes cerrado y la ventana de 30 días no ve.
+
+    El mes cerrado puede empezar ~60 días atrás: un gasto de ese mes cargado o
+    anulado hoy no movía el fingerprint y el estado cacheado seguía con el neto
+    viejo. También entra la compuerta: habilitar una cuenta cambia la fuente.
+    """
+    if not net_margin_enabled_for(tenant_id):
+        return "fijos"
+    mes = Period.mes_cerrado(today=today_ar())
+    partes = ["mes_cerrado", mes.label]
+    for modelo in (SaleEntry, ExpenseEntry):
+        fila = (
+            await session.execute(
+                select(func.count(modelo.id), func.sum(modelo.amount)).where(
+                    modelo.tenant_id == tenant_id,
+                    modelo.voided_at.is_(None),
+                    func.date(modelo.transaction_date) >= mes.start,
+                    func.date(modelo.transaction_date) <= mes.end,
+                )
+            )
+        ).one()
+        partes += [str(fila[0]), str(fila[1] or 0)]
+    return ":".join(partes)
 
 
 # ── Main function ──────────────────────────────────────────────────────────────
@@ -613,6 +675,7 @@ async def compute_business_state(
         # FactsService corta su ventana en fecha AR: al cambiar el día AR el
         # margen cambia aunque no cambie ningún dato.
         dia_ar=today_ar().isoformat(),
+        neto_marca=await _marca_del_neto(session, tenant_id),
     )
     cached_hash: str | None = await redis.get(_hash_key(tenant_id))
     if cached_hash == fingerprint:
@@ -738,7 +801,9 @@ async def compute_business_state(
     # FactsService mide el margen bruto sobre el costo congelado por venta, con
     # `include_demo` según el tenant. Acá no se agrega nada: sólo se copia.
     lectura = await leer_margenes(session, tenant_id)
-    margen = _margen_del_estado(lectura)
+    margen = _margen_del_estado(
+        lectura, neto_habilitado=net_margin_enabled_for(tenant_id)
+    )
 
     # ── 8. Persist BusinessSnapshot (immutable) ──────────────────────────────
     snapshot = BusinessSnapshot(

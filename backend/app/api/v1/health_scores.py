@@ -35,13 +35,28 @@ class MarginHistoryItem(BaseModel):
     #: confirmado | estimado | ausente; ``None`` en snapshots anteriores a M·2b-3.
     margin_status: str | None = None
     #: "costo_vendido" (M·2b-3, FactsService) | "mercaderia_comprada" (fórmula
-    #: vieja de los snapshots anteriores: restaba lo COMPRADO, no lo vendido).
+    #: vieja de los snapshots anteriores: restaba lo COMPRADO, no lo vendido) |
+    #: "neto_mes_cerrado" (M·3-1: ``margin_pct`` es el neto del último mes
+    #: cerrado; ``revenue_est``/``cogs_est`` siguen siendo los del bruto de 30 días).
     margin_basis: str
 
 
 def _margin_history_item(snap: Any) -> MarginHistoryItem:
     inputs: dict[str, Any] = snap.score_inputs_json or {}
     fixed = float(str(inputs.get("monthly_fixed_expenses_est") or 0))
+    if inputs.get("margin_net_source") == "mes_cerrado":
+        # M·3-1: el subscore salió del neto del mes cerrado de FactsService.
+        cogs_mc = inputs.get("cogs_sold_est")
+        return MarginHistoryItem(
+            snapshot_date=snap.snapshot_date.isoformat(),
+            score_margin=snap.score_margin,
+            revenue_est=float(str(inputs.get("margin_sales_base") or 0)),
+            cogs_est=None if cogs_mc is None else float(str(cogs_mc)),
+            fixed_expenses_est=fixed,
+            margin_pct=inputs.get("margin_net_pct"),
+            margin_status=inputs.get("margin_status"),
+            margin_basis="neto_mes_cerrado",
+        )
     if "margin_status" in inputs:
         revenue = float(str(inputs.get("margin_sales_base") or 0))
         cogs_raw = inputs.get("cogs_sold_est")

@@ -30,6 +30,29 @@ describe("marginTile", () => {
     expect(tile.hint).toBe("sin costo suficiente (cobertura 9%)");
   });
 
+  it("margen neto ausente por gastos o mes incompleto: dice ese motivo (M·3-1)", () => {
+    const tile = marginTile(
+      score({
+        score_margin: null,
+        margin_status: "ausente",
+        margin_reason: "sin gastos cargados en el mes",
+        cost_coverage_total_pct: 100,
+      }),
+    );
+    expect(tile).toEqual({ label: "Margen", value: null, hint: "sin gastos cargados en el mes" });
+  });
+
+  it("motivo de cobertura: sigue diciendo «sin costo suficiente»", () => {
+    const tile = marginTile(
+      score({
+        score_margin: null,
+        margin_reason: "cobertura de costo 9,0%",
+        cost_coverage_total_pct: 9,
+      }),
+    );
+    expect(tile.hint).toBe("sin costo suficiente (cobertura 9%)");
+  });
+
   it("margen ausente sin cobertura conocida", () => {
     expect(marginTile(score({ score_margin: null })).hint).toBe("sin costo suficiente");
   });
