@@ -21,10 +21,16 @@ interface Props {
 type SubscoreTile = { label: string; value: number | null; hint?: string };
 
 /**
- * El subscore de margen con su estado (M·2b-3). Sin costo suficiente de lo
- * vendido el margen está AUSENTE: se muestra «—» con el motivo, nunca un 0.
+ * El subscore de margen con su estado (M·2b-3). Sin margen medible está
+ * AUSENTE: se muestra «—» con el motivo, nunca un 0. Con el margen neto del
+ * mes cerrado (M·3-1) puede faltar por gastos o por un mes incompleto, no sólo
+ * por costo: si el backend manda el motivo, se dice ese.
  */
 export function marginTile(score: HealthScoreV2Response): SubscoreTile {
+  const motivo = score.margin_reason;
+  if (score.score_margin == null && motivo && !motivo.startsWith("cobertura")) {
+    return { label: "Margen", value: null, hint: motivo };
+  }
   if (score.score_margin == null) {
     const cobertura =
       score.cost_coverage_total_pct != null

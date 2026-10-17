@@ -84,6 +84,10 @@ def _state_to_dict(state: BusinessState) -> dict[str, Any]:
         "margin_gross_pct": state.margin_gross_pct,
         "cost_coverage_confirmed_pct": state.cost_coverage_confirmed_pct,
         "cost_coverage_total_pct": state.cost_coverage_total_pct,
+        # M·3-1: de dónde sale el subscore (lo lee /margin-history).
+        "margin_net_source": state.margin_net_source,
+        "margin_net_pct": state.margin_net_pct,
+        "margin_net_period": state.margin_net_period,
         "product_count": state.product_count,
         "supplier_count": state.supplier_count,
         "main_concern": state.main_concern,
@@ -104,9 +108,22 @@ def margin_explanation_for(state: BusinessState, result: HealthScoreResult) -> s
     """El margen del subscore dicho con su estado (M·2b-3); nunca un 0 inventado."""
     if result.margin_net_ratio is None:
         motivo = state.margin_reason or "sin costo de lo vendido"
+        if state.margin_net_source == "mes_cerrado":
+            # Puede faltar por gastos o por un mes incompleto, no sólo por costo.
+            return f"Sin margen neto del último mes cerrado ({motivo}); no entra en el total."
         return f"Sin costo suficiente para medir el margen ({motivo}); no entra en el total."
-    # «Después de fijos» y no «neto»: el margen neto de FactsService es ventas −
-    # TODOS los gastos, otra cuenta (revisión de M·2b-3).
+    if state.margin_net_source == "mes_cerrado":
+        # M·3-1: el neto del mes cerrado (ingreso − costo vendido − gastos
+        # operativos), el mismo número de la tarjeta y del chat.
+        neto_mc = result.margin_net_ratio * 100
+        estimado = " estimado" if result.margin_status == "estimado" else ""
+        return (
+            f"Margen neto{estimado} del último mes cerrado de {neto_mc:.1f}% "
+            f"(ventas − costo de lo vendido − gastos operativos; cobertura de costo "
+            f"{state.cost_coverage_total_pct}%)."
+        )
+    # «Después de fijos» y no «neto»: el margen neto de FactsService (M·3-1) es
+    # el del mes cerrado con TODOS los gastos operativos, otra cuenta.
     neto = result.margin_net_ratio * 100
     bruto = state.margin_gross_pct
     if result.margin_status == "estimado":
@@ -289,7 +306,11 @@ class HealthScoreService:
         # una respuesta de formulario entraría como observación (invariante 5b).
         margin_ratio: float | None = (
             result.margin_net_ratio
-            if result.margin_status == "confirmado" and state.fixed_expenses_observed
+            if result.margin_status == "confirmado"
+            and state.fixed_expenses_observed
+            # M·3-1: el neto del mes cerrado es otra definición; no se mezcla en
+            # la muestra del rubro (``compute_margin_benchmark``) con «bruto − fijos».
+            and state.margin_net_source != "mes_cerrado"
             else None
         )
         cash_ratio: float | None = None

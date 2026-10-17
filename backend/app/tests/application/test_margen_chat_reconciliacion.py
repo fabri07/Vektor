@@ -14,6 +14,11 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.chat.agent import AgentChat
+from app.application.agents.shared.margen_texto import (
+    describir_margen_bruto,
+    describir_margen_neto,
+    nombre_del_mes,
+)
 from app.application.services.facts_provider import margenes_del_tenant
 from app.domain.business_time import today_ar
 from app.persistence.models.transaction import SaleEntry
@@ -56,7 +61,20 @@ async def test_chat_y_facts_dan_el_mismo_margen_estimado(
     assert bruto.detail["cobertura_total_pct"] == 75.0
 
     contexto = await AgentChat()._load_financial_context(tid, db_session)
-    assert f"Margen bruto (ventas − costo de lo vendido): {bruto.value}% ESTIMADO" in contexto
+    # M·3-1: el chat dice el bruto del MES EN CURSO y el neto del mes cerrado,
+    # los mismos hechos de FactsService (comparados contra el hecho y no contra
+    # un número fijo: en los primeros días del mes estas ventas son del anterior).
+    en_curso = margenes.bruto_mes_en_curso
+    assert en_curso is not None
+    assert (
+        "Margen bruto del mes en curso (ventas − costo de lo vendido): "
+        f"{describir_margen_bruto(en_curso)}"
+    ) in contexto
+    assert (
+        f"Margen neto de {nombre_del_mes(margenes.neto)} (mes cerrado; "
+        "ventas − costo de lo vendido − gastos operativos): "
+        f"{describir_margen_neto(margenes.neto)}"
+    ) in contexto
     assert "Resultado (ventas − todos los gastos)" in contexto
 
 
@@ -70,10 +88,16 @@ async def test_chat_dice_sin_medir_con_el_motivo(
     ])
     await db_session.commit()
 
+    margenes = await margenes_del_tenant(db_session, tid)
+    assert margenes is not None
+    assert margenes.bruto.detail is not None
+    assert margenes.bruto.detail["motivo"] == "cobertura de costo 10,0%"
     contexto = await AgentChat()._load_financial_context(tid, db_session)
-    assert "Margen bruto (ventas − costo de lo vendido): sin medir (cobertura de costo 10,0%)" in (
+    assert margenes.bruto_mes_en_curso is not None
+    assert "Margen bruto del mes en curso (ventas − costo de lo vendido): sin medir (" in (
         contexto
     )
+    assert describir_margen_bruto(margenes.bruto_mes_en_curso) in contexto
     # Nunca un 0 inventado ni el margen viejo (ventas − gastos).
     assert "Margen bruto: 100" not in contexto
 
@@ -97,6 +121,4 @@ async def test_un_error_de_facts_no_tumba_la_respuesta(
     assert (lectura.margenes, lectura.motivo) == (None, facts_provider.MOTIVO_ERROR)
     contexto = await AgentChat()._load_financial_context(tid, db_session)
     assert "Ventas: $1000" in contexto
-    assert "Margen bruto (ventas − costo de lo vendido): sin medir (no se pudo medir ahora)" in (
-        contexto
-    )
+    assert "Margen neto: sin medir (no se pudo medir ahora)" in contexto

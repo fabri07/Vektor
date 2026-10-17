@@ -210,7 +210,11 @@ def _margin_bands(b: MarginBenchmark) -> list[_Band]:
 
 
 def margin_net_ratio(state: BusinessState) -> float | None:
-    """Margen neto del subscore: (ingreso − costo vendido − gastos fijos) / ingreso.
+    """Margen neto del subscore.
+
+    Con ``margin_net_source == "mes_cerrado"`` (M·3-1, cuenta habilitada) es el
+    margen neto del último mes cerrado de FactsService. Si no, la fórmula previa:
+    (ingreso − costo vendido − gastos fijos) / ingreso.
 
     El ingreso y el costo vendido son los de FactsService (``domain/margen.py``,
     costo congelado por venta); los fijos, los del estado. ``None`` si el margen
@@ -218,6 +222,12 @@ def margin_net_ratio(state: BusinessState) -> float | None:
     sin ventas, daba 50; y restaba la mercadería COMPRADA, no la vendida: el
     −776% de ASTERIA).
     """
+    if state.margin_net_source == "mes_cerrado":
+        # M·3-1: el margen neto del último mes cerrado, tal cual lo midió
+        # FactsService (el de la tarjeta y el chat). Sin él, no hay número.
+        if state.margin_status == "ausente" or state.margin_net_pct is None:
+            return None
+        return state.margin_net_pct / 100
     base = state.margin_sales_base
     if state.margin_status == "ausente" or state.cogs_sold_est is None or base <= 0:
         return None

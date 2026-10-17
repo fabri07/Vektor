@@ -11,7 +11,10 @@ DECISIONES CANÓNICAS RATIFICADAS (Fabrizio):
       venta (snapshot M·2a/M·2c) y la definición única de domain/margen.py:
       cobertura sobre TODO lo vendido, piso del 50%, confirmado/estimado/ausente.
       Nunca el costo actual del producto ni las compras del período (M·2b).
-    - margen_neto  = (ventas − TODOS los gastos) / ventas   ← la heurística corre sobre neto
+    - margen_neto  = (ingreso − costo vendido − gastos operativos) / ingreso, por MES
+      CERRADO (M·3-1, dueño 2026-10-16): gastos operativos = todo gasto vivo que no
+      sea mercadería. Es el indicador de salud: tarjeta, chat, alertas y score.
+      Antes era ventas − TODOS los gastos (restaba la mercadería COMPRADA).
     - caja_liquida excluye fiado (fiado = deuda a cobrar, no efectivo)
     - caja_liquida excluye tarjeta de crédito (se acredita ~30 días → DELAYED_METHODS)
     - ingresos_totales incluye fiado (es venta reconocida)
@@ -41,14 +44,17 @@ import pandas as pd
 from pydantic import BaseModel
 
 from app.domain.business_time import AR_TZ
+from app.domain.expense_categories import normalize_expense_category
 from app.domain.margen import (
     ESTADO_PROMEDIO_MEDIDO,
     ComparacionDeMargenes,
     LineaDeComparacion,
     LineaDeMargen,
     MedicionDeMargen,
+    MedicionDeMargenNeto,
     comparar_promedio_y_reposicion,
     medir_margen,
+    medir_margen_neto,
 )
 from app.domain.transaction import PaymentMethod
 
@@ -73,6 +79,19 @@ DELAYED_METHODS = frozenset({PaymentMethod.CREDIT_CARD.value, "tarjeta_credito"}
 # enum canónico). NO son ventas (la venta fiada original ya se contó) — son plata
 # que ENTRA a caja. Se excluyen de ventas/ticket/margen y se suman a caja_liquida.
 INFLOW_METHOD = "inflow"
+
+def es_categoria_de_mercaderia(categoria: object) -> bool:
+    """¿La categoría de un gasto es compra de mercadería (aunque diga OPEX)?
+
+    La migración 20260710_0001 dejó compras viejas como OPEX, y hay filas con el
+    texto libre de antes del catálogo («mercaderia», «compras», «compra
+    proveedor», «reposicion»…). Se normaliza con el MISMO catálogo de alias
+    (``domain/expense_categories``): si no, el neto restaría como gasto una
+    compra que ya está en el costo vendido.
+    """
+    if not isinstance(categoria, str):
+        return False
+    return normalize_expense_category(categoria)[0] == "INVENTORY"
 
 # Muestra mínima para reportar una métrica como confiable sin advertencia.
 MIN_CONFIDENCE_SAMPLE = 50  # < 50 ventas → REAL con confidence reducido, NUNCA blend
@@ -172,6 +191,24 @@ class Period:
         today = today or datetime.now(AR_TZ).date()
         return cls(start=today - timedelta(days=n - 1), end=today, label=f"últimos_{n}_días")
 
+    @classmethod
+    def mes_cerrado(cls, *, today: date | None = None) -> Period:
+        """El último mes calendario COMPLETO antes de ``today`` (M·3-1).
+
+        El margen neto se mide por mes cerrado: en una ventana parcial el
+        alquiler o los sueldos del mes todavía no están o caen enteros.
+        """
+        today = today or datetime.now(AR_TZ).date()
+        fin = today.replace(day=1) - timedelta(days=1)
+        return cls(start=fin.replace(day=1), end=fin, label=f"mes_{fin:%Y_%m}")
+
+    @classmethod
+    def mes_en_curso(cls, *, today: date | None = None) -> Period:
+        """Del 1.º del mes de ``today`` a ``today`` (el bruto mientras corre el mes)."""
+        today = today or datetime.now(AR_TZ).date()
+        return cls(start=today.replace(day=1), end=today,
+                   label=f"mes_en_curso_{today:%Y_%m}")
+
     def previous(self) -> Period:
         """Ventana inmediatamente anterior, mismo largo. Para variación %."""
         span = (self.end - self.start).days
@@ -241,6 +278,9 @@ class FactsDataProvider(Protocol):
     def expenses(self, tenant_id: str, start: date, end: date) -> pd.DataFrame: ...
     def products(self, tenant_id: str) -> pd.DataFrame: ...
     def mixed_tenders(self, tenant_id: str, start: date, end: date) -> pd.DataFrame: ...
+    # Opcional (M·3-1): ``primer_movimiento(tenant_id) -> date | None``, la fecha de
+    # la primera venta o gasto vivos del negocio. Sin el método, el neto no puede
+    # saber si el mes cerrado está completo y lo da como completo.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -534,25 +574,83 @@ class FactsService:
             explanation_key="margen_promedio_vs_reposicion", detail=detail,
         )
 
+    def _gastos_operativos(self, tenant_id: str, p: Period,
+                           include_demo: bool) -> pd.DataFrame:
+        """Los gastos que resta el margen neto: todo lo vivo que NO es mercadería.
+
+        La mercadería ya está en el costo de lo vendido (con el costo congelado
+        por venta); restar además la compra del período la contaba dos veces y un
+        mes de reposición fuerte parecía una pérdida. Mismo criterio que
+        ``business_state_service`` (``expense_type`` COGS + las categorías
+        ``INVENTORY``/``mercaderia`` que esa columna no alcanza). El flete
+        capitalizado ya lo saca el provider (``gasto_de_resultado``).
+        """
+        exp = self._expenses(tenant_id, p, include_demo)
+        if exp.empty:
+            return exp
+        mercaderia = (exp["expense_type"] == "COGS") | exp["category"].map(
+            es_categoria_de_mercaderia
+        ).astype(bool)
+        return exp[~mercaderia]
+
+    def medir_margen_neto(self, tenant_id: str, p: Period, *,
+                          include_demo: bool = False) -> MedicionDeMargenNeto:
+        """El margen neto de ``p`` (un mes cerrado, para la salud) — M·3-1."""
+        gastos = self._gastos_operativos(tenant_id, p, include_demo)
+        total = Decimal(str(float(gastos["amount_ars"].sum()))) if len(gastos) else Decimal(0)
+        primer = getattr(self.provider, "primer_movimiento", None)
+        return medir_margen_neto(
+            self.medir_margen(tenant_id, p, include_demo=include_demo),
+            total,
+            gastos_observados=not gastos.empty,
+            datos_desde=primer(tenant_id) if callable(primer) else None,
+            periodo_desde=p.start,
+        )
+
     def margen_neto(self, tenant_id: str, p: Period, *, include_demo: bool = False,
                     benchmark_floor: float | None = None) -> BusinessFact:
-        """LA métrica del health score. ventas − TODOS los gastos, sobre ventas."""
-        sales = self._ventas_reales(tenant_id, p, include_demo)
-        ventas = float(sales["amount_ars"].sum()) if len(sales) else 0.0
-        if ventas <= 0:
-            return BusinessFact(fact_id=f"margen_neto_{p.label}", domain="rentabilidad",
-                                metric="margen_neto", value=None, unit="%", period=p.label,
-                                provenance=Provenance.EMPTY, confidence=0.0,
-                                sample_size=len(sales), source="sales,expenses")
-        exp = self._expenses(tenant_id, p, include_demo)
-        gastos_totales = float(exp["amount_ars"].sum()) if len(exp) else 0.0
-        margen = (ventas - gastos_totales) / ventas * 100.0
+        """LA métrica de salud (M·3-1): (ingreso − costo vendido − gastos operativos) / ingreso.
 
-        # Cero gastos cargados casi siempre significa "todavía no los cargó", no
-        # "no tiene gastos": el 100% resultante sale con confidence mínima
-        # nunca como dato pleno.
-        sin_gastos = exp.empty
-        confidence = 0.4 if sin_gastos else 1.0
+        ``p`` es un mes cerrado (``Period.mes_cerrado``) en todos los lectores de
+        salud. Ausente → EMPTY con ``detail["motivo"]``; la severidad del
+        benchmark sólo con número. Antes era «ventas − TODOS los gastos», que
+        restaba la mercadería comprada en vez de la vendida.
+        """
+        sales = self._ventas_reales(tenant_id, p, include_demo)
+        m = self.medir_margen_neto(tenant_id, p, include_demo=include_demo)
+        gastos = self._gastos_operativos(tenant_id, p, include_demo)
+        por_categoria = (
+            {str(k): _ars(float(v)) for k, v in
+             gastos.groupby("category")["amount_ars"].sum().items()}
+            if len(gastos) else {}
+        )
+        bruto = self.medir_margen(tenant_id, p, include_demo=include_demo)
+        detail: dict[str, object] = {
+            "estado": m.estado,
+            "motivo": m.motivo,
+            "ingreso_ars": _ars(float(m.ingreso_total)),
+            "costo_vendido_ars": (
+                _ars(float(m.costo_vendido)) if m.costo_vendido is not None else None
+            ),
+            "gastos_operativos_ars": _ars(float(m.gastos_operativos)),
+            "gastos_por_categoria": por_categoria,
+            "resultado_ars": _ars(float(m.resultado)) if m.resultado is not None else None,
+            "cobertura_confirmada_pct": _pct(float(bruto.cobertura_confirmada * 100)),
+            "cobertura_total_pct": _pct(float(bruto.cobertura_total * 100)),
+            "supuestos": list(m.supuestos),
+            "periodo_desde": p.start.isoformat(),
+            "periodo_hasta": p.end.isoformat(),
+        }
+        if m.margen_pct is None:
+            return BusinessFact(
+                fact_id=f"margen_neto_{p.label}", domain="rentabilidad",
+                metric="margen_neto", value=None, unit="%", period=p.label,
+                provenance=Provenance.EMPTY,
+                confidence=round(min(1.0, float(bruto.cobertura_total)), 2),
+                sample_size=len(sales), source="sales[snapshot_costo],expenses[operativos]",
+                explanation_key="margen_neto", detail=detail,
+            )
+        margen = float(m.margen_pct)
 
         # Sin umbrales del vertical no hay con qué comparar el margen: el hecho
         # sale sin severity antes que con la severidad de otro rubro.
@@ -568,14 +666,12 @@ class FactsService:
         return BusinessFact(
             fact_id=f"margen_neto_{p.label}", domain="rentabilidad", metric="margen_neto",
             value=_pct(margen), unit="%", period=p.label, severity=severity,
-            confidence=confidence, sample_size=len(sales),
-            source="sales,expenses[sin_gastos]" if sin_gastos else "sales,expenses",
-            explanation_key="margen_neto",
+            confidence=round(min(1.0, float(bruto.cobertura_del_estado)), 2),
+            sample_size=len(sales),
+            source=f"sales[snapshot_costo,{m.estado}],expenses[operativos]",
+            explanation_key="margen_neto", detail=detail,
         )
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # MÉTRICA 3 — CAJA (líquida, sin fiado ni tarjeta) + FIADO como deuda separada
-    # ═══════════════════════════════════════════════════════════════════════
     def _split_liquidez(self, sales_full: pd.DataFrame, mixtos: pd.DataFrame) -> Liquidez:
         """Reparte las ventas del período entre medios, con el pago mixto de caja.
 
@@ -737,7 +833,11 @@ class FactsService:
             "ventas": self.ventas_periodo(tenant_id, p, include_demo=include_demo),
             "ticket_promedio": self.ticket_promedio(tenant_id, p, include_demo=include_demo),
             "margen_bruto": self.margen_bruto(tenant_id, p, include_demo=include_demo),
-            "margen_neto": self.margen_neto(tenant_id, p, include_demo=include_demo),
+            # El neto es del último mes CERRADO (M·3-1), no de ``p``: el
+            # proveedor carga ese mes (``build_facts_service``).
+            "margen_neto": self.margen_neto(
+                tenant_id, Period.mes_cerrado(today=p.end), include_demo=include_demo
+            ),
             "caja_liquida": self.caja_liquida(tenant_id, p, include_demo=include_demo),
             "fiado_pendiente": self.fiado_pendiente(tenant_id, p, include_demo=include_demo),
             "valor_stock": self.valor_stock(tenant_id, include_demo=include_demo),

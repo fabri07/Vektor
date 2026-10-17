@@ -29,14 +29,17 @@ Reglas (decisiones del dueño, 2026-10-11 y 2026-10-12):
   confirmada alcanzaba, el ratio sigue saliendo de las confirmadas: lo que
   baja es el rótulo, no el dato de costo).
 
-Al final, M·P4-2: ``comparar_promedio_y_reposicion``, el margen con costo
-promedio al lado del de reposición (un dato, no un segundo margen).
+Después del bruto, M·3-1: ``medir_margen_neto``, el indicador de salud
+(bruto menos los gastos operativos del mes cerrado). Al final, M·P4-2:
+``comparar_promedio_y_reposicion``, el margen con costo promedio al lado del de
+reposición (un dato, no un segundo margen).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Final, Literal
 
@@ -196,6 +199,84 @@ def medir_margen(
         base_del_ratio=base,
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M·3-1 — margen NETO: el indicador de salud del negocio
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Decisión del dueño (2026-10-16): ``neto = (ingreso − costo de lo vendido −
+# gastos operativos) / ingreso``, por MES CALENDARIO CERRADO. Gastos operativos =
+# todo gasto vivo del período que no sea compra de mercadería (alquiler,
+# sueldos, servicios, comisiones, impuestos, fletes no capitalizados),
+# recurrente o no. Lo arma el llamador; acá no se filtra nada.
+#
+# Sale del bruto: mismo ingreso comparable y mismo costo vendido (con el ratio
+# del cubierto), así que hereda su estado, su motivo y sus supuestos. Sin bruto
+# no hay neto. Sin ningún gasto cargado en el mes tampoco: casi siempre es «no
+# los cargó», y el gasto declarado en el onboarding no es una medición
+# (no-invention).
+
+MOTIVO_SIN_GASTOS: Final = "sin gastos cargados en el mes"
+
+
+@dataclass(frozen=True)
+class MedicionDeMargenNeto:
+    estado: EstadoDeMargen
+    motivo: str | None
+    ingreso_total: Decimal
+    costo_vendido: Decimal | None
+    gastos_operativos: Decimal
+    margen_pct: Decimal | None
+    #: ingreso − costo vendido − gastos operativos (``None`` si ausente).
+    resultado: Decimal | None
+    supuestos: tuple[str, ...] = ()
+
+
+def motivo_mes_incompleto(desde: date) -> str:
+    """«mes incompleto: los datos empiezan el 27/09/2026»."""
+    return f"mes incompleto: los datos empiezan el {desde:%d/%m/%Y}"
+
+
+def medir_margen_neto(
+    bruto: MedicionDeMargen, gastos_operativos: Decimal, *, gastos_observados: bool,
+    datos_desde: date | None = None, periodo_desde: date | None = None,
+) -> MedicionDeMargenNeto:
+    """El margen neto de un período a partir de su bruto y sus gastos operativos.
+
+    ``datos_desde`` es el primer movimiento del negocio (venta o gasto). Si es
+    posterior al inicio del período, el mes no está completo: cuatro días de
+    ventas contra el alquiler del mes entero darían un neto falso (revisión de
+    M·3-1). Ausente con el motivo.
+    """
+    if (
+        datos_desde is not None and periodo_desde is not None
+        and datos_desde > periodo_desde
+    ):
+        return MedicionDeMargenNeto(
+            "ausente", motivo_mes_incompleto(datos_desde), bruto.ingreso_total,
+            bruto.costo_vendido, gastos_operativos, None, None, bruto.supuestos,
+        )
+    if bruto.margen_pct is None or bruto.costo_vendido is None:
+        return MedicionDeMargenNeto(
+            "ausente", bruto.motivo, bruto.ingreso_total, None, gastos_operativos,
+            None, None, bruto.supuestos,
+        )
+    if not gastos_observados:
+        return MedicionDeMargenNeto(
+            "ausente", MOTIVO_SIN_GASTOS, bruto.ingreso_total, bruto.costo_vendido,
+            gastos_operativos, None, None, bruto.supuestos,
+        )
+    resultado = bruto.ingreso_total - bruto.costo_vendido - gastos_operativos
+    return MedicionDeMargenNeto(
+        estado=bruto.estado,
+        motivo=bruto.motivo,
+        ingreso_total=bruto.ingreso_total,
+        costo_vendido=bruto.costo_vendido,
+        gastos_operativos=gastos_operativos,
+        margen_pct=resultado / bruto.ingreso_total * 100,
+        resultado=resultado,
+        supuestos=bruto.supuestos,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # M·P4-2 — margen con costo PROMEDIO vs. margen con costo de REPOSICIÓN

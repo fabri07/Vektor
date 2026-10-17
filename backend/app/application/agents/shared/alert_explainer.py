@@ -110,7 +110,10 @@ def resolve_alert_facts(
             from_risk_code = True
             for metric in _RISK_CODE_TO_METRICS[alert_id]:
                 candidate = by_metric.get(metric)
-                if candidate is not None:
+                # Un hecho sin número no fundamenta la alerta: con el neto del
+                # mes cerrado ausente (sin mes cerrado, sin gastos) se cae al
+                # bruto (revisión de M·3-1).
+                if candidate is not None and candidate.value is not None:
                     fact = candidate
                     break
         if fact is None and meaning is None:

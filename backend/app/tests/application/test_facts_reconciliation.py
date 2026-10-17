@@ -178,11 +178,37 @@ def test_margen_bruto_usa_cogs(svc):
     assert f.value == 39.1
 
 
-def test_margen_neto_resta_todos_los_gastos(svc):
+def test_margen_neto_resta_gastos_operativos_no_la_mercaderia(svc):
+    # M·3-1: (ingreso − costo vendido − gastos operativos) / ingreso.
+    # ventas 23000, costo vendido 14000, alquiler 1000; la compra INVENTORY de
+    # 4000 NO se resta (ya está en el costo vendido): 8000/23000 = 34,78%.
     f = svc.margen_neto("t", P30)
-    # ventas 23000, gastos totales = 4000+1000 = 5000
-    # (23000-5000)/23000*100 = 78.26%
-    assert f.value == 78.3
+    assert f.value == 34.8
+    assert f.detail is not None
+    assert f.detail["gastos_operativos_ars"] == 1000.0
+    assert f.detail["resultado_ars"] == 8000.0
+
+
+def test_margen_neto_cuenta_gastos_no_recurrentes_y_saca_mercaderia_legacy():
+    svc = _service(
+        sales_rows=[{"sale_date": TODAY, "amount_ars": 10000, "cost_ars": 6000,
+                     "payment_method": "cash", "provenance": "REAL"}],
+        expenses_rows=[
+            # comisión puntual: cuenta (recurrente o no)
+            {"expense_date": TODAY, "amount_ars": 500, "category": "BANK_FEES",
+             "expense_type": "OPEX", "provenance": "REAL"},
+            # compra vieja marcada OPEX y la forma legacy: son mercadería
+            {"expense_date": TODAY, "amount_ars": 3000, "category": "INVENTORY",
+             "expense_type": "OPEX", "provenance": "REAL"},
+            {"expense_date": TODAY, "amount_ars": 3000, "category": "mercaderia",
+             "expense_type": "OPEX", "provenance": "REAL"},
+            # gasto demo en tenant real: fuera
+            {"expense_date": TODAY, "amount_ars": 9000, "category": "RENT",
+             "expense_type": "OPEX", "provenance": "DEMO"},
+        ],
+    )
+    f = svc.margen_neto("t", P30)
+    assert f.value == 35.0  # (10000 − 6000 − 500) / 10000
 
 
 def test_bruto_y_neto_son_distintos(svc):
@@ -226,16 +252,32 @@ def test_sin_costo_no_es_margen_100():
     assert svc.margen_bruto("t", P30).value is None
 
 
-def test_margen_neto_sin_gastos_degrada_confidence():
-    # Cero gastos cargados ≠ cero gastos reales: el 100% sale con confidence 0.4.
+def test_margen_neto_sin_gastos_es_ausente():
+    # Cero gastos cargados ≠ cero gastos reales (casi siempre: no los cargó).
+    # Antes salía 100% con confidence 0.4; M·3-1: sin número, con el motivo.
     svc = _service(
-        sales_rows=[{"sale_date": TODAY, "amount_ars": 10000, "cost_ars": None,
+        sales_rows=[{"sale_date": TODAY, "amount_ars": 10000, "cost_ars": 6000,
                      "payment_method": "cash", "provenance": "REAL"}],
     )
     f = svc.margen_neto("t", P30)
-    assert f.value == 100.0
-    assert f.confidence == 0.4
-    assert "sin_gastos" in f.source
+    assert f.value is None
+    assert f.provenance == Provenance.EMPTY
+    assert f.severity is None
+    assert f.detail is not None
+    assert f.detail["motivo"] == "sin gastos cargados en el mes"
+
+
+def test_margen_neto_sin_bruto_es_ausente_con_el_motivo_del_bruto():
+    svc = _service(
+        sales_rows=[{"sale_date": TODAY, "amount_ars": 10000, "cost_ars": None,
+                     "payment_method": "cash", "provenance": "REAL"}],
+        expenses_rows=[{"expense_date": TODAY, "amount_ars": 1000, "category": "RENT",
+                        "expense_type": "OPEX", "provenance": "REAL"}],
+    )
+    f = svc.margen_neto("t", P30)
+    assert f.value is None
+    assert f.detail is not None
+    assert f.detail["motivo"] == "cobertura de costo 0,0%"
 
 
 def test_cobertura_parcial_proyecta_el_ratio_y_la_declara():
@@ -582,7 +624,7 @@ def svc_sin_umbrales():
          "payment_method": "cash", "provenance": "REAL"},
     ])
     expenses = pd.DataFrame([
-        {"expense_date": TODAY, "amount_ars": 9900, "category": "RENT",
+        {"expense_date": TODAY, "amount_ars": 3900, "category": "RENT",
          "expense_type": "OPEX", "provenance": "REAL"},
     ])
     products = pd.DataFrame([], columns=_PRODUCTS_COLS)
@@ -604,7 +646,7 @@ def test_margen_neto_con_umbrales_si_lleva_severity():
     svc_kiosco = _service(
         sales_rows=[{"sale_date": TODAY, "amount_ars": 10000, "cost_ars": 6000,
                      "payment_method": "cash", "provenance": "REAL"}],
-        expenses_rows=[{"expense_date": TODAY, "amount_ars": 9900, "category": "RENT",
+        expenses_rows=[{"expense_date": TODAY, "amount_ars": 3900, "category": "RENT",
                         "expense_type": "OPEX", "provenance": "REAL"}],
     )
     assert svc_kiosco.margen_neto("t", P30).severity == "critical"

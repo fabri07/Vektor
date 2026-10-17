@@ -38,6 +38,42 @@ def datos_margen_bruto(f: BusinessFact) -> dict[str, Any]:
     }
 
 
+_MESES = (
+    "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+    "septiembre", "octubre", "noviembre", "diciembre",
+)
+
+
+def nombre_del_mes(f: BusinessFact) -> str:
+    """«septiembre 2026» desde ``detail["periodo_desde"]`` o el label ``mes_AAAA_MM``."""
+    d = f.detail or {}
+    desde = d.get("periodo_desde")
+    texto = str(desde) if desde else ""
+    if not texto and f.period:
+        partes = f.period.rsplit("_", 2)
+        texto = f"{partes[-2]}-{partes[-1]}-01" if len(partes) == 3 else ""
+    try:
+        anio, mes = int(texto[:4]), int(texto[5:7])
+    except ValueError:
+        return f.period or "el período"
+    return f"{_MESES[mes - 1]} {anio}"
+
+
+def describir_margen_neto(f: BusinessFact) -> str:
+    """El neto del mes cerrado (M·3-1): «12.4% (…)», «… ESTIMADO» o «sin medir (…)»."""
+    d = f.detail or {}
+    if f.value is None:
+        return f"sin medir ({d.get('motivo') or 'sin ventas en el período'})"
+    detalle = (
+        f"resultado ${d.get('resultado_ars')}; gastos operativos "
+        f"${d.get('gastos_operativos_ars')}; cobertura de costo "
+        f"{d.get('cobertura_total_pct')}%"
+    )
+    if d.get("estado") == "estimado":
+        return f"{f.value}% ESTIMADO ({d.get('motivo')}; {detalle})"
+    return f"{f.value}% ({detalle})"
+
+
 def describir_promedio_vs_reposicion(f: BusinessFact | None) -> str | None:
     """El efecto inflación sobre el stock (M·P4-2), o ``None``.
 

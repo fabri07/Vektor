@@ -57,7 +57,18 @@ import asyncpg  # noqa: E402
 from _db import normalize_dsn  # noqa: E402
 
 from app.domain.business_time import today_ar  # noqa: E402
-from app.domain.margen import LineaDeMargen, MedicionDeMargen, medir_margen  # noqa: E402
+from app.domain.expense_categories import _EXPENSE_ALIASES  # noqa: E402
+from app.domain.margen import (  # noqa: E402
+    LineaDeMargen,
+    MedicionDeMargen,
+    MedicionDeMargenNeto,
+    medir_margen,
+    medir_margen_neto,
+)
+from app.domain.purchase_cost import ATRIBUIDO_A_INVENTARIO_FIELD  # noqa: E402
+from app.domain.verticals import try_parse_vertical  # noqa: E402
+from app.heuristics.health_engine import _band_score, _margin_bands  # noqa: E402
+from app.heuristics.verticals.loader import load_margin_benchmark  # noqa: E402
 
 CIEN = Decimal("100")
 
@@ -140,6 +151,13 @@ class DatosTenant:
     gastos_30d_det: Decimal = Decimal("0")
     ultima_venta: date | None = None
     salud: Salud | None = None
+    #: M·3-1 (sombra): ventas y gastos operativos del último mes CERRADO.
+    lineas_mes_cerrado: list[LineaVenta] = field(default_factory=list)
+    gastos_operativos_mes: Decimal = Decimal("0")
+    gastos_operativos_mes_n: int = 0
+    inicio_mes_cerrado: date | None = None
+    #: Primera venta o gasto vivos (¿el mes cerrado está completo?).
+    primer_movimiento: date | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -232,6 +250,26 @@ def margen_facts(lineas: Sequence[LineaVenta], regimen: str | None) -> MedicionD
     return medir_margen(
         (LineaDeMargen(ln.importe, ln.costo, ln.confirmado) for ln in lineas), regimen
     )
+
+
+def margen_neto_mes_cerrado(d: DatosTenant) -> MedicionDeMargenNeto:
+    """M·3-1: ``FactsService.margen_neto`` del último mes cerrado (la sombra)."""
+    return medir_margen_neto(
+        margen_facts(d.lineas_mes_cerrado, d.regimen),
+        d.gastos_operativos_mes,
+        gastos_observados=d.gastos_operativos_mes_n > 0,
+        datos_desde=d.primer_movimiento,
+        periodo_desde=d.inicio_mes_cerrado,
+    )
+
+
+def subscore_con_neto(d: DatosTenant, neto: MedicionDeMargenNeto) -> int | None:
+    """El subscore de margen que daría el neto del mes cerrado (cuenta habilitada)."""
+    vertical = try_parse_vertical(d.rubro)
+    if vertical is None or neto.margen_pct is None:
+        return None
+    ratio = float(neto.margen_pct / CIEN)
+    return _band_score(ratio, _margin_bands(load_margin_benchmark(vertical)))
 
 
 def margen_neto_det(ventas: Decimal, gastos: Decimal) -> Decimal | None:
@@ -458,6 +496,19 @@ def informe_tenant(d: DatosTenant, desde: date, hasta: date, ejemplos: int = 3) 
                 f"  (ingreso − costo vendido − fijos) / ingreso [{s.margen_estado}]",
                 pct(margen_salud(s), s.margen_motivo or "margen ausente"),
             )
+    neto = margen_neto_mes_cerrado(d)
+    linea(
+        "M·3-1 sombra: margen neto del último mes cerrado",
+        f"{pct(neto.margen_pct, neto.motivo or 'sin medición')} estado={neto.estado} "
+        f"ventas={len(d.lineas_mes_cerrado)} líneas "
+        f"gastos operativos={ars(d.gastos_operativos_mes)} ({d.gastos_operativos_mes_n})",
+    )
+    nuevo = subscore_con_neto(d, neto)
+    linea(
+        "M·3-1 sombra: score_margin antes → después",
+        f"{d.salud.score_margin if d.salud else 'sin snapshot'} → "
+        f"{nuevo if nuevo is not None else 'sin medición (no entra en el total)'}",
+    )
     linea("gastos de mercadería en la ventana (criterio BSL)", ars(d.inventario_bsl))
     linea("  de ellos «Stock inicial: …» (catálogo como compra)", ars(d.inventario_stock_inicial))
 
@@ -550,6 +601,27 @@ SELECT tenant_id::text AS tenant_id,
  GROUP BY tenant_id
 """
 
+#: Las formas de «mercadería» del catálogo de alias (``es_categoria_de_mercaderia``
+#: de FactsService normaliza con el mismo catálogo).
+_MERCADERIA_SQL = ", ".join(
+    f"'{k}'" for k in sorted({"inventory", *(a for a, c in _EXPENSE_ALIASES.items()
+                                            if c == "INVENTORY")})
+)
+
+#: M·3-1: los gastos que resta el margen neto (todo lo vivo que NO es
+#: mercadería, sin el flete capitalizado: ``gasto_de_resultado``).
+_GASTOS_OPERATIVOS = f"""
+SELECT tenant_id::text AS tenant_id, coalesce(sum(amount), 0) AS total, count(*) AS n
+  FROM expense_entries
+ WHERE voided_at IS NULL AND provenance = 'REAL'
+   AND date(transaction_date) BETWEEN $2 AND $3
+   AND expense_type <> 'COGS'
+   AND translate(lower(trim(category)), 'áéíóúü', 'aeiouu') NOT IN ({_MERCADERIA_SQL})
+   AND coalesce(custom_fields ->> '{ATRIBUIDO_A_INVENTARIO_FIELD}', '') NOT IN ('true', '1')
+   AND {_FILTRO.format(col="tenant_id")}
+ GROUP BY tenant_id
+"""
+
 #: ``calcular_flujo_neto_30d``: todo lo vivo desde hoy − 30, sin cobros de fiado (M·2b-2).
 _DET = f"""
 SELECT t.tenant_id::text AS tenant_id, sum(t.v) AS ventas, sum(t.g) AS gastos FROM (
@@ -559,6 +631,16 @@ SELECT t.tenant_id::text AS tenant_id, sum(t.v) AS ventas, sum(t.g) AS gastos FR
     UNION ALL
     SELECT tenant_id, 0, amount FROM expense_entries
      WHERE voided_at IS NULL AND transaction_date >= $2
+) t
+ WHERE {_FILTRO.format(col="t.tenant_id")}
+ GROUP BY t.tenant_id
+"""
+
+_PRIMER_MOVIMIENTO = f"""
+SELECT t.tenant_id::text AS tenant_id, min(t.f)::date AS primero FROM (
+    SELECT tenant_id, transaction_date AS f FROM sales_entries WHERE voided_at IS NULL
+    UNION ALL
+    SELECT tenant_id, transaction_date FROM expense_entries WHERE voided_at IS NULL
 ) t
  WHERE {_FILTRO.format(col="t.tenant_id")}
  GROUP BY t.tenant_id
@@ -632,6 +714,22 @@ async def leer(conn: Any, tenant: str | None, desde: date, hasta: date) -> list[
         d = de(r["tenant_id"])
         d.inventario_bsl = Decimal(str(r["inventario_bsl"]))
         d.inventario_stock_inicial = Decimal(str(r["inventario_stock_inicial"]))
+    fin_mc = hasta.replace(day=1) - timedelta(days=1)
+    inicio_mc = fin_mc.replace(day=1)
+    for r in await conn.fetch(_VENTAS, tenant, inicio_mc, fin_mc):
+        de(r["tenant_id"]).lineas_mes_cerrado.append(
+            LineaVenta(
+                importe=Decimal(str(r["amount"])),
+                costo=_dec(r["cost_ars"]),
+                confirmado=r["cost_confirmed"] is True,
+            )
+        )
+    for r in await conn.fetch(_GASTOS_OPERATIVOS, tenant, inicio_mc, fin_mc):
+        d = de(r["tenant_id"])
+        d.gastos_operativos_mes = Decimal(str(r["total"]))
+        d.gastos_operativos_mes_n = int(r["n"])
+    for r in await conn.fetch(_PRIMER_MOVIMIENTO, tenant):
+        de(r["tenant_id"]).primer_movimiento = r["primero"]
     for r in await conn.fetch(_DET, tenant, hasta - timedelta(days=30)):
         d = de(r["tenant_id"])
         d.ventas_30d_det = Decimal(str(r["ventas"]))
@@ -643,6 +741,7 @@ async def leer(conn: Any, tenant: str | None, desde: date, hasta: date) -> list[
     if tenant:
         de(tenant)
     for tid, d in datos.items():
+        d.inicio_mes_cerrado = inicio_mc
         if (p := perfiles.get(tid)) is not None:
             d.tiene_perfil = True
             d.rubro = p["vertical_code"]

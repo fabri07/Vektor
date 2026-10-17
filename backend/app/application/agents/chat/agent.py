@@ -265,7 +265,9 @@ class AgentChat(BaseAgent):
         try:
             from app.application.agents.shared.margen_texto import (  # noqa: PLC0415
                 describir_margen_bruto,
+                describir_margen_neto,
                 describir_promedio_vs_reposicion,
+                nombre_del_mes,
             )
             from app.application.services.deterministic_finance import (  # noqa: PLC0415
                 get_financial_summary,
@@ -293,13 +295,23 @@ class AgentChat(BaseAgent):
                 )
             # El margen sale de FactsService (M·2b-2): la misma definición que el
             # dashboard y la salud. Estimado o sin medir se dice como tal.
+            # M·3-1: el indicador de salud es el NETO del último mes cerrado;
+            # mientras corre el mes se ve el BRUTO del mes en curso.
             lectura = await leer_margenes(db, tenant_id)
-            margen_txt = (
-                describir_margen_bruto(lectura.margenes.bruto)
-                if lectura.margenes is not None
-                else f"sin medir ({lectura.motivo})"
-            )
-            lines.append(f"  Margen bruto (ventas − costo de lo vendido): {margen_txt}")
+            margenes = lectura.margenes
+            if margenes is None:
+                lines.append(f"  Margen neto: sin medir ({lectura.motivo})")
+            else:
+                lines.append(
+                    f"  Margen neto de {nombre_del_mes(margenes.neto)} (mes cerrado; "
+                    f"ventas − costo de lo vendido − gastos operativos): "
+                    f"{describir_margen_neto(margenes.neto)}"
+                )
+                en_curso = margenes.bruto_mes_en_curso or margenes.bruto
+                lines.append(
+                    f"  Margen bruto del mes en curso (ventas − costo de lo vendido): "
+                    f"{describir_margen_bruto(en_curso)}"
+                )
             # M·P4-2: sólo con la cuenta habilitada y el dato presente.
             promedio_txt = (
                 describir_promedio_vs_reposicion(lectura.margenes.promedio_vs_reposicion)
@@ -307,7 +319,9 @@ class AgentChat(BaseAgent):
                 else None
             )
             if promedio_txt is not None:
-                lines.append(f"  Dato aparte del margen bruto: {promedio_txt}")
+                lines.append(
+                    f"  Dato aparte del margen bruto (últimos 30 días): {promedio_txt}"
+                )
             if not ticket.get("sin_datos"):
                 lines.append(
                     f"  Ticket promedio: ${ticket.get('ticket_promedio', 0)} "

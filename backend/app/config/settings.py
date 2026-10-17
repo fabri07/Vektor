@@ -346,6 +346,14 @@ class Settings(BaseSettings):
     def parse_avg_cost_display_rollout_tenant_ids(cls, v: object) -> list[str]:
         return parse_rollout_tenant_ids(v)
 
+    # M·3-1 — qué cuentas puntúan el margen con el NETO del mes cerrado.
+    NET_MARGIN_ROLLOUT_TENANT_IDS: list[str] = Field(default_factory=list)
+
+    @field_validator("NET_MARGIN_ROLLOUT_TENANT_IDS", mode="before")
+    @classmethod
+    def parse_net_margin_rollout_tenant_ids(cls, v: object) -> list[str]:
+        return parse_rollout_tenant_ids(v)
+
     # Auth social
     ENABLE_GOOGLE_LOGIN: bool = False
     ENABLE_FACEBOOK_LOGIN: bool = False  # Diferido — solo abstracción en fase 1

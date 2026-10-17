@@ -26,6 +26,7 @@ Mapeos clave (contratos verificados en app/persistence/models/transaction.py):
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -37,6 +38,7 @@ from app.application.services.facts_service import (
     BusinessFact,
     FactsService,
     Period,
+    Provenance,
     SeverityThresholds,
 )
 from app.config.avg_cost_display_rollout import avg_cost_display_enabled_for
@@ -86,6 +88,9 @@ class FactsFrames:
     mixed_tenders: pd.DataFrame
     coverage_start: date
     coverage_end: date
+    #: Primera venta o gasto vivos del negocio (M·3-1: ¿el mes cerrado está
+    #: completo?). ``None`` = sin movimientos.
+    primer_movimiento: date | None = None
 
 
 async def _gastos(
@@ -185,6 +190,7 @@ async def load_facts_frames(
             mixed_tenders=pd.DataFrame(columns=_MIXED_TENDERS_COLS),
             coverage_start=start,
             coverage_end=end,
+            primer_movimiento=await _primer_movimiento(session, tenant_id),
         )
 
     # ── Tenders de las operaciones de caja mixtas (B9) ──────────────────────
@@ -267,7 +273,28 @@ async def load_facts_frames(
         mixed_tenders=mixed_df,
         coverage_start=start,
         coverage_end=end,
+        primer_movimiento=await _primer_movimiento(session, tenant_id),
     )
+
+
+async def _primer_movimiento(session: AsyncSession, tenant_id: uuid.UUID) -> date | None:
+    """La primera venta o gasto vivos del negocio, en fecha (dos ``min`` por índice)."""
+    fechas: list[date] = []
+    for modelo in (SaleEntry, ExpenseEntry):
+        valor = (
+            await session.execute(
+                select(func.min(modelo.transaction_date)).where(
+                    modelo.tenant_id == tenant_id, modelo.voided_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if isinstance(valor, datetime):
+            local = _naive_ar(valor)
+            if local is not None:
+                fechas.append(local.date())
+        elif isinstance(valor, date):
+            fechas.append(valor)
+    return min(fechas) if fechas else None
 
 
 async def load_capital_frame(
@@ -352,6 +379,10 @@ class PreloadedFactsProvider:
         self._check_tenant(tenant_id)
         return self._frames.products.copy()
 
+    def primer_movimiento(self, tenant_id: str) -> date | None:
+        self._check_tenant(tenant_id)
+        return self._frames.primer_movimiento
+
     def mixed_tenders(self, tenant_id: str, start: date, end: date) -> pd.DataFrame:
         self._check_tenant(tenant_id)
         self._check_coverage(start, end)
@@ -404,7 +435,9 @@ async def build_facts_service(
     frames = await load_facts_frames(
         session,
         tenant_id,
-        start=period.previous().start,
+        # El margen neto es del último mes cerrado (M·3-1), que puede empezar
+        # antes del período anterior (p. ej. 31 de octubre − 59 días = 2/9).
+        start=min(period.previous().start, Period.mes_cerrado(today=period.end).start),
         end=period.end,
     )
     return FactsService(
@@ -428,14 +461,17 @@ async def _regimen_crudo(session: AsyncSession, tenant_id: uuid.UUID) -> str | N
 
 @dataclass(frozen=True)
 class MargenesDelPeriodo:
-    """Los dos márgenes del negocio, del MISMO FactsService (M·2b-2).
+    """Los márgenes del negocio, del MISMO FactsService (M·2b-2, M·3-1).
 
-    ``bruto`` = ventas − costo vendido (definición única, ``domain/margen.py``);
-    ``neto`` = ventas − TODOS los gastos (el resultado operativo).
+    ``bruto`` = ventas − costo vendido de los últimos 30 días (definición única,
+    ``domain/margen.py``); ``neto`` = el indicador de salud, del último MES
+    CERRADO: ingreso − costo vendido − gastos operativos; ``bruto_mes_en_curso``
+    = el bruto mientras corre el mes (lo que se ve hasta que cierre).
     """
 
     bruto: BusinessFact
     neto: BusinessFact
+    bruto_mes_en_curso: BusinessFact | None = None
     #: M·P4-2: el margen con costo promedio al lado del de reposición. ``None``
     #: si la cuenta no está habilitada (``AVG_COST_DISPLAY_ROLLOUT_TENANT_IDS``):
     #: nadie lo ve hasta que el dueño revise su sombra. Nunca es un 2.º margen.
@@ -445,7 +481,7 @@ class MargenesDelPeriodo:
 async def margenes_del_tenant(
     session: AsyncSession, tenant_id: uuid.UUID, *, dias: int = 30
 ) -> MargenesDelPeriodo | None:
-    """Margen bruto y neto de los últimos ``dias`` para el chat.
+    """Márgenes del tenant para el chat y el estado del negocio.
 
     Arma el servicio con el rubro del perfil y ``include_demo`` según el tenant
     (en un tenant demo todo es ``provenance='DEMO'``; un tenant real no ve filas
@@ -465,10 +501,13 @@ async def margenes_del_tenant(
     tenant = await session.get(Tenant, tenant_id)
     include_demo = bool(tenant and tenant.is_demo)
     period = Period.last_n_days(dias)
-    # Sólo ventas y gastos del período: los márgenes no comparan contra el
-    # anterior ni miran productos (corre en cada turno del chat).
+    mes_cerrado = Period.mes_cerrado(today=period.end)
+    mes_en_curso = Period.mes_en_curso(today=period.end)
+    # Sólo ventas y gastos (los márgenes no miran productos ni el período
+    # anterior; corre en cada turno del chat), desde el mes cerrado.
     frames = await load_facts_frames(
-        session, tenant_id, start=period.start, end=period.end, completo=False
+        session, tenant_id,
+        start=min(period.start, mes_cerrado.start), end=period.end, completo=False,
     )
     svc = FactsService(
         PreloadedFactsProvider(frames),
@@ -478,9 +517,35 @@ async def margenes_del_tenant(
     tid = str(tenant_id)
     return MargenesDelPeriodo(
         bruto=svc.margen_bruto(tid, period, include_demo=include_demo),
-        neto=svc.margen_neto(tid, period, include_demo=include_demo),
+        # El neto y el bruto en curso van aislados: un error suyo no puede
+        # tumbar el bruto de 30 días, que es lo que puntúa una cuenta sin
+        # habilitar (revisión de M·3-1).
+        neto=_aislado(
+            lambda: svc.margen_neto(tid, mes_cerrado, include_demo=include_demo),
+            tid, "margen_neto", mes_cerrado,
+        ),
+        bruto_mes_en_curso=_aislado(
+            lambda: svc.margen_bruto(tid, mes_en_curso, include_demo=include_demo),
+            tid, "margen_bruto", mes_en_curso,
+        ),
         promedio_vs_reposicion=_promedio_vs_reposicion(svc, tid, period, include_demo),
     )
+
+
+def _aislado(
+    calcular: Callable[[], BusinessFact], tid: str, metric: str, period: Period
+) -> BusinessFact:
+    """El hecho, o uno EMPTY «no se pudo medir ahora» si falla (nunca un número)."""
+    try:
+        return calcular()
+    except Exception as exc:  # noqa: BLE001 — un margen accesorio no tumba los demás
+        logger.warning(f"{metric}_fallo", tenant_id=tid, error=str(exc))
+        return BusinessFact(
+            fact_id=f"{metric}_{period.label}", domain="rentabilidad", metric=metric,
+            value=None, unit="%", period=period.label, provenance=Provenance.EMPTY,
+            confidence=0.0, source="error", explanation_key=metric,
+            detail={"estado": "ausente", "motivo": MOTIVO_ERROR},
+        )
 
 
 def _promedio_vs_reposicion(
