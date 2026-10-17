@@ -1,13 +1,14 @@
 """ORM models: sales_entries, expense_entries, products."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -101,6 +102,10 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     cost_origin: Mapped[str | None] = mapped_column(String(20), nullable=True)
     cost_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     cost_snapshot_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # M·3-4: fecha de NEGOCIO de la fuente del costo (la compra, el stock inicial o
+    # la edición manual/de catálogo). NULL = antigüedad desconocida (costo cargado
+    # sin fecha, sin costo, o venta anterior al backfill ``--solo-fecha``).
+    cost_source_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # M·P3 — costo PROMEDIO a la fecha de la venta (mig 20261014_0001). Es un DATO,
     # no el costo principal (``cost_*`` no se toca): derivado del historial
     # (``product_cost_history``) y recalculado cuando ese historial se republica.

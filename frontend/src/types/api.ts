@@ -186,6 +186,12 @@ export interface MarginFact {
   resultado_ars: number | null;
   /** Sólo en el desglose por categoría. */
   categoria: string | null;
+  /** M·3-4, sólo en el bruto: vendido con costo de hace > 45 días. */
+  costo_desactualizado_ars?: number | null;
+  costo_desactualizado_pct?: number | null;
+  costo_antiguedad_desconocida_ars?: number | null;
+  costo_antiguedad_desconocida_pct?: number | null;
+  costo_desactualizado_umbral_dias?: number | null;
 }
 
 export interface MarginsResponse {

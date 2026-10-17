@@ -14,7 +14,7 @@ import type { ProductResponse } from "@/services/products.service";
 import type { SaleEntryResponse } from "@/services/sales.service";
 import type { SupplierResponse } from "@/services/suppliers.service";
 import { fetchMargins } from "@/services/dashboard.service";
-import { describirMargen, nombreDelMes } from "@/features/dashboard/marginText";
+import { avisoCostoDesactualizado, describirMargen, nombreDelMes } from "@/features/dashboard/marginText";
 import type { MarginFact } from "@/types/api";
 import {
   buildCashBreakdown,
@@ -38,6 +38,7 @@ const TONO_MARGEN: Record<"negativo" | "normal" | "ausente", string> = {
 
 function MarginLine({ titulo, fact, grande = false }: { titulo: string; fact: MarginFact | null; grande?: boolean }) {
   const d = describirMargen(fact);
+  const desactualizado = avisoCostoDesactualizado(fact);
   return (
     <div className="rounded-xl border border-vektor-border bg-vektor-surface px-4 py-3">
       <div className="flex items-baseline justify-between gap-3">
@@ -48,6 +49,7 @@ function MarginLine({ titulo, fact, grande = false }: { titulo: string; fact: Ma
         </span>
       </div>
       {d.detalle && <p className="mt-1 text-xs text-vektor-muted">{d.detalle}</p>}
+      {desactualizado && <p className="mt-1 text-xs text-vektor-amber">{desactualizado}</p>}
     </div>
   );
 }

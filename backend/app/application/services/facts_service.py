@@ -46,6 +46,7 @@ from pydantic import BaseModel
 from app.domain.business_time import AR_TZ
 from app.domain.expense_categories import normalize_expense_category
 from app.domain.margen import (
+    COSTO_DESACTUALIZADO_DIAS,
     ESTADO_PROMEDIO_MEDIDO,
     ComparacionDeMargenes,
     LineaDeComparacion,
@@ -519,6 +520,7 @@ class FactsService:
             "supuestos": list(m.supuestos),
             "periodo_desde": p.start.isoformat(),
             "periodo_hasta": p.end.isoformat(),
+            **self._antiguedad_del_costo(sales),
         }
         if m.margen_pct is None:
             return BusinessFact(
@@ -536,6 +538,40 @@ class FactsService:
             sample_size=len(sales), source=f"sales[snapshot_costo,{m.estado}]",
             explanation_key="margen_bruto", detail=detail,
         )
+
+    @staticmethod
+    def _antiguedad_del_costo(sales: pd.DataFrame) -> dict[str, object]:
+        """M·3-4: cuánto de lo vendido usó un costo de hace más de 45 días.
+
+        A la fecha de la VENTA (el costo quedó congelado ahí). Sólo ventas con
+        costo; sin ``cost_source_date`` = antigüedad desconocida (costo cargado sin
+        fecha o venta anterior al backfill), que se informa aparte y nunca cuenta
+        como al día. El % es sobre todo lo vendido, como la cobertura.
+        """
+        vacio: dict[str, object] = {
+            "costo_desactualizado_ars": 0.0, "costo_desactualizado_pct": None,
+            "costo_antiguedad_desconocida_ars": 0.0, "costo_antiguedad_desconocida_pct": None,
+            "costo_desactualizado_umbral_dias": COSTO_DESACTUALIZADO_DIAS,
+        }
+        if sales.empty or "cost_source_date" not in sales.columns:
+            return vacio
+        con_costo = sales[sales["cost_ars"].notna()]
+        fuente = pd.to_datetime(con_costo["cost_source_date"], errors="coerce")
+        dias = (pd.to_datetime(con_costo["sale_date"]).dt.normalize() - fuente).dt.days
+        viejo = dias > COSTO_DESACTUALIZADO_DIAS
+        # Importes como se vendieron (con IVA para un RI); sólo valen sus %.
+        ingreso = float(sales["amount_ars"].sum())
+        desactualizado = float(con_costo.loc[viejo, "amount_ars"].sum())
+        desconocido = float(con_costo.loc[fuente.isna(), "amount_ars"].sum())
+        return {
+            "costo_desactualizado_ars": _ars(desactualizado),
+            "costo_desactualizado_pct": _pct(desactualizado / ingreso * 100) if ingreso else None,
+            "costo_antiguedad_desconocida_ars": _ars(desconocido),
+            "costo_antiguedad_desconocida_pct": (
+                _pct(desconocido / ingreso * 100) if ingreso else None
+            ),
+            "costo_desactualizado_umbral_dias": COSTO_DESACTUALIZADO_DIAS,
+        }
 
     def comparar_promedio_y_reposicion(self, tenant_id: str, p: Period, *,
                                        include_demo: bool = False) -> ComparacionDeMargenes:

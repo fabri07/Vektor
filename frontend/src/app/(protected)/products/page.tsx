@@ -270,7 +270,19 @@ const COLUMNS = [
     // M·3-2: visible, con el motivo cuando no hay (un costo 0 ya no da 100%).
     defaultVisible: true,
     render: (v: unknown, row: Record<string, unknown>) => {
-      if (v != null) return `${Number(v).toFixed(1)}%`;
+      if (v != null) {
+        // M·3-4: «costo desactualizado» con más de 45 días desde la última compra.
+        const texto =
+          typeof row.costo_antiguedad_texto === "string" ? row.costo_antiguedad_texto : null;
+        return (
+          <span title={texto ?? undefined}>
+            {`${Number(v).toFixed(1)}%`}
+            {row.costo_desactualizado === true && (
+              <span className="ml-1 text-xs text-vk-warning">(costo desactualizado: {texto})</span>
+            )}
+          </span>
+        );
+      }
       const motivo = typeof row.margin_motivo === "string" ? row.margin_motivo : null;
       return (
         <span className="text-vk-text-muted" title={motivo ?? undefined}>

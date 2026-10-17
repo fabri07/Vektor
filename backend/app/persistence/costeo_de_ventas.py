@@ -89,7 +89,7 @@ _UNIDAD_DUDOSA: Final = "m2a_ventas_unidad_dudosa"
 
 _COLUMNAS_DEL_SNAPSHOT: Final = (
     "cost_unit_ars", "cost_ars", "cost_confirmed", "cost_origin", "cost_reason",
-    "cost_snapshot_version",
+    "cost_snapshot_version", "cost_source_date",
     # M·P3: sin producto tampoco hay costo promedio.
     "cost_avg_unit_ars", "cost_avg_ars", "cost_avg_estado", "cost_avg_aproximado",
     "cost_avg_motivo", "cost_avg_pendiente",
@@ -259,6 +259,47 @@ def _elegir_fuente(
     dudosas: set[uuid.UUID],
 ) -> None:
     """El snapshot de M·2a: elige la fuente del costo principal a la fecha."""
+    for venta, snapshot in _snapshots(session, tenant_id, a_elegir, productos, dudosas):
+        venta.cost_unit_ars = snapshot.costo_unitario
+        venta.cost_ars = snapshot.costo_linea
+        venta.cost_confirmed = snapshot.confirmado
+        venta.cost_origin = snapshot.origen
+        venta.cost_reason = snapshot.motivo[:200] if snapshot.motivo else None
+        venta.cost_source_date = snapshot.fecha_fuente
+        venta.cost_snapshot_version = VERSION_SNAPSHOT
+
+
+def snapshots_sin_escribir(
+    session: Session,
+    tenant_id: uuid.UUID,
+    ventas: list[SaleEntry],
+    dudosas: set[uuid.UUID],
+) -> list[tuple[SaleEntry, CostoDeVenta]]:
+    """La fuente que elegiría HOY el costeo para cada venta, sin tocar la venta.
+
+    M·3-4 (``--solo-fecha``): el backfill de ``cost_source_date`` compara el costo
+    de esa fuente con el congelado y sólo fecha si coinciden (nunca revalúa).
+    """
+    product_ids = {v.product_id for v in ventas if v.product_id is not None}
+    productos = {
+        p.id: p
+        for p in session.execute(
+            select(Product).where(Product.tenant_id == tenant_id, Product.id.in_(product_ids))
+        ).scalars()
+    }
+    con_producto = [v for v in ventas if v.product_id in productos]
+    if not con_producto:
+        return []
+    return _snapshots(session, tenant_id, con_producto, productos, dudosas)
+
+
+def _snapshots(
+    session: Session,
+    tenant_id: uuid.UUID,
+    a_elegir: list[SaleEntry],
+    productos: dict[uuid.UUID, Product],
+    dudosas: set[uuid.UUID],
+) -> list[tuple[SaleEntry, CostoDeVenta]]:
     fiscal_crudo = session.execute(
         select(BusinessProfile.fiscal_condition)
         .where(BusinessProfile.tenant_id == tenant_id)
@@ -271,6 +312,7 @@ def _elegir_fuente(
     ):
         candidatas[fila.product_id].append(candidata_de_fila(fila))
 
+    resultado: list[tuple[SaleEntry, CostoDeVenta]] = []
     for venta in a_elegir:
         producto = productos[venta.product_id]  # type: ignore[index]
         dia = _dia(venta)
@@ -289,12 +331,8 @@ def _elegir_fuente(
                 base_units_per_sale_unit=producto.base_units_per_sale_unit,
                 fiscal_condition_crudo=fiscal_crudo,
             )
-        venta.cost_unit_ars = snapshot.costo_unitario
-        venta.cost_ars = snapshot.costo_linea
-        venta.cost_confirmed = snapshot.confirmado
-        venta.cost_origin = snapshot.origen
-        venta.cost_reason = snapshot.motivo[:200] if snapshot.motivo else None
-        venta.cost_snapshot_version = VERSION_SNAPSHOT
+        resultado.append((venta, snapshot))
+    return resultado
 
 
 def _costear_promedio(

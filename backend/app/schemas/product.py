@@ -7,7 +7,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
-from app.domain.business_time import now_ar_naive
+from app.domain.business_time import now_ar_naive, today_ar
+from app.domain.costo_vigente import FECHA_FIELD, ORIGEN_FIELD
+from app.domain.margen import es_costo_desactualizado, texto_antiguedad_del_costo
 from app.domain.product import effective_threshold
 from app.domain.sale_unit import formatear_cantidad, validar_unidad
 from app.schemas.pos import PosProductResponse
@@ -103,6 +105,37 @@ class ProductResponse(BaseModel):
         if self.sale_price_ars <= 0:
             return "sin precio de venta"
         return None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def costo_antiguedad_dias(self) -> int | None:
+        """M·3-4: días desde la fecha del costo vigente (compra o edición) a hoy.
+
+        Sale del sello que deja ``costo_vigente`` en ``custom_fields``; sin sello
+        (costo cargado sin fecha, import viejo) = ``None``, antigüedad desconocida.
+        """
+        sello = (self.custom_fields or {}).get(FECHA_FIELD)
+        if self.unit_cost_ars is None or self.unit_cost_ars <= 0 or not sello:
+            return None
+        try:
+            fecha = datetime.fromisoformat(str(sello)).date()
+        except ValueError:
+            return None
+        return max(0, (today_ar() - fecha).days)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def costo_desactualizado(self) -> bool | None:
+        """Más de 45 días (``domain/margen.COSTO_DESACTUALIZADO_DIAS``)."""
+        return es_costo_desactualizado(self.costo_antiguedad_dias)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def costo_antiguedad_texto(self) -> str | None:
+        """«última compra hace 52 días» / «costo cargado hace 3 días»."""
+        return texto_antiguedad_del_costo(
+            (self.custom_fields or {}).get(ORIGEN_FIELD), self.costo_antiguedad_dias
+        )
 
     @computed_field  # type: ignore[prop-decorator]
     @property

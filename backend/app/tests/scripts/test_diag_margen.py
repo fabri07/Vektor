@@ -11,6 +11,7 @@ import sys
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 
@@ -166,7 +167,7 @@ def test_sombra_m31_neto_del_mes_cerrado_y_subscore() -> None:
 
 def test_sombra_m33_el_iva_de_un_ri_no_resta() -> None:
     """La sombra espeja ``FactsService._iva_de_ri`` (revisión de M·3-3)."""
-    base = {
+    base: dict[str, Any] = {
         "tenant_id": "t", "rubro": "kiosco_almacen",
         "lineas_mes_cerrado": [LineaVenta(Decimal("12100"), Decimal("6000"), True)],
         "gastos_operativos_mes": Decimal("1500"), "gastos_operativos_mes_n": 2,

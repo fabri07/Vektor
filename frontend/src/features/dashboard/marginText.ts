@@ -82,3 +82,26 @@ export function etiquetaDelTramo(fact: MarginFact, granularidad: "dia" | "semana
   const [, mes, dia] = desde.split("-");
   return granularidad === "semana" ? `sem. ${dia}/${mes}` : `${dia}/${mes}`;
 }
+
+/**
+ * M·3-4: el aviso de costo desactualizado del bruto, o null. El backend ya
+ * calculó todo (a la fecha de cada venta) y manda el umbral; acá sólo se
+ * redacta. Lo vendido con antigüedad desconocida también se dice: nunca se
+ * lee como «al día».
+ */
+export function avisoCostoDesactualizado(fact: MarginFact | null | undefined): string | null {
+  if (fact == null || fact.value == null) return null;
+  const viejo = fact.costo_desactualizado_pct;
+  const desconocido = fact.costo_antiguedad_desconocida_pct;
+  const dias = fact.costo_desactualizado_umbral_dias ?? 45;
+  const partes: string[] = [];
+  if (viejo != null && viejo > 0) {
+    partes.push(`Costo desactualizado: ${formatPct(viejo)} de lo vendido usó un costo de hace más de ${dias} días`);
+  }
+  if (desconocido != null && desconocido > 0) {
+    partes.push(`antigüedad del costo desconocida en ${formatPct(desconocido)} de lo vendido`);
+  }
+  if (partes.length === 0) return null;
+  const texto = partes.join("; ");
+  return texto.charAt(0).toUpperCase() + texto.slice(1);
+}

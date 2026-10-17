@@ -279,6 +279,36 @@ def medir_margen_neto(
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# M·3-4 — antigüedad del costo («costo desactualizado»)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Un costo de reposición viejo con inflación infla el margen: la venta se costeó
+# con lo que valía la mercadería hace meses. No se ajusta ningún costo: se dice
+# qué parte de lo vendido usó un costo de hace MÁS de 45 días (decisión del
+# dueño). La antigüedad es a la fecha de la VENTA (el costo está congelado ahí);
+# en Productos, a hoy.
+
+COSTO_DESACTUALIZADO_DIAS: Final = 45
+
+
+def es_costo_desactualizado(dias: int | None) -> bool | None:
+    """``True`` con más de 45 días; ``None`` si la antigüedad no se sabe."""
+    if dias is None:
+        return None
+    return dias > COSTO_DESACTUALIZADO_DIAS
+
+
+def texto_antiguedad_del_costo(origen: str | None, dias: int | None) -> str | None:
+    """«última compra hace 52 días» / «costo cargado hace 3 días» / ``None``."""
+    if dias is None:
+        return None
+    cuando = "hoy" if dias <= 0 else ("hace 1 día" if dias == 1 else f"hace {dias} días")
+    if origen in ("compra", "stock_inicial"):
+        return f"última compra {cuando}"
+    return f"costo cargado {cuando}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # M·P4-2 — margen con costo PROMEDIO vs. margen con costo de REPOSICIÓN
 # ─────────────────────────────────────────────────────────────────────────────
 #

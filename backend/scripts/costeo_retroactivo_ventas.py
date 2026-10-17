@@ -10,6 +10,11 @@ Este script sólo elige los tenants, imprime el resumen y confirma o revierte.
   Sólo toca ventas SIN snapshot, así que reejecutarlo no duplica nada.
 - **``--revert <run_id>``:** devuelve a NULL las ventas de esa corrida cuyo snapshot
   sigue siendo el que escribió.
+- **``--solo-fecha`` (M·3-4):** no costea: completa ``cost_source_date`` de las
+  ventas YA costeadas, sólo donde la fuente que elige hoy el costeo da el mismo
+  costo y origen que los congelados (nunca revalúa). Dry-run igual; con
+  ``--apply`` deja un ``data_repair_runs`` ``M34_FECHA_DEL_COSTO`` que
+  ``--revert`` deshace.
 
 Nunca imprime la connection URL: sólo ``host`` y ``base``.
 
@@ -19,6 +24,7 @@ Usage (desde ``backend/``):
     ... --tenant-id <uuid> [--apply]
     ... --all [--apply]
     ... --revert <run_id>
+    ... --all --solo-fecha [--apply]
 """
 
 from __future__ import annotations
@@ -41,7 +47,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E40
 
 from app.application.services.costeo_retroactivo_service import (  # noqa: E402
     Resumen,
+    ResumenFecha,
     costear_historico,
+    fechar_costos,
     revertir,
 )
 from app.persistence.db.engine_factory import crear_engine  # noqa: E402
@@ -74,6 +82,17 @@ def _imprimir(r: Resumen, aplicar: bool, nombre: str) -> None:
         print(f"   APLICADO · run_id {r.run_id} (para revertir: --revert {r.run_id})")
 
 
+def _imprimir_fecha(r: ResumenFecha, aplicar: bool, nombre: str) -> None:
+    print(f"\n── {nombre} ({str(r.tenant_id)[:8]}…)  ventas costeadas sin fecha: {r.ventas}")
+    if not r.ventas:
+        return
+    print(f"   fechadas: {r.fechadas} (de ellas con costo de > 45 días: {r.desactualizadas})")
+    print(f"   la fuente de hoy no da el costo congelado (quedan sin fecha): {r.no_coinciden}")
+    print(f"   fuente sin fecha (costo cargado; antigüedad desconocida): {r.fuente_sin_fecha}")
+    if aplicar and r.run_id:
+        print(f"   APLICADO · run_id {r.run_id} (para revertir: --revert {r.run_id})")
+
+
 async def _tenants(session: AsyncSession, args: argparse.Namespace) -> list[uuid.UUID]:
     if args.tenant_id:
         return [uuid.UUID(args.tenant_id)]
@@ -93,7 +112,9 @@ async def _tenants(session: AsyncSession, args: argparse.Namespace) -> list[uuid
         .where(
             SaleEntry.product_id.is_not(None),
             SaleEntry.voided_at.is_(None),
-            SaleEntry.cost_snapshot_version.is_(None),
+            SaleEntry.cost_unit_ars.is_not(None) & SaleEntry.cost_source_date.is_(None)
+            if args.solo_fecha
+            else SaleEntry.cost_snapshot_version.is_(None),
         )
         .distinct()
     )
@@ -108,6 +129,8 @@ async def main() -> None:
     quien.add_argument("--all", action="store_true")
     quien.add_argument("--revert", metavar="RUN_ID")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--solo-fecha", action="store_true",
+                    help="M·3-4: sólo la fecha de la fuente de ventas ya costeadas")
     args = ap.parse_args()
 
     # La configuración de logging de la app puede dejar el eco del SQL en INFO.
@@ -132,6 +155,11 @@ async def main() -> None:
                         {"t": tenant_id},
                     )
                 ).scalar_one_or_none() or "(sin nombre)"
+                if args.solo_fecha:
+                    fechas = await fechar_costos(session, tenant_id, aplicar=args.apply)
+                    await (session.commit() if args.apply else session.rollback())
+                    _imprimir_fecha(fechas, args.apply, nombre)
+                    continue
                 resumen = await costear_historico(session, tenant_id, aplicar=args.apply)
                 if args.apply:
                     await session.commit()
