@@ -25,7 +25,7 @@ export const KPI_TOOLTIP_COPY: Record<string, string> = {
   Caja:
     "Caja: cuánto dinero está entrando y cómo se reparte entre distintos medios de cobro.",
   Margen:
-    "Margen: qué parte de cada venta se transforma en ganancia antes de gastos fijos.",
+    "Margen neto: lo que queda de cada venta después del costo de la mercadería y de todos los gastos del mes cerrado. Debajo, el margen bruto del mes en curso (sólo el costo de la mercadería).",
   Stock:
     "Stock: cómo está distribuido tu inventario entre productos disponibles, bajos, agotados y en camino.",
   Proveedores:
@@ -39,12 +39,6 @@ export interface CashMethodRow {
   amount: number;
   percentage: number;
   colorClass: string;
-}
-
-export interface MarginCategoryRow {
-  category: string;
-  margin: number;
-  tone: "green" | "amber" | "red";
 }
 
 export interface StockStatusRow {
@@ -78,9 +72,14 @@ export interface VolumeSummary {
 }
 
 export interface LineMetricOption {
-  value: "caja" | "ventas" | "margen" | "stock";
+  value: "caja" | "ventas" | "margen" | "margen_neto" | "stock";
   label: string;
   title: string;
+}
+
+/** Las métricas de margen salen de FactsService (M·3-2), no de `buildLineSeries`. */
+export function esMetricaDeMargen(metric: string): metric is "margen" | "margen_neto" {
+  return metric === "margen" || metric === "margen_neto";
 }
 
 export interface CompareOption {
@@ -98,7 +97,8 @@ export interface DistributionOption {
 export const LINE_METRIC_OPTIONS: LineMetricOption[] = [
   { value: "caja", label: "Evolución de caja", title: "¿Cómo evolucionó tu caja este mes?" },
   { value: "ventas", label: "Ventas totales", title: "¿Cómo evolucionaron tus ventas?" },
-  { value: "margen", label: "Margen promedio", title: "¿Cómo se movió tu margen promedio?" },
+  { value: "margen", label: "Margen bruto", title: "¿Cómo se movió tu margen bruto?" },
+  { value: "margen_neto", label: "Margen neto (mensual)", title: "¿Cómo se movió tu margen neto mes a mes?" },
   { value: "stock", label: "Score de stock", title: "¿Cómo evolucionó tu score de stock?" },
 ];
 
@@ -200,34 +200,6 @@ export function buildCashBreakdown(entries: SaleEntryResponse[]): {
   }));
 
   return { total, rows };
-}
-
-export function buildMarginBreakdown(products: ProductResponse[]): MarginCategoryRow[] {
-  const categories = new Map<string, { total: number; count: number }>();
-
-  for (const product of products) {
-    if (product.margin_pct == null) continue;
-    const category = product.category?.trim() || "Sin categoría";
-    const current = categories.get(category) ?? { total: 0, count: 0 };
-    current.total += product.margin_pct;
-    current.count += 1;
-    categories.set(category, current);
-  }
-
-  if (categories.size === 0) {
-    return [];
-  }
-
-  return [...categories.entries()]
-    .map(([category, summary]) => {
-      const margin = summary.total / summary.count;
-      return {
-        category,
-        margin,
-        tone: margin > 25 ? "green" : margin >= 10 ? "amber" : "red",
-      } satisfies MarginCategoryRow;
-    })
-    .sort((a, b) => b.margin - a.margin);
 }
 
 /**
@@ -508,7 +480,7 @@ function inBucket(dateStr: string, bucket: LineBucket): boolean {
 }
 
 export function buildLineSeries(
-  metric: LineMetricOption["value"],
+  metric: "caja" | "ventas" | "stock",
   sales: SaleEntryResponse[],
   expenses: ExpenseEntryResponse[],
   granularity: "hourly" | "daily" | "weekly" | "monthly",
@@ -544,15 +516,6 @@ export function buildLineSeries(
         .filter((entry) => inBucket(entry.transaction_date, bucket))
         .reduce((sum, entry) => sum + Number(entry.amount), 0);
       value = previous + salesTotal - expensesTotal;
-    } else if (metric === "margen") {
-      const periodRevenue = sales
-        .filter((entry) => inBucket(entry.transaction_date, bucket))
-        .reduce((sum, entry) => sum + Number(entry.amount), 0);
-      const periodCost = expenses
-        .filter((entry) => inBucket(entry.transaction_date, bucket))
-        .reduce((sum, entry) => sum + Number(entry.amount), 0);
-      // null cuando no hay ventas: el chart muestra un gap real en vez de interpolar
-      value = periodRevenue > 0 ? ((periodRevenue - periodCost) / periodRevenue) * 100 : null;
     } else {
       // stock: usa score_stock del historial real más cercano al bucket. Sin
       // historial no se fabrica un valor (no-invention) — el punto queda vacío.
@@ -651,10 +614,4 @@ export function buildDistributionSeries(
   }
 
   return [...buckets.entries()].map(([name, value]) => ({ name, value }));
-}
-
-export function getMarginToneClass(tone: MarginCategoryRow["tone"]): string {
-  if (tone === "green") return "text-vektor-teal";
-  if (tone === "amber") return "text-vektor-amber";
-  return "text-vektor-red";
 }

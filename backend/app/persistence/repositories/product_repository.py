@@ -126,7 +126,9 @@ class ProductRepository:
             unit_cost = float(p.unit_cost_ars) if p.unit_cost_ars is not None else None
             margin_pct: float | None = None
             margin_abs: float | None = None
-            if unit_cost is not None and sale_price > 0:
+            # M·3-2: un costo 0 es costo sin cargar, no «margen 100%» (misma
+            # regla que ProductResponse.margin_pct): va con los sin costo.
+            if unit_cost is not None and unit_cost > 0 and sale_price > 0:
                 margin_abs = round(sale_price - unit_cost, 2)
                 margin_pct = round((sale_price - unit_cost) / sale_price * 100, 1)
             out.append(

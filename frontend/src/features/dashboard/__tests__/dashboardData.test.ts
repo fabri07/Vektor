@@ -1,4 +1,4 @@
-import { buildLineSeries } from "@/features/dashboard/dashboardData";
+import { buildLineSeries, esMetricaDeMargen } from "@/features/dashboard/dashboardData";
 import type { SaleEntryResponse } from "@/services/sales.service";
 import type { ExpenseEntryResponse } from "@/services/expenses.service";
 import type { HealthScoreV2Response } from "@/types/api";
@@ -147,28 +147,10 @@ describe("buildLineSeries — buckets sobre el rango elegido, no sobre 'hoy'", (
     expect(series.every((point) => point.value === 0)).toBe(true);
   });
 
-  it("sólo ventas (sin gastos): margen no rompe y da 100% cuando no hubo costo", () => {
-    const sales = [sale({ amount: 1000, transaction_date: "2025-01-10T00:00:00" })];
-    const series = buildLineSeries(
-      "margen",
-      sales,
-      [],
-      "daily",
-      { from: "2025-01-10", to: "2025-01-10" },
-    );
-    expect(series[0]!.value).toBe(100);
-  });
-
-  it("sólo gastos (sin ventas): margen queda null (gap), no fabrica un valor", () => {
-    const expenses = [expense({ amount: 500, transaction_date: "2025-01-10T00:00:00" })];
-    const series = buildLineSeries(
-      "margen",
-      [],
-      expenses,
-      "daily",
-      { from: "2025-01-10", to: "2025-01-10" },
-    );
-    expect(series[0]!.value).toBeNull();
+  it("el margen ya no se calcula en React (M·3-2): sale de FactsService", () => {
+    expect(esMetricaDeMargen("margen")).toBe(true);
+    expect(esMetricaDeMargen("margen_neto")).toBe(true);
+    expect(esMetricaDeMargen("ventas")).toBe(false);
   });
 
   it("stock sin scoreHistory da null (no-invention) — ya no fabrica un coseno", () => {

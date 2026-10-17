@@ -87,6 +87,7 @@ RUTAS_DE_ANALISIS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
         ("GET", f"{P}/insights/actions"),
         ("GET", f"{P}/insights/breakdown"),
         ("GET", f"{P}/insights/cash-breakdown"),
+        ("GET", f"{P}/insights/margins"),  # M·3-2
         ("GET", f"{P}/forecast/cash"),
         ("GET", f"{P}/health-scores/current"),
         ("GET", f"{P}/health-scores/summary"),

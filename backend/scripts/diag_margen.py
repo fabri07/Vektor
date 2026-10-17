@@ -186,9 +186,9 @@ def clasificar_costo(precio: Decimal | None, costo: Decimal | None) -> str:
 def margen_api(precio: Decimal | None, costo: Decimal | None) -> Decimal | None:
     """Réplica EXACTA de ``ProductResponse.margin_pct`` (schemas/product.py).
 
-    Con costo 0 da 100: así lo ve hoy el frontend.
+    Desde M·3-2 un costo 0 no da 100: sale sin número (costo sin cargar).
     """
-    if costo is None or precio is None or precio == 0:
+    if costo is None or costo <= 0 or precio is None or precio <= 0:
         return None
     return (precio - costo) / precio * CIEN
 

@@ -222,6 +222,40 @@ class Period:
         return (d >= self.start) & (d <= self.end)
 
 
+Granularidad = Literal["dia", "semana", "mes"]
+
+CATEGORIA_SIN_PRODUCTO = "Sin producto"
+CATEGORIA_SIN_CATEGORIA = "Sin categoría"
+
+
+def tramos(p: Period, granularidad: Granularidad, *, completos: bool = False) -> list[Period]:
+    """Parte ``p`` en días, semanas (lunes a domingo) o meses calendario.
+
+    Los tramos de los bordes se recortan a ``p``; con ``completos`` (sólo meses)
+    se devuelve el mes entero, para el neto, que es de mes cerrado.
+    """
+    out: list[Period] = []
+    cursor = p.start
+    while cursor <= p.end:
+        if granularidad == "dia":
+            inicio, fin = cursor, cursor
+            etiqueta = f"dia_{cursor:%Y_%m_%d}"
+        elif granularidad == "semana":
+            inicio = cursor - timedelta(days=cursor.weekday())
+            fin = inicio + timedelta(days=6)
+            etiqueta = f"semana_{inicio:%Y_%m_%d}"
+        else:
+            inicio = cursor.replace(day=1)
+            siguiente = (inicio + timedelta(days=32)).replace(day=1)
+            fin = siguiente - timedelta(days=1)
+            etiqueta = f"mes_{inicio:%Y_%m}"
+        if not completos:
+            inicio, fin = max(inicio, p.start), min(fin, p.end)
+        out.append(Period(start=inicio, end=fin, label=etiqueta))
+        cursor = fin + timedelta(days=1) if completos else min(fin, p.end) + timedelta(days=1)
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. SEAM DE DATOS — el único punto que toca tu ORM/repos reales
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,6 +278,8 @@ class FactsDataProvider(Protocol):
         cost_avg_ars:    float|NaN # costo PROMEDIO de la venta (M·P3), un dato al lado del
                                    #   principal (opcional: sin columna = sin promedio)
         cost_avg_estado: str|None  # medido|incompleto|sin_medicion (opcional)
+        product_id:      str|None  # M·3-2 (opcional): None = venta sin producto
+        product_category: str|None # categoría ACTUAL del producto (opcional)
         payment_method:  str       # cash|debit_card|credit_card|transfer|qr|account|other
                                    #   (+ "inflow" = cobro de fiado, NO es venta)
         provenance:      str       # REAL|DEMO
@@ -323,6 +359,7 @@ class FactsService:
                  thresholds: SeverityThresholds | None = None, *,
                  fiscal_condition_crudo: str | None = None) -> None:
         self.provider = provider
+        self._memo: dict[tuple[object, ...], pd.DataFrame] = {}
         # Régimen CRUDO del tenant: el margen de un RI se compara sin IVA.
         self.fiscal_condition_crudo = fiscal_condition_crudo
         # `None` = el caller no sabe el vertical. Los umbrales independientes del
@@ -340,10 +377,23 @@ class FactsService:
 
     # ---- carga base (una sola vez por request si querés cachear) -----------
     def _sales(self, tenant_id: str, p: Period, include_demo: bool) -> pd.DataFrame:
-        return self._filter(self.provider.sales(tenant_id, p.start, p.end), include_demo)
+        # Memorizado por período: un margen pide las mismas ventas 2 a 4 veces
+        # (M·3-2: series con decenas de tramos). Nadie modifica estos frames en
+        # el lugar; el servicio vive lo que dura un pedido.
+        clave = ("sales", tenant_id, p.start, p.end, include_demo)
+        if clave not in self._memo:
+            self._memo[clave] = self._filter(
+                self.provider.sales(tenant_id, p.start, p.end), include_demo
+            )
+        return self._memo[clave]
 
     def _expenses(self, tenant_id: str, p: Period, include_demo: bool) -> pd.DataFrame:
-        return self._filter(self.provider.expenses(tenant_id, p.start, p.end), include_demo)
+        clave = ("expenses", tenant_id, p.start, p.end, include_demo)
+        if clave not in self._memo:
+            self._memo[clave] = self._filter(
+                self.provider.expenses(tenant_id, p.start, p.end), include_demo
+            )
+        return self._memo[clave]
 
     def _mixed_tenders(self, tenant_id: str, p: Period, include_demo: bool) -> pd.DataFrame:
         # Mismo período y MISMO filtro de procedencia que las ventas: un tender
@@ -362,8 +412,10 @@ class FactsService:
         return df[~is_inflow], df[is_inflow]
 
     def _ventas_reales(self, tenant_id: str, p: Period, include_demo: bool) -> pd.DataFrame:
-        ventas, _ = self._split_inflows(self._sales(tenant_id, p, include_demo))
-        return ventas
+        clave = ("ventas_reales", tenant_id, p.start, p.end, include_demo)
+        if clave not in self._memo:
+            self._memo[clave], _ = self._split_inflows(self._sales(tenant_id, p, include_demo))
+        return self._memo[clave]
 
     # ═══════════════════════════════════════════════════════════════════════
     # MÉTRICA 1 — VENTAS DEL PERÍODO (+ variación vs anterior)
@@ -441,23 +493,7 @@ class FactsService:
         sales = self._ventas_reales(tenant_id, p, include_demo)
         if sales.empty:
             return medir_margen([], self.fiscal_condition_crudo)
-        costos = sales["cost_ars"] if "cost_ars" in sales.columns else None
-        confirmadas = (
-            sales["cost_confirmed"].astype("boolean").fillna(False).astype(bool)
-            if "cost_confirmed" in sales.columns
-            else None
-        )
-        lineas = []
-        for i, importe in enumerate(sales["amount_ars"]):
-            costo = None if costos is None else costos.iloc[i]
-            con_costo = costo is not None and not pd.isna(costo)
-            lineas.append(LineaDeMargen(
-                importe=Decimal(str(importe)),
-                costo=Decimal(str(costo)) if con_costo else None,
-                confirmado=bool(con_costo and confirmadas is not None
-                                and confirmadas.iloc[i]),
-            ))
-        return medir_margen(lineas, self.fiscal_condition_crudo)
+        return self._medir_lineas(sales)
 
     def margen_bruto(self, tenant_id: str, p: Period, *,
                      include_demo: bool = False) -> BusinessFact:
@@ -480,6 +516,8 @@ class FactsService:
                 _ars(float(m.costo_vendido)) if m.costo_vendido is not None else None
             ),
             "supuestos": list(m.supuestos),
+            "periodo_desde": p.start.isoformat(),
+            "periodo_hasta": p.end.isoformat(),
         }
         if m.margen_pct is None:
             return BusinessFact(
@@ -573,6 +611,108 @@ class FactsService:
             sample_size=len(sales), source="sales[snapshot_costo,costo_promedio]",
             explanation_key="margen_promedio_vs_reposicion", detail=detail,
         )
+
+    # ── M·3-2: lo que pinta la pantalla del margen ───────────────────────────
+    def margen_bruto_por_categoria(self, tenant_id: str, p: Period, *,
+                                   include_demo: bool = False) -> list[BusinessFact]:
+        """El bruto de ``p`` por categoría de producto, cada una con su cobertura.
+
+        Las ventas sin producto van a «Sin producto» (ingreso sin costo: su
+        cobertura es 0 y sale ausente, a la vista); un producto sin categoría a
+        «Sin categoría». Mismo universo y misma definición que ``margen_bruto``.
+        """
+        sales = self._ventas_reales(tenant_id, p, include_demo)
+        if sales.empty:
+            return []
+        if "product_id" in sales.columns:
+            sin_producto = sales["product_id"].isna()
+        else:
+            sin_producto = pd.Series(True, index=sales.index)
+        cat = (
+            sales["product_category"] if "product_category" in sales.columns
+            else pd.Series(None, index=sales.index, dtype=object)
+        )
+        grupo = cat.where(cat.notna() & (cat.astype(str).str.strip() != ""),
+                          CATEGORIA_SIN_CATEGORIA).astype(str)
+        grupo = grupo.mask(sin_producto, CATEGORIA_SIN_PRODUCTO)
+        out: list[tuple[Decimal, BusinessFact]] = []
+        for nombre, filas in sales.groupby(grupo, sort=False):
+            m = self._medir_lineas(filas)
+            out.append((m.ingreso_total, BusinessFact(
+                fact_id=f"margen_bruto_categoria_{p.label}_{nombre}", domain="rentabilidad",
+                metric="margen_bruto_categoria",
+                value=None if m.margen_pct is None else _pct(float(m.margen_pct)),
+                unit="%", period=p.label,
+                provenance=Provenance.EMPTY if m.margen_pct is None else Provenance.REAL,
+                confidence=round(min(1.0, float(m.cobertura_del_estado)), 2),
+                sample_size=len(filas), source="sales[snapshot_costo,categoria]",
+                explanation_key="margen_bruto",
+                detail={
+                    "categoria": str(nombre),
+                    "estado": m.estado, "motivo": m.motivo,
+                    "ingreso_ars": _ars(float(m.ingreso_total)),
+                    "cobertura_confirmada_pct": _pct(float(m.cobertura_confirmada * 100)),
+                    "cobertura_total_pct": _pct(float(m.cobertura_total * 100)),
+                },
+            )))
+        # De la categoría que más vendió a la que menos.
+        return [f for _, f in sorted(out, key=lambda par: par[0], reverse=True)]
+
+    def _medir_lineas(self, sales: pd.DataFrame) -> MedicionDeMargen:
+        """``medir_margen`` sobre un frame de ventas, vectorizado.
+
+        Las sumas del dominio son lineales (también la división por el IVA
+        supuesto de un RI), así que pasarle tres líneas agregadas —sin costo,
+        con costo estimado, con costo confirmado— da EXACTAMENTE lo mismo que
+        una por venta, sin un objeto por fila (M·3-2: series de hasta 3 años).
+        """
+        if sales.empty:
+            return medir_margen([], self.fiscal_condition_crudo)
+        importes = sales["amount_ars"].astype(float)
+        if "cost_ars" in sales.columns:
+            costos = pd.to_numeric(sales["cost_ars"], errors="coerce")
+        else:
+            costos = pd.Series(float("nan"), index=sales.index)
+        con_costo = costos.notna()
+        if "cost_confirmed" in sales.columns:
+            confirmadas = sales["cost_confirmed"].astype("boolean").fillna(False).astype(bool)
+        else:
+            confirmadas = pd.Series(False, index=sales.index)
+        confirmadas = confirmadas & con_costo
+
+        def total(serie: pd.Series) -> Decimal:
+            return Decimal(str(float(serie.sum())))
+
+        lineas = [LineaDeMargen(importe=total(importes[~con_costo]), costo=None)]
+        estimadas = con_costo & ~confirmadas
+        if estimadas.any():
+            lineas.append(LineaDeMargen(
+                importe=total(importes[estimadas]), costo=total(costos[estimadas]),
+                confirmado=False,
+            ))
+        if confirmadas.any():
+            lineas.append(LineaDeMargen(
+                importe=total(importes[confirmadas]), costo=total(costos[confirmadas]),
+                confirmado=True,
+            ))
+        return medir_margen(lineas, self.fiscal_condition_crudo)
+
+    def serie_margen_bruto(self, tenant_id: str, p: Period, granularidad: Granularidad, *,
+                           include_demo: bool = False) -> list[BusinessFact]:
+        """El bruto por tramo (día, semana desde el lunes, mes) dentro de ``p``."""
+        return [self.margen_bruto(tenant_id, tramo, include_demo=include_demo)
+                for tramo in tramos(p, granularidad)]
+
+    def serie_margen_neto(self, tenant_id: str, p: Period, *, today: date | None = None,
+                          include_demo: bool = False) -> list[BusinessFact]:
+        """El neto de cada mes CERRADO que cae entero o en parte dentro de ``p``.
+
+        Un mes en curso nunca entra: el neto es de mes cerrado (M·3-1).
+        """
+        hoy = today or datetime.now(AR_TZ).date()
+        limite = Period.mes_cerrado(today=hoy).end
+        return [self.margen_neto(tenant_id, mes, include_demo=include_demo)
+                for mes in tramos(p, "mes", completos=True) if mes.end <= limite]
 
     def _gastos_operativos(self, tenant_id: str, p: Period,
                            include_demo: bool) -> pd.DataFrame:

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
+    get_current_user,
     require_active_subscription,
     require_modify_access,
     require_role,
@@ -44,6 +45,7 @@ from app.domain.sale_unit import importe
 from app.persistence.costeo_de_ventas import marcar_unidad_no_confirmada
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.pos_operation import PosOperationLine
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
@@ -216,12 +218,13 @@ async def list_sales(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     tenant: Tenant = Depends(get_current_tenant),
+    current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
-) -> list[SaleEntry]:
+) -> list[SaleEntryResponse]:
     if from_date is None:
         from_date = date.today() - timedelta(days=30)
     repo = SaleRepository(session)
-    return await repo.list_by_tenant(
+    ventas = await repo.list_by_tenant(
         tenant.tenant_id,
         from_date=from_date,
         to_date=to_date,
@@ -229,6 +232,44 @@ async def list_sales(
         limit=limit,
         offset=offset,
     )
+    respuesta = [SaleEntryResponse.model_validate(v) for v in ventas]
+    # M·3-2: el costo y el margen de cada venta, sólo para dueño o admin. Un
+    # analista o un visor recibe ``null`` (el cajero ni llega: 403 en /sales).
+    if current_user.role_code in ROLES_QUE_VEN_EL_COSTO:
+        regimen = (
+            await session.execute(
+                select(BusinessProfile.fiscal_condition)
+                .where(BusinessProfile.tenant_id == tenant.tenant_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        for venta, fila in zip(ventas, respuesta, strict=True):
+            _con_margen(fila, venta, regimen)
+    return respuesta
+
+
+#: Quién ve costo y margen por venta (plan M·3, «sólo para dueño o admin»).
+ROLES_QUE_VEN_EL_COSTO = frozenset({"OWNER", "ADMIN"})
+
+
+def _con_margen(fila: SaleEntryResponse, venta: SaleEntry, regimen: str | None) -> None:
+    """El margen de UNA venta con la definición única (``domain/margen.py``)."""
+    from app.domain.margen import LineaDeMargen, medir_margen  # noqa: PLC0415
+
+    if (venta.payment_method or "").lower() == "inflow":
+        return  # un cobro de fiado no es venta: no tiene margen
+    costo = venta.cost_ars
+    fila.costo_ars = None if costo is None else float(costo)
+    if costo is None:
+        fila.margen_estado = "ausente"
+        fila.margen_motivo = venta.cost_reason or "sin costo"
+        return
+    m = medir_margen(
+        [LineaDeMargen(venta.amount, costo, venta.cost_confirmed is True)], regimen
+    )
+    fila.margen_estado = m.estado
+    fila.margen_motivo = m.motivo
+    fila.margen_pct = None if m.margen_pct is None else round(float(m.margen_pct), 1)
 
 
 @router.get(

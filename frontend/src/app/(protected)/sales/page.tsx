@@ -16,6 +16,7 @@ import { customersService, type CustomerResponse } from "@/services/customers.se
 import { AllDataModal } from "@/features/customFields/AllDataModal";
 import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFieldColumns";
 import { useAuthStore } from "@/stores/authStore";
+import { textoMargenDeVenta } from "@/features/sales/margenDeVenta";
 import { AddColumnButton } from "@/features/customFields/AddColumnButton";
 import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsButton";
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
@@ -68,6 +69,7 @@ function buildColumns(
   cargandoProductos: boolean,
   catalogLabels: Record<string, string>,
   customerById: Map<string, CustomerResponse>,
+  verCosto = false,
 ) {
   // Resuelve el nombre del cliente de una venta. El centinela "Local" entra al map
   // (include_sentinel), así que sus ventas resuelven a "Local" por nombre. Venta sin
@@ -153,7 +155,35 @@ function buildColumns(
     ),
     csvValue: (v: unknown) => String(Number(v)),
   },
+  // M·3-2: costo y margen de cada venta, sólo para dueño o admin. El backend
+  // ya los manda en null a los demás roles; acá ni se ofrecen las columnas.
+  ...(verCosto
+    ? [
+        {
+          key: "costo_ars",
+          header: "Costo",
+          hideable: true,
+          render: (v: unknown) => (v != null ? formatARS(Number(v)) : "—"),
+          csvValue: (v: unknown) => (v != null ? String(Number(v)) : ""),
+        },
+        {
+          key: "margen_pct",
+          header: "Margen",
+          hideable: true,
+          render: (v: unknown, row: SaleEntryResponse) => margenDeVenta(v, row),
+          csvValue: (v: unknown) => (v != null ? `${Number(v).toFixed(1)}%` : ""),
+        },
+      ]
+    : []),
   ];
+}
+
+function margenDeVenta(v: unknown, row: SaleEntryResponse) {
+  return (
+    <span className={v != null && Number(v) < 0 ? "text-vektor-red" : undefined} title={row.margen_motivo ?? undefined}>
+      {textoMargenDeVenta(v, row)}
+    </span>
+  );
 }
 
 export default function SalesPage() {
@@ -291,7 +321,13 @@ export default function SalesPage() {
 
   const columns = useBusinessFieldColumns<SaleEntryResponse>({
     entityType: "sale",
-    existingColumns: buildColumns(productById, cargandoProductos, catalogLabels, customerById),
+    existingColumns: buildColumns(
+      productById,
+      cargandoProductos,
+      catalogLabels,
+      customerById,
+      user?.role === "OWNER" || user?.role === "ADMIN",
+    ),
     onSaveCustomField: saveCustomField,
   });
 

@@ -506,3 +506,130 @@ async def get_cash_breakdown(
         income_series=_aggregate_to_series(income_rows, all_dates),
         expense_series=_aggregate_to_series(expense_rows, all_dates),
     )
+
+
+# ── M·3-2: el margen en pantalla (FactsService, sin fórmula en el front) ──────
+
+
+class MarginFactOut(BaseModel):
+    """Un margen de FactsService con su estado: nunca un 0 inventado."""
+
+    value: float | None
+    #: confirmado | estimado | ausente
+    estado: str
+    motivo: str | None = None
+    periodo: str | None = None
+    desde: date | None = None
+    hasta: date | None = None
+    cobertura_confirmada_pct: float | None = None
+    cobertura_total_pct: float | None = None
+    ingreso_ars: float | None = None
+    costo_vendido_ars: float | None = None
+    #: Sólo en el neto.
+    gastos_operativos_ars: float | None = None
+    resultado_ars: float | None = None
+    #: Sólo en el desglose por categoría.
+    categoria: str | None = None
+
+
+class MarginsResponse(BaseModel):
+    #: La completitud de los datos no llega a 50: estado vacío (no-invention).
+    sin_datos: bool = False
+    motivo: str | None = None
+    neto_mes_cerrado: MarginFactOut | None = None
+    bruto_mes_en_curso: MarginFactOut | None = None
+    bruto_periodo: MarginFactOut | None = None
+    #: dia | semana | mes (según el largo del período)
+    granularidad: str = "dia"
+    serie_bruto: list[MarginFactOut] = []
+    #: Un punto por mes CERRADO del período (el neto es de mes cerrado).
+    serie_neto: list[MarginFactOut] = []
+    por_categoria: list[MarginFactOut] = []
+
+
+def _num(v: object) -> float | None:
+    return None if v is None else float(str(v))
+
+
+def _margin_out(f: Any, desde: date, hasta: date) -> MarginFactOut:
+    d = f.detail or {}
+    return MarginFactOut(
+        value=f.value,
+        estado=str(d.get("estado") or ("ausente" if f.value is None else "confirmado")),
+        motivo=d.get("motivo"),
+        periodo=f.period,
+        desde=desde,
+        hasta=hasta,
+        cobertura_confirmada_pct=_num(d.get("cobertura_confirmada_pct")),
+        cobertura_total_pct=_num(d.get("cobertura_total_pct")),
+        ingreso_ars=_num(d.get("ingreso_ars")),
+        costo_vendido_ars=_num(d.get("costo_vendido_ars")),
+        gastos_operativos_ars=_num(d.get("gastos_operativos_ars")),
+        resultado_ars=_num(d.get("resultado_ars")),
+        categoria=d.get("categoria"),
+    )
+
+
+@router.get(
+    "/margins",
+    response_model=MarginsResponse,
+    summary="Margen neto del mes cerrado, bruto en curso, series y desglose (M·3-2)",
+    dependencies=_GATE_DE_ANALISIS,
+)
+async def get_margins(
+    from_date: date | None = Query(default=None, description="Inicio del período (inclusive)"),
+    to_date: date | None = Query(default=None, description="Fin del período (inclusive)"),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> MarginsResponse:
+    """Todo sale de FactsService (invariante 2c): el front no calcula ningún margen.
+
+    Sin período, el mes en curso. El neto es siempre del último mes cerrado; el
+    período elige el bruto, la serie y el desglose por categoría.
+    """
+    from app.application.services.facts_provider import (  # noqa: PLC0415
+        MOTIVO_SIN_RUBRO,
+        margenes_para_pantalla,
+    )
+    from app.domain.business_time import today_ar  # noqa: PLC0415
+
+    hoy = today_ar()
+    hasta = min(to_date or hoy, hoy)
+    desde = from_date or hasta.replace(day=1)
+    if desde > hasta:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="from_date no puede ser posterior a to_date",
+        )
+    if (hasta - desde).days > 3 * 366:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El período no puede superar los 3 años",
+        )
+    m = await margenes_para_pantalla(session, tenant.tenant_id, desde=desde, hasta=hasta)
+    if m is None:
+        return MarginsResponse(sin_datos=True, motivo=MOTIVO_SIN_RUBRO)
+    if m.sin_datos:
+        return MarginsResponse(
+            sin_datos=True, motivo="faltan datos del negocio para medir el margen"
+        )
+
+    def out(f: Any) -> MarginFactOut:
+        d = f.detail or {}
+        desde_f = d.get("periodo_desde")
+        hasta_f = d.get("periodo_hasta")
+        return _margin_out(
+            f,
+            date.fromisoformat(str(desde_f)) if desde_f else desde,
+            date.fromisoformat(str(hasta_f)) if hasta_f else hasta,
+        )
+
+    return MarginsResponse(
+        neto_mes_cerrado=out(m.neto_mes_cerrado) if m.neto_mes_cerrado else None,
+        bruto_mes_en_curso=out(m.bruto_mes_en_curso) if m.bruto_mes_en_curso else None,
+        bruto_periodo=out(m.bruto_periodo) if m.bruto_periodo else None,
+        granularidad=m.granularidad,
+        serie_bruto=[out(f) for f in m.serie_bruto],
+        serie_neto=[out(f) for f in m.serie_neto],
+        por_categoria=[out(f) for f in m.por_categoria],
+    )

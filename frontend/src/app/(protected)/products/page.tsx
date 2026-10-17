@@ -267,9 +267,17 @@ const COLUMNS = [
     key: "margin_pct",
     header: "Margen",
     hideable: true,
-    defaultVisible: false,
-    render: (v: unknown) =>
-      v != null ? `${Number(v).toFixed(1)}%` : "—",
+    // M·3-2: visible, con el motivo cuando no hay (un costo 0 ya no da 100%).
+    defaultVisible: true,
+    render: (v: unknown, row: Record<string, unknown>) => {
+      if (v != null) return `${Number(v).toFixed(1)}%`;
+      const motivo = typeof row.margin_motivo === "string" ? row.margin_motivo : null;
+      return (
+        <span className="text-vk-text-muted" title={motivo ?? undefined}>
+          —{motivo ? ` (${motivo})` : ""}
+        </span>
+      );
+    },
     csvValue: (v: unknown) => (v != null ? `${Number(v).toFixed(1)}%` : ""),
   },
   {

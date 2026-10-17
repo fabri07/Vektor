@@ -68,8 +68,8 @@ def test_ponderado_47_contra_simple_35_ejemplo_del_plan() -> None:
 def test_costo_cero_es_sin_costo_no_100() -> None:
     assert clasificar_costo(D("100"), D("0")) == "costo_cero"
     assert margen_producto(D("100"), D("0")) is None
-    # Lo que hace HOY la API (ProductResponse.margin_pct): 100%. Se documenta.
-    assert margen_api(D("100"), D("0")) == D("100")
+    # La API (ProductResponse.margin_pct) daba 100%; desde M·3-2, sin número.
+    assert margen_api(D("100"), D("0")) is None
     # El ponderado no suma un costo 0 como costo: lo deja fuera de la cobertura.
     margen, cobertura = margen_ponderado([(D("100"), D("0")), (D("100"), D("50"))])
     assert margen == D("50")
