@@ -530,6 +530,14 @@ class MarginFactOut(BaseModel):
     resultado_ars: float | None = None
     #: Sólo en el desglose por categoría.
     categoria: str | None = None
+    #: M·3-4, sólo en el bruto: lo vendido con un costo de hace > 45 días (a la
+    #: fecha de cada venta) y lo vendido con costo de antigüedad desconocida.
+    costo_desactualizado_ars: float | None = None
+    costo_desactualizado_pct: float | None = None
+    costo_antiguedad_desconocida_ars: float | None = None
+    costo_antiguedad_desconocida_pct: float | None = None
+    #: El umbral (``COSTO_DESACTUALIZADO_DIAS``): el front no lo repite.
+    costo_desactualizado_umbral_dias: int | None = None
 
 
 class MarginsResponse(BaseModel):
@@ -567,6 +575,14 @@ def _margin_out(f: Any, desde: date, hasta: date) -> MarginFactOut:
         gastos_operativos_ars=_num(d.get("gastos_operativos_ars")),
         resultado_ars=_num(d.get("resultado_ars")),
         categoria=d.get("categoria"),
+        costo_desactualizado_ars=_num(d.get("costo_desactualizado_ars")),
+        costo_desactualizado_pct=_num(d.get("costo_desactualizado_pct")),
+        costo_antiguedad_desconocida_ars=_num(d.get("costo_antiguedad_desconocida_ars")),
+        costo_antiguedad_desconocida_pct=_num(d.get("costo_antiguedad_desconocida_pct")),
+        costo_desactualizado_umbral_dias=(
+            int(str(d["costo_desactualizado_umbral_dias"]))
+            if d.get("costo_desactualizado_umbral_dias") is not None else None
+        ),
     )
 
 

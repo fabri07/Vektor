@@ -59,6 +59,9 @@ Ya resuelto y reutilizable: `medir_margen` (cobertura, estados, RI sin IVA), `ga
 
 ---
 
+**Cómo quedó (M·3-4):** como el plan. La antigüedad del margen es a la fecha de la venta; la de Productos, a hoy (sello del costo vigente). El backfill exige mismo costo **y** mismo origen. Detalle en `docs/claude/plataforma.md`.
+
+
 ## Verificación (cada PR)
 - Backend con env de CI: `ruff check .`, `mypy --no-incremental app` (el mypy con caché no vio un error en M·P4-2), suite completa `-n 6`; `-m postgres -n 0` contra `vektor_pgtest` en los PRs con migración (M·3-3, M·3-4).
 - Frontend (M·3-2): `npm run type-check`, `lint`, `npm run test -- --runInBand`.

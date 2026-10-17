@@ -67,7 +67,7 @@ def _naive_ar(value: datetime | None) -> datetime | None:
 
 _SALES_COLS = [
     "sale_date", "amount_ars", "cost_ars", "cost_confirmed", "cost_avg_ars", "cost_avg_estado",
-    "payment_method", "provenance", "product_id", "product_category",
+    "payment_method", "provenance", "product_id", "product_category", "cost_source_date",
 ]
 _MIXED_TENDERS_COLS = ["sale_date", "amount_ars", "payment_method", "provenance"]
 _EXPENSES_COLS = [
@@ -161,6 +161,7 @@ async def load_facts_frames(
         SaleEntry.provenance,
         SaleEntry.product_id,
         Product.category.label("product_category"),
+        SaleEntry.cost_source_date,
     ).outerjoin(
         # M·3-2: el desglose del margen por categoría de producto. La categoría
         # es la de HOY del producto (no se congela en la venta).
@@ -189,6 +190,8 @@ async def load_facts_frames(
                 "provenance": row.provenance,
                 "product_id": str(row.product_id) if row.product_id is not None else None,
                 "product_category": row.product_category,
+                # M·3-4: fecha de la fuente del costo (NULL = antigüedad desconocida).
+                "cost_source_date": row.cost_source_date,
             }
             for row in sales_rows
         ],

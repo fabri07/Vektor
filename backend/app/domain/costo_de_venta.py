@@ -59,6 +59,9 @@ class CostoDeVenta:
     confirmado: bool
     origen: OrigenDeVenta
     motivo: str | None
+    #: M·3-4: fecha de negocio de la fuente (compra, stock inicial o edición);
+    #: ``None`` = antigüedad desconocida (costo cargado sin fecha).
+    fecha_fuente: date | None = None
 
 
 def _elegible(edicion: CostoFechado | None, dia: date) -> CostoFechado | None:
@@ -118,4 +121,5 @@ def costo_de_venta(
         confirmado=base.confirmada,
         origen=origen,
         motivo=motivo,
+        fecha_fuente=fuente.fecha.date() if fuente.fecha is not None else None,
     )

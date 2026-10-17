@@ -1,4 +1,4 @@
-import { avisoDeSerieDeMargen, describirMargen, etiquetaDelTramo, nombreDelMes } from "@/features/dashboard/marginText";
+import { avisoCostoDesactualizado, avisoDeSerieDeMargen, describirMargen, etiquetaDelTramo, nombreDelMes } from "@/features/dashboard/marginText";
 import type { MarginFact } from "@/types/api";
 
 // M·3-2: la pantalla sólo formatea lo que manda FactsService.
@@ -87,5 +87,40 @@ describe("avisoDeSerieDeMargen", () => {
   it("con puntos: sin aviso", () => {
     expect(avisoDeSerieDeMargen("margen", { ...base, serie_bruto: [fact({})] }, false)).toBeNull();
     expect(avisoDeSerieDeMargen("margen_neto", { ...base, serie_neto: [fact({})] }, false)).toBeNull();
+  });
+});
+
+describe("avisoCostoDesactualizado (M·3-4)", () => {
+  const base = {
+    value: 30, estado: "confirmado" as const, motivo: null, periodo: "p", desde: "2026-10-01",
+    hasta: "2026-10-17", cobertura_confirmada_pct: 80, cobertura_total_pct: 90, ingreso_ars: 1000,
+    costo_vendido_ars: 700, gastos_operativos_ars: null, resultado_ars: null, categoria: null,
+  };
+
+  it("avisa con el % que manda el backend", () => {
+    expect(avisoCostoDesactualizado({ ...base, costo_desactualizado_pct: 12.5 })).toBe(
+      "Costo desactualizado: 12,5% de lo vendido usó un costo de hace más de 45 días",
+    );
+  });
+
+  it("dice la antigüedad desconocida: nunca se lee como al día", () => {
+    expect(
+      avisoCostoDesactualizado({ ...base, costo_desactualizado_pct: 0, costo_antiguedad_desconocida_pct: 80 }),
+    ).toBe("Antigüedad del costo desconocida en 80,0% de lo vendido");
+    expect(
+      avisoCostoDesactualizado({
+        ...base, costo_desactualizado_pct: 10, costo_antiguedad_desconocida_pct: 5,
+        costo_desactualizado_umbral_dias: 60,
+      }),
+    ).toBe(
+      "Costo desactualizado: 10,0% de lo vendido usó un costo de hace más de 60 días; antigüedad del costo desconocida en 5,0% de lo vendido",
+    );
+  });
+
+  it("sin desactualizado, sin margen o sin dato no dice nada", () => {
+    expect(avisoCostoDesactualizado({ ...base, costo_desactualizado_pct: 0 })).toBeNull();
+    expect(avisoCostoDesactualizado({ ...base, costo_desactualizado_pct: null })).toBeNull();
+    expect(avisoCostoDesactualizado({ ...base, value: null, costo_desactualizado_pct: 40 })).toBeNull();
+    expect(avisoCostoDesactualizado(null)).toBeNull();
   });
 });

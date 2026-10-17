@@ -78,6 +78,12 @@ export interface ProductResponse {
   margin_pct: number | null;
   /** M·3-2: por qué no hay margen de lista (costo 0, sin costo, sin precio). */
   margin_motivo?: string | null;
+  /** M·3-4: días desde la fecha del costo vigente (null = desconocida). */
+  costo_antiguedad_dias?: number | null;
+  /** Más de 45 días. */
+  costo_desactualizado?: boolean | null;
+  /** «última compra hace 52 días» / «costo cargado hace 3 días». */
+  costo_antiguedad_texto?: string | null;
   is_low_stock: boolean;
   stock_status: "in_stock" | "low_stock" | "out_of_stock";
   // F6-B4: estado de vencimiento a nivel producto (null = sin vencimiento conocido).
