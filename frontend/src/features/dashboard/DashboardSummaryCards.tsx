@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Building2, ChevronDown, ChevronRight, Package, Tag, Users, Wallet } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Select } from "@/components/ui/Select";
@@ -12,10 +13,12 @@ import type { ExpenseEntryResponse } from "@/services/expenses.service";
 import type { ProductResponse } from "@/services/products.service";
 import type { SaleEntryResponse } from "@/services/sales.service";
 import type { SupplierResponse } from "@/services/suppliers.service";
+import { fetchMargins } from "@/services/dashboard.service";
+import { describirMargen, nombreDelMes } from "@/features/dashboard/marginText";
+import type { MarginFact } from "@/types/api";
 import {
   buildCashBreakdown,
   buildCustomerBreakdown,
-  buildMarginBreakdown,
   buildProductPurchases,
   buildStockStatuses,
   buildSupplierBreakdown,
@@ -23,10 +26,93 @@ import {
   formatARSCompact,
   formatPercent,
   formatShortDate,
-  getMarginToneClass,
   KPI_TOOLTIP_COPY,
   type VolumeSummary,
 } from "@/features/dashboard/dashboardData";
+
+const TONO_MARGEN: Record<"negativo" | "normal" | "ausente", string> = {
+  negativo: "text-vektor-red",
+  normal: "text-vektor-white",
+  ausente: "text-vektor-muted",
+};
+
+function MarginLine({ titulo, fact, grande = false }: { titulo: string; fact: MarginFact | null; grande?: boolean }) {
+  const d = describirMargen(fact);
+  return (
+    <div className="rounded-xl border border-vektor-border bg-vektor-surface px-4 py-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-sm font-medium text-vektor-body">{titulo}</span>
+        <span className={`${grande ? "text-2xl" : "text-base"} font-semibold ${TONO_MARGEN[d.tono]}`}>
+          {d.valor}
+          {d.rotulo && <span className="ml-1 text-xs font-normal text-vektor-muted">{d.rotulo}</span>}
+        </span>
+      </div>
+      {d.detalle && <p className="mt-1 text-xs text-vektor-muted">{d.detalle}</p>}
+    </div>
+  );
+}
+
+/**
+ * M·3-2: la tarjeta de margen sale de FactsService (`GET /insights/margins`):
+ * el NETO del último mes cerrado (el indicador de salud) arriba y el BRUTO del
+ * mes en curso debajo, con su desglose por categoría. Sin fórmula en React.
+ */
+export function MarginCard() {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["margins", "dashboard"],
+    queryFn: () => fetchMargins(),
+    staleTime: 60_000,
+  });
+
+  return (
+    <article className="vektor-card p-5">
+      <Tooltip content={KPI_TOOLTIP_COPY.Margen}>
+        <h2 className="text-lg font-semibold text-vektor-white">Margen</h2>
+      </Tooltip>
+      {isLoading ? (
+        <div className="mt-5 h-32 animate-pulse rounded-xl bg-vektor-surface" />
+      ) : isError || !data ? (
+        <p className="mt-4 text-sm text-vektor-muted">No se pudo leer el margen ahora.</p>
+      ) : data.sin_datos ? (
+        <CardEmptyState
+          icon={Tag}
+          title="Todavía no hay datos para medir el margen"
+          description={data.motivo ?? "Cargá ventas, compras y gastos para ver el margen."}
+          cta="Cargar datos"
+          ctaHref="/ingestion"
+        />
+      ) : (
+        <div className="mt-5 space-y-3">
+          <MarginLine
+            grande
+            titulo={`Margen neto · ${data.neto_mes_cerrado ? nombreDelMes(data.neto_mes_cerrado) : "mes cerrado"}`}
+            fact={data.neto_mes_cerrado}
+          />
+          <MarginLine
+            titulo={`Margen bruto · ${data.bruto_mes_en_curso ? nombreDelMes(data.bruto_mes_en_curso) : "mes"} (en curso)`}
+            fact={data.bruto_mes_en_curso}
+          />
+          {data.por_categoria.length > 0 && (
+            <ul className="space-y-1 pt-1">
+              {data.por_categoria.map((c) => {
+                const d = describirMargen(c);
+                return (
+                  <li key={c.categoria ?? "?"} className="flex items-center justify-between text-sm">
+                    <span className="text-vektor-body">{c.categoria}</span>
+                    <span className={TONO_MARGEN[d.tono]} title={d.detalle ?? undefined}>
+                      {d.valor}
+                      {d.rotulo && <span className="ml-1 text-xs text-vektor-muted">{d.rotulo}</span>}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
 
 interface Props {
   sales: SaleEntryResponse[];
@@ -152,7 +238,6 @@ export function DashboardSummaryCards({
   const [cashOpen, setCashOpen] = useState(false);
 
   const cash = useMemo(() => buildCashBreakdown(sales), [sales]);
-  const margins = useMemo(() => buildMarginBreakdown(products), [products]);
   const stockStatuses = useMemo(() => buildStockStatuses(products), [products]);
   const productPurchases = useMemo(
     () => buildProductPurchases(expenses, products),
@@ -242,36 +327,7 @@ export function DashboardSummaryCards({
         )}
       </article>
 
-      <article className="vektor-card p-5">
-        <Tooltip content={KPI_TOOLTIP_COPY.Margen}>
-          <h2 className="text-lg font-semibold text-vektor-white">Margen</h2>
-        </Tooltip>
-        {margins.length === 0 ? (
-          <CardEmptyState
-            icon={Tag}
-            title="Sin productos para calcular margen"
-            description="Agregá productos para ver los márgenes por categoría."
-            cta="Registrar compra"
-            ctaHref="/ingestion"
-          />
-        ) : (
-          <div className="mt-5 space-y-3">
-            {margins.map((row) => (
-              <Tooltip
-                key={row.category}
-                content={`Margen promedio de ${row.category}: cuánto ganás por cada peso vendido en esta categoría.`}
-              >
-                <div className="flex items-center justify-between rounded-xl border border-vektor-border bg-vektor-surface px-4 py-3">
-                  <span className="text-sm font-medium text-vektor-body">{row.category}</span>
-                  <span className={`text-base font-semibold ${getMarginToneClass(row.tone)}`}>
-                    {formatPercent(row.margin)}
-                  </span>
-                </div>
-              </Tooltip>
-            ))}
-          </div>
-        )}
-      </article>
+      <MarginCard />
 
       <article className="vektor-card p-5">
         <Tooltip content={KPI_TOOLTIP_COPY.Stock}>

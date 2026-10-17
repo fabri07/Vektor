@@ -169,6 +169,39 @@ export interface HealthScoreV2Response {
   cost_coverage_total_pct?: number | null;
 }
 
+/** M·3-2: un margen de FactsService (`GET /insights/margins`). Nunca un 0 inventado. */
+export interface MarginFact {
+  value: number | null;
+  estado: "confirmado" | "estimado" | "ausente";
+  motivo: string | null;
+  periodo: string | null;
+  desde: string | null;
+  hasta: string | null;
+  cobertura_confirmada_pct: number | null;
+  cobertura_total_pct: number | null;
+  ingreso_ars: number | null;
+  costo_vendido_ars: number | null;
+  /** Sólo en el neto. */
+  gastos_operativos_ars: number | null;
+  resultado_ars: number | null;
+  /** Sólo en el desglose por categoría. */
+  categoria: string | null;
+}
+
+export interface MarginsResponse {
+  /** La completitud de los datos no llega a 50: estado vacío (no-invention). */
+  sin_datos: boolean;
+  motivo: string | null;
+  neto_mes_cerrado: MarginFact | null;
+  bruto_mes_en_curso: MarginFact | null;
+  bruto_periodo: MarginFact | null;
+  granularidad: "dia" | "semana" | "mes";
+  serie_bruto: MarginFact[];
+  /** Un punto por mes CERRADO del período. */
+  serie_neto: MarginFact[];
+  por_categoria: MarginFact[];
+}
+
 export interface CalculatingResponse {
   status: "CALCULATING";
 }

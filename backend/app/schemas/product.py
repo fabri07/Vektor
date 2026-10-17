@@ -86,9 +86,23 @@ class ProductResponse(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def margin_pct(self) -> float | None:
-        if self.unit_cost_ars is None or self.sale_price_ars == 0:
+        # M·3-2: un costo 0 no es «margen 100%»: es costo sin cargar (lo dejan
+        # imports viejos; el alta exige > 0). Sin número, con su motivo.
+        if self.unit_cost_ars is None or self.unit_cost_ars <= 0 or self.sale_price_ars <= 0:
             return None
         return float((self.sale_price_ars - self.unit_cost_ars) / self.sale_price_ars * 100)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def margin_motivo(self) -> str | None:
+        """Por qué no hay margen de lista (``None`` si lo hay)."""
+        if self.unit_cost_ars is None:
+            return "sin costo cargado"
+        if self.unit_cost_ars <= 0:
+            return "costo 0: falta cargar el costo"
+        if self.sale_price_ars <= 0:
+            return "sin precio de venta"
+        return None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

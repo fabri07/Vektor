@@ -76,6 +76,8 @@ export interface ProductResponse {
   // FASE 3 (B2): producto auto-creado por import al que le faltan precio/costo.
   requires_completion?: boolean;
   margin_pct: number | null;
+  /** M·3-2: por qué no hay margen de lista (costo 0, sin costo, sin precio). */
+  margin_motivo?: string | null;
   is_low_stock: boolean;
   stock_status: "in_stock" | "low_stock" | "out_of_stock";
   // F6-B4: estado de vencimiento a nivel producto (null = sin vencimiento conocido).

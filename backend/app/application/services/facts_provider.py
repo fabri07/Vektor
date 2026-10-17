@@ -33,10 +33,12 @@ from datetime import date, datetime
 import pandas as pd
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.application.services.facts_service import (
     BusinessFact,
     FactsService,
+    Granularidad,
     Period,
     Provenance,
     SeverityThresholds,
@@ -65,7 +67,7 @@ def _naive_ar(value: datetime | None) -> datetime | None:
 
 _SALES_COLS = [
     "sale_date", "amount_ars", "cost_ars", "cost_confirmed", "cost_avg_ars", "cost_avg_estado",
-    "payment_method", "provenance",
+    "payment_method", "provenance", "product_id", "product_category",
 ]
 _MIXED_TENDERS_COLS = ["sale_date", "amount_ars", "payment_method", "provenance"]
 _EXPENSES_COLS = ["expense_date", "amount_ars", "category", "expense_type", "provenance"]
@@ -153,6 +155,12 @@ async def load_facts_frames(
         SaleEntry.cost_avg_estado,
         SaleEntry.payment_method,
         SaleEntry.provenance,
+        SaleEntry.product_id,
+        Product.category.label("product_category"),
+    ).outerjoin(
+        # M·3-2: el desglose del margen por categoría de producto. La categoría
+        # es la de HOY del producto (no se congela en la venta).
+        Product, (Product.id == SaleEntry.product_id) & (Product.tenant_id == tenant_id),
     ).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.voided_at.is_(None),
@@ -175,6 +183,8 @@ async def load_facts_frames(
                 "cost_avg_estado": row.cost_avg_estado,
                 "payment_method": row.payment_method,
                 "provenance": row.provenance,
+                "product_id": str(row.product_id) if row.product_id is not None else None,
+                "product_category": row.product_category,
             }
             for row in sales_rows
         ],
@@ -343,6 +353,9 @@ class PreloadedFactsProvider:
 
     def __init__(self, frames: FactsFrames) -> None:
         self._frames = frames
+        # La fecha de cada frame normalizada UNA vez: cortar por tramo
+        # (M·3-2: series de hasta 3 años) convertía el frame entero en cada corte.
+        self._fechas: dict[str, pd.Series] = {}
 
     def _check_tenant(self, tenant_id: str) -> None:
         if str(tenant_id) != self._frames.tenant_id:
@@ -358,22 +371,25 @@ class PreloadedFactsProvider:
                 f"[{self._frames.coverage_start}, {self._frames.coverage_end}]"
             )
 
-    @staticmethod
-    def _slice(df: pd.DataFrame, date_col: str, start: date, end: date) -> pd.DataFrame:
+    def _slice(self, nombre: str, df: pd.DataFrame, date_col: str, start: date,
+               end: date) -> pd.DataFrame:
         if df.empty:
             return df.copy()
-        d = pd.to_datetime(df[date_col]).dt.date
+        d = self._fechas.get(nombre)
+        if d is None:
+            d = pd.to_datetime(df[date_col]).dt.date
+            self._fechas[nombre] = d
         return df[(d >= start) & (d <= end)].copy()
 
     def sales(self, tenant_id: str, start: date, end: date) -> pd.DataFrame:
         self._check_tenant(tenant_id)
         self._check_coverage(start, end)
-        return self._slice(self._frames.sales, "sale_date", start, end)
+        return self._slice("sales", self._frames.sales, "sale_date", start, end)
 
     def expenses(self, tenant_id: str, start: date, end: date) -> pd.DataFrame:
         self._check_tenant(tenant_id)
         self._check_coverage(start, end)
-        return self._slice(self._frames.expenses, "expense_date", start, end)
+        return self._slice("expenses", self._frames.expenses, "expense_date", start, end)
 
     def products(self, tenant_id: str) -> pd.DataFrame:
         self._check_tenant(tenant_id)
@@ -386,7 +402,7 @@ class PreloadedFactsProvider:
     def mixed_tenders(self, tenant_id: str, start: date, end: date) -> pd.DataFrame:
         self._check_tenant(tenant_id)
         self._check_coverage(start, end)
-        return self._slice(self._frames.mixed_tenders, "sale_date", start, end)
+        return self._slice("mixed_tenders", self._frames.mixed_tenders, "sale_date", start, end)
 
 
 def thresholds_for_vertical(vertical: Vertical) -> SeverityThresholds:
@@ -563,6 +579,118 @@ def _promedio_vs_reposicion(
     except Exception as exc:  # noqa: BLE001 — es un dato accesorio al margen
         logger.warning("margen_promedio_vs_reposicion_fallo", tenant_id=tid, error=str(exc))
         return None
+
+
+@dataclass(frozen=True)
+class MargenesDePantalla:
+    """Lo que pinta la pantalla del margen (M·3-2), todo de FactsService.
+
+    ``sin_datos`` = la completitud de los datos no llega a 50 (no-invention):
+    la pantalla muestra el estado vacío y no hay ningún hecho.
+    """
+
+    sin_datos: bool
+    neto_mes_cerrado: BusinessFact | None = None
+    bruto_mes_en_curso: BusinessFact | None = None
+    bruto_periodo: BusinessFact | None = None
+    serie_bruto: tuple[BusinessFact, ...] = ()
+    serie_neto: tuple[BusinessFact, ...] = ()
+    por_categoria: tuple[BusinessFact, ...] = ()
+    granularidad: Granularidad = "dia"
+
+
+def granularidad_para(desde: date, hasta: date) -> Granularidad:
+    """Día hasta 31 días, semana hasta 120, mes más allá."""
+    dias = (hasta - desde).days + 1
+    return "dia" if dias <= 31 else "semana" if dias <= 120 else "mes"
+
+
+async def margenes_para_pantalla(
+    session: AsyncSession, tenant_id: uuid.UUID, *, desde: date, hasta: date
+) -> MargenesDePantalla | None:
+    """Neto del mes cerrado, bruto en curso, bruto del período, series y desglose.
+
+    ``None`` sin rubro (como ``margenes_del_tenant``). Con la completitud del
+    último score por debajo de 50 → ``sin_datos``: no se calcula nada.
+    """
+    from app.persistence.models.score import HealthScoreSnapshot  # noqa: PLC0415
+
+    completitud = (
+        await session.execute(
+            select(HealthScoreSnapshot.data_completeness_score)
+            .where(HealthScoreSnapshot.tenant_id == tenant_id)
+            .order_by(HealthScoreSnapshot.snapshot_date.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if completitud is not None and completitud < 50:
+        return MargenesDePantalla(sin_datos=True)
+    vertical_code = (
+        await session.execute(
+            select(BusinessProfile.vertical_code)
+            .where(BusinessProfile.tenant_id == tenant_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    vertical = try_parse_vertical(vertical_code)
+    if vertical is None:
+        return None
+    tenant = await session.get(Tenant, tenant_id)
+    include_demo = bool(tenant and tenant.is_demo)
+    hoy = datetime.now(AR_TZ).date()
+    hasta = min(hasta, hoy)
+    periodo = Period(start=desde, end=hasta, label=f"periodo_{desde:%Y_%m_%d}_{hasta:%Y_%m_%d}")
+    mes_cerrado = Period.mes_cerrado(today=hoy)
+    mes_en_curso = Period.mes_en_curso(today=hoy)
+    granularidad = granularidad_para(desde, hasta)
+    # Los meses del neto se miden enteros: la carga arranca en el 1.º del mes de
+    # ``desde`` (o del mes cerrado, si es anterior).
+    inicio = min(desde.replace(day=1), mes_cerrado.start)
+    frames = await load_facts_frames(session, tenant_id, start=inicio, end=hoy, completo=False)
+    svc = FactsService(
+        PreloadedFactsProvider(frames),
+        thresholds_for_vertical(vertical),
+        fiscal_condition_crudo=await _regimen_crudo(session, tenant_id),
+    )
+    tid = str(tenant_id)
+
+    def calcular() -> MargenesDePantalla:
+        def pieza(metric: str, periodo_: Period, f: Callable[[], BusinessFact]) -> BusinessFact:
+            return _aislado(f, tid, metric, periodo_)
+
+        def lista(f: Callable[[], list[BusinessFact]], nombre: str) -> tuple[BusinessFact, ...]:
+            try:
+                return tuple(f())
+            except Exception as exc:  # noqa: BLE001 — una serie no tumba la tarjeta
+                logger.warning(f"{nombre}_fallo", tenant_id=tid, error=str(exc))
+                return ()
+
+        return MargenesDePantalla(
+            sin_datos=False,
+            neto_mes_cerrado=pieza(
+                "margen_neto", mes_cerrado,
+                lambda: svc.margen_neto(tid, mes_cerrado, include_demo=include_demo),
+            ),
+            bruto_mes_en_curso=pieza(
+                "margen_bruto", mes_en_curso,
+                lambda: svc.margen_bruto(tid, mes_en_curso, include_demo=include_demo),
+            ),
+            bruto_periodo=pieza(
+                "margen_bruto", periodo,
+                lambda: svc.margen_bruto(tid, periodo, include_demo=include_demo),
+            ),
+            serie_bruto=lista(lambda: svc.serie_margen_bruto(
+                tid, periodo, granularidad, include_demo=include_demo), "serie_margen_bruto"),
+            serie_neto=lista(lambda: svc.serie_margen_neto(
+                tid, periodo, today=hoy, include_demo=include_demo), "serie_margen_neto"),
+            por_categoria=lista(lambda: svc.margen_bruto_por_categoria(
+                tid, periodo, include_demo=include_demo), "margen_por_categoria"),
+            granularidad=granularidad,
+        )
+
+    # pandas es síncrono: fuera del event loop, para no frenar la API (y el POS)
+    # mientras se arma una serie larga.
+    return await run_in_threadpool(calcular)
 
 
 MOTIVO_SIN_RUBRO = "falta el rubro del negocio"

@@ -49,6 +49,14 @@ class SaleEntryResponse(BaseModel):
     notes: str | None
     custom_fields: dict[str, Any] = {}
     created_at: datetime
+    # M·3-2: costo y margen de la venta, SÓLO para dueño o admin (los llena
+    # ``GET /sales``; para los demás roles van ``null``). Nombres distintos de
+    # las columnas ``cost_*`` a propósito: ``from_attributes`` no los copia solo.
+    costo_ars: float | None = None
+    margen_pct: float | None = None
+    #: confirmado | estimado | ausente
+    margen_estado: str | None = None
+    margen_motivo: str | None = None
 
     @field_serializer("unit_price")
     def _serialize_unit_price(self, v: Decimal | None) -> float | None:

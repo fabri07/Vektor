@@ -6,7 +6,19 @@ import type {
   BusinessBreakdownResponse,
   CashForecastResponse,
   HealthScoreV2Response,
+  MarginsResponse,
 } from "@/types/api";
+
+/**
+ * M·3-2: los márgenes que pinta la pantalla, todos de FactsService. Sin rango,
+ * el mes en curso; el neto es siempre del último mes cerrado.
+ */
+export async function fetchMargins(range?: { from: string; to: string }): Promise<MarginsResponse> {
+  const { data } = await api.get<MarginsResponse>("/insights/margins", {
+    params: range ? { from_date: range.from, to_date: range.to } : undefined,
+  });
+  return data;
+}
 
 export async function fetchLatestScore(): Promise<LatestScoreResponse> {
   const { data } = await api.get<LatestScoreResponse>("/health-scores/latest");

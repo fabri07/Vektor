@@ -57,7 +57,8 @@ function round2(n: number): number {
 }
 
 function marginPct(cost: number, price: number): number | null {
-  if (!price || price <= 0) return null;
+  // Un costo 0 es costo sin cargar, no «margen 100%» (misma regla que el backend).
+  if (!price || price <= 0 || !cost || cost <= 0) return null;
   return Math.round(((price - cost) / price) * 1000) / 10;
 }
 

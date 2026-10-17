@@ -48,6 +48,11 @@ export interface SaleEntryResponse {
   notes: string | null;
   custom_fields?: Record<string, unknown>;
   created_at: string;
+  /** M·3-2: sólo para dueño o admin; para los demás roles el backend manda null. */
+  costo_ars?: number | null;
+  margen_pct?: number | null;
+  margen_estado?: "confirmado" | "estimado" | "ausente" | null;
+  margen_motivo?: string | null;
 }
 
 export interface SalesListParams {

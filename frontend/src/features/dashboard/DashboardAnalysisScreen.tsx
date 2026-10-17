@@ -5,7 +5,8 @@ import { enUnidadDeVenta } from "@/lib/pos/saleUnit";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown } from "lucide-react";
-import { fetchBusinessBreakdown, fetchCurrentInsight } from "@/services/dashboard.service";
+import { fetchBusinessBreakdown, fetchCurrentInsight, fetchMargins } from "@/services/dashboard.service";
+import { avisoDeSerieDeMargen, etiquetaDelTramo } from "@/features/dashboard/marginText";
 import type {
   BusinessBreakdownResponse,
   HealthScoreV2Response,
@@ -35,6 +36,7 @@ import {
   buildComparisonSeries,
   buildDistributionSeries,
   buildLineSeries,
+  esMetricaDeMargen,
   COMPARE_OPTIONS,
   DISTRIBUTION_OPTIONS,
   formatARS,
@@ -177,10 +179,29 @@ export function DashboardAnalysisScreen({
   // `isSingleDay` es false.
   const effectiveGranularity = granularity === "hourly" && !isSingleDay ? "daily" : granularity;
 
-  const lineData = useMemo(
-    () => buildLineSeries(lineMetric as "caja" | "ventas" | "margen" | "stock", sales, expenses, effectiveGranularity, { from, to }, scoreHistory),
-    [lineMetric, sales, expenses, effectiveGranularity, from, to, scoreHistory],
-  );
+  // M·3-2: el margen sale de FactsService (`GET /insights/margins`); el front
+  // no calcula ningún margen. El bruto va por tramo y el neto por mes cerrado.
+  const esMargen = esMetricaDeMargen(lineMetric);
+  const marginsQuery = useQuery({
+    queryKey: ["margins", "analisis", from, to],
+    queryFn: () => fetchMargins({ from, to }),
+    enabled: esMargen,
+    staleTime: 60_000,
+  });
+  const lineData = useMemo(() => {
+    if (esMetricaDeMargen(lineMetric)) {
+      const m = marginsQuery.data;
+      if (!m || m.sin_datos) return [];
+      const serie = lineMetric === "margen_neto" ? m.serie_neto : m.serie_bruto;
+      const granularidad = lineMetric === "margen_neto" ? "mes" : m.granularidad;
+      return serie.map((f) => ({ label: etiquetaDelTramo(f, granularidad), value: f.value, change: 0 }));
+    }
+    return buildLineSeries(lineMetric as "caja" | "ventas" | "stock", sales, expenses, effectiveGranularity, { from, to }, scoreHistory);
+  }, [lineMetric, marginsQuery.data, sales, expenses, effectiveGranularity, from, to, scoreHistory]);
+  // Sin serie de margen se dice por qué, nunca un gráfico en blanco (no-invention).
+  const avisoSerieDeMargen = esMargen
+    ? avisoDeSerieDeMargen(lineMetric, marginsQuery.data, marginsQuery.isError)
+    : null;
   const comparisonData = useMemo(
     () => buildComparisonSeries(compareBy as "categoria" | "proveedor" | "metodo" | "dia", sales, expenses, products),
     [compareBy, sales, expenses, products],
@@ -232,6 +253,9 @@ export function DashboardAnalysisScreen({
               value={lineMetric}
               onChange={setLineMetric}
             />
+            {/* El margen lo agrupa el backend (día/semana/mes según el largo, y el
+                neto por mes cerrado): el selector no aplica. */}
+            {!esMargen && (
             <div className="inline-flex rounded-full border border-vektor-border bg-vektor-surface p-1">
               {[
                 // "Por hora" sólo aplica a un único día seleccionado (puede ser histórico).
@@ -257,11 +281,16 @@ export function DashboardAnalysisScreen({
                 </button>
               ))}
             </div>
+            )}
           </div>
         )}
       >
-        {loading ? (
+        {loading || (esMargen && marginsQuery.isLoading) ? (
           <ChartSkeleton />
+        ) : esMargen && avisoSerieDeMargen ? (
+          <div className="flex h-[320px] items-center justify-center rounded-xl border border-dashed border-vektor-border px-6 text-center text-sm text-vektor-muted">
+            {avisoSerieDeMargen}
+          </div>
         ) : (
           <>
             <div className="h-[320px]">
@@ -274,7 +303,7 @@ export function DashboardAnalysisScreen({
                     tickLine={false}
                     axisLine={false}
                     tickFormatter={(value) => {
-                      if (lineMetric === "margen") return `${Number(value).toFixed(1)}%`;
+                      if (esMargen) return `${Number(value).toFixed(1)}%`;
                       if (lineMetric === "stock") return `${Math.round(Number(value))}`;
                       return formatARSCompact(Number(value));
                     }}
@@ -282,7 +311,12 @@ export function DashboardAnalysisScreen({
                   <RechartsTooltip
                     contentStyle={{ background: "#162236", border: "1px solid #243246", borderRadius: 16 }}
                     formatter={(value, _name, item) => {
-                      if (lineMetric === "margen") return [`${Number(value ?? 0).toFixed(1)}%`, "Margen"];
+                      if (esMargen) {
+                        return [
+                          value == null ? "sin medir" : `${Number(value).toFixed(1)}%`,
+                          lineMetric === "margen_neto" ? "Margen neto" : "Margen bruto",
+                        ];
+                      }
                       if (lineMetric === "stock") return [`${Math.round(Number(value ?? 0))} pts`, "Score de stock"];
                       return [
                         `${formatARS(Number(value ?? 0))} (${formatSignedPercent(Number((item as { payload?: { change?: number } })?.payload?.change ?? 0))})`,
