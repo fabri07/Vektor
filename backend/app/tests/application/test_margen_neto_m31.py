@@ -322,8 +322,8 @@ def test_compras_con_texto_libre_viejo_no_restan_como_gasto() -> None:
     for cat in ("INVENTORY", "mercaderia", "Mercadería", "compras", "compra proveedor",
                 "reposicion"):
         assert es_categoria_de_mercaderia(cat), cat
-    for cat in ("RENT", "TAXES", "OTHER", None):
-        assert not es_categoria_de_mercaderia(cat), cat
+    for otra in ("RENT", "TAXES", "OTHER", None):
+        assert not es_categoria_de_mercaderia(otra), otra
 
 
 async def test_si_el_neto_falla_el_bruto_sigue(
