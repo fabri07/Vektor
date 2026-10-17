@@ -22,7 +22,7 @@ from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
 from app.domain.business_time import fecha_de_negocio
-from app.domain.expense_categories import infer_expense_type
+from app.domain.expense_categories import infer_expense_type, resolve_tax_kind
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.owner_capital import KIND_RETIRO
@@ -70,6 +70,7 @@ def _expense_snapshot(entry: ExpenseEntry) -> dict[str, object]:
         "id": str(entry.id),
         "amount": str(entry.amount),
         "category": entry.category,
+        "tax_kind": entry.tax_kind,
         "transaction_date": str(entry.transaction_date),
         "description": entry.description,
         "is_recurring": entry.is_recurring,
@@ -224,6 +225,9 @@ async def create_expense(
         # eligió (None), infiere por categoría (mercadería/INVENTORY → COGS). Antes se
         # persistía el default "OPEX" y una compra de mercadería manual quedaba mal.
         expense_type=infer_expense_type(body.category, explicit=body.expense_type),
+        # M·3-3: el que eligió el usuario; «Sin especificar» = sin tipo (la
+        # categoría del formulario ya es el código, no hay texto que inferir).
+        tax_kind=resolve_tax_kind(body.category, explicit=body.tax_kind),
         transaction_date=body.expense_date,
         description=body.description,
         is_recurring=body.is_recurring,
@@ -374,6 +378,19 @@ async def update_expense(
         entry.category = body.category
     if body.expense_type is not None:
         entry.expense_type = body.expense_type
+    # M·3-3: el tipo sólo vive en TAXES. Mandarlo con otra categoría es un error;
+    # sacar el gasto de TAXES lo limpia; null explícito también.
+    if body.tax_kind is not None and entry.category != "TAXES":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tax_kind sólo aplica a la categoría TAXES.",
+        )
+    if "tax_kind" in body.model_fields_set:
+        entry.tax_kind = body.tax_kind
+    elif body.category is not None or entry.category != "TAXES":
+        # Cambiar la categoría sin mandar el tipo lo limpia: un tipo que quedó de
+        # antes no revive al volver a TAXES.
+        entry.tax_kind = None
     if body.expense_date is not None:
         entry.transaction_date = body.expense_date
     if body.description is not None:

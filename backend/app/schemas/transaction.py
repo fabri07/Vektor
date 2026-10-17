@@ -9,7 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
-from app.domain.expense_categories import EXPENSE_CATEGORIES_PATTERN
+from app.domain.expense_categories import EXPENSE_CATEGORIES_PATTERN, TAX_KIND_PATTERN
 
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
 _MAX_AMOUNT = Decimal("999999999")
@@ -213,6 +213,8 @@ class ExpenseEntryResponse(BaseModel):
     category_label: str | None = None
     # OPEX = gasto operativo; COGS = compra de mercadería.
     expense_type: str = "OPEX"
+    # M·3-3: tipo de impuesto (sólo con category TAXES); None = sin tipo.
+    tax_kind: str | None = None
     transaction_date: datetime
     description: str
     is_recurring: bool
@@ -246,6 +248,9 @@ class CreateExpenseRequest(BaseModel):
     # (INVENTORY/mercadería → COGS). Un valor explícito gana. Antes defaulteaba a
     # "OPEX", lo que hacía que una compra de mercadería manual quedara mal clasificada.
     expense_type: str | None = Field(default=None, pattern=r"^(OPEX|COGS)$")
+    # M·3-3: sólo con category TAXES (otra categoría + tipo → 422). None = el
+    # usuario no eligió: se infiere del texto si lo dice, si no queda sin tipo.
+    tax_kind: str | None = Field(default=None, pattern=TAX_KIND_PATTERN)
     expense_date: datetime
     notes: str | None = Field(default=None, max_length=1000)
     description: str = Field(default="", max_length=500)
@@ -269,6 +274,12 @@ class CreateExpenseRequest(BaseModel):
         if fecha_de_negocio(v) > today_ar():
             raise ValueError("expense_date cannot be in the future.")
         return a_hora_de_negocio(v)
+
+    @model_validator(mode="after")
+    def _tax_kind_solo_impuestos(self) -> "CreateExpenseRequest":
+        if self.tax_kind is not None and self.category != "TAXES":
+            raise ValueError("tax_kind sólo aplica a la categoría TAXES.")
+        return self
 
 
 class ProfitWithdrawalRequest(BaseModel):
@@ -300,6 +311,8 @@ class UpdateExpenseRequest(BaseModel):
     category: str | None = Field(default=None, pattern=EXPENSE_CATEGORIES)
     category_label: str | None = Field(default=None, max_length=50)
     expense_type: str | None = Field(default=None, pattern=r"^(OPEX|COGS)$")
+    # M·3-3: null explícito lo limpia; cambiar la categoría fuera de TAXES también.
+    tax_kind: str | None = Field(default=None, pattern=TAX_KIND_PATTERN)
     expense_date: datetime | None = None
     description: str | None = Field(default=None, max_length=500)
     is_recurring: bool | None = None

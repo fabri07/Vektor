@@ -70,7 +70,9 @@ _SALES_COLS = [
     "payment_method", "provenance", "product_id", "product_category",
 ]
 _MIXED_TENDERS_COLS = ["sale_date", "amount_ars", "payment_method", "provenance"]
-_EXPENSES_COLS = ["expense_date", "amount_ars", "category", "expense_type", "provenance"]
+_EXPENSES_COLS = [
+    "expense_date", "amount_ars", "category", "expense_type", "provenance", "tax_kind",
+]
 _PRODUCTS_COLS = [
     "product_id", "stock_units", "base_units_per_sale_unit", "unit_cost_ars", "last_sold_date",
     "first_seen_date", "provenance",
@@ -105,6 +107,7 @@ async def _gastos(
         ExpenseEntry.category,
         ExpenseEntry.expense_type,
         ExpenseEntry.provenance,
+        ExpenseEntry.tax_kind,
     ).where(
         ExpenseEntry.tenant_id == tenant_id,
         ExpenseEntry.voided_at.is_(None),
@@ -123,6 +126,7 @@ async def _gastos(
                 "category": row.category,
                 "expense_type": row.expense_type,
                 "provenance": row.provenance,
+                "tax_kind": row.tax_kind,
             }
             for row in expense_rows
         ],

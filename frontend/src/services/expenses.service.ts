@@ -19,6 +19,8 @@ export interface CreateExpensePayload {
   notes?: string | null;
   /** OPEX = gasto operativo; COGS = compra de mercadería. */
   expense_type?: "OPEX" | "COGS";
+  /** M·3-3: tipo de impuesto, sólo con category === "TAXES". */
+  tax_kind?: string | null;
   custom_fields?: Record<string, unknown>;
 }
 
@@ -35,6 +37,8 @@ export interface ExpenseEntryResponse {
   category_label?: string | null;
   /** OPEX = gasto operativo; COGS = compra de mercadería. */
   expense_type?: "OPEX" | "COGS";
+  /** M·3-3: tipo de impuesto (sólo TAXES); null = sin tipo. */
+  tax_kind?: string | null;
   transaction_date: string;
   description: string;
   is_recurring: boolean;

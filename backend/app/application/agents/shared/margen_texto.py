@@ -69,6 +69,14 @@ def describir_margen_neto(f: BusinessFact) -> str:
         f"${d.get('gastos_operativos_ars')}; cobertura de costo "
         f"{d.get('cobertura_total_pct')}%"
     )
+    # M·3-3: los impuestos sin tipo restan igual; el IVA de un RI no resta.
+    if d.get("impuestos_sin_tipo"):
+        detalle += (
+            f"; {d.get('impuestos_sin_tipo')} gastos de impuestos sin tipo "
+            f"(${d.get('impuestos_sin_tipo_ars')}) se restaron igual"
+        )
+    if d.get("iva_excluido_ars"):
+        detalle += f"; IVA pagado ${d.get('iva_excluido_ars')} no resta (ventas sin IVA)"
     if d.get("estado") == "estimado":
         return f"{f.value}% ESTIMADO ({d.get('motivo')}; {detalle})"
     return f"{f.value}% ({detalle})"

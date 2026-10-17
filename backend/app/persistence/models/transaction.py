@@ -170,6 +170,9 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     expense_type: Mapped[str] = mapped_column(
         String(10), nullable=False, server_default="OPEX", default="OPEX"
     )
+    # M·3-3: tipo de impuesto, sólo con category TAXES (``domain/expense_categories
+    # .resolve_tax_kind``). NULL = sin tipo: el margen neto lo resta y lo avisa.
+    tax_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # B1: archivo de origen de una fila importada (NULL = manual / histórico).
     source_upload_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -204,6 +207,10 @@ class ExpenseEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("provenance IN ('REAL', 'DEMO')", name="ck_expense_entries_provenance"),
         CheckConstraint(
             "expense_type IN ('OPEX', 'COGS')", name="ck_expense_entries_expense_type"
+        ),
+        CheckConstraint(
+            "tax_kind IN ('iibb','monotributo','iva','tasa_municipal','otro')",
+            name="ck_expense_entries_tax_kind",
         ),
         Index("ix_expense_entries_tenant_expense_type", "tenant_id", "expense_type"),
         CheckConstraint(

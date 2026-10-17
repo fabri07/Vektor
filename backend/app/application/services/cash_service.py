@@ -13,6 +13,7 @@ from app.domain.date_parsing import parse_business_datetime
 from app.domain.expense_categories import (
     infer_expense_type,
     normalize_expense_category,
+    resolve_tax_kind,
     strip_accents,
 )
 from app.observability.logger import get_logger
@@ -205,6 +206,11 @@ async def save_expense(
         amount=Decimal(str(entities["amount"])),
         category=category,
         expense_type=expense_type,
+        # M·3-3: categoría «ingresos brutos» → TAXES/iibb; «impuestos» → sin tipo.
+        # Nunca por la descripción (ver ``resolve_tax_kind``).
+        tax_kind=resolve_tax_kind(
+            category, explicit=entities.get("tax_kind"), textos=(entities.get("category"),)
+        ),
         transaction_date=_coerce_transaction_date(
             entities.get("transaction_date") or entities.get("date")
         ),

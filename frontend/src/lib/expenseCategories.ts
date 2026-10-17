@@ -74,3 +74,23 @@ export function accountingTypeDisplay(expenseType?: string | null): {
     ? { label: "Mercadería", variant: "success" }
     : { label: "Operativo", variant: "info" };
 }
+
+/**
+ * Tipo de impuesto (M·3-3) — espejo de ``TAX_KIND_LABELS_ES`` en
+ * backend/app/domain/expense_categories.py. Sólo con categoría TAXES; sin tipo
+ * = el margen neto lo resta igual y avisa. El IVA de un RI no resta.
+ */
+export const TAX_KIND_LABELS: Record<string, string> = {
+  iibb: "Ingresos Brutos",
+  monotributo: "Monotributo",
+  iva: "IVA",
+  tasa_municipal: "Tasas municipales",
+  otro: "Otro impuesto",
+};
+
+export const TAX_KINDS = Object.keys(TAX_KIND_LABELS);
+
+/** El ``tax_kind`` que se manda: sólo con TAXES, y ``null`` si no eligió. */
+export function taxKindParaEnviar(category: string, taxKind: string | null | undefined): string | null {
+  return category === "TAXES" && taxKind ? taxKind : null;
+}

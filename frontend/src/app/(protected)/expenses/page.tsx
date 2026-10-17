@@ -30,8 +30,11 @@ import {
   ALL_CATEGORIES,
   CATEGORY_LABELS,
   CATEGORY_VARIANTS,
+  TAX_KINDS,
+  TAX_KIND_LABELS,
   accountingTypeDisplay,
   categoryDisplay,
+  taxKindParaEnviar,
 } from "@/lib/expenseCategories";
 
 function formatRangeDate(value: string | null): string {
@@ -178,6 +181,8 @@ export default function ExpensesPage() {
       expensesService.updateExpense(payload.id, {
         amount: Number(payload.amount),
         category: payload.category,
+        // M·3-3: fuera de TAXES el backend lo limpia; null = sin tipo.
+        tax_kind: taxKindParaEnviar(payload.category, payload.tax_kind),
         expense_date: payload.transaction_date,
         description: payload.description,
         is_recurring: payload.is_recurring,
@@ -437,6 +442,9 @@ function ExpenseEditModal({
           <label className="grid gap-1 text-sm text-vektor-body">Fecha y hora<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} /></label>
           <label className="grid gap-1 text-sm text-vektor-body">Categoría<select className="rounded border border-vk-border-w px-3 py-2" value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
         </div>
+        {form.category === "TAXES" && (
+          <label className="grid gap-1 text-sm text-vektor-body">Tipo de impuesto<select className="rounded border border-vk-border-w px-3 py-2" value={form.tax_kind ?? ""} onChange={(e) => set("tax_kind", e.target.value || null)}><option value="">Sin especificar</option>{TAX_KINDS.map((k) => <option key={k} value={k}>{TAX_KIND_LABELS[k]}</option>)}</select></label>
+        )}
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value)} /></label>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vektor-body">Proveedor<input className="rounded border border-vk-border-w px-3 py-2" value={form.supplier_name ?? ""} onChange={(e) => set("supplier_name", e.target.value || null)} /></label>
