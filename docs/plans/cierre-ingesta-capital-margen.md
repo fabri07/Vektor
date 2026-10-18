@@ -242,6 +242,7 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
    - Guarda el vínculo al gasto original, se puede reejecutar sin duplicar y es reversible.
    - Concilia gastos, margen y score.
    - **El `--apply` lo autorizás vos aparte.**
+   - **Cómo quedó (2026-10-17, sin migración, `scripts/reparar_retiros_a_capital.py`):** cada gasto con la marca `profit_withdrawal` (sin archivo) pasa a un `retiro` de capital en dinero `migrado_de_gasto` (mismo importe, día y medio) y el gasto se anula. Análisis sólo lectura por defecto (`--all`), `--simular` y `--apply` por cuenta; una transacción por tenant con lock y revalidación bajo bloqueo; la caja se compara por día y medio, arqueo y proyección antes de confirmar; la reversión es de a pares indivisibles y deja pendientes reintentables. Detalle en `docs/claude/plataforma.md`.
 9. **D·4**:
    - aportes y retiros por socio, en dinero y en especie, más los préstamos pendientes;
    - el flujo operativo va **separado** del flujo con capital y de la caja contada;
