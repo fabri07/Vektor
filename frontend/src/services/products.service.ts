@@ -60,6 +60,8 @@ export interface ProductResponse {
   avg_cost_ars?: number | string | null;
   avg_cost_estado?: "medido" | "incompleto" | "sin_medicion" | null;
   avg_cost_motivo?: string | null;
+  /** M·P4b: el promedio está neto de IVA (RI); el costo de reposición no. */
+  avg_cost_sin_iva?: boolean | null;
   /** Precio de lista/sugerido por proveedor. Informativo: no entra al margen. */
   list_price_ars: number | null;
   /** Unidad de venta (B3). El stock está en unidades BASE; precio y costo, por

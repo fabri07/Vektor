@@ -323,18 +323,12 @@ def texto_antiguedad_del_costo(origen: str | None, dias: int | None) -> str | No
 
 ESTADO_PROMEDIO_MEDIDO: Final = "medido"
 
-#: RI (decisión del dueño, 2026-10-15): el promedio promedia el costo CRUDO
-#: (``costo_promedio_repository``) y la reposición de la venta pasa por
-#: ``base_comparable`` (neto). Compararlos daría una brecha falsa del tamaño del
-#: IVA. Pasar el promedio a neto es M·P4b.
-MOTIVO_PROMEDIO_SIN_NETO_IVA: Final = "costo promedio todavía sin neto de IVA"
-
-# Fuera del RI la comparación supone que ``cost_ars`` y el promedio están en la
-# MISMA base cruda. Vale hoy porque ningún escritor de compras emite un impuesto
-# ``adicional`` (``contrato_de_costo`` sólo escribe ``incluido``/``desconocido``):
-# con uno, ``base_comparable`` le sumaría el IVA a la reposición de un
-# monotributista y no al promedio, y la brecha mostraría ~21 puntos de
-# «inflación» falsa. Si M·1d habilita ``adicional``, esto entra en M·P4b.
+# Las dos cifras tienen que estar en la MISMA base. M·P4b: el promedio entra en la
+# base comparable de cada compra (``domain/costo_promedio.costo_comparable``,
+# la misma ``base_comparable`` de la reposición). Para un RI, la reposición
+# estimada de una venta está en base cruda (puede traer el IVA): sólo cuentan las
+# ventas con costo de reposición CONFIRMADO (neto), y un promedio con alguna
+# compra sin neto confirmado ya llega ``incompleto``.
 
 
 @dataclass(frozen=True)
@@ -345,6 +339,9 @@ class LineaDeComparacion:
     costo_reposicion: Decimal | None
     costo_promedio: Decimal | None
     estado_promedio: str | None
+    #: El costo de reposición es una base confirmada. Para un RI, sin confirmar
+    #: queda fuera de la intersección.
+    reposicion_confirmada: bool = False
 
 
 @dataclass(frozen=True)
@@ -371,6 +368,7 @@ def comparar_promedio_y_reposicion(
     lineas: Iterable[LineaDeComparacion], fiscal_condition_crudo: str | None
 ) -> ComparacionDeMargenes:
     """Margen con costo promedio y con costo de reposición sobre la intersección."""
+    ri = es_responsable_inscripto(fiscal_condition_crudo)
     ingreso_total = ingreso_comun = costo_rep = costo_prom = Decimal(0)
     for linea in lineas:
         ingreso_total += linea.importe
@@ -378,6 +376,7 @@ def comparar_promedio_y_reposicion(
             linea.costo_reposicion is None
             or linea.costo_promedio is None
             or linea.estado_promedio != ESTADO_PROMEDIO_MEDIDO
+            or (ri and not linea.reposicion_confirmada)
         ):
             continue
         ingreso_comun += linea.importe
@@ -388,10 +387,6 @@ def comparar_promedio_y_reposicion(
     if ingreso_total <= 0:
         return ComparacionDeMargenes(MOTIVO_SIN_INGRESO, ingreso_total, ingreso_comun, cero)
     cobertura = ingreso_comun / ingreso_total
-    if es_responsable_inscripto(fiscal_condition_crudo):
-        return ComparacionDeMargenes(
-            MOTIVO_PROMEDIO_SIN_NETO_IVA, ingreso_total, ingreso_comun, cobertura
-        )
     if cobertura < COBERTURA_MINIMA:
         return ComparacionDeMargenes(
             motivo_cobertura(cobertura), ingreso_total, ingreso_comun, cobertura

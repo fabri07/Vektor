@@ -21,11 +21,13 @@ reconstruye el producto entero y la cuenta. Es la venta del POS de todos los dí
 no escribe estado ni toma locks.
 
 **Todo lo demás marca:** entradas, anulaciones, reactivaciones, borrados, cambios
-de cantidad/signo/clase/producto/fecha/origen, ventas sin su movimiento (mueven
-``aproximado``) y cambios de B11. Lo que mueve una marca global invalida TODO el
-historial (``pendiente_desde = date.min``). Si no se conoce un valor anterior, se
-invalida todo el historial: marcar de más cuesta un recálculo; marcar de menos
-deja un dato viejo que parece válido.
+de cantidad/signo/clase/producto/fecha/origen/costo/contrato (envío e impuesto,
+M·P4b), ventas sin su movimiento (mueven ``aproximado``) y cambios de B11. Un
+cambio de ``fiscal_condition`` invalida todo el historial de todos los productos
+del tenant: el régimen decide la base comparable de cada costo (M·P4b). Lo que
+mueve una marca global invalida TODO el historial (``pendiente_desde = date.min``).
+Si no se conoce un valor anterior, se invalida todo el historial: marcar de más
+cuesta un recálculo; marcar de menos deja un dato viejo que parece válido.
 
 **Savepoints.** Un rollback de nivel superior descarta lo anotado; el de un
 savepoint no descarta nada (marcaría de más, nunca de menos). Se marca y se
@@ -60,6 +62,7 @@ from sqlalchemy.orm import InstanceState, Session
 
 from app.domain.business_time import a_hora_de_negocio
 from app.observability.logger import get_logger
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.pos_stock_discrepancy import PosStockDiscrepancy
 from app.persistence.models.product import Product
@@ -78,9 +81,10 @@ _VENTAS_CON_MOV: Final = "mp2b_ventas_con_movimiento"  # set[venta]
 _A_ENCOLAR: Final = "mp2b_a_encolar"  # list[(tenant, producto)]
 _STOCK_TOCADO: Final = "mp2b_stock_tocado"  # set[(tenant, producto)] con stock_units cambiado
 _CON_MOVIMIENTO: Final = "mp2b_con_movimiento"  # set[(tenant, producto)] con movimiento tocado
+_REGIMEN_TOCADO: Final = "mp4b_regimen_tocado"  # set[tenant] con fiscal_condition cambiada
 _CLAVES: Final = (
     _MARCAS, _CANDIDATAS, _VENTAS_NUEVAS, _VENTAS_CON_MOV, _A_ENCOLAR, _STOCK_TOCADO,
-    _CON_MOVIMIENTO,
+    _CON_MOVIMIENTO, _REGIMEN_TOCADO,
 )
 #: Encolar en un hilo aparte (los tests lo apagan para ver el encolado en línea).
 ENCOLAR_EN_HILO: bool = True
@@ -94,6 +98,8 @@ TANDA_DE_DECISION: Final = 2000
 _COLUMNAS_DEL_MOVIMIENTO: Final = (
     "qty", "voided_at", "occurred_at", "product_id", "unit_cost", "unit_cost_final",
     "movement_type", "source_type", "source_event_id",
+    # M·P4b: el contrato decide la base comparable del costo.
+    "shipping_treatment", "tax_treatment", "tax_rate", "tax_amount", "tax_recoverable",
 )
 _COLUMNAS_DE_LA_VENTA: Final = ("voided_at", "product_id", "quantity", "source_upload_id")
 
@@ -265,6 +271,12 @@ def _anotar(session: Session, _flush_context: Any) -> None:
             and _estado_orm(obj).attrs["status"].history.has_changes()
         ):
             _marcar(session, obj.tenant_id, obj.product_id, TODO_EL_HISTORIAL)
+        elif (
+            isinstance(obj, BusinessProfile)
+            and _estado_orm(obj).attrs["fiscal_condition"].history.has_changes()
+        ):
+            # M·P4b: el régimen decide la base de TODOS los costos del tenant.
+            session.info.setdefault(_REGIMEN_TOCADO, set()).add(obj.tenant_id)
     for obj in session.deleted:
         if isinstance(obj, InventoryMovement | SaleEntry | PosStockDiscrepancy):
             _marcar(session, obj.tenant_id, obj.product_id, TODO_EL_HISTORIAL)
@@ -445,6 +457,10 @@ def _marcar_al_confirmar(session: Session) -> None:
     con_mov: set[tuple[uuid.UUID, uuid.UUID]] = session.info.pop(_CON_MOVIMIENTO, set())
     for tenant_id, product_id in session.info.pop(_STOCK_TOCADO, set()) - con_mov:
         _marcar(session, tenant_id, product_id, TODO_EL_HISTORIAL)
+    for tenant_id in session.info.pop(_REGIMEN_TOCADO, set()):
+        productos = session.execute(select(Product.id).where(Product.tenant_id == tenant_id))
+        for (pid,) in productos.tuples():
+            _marcar(session, tenant_id, pid, TODO_EL_HISTORIAL)
     _marcar_no_omitibles(session, candidatas)
     marcas: dict[tuple[uuid.UUID, uuid.UUID], date] = session.info.pop(_MARCAS, {})
     if not marcas:
