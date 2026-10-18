@@ -38,6 +38,7 @@ from app.application.services.score_trigger_service import trigger_score_recalcu
 from app.config.avg_cost_display_rollout import avg_cost_display_enabled_for
 from app.domain.business_time import now_ar_naive, today_ar
 from app.domain.costo_promedio import Estado as EstadoPromedio
+from app.domain.costo_promedio import es_ri
 from app.domain.costo_promedio_de_venta import CENTAVO
 from app.domain.costo_vigente import (
     conservar_claves_del_costo,
@@ -110,9 +111,15 @@ async def _con_sugerencias(
     reconocido se queda sin sugerencias en vez de romper el listado.
     """
     result = await session.execute(
-        select(BusinessProfile.vertical_code).where(BusinessProfile.tenant_id == tenant_id)
+        select(BusinessProfile.vertical_code, BusinessProfile.fiscal_condition).where(
+            BusinessProfile.tenant_id == tenant_id
+        )
     )
-    vertical = try_parse_vertical(result.scalar_one_or_none())
+    perfil = result.one_or_none()
+    vertical = try_parse_vertical(perfil[0] if perfil else None)
+    # M·P4b: para un RI el promedio está neto de IVA (base comparable); el costo
+    # de reposición del catálogo, no. La columna lo rotula.
+    promedio_sin_iva = es_ri(perfil[1] if perfil else None)
     labels = (
         {c["code"]: c["label"] for c in product_category_catalog(vertical)}
         if vertical is not None
@@ -132,6 +139,7 @@ async def _con_sugerencias(
             # historial (p. ej. antes del backfill) no es «sin compras».
             response.avg_cost_estado = cast(EstadoPromedio, registro.estado)
             response.avg_cost_motivo = registro.motivo
+            response.avg_cost_sin_iva = promedio_sin_iva
             if registro.estado != "sin_medicion" and registro.costo_promedio is not None:
                 response.avg_cost_ars = registro.costo_promedio.quantize(
                     CENTAVO, rounding=ROUND_HALF_UP

@@ -597,6 +597,15 @@ class FactsService:
                 & sales["cost_avg_ars"].notna()
                 & (sales["cost_avg_estado"] == ESTADO_PROMEDIO_MEDIDO)
             )
+            # M·P4b: la intersección va como UNA línea; con un RI, sólo las ventas
+            # con reposición confirmada (neta), igual que exige el dominio.
+            if es_responsable_inscripto(self.fiscal_condition_crudo):
+                confirmado = (
+                    sales["cost_confirmed"].fillna(False).astype(bool)
+                    if "cost_confirmed" in cols
+                    else pd.Series(False, index=sales.index)
+                )
+                comun = comun & confirmado
 
         def total(serie: pd.Series) -> Decimal:
             return Decimal(str(float(serie.sum())))
@@ -611,6 +620,7 @@ class FactsService:
                 costo_reposicion=total(sales.loc[comun, "cost_ars"]),
                 costo_promedio=total(sales.loc[comun, "cost_avg_ars"]),
                 estado_promedio=ESTADO_PROMEDIO_MEDIDO,
+                reposicion_confirmada=True,
             ))
         return comparar_promedio_y_reposicion(lineas, self.fiscal_condition_crudo)
 

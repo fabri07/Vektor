@@ -130,6 +130,9 @@ const AVG_COST_COLUMN = {
     return (
       <span title={product.avg_cost_motivo ?? undefined}>
         {formatARS(Number(v))}
+        {product.avg_cost_sin_iva && (
+          <span className="ml-1 text-xs text-vk-text-secondary">sin IVA</span>
+        )}
         {product.avg_cost_estado === "incompleto" && (
           <span className="ml-1 text-xs text-vk-text-secondary">(parcial)</span>
         )}

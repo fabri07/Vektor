@@ -2,7 +2,8 @@
 
 Es un dato, nunca un segundo margen: ``margen_bruto`` no cambia, la comparación
 sale de la intersección (venta con costo de reposición y promedio ``medido``),
-un RI sale ausente hasta M·P4b y el chat lo dice sólo con la cuenta habilitada.
+un RI sólo compara ventas con reposición confirmada (M·P4b) y el chat lo dice
+sólo con la cuenta habilitada.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from app.application.services.facts_service import FactsService, Provenance
 from app.config.settings import get_settings
 from app.domain.business_time import today_ar
 from app.domain.margen import (
-    MOTIVO_PROMEDIO_SIN_NETO_IVA,
     MOTIVO_SIN_INGRESO,
     LineaDeComparacion,
     comparar_promedio_y_reposicion,
@@ -40,12 +40,13 @@ from app.tests.application.test_facts_reconciliation import (
 
 
 def _l(importe: str, rep: str | None, prom: str | None,
-       estado: str | None = "medido") -> LineaDeComparacion:
+       estado: str | None = "medido", *, confirmada: bool = False) -> LineaDeComparacion:
     return LineaDeComparacion(
         importe=Decimal(importe),
         costo_reposicion=None if rep is None else Decimal(rep),
         costo_promedio=None if prom is None else Decimal(prom),
         estado_promedio=estado,
+        reposicion_confirmada=confirmada,
     )
 
 
@@ -99,13 +100,24 @@ def test_promedio_no_medido_queda_fuera(estado: str | None) -> None:
     assert c.ausente
 
 
-def test_ri_sale_ausente_aunque_haya_cobertura() -> None:
+def test_ri_compara_solo_la_reposicion_confirmada() -> None:
+    """M·P4b: el promedio de un RI ya está neto; la reposición estimada no."""
     c = comparar_promedio_y_reposicion(
+        [_l("1000", "500", "400", confirmada=True), _l("500", "300", "200")],
+        "responsable_inscripto",
+    )
+    assert c.motivo_ausente is None
+    assert c.ingreso_comun == Decimal("1000")
+    assert c.margen_promedio_pct == Decimal("60")
+    assert c.brecha_pp == Decimal("10")
+    # Toda la reposición estimada: no hay intersección.
+    solo_estimada = comparar_promedio_y_reposicion(
         [_l("1000", "500", "400")], "responsable_inscripto"
     )
-    assert c.motivo_ausente == MOTIVO_PROMEDIO_SIN_NETO_IVA
-    assert c.cobertura_conjunta == 1
-    assert c.margen_promedio_pct is None
+    assert solo_estimada.cobertura_conjunta == 0 and solo_estimada.ausente
+    # Fuera del RI la confirmación no se exige (misma base cruda).
+    mono = comparar_promedio_y_reposicion([_l("1000", "500", "400")], "monotributo")
+    assert mono.ausente is False
 
 
 def test_monotributo_y_legacy_registered_no_son_ri() -> None:
@@ -162,14 +174,24 @@ def test_el_hecho_lleva_la_comparación_en_detail() -> None:
 
 
 def test_ausente_es_empty_sin_numero() -> None:
-    f = _svc(_FILAS, _CON_PROMEDIO, "responsable_inscripto").margen_promedio_vs_reposicion(
+    # RI con la reposición estimada: sin intersección, ausente sin número.
+    filas = [{**r, "cost_confirmed": False} for r in _FILAS]
+    f = _svc(filas, _CON_PROMEDIO, "responsable_inscripto").margen_promedio_vs_reposicion(
         "t", P30
     )
     assert f.value is None
     assert f.provenance == Provenance.EMPTY
     assert f.detail is not None
-    assert f.detail["motivo"] == MOTIVO_PROMEDIO_SIN_NETO_IVA
+    assert f.detail["motivo"] == "cobertura de costo 0,0%"
     assert f.detail["brecha_pp"] is None
+
+
+def test_ri_con_reposicion_confirmada_compara() -> None:
+    f = _svc(_FILAS, _CON_PROMEDIO, "responsable_inscripto").margen_promedio_vs_reposicion(
+        "t", P30
+    )
+    assert f.value == 50.0
+    assert f.detail is not None and f.detail["brecha_pp"] == 10.0
 
 
 def test_margen_bruto_idéntico_con_y_sin_columnas_de_promedio() -> None:
@@ -319,7 +341,9 @@ def test_vectorizado_igual_al_dominio_línea_por_línea() -> None:
 
 
 def test_texto_ausente_no_dice_nada() -> None:
-    f = _svc(_FILAS, _CON_PROMEDIO, "responsable_inscripto").margen_promedio_vs_reposicion(
+    # RI con la reposición estimada: sin intersección, ausente.
+    filas = [{**r, "cost_confirmed": False} for r in _FILAS]
+    f = _svc(filas, _CON_PROMEDIO, "responsable_inscripto").margen_promedio_vs_reposicion(
         "t", P30
     )
     assert describir_promedio_vs_reposicion(f) is None

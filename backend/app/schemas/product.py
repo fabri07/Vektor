@@ -76,6 +76,9 @@ class ProductResponse(BaseModel):
     avg_cost_ars: Decimal | None = None
     avg_cost_estado: Literal["medido", "incompleto", "sin_medicion"] | None = None
     avg_cost_motivo: str | None = None
+    #: M·P4b: el promedio está neto de IVA (RI, base comparable) y el costo de
+    #: reposición del catálogo no; null cuando no hay promedio.
+    avg_cost_sin_iva: bool | None = None
 
     @field_validator("custom_fields", mode="before")
     @classmethod

@@ -238,7 +238,7 @@ async def test_con_compuerta_muestra_el_promedio_y_nada_mas_cambia(
     fila_b = despues[str(b.id)]
     assert (fila_b["avg_cost_estado"], fila_b["avg_cost_ars"]) == ("incompleto", "50.00")
     # Lo demás de la respuesta (costo de reposición, margen) no cambia.
-    campos = ("avg_cost_ars", "avg_cost_estado", "avg_cost_motivo")
+    campos = ("avg_cost_ars", "avg_cost_estado", "avg_cost_motivo", "avg_cost_sin_iva")
     for pid, fila in despues.items():
         assert {k: v for k, v in fila.items() if k not in campos} == {
             k: v for k, v in antes[pid].items() if k not in campos

@@ -50,14 +50,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.domain.base_comparable import base_comparable
 from app.domain.business_time import today_ar
 from app.domain.costo_de_venta import MOTIVO_UNIDAD_DUDOSA
-from app.domain.costo_promedio import PRIORIDAD, Registro, proyectar, registros
+from app.domain.costo_promedio import PRIORIDAD, Registro, es_ri, proyectar, registros
 from app.domain.costo_promedio_de_venta import (
     PuntoDelHistorial,
     costo_promedio_de_venta,
     punto_a,
 )
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product_cost import ProductCostHistory, ProductCostState
 from app.persistence.repositories.costo_de_referencia_repository import costos_de_referencia
 from app.persistence.repositories.costo_promedio_repository import (
@@ -176,7 +178,10 @@ async def calcular(
     regs: dict[uuid.UUID, list[Registro]] = {}
     for pid, h in historias.items():
         proy = proyectar(
-            h.eventos, stock_fuera_del_ledger=h.stock_fuera_del_ledger, aproximado=h.aproximado
+            h.eventos,
+            stock_fuera_del_ledger=h.stock_fuera_del_ledger,
+            aproximado=h.aproximado,
+            motivo_sin_costo=h.motivo_sin_costo,
         )
         regs[pid] = registros(proy)
     return Calculo(
@@ -359,15 +364,24 @@ async def _medir_brecha(
     if not medidos:
         return
     reposicion = await costos_de_referencia(session, calculo.tenant_id, medidos, today_ar())
+    # M·P4b: el promedio está en la base comparable; la reposición, también.
+    regimen = (
+        await session.execute(
+            select(BusinessProfile.fiscal_condition).where(
+                BusinessProfile.tenant_id == calculo.tenant_id
+            )
+        )
+    ).scalar_one_or_none()
+    ri = es_ri(regimen)
     for pid, prom in medidos.items():
         ref = reposicion.get(pid)
-        if (
-            ref is not None
-            and ref.origen in ORIGENES_DE_REPOSICION
-            and ref.costo_unitario
-            and ref.costo_unitario > 0
-        ):
-            resumen.brechas.append(1 - prom / ref.costo_unitario)
+        if ref is None or ref.origen not in ORIGENES_DE_REPOSICION:
+            continue
+        base = base_comparable(ref, regimen)
+        if ri and not base.confirmada:
+            continue
+        if base.costo and base.costo > 0:
+            resumen.brechas.append(1 - prom / base.costo)
 
 
 def _sumar(

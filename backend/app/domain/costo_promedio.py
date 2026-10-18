@@ -40,6 +40,11 @@ Reglas:
 - **Apertura:** el stock que el negocio ya tenía, con su costo, EN SU FECHA de
   negocio (no al comienzo de todo, como el chequeo temporal de integridad). Es
   un delta, igual que en el ledger.
+- **Base comparable (M·P4b):** cada costo entra al promedio en la MISMA base que
+  la reposición de la venta (``base_comparable``, ``costo_comparable``). Para un
+  Responsable Inscripto, una compra sin neto de IVA confirmado no tiene costo
+  comparable: sus unidades cuentan como sin costo (nunca se mezcla un costo neto
+  con uno con IVA), con el motivo ``MOTIVO_SIN_COSTO_RI``.
 """
 
 from __future__ import annotations
@@ -50,6 +55,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
+
+from app.domain.base_comparable import base_comparable, regimen_para_base
+from app.domain.costo_de_referencia import TRATAMIENTOS, CostoDeReferencia, Origen, Tratamiento
 
 Clase = Literal["apertura", "compra", "entrada", "salida", "complejo", "ancla"]
 Estado = Literal["medido", "incompleto", "sin_medicion"]
@@ -81,6 +89,9 @@ MOTIVO_NO_RECONSTRUIBLE: Final = (
     "stock no reconstruible (devolución o ajuste sin procedencia): hace falta un conteo"
 )
 MOTIVO_FUERA_DEL_LEDGER: Final = "hay stock cargado por fuera del registro de movimientos"
+#: RI: lo mismo que ``MOTIVO_SIN_COSTO``, pero la causa puede ser también una
+#: compra sin neto de IVA confirmado.
+MOTIVO_SIN_COSTO_RI: Final = "hay unidades sin costo neto de IVA confirmado en el stock"
 
 # Valores de ``source_type`` (los mismos literales que
 # ``application/services/inventory_movement_origin``; un test los ata).
@@ -203,6 +214,61 @@ def clasificar(
     return "complejo"
 
 
+@dataclass(frozen=True)
+class ContratoDelMovimiento:
+    """Lo que el movimiento dice de su costo (contrato de M·1a/M·1b)."""
+
+    envio: str | None = None
+    impuesto: str | None = None
+    tax_rate: Decimal | None = None
+    tax_amount: Decimal | None = None
+    tax_recoverable: bool | None = None
+
+
+def _tratamiento(valor: str | None) -> Tratamiento:
+    return valor if valor in TRATAMIENTOS else "desconocido"  # type: ignore[return-value]
+
+
+def costo_comparable(
+    costo: Decimal | None,
+    clase: Clase,
+    contrato: ContratoDelMovimiento,
+    fiscal_condition_crudo: str | None,
+) -> Decimal | None:
+    """El costo con el que el evento entra al promedio (M·P4b).
+
+    El de ``base_comparable``, la misma regla que la reposición de la venta:
+    sólo una COMPRA con envío e impuesto conocidos y régimen definido confirma.
+    Sin base confirmada, un RI no tiene costo comparable (``None``: el costo
+    crudo puede traer el IVA o no); los demás regímenes siguen con el crudo,
+    igual que la reposición estimada de su venta.
+    """
+    if costo is None or costo <= 0:
+        return costo
+    origen: Origen = "compra" if clase == "compra" else (
+        "stock_inicial" if clase == "apertura" else "costo_cargado"
+    )
+    base = base_comparable(
+        CostoDeReferencia(
+            origen=origen,
+            costo_unitario=costo,
+            envio=_tratamiento(contrato.envio),
+            impuesto=_tratamiento(contrato.impuesto),
+            tax_rate=contrato.tax_rate,
+            tax_amount=contrato.tax_amount,
+            tax_recoverable=contrato.tax_recoverable,
+        ),
+        fiscal_condition_crudo,
+    )
+    if base.confirmada:
+        return base.costo
+    return None if es_ri(fiscal_condition_crudo) else costo
+
+
+def es_ri(fiscal_condition_crudo: str | None) -> bool:
+    return regimen_para_base(fiscal_condition_crudo) == "ri"
+
+
 def _estado(u_c: Decimal, u_s: Decimal, prom: Decimal | None, motivo: str | None) -> EstadoCosto:
     if prom is None:
         sin_compras = MOTIVO_SIN_COSTO if u_s > 0 else MOTIVO_SIN_COMPRAS
@@ -287,6 +353,7 @@ def proyectar(
     desde: EstadoCosto = INICIAL,
     stock_fuera_del_ledger: bool = False,
     aproximado: bool = False,
+    motivo_sin_costo: str = MOTIVO_SIN_COSTO,
 ) -> list[tuple[Evento, EstadoCosto]]:
     """Cada evento, en orden, con el estado que deja.
 
@@ -295,6 +362,8 @@ def proyectar(
     detecta el llamador (el stock actual no cierra con el ledger): sin un ancla,
     no hay medición. ``aproximado`` también lo decide el llamador (ventas
     importadas sin movimiento de stock) y viaja en cada estado.
+    ``motivo_sin_costo`` reemplaza a ``MOTIVO_SIN_COSTO`` en la salida (un RI:
+    ``MOTIVO_SIN_COSTO_RI``); adentro el dominio sigue con el genérico.
     """
     estado = desde
     if stock_fuera_del_ledger:
@@ -304,7 +373,10 @@ def proyectar(
         estado = aplicar(estado, ev)
         if aproximado and not estado.aproximado:
             estado = replace(estado, aproximado=True)
-        salida.append((ev, estado))
+        visible = estado
+        if motivo_sin_costo != MOTIVO_SIN_COSTO and estado.motivo == MOTIVO_SIN_COSTO:
+            visible = replace(estado, motivo=motivo_sin_costo)
+        salida.append((ev, visible))
     return salida
 
 

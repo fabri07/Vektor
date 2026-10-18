@@ -19,6 +19,11 @@ trae costos ni ids, la otra deja afuera las compras sin costo. Acá va todo lo q
   sólo con el clamp, no hay stock por fuera: el producto queda ``aproximado``
   (el dominio no reproduce el clamp: arrastra el faltante).
 
+**Base comparable (M·P4b).** Cada costo entra en la base de la reposición de la
+venta (``domain/costo_promedio.costo_comparable``): se lee el contrato de cada
+movimiento y el régimen del tenant. Un RI sin neto de IVA confirmado deja esas
+unidades sin costo, con su motivo.
+
 **Fechas.** ``occurred_at`` ya es hora argentina rotulada UTC: se le saca la zona.
 ``created_at`` es un instante UTC real (de 21 a 24 hora AR ya es el día
 siguiente): se lleva a hora argentina. Lo mismo para la carga (desempate).
@@ -40,7 +45,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import a_hora_de_negocio
-from app.domain.costo_promedio import AJUSTE_MANUAL, Evento, clasificar
+from app.domain.costo_promedio import (
+    AJUSTE_MANUAL,
+    MOTIVO_SIN_COSTO,
+    MOTIVO_SIN_COSTO_RI,
+    ContratoDelMovimiento,
+    Evento,
+    clasificar,
+    costo_comparable,
+    es_ri,
+)
+from app.persistence.models.business import BusinessProfile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
@@ -49,6 +64,8 @@ from app.persistence.models.transaction import SaleEntry
 #: Mismo literal que ``reparacion_stock_inicial_service.REPAIR_TYPE`` (un test
 #: los ata): importar el servicio arrastraría la relectura entera.
 REPAIR_TYPE_MR: Final = "MR_STOCK_INICIAL_APERTURA"
+#: Las clases cuyo costo cuenta para el promedio (``domain/costo_promedio.aplicar``).
+_CON_COSTO: Final = frozenset({"apertura", "compra", "entrada", "ancla"})
 #: ``stock_service.sale_source_event_id``.
 PREFIJO_VENTA: Final = "sale:"
 
@@ -59,6 +76,8 @@ class HistoriaProducto:
     eventos: list[Evento] = field(default_factory=list)
     stock_fuera_del_ledger: bool = False
     aproximado: bool = False
+    #: El motivo de las unidades sin costo (un RI: ``MOTIVO_SIN_COSTO_RI``).
+    motivo_sin_costo: str = MOTIVO_SIN_COSTO
 
 
 def _hora_de_negocio_del_ledger(occurred_at: datetime | None, created_at: datetime) -> datetime:
@@ -141,7 +160,13 @@ async def cargar_historias(
     stock: dict[uuid.UUID, int] = {
         pid: int(su or 0) for pid, su in (await session.execute(consulta_productos)).tuples()
     }
-    historias = {pid: HistoriaProducto(pid) for pid in stock}
+    regimen = (
+        await session.execute(
+            select(BusinessProfile.fiscal_condition).where(BusinessProfile.tenant_id == tenant_id)
+        )
+    ).scalar_one_or_none()
+    motivo = MOTIVO_SIN_COSTO_RI if es_ri(regimen) else MOTIVO_SIN_COSTO
+    historias = {pid: HistoriaProducto(pid, motivo_sin_costo=motivo) for pid in stock}
     if not historias:
         return historias
 
@@ -158,6 +183,11 @@ async def cargar_historias(
         m.occurred_at,
         m.created_at,
         m.source_event_id,
+        m.shipping_treatment,
+        m.tax_treatment,
+        m.tax_rate,
+        m.tax_amount,
+        m.tax_recoverable,
     ).where(m.tenant_id == tenant_id, m.voided_at.is_(None))
     if filtro is not None:
         consulta = consulta.where(m.product_id.in_(filtro))
@@ -169,7 +199,10 @@ async def cargar_historias(
     # movimientos no paga el armado de filas del ORM (medido: ~0,5 s en 50.000).
     conexion = await session.connection()
     for fila in (await conexion.execute(consulta)).tuples():
-        (mid, pid, tipo, origen, qty, costo, costo_final, occurred_at, created_at, evento) = fila
+        (
+            mid, pid, tipo, origen, qty, costo, costo_final, occurred_at, created_at, evento,
+            envio, impuesto, tasa, monto_iva, recuperable,
+        ) = fila
         historia = historias.get(pid)
         if historia is None:
             continue
@@ -180,13 +213,23 @@ async def cargar_historias(
         clase = clasificar(tipo, origen, int(qty), catalogo_reparado=mid in reparados)
         if clase is None:
             continue
-        precio = costo_final if costo_final is not None else costo
+        crudo = costo_final if costo_final is not None else costo
+        precio = None if crudo is None else Decimal(crudo)
+        if clase in _CON_COSTO:
+            # Sólo las clases que traen mercadería con precio: una venta no paga
+            # el armado de la base.
+            precio = costo_comparable(
+                precio,
+                clase,
+                ContratoDelMovimiento(envio, impuesto, tasa, monto_iva, recuperable),
+                regimen,
+            )
         historia.eventos.append(
             Evento(
                 fecha=_hora_de_negocio_del_ledger(occurred_at, created_at),
                 clase=clase,
                 unidades=abs(int(qty)),
-                costo=None if precio is None else Decimal(precio),
+                costo=precio,
                 # Sólo desempata dentro del mismo día y la hora: no hace falta llevarlo
                 # a hora argentina (el corrimiento no cambia el orden) y ahorra la
                 # conversión de zona en cada fila.
