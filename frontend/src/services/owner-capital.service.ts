@@ -44,7 +44,13 @@ export interface CapitalSummaryResponse {
   has_in_kind: boolean;
   partners: CapitalPartnerSummary[];
   totals: CapitalPartnerSummary | null;
+  /** Flujo en dinero; no incluye el capital inicial declarado en el alta. */
   cash_flow: { entradas: number; salidas: number; neto: number } | null;
+  /**
+   * Capital inicial declarado en el onboarding (D·5) que cae en el período. Ya
+   * está sumado en los aportes; viene aparte para rotularlo. `null` si no hay.
+   */
+  initial_capital_declared?: { amount_ars: number; occurred_on: string } | null;
 }
 
 export interface CreateCapitalMovementPayload {

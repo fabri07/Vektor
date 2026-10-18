@@ -18,6 +18,7 @@ from app.persistence.models.owner_capital import (
     FORM_DINERO,
     KINDS_ENTRADA,
     KINDS_SALIDA,
+    SOURCE_ONBOARDING_DECLARADO,
     OwnerCapitalMovement,
 )
 
@@ -35,7 +36,12 @@ class FlujoDeCapital:
 async def flujo_de_dinero(
     session: AsyncSession, tenant_id: uuid.UUID, desde: date, hasta: date
 ) -> list[FlujoDeCapital]:
-    """Capital en DINERO, vivo, por día y medio. Sólo para agregados de caja."""
+    """Capital en DINERO, vivo, por día y medio. Sólo para agregados de caja.
+
+    Excluye el capital inicial declarado en el onboarding (D·5): es lo que el
+    dueño DICE que puso al arrancar, no plata que haya entrado al cajón ese día.
+    Si lo leyera, el arqueo de esa fecha esperaría un efectivo que nunca entró.
+    """
     m = OwnerCapitalMovement
     entradas = func.sum(case((m.kind.in_(KINDS_ENTRADA), m.amount_ars), else_=0))
     salidas = func.sum(case((m.kind.in_(KINDS_SALIDA), m.amount_ars), else_=0))
@@ -46,6 +52,7 @@ async def flujo_de_dinero(
                 m.tenant_id == tenant_id,
                 m.voided_at.is_(None),
                 m.form == FORM_DINERO,
+                m.source_type != SOURCE_ONBOARDING_DECLARADO,
                 m.occurred_on >= desde,
                 m.occurred_on <= hasta,
             )

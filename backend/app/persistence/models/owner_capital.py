@@ -45,10 +45,13 @@ FORM_ESPECIE = "especie"
 FORMS: tuple[str, ...] = (FORM_DINERO, FORM_ESPECIE)
 
 SOURCE_MANUAL = "manual"
+#: Capital inicial declarado en el onboarding (D·5). Es un dato DECLARADO, no
+#: plata contada: ningún agregado de caja lo lee (``flujo_de_dinero`` lo excluye).
+SOURCE_ONBOARDING_DECLARADO = "onboarding_declarado"
 SOURCE_TYPES: tuple[str, ...] = (
     SOURCE_MANUAL,
     "archivo",
-    "onboarding_declarado",
+    SOURCE_ONBOARDING_DECLARADO,
     "migrado_de_gasto",
 )
 

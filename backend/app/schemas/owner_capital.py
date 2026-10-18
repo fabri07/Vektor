@@ -113,6 +113,11 @@ class CapitalCashFlow(BaseModel):
     neto: float
 
 
+class CapitalInitialDeclared(BaseModel):
+    amount_ars: float
+    occurred_on: date
+
+
 class CapitalSummaryResponse(BaseModel):
     from_date: date
     to_date: date
@@ -123,4 +128,8 @@ class CapitalSummaryResponse(BaseModel):
     #: None cuando ``has_data`` es False.
     totals: CapitalPartnerSummary | None
     #: Flujo de capital en DINERO del período; None cuando ``has_data`` es False.
+    #: No incluye el capital inicial declarado en el alta (no es plata contada).
     cash_flow: CapitalCashFlow | None
+    #: Capital inicial declarado en el onboarding (D·5) que cae en el período.
+    #: Ya está sumado en los aportes; se expone para rotularlo. None si no hay.
+    initial_capital_declared: CapitalInitialDeclared | None = None

@@ -37,6 +37,7 @@ from app.persistence.models.user import User
 from app.schemas.owner_capital import (
     CapitalAmountsByForm,
     CapitalCashFlow,
+    CapitalInitialDeclared,
     CapitalKind,
     CapitalMovementListResponse,
     CapitalMovementResponse,
@@ -173,6 +174,14 @@ async def capital_summary(
                 neto=r.flujo_dinero.neto,
             )
             if r.flujo_dinero is not None
+            else None
+        ),
+        initial_capital_declared=(
+            CapitalInitialDeclared(
+                amount_ars=r.capital_inicial_declarado.monto,
+                occurred_on=r.capital_inicial_declarado.fecha,
+            )
+            if r.capital_inicial_declarado is not None
             else None
         ),
     )

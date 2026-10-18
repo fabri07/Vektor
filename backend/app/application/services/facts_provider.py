@@ -78,7 +78,7 @@ _PRODUCTS_COLS = [
     "first_seen_date", "provenance",
 ]
 
-_CAPITAL_COLS = ["occurred_on", "kind", "form", "amount_ars", "partner_name"]
+_CAPITAL_COLS = ["occurred_on", "kind", "form", "amount_ars", "partner_name", "source_type"]
 
 
 @dataclass(frozen=True)
@@ -326,7 +326,9 @@ async def load_capital_frame(
     m = OwnerCapitalMovement
     rows = (
         await session.execute(
-            select(m.occurred_on, m.kind, m.form, m.amount_ars, m.partner_name).where(
+            select(
+                m.occurred_on, m.kind, m.form, m.amount_ars, m.partner_name, m.source_type
+            ).where(
                 m.tenant_id == tenant_id,
                 m.voided_at.is_(None),
                 m.occurred_on <= hasta,
@@ -341,6 +343,7 @@ async def load_capital_frame(
                 "form": row.form,
                 "amount_ars": float(row.amount_ars),
                 "partner_name": row.partner_name,
+                "source_type": row.source_type,
             }
             for row in rows
         ],

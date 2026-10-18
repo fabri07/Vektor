@@ -248,8 +248,9 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
    - el flujo operativo va **separado** del flujo con capital y de la caja contada;
    - no se llama «balance contable».
 10. **D·5**: capital inicial opcional en el onboarding.
-    - Es declarado (`PESO_DECLARADO`), con fecha y sin duplicarse si se repite el onboarding.
+    - Es declarado, con fecha y sin duplicarse si se repite el onboarding. (El plan decía `PESO_DECLARADO` en la completitud; quedó afuera, ver «Cómo quedó».)
     - No se confunde con la caja actual.
+    - **Cómo quedó (2026-10-17, sin migración):** dos campos opcionales en `POST /onboarding/submit` (`initial_capital_ars` > 0 e `initial_capital_date` no futura, los dos o ninguno) que crean, en la misma transacción que el perfil, un `aporte` en dinero `onboarding_declarado` (medio `other`, socio sin identificar, usuario del JWT, auditado como `ui:onboarding`). No se duplica: el perfil se lee con `FOR UPDATE` (el segundo submit da 409) y no se crea si ya hay uno vivo. La caja nunca lo ve (`flujo_de_dinero` lo excluye: arqueo, liquidez, proyección y la guarda de D·3). El Balance lo cuenta en aportes, fuera del flujo de capital, rotulado «Capital inicial (declarado en el alta)». **No entra en la completitud:** ninguna métrica lo consume, así que sumarlo (aun con `PESO_DECLARADO`) subiría la confianza por contestar una pregunta que no alimenta ningún número. Detalle en `docs/claude/plataforma.md`.
 
 ### Aceptación de la fase 2
 - **Margen ponderado:** ventas de $100 con costo $80 y de $900 con costo $450 → ganancia $470, **47%**. El promedio simple daría 35%.

@@ -29,6 +29,13 @@ export interface Step2Data {
   work_close_hour: number;
   /** Régimen fiscal — opcional y salteable. `null` = el usuario no eligió. */
   fiscal_condition: FiscalCondition | null;
+  /**
+   * Capital inicial (D·5) — opcional. Con cuánta plata ARRANCÓ el negocio y
+   * cuándo; no es `cash_on_hand_ars` (cuánta hay hoy). Los dos `null` o los dos
+   * con valor: el backend rechaza uno solo.
+   */
+  initial_capital_ars: number | null;
+  initial_capital_date: string | null; // YYYY-MM-DD
 }
 
 // 0=lunes … 6=domingo (consistente con el backend)
@@ -45,6 +52,21 @@ const DEFAULT_WORK_DAYS = [0, 1, 2, 3, 4, 5];
 const DEFAULT_OPEN_HOUR = 9;
 const DEFAULT_CLOSE_HOUR = 18;
 const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => h);
+
+/**
+ * Hoy en Argentina, `YYYY-MM-DD`: el backend valida "no futura" con
+ * `today_ar()`, y con la hora de un navegador adelantado la fecha por defecto
+ * caería en mañana y el submit daría un 422 sin pista.
+ */
+function todayISO(): string {
+  // `en-CA` formatea como YYYY-MM-DD.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Argentina/Buenos_Aires",
+  }).format(new Date());
+}
+
+/** Tope del backend (`_MAX_AMOUNT`) y sus 2 decimales. */
+const MAX_CAPITAL = 999_999_999;
 
 interface Step2FormProps {
   initialData: Step2Data | null;
@@ -63,6 +85,7 @@ interface FormErrors {
   supplier_count_estimate?: string;
   main_concern?: string;
   work_schedule?: string;
+  initial_capital?: string;
 }
 
 /*
@@ -165,6 +188,8 @@ export function Step2Form({
     product_count_estimate: String(initialData?.product_count_estimate ?? ""),
     supplier_count_estimate: String(initialData?.supplier_count_estimate ?? ""),
     main_concern: initialData?.main_concern ?? ("" as MainConcern | ""),
+    initial_capital_ars: String(initialData?.initial_capital_ars ?? ""),
+    initial_capital_date: initialData?.initial_capital_date ?? todayISO(),
   });
   const [workDays, setWorkDays] = useState<number[]>(
     initialData?.work_days ?? DEFAULT_WORK_DAYS,
@@ -236,6 +261,26 @@ export function Step2Form({
       errs.work_schedule = "El horario de cierre debe ser posterior al de apertura.";
     }
 
+    // Capital inicial: opcional. En blanco = no contestó (no es 0). Si hay
+    // monto, tiene que ser > 0 y llevar una fecha que no sea futura.
+    let initialCapital: number | null = null;
+    let initialCapitalDate: string | null = null;
+    if (fields.initial_capital_ars.trim() !== "") {
+      const monto = parseFloat(fields.initial_capital_ars);
+      if (isNaN(monto) || monto <= 0) {
+        errs.initial_capital = "Ingresá un monto mayor a 0, o dejalo en blanco.";
+      } else if (monto > MAX_CAPITAL || !/^\d+([.,]\d{1,2})?$/.test(fields.initial_capital_ars.trim())) {
+        errs.initial_capital = "Ingresá el monto en pesos, con hasta 2 decimales.";
+      } else if (!fields.initial_capital_date) {
+        errs.initial_capital = "Indicá cuándo arrancó el negocio con ese capital.";
+      } else if (fields.initial_capital_date > todayISO()) {
+        errs.initial_capital = "La fecha no puede ser futura.";
+      } else {
+        initialCapital = monto;
+        initialCapitalDate = fields.initial_capital_date;
+      }
+    }
+
     setErrors(errs);
     if (Object.keys(errs).length > 0) return null;
 
@@ -255,6 +300,8 @@ export function Step2Form({
       work_open_hour: openHour,
       work_close_hour: closeHour,
       fiscal_condition: fiscalCondition,
+      initial_capital_ars: initialCapital,
+      initial_capital_date: initialCapitalDate,
     };
   }
 
@@ -319,6 +366,43 @@ export function Step2Form({
           helper="Este dato tiene 7 días de vigencia. Podés actualizarlo cuando quieras desde el dashboard."
           prefix="$"
         />
+
+        {/*
+          Capital inicial (D·5). Pregunta distinta de la de arriba: aquella es
+          cuánta plata hay HOY; ésta, con cuánta arrancó el negocio. Se guarda
+          como aporte de capital declarado y se ve en el Balance; no entra en la
+          caja ni en el arqueo.
+        */}
+        <div>
+          <NumberInput
+            id="initial-capital"
+            label="¿Con cuánto capital arrancó el negocio? (opcional)"
+            value={fields.initial_capital_ars}
+            onChange={set("initial_capital_ars")}
+            hint="La plata que pusieron los dueños para empezar. No es lo que tenés hoy: eso va en la pregunta de arriba. Si no lo sabés, dejalo en blanco."
+            helper="Lo vas a ver en el Balance como capital inicial declarado. No suma a la caja."
+            error={errors.initial_capital}
+            prefix="$"
+          />
+          {fields.initial_capital_ars.trim() !== "" && (
+            <div className="mt-3">
+              <label
+                htmlFor="initial-capital-date"
+                className="block text-sm font-medium text-gray-800"
+              >
+                ¿Desde cuándo?
+              </label>
+              <input
+                id="initial-capital-date"
+                type="date"
+                max={todayISO()}
+                value={fields.initial_capital_date}
+                onChange={(e) => set("initial_capital_date")(e.target.value)}
+                className="mt-2 h-11 rounded-xl border border-gray-300 bg-white px-4 text-base text-gray-900 focus:border-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-200"
+              />
+            </div>
+          )}
+        </div>
 
         <NumberInput
           id="product-count"
