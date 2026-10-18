@@ -297,7 +297,7 @@ class AgentChat(BaseAgent):
             # dashboard y la salud. Estimado o sin medir se dice como tal.
             # M·3-1: el indicador de salud es el NETO del último mes cerrado;
             # mientras corre el mes se ve el BRUTO del mes en curso.
-            lectura = await leer_margenes(db, tenant_id)
+            lectura = await leer_margenes(db, tenant_id, compuerta=True)
             margenes = lectura.margenes
             if margenes is None:
                 lines.append(f"  Margen neto: sin medir ({lectura.motivo})")

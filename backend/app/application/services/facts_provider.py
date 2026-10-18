@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Final
 
 import pandas as pd
 from sqlalchemy import func, select
@@ -36,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.application.services.facts_service import (
+    INFLOW_METHOD,
     BusinessFact,
     FactsService,
     Granularidad,
@@ -295,23 +297,29 @@ async def load_facts_frames(
 
 
 async def _primer_movimiento(session: AsyncSession, tenant_id: uuid.UUID) -> date | None:
-    """La primera venta o gasto vivos del negocio, en fecha (dos ``min`` por índice)."""
-    fechas: list[date] = []
-    for modelo in (SaleEntry, ExpenseEntry):
-        valor = (
-            await session.execute(
-                select(func.min(modelo.transaction_date)).where(
-                    modelo.tenant_id == tenant_id, modelo.voided_at.is_(None)
-                )
+    """La fecha de la primera venta viva y REAL del negocio (un ``min`` por índice).
+
+    Es lo que decide si un mes cerrado está completo. Sólo las ventas: si contara
+    un gasto, el alquiler cargado el día 1 haría «completo» un mes en que las
+    ventas empiezan el 27 (revisión de la fase 2). Las ventas DEMO y los cobros
+    de fiado no cuentan, igual que en las métricas.
+    """
+    valor = (
+        await session.execute(
+            select(func.min(SaleEntry.transaction_date)).where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.provenance == "REAL",
+                SaleEntry.payment_method != INFLOW_METHOD,  # un cobro de fiado no es venta
             )
-        ).scalar_one_or_none()
-        if isinstance(valor, datetime):
-            local = _naive_ar(valor)
-            if local is not None:
-                fechas.append(local.date())
-        elif isinstance(valor, date):
-            fechas.append(valor)
-    return min(fechas) if fechas else None
+        )
+    ).scalar_one_or_none()
+    if isinstance(valor, datetime):
+        local = _naive_ar(valor)
+        return local.date() if local is not None else None
+    if isinstance(valor, date):
+        return valor
+    return None
 
 
 async def load_capital_frame(
@@ -615,13 +623,19 @@ def granularidad_para(desde: date, hasta: date) -> Granularidad:
     return "dia" if dias <= 31 else "semana" if dias <= 120 else "mes"
 
 
-async def margenes_para_pantalla(
-    session: AsyncSession, tenant_id: uuid.UUID, *, desde: date, hasta: date
-) -> MargenesDePantalla | None:
-    """Neto del mes cerrado, bruto en curso, bruto del período, series y desglose.
+#: La compuerta de no-invención (``data_completeness_score < 50``).
+COMPLETITUD_MINIMA: Final = 50
+MOTIVO_POCOS_DATOS = "faltan datos para medirlo"
 
-    ``None`` sin rubro (como ``margenes_del_tenant``). Con la completitud del
-    último score por debajo de 50 → ``sin_datos``: no se calcula nada.
+
+async def completitud_insuficiente(session: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    """La completitud del último score está por debajo de 50, o no hay score.
+
+    La misma compuerta para todo lector del margen que se le muestra a alguien:
+    pantalla, chat, punto de equilibrio y agente de salud. Sin ningún score
+    todavía no se sabe si hay datos, y eso no habilita conclusiones (revisión de
+    la fase 2: antes la pantalla mostraba márgenes y el chat no miraba nada).
+    El BSL NO la usa: la completitud sale de él.
     """
     from app.persistence.models.score import HealthScoreSnapshot  # noqa: PLC0415
 
@@ -633,7 +647,18 @@ async def margenes_para_pantalla(
             .limit(1)
         )
     ).scalar_one_or_none()
-    if completitud is not None and completitud < 50:
+    return completitud is None or completitud < COMPLETITUD_MINIMA
+
+
+async def margenes_para_pantalla(
+    session: AsyncSession, tenant_id: uuid.UUID, *, desde: date, hasta: date
+) -> MargenesDePantalla | None:
+    """Neto del mes cerrado, bruto en curso, bruto del período, series y desglose.
+
+    ``None`` sin rubro (como ``margenes_del_tenant``). Con la completitud del
+    último score por debajo de 50 → ``sin_datos``: no se calcula nada.
+    """
+    if await completitud_insuficiente(session, tenant_id):
         return MargenesDePantalla(sin_datos=True)
     vertical_code = (
         await session.execute(
@@ -718,8 +743,14 @@ class LecturaDeMargenes:
     motivo: str | None = None
 
 
-async def leer_margenes(session: AsyncSession, tenant_id: uuid.UUID) -> LecturaDeMargenes:
+async def leer_margenes(
+    session: AsyncSession, tenant_id: uuid.UUID, *, compuerta: bool = False
+) -> LecturaDeMargenes:
     """Lee los márgenes dentro de un SAVEPOINT y nunca levanta.
+
+    ``compuerta=True`` (todo lector que se lo muestra a alguien) aplica
+    ``completitud_insuficiente``: sin datos suficientes, ``None`` con su motivo.
+    El BSL la deja apagada, porque la completitud se calcula ahí.
 
     Antes el chat leía el margen de ``get_financial_summary``, que atrapaba sus
     errores; sin esto, un fallo de FactsService convertía la consulta de caja o
@@ -729,6 +760,8 @@ async def leer_margenes(session: AsyncSession, tenant_id: uuid.UUID) -> LecturaD
     """
     try:
         async with session.begin_nested():
+            if compuerta and await completitud_insuficiente(session, tenant_id):
+                return LecturaDeMargenes(None, MOTIVO_POCOS_DATOS)
             margenes = await margenes_del_tenant(session, tenant_id)
     except Exception as exc:  # noqa: BLE001 — el margen es accesorio a la respuesta
         logger.warning("margenes_del_tenant_fallo", tenant_id=str(tenant_id), error=str(exc))

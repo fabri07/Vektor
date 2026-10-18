@@ -3,7 +3,7 @@
 import math
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
@@ -239,6 +239,12 @@ class ExpenseEntryResponse(BaseModel):
         return self
 
 
+#: La marca de los retiros que se cargaban como gasto (D·3 los pasa a capital).
+#: Sólo la escribió el sistema: por API no se agrega ni se cambia, o cualquier
+#: gasto podría convertirse en retiro (revisión de la fase 2).
+MARCA_RETIRO: Final = "profit_withdrawal"
+
+
 class CreateExpenseRequest(BaseModel):
     amount: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
     category: str = Field(pattern=EXPENSE_CATEGORIES)
@@ -275,6 +281,15 @@ class CreateExpenseRequest(BaseModel):
             raise ValueError("expense_date cannot be in the future.")
         return a_hora_de_negocio(v)
 
+    @field_validator("custom_fields")
+    @classmethod
+    def sin_marca_de_retiro(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if MARCA_RETIRO in v:
+            raise ValueError(
+                f"custom_fields.{MARCA_RETIRO} es reservado: un retiro se carga en capital."
+            )
+        return v
+
     @model_validator(mode="after")
     def _tax_kind_solo_impuestos(self) -> "CreateExpenseRequest":
         if self.tax_kind is not None and self.category != "TAXES":
@@ -283,7 +298,7 @@ class CreateExpenseRequest(BaseModel):
 
 
 class ProfitWithdrawalRequest(BaseModel):
-    """Retiro de ganancias anticipadas = sueldo/retiro del dueño (gasto PAYROLL/OPEX)."""
+    """Retiro de ganancias anticipadas del dueño: un retiro de capital (D·2), no un gasto."""
 
     amount: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
     withdrawal_date: datetime

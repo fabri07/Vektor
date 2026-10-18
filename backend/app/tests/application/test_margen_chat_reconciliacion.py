@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.chat.agent import AgentChat
@@ -22,6 +23,9 @@ from app.application.agents.shared.margen_texto import (
 from app.application.services.facts_provider import margenes_del_tenant
 from app.domain.business_time import today_ar
 from app.persistence.models.transaction import SaleEntry
+
+#: Los lectores del margen exigen un score con datos (compuerta de completitud).
+pytestmark = pytest.mark.usefixtures("score_suficiente")
 
 
 def _venta(tid, dias: int, monto: str, costo: str | None, confirmado: bool,

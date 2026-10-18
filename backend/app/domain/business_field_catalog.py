@@ -466,7 +466,10 @@ EXPENSE_FIELDS: tuple[FieldDescriptor, ...] = (
         value_path="custom_fields.profit_withdrawal",
         editable=False,
         default_visible=False,
-        financial_rule="Marca un gasto PAYROLL/OPEX como retiro del dueño, no un pago a terceros.",
+        financial_rule=(
+            "Marca de los retiros que se cargaban como gasto (antes de D·2); D·3 los "
+            "pasa a capital. Reservada: por API no se agrega ni se cambia."
+        ),
     ),
 )
 

@@ -52,6 +52,8 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
         ("POST", f"{P}/expenses"),
         # Alta de capital de socios (D·2). La anulación es una baja: sin gate.
         ("POST", f"{P}/capital-movements"),
+        # El atajo viejo que escribe el mismo retiro (revisión de la fase 2).
+        ("POST", f"{P}/expenses/profit-withdrawal"),
         ("POST", f"{P}/products"),
         ("POST", f"{P}/products/custom-categories"),
         ("POST", f"{P}/customers"),

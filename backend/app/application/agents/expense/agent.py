@@ -540,6 +540,7 @@ class AgentExpense(BaseAgent):
             from app.application.services.facts_provider import (  # noqa: PLC0415
                 leer_margenes,
             )
+            from app.domain.margen import SUPUESTO_ALICUOTA_RI  # noqa: PLC0415
             from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
             cutoff = date.today() - timedelta(days=30)
@@ -556,7 +557,7 @@ class AgentExpense(BaseAgent):
             # después de pagar la mercadería). Antes se dividía por un «margen»
             # que ya había restado todos los gastos, fijos incluidos: los fijos
             # se contaban dos veces (M·2b-2). El margen es el de FactsService.
-            lectura = await leer_margenes(self._db, tenant_id)
+            lectura = await leer_margenes(self._db, tenant_id, compuerta=True)
             bruto = lectura.margenes.bruto if lectura.margenes is not None else None
             if bruto is None or bruto.value is None:
                 motivo = (bruto.detail or {}).get("motivo") if bruto is not None else lectura.motivo
@@ -579,8 +580,13 @@ class AgentExpense(BaseAgent):
                     "equilibrio_sin_margen",
                     "No puedo calcular el punto de equilibrio sin un margen bruto positivo.",
                 )
+            # Un RI compara sin IVA (``SUPUESTO_ALICUOTA_RI``): el equilibrio
+            # también está en ventas sin IVA, y se dice.
+            supuestos = (bruto.detail or {}).get("supuestos")
+            sin_iva = isinstance(supuestos, list) and SUPUESTO_ALICUOTA_RI in supuestos
             lines = [
                 f"Tu punto de equilibrio mensual es ${be:,.0f} en ventas"
+                + (" sin IVA" if sin_iva else "")
                 + (" (estimado)." if estimado else "."),
                 f"Se calcula con tus costos fijos (${fixed_costs:,.0f}/mes) y tu margen "
                 f"bruto ({margen_pct:.0f}%"

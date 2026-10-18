@@ -1404,7 +1404,7 @@ async def test_health_con_datos_llama_narrador() -> None:
     # El neto de FactsService no va: no cierra con flujo_neto (otra ventana).
     assert "margen_neto_pct" not in rf
     assert "margen_pct" not in rf
-    mock_margenes.assert_called_once_with(mock_db, UUID(_TENANT_A))
+    mock_margenes.assert_called_once_with(mock_db, UUID(_TENANT_A), compuerta=True)
     assert rf["ticket_promedio"] == pytest.approx(5000.0)
     assert rf["n_transacciones"] == 30
     # Todos float (no Decimal)

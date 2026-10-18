@@ -130,6 +130,41 @@ class TestRutas:
         assert venta.cost_ars == 80
         assert venta.cost_snapshot_version == 1
 
+    async def test_patch_a_un_producto_fraccionado_queda_sin_costo(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        """Revisión de la fase 2: el PATCH recosteaba 2 «unidades» como 2 gramos."""
+        from app.domain.costo_de_venta import MOTIVO_UNIDAD_DUDOSA  # noqa: PLC0415
+
+        vela = await _producto(client, auth_headers, costo="40.00")
+        queso = await client.post(
+            "/api/v1/products",
+            json={
+                "name": f"Queso {uuid.uuid4().hex[:6]}", "sale_price_ars": "10000.00",
+                "unit_cost_ars": "5000.00", "stock_units": 5000,
+                "sale_unit": "gram", "base_units_per_sale_unit": 1000,
+            },
+            headers=auth_headers,
+        )
+        assert queso.status_code == 201, queso.text
+        queso_id = str(queso.json()["id"])
+        alta = await client.post(
+            "/api/v1/sales",
+            json={"amount": "200.00", "quantity": 2, "product_id": vela,
+                  "transaction_date": _ahora(), "payment_method": "cash"},
+            headers=auth_headers,
+        )
+        assert alta.status_code == 201, alta.text
+        await _ventas(db_session, vela)
+        resp = await client.patch(
+            f"/api/v1/sales/{alta.json()['id']}", json={"product_id": queso_id},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        [venta] = await _ventas(db_session, queso_id)
+        assert venta.cost_origin == "sin_costo"
+        assert venta.cost_reason == MOTIVO_UNIDAD_DUDOSA
+
     async def test_sales_bulk_queda_costeada(
         self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
     ) -> None:

@@ -38,6 +38,9 @@ from app.tests.application.test_facts_reconciliation import (
     FakeProvider,
 )
 
+#: Los lectores del margen exigen un score con datos (compuerta de completitud).
+pytestmark = pytest.mark.usefixtures("score_suficiente")
+
 
 def _l(importe: str, rep: str | None, prom: str | None,
        estado: str | None = "medido") -> LineaDeComparacion:
