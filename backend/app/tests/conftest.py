@@ -325,6 +325,32 @@ async def sample_tenant(db_session: AsyncSession) -> Tenant:
     return tenant
 
 
+async def agregar_score_suficiente(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Un score de ayer con completitud 80: los lectores del margen lo exigen.
+
+    Sin ningún score, ``completitud_insuficiente`` cierra la compuerta (no se
+    sabe si hay datos). Es de ayer para que un test que carga otro score hoy
+    sea el que manda.
+    """
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+    from decimal import Decimal  # noqa: PLC0415
+
+    from app.persistence.models.score import HealthScoreSnapshot  # noqa: PLC0415
+
+    ayer = datetime.now(UTC) - timedelta(days=1)
+    db.add(HealthScoreSnapshot(
+        tenant_id=tenant_id, total_score=70, level="FAIR", dimensions=[],
+        triggered_by="test", snapshot_date=ayer, created_at=ayer,
+        data_completeness_score=Decimal("80"), confidence_level="HIGH",
+    ))
+    await db.flush()
+
+
+@pytest_asyncio.fixture
+async def score_suficiente(db_session: AsyncSession, sample_tenant: Tenant) -> None:
+    await agregar_score_suficiente(db_session, sample_tenant.tenant_id)
+
+
 @pytest_asyncio.fixture
 async def sample_business_profile(
     db_session: AsyncSession, sample_tenant: Tenant

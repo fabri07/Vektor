@@ -180,6 +180,11 @@ async def _revertir(session: AsyncSession, run_id: uuid.UUID) -> None:
     print(f"Revertidos: {len(res.revertidos)} · pendientes: {len(res.pendientes)}")
     for gasto, motivo in res.pendientes.items():
         print(f"   pendiente {gasto}: {motivo}")
+    if res.revertidos:
+        print(
+            "El score NO se recalcula solo: correr scripts/refresh_health_score.py"
+            " con el email del negocio."
+        )
     if res.completa:
         print("Reversión COMPLETA.")
     elif res.reintentables:

@@ -439,6 +439,23 @@ async def _marca_del_neto(session: AsyncSession, tenant_id: UUID) -> str:
             )
         ).one()
         partes += [str(fila[0]), str(fila[1] or 0)]
+    # El costeo tardío (retroactivo o el promedio) cambia el costo vendido sin
+    # tocar la cantidad ni el importe de las ventas (revisión de la fase 2).
+    costeo = (
+        await session.execute(
+            select(
+                func.sum(SaleEntry.cost_ars),
+                func.sum(SaleEntry.cost_avg_ars),
+                func.count(SaleEntry.id).filter(SaleEntry.cost_confirmed.is_(True)),
+            ).where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                func.date(SaleEntry.transaction_date) >= mes.start,
+                func.date(SaleEntry.transaction_date) <= mes.end,
+            )
+        )
+    ).one()
+    partes.append(f"costo={costeo[0] or 0}/{costeo[1] or 0}/{costeo[2]}")
     # M·3-3: tipar un impuesto como IVA cambia el neto de un RI sin cambiar la
     # cantidad ni la suma de gastos; también un cambio de categoría.
     iva = (

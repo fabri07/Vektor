@@ -156,13 +156,13 @@ def _gasto(tid: Any, cuando: datetime, monto: str, categoria: str,
     )
 
 
-def _historia_previa(tid: Any) -> ExpenseEntry:
-    """Un gasto 10 días antes del mes cerrado: la cuenta ya existía (mes completo).
+def _historia_previa(tid: Any) -> SaleEntry:
+    """Una venta 10 días antes del mes cerrado: la cuenta ya vendía (mes completo).
 
     Siempre fuera de los últimos 30 días (el mes cerrado empieza ≥ 28 días atrás).
     """
     inicio = Period.mes_cerrado(today=today_ar()).start
-    return _gasto(tid, datetime.combine(inicio - timedelta(days=10), time(12)), "1", "OTHER")
+    return _venta(tid, datetime.combine(inicio - timedelta(days=10), time(12)), "1", "1")
 
 
 async def _cargar_mes_cerrado(db: AsyncSession, tid: Any) -> None:
@@ -314,6 +314,58 @@ async def test_cuenta_que_empezo_en_el_mes_cerrado_no_tiene_neto(
     assert margenes.neto.severity is None
     assert margenes.neto.detail is not None
     assert str(margenes.neto.detail["motivo"]).startswith("mes incompleto")
+
+
+async def test_un_gasto_del_dia_1_no_completa_el_mes(
+    db_session: AsyncSession, sample_tenant: Any
+) -> None:
+    # Revisión de la fase 2: el alquiler cargado el 1° hacía «completo» un mes en
+    # que las ventas empiezan el 26, y el neto salía −35%.
+    tid = sample_tenant.tenant_id
+    db_session.add_all([
+        _gasto(tid, _en_mes_cerrado(0), "30000", "RENT"),
+        _venta(tid, _en_mes_cerrado(26), "40000", "24000"),
+    ])
+    await db_session.commit()
+    margenes = await margenes_del_tenant(db_session, tid)
+    assert margenes is not None
+    assert margenes.neto.value is None
+    assert margenes.neto.detail is not None
+    assert str(margenes.neto.detail["motivo"]).startswith("mes incompleto")
+
+
+async def test_un_cobro_de_fiado_viejo_no_completa_el_mes(
+    db_session: AsyncSession, sample_tenant: Any
+) -> None:
+    tid = sample_tenant.tenant_id
+    cobro = _venta(tid, _en_mes_cerrado(0) - timedelta(days=60), "100", "50")
+    cobro.payment_method = "inflow"
+    db_session.add_all([
+        cobro,
+        _venta(tid, _en_mes_cerrado(26), "40000", "24000"),
+        _gasto(tid, _en_mes_cerrado(26), "30000", "RENT"),
+    ])
+    await db_session.commit()
+    margenes = await margenes_del_tenant(db_session, tid)
+    assert margenes is not None
+    assert margenes.neto.value is None
+
+
+async def test_una_venta_demo_vieja_no_completa_el_mes(
+    db_session: AsyncSession, sample_tenant: Any
+) -> None:
+    tid = sample_tenant.tenant_id
+    demo = _venta(tid, _en_mes_cerrado(0) - timedelta(days=60), "100", "50")
+    demo.provenance = "DEMO"
+    db_session.add_all([
+        demo,
+        _venta(tid, _en_mes_cerrado(26), "40000", "24000"),
+        _gasto(tid, _en_mes_cerrado(26), "30000", "RENT"),
+    ])
+    await db_session.commit()
+    margenes = await margenes_del_tenant(db_session, tid)
+    assert margenes is not None
+    assert margenes.neto.value is None
 
 
 def test_compras_con_texto_libre_viejo_no_restan_como_gasto() -> None:

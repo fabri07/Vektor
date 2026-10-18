@@ -27,6 +27,9 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.user import User
 from app.schemas.product import ProductResponse
 
+#: Los lectores del margen exigen un score con datos (compuerta de completitud).
+pytestmark = pytest.mark.usefixtures("score_suficiente")
+
 # ── Tramos y granularidad ────────────────────────────────────────────────────
 
 
@@ -119,10 +122,8 @@ async def _escenario(db: AsyncSession, tid: Any) -> None:
     db.add(bebidas)
     await db.flush()
     db.add_all([
-        # historia previa: el mes cerrado está completo
-        ExpenseEntry(tenant_id=tid, amount=Decimal("1"), category="OTHER",
-                     expense_type="OPEX", description="x",
-                     transaction_date=_cuando(mc.start - timedelta(days=10))),
+        # historia previa (una venta: un gasto no alcanza): el mes cerrado está completo
+        _venta(tid, mc.start - timedelta(days=10), "1", "1"),
         # mes cerrado: 20000 de ventas con costo 12000, 3000 de gastos operativos
         _venta(tid, mc.start + timedelta(days=2), "10000", "6000", producto=bebidas.id),
         _venta(tid, mc.start + timedelta(days=9), "10000", "6000", producto=bebidas.id),

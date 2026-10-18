@@ -243,7 +243,7 @@ def medir_margen_neto(
 ) -> MedicionDeMargenNeto:
     """El margen neto de un período a partir de su bruto y sus gastos operativos.
 
-    ``datos_desde`` es el primer movimiento del negocio (venta o gasto). Si es
+    ``datos_desde`` es la primera venta del negocio (no un gasto). Si es
     posterior al inicio del período, el mes no está completo: cuatro días de
     ventas contra el alquiler del mes entero darían un neto falso (revisión de
     M·3-1). Ausente con el motivo.

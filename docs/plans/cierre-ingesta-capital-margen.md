@@ -267,6 +267,8 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
 
 **Cierre de la fase 2:** suites completas, `-m postgres` (hay migraciones) y un ensayo conjunto del margen y el capital en demo.
 
+**Revisión de la fase 2 (2026-10-18, tres revisores sobre `de0b6b87..ba5f028f`):** un grave y cinco menores de código, arreglados en un PR: el «mes incompleto» del neto se decide por la primera VENTA real (un gasto del día 1 lo apagaba: −35% en vez de ausente); `PATCH /sales` marca la unidad dudosa; `POST /expenses/profit-withdrawal` con gate de suscripción; la marca `profit_withdrawal` es reservada; la compuerta de completitud es la misma en pantalla, chat, punto de equilibrio y agente de salud (y sin score cierra); la caché del neto ve el costeo tardío. Documentados como límite hasta B·5: el neto de un RI con gastos con IVA, y el punto de equilibrio sin IVA (ahora lo dice). Decidido sin cambio: liquidez y proyección no suman aportes. Del dueño: el cron `--pendientes` en Railway.
+
 ## Fase 3: B·4 a B·9, calidad, resolución y alias
 11. **B·4**:
     - F-N revisado: completa sólo lo vacío y respeta `has_user_edits`;

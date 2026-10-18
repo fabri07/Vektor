@@ -346,3 +346,32 @@ async def test_tipar_iva_cambia_la_marca_del_cache(
     g.category = "RENT"
     await db_session.flush()
     assert await _marca_del_neto(db_session, tid) not in (antes, con_iva)
+
+
+async def test_un_costeo_tardio_cambia_la_marca_del_cache(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revisión de la fase 2: el costeo retroactivo de una venta del mes cerrado
+    cambia el costo vendido sin tocar su cantidad ni su importe."""
+    from datetime import datetime, time  # noqa: PLC0415
+    from decimal import Decimal  # noqa: PLC0415
+
+    from app.config.settings import get_settings  # noqa: PLC0415
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+    from app.state.business_state_service import _marca_del_neto  # noqa: PLC0415
+
+    tid = sample_tenant.tenant_id
+    monkeypatch.setattr(get_settings(), "NET_MARGIN_ROLLOUT_TENANT_IDS", [str(tid)])
+    mes = Period.mes_cerrado(today=today_ar())
+    v = SaleEntry(tenant_id=tid, amount=Decimal("1000"), quantity=1, payment_method="cash",
+                  transaction_date=datetime.combine(mes.start, time(12)))
+    db_session.add(v)
+    await db_session.flush()
+    antes = await _marca_del_neto(db_session, tid)
+    v.cost_ars, v.cost_unit_ars, v.cost_origin = Decimal("600"), Decimal("600"), "catalogo"
+    await db_session.flush()
+    estimada = await _marca_del_neto(db_session, tid)
+    assert estimada != antes
+    v.cost_confirmed = True
+    await db_session.flush()
+    assert await _marca_del_neto(db_session, tid) not in (antes, estimada)

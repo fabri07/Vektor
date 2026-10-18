@@ -632,7 +632,7 @@ class AgentHealth(BaseAgent):
         # margen NETO de FactsService no va: su ventana y su procedencia difieren
         # de las de este flujo y el narrador recibiría dos resultados que no
         # cierran entre sí.
-        lectura = await leer_margenes(self._db, tenant_id)
+        lectura = await leer_margenes(self._db, tenant_id, compuerta=True)
         if lectura.margenes is not None:
             structured_data["resumen_financiero"].update(
                 datos_margen_bruto(lectura.margenes.bruto)

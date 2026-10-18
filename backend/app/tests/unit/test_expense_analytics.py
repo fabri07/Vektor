@@ -13,6 +13,7 @@ from app.domain.business_time import today_ar
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.tests.conftest import agregar_score_suficiente
 
 
 def _task(intent: str) -> AgentTask:
@@ -128,6 +129,7 @@ async def test_punto_equilibrio_usa_margen_bruto_no_un_neto(db_session, seeded):
     gastos = 1.000.000 − 450.000 − 30.000 − 90.000 = 43%) los fijos se restaban
     dos veces y daba otro número."""
     db_session.add(BusinessProfile(tenant_id=seeded, vertical_code="kiosco_almacen"))
+    await agregar_score_suficiente(db_session, seeded)
     hoy = today_ar()
     for i in range(10):
         db_session.add(SaleEntry(
@@ -146,6 +148,28 @@ async def test_punto_equilibrio_usa_margen_bruto_no_un_neto(db_session, seeded):
     assert data["margin_pct"] == 40.0
     assert data["margin_estimated"] is False
     assert data["breakeven"] == 450000 / 0.40
+
+
+async def test_punto_equilibrio_de_un_ri_dice_sin_iva(db_session, seeded):
+    """Revisión de la fase 2: un RI compara sin IVA; el equilibrio también, y se dice."""
+    db_session.add(BusinessProfile(tenant_id=seeded, vertical_code="kiosco_almacen",
+                                   fiscal_condition="responsable_inscripto"))
+    await agregar_score_suficiente(db_session, seeded)
+    hoy = today_ar()
+    for i in range(10):
+        db_session.add(SaleEntry(
+            tenant_id=seeded, amount=Decimal("121000"), quantity=1,
+            transaction_date=datetime.combine(hoy - timedelta(days=i), time(12)),
+            payment_method="cash", cost_unit_ars=Decimal("60000"),
+            cost_ars=Decimal("60000"), cost_confirmed=True, cost_origin="compra",
+            cost_snapshot_version=1,
+        ))
+    await db_session.commit()
+    resp = await AgentExpense(db=db_session).process(
+        _req(seeded), task=_task("calcular_punto_equilibrio")
+    )
+    assert resp.result["summary"] == "calcular_punto_equilibrio"
+    assert "en ventas sin IVA" in resp.message
 
 
 async def test_empty(db_session):

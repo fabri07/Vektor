@@ -731,6 +731,11 @@ async def update_sale(
     # Efecto neto: reponer el movimiento viejo (si había) y descontar con los valores
     # nuevos. decrement_for_sale no-opea si se desasoció el producto (product_id None) → en
     # ese caso solo repone stock.
+    # M·2a: la cantidad o el producto nuevos llegan sin factor, igual que en el
+    # alta. Con un producto fraccionado la venta queda ``sin_costo`` y no 2 g de
+    # queso costeados como 2 unidades (revisión de la fase 2).
+    if _stock_changed:
+        marcar_unidad_no_confirmada(session.info, [saved.id])
     if _is_live_sale and _stock_changed:
         await stock_service.revert_sale_stock(entry.id, tenant.tenant_id, session)
         await stock_service.decrement_for_sale(entry, session)

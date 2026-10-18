@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
@@ -33,6 +34,7 @@ from app.persistence.repositories.supplier_repository import SupplierRepository
 from app.persistence.repositories.transaction_repository import ExpenseRepository
 from app.schemas.common import MessageResponse
 from app.schemas.transaction import (
+    MARCA_RETIRO,
     CreateExpenseRequest,
     DateRangeResponse,
     ExpenseEntryResponse,
@@ -62,6 +64,26 @@ def _apply_category_label(
             cf["category_label"] = label.strip()[:50]
     else:
         cf.pop("category_label", None)
+    return cf
+
+
+def _conservar_marca_de_retiro(
+    nuevos: dict[str, Any], previos: dict[str, Any] | None
+) -> dict[str, Any]:
+    """El PATCH reemplaza el dict entero, pero la marca de retiro queda como estaba.
+
+    El editor de campos manda el dict completo: un retiro viejo vuelve con su
+    marca y pasa. Agregarla o cambiarla es convertir un gasto en retiro: 422.
+    """
+    cf = dict(nuevos)
+    previos = previos or {}
+    if MARCA_RETIRO in cf and cf[MARCA_RETIRO] != previos.get(MARCA_RETIRO):
+        raise HTTPException(
+            status_code=422,
+            detail=f"custom_fields.{MARCA_RETIRO} es reservado: un retiro se carga en capital.",
+        )
+    if MARCA_RETIRO in previos:
+        cf[MARCA_RETIRO] = previos[MARCA_RETIRO]
     return cf
 
 
@@ -255,6 +277,8 @@ async def create_profit_withdrawal(
     user: User = Depends(require_capital_write),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    # Es el mismo alta que ``POST /capital-movements``: el mismo gate.
+    _sub_guard: None = Depends(require_active_subscription),
 ) -> ExpenseEntryResponse:
     """Retiro de ganancias anticipadas (D·2): ya NO es un gasto PAYROLL.
 
@@ -299,7 +323,7 @@ async def create_profit_withdrawal(
         payment_method=body.payment_method,
         supplier_name=None,
         notes=body.notes,
-        custom_fields={"profit_withdrawal": True},
+        custom_fields={MARCA_RETIRO: True},
         created_at=mov.created_at,
     )
 
@@ -416,7 +440,7 @@ async def update_expense(
     if body.notes is not None:
         entry.notes = body.notes
     if body.custom_fields is not None:
-        entry.custom_fields = body.custom_fields
+        entry.custom_fields = _conservar_marca_de_retiro(body.custom_fields, entry.custom_fields)
     # FASE 3.1: re-aplicar label de "Otro" si cambió la categoría o el label.
     if body.category_label is not None or body.category is not None:
         entry.custom_fields = _apply_category_label(

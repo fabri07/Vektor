@@ -663,3 +663,61 @@ async def test_flujo_de_dinero_excluye_anulados_y_aisla_por_tenant(
     flujo = await flujo_de_dinero(db_session, sample_tenant.tenant_id, hoy, hoy)
     assert sum((f.entradas for f in flujo), Decimal("0")) == Decimal("1000.00")
     assert sum((f.salidas for f in flujo), Decimal("0")) == Decimal("0")
+
+
+# ── La marca de retiro es reservada (revisión de la fase 2) ──────────────────
+
+
+async def test_un_alta_de_gasto_no_puede_traer_la_marca_de_retiro(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+) -> None:
+    resp = await client.post(
+        "/api/v1/expenses",
+        json={"amount": "1000.00", "category": "RENT", "expense_date": today_ar().isoformat(),
+              "custom_fields": {"profit_withdrawal": True}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422, resp.text
+    assert await _count(db_session, ExpenseEntry) == 0
+
+
+async def test_un_patch_no_convierte_un_gasto_en_retiro(
+    client: AsyncClient, auth_headers: dict[str, str], sample_tenant: Tenant,
+    db_session: AsyncSession,
+) -> None:
+    gasto = _gasto_retiro_viejo(sample_tenant, Decimal("500"), today_ar(), "cash")
+    gasto.category, gasto.custom_fields = "RENT", {"zona": "centro"}
+    db_session.add(gasto)
+    await db_session.commit()
+    resp = await client.patch(
+        f"/api/v1/expenses/{gasto.id}",
+        json={"custom_fields": {"zona": "centro", "profit_withdrawal": True}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422, resp.text
+    await db_session.refresh(gasto)
+    assert gasto.custom_fields == {"zona": "centro"}
+
+
+async def test_editar_los_campos_de_un_retiro_viejo_conserva_su_marca(
+    client: AsyncClient, auth_headers: dict[str, str], sample_tenant: Tenant,
+    db_session: AsyncSession,
+) -> None:
+    viejo = _gasto_retiro_viejo(sample_tenant, Decimal("500"), today_ar(), "cash")
+    db_session.add(viejo)
+    await db_session.commit()
+    # El editor de campos manda el dict entero, con la marca adentro.
+    resp = await client.patch(
+        f"/api/v1/expenses/{viejo.id}",
+        json={"custom_fields": {"profit_withdrawal": True, "zona": "centro"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    # Y si no la manda, tampoco se borra: D·3 la necesita.
+    resp = await client.patch(
+        f"/api/v1/expenses/{viejo.id}", json={"custom_fields": {"zona": "sur"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    await db_session.refresh(viejo)
+    assert viejo.custom_fields == {"zona": "sur", "profit_withdrawal": True}

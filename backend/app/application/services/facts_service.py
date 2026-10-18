@@ -317,7 +317,7 @@ class FactsDataProvider(Protocol):
     def products(self, tenant_id: str) -> pd.DataFrame: ...
     def mixed_tenders(self, tenant_id: str, start: date, end: date) -> pd.DataFrame: ...
     # Opcional (M·3-1): ``primer_movimiento(tenant_id) -> date | None``, la fecha de
-    # la primera venta o gasto vivos del negocio. Sin el método, el neto no puede
+    # la primera venta viva y REAL del negocio. Sin el método, el neto no puede
     # saber si el mes cerrado está completo y lo da como completo.
 
 
