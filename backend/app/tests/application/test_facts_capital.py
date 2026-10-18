@@ -147,3 +147,41 @@ def test_el_mismo_socio_con_otra_grafia_es_uno_solo() -> None:
     assert ana.devoluciones.dinero == 50000.0
     assert ana.prestamo_pendiente == 0.0
     assert not ana.prestamo_pendiente_inconsistente
+
+
+# ── D·5: capital inicial declarado en el onboarding ──────────────────────────
+
+COLS_D5 = [*COLS, "source_type"]
+
+
+def test_el_capital_declarado_es_aporte_pero_no_flujo_en_dinero() -> None:
+    frame = pd.DataFrame(
+        [(HOY - timedelta(days=3), "aporte", "dinero", 500000.0, None, "onboarding_declarado"),
+         (HOY, "aporte", "dinero", 700.0, None, "manual")],
+        columns=COLS_D5,
+    )
+    r = capital_de_socios(frame, PERIODO)
+    (sin_socio,) = r.socios
+    assert sin_socio.aportes.dinero == 500700.0
+    assert r.flujo_dinero is not None
+    assert (r.flujo_dinero.entradas, r.flujo_dinero.neto) == (700.0, 700.0)
+    assert r.capital_inicial_declarado is not None
+    assert r.capital_inicial_declarado.monto == 500000.0
+    assert r.capital_inicial_declarado.fecha == HOY - timedelta(days=3)
+
+
+def test_capital_declarado_fuera_del_periodo_no_se_informa() -> None:
+    frame = pd.DataFrame(
+        [(ANTES, "aporte", "dinero", 500000.0, None, "onboarding_declarado"),
+         (HOY, "retiro", "dinero", 100.0, "Juan", "manual")],
+        columns=COLS_D5,
+    )
+    r = capital_de_socios(frame, PERIODO)
+    assert r.capital_inicial_declarado is None
+    assert [s.socio for s in r.socios] == ["Juan"]
+
+
+def test_sin_columna_de_procedencia_todo_es_manual() -> None:
+    r = capital_de_socios(_frame((HOY, "aporte", "dinero", 900.0, None)), PERIODO)
+    assert r.capital_inicial_declarado is None
+    assert r.flujo_dinero is not None and r.flujo_dinero.entradas == 900.0

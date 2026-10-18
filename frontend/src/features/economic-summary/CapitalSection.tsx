@@ -268,6 +268,17 @@ export function CapitalSection({ from, to }: { from: string; to: string }) {
             Los montos son del período elegido; el préstamo pendiente es lo acumulado hasta
             el último día del período.
           </p>
+          {data.initial_capital_declared && (
+            <p className="rounded-lg border border-vk-border-w bg-vk-surface-w px-4 py-2 text-xs text-vk-text-secondary">
+              Capital inicial (declarado en el alta):{" "}
+              <span className="font-semibold text-vk-text-primary">
+                {formatARS(data.initial_capital_declared.amount_ars)}
+              </span>{" "}
+              desde el {data.initial_capital_declared.occurred_on}. Está incluido en los
+              aportes; como es un dato declarado y no plata contada, no figura en el flujo de
+              capital ni en la caja.
+            </p>
+          )}
           {inconsistent && (
             <p className="rounded-lg border border-vk-warning/30 bg-vk-warning-bg/40 px-4 py-2 text-xs text-vk-text-secondary">
               Hay devoluciones mayores que lo prestado. Revisá si falta cargar un préstamo o si
@@ -309,7 +320,11 @@ export function CapitalSection({ from, to }: { from: string; to: string }) {
                   <td className="px-3 py-2">{CAPITAL_KIND_LABELS[m.kind] ?? m.kind}</td>
                   <td className="px-3 py-2">{m.partner_name ?? "—"}</td>
                   <td className="px-3 py-2">
-                    {m.payment_method ? paymentLabel(m.payment_method) : "En especie"}
+                    {m.source_type === "onboarding_declarado"
+                      ? "Declarado en el alta"
+                      : m.payment_method
+                        ? paymentLabel(m.payment_method)
+                        : "En especie"}
                   </td>
                   <td className="px-3 py-2 text-right">{formatARS(m.amount_ars)}</td>
                   <td className="px-3 py-2 text-vk-text-secondary">{m.notes ?? ""}</td>

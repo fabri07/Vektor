@@ -35,6 +35,13 @@ export interface OnboardingSubmitPayload {
   work_close_hour?: number;
   /** Régimen fiscal — opcional y salteable en el onboarding. */
   fiscal_condition?: FiscalCondition;
+  /**
+   * Capital inicial (D·5): con cuánto arrancó el negocio y desde cuándo
+   * (`YYYY-MM-DD`). Los dos juntos o ninguno; el backend lo guarda como aporte
+   * de capital declarado, fuera de la caja.
+   */
+  initial_capital_ars?: number;
+  initial_capital_date?: string;
 }
 
 export interface OnboardingSubmitResult {

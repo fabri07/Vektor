@@ -65,6 +65,7 @@ def _audit(
     before: dict[str, object] | None,
     after: dict[str, object],
     endpoint: str,
+    triggered_by: str = "ui:owner_capital",
 ) -> None:
     session.add(
         DecisionAuditLog(
@@ -77,7 +78,7 @@ def _audit(
                 "after": after,
                 "source": "ui",
             },
-            triggered_by="ui:owner_capital",
+            triggered_by=triggered_by,
             actor_user_id=user_id,
             context={"endpoint": endpoint},
             created_at=datetime.now(UTC),
@@ -97,8 +98,14 @@ async def registrar_movimiento(
     partner_name: str | None = None,
     notes: str | None = None,
     endpoint: str = "capital-movements",
+    source_type: str = SOURCE_MANUAL,
+    triggered_by: str = "ui:owner_capital",
 ) -> OwnerCapitalMovement:
-    """Alta de un movimiento en dinero, con su auditoría. No commitea."""
+    """Alta de un movimiento en dinero, con su auditoría. No commitea.
+
+    ``source_type`` lo fija quien llama, nunca el cliente: la API sólo da de alta
+    ``manual``; el onboarding (D·5) da de alta ``onboarding_declarado``.
+    """
     mov = OwnerCapitalMovement(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -109,7 +116,7 @@ async def registrar_movimiento(
         payment_method=payment_method,
         partner_name=partner_name,
         notes=notes,
-        source_type=SOURCE_MANUAL,
+        source_type=source_type,
         created_by_user_id=user_id,
     )
     session.add(mov)
@@ -122,6 +129,7 @@ async def registrar_movimiento(
         before=None,
         after=_snapshot(mov),
         endpoint=endpoint,
+        triggered_by=triggered_by,
     )
     return mov
 

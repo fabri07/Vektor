@@ -1116,9 +1116,17 @@ class FactsService:
 #
 # Frame de entrada (facts_provider.load_capital_frame): movimientos VIVOS del
 # tenant con occurred_on <= fin, historia completa (el préstamo pendiente es
-# acumulado). Columnas: occurred_on, kind, form, amount_ars, partner_name.
+# acumulado). Columnas: occurred_on, kind, form, amount_ars, partner_name y
+# source_type (opcional: sin la columna, todo cuenta como cargado a mano).
+#
+# El capital inicial declarado en el onboarding (D·5, `onboarding_declarado`)
+# es un aporte más del socio sin identificar, pero NO entra en el flujo en
+# dinero: es lo que el dueño dijo que puso al arrancar, no plata que se vio
+# entrar. Sale aparte en `capital_inicial_declarado` para que la pantalla lo
+# rotule.
 
 _CAPITAL_KINDS_ENTRADA = ("aporte", "prestamo_socio")
+_CAPITAL_DECLARADO = "onboarding_declarado"
 _CAPITAL_KINDS_SALIDA = ("retiro", "devolucion_prestamo")
 
 
@@ -1156,6 +1164,14 @@ class FlujoDeCapitalEnDinero:
 
 
 @dataclass(frozen=True)
+class CapitalInicialDeclarado:
+    """El capital con el que el dueño dijo que arrancó (D·5), si cae en el período."""
+
+    monto: float
+    fecha: date
+
+
+@dataclass(frozen=True)
 class CapitalDeSocios:
     start: date
     end: date
@@ -1166,6 +1182,8 @@ class CapitalDeSocios:
     socios: list[CapitalDeSocio]
     totales: CapitalDeSocio | None
     flujo_dinero: FlujoDeCapitalEnDinero | None
+    # Incluido en los aportes de arriba; None si no hay uno en el período.
+    capital_inicial_declarado: CapitalInicialDeclarado | None = None
 
 
 def _ars0(x: float) -> float:
@@ -1245,7 +1263,18 @@ def capital_de_socios(frame: pd.DataFrame, p: Period) -> CapitalDeSocios:
     if not socios:
         return vacio
 
-    en_dinero = periodo[periodo["form"] == "dinero"]
+    declarado = (
+        periodo["source_type"] == _CAPITAL_DECLARADO
+        if "source_type" in periodo.columns
+        else pd.Series(False, index=periodo.index)
+    )
+    inicial = None
+    if declarado.any():
+        inicial = CapitalInicialDeclarado(
+            monto=_ars0(periodo.loc[declarado, "amount_ars"].sum()),
+            fecha=min(pd.to_datetime(periodo.loc[declarado, "occurred_on"]).dt.date),
+        )
+    en_dinero = periodo[(periodo["form"] == "dinero") & ~declarado]
     entradas = float(en_dinero.loc[en_dinero["kind"].isin(_CAPITAL_KINDS_ENTRADA),
                                    "amount_ars"].sum())
     salidas = float(en_dinero.loc[en_dinero["kind"].isin(_CAPITAL_KINDS_SALIDA),
@@ -1262,4 +1291,5 @@ def capital_de_socios(frame: pd.DataFrame, p: Period) -> CapitalDeSocios:
             salidas=_ars0(salidas),
             neto=_ars0(entradas - salidas),
         ),
+        capital_inicial_declarado=inicial,
     )

@@ -1,13 +1,15 @@
 """Onboarding service: processes initial business data for a tenant."""
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.owner_capital_service import registrar_movimiento
 from app.application.services.work_schedule_service import (
     DEFAULT_CLOSE_HOUR,
     DEFAULT_OPEN_HOUR,
@@ -16,6 +18,11 @@ from app.application.services.work_schedule_service import (
 from app.domain.verticals import heuristic_profile_version, parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessSnapshot
+from app.persistence.models.owner_capital import (
+    KIND_APORTE,
+    SOURCE_ONBOARDING_DECLARADO,
+    OwnerCapitalMovement,
+)
 from app.persistence.repositories.business_profile_repository import (
     BusinessProfileRepository,
 )
@@ -104,9 +111,12 @@ class OnboardingService:
         self._repo = BusinessProfileRepository(session)
 
     async def submit(
-        self, tenant_id: UUID, body: OnboardingSubmitRequest
+        self, tenant_id: UUID, body: OnboardingSubmitRequest, user_id: UUID
     ) -> OnboardingSubmitResponse:
-        bp = await self._repo.get_by_tenant_id(tenant_id)
+        # FOR UPDATE: sin el lock, dos submits a la vez leían los dos
+        # `onboarding_completed = False` y pasaban los dos (D·5 lo vuelve
+        # visible: serían dos aportes de capital inicial).
+        bp = await self._repo.get_by_tenant_id_for_update(tenant_id)
         if bp is None:
             raise ValueError("Business profile not found for tenant.")
 
@@ -147,6 +157,12 @@ class OnboardingService:
         if body.fiscal_condition is not None:
             bp.fiscal_condition = body.fiscal_condition
         await self._repo.save(bp)
+
+        # Step 4b: capital inicial (D·5), en la MISMA transacción que el perfil.
+        if body.initial_capital_ars is not None and body.initial_capital_date is not None:
+            await self._registrar_capital_inicial(
+                tenant_id, user_id, body.initial_capital_ars, body.initial_capital_date
+            )
 
         # Step 5-6: calculate completeness and confidence
         completeness = _calculate_completeness(body)
@@ -212,6 +228,41 @@ class OnboardingService:
             data_completeness_score=completeness,
             confidence_level=confidence,
             message="Procesando tu score...",
+        )
+
+    async def _registrar_capital_inicial(
+        self, tenant_id: UUID, user_id: UUID, monto: Decimal, fecha: date
+    ) -> None:
+        """Un aporte `onboarding_declarado` en dinero, salvo que ya haya uno vivo.
+
+        Es declarado: el dueño no dijo por qué medio entró, y el CHECK exige uno
+        en dinero, así que va `other`. Ningún agregado de caja lo lee
+        (`flujo_de_dinero` lo excluye) y no suma a la completitud: contestar el
+        formulario no es un dato observado (invariante 5b).
+        """
+        m = OwnerCapitalMovement
+        ya_hay = await self.session.scalar(
+            select(func.count()).select_from(m).where(
+                m.tenant_id == tenant_id,
+                m.source_type == SOURCE_ONBOARDING_DECLARADO,
+                m.voided_at.is_(None),
+            )
+        )
+        if ya_hay:
+            logger.info("onboarding.capital_inicial_ya_declarado", tenant_id=str(tenant_id))
+            return
+        await registrar_movimiento(
+            self.session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            kind=KIND_APORTE,
+            amount=monto,
+            occurred_on=fecha,
+            payment_method="other",
+            notes="Capital inicial declarado en el alta",
+            endpoint="onboarding/submit",
+            source_type=SOURCE_ONBOARDING_DECLARADO,
+            triggered_by="ui:onboarding",
         )
 
     async def get_status(self, tenant_id: UUID) -> OnboardingStatusResponse:

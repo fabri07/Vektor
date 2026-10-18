@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Final, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.domain.business_time import today_ar
 from app.domain.fiscal_condition import FiscalCondition
+from app.schemas.transaction import _MAX_AMOUNT, _reject_nan_inf
 
 #: Preocupación principal declarada por el dueño del negocio. Definida acá una
 #: sola vez porque la preguntan DOS formularios distintos: el onboarding
@@ -107,6 +110,26 @@ class OnboardingSubmitRequest(BusinessSurveyMixin):
     # Condición fiscal — opcional y solo informativa. Si viene, se guarda en el
     # profile; si falta, queda NULL (no configurado) y NO bloquea el onboarding.
     fiscal_condition: FiscalCondition | None = Field(default=None)
+    # Capital inicial (D·5) — opcional. Con cuánta plata ARRANCÓ el negocio, y
+    # cuándo. NO es `cash_on_hand_ars` (cuánta hay hoy): se guarda como un aporte
+    # de capital `onboarding_declarado`, que el Balance muestra y la caja nunca
+    # ve (no es plata contada). Los dos campos van juntos o ninguno.
+    initial_capital_ars: Decimal | None = Field(
+        default=None, gt=0, le=_MAX_AMOUNT, decimal_places=2
+    )
+    initial_capital_date: date | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _validate_initial_capital(self) -> Self:
+        if (self.initial_capital_ars is None) != (self.initial_capital_date is None):
+            raise ValueError(
+                "Enviá initial_capital_ars e initial_capital_date juntos, o ninguno."
+            )
+        if self.initial_capital_ars is not None:
+            _reject_nan_inf(self.initial_capital_ars, "initial_capital_ars")
+        if self.initial_capital_date is not None and self.initial_capital_date > today_ar():
+            raise ValueError("initial_capital_date no puede ser futura.")
+        return self
 
 
 class OnboardingSubmitResponse(BaseModel):

@@ -185,6 +185,71 @@ describe("OnboardingWizard", () => {
     expect(payload.cash_on_hand_ars).toBeNull();
   });
 
+  describe("capital inicial (D·5)", () => {
+    test("en blanco no viaja: ni monto ni fecha", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderWizard();
+
+      await completarDatos(user);
+      await user.click(screen.getByRole("button", { name: "Continuar" }));
+
+      await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1));
+      const payload = mockSubmit.mock.calls[0]![0];
+      expect(payload).not.toHaveProperty("initial_capital_ars");
+      expect(payload).not.toHaveProperty("initial_capital_date");
+    });
+
+    test("con monto viajan los dos, con la fecha elegida", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderWizard();
+
+      await user.type(
+        await screen.findByLabelText(/Con cuánto capital arrancó/i),
+        "500000",
+      );
+      const fecha = screen.getByLabelText(/Desde cuándo/i);
+      await user.clear(fecha);
+      await user.type(fecha, "2025-03-01");
+      await completarDatos(user);
+      await user.click(screen.getByRole("button", { name: "Continuar" }));
+
+      await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1));
+      expect(mockSubmit.mock.calls[0]![0]).toMatchObject({
+        initial_capital_ars: 500000,
+        initial_capital_date: "2025-03-01",
+      });
+    });
+
+    test("un monto en cero no deja avanzar", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderWizard();
+
+      await user.type(await screen.findByLabelText(/Con cuánto capital arrancó/i), "0");
+      await completarDatos(user);
+
+      expect(await screen.findByText(/monto mayor a 0, o dejalo en blanco/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Continuar" })).toBeNull();
+    });
+
+    test("más de 2 decimales no deja avanzar", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderWizard();
+
+      await user.type(await screen.findByLabelText(/Con cuánto capital arrancó/i), "1500.505");
+      await completarDatos(user);
+
+      expect(await screen.findByText(/con hasta 2 decimales/)).toBeInTheDocument();
+      expect(mockSubmit).not.toHaveBeenCalled();
+    });
+
+    test("el copy lo separa de la plata disponible hoy", async () => {
+      renderWizard();
+      await screen.findByLabelText(/Con cuánto capital arrancó/i);
+      expect(screen.getByText(/No es lo que tenés hoy/)).toBeInTheDocument();
+      expect(screen.getByText(/No suma a la caja/)).toBeInTheDocument();
+    });
+  });
+
   /**
    * La preocupación principal se pregunta en el formulario público de
    * solicitud, y la aprobación la sella en el perfil. El backend ya la tomaba

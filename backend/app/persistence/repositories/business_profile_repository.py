@@ -18,6 +18,15 @@ class BusinessProfileRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_tenant_id_for_update(self, tenant_id: UUID) -> BusinessProfile | None:
+        """El perfil con ``FOR UPDATE``: serializa dos submits del onboarding."""
+        result = await self.session.execute(
+            select(BusinessProfile)
+            .where(BusinessProfile.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def save(self, bp: BusinessProfile) -> BusinessProfile:
         self.session.add(bp)
         await self.session.flush()

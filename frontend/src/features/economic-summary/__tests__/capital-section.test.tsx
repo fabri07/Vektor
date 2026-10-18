@@ -168,6 +168,39 @@ describe("Capital de los socios (D·4)", () => {
     );
   });
 
+  test("el capital inicial declarado sale rotulado y su fila dice de dónde vino", async () => {
+    setRole("OWNER");
+    svc.getSummary.mockResolvedValue({
+      ...SUMMARY,
+      initial_capital_declared: { amount_ars: 543210.5, occurred_on: "2026-10-02" },
+    });
+    svc.list.mockResolvedValue([
+      {
+        ...MOVIMIENTO,
+        id: "d5",
+        kind: "aporte",
+        payment_method: "other",
+        partner_name: null,
+        source_type: "onboarding_declarado",
+      },
+    ]);
+    renderScreen();
+
+    expect(
+      await screen.findByText(/Capital inicial \(declarado en el alta\)/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/543\.210,5/)).toBeInTheDocument();
+    expect(screen.getByText(/no figura en el flujo de\s+capital ni en la caja/)).toBeInTheDocument();
+    expect(screen.getByText("Declarado en el alta")).toBeInTheDocument();
+  });
+
+  test("sin capital declarado no hay rótulo", async () => {
+    setRole("OWNER");
+    renderScreen();
+    await waitFor(() => expect(screen.getByText("Sin socio identificado")).toBeInTheDocument());
+    expect(screen.queryByText(/declarado en el alta/i)).not.toBeInTheDocument();
+  });
+
   test("con menos filas que el tope no hay aviso", async () => {
     setRole("OWNER");
     renderScreen();

@@ -111,6 +111,14 @@ export function OnboardingWizard() {
           ...(state.formData.fiscal_condition
             ? { fiscal_condition: state.formData.fiscal_condition }
             : {}),
+          // Capital inicial (D·5): los dos juntos o ninguno.
+          ...(state.formData.initial_capital_ars !== null &&
+          state.formData.initial_capital_date !== null
+            ? {
+                initial_capital_ars: state.formData.initial_capital_ars,
+                initial_capital_date: state.formData.initial_capital_date,
+              }
+            : {}),
         });
         setState((prev) => ({ ...prev, formSubmitted: true }));
       } catch {
