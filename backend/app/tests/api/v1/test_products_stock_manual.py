@@ -43,7 +43,7 @@ _ALTA = {
     "name": "Vela aromática",
     "sale_price_ars": "300.00",
     "unit_cost_ars": "80.00",
-    "stock_units": 50,
+    "stock_units": 50, "acquired_at": "2026-01-01T09:00:00",
 }
 
 

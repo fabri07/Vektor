@@ -32,7 +32,7 @@ async def _producto(client: AsyncClient, headers: dict[str, Any], name: str, **e
         "/api/v1/products",
         # M·P2c: el stock cargado a mano lleva precio de compra.
         json={"name": name, "sale_price_ars": "100.00", "stock_units": 10,
-              "unit_cost_ars": "50.00", **extra},
+              "acquired_at": "2026-01-01T09:00:00", "unit_cost_ars": "50.00", **extra},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text

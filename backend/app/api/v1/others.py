@@ -19,7 +19,11 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1._stock_manual import registrar_apertura_http
+from app.api.v1._stock_manual import (
+    exigir_fecha_con_stock,
+    momento_del_costo_del_alta,
+    registrar_apertura_http,
+)
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
@@ -428,7 +432,7 @@ async def reclassify_record(
     # F3-T3 review: auth ANTES que el guard 423 (ver nota en resolve_purchase). Este
     # endpoint puede crear/mutar Product (ramas "product" abajo) — CRITICAL sin
     # tocar del cableado original de F3-T3.
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_role("OWNER", "ADMIN")),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
@@ -629,6 +633,8 @@ async def reclassify_record(
             stock_inicial = data.pop("stock_units")
             costo_envio = data.pop("costo_envio")
             data["stock_units"] = 0
+            # M·2d: la fecha del stock inicial la da el usuario, como en el alta.
+            exigir_fecha_con_stock(stock_inicial > 0, data.get("acquired_at"))
             existing_product = await _find_active_product_by_identity(
                 session, tenant.tenant_id, barcode=data.get("barcode"), sku=data.get("sku")
             )
@@ -661,7 +667,10 @@ async def reclassify_record(
                     _cf_nuevo = conservar_claves_del_costo(None, data.get("custom_fields"))
                     data["custom_fields"] = (
                         custom_fields_tras_editar_costo(
-                            _cf_nuevo, None, data.get("unit_cost_ars"), now_ar_naive()
+                            _cf_nuevo,
+                            None,
+                            data.get("unit_cost_ars"),
+                            momento_del_costo_del_alta(stock_inicial, data.get("acquired_at")),
                         )
                         or _cf_nuevo
                     )
@@ -685,6 +694,8 @@ async def reclassify_record(
                     stock_inicial,
                     costo=data.get("unit_cost_ars"),
                     envio=costo_envio,
+                    fecha=data["acquired_at"],
+                    confirmado_por=user.user_id,
                     source_upload_id=_upload_id,
                 )
             await _ledger_producto_creado(

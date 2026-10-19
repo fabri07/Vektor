@@ -86,7 +86,7 @@ async def _producto(
     resp = await client.post(
         "/api/v1/products",
         json={"name": name, "sale_price_ars": price, "stock_units": 10, "unit_cost_ars": "60.00",
-              **extra},
+              "acquired_at": "2026-01-01T09:00:00", **extra},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text

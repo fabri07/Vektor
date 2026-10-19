@@ -33,7 +33,7 @@ async def _producto(client: AsyncClient, headers: dict[str, Any], nombre: str, s
         json={
             "name": nombre, "sale_price_ars": "1000.00", "stock_units": stock,
             # M·P2c: el stock cargado a mano lleva precio de compra.
-            **({"unit_cost_ars": "500.00"} if stock else {}),
+            **({"unit_cost_ars": "500.00", "acquired_at": "2026-01-01T09:00:00"} if stock else {}),
         },
         headers=headers,
     )

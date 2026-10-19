@@ -90,5 +90,6 @@
 | `20261014_0001` | `sales_entries.cost_avg_unit_ars` / `cost_avg_ars` / `cost_avg_estado` / `cost_avg_aproximado` / `cost_avg_motivo` / `cost_avg_pendiente` + CHECKs — costo promedio de cada venta, un dato al lado del costo principal (M·P3) |
 | `20261017_0001` | `expense_entries.tax_kind` (`iibb`/`monotributo`/`iva`/`tasa_municipal`/`otro`, nullable + CHECK) — tipo de impuesto de un gasto `TAXES`; el IVA de un RI no resta del margen neto (M·3-3), ver `docs/claude/plataforma.md` |
 | `20261017_0002` | `sales_entries.cost_source_date` (DATE nullable) — fecha de la fuente del costo de cada venta; «costo desactualizado» > 45 días (M·3-4), ver `docs/claude/plataforma.md` |
+| `20261019_0001` | `inventory_movements.opening_confirmed_at` / `opening_confirmed_by_user_id` (FK `users`, SET NULL) / `opening_date_source` (`usuario`/`archivo`, CHECK `NOT VALID`→`VALIDATE`), todo nullable — confirmación del stock inicial por el usuario (M·2d-1); NULL = sin confirmar, ver `docs/claude/plataforma.md` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.

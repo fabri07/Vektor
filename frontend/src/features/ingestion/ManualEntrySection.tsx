@@ -2,7 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { UNIDADES_DE_VENTA, type UnidadDeVenta } from "@/features/products/saleUnitOptions";
-import { COSTO_REQUERIDO_CON_STOCK, EnvioSelect } from "@/features/products/costoManual";
+import {
+  COSTO_REQUERIDO_CON_STOCK,
+  EnvioSelect,
+  FECHA_STOCK_INICIAL_REQUERIDA,
+} from "@/features/products/costoManual";
 import { aUnidadesBase } from "@/lib/pos/saleUnit";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
@@ -1146,6 +1150,9 @@ function CatalogProductTab({
   const [unitCost, setUnitCost] = useState("");
   const [envio, setEnvio] = useState<TratamientoEnvio | "">("");
   const [stock, setStock] = useState("0");
+  // M·2d: desde cuándo el negocio tiene ese stock. Vacía a propósito: la dice
+  // el usuario, no se supone «hoy».
+  const [stockDesde, setStockDesde] = useState("");
   const [threshold, setThreshold] = useState("");
   const [sku, setSku] = useState("");
   const [description, setDescription] = useState("");
@@ -1163,6 +1170,7 @@ function CatalogProductTab({
     setUnitCost("");
     setEnvio("");
     setStock("0");
+    setStockDesde("");
     setThreshold("");
     setSku("");
     setDescription("");
@@ -1204,6 +1212,14 @@ function CatalogProductTab({
       setError(COSTO_REQUERIDO_CON_STOCK);
       return;
     }
+    if (stockBase > 0 && !stockDesde) {
+      setError(FECHA_STOCK_INICIAL_REQUERIDA);
+      return;
+    }
+    if (stockBase > 0 && stockDesde > nowStr()) {
+      setError("La fecha del stock inicial no puede ser futura.");
+      return;
+    }
     setSubmitting(true);
     await submit(
       "product",
@@ -1213,6 +1229,7 @@ function CatalogProductTab({
         unit_cost_ars: unitCost ? round2(parseFloat(unitCost)) : null,
         stock_units: stockBase,
         ...(stockBase > 0 && envio ? { costo_envio: envio } : {}),
+        ...(stockBase > 0 ? { acquired_at: stockDesde } : {}),
         ...(umbralBase !== null ? { low_stock_threshold_units: umbralBase } : {}),
         sale_unit: unidad.saleUnit,
         base_units_per_sale_unit: unidad.factor,
@@ -1317,6 +1334,19 @@ function CatalogProductTab({
           onChange={(e) => setStock(e.target.value)}
         />
       </div>
+
+      {hayStock && (
+        <Field label="¿Desde qué fecha tenés este stock?">
+          <input
+            type="datetime-local"
+            aria-label="Fecha del stock inicial"
+            max={nowStr()}
+            value={stockDesde}
+            onChange={(e) => setStockDesde(e.target.value)}
+            className={selectClass}
+          />
+        </Field>
+      )}
 
       {hayStock && <EnvioSelect value={envio} onChange={setEnvio} />}
 

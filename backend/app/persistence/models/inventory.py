@@ -146,6 +146,18 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     tax_recoverable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     document_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
     cost_contract_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # M·2d — confirmación del stock inicial (mig 20261019_0001). Sólo en aperturas
+    # (``adjustment`` + ``catalog_initial_stock``). NULL = sin confirmar: la fecha
+    # no la dio el usuario. Una apertura PENDIENTE lleva además ``occurred_at``
+    # NULL (su fecha de negocio es la de carga). ``opening_date_source``:
+    # ``usuario`` | ``archivo`` (la fecha de la fila, mostrada en el confirm).
+    opening_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    opening_confirmed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
+    )
+    opening_date_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     def __repr__(self) -> str:
         return (

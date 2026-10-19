@@ -7,6 +7,7 @@ import type {
   CashForecastResponse,
   HealthScoreV2Response,
   MarginsResponse,
+  ConfirmarAperturaResponse,
 } from "@/types/api";
 
 /**
@@ -17,6 +18,33 @@ export async function fetchMargins(range?: { from: string; to: string }): Promis
   const { data } = await api.get<MarginsResponse>("/insights/margins", {
     params: range ? { from_date: range.from, to_date: range.to } : undefined,
   });
+  return data;
+}
+
+/**
+ * M·2d: el usuario dice desde cuándo tiene el stock inicial. Por archivo
+ * (todas las cargas de ese archivo) o por producto (las cargadas a mano). Pide
+ * PIN (lo resuelve el interceptor de `api`).
+ */
+export async function confirmarAperturaDeArchivo(
+  uploadId: string,
+  fecha: string,
+): Promise<ConfirmarAperturaResponse> {
+  const { data } = await api.post<ConfirmarAperturaResponse>(
+    `/ingestion/files/${uploadId}/opening-confirmation`,
+    { fecha },
+  );
+  return data;
+}
+
+export async function confirmarAperturaDeProducto(
+  productId: string,
+  fecha: string,
+): Promise<ConfirmarAperturaResponse> {
+  const { data } = await api.post<ConfirmarAperturaResponse>(
+    `/products/${productId}/opening-confirmation`,
+    { fecha },
+  );
   return data;
 }
 

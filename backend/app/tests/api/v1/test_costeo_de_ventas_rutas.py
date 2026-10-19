@@ -40,7 +40,7 @@ async def _producto(client: AsyncClient, headers: dict[str, Any], costo: str = "
             "name": f"Vela {uuid.uuid4().hex[:6]}",
             "sale_price_ars": "100.00",
             "unit_cost_ars": costo,
-            "stock_units": 50,
+            "stock_units": 50, "acquired_at": "2026-01-01T09:00:00",
         },
         headers=headers,
     )
@@ -142,6 +142,7 @@ class TestRutas:
             json={
                 "name": f"Queso {uuid.uuid4().hex[:6]}", "sale_price_ars": "10000.00",
                 "unit_cost_ars": "5000.00", "stock_units": 5000,
+                "acquired_at": "2026-01-01T09:00:00",
                 "sale_unit": "gram", "base_units_per_sale_unit": 1000,
             },
             headers=auth_headers,

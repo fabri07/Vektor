@@ -206,6 +206,45 @@ export interface MarginsResponse {
   /** Un punto por mes CERRADO del período. */
   serie_neto: MarginFact[];
   por_categoria: MarginFact[];
+  /** M·2d: stock inicial por confirmar. null = nada que confirmar. */
+  aperturas_por_confirmar?: AperturasPorConfirmar | null;
+}
+
+/** M·2d: un archivo que cargó stock inicial sin fecha confirmada. */
+export interface AperturaPorConfirmar {
+  upload_id: string;
+  archivo: string | null;
+  aperturas: number;
+  productos: number;
+  /** La fecha que tiene hoy (la de carga si está pendiente). */
+  fecha_actual: string | null;
+}
+
+/** M·2d: un stock inicial cargado a mano sin fecha confirmada. */
+export interface AperturaManualPorConfirmar {
+  product_id: string;
+  producto: string;
+  fecha_actual: string | null;
+}
+
+export interface AperturasPorConfirmar {
+  sin_confirmar: number;
+  por_archivo: AperturaPorConfirmar[];
+  manuales: AperturaManualPorConfirmar[];
+  /** Ventas sin costo anteriores al stock inicial de su producto. */
+  ventas_sin_costo_antes: number;
+  /** Ventas sin costo posteriores al stock inicial: quedan así hasta recostear. */
+  ventas_sin_costo_con_fuente: number;
+  /** Ventas costeadas con el stock inicial y anteriores a él (no se revalúan). */
+  ventas_costeadas_antes: number;
+}
+
+/** Respuesta de `.../opening-confirmation`. */
+export interface ConfirmarAperturaResponse {
+  aperturas: number;
+  productos: number;
+  ventas_costeadas_antes: number;
+  venta_ids: string[];
 }
 
 export interface CalculatingResponse {

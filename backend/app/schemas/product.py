@@ -7,12 +7,26 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
-from app.domain.business_time import now_ar_naive, today_ar
+from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, now_ar_naive, today_ar
 from app.domain.costo_vigente import FECHA_FIELD, ORIGEN_FIELD
 from app.domain.margen import es_costo_desactualizado, texto_antiguedad_del_costo
 from app.domain.product import effective_threshold
 from app.domain.sale_unit import formatear_cantidad, validar_unidad
 from app.schemas.pos import PosProductResponse
+
+
+def _validar_acquired_at(v: datetime | None) -> datetime | None:
+    """M·2d: la fecha de alta (y la del stock inicial) no puede ser futura.
+
+    Compara sólo el día de negocio, como ``transaction_date``: hoy a cualquier
+    hora vale. Devuelve hora argentina sin zona, el formato de la columna.
+    """
+    if v is None:
+        return None
+    if fecha_de_negocio(v) > today_ar():
+        raise ValueError("acquired_at cannot be in the future.")
+    return a_hora_de_negocio(v)
+
 
 # F6-B4: umbral "próximo a vencer" (días). Documentado y único.
 EXPIRY_WARNING_DAYS = 30
@@ -209,12 +223,23 @@ class CreateProductRequest(BaseModel):
     barcode: str | None = Field(default=None, max_length=64)
     expiry_date: date | None = Field(default=None, description="Vencimiento (informativo)")
     description: str | None = Field(default=None, max_length=1000)
-    acquired_at: datetime | None = Field(default=None, description="Fecha/hora de alta")
+    acquired_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Fecha/hora de alta. Con stock_units > 0 es obligatoria: es desde cuándo "
+            "el negocio tiene ese stock inicial (M·2d). No puede ser futura."
+        ),
+    )
     custom_fields: dict[str, Any] = Field(default_factory=dict)
     #: Unidad de venta (B3). Stock y umbral van en UNIDADES BASE (gramos,
     #: mililitros); precio y costo, por unidad de venta (kg, L).
     sale_unit: Literal["unit", "gram", "milliliter"] = "unit"
     base_units_per_sale_unit: int = Field(default=1, ge=1)
+
+    @field_validator("acquired_at")
+    @classmethod
+    def _acquired_at_no_futura(cls, v: datetime | None) -> datetime | None:
+        return _validar_acquired_at(v)
 
     @model_validator(mode="after")
     def _unidad_valida(self) -> "CreateProductRequest":
@@ -252,6 +277,11 @@ class UpdateProductRequest(BaseModel):
     sale_unit: Literal["unit", "gram", "milliliter"] | None = None
     base_units_per_sale_unit: int | None = Field(default=None, ge=1)
 
+    @field_validator("acquired_at")
+    @classmethod
+    def _acquired_at_no_futura(cls, v: datetime | None) -> datetime | None:
+        return _validar_acquired_at(v)
+
     @model_validator(mode="after")
     def _unidad_valida(self) -> "UpdateProductRequest":
         # Van juntos: cambiar uno sin el otro dejaría una combinación que nadie
@@ -285,3 +315,25 @@ class ScanLookupResponse(BaseModel):
 class LearnBarcodeRequest(BaseModel):
     #: Lo que mandó el lector, tal cual. El servidor lo clasifica.
     barcode: str = Field(min_length=1, max_length=64)
+
+
+class ConfirmarAperturaRequest(BaseModel):
+    """M·2d: desde qué fecha el negocio tiene el stock inicial (la dice el usuario)."""
+
+    fecha: datetime
+
+    @field_validator("fecha")
+    @classmethod
+    def _no_futura(cls, v: datetime) -> datetime:
+        resultado = _validar_acquired_at(v)
+        assert resultado is not None
+        return resultado
+
+
+class ConfirmarAperturaResponse(BaseModel):
+    aperturas: int
+    productos: int
+    #: Ventas ya costeadas con el stock inicial y anteriores a la fecha nueva: su
+    #: costo no se revalúa (M·2a); se informan para revisarlas.
+    ventas_costeadas_antes: int
+    venta_ids: list[UUID]

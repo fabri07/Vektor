@@ -34,7 +34,7 @@ _PRODUCT_PAYLOAD = {
     "category": "bebidas",
     "unit_cost_ars": "80.00",
     "sale_price_ars": "150.00",
-    "stock_units": 50,
+    "stock_units": 50, "acquired_at": "2026-01-01T09:00:00",
 }
 
 

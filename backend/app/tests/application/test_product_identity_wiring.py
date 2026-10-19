@@ -253,7 +253,7 @@ _PAYLOAD: dict[str, Any] = {
     "name": "Producto de prueba",
     "sale_price_ars": "150.00",
     "unit_cost_ars": "100.00",
-    "stock_units": 10,
+    "stock_units": 10, "acquired_at": "2026-01-01T09:00:00",
 }
 
 

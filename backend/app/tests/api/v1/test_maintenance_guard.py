@@ -42,6 +42,7 @@ _PRODUCT_PAYLOAD = {
     "unit_cost_ars": "80.00",
     "sale_price_ars": "150.00",
     "stock_units": 50,
+    "acquired_at": "2026-01-01T09:00:00",
     "low_stock_threshold_units": 10,
 }
 
@@ -63,7 +64,7 @@ async def _create_product_via_api(
         json={
             "name": name, "sale_price_ars": price, "stock_units": stock,
             # M·P2c: el stock cargado a mano lleva precio de compra.
-            **({"unit_cost_ars": "50.00"} if stock else {}),
+            **({"unit_cost_ars": "50.00", "acquired_at": "2026-01-01T09:00:00"} if stock else {}),
         },
         headers=headers,
     )

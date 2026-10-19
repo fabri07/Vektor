@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1._stock_manual import (
     aplicar_ajuste_manual_http,
     exigir_costo_con_stock,
+    exigir_fecha_con_stock,
+    momento_del_costo_del_alta,
     registrar_apertura_http,
 )
 from app.api.v1.deps import (
@@ -23,7 +25,11 @@ from app.api.v1.deps import (
     require_pos_permission,
     require_role,
 )
-from app.application.services import maintenance_lock_service, tenant_categories_service
+from app.application.services import (
+    apertura_service,
+    maintenance_lock_service,
+    tenant_categories_service,
+)
 from app.application.services.costo_promedio_service import costos_a_lote
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.pos_terminal_service import (
@@ -34,7 +40,10 @@ from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
 )
-from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation,
+    trigger_score_recalculation_after_commit,
+)
 from app.config.avg_cost_display_rollout import avg_cost_display_enabled_for
 from app.domain.business_time import now_ar_naive, today_ar
 from app.domain.costo_promedio import Estado as EstadoPromedio
@@ -68,6 +77,8 @@ from app.schemas.common import MessageResponse
 from app.schemas.pos import PosProductResponse, a_pos_product
 from app.schemas.product import (
     CategorySuggestionResponse,
+    ConfirmarAperturaRequest,
+    ConfirmarAperturaResponse,
     CreateProductRequest,
     LearnBarcodeRequest,
     ProductResponse,
@@ -471,7 +482,7 @@ async def create_product(
     # el tenant lockeado recibiría 423 en vez de 403 (filtra estado de mantenimiento
     # a un usuario sin permiso). El guard 423 es solo UX fast-fail; la garantía real
     # es el advisory lock que toma ProductRepository.save().
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_role("OWNER", "ADMIN")),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -490,6 +501,7 @@ async def create_product(
     stock_inicial = data.pop("stock_units")
     costo_envio = data.pop("costo_envio")
     exigir_costo_con_stock(stock_inicial > 0, data.get("unit_cost_ars"))
+    exigir_fecha_con_stock(stock_inicial > 0, data.get("acquired_at"))
     data["stock_units"] = 0
     # Un producto por peso o volumen sin umbral propio: el default (5) contado
     # en unidades base serían 5 gramos, que nunca alerta. Se lo lleva a 5 de la
@@ -526,7 +538,7 @@ async def create_product(
             conservar_claves_del_costo(None, data.get("custom_fields")),
             None,
             data.get("unit_cost_ars"),
-            now_ar_naive(),
+            momento_del_costo_del_alta(stock_inicial, data.get("acquired_at")),
         )
         or conservar_claves_del_costo(None, data.get("custom_fields"))
     )
@@ -554,6 +566,8 @@ async def create_product(
             stock_inicial,
             costo=data["unit_cost_ars"],
             envio=costo_envio,
+            fecha=data["acquired_at"],
+            confirmado_por=user.user_id,
         )
     trigger_score_recalculation.delay(str(tenant.tenant_id), "product_created")
     return saved
@@ -813,6 +827,51 @@ async def update_product(
     )
     trigger_score_recalculation.delay(str(tenant.tenant_id), "product_updated")
     return saved
+
+
+@router.post(
+    "/{product_id}/opening-confirmation",
+    response_model=ConfirmarAperturaResponse,
+    summary="Confirmar o corregir la fecha del stock inicial de un producto (M·2d)",
+)
+async def confirm_product_opening(
+    product_id: UUID,
+    body: ConfirmarAperturaRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    # Mueve una fecha del ledger: el mismo permiso que editar el producto.
+    user: User = Depends(require_modify_access),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+    session: AsyncSession = Depends(get_db_session),
+) -> ConfirmarAperturaResponse:
+    """Fija desde cuándo el negocio tiene el stock inicial de este producto.
+
+    - 404: el producto no existe o no tiene stock inicial.
+    - 409 ``OPENING_AMBIGUOUS``: tiene más de una carga de stock inicial viva
+      (de archivos distintos); se confirma desde cada archivo.
+
+    Las ventas ya costeadas con el stock inicial y anteriores a la fecha nueva no
+    cambian de costo: se devuelven para revisarlas.
+    """
+    try:
+        r = await apertura_service.confirmar_apertura_de_producto(
+            session, tenant.tenant_id, product_id, body.fecha, user.user_id
+        )
+    except apertura_service.SinAperturaError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except apertura_service.AperturaAmbiguaError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "OPENING_AMBIGUOUS", "message": str(exc), "cantidad": exc.cantidad},
+        ) from exc
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "opening_confirmed"
+    )
+    return ConfirmarAperturaResponse(
+        aperturas=r.aperturas,
+        productos=r.productos,
+        ventas_costeadas_antes=r.ventas_costeadas_antes,
+        venta_ids=r.venta_ids,
+    )
 
 
 @router.delete("/{product_id}", response_model=MessageResponse, summary="Soft-delete a product")

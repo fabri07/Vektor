@@ -47,6 +47,29 @@ SOURCE_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# ── M·2d: confirmación del stock inicial ────────────────────────────────────────
+# Una apertura (``adjustment`` + ``catalog_initial_stock``) tiene fecha confirmada
+# sólo si la dio el usuario (``usuario``) o la traía la fila del archivo y el
+# confirm se la mostró (``archivo``). Sin eso queda PENDIENTE: ``occurred_at``
+# NULL, y su fecha de negocio es la de carga. Nunca se infiere una fecha anterior.
+FECHA_DE_USUARIO = "usuario"
+FECHA_DE_ARCHIVO = "archivo"
+FUENTES_DE_FECHA_DE_APERTURA: frozenset[str] = frozenset({FECHA_DE_USUARIO, FECHA_DE_ARCHIVO})
+
+
+def columnas_de_apertura_confirmada(
+    fuente: str, user_id: UUID | None, ahora: datetime | None = None
+) -> dict[str, object]:
+    """Las columnas de confirmación de una apertura (``InventoryMovement``)."""
+    if fuente not in FUENTES_DE_FECHA_DE_APERTURA:
+        raise ValueError(f"Fuente de fecha de apertura desconocida: {fuente!r}")
+    return {
+        "opening_confirmed_at": ahora or datetime.now(UTC),
+        "opening_confirmed_by_user_id": user_id,
+        "opening_date_source": fuente,
+    }
+
+
 # source_types que representan una COMPRA real de mercadería (cuentan como "comprado"
 # y deben tener su COGS). El stock inicial de catálogo ES una compra real.
 PURCHASE_SOURCE_TYPES: frozenset[str] = frozenset(

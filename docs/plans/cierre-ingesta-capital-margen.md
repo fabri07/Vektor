@@ -276,6 +276,13 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
 - **Una venta `sin_costo` no se recostea:** «no se revalúa» (M·2a) vale también para la pendiente. Una cuenta que carga primero sus ventas de un mes y después los remitos con fecha anterior nunca tiene costo ni neto de ese mes (`costeo_retroactivo_ventas.py` sólo toma `cost_snapshot_version IS NULL`). Y la apertura de un producto queda fechada en la carga aunque `acquired_at` sea anterior, así que tampoco respalda esas ventas.
 - **El arqueo esperado puede ser negativo:** un retiro en efectivo mayor que las ventas en efectivo del día da un esperado < 0 (igual que cuando el retiro era un gasto; el fondo de caja no entra al esperado).
 
+### M·2d — decisiones del dueño sobre los hallazgos (2026-10-18), antes de la fase 3
+
+- **Demos:** irrelevantes; no se tocan.
+- **Fecha de documento ≠ fecha de carga:** el costo sigue a la del documento; la carga manual en vivo no falla. La fecha y la cantidad del stock inicial **las confirma el usuario** y el backend lo exige en todos los caminos (alta manual, Otros, importación; el chat no crea aperturas). Sin confirmación la apertura queda pendiente (fecha de carga), nunca con una fecha inferida (el momento cero queda como sugerencia). Una venta recosteada queda confirmada o estimada **según la fuente**.
+- **Arqueo negativo:** correcto (retiros mayores que lo que entra, causa principal de cierre de negocios); tiene que poder cerrar como «caja cuadrada» y se separa de la señal económica «los retiros superan el resultado».
+- **Orden:** M·2d-1a (migración `20261019_0001`, alta manual y Otros con fecha obligatoria, confirmar por producto y por archivo, aviso en `/insights/margins`) → M·2d-1b (confirm de la importación por hoja) → M·2d-2 (recosteo de `sin_costo` por listener y por la publicación del costo promedio; el cron `--pendientes` pasa a ser obligatorio; script `--sin-costo` que no mueve aperturas) → M·2d-3 (arqueo negativo y señal de retiros) → fase 3.
+
 ## Fase 3: B·4 a B·9, calidad, resolución y alias
 11. **B·4**:
     - F-N revisado: completa sólo lo vacío y respeta `has_user_edits`;
