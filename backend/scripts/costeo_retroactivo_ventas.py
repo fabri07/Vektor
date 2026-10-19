@@ -15,6 +15,14 @@ Este script sólo elige los tenants, imprime el resumen y confirma o revierte.
   costo y origen que los congelados (nunca revalúa). Dry-run igual; con
   ``--apply`` deja un ``data_repair_runs`` ``M34_FECHA_DEL_COSTO`` que
   ``--revert`` deshace.
+- **``--sin-costo`` (M·2d-2):** costea las ventas ``sin_costo`` que hoy YA tienen
+  fuente (cargadas antes que la compra con fecha anterior), con la regla de una
+  venta en vivo: confirmadas o estimadas según la fuente. NO mueve ninguna
+  apertura: informa las aperturas sin confirmar y las ventas anteriores a ellas,
+  para confirmarlas desde la pantalla. Con ``--apply`` deja un
+  ``data_repair_runs`` ``M2D_FUENTE_TARDIA`` con el snapshot anterior real;
+  ``--revert`` lo restaura (ojo: la próxima publicación del costo promedio de
+  ese producto las vuelve a costear, porque la fuente sigue ahí).
 
 Nunca imprime la connection URL: sólo ``host`` y ``base``.
 
@@ -25,6 +33,7 @@ Usage (desde ``backend/``):
     ... --all [--apply]
     ... --revert <run_id>
     ... --all --solo-fecha [--apply]
+    ... --all --sin-costo [--apply]
 """
 
 from __future__ import annotations
@@ -48,8 +57,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E40
 from app.application.services.costeo_retroactivo_service import (  # noqa: E402
     Resumen,
     ResumenFecha,
+    ResumenSinCosto,
     costear_historico,
     fechar_costos,
+    recostear_sin_costo_historico,
     revertir,
 )
 from app.persistence.db.engine_factory import crear_engine  # noqa: E402
@@ -93,6 +104,22 @@ def _imprimir_fecha(r: ResumenFecha, aplicar: bool, nombre: str) -> None:
         print(f"   APLICADO · run_id {r.run_id} (para revertir: --revert {r.run_id})")
 
 
+def _imprimir_sin_costo(r: ResumenSinCosto, aplicar: bool, nombre: str) -> None:
+    print(f"\n── {nombre} ({str(r.tenant_id)[:8]}…)  ventas sin costo con fuente: {r.candidatas}")
+    if r.candidatas:
+        print(f"   costeadas: {r.costeadas} (confirmadas: {r.confirmadas})")
+        for origen, n in r.por_origen.most_common():
+            print(f"   origen {origen:14} {n:6}")
+    if r.aperturas_sin_confirmar or r.ventas_antes_de_apertura:
+        print(
+            f"   stock inicial sin confirmar: {r.aperturas_sin_confirmar} · ventas sin costo"
+            f" anteriores al stock inicial: {r.ventas_antes_de_apertura}"
+            " (se confirman desde la tarjeta de Margen; este script no mueve fechas)"
+        )
+    if aplicar and r.run_id:
+        print(f"   APLICADO · run_id {r.run_id} (para revertir: --revert {r.run_id})")
+
+
 async def _tenants(session: AsyncSession, args: argparse.Namespace) -> list[uuid.UUID]:
     if args.tenant_id:
         return [uuid.UUID(args.tenant_id)]
@@ -114,6 +141,8 @@ async def _tenants(session: AsyncSession, args: argparse.Namespace) -> list[uuid
             SaleEntry.voided_at.is_(None),
             SaleEntry.cost_unit_ars.is_not(None) & SaleEntry.cost_source_date.is_(None)
             if args.solo_fecha
+            else SaleEntry.cost_origin == "sin_costo"
+            if args.sin_costo
             else SaleEntry.cost_snapshot_version.is_(None),
         )
         .distinct()
@@ -129,8 +158,11 @@ async def main() -> None:
     quien.add_argument("--all", action="store_true")
     quien.add_argument("--revert", metavar="RUN_ID")
     ap.add_argument("--apply", action="store_true")
-    ap.add_argument("--solo-fecha", action="store_true",
-                    help="M·3-4: sólo la fecha de la fuente de ventas ya costeadas")
+    modo = ap.add_mutually_exclusive_group()
+    modo.add_argument("--solo-fecha", action="store_true",
+                      help="M·3-4: sólo la fecha de la fuente de ventas ya costeadas")
+    modo.add_argument("--sin-costo", action="store_true",
+                      help="M·2d-2: costea las ventas sin_costo que ya tienen fuente")
     args = ap.parse_args()
 
     # La configuración de logging de la app puede dejar el eco del SQL en INFO.
@@ -155,6 +187,13 @@ async def main() -> None:
                         {"t": tenant_id},
                     )
                 ).scalar_one_or_none() or "(sin nombre)"
+                if args.sin_costo:
+                    sc = await recostear_sin_costo_historico(
+                        session, tenant_id, aplicar=args.apply
+                    )
+                    await (session.commit() if args.apply else session.rollback())
+                    _imprimir_sin_costo(sc, args.apply, nombre)
+                    continue
                 if args.solo_fecha:
                     fechas = await fechar_costos(session, tenant_id, aplicar=args.apply)
                     await (session.commit() if args.apply else session.rollback())

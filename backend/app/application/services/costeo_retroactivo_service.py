@@ -30,7 +30,7 @@ from __future__ import annotations
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final
 
@@ -46,6 +46,8 @@ from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import SaleEntry
 
 REPAIR_TYPE: Final = "M2C_COSTEO_RETROACTIVO"
+#: M·2d-2: ``--sin-costo`` costea ventas ``sin_costo`` que hoy ya tienen fuente.
+REPAIR_TYPE_SIN_COSTO: Final = "M2D_FUENTE_TARDIA"
 #: M·3-4: ``--solo-fecha`` completa ``cost_source_date`` de ventas ya costeadas.
 REPAIR_TYPE_FECHA: Final = "M34_FECHA_DEL_COSTO"
 MOTIVO_RETROACTIVO: Final = "costeado después de la venta (M·2c): estimación"
@@ -231,6 +233,8 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> tuple[int, int]:
     run = await session.get(DataRepairRun, run_id)
     if run is not None and run.repair_type == REPAIR_TYPE_FECHA:
         return await _revertir_fechas(session, run)
+    if run is not None and run.repair_type == REPAIR_TYPE_SIN_COSTO:
+        return await _revertir_sin_costo(session, run)
     if run is None or run.repair_type != REPAIR_TYPE:
         raise ValueError(f"No es una corrida de {REPAIR_TYPE}: {run_id}")
     if run.status == "REVERTED":
@@ -428,6 +432,212 @@ async def _revertir_fechas(session: AsyncSession, run: DataRepairRun) -> tuple[i
                 salteadas += 1
                 continue
             venta.cost_source_date = None
+            revertidas += 1
+    run.status = "REVERTED"
+    await session.flush()
+    return revertidas, salteadas
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M·2d-2 — ``--sin-costo``: ventas ``sin_costo`` que hoy ya tienen fuente
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Lo que quedó en la base antes de M·2d-2: ventas que se cargaron antes que la
+# compra (con fecha anterior) que las respalda. Se costean con la MISMA regla
+# que el listener (``costeo_de_ventas.recostear_sin_costo``): confirmadas o
+# estimadas según la fuente. NO mueve ninguna apertura: ``acquired_at`` no
+# prueba desde cuándo existía el stock; las aperturas sin confirmar y las ventas
+# anteriores a ellas se informan para confirmarlas desde la pantalla (M·2d-1).
+# A diferencia de M·2c, el item guarda el snapshot ANTERIOR real y el revert lo
+# restaura (no lo pone en NULL).
+
+_DECIMALES: Final = frozenset({"cost_unit_ars", "cost_ars"})
+_FECHAS: Final = frozenset({"cost_source_date"})
+
+
+@dataclass
+class ResumenSinCosto:
+    tenant_id: uuid.UUID
+    #: Ventas ``sin_costo`` con una fuente a su fecha (candidatas).
+    candidatas: int = 0
+    costeadas: int = 0
+    confirmadas: int = 0
+    por_origen: Counter[str] = field(default_factory=Counter)
+    #: Del aviso de M·2d-1, para confirmar desde la pantalla.
+    aperturas_sin_confirmar: int = 0
+    ventas_antes_de_apertura: int = 0
+    run_id: uuid.UUID | None = None
+
+
+#: El costo PRINCIPAL que escribe el recosteo. No ``cost_avg_*``: son derivadas
+#: y las reescribe cada publicación del promedio; compararlas haría saltear el
+#: revert de una venta cuyo costo principal sigue intacto.
+_COLUMNAS_SIN_COSTO: Final = (*_COLUMNAS, "cost_source_date")
+
+
+def _columnas_del_snapshot() -> tuple[str, ...]:
+    return _COLUMNAS_SIN_COSTO
+
+
+def _serializar(venta: SaleEntry) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for c in _columnas_del_snapshot():
+        v = getattr(venta, c)
+        out[c] = str(v) if isinstance(v, Decimal) else v.isoformat() if isinstance(v, date) else v
+    return out
+
+
+def _restaurar(columna: str, valor: Any) -> Any:
+    if valor is None:
+        return None
+    if columna in _DECIMALES:
+        return Decimal(str(valor))
+    if columna in _FECHAS:
+        return date.fromisoformat(str(valor))
+    return valor
+
+
+async def recostear_sin_costo_historico(
+    session: AsyncSession, tenant_id: uuid.UUID, *, aplicar: bool
+) -> ResumenSinCosto:
+    """Costea las ventas ``sin_costo`` del tenant que hoy tienen fuente. Sin
+    ``aplicar`` es un ensayo: el llamador hace ``rollback``."""
+    from app.application.services.facts_provider import (  # noqa: PLC0415
+        aperturas_por_confirmar,
+    )
+    from app.persistence.costeo_de_ventas import (  # noqa: PLC0415
+        primeras_fuentes,
+        ventas_sin_costo_desde,
+    )
+
+    resumen = ResumenSinCosto(tenant_id=tenant_id)
+    aviso = await aperturas_por_confirmar(session, tenant_id)
+    resumen.aperturas_sin_confirmar = aviso.sin_confirmar
+    resumen.ventas_antes_de_apertura = aviso.ventas_sin_costo_antes
+
+    productos = [
+        pid
+        for pid in (
+            await session.execute(
+                select(SaleEntry.product_id)
+                .where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.product_id.is_not(None),
+                    SaleEntry.voided_at.is_(None),
+                    SaleEntry.cost_origin == "sin_costo",
+                )
+                .distinct()
+            )
+        ).scalars()
+        if pid is not None
+    ]
+
+    def _candidatas(s: Session) -> list[uuid.UUID]:
+        return ventas_sin_costo_desde(s, primeras_fuentes(s, tenant_id, productos))
+
+    ids = await session.run_sync(_candidatas)
+    resumen.candidatas = len(ids)
+    run: DataRepairRun | None = None
+    if aplicar and ids:
+        run = DataRepairRun(
+            tenant_id=tenant_id, repair_type=REPAIR_TYPE_SIN_COSTO, status="RUNNING",
+            dry_run=False, candidates_found=len(ids),
+        )
+        session.add(run)
+        await session.flush()
+        resumen.run_id = run.id
+
+    for i in range(0, len(ids), LOTE):
+        # Bloquea y vuelve a filtrar: una venta que se costeó o anuló en el medio
+        # (camino en vivo) no se toca.
+        ventas = list(
+            (
+                await session.execute(
+                    select(SaleEntry)
+                    .where(
+                        SaleEntry.id.in_(ids[i : i + LOTE]),
+                        SaleEntry.tenant_id == tenant_id,
+                        SaleEntry.voided_at.is_(None),
+                        SaleEntry.cost_origin == "sin_costo",
+                    )
+                    .with_for_update()
+                )
+            ).scalars()
+        )
+        if not ventas:
+            continue
+        antes = {v.id: _serializar(v) for v in ventas}
+        pendientes = dict.fromkeys(antes, True)
+
+        def _costear(s: Session, pendientes: dict[uuid.UUID, bool] = pendientes) -> None:
+            costear_ventas(s, pendientes, set())
+
+        await session.run_sync(_costear)
+        for venta in ventas:
+            if venta.cost_origin == "sin_costo":
+                continue
+            resumen.costeadas += 1
+            resumen.confirmadas += bool(venta.cost_confirmed)
+            resumen.por_origen[venta.cost_origin or "?"] += 1
+            if run is not None:
+                session.add(
+                    DataRepairItem(
+                        run_id=run.id, tenant_id=tenant_id, sale_entry_id=venta.id,
+                        product_id=venta.product_id, action="UPDATE_SALE",
+                        before_json=antes[venta.id], after_json=_serializar(venta),
+                        confidence="MEDIUM",
+                    )
+                )
+        await session.flush()
+
+    if run is not None:
+        run.status = "APPLIED"
+        run.sales_detected = resumen.costeadas
+        run.completed_at = datetime.now(UTC)
+        run.details_json = {
+            "por_origen": dict(resumen.por_origen),
+            "confirmadas": resumen.confirmadas,
+            "aperturas_sin_confirmar": resumen.aperturas_sin_confirmar,
+            "ventas_antes_de_apertura": resumen.ventas_antes_de_apertura,
+        }
+        await session.flush()
+    return resumen
+
+
+async def _revertir_sin_costo(session: AsyncSession, run: DataRepairRun) -> tuple[int, int]:
+    """Restaura el snapshot ANTERIOR de cada venta que sigue como la dejó la
+    corrida. Una que cambió después (se editó, se anuló) se saltea."""
+    if run.status == "REVERTED":
+        return 0, 0
+    items = list(
+        (
+            await session.execute(select(DataRepairItem).where(DataRepairItem.run_id == run.id))
+        ).scalars()
+    )
+    columnas = _columnas_del_snapshot()
+    revertidas = salteadas = 0
+    for i in range(0, len(items), LOTE):
+        tanda = items[i : i + LOTE]
+        ventas = {
+            v.id: v
+            for v in (
+                await session.execute(
+                    select(SaleEntry)
+                    .where(
+                        SaleEntry.id.in_([it.sale_entry_id for it in tanda]),
+                        SaleEntry.tenant_id == run.tenant_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalars()
+        }
+        for item in tanda:
+            venta = ventas.get(item.sale_entry_id) if item.sale_entry_id else None
+            if venta is None or _serializar(venta) != item.after_json:
+                salteadas += 1
+                continue
+            for c in columnas:
+                setattr(venta, c, _restaurar(c, (item.before_json or {}).get(c)))
             revertidas += 1
     run.status = "REVERTED"
     await session.flush()
