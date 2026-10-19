@@ -21,6 +21,18 @@ la cantidad, se recalcula el costo de la línea con el MISMO costo unitario. Só
 si le cambian el producto se vuelve a elegir la fuente. Una venta anulada o sin
 producto no se costea.
 
+**Excepción acotada (M·2d-2): una venta ``sin_costo`` se costea cuando aparece
+su fuente.** La fecha del documento y la de carga son distintas: un remito de
+agosto cargado después de las ventas de septiembre es la fuente de esas ventas.
+``after_flush`` también anota cada compra o apertura (``es_fuente_de_costo``)
+nueva o modificada (reactivada, con otra fecha u otro costo, una apertura
+confirmada) como ``(tenant, producto) → día``; ``before_commit`` busca las ventas
+vivas ``sin_costo`` de ese producto desde ese día, sin las de unidad dudosa
+(``es_unidad_dudosa``: una compra no la resuelve), y las costea con la MISMA
+regla que en vivo: confirmadas o estimadas según la fuente. Las escrituras Core
+(dedup, relectura, M·R) no pasan por acá: las cubre la publicación del costo
+promedio (``recostear_sin_costo`` desde ``costo_promedio_service._escribir``).
+
 **No bloquea la venta:** el costeo corre en un SAVEPOINT. Si falla, se registra
 el error y la venta se guarda sin snapshot (NULL = sin costear), que es lo mismo
 que una venta vieja y lo completa el script de M·2c. El cliente nunca manda
@@ -35,19 +47,21 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final
 
-from sqlalchemy import event, inspect, select
+from sqlalchemy import event, func, inspect, or_, select
 from sqlalchemy.orm import Session
 
+from app.domain.business_time import today_ar
 from app.domain.costo_de_referencia import CompraCandidata, costo_de_referencia
 from app.domain.costo_de_venta import (
     MOTIVO_UNIDAD_DUDOSA,
     VERSION_SNAPSHOT,
     CostoDeVenta,
     costo_de_venta,
+    es_unidad_dudosa,
 )
 from app.domain.costo_promedio_de_venta import (
     CostoPromedioDeVenta,
@@ -63,11 +77,14 @@ from app.domain.costo_vigente import (
 from app.domain.sale_unit import importe
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessProfile
+from app.persistence.models.inventory import InventoryMovement, movement_business_time
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.repositories.costo_de_referencia_repository import (
     candidata_de_fila,
     consulta_todas_las_candidatas,
+    es_fuente_de_costo,
+    filtro_de_fuentes,
 )
 from app.persistence.repositories.costo_promedio_de_venta_repository import (
     consulta_estados,
@@ -81,6 +98,18 @@ logger = get_logger(__name__)
 #: obliga a elegir la fuente de nuevo (venta nueva o con otro producto).
 _PENDIENTES: Final = "m2a_ventas_por_costear"
 
+
+#: ``session.info[_FUENTES]`` = ``{(tenant_id, product_id): día}``: compras o
+#: aperturas nuevas o modificadas en esta transacción (M·2d-2). Las ventas
+#: ``sin_costo`` de ese producto desde ese día se vuelven a costear.
+_FUENTES: Final = "m2d_fuentes_de_costo"
+
+#: Columnas de un movimiento que, al cambiar, pueden hacerlo fuente de ventas
+#: que no la tenían (las mismas que vigila el costo promedio, menos ``qty``).
+_COLUMNAS_DE_FUENTE: Final = (
+    "occurred_at", "voided_at", "unit_cost", "unit_cost_final", "movement_type",
+    "source_type", "product_id",
+)
 
 #: ``session.info[_UNIDAD_DUDOSA]`` = ventas cuya ruta NO garantiza que
 #: ``quantity`` esté en unidades base (``POST /sales``, ``/sales/bulk``, chat).
@@ -114,8 +143,39 @@ def _limpiar_snapshot(venta: SaleEntry) -> None:
         setattr(venta, columna, None)
 
 
+def _dia_de_negocio(mov: InventoryMovement) -> date:
+    """``COALESCE(occurred_at, created_at)`` como día: el ledger guarda la hora
+    argentina rotulada UTC, así que el día es el de ese valor en UTC (como corta
+    ``_filtro_candidatas``)."""
+    valor = mov.occurred_at or mov.created_at
+    if valor is None:
+        return today_ar()
+    return (valor.astimezone(UTC) if valor.tzinfo is not None else valor).date()
+
+
+def _anotar_fuente(session: Session, mov: InventoryMovement) -> None:
+    fuentes: dict[tuple[uuid.UUID, uuid.UUID], date] = session.info.setdefault(_FUENTES, {})
+    clave = (mov.tenant_id, mov.product_id)
+    dia = _dia_de_negocio(mov)
+    previo = fuentes.get(clave)
+    fuentes[clave] = dia if previo is None else min(previo, dia)
+
+
+def _anotar_fuentes(session: Session) -> None:
+    for obj in session.new:
+        if isinstance(obj, InventoryMovement) and es_fuente_de_costo(obj):
+            _anotar_fuente(session, obj)
+    for obj in session.dirty:
+        if not isinstance(obj, InventoryMovement) or not es_fuente_de_costo(obj):
+            continue
+        estado = inspect(obj)
+        if any(estado.attrs[c].history.has_changes() for c in _COLUMNAS_DE_FUENTE):
+            _anotar_fuente(session, obj)
+
+
 @event.listens_for(Session, "after_flush")
 def _anotar_ventas(session: Session, _flush_context: Any) -> None:
+    _anotar_fuentes(session)
     for obj in session.new:
         if (
             isinstance(obj, SaleEntry)
@@ -148,6 +208,7 @@ def _olvidar_al_revertir(session: Session, previous_transaction: Any) -> None:
     if previous_transaction.parent is None:
         session.info.pop(_PENDIENTES, None)
         session.info.pop(_UNIDAD_DUDOSA, None)
+        session.info.pop(_FUENTES, None)
 
 
 # ``insert=True``: este ``before_commit`` corre PRIMERO, se importe este módulo
@@ -169,8 +230,113 @@ def _costear_al_confirmar(session: Session) -> None:
     session.flush()
     pendientes: dict[uuid.UUID, bool] = session.info.pop(_PENDIENTES, {})
     dudosas: set[uuid.UUID] = session.info.pop(_UNIDAD_DUDOSA, set())
+    fuentes: dict[tuple[uuid.UUID, uuid.UUID], date] = session.info.pop(_FUENTES, {})
+    if fuentes:
+        for venta_id in ventas_sin_costo_desde(session, fuentes):
+            # ``True`` siempre: si además se le editó la cantidad en esta
+            # transacción venía anotada con ``False`` (mismo costo unitario), y
+            # una ``sin_costo`` no tiene costo unitario que conservar.
+            pendientes[venta_id] = True
     if pendientes:
         costear_ventas(session, pendientes, dudosas)
+
+
+def ventas_sin_costo_desde(
+    session: Session, fuentes: dict[tuple[uuid.UUID, uuid.UUID], date]
+) -> list[uuid.UUID]:
+    """Ventas vivas ``sin_costo`` de cada producto desde su día (M·2d-2).
+
+    Sin las de unidad dudosa (filtradas en SQL: ninguna fuente las resuelve, y
+    releerlas en cada publicación del promedio sería trabajo perdido). Una
+    consulta por tenant desde el día más temprano; el corte por producto se hace
+    acá. ``FOR UPDATE SKIP LOCKED``: una venta que otra transacción está
+    editando no se costea con su cantidad vieja; la próxima publicación del
+    producto la toma.
+    """
+    por_tenant: dict[uuid.UUID, dict[uuid.UUID, date]] = defaultdict(dict)
+    for (tenant_id, product_id), dia in fuentes.items():
+        por_tenant[tenant_id][product_id] = dia
+    ids: list[uuid.UUID] = []
+    for tenant_id, dias in por_tenant.items():
+        desde = datetime.combine(min(dias.values()), datetime.min.time())
+        filas = session.execute(
+            select(
+                SaleEntry.id, SaleEntry.product_id, SaleEntry.transaction_date,
+                SaleEntry.cost_reason,
+            )
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.product_id.in_(list(dias)),
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.cost_origin == "sin_costo",
+                # ``transaction_date`` es hora argentina sin zona.
+                SaleEntry.transaction_date >= desde,
+                or_(
+                    SaleEntry.cost_reason.is_(None),
+                    ~SaleEntry.cost_reason.contains(MOTIVO_UNIDAD_DUDOSA),
+                ),
+            )
+            .with_for_update(skip_locked=True)
+        ).all()
+        nuevas = [
+            f.id
+            for f in filas
+            if _dia_de_la_venta(f.transaction_date) >= dias[f.product_id]
+            # Red: el mismo criterio que el filtro SQL.
+            and not es_unidad_dudosa(f.cost_reason)
+        ]
+        if nuevas:
+            logger.info(
+                "costeo.fuente_tardia",
+                tenant_id=str(tenant_id), productos=len(dias), ventas=len(nuevas),
+            )
+        ids.extend(nuevas)
+    return ids
+
+
+def _dia_de_la_venta(valor: object) -> date:
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    return datetime.fromisoformat(str(valor)).date()
+
+
+def primeras_fuentes(
+    session: Session, tenant_id: uuid.UUID, product_ids: Iterable[uuid.UUID]
+) -> dict[tuple[uuid.UUID, uuid.UUID], date]:
+    """El día de la primera fuente viva con costo de cada producto: antes de
+    ese día ninguna venta ``sin_costo`` puede costearse."""
+    ids = list(dict.fromkeys(product_ids))
+    if not ids:
+        return {}
+    filas = session.execute(
+        select(InventoryMovement.product_id, func.min(movement_business_time()))
+        .where(*filtro_de_fuentes(tenant_id, ids, today_ar()))
+        .group_by(InventoryMovement.product_id)
+    ).all()
+    fuentes: dict[tuple[uuid.UUID, uuid.UUID], date] = {}
+    for pid, valor in filas:
+        momento = valor if isinstance(valor, datetime) else datetime.fromisoformat(str(valor))
+        if momento.tzinfo is not None:
+            momento = momento.astimezone(UTC)
+        fuentes[(tenant_id, pid)] = momento.date()
+    return fuentes
+
+
+def recostear_sin_costo(
+    session: Session, fuentes: dict[tuple[uuid.UUID, uuid.UUID], date]
+) -> int:
+    """Costea las ventas ``sin_costo`` que ya tienen fuente (API sincrónica).
+
+    La llama la publicación del costo promedio, que cubre las escrituras Core
+    que este módulo no ve (dedup, relectura, M·R). Idempotente: una venta que
+    sigue sin fuente queda igual, y una ya costeada no vuelve a entrar.
+    """
+    ids = ventas_sin_costo_desde(session, fuentes)
+    if ids:
+        costear_ventas(session, dict.fromkeys(ids, True), set())
+    return len(ids)
 
 
 def costear_ventas(
@@ -400,9 +566,7 @@ def _costear_promedio(
                 base_units_per_sale_unit=producto.base_units_per_sale_unit,
                 # El MISMO criterio que la publicación: la marca de esta
                 # transacción o el motivo que dejó el snapshot.
-                unidad_dudosa=(
-                    venta.id in dudosas or venta.cost_reason == MOTIVO_UNIDAD_DUDOSA
-                ),
+                unidad_dudosa=(venta.id in dudosas or es_unidad_dudosa(venta.cost_reason)),
                 motivo_dudosa=MOTIVO_UNIDAD_DUDOSA,
             )
         for columna, valor in valores.columnas(pendiente=pendiente).items():

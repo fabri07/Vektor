@@ -51,13 +51,14 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.business_time import today_ar
-from app.domain.costo_de_venta import MOTIVO_UNIDAD_DUDOSA
+from app.domain.costo_de_venta import MOTIVO_UNIDAD_DUDOSA, es_unidad_dudosa
 from app.domain.costo_promedio import PRIORIDAD, Registro, proyectar, registros
 from app.domain.costo_promedio_de_venta import (
     PuntoDelHistorial,
     costo_promedio_de_venta,
     punto_a,
 )
+from app.observability.logger import get_logger
 from app.persistence.models.product_cost import ProductCostHistory, ProductCostState
 from app.persistence.repositories.costo_de_referencia_repository import costos_de_referencia
 from app.persistence.repositories.costo_promedio_repository import (
@@ -74,6 +75,8 @@ ORIGENES_DE_REPOSICION: Final = frozenset({"compra", "stock_inicial"})
 _ESPACIO_LOCK: Final = 0x4D50  # "MP"
 MOTIVO_RECALCULANDO: Final = "recalculando"
 MAX_ERROR: Final = 300
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -287,6 +290,16 @@ async def _escribir(
             regs = [r for r in regs if r.evento.fecha.date() >= dia]
         filas.extend(_fila(tenant_id, pid, r, revision) for r in regs)
     await _insertar_registros(session, filas)
+    # M·2d-2: las ventas que quedaron ``sin_costo`` y ya tienen fuente. Cubre las
+    # escrituras Core (dedup, relectura, M·R), que el listener del costeo no ve
+    # pero sí marcan el producto; idempotente. Antes del costo promedio de las
+    # ventas, que así se calcula sobre el snapshot nuevo.
+    # Un error acá no frena el promedio: el costo principal es otro dato.
+    try:
+        async with session.begin_nested():
+            await session.run_sync(lambda s: _recostear(s, tenant_id, ids))
+    except Exception:  # noqa: BLE001 — se registra; la publicación sigue
+        logger.exception("costeo.fuente_tardia_fallo", tenant_id=str(tenant_id))
     # M·P3: las ventas en la MISMA transacción que el historial y ANTES del FOR
     # UPDATE del estado: si la revisión cambió, el savepoint revierte las dos
     # cosas y el producto sigue pendiente (nunca una venta vieja con el
@@ -308,6 +321,17 @@ async def _escribir(
         st.aproximado = h.aproximado
         st.reconstruido_en = ahora
     await session.flush()
+
+
+def _recostear(s: Any, tenant_id: uuid.UUID, ids: set[uuid.UUID]) -> int:
+    # Tarde: el módulo del costeo registra listeners de ``Session`` y su orden
+    # depende de quién lo importa primero (``models/__init__``).
+    from app.persistence.costeo_de_ventas import (  # noqa: PLC0415
+        primeras_fuentes,
+        recostear_sin_costo,
+    )
+
+    return recostear_sin_costo(s, primeras_fuentes(s, tenant_id, ids))
 
 
 async def publicar(
@@ -486,7 +510,7 @@ async def _filas_de_ventas(
             unidades_base=cantidad,
             base_units_per_sale_unit=factores.get(pid) or 1,
             # La ruta que no confirma unidades base la marcó al costear (M·2a).
-            unidad_dudosa=motivo_costo == MOTIVO_UNIDAD_DUDOSA,
+            unidad_dudosa=es_unidad_dudosa(motivo_costo),
             motivo_dudosa=MOTIVO_UNIDAD_DUDOSA,
         )
         filas.append({"id": sid, **valores.columnas(pendiente=False)})

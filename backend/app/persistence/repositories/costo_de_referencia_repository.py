@@ -49,6 +49,26 @@ def _aware(v: object) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+def es_fuente_de_costo(m: InventoryMovement) -> bool:
+    """El gemelo en Python de ``_filtro_candidatas`` (sin el corte de fecha).
+
+    Un movimiento que puede darle costo a una venta: compra o apertura, vivo y
+    con costo > 0. Lo usa el costeo de ventas (M·2d) para saber qué movimiento
+    nuevo o modificado puede costear ventas que quedaron ``sin_costo``. Si cambia
+    la regla de uno, cambia la del otro (``test_es_fuente_de_costo_coincide``).
+    """
+    es_apertura = (
+        m.movement_type == "adjustment" and m.source_type == SOURCE_CATALOG_INITIAL_STOCK
+    )
+    costo = m.unit_cost_final if m.unit_cost_final is not None else m.unit_cost
+    return (
+        (m.movement_type == "purchase" or es_apertura)
+        and m.voided_at is None
+        and costo is not None
+        and costo > 0
+    )
+
+
 def _filtro_candidatas(
     tenant_id: uuid.UUID, ids: list[uuid.UUID], corte: date
 ) -> list[ColumnElement[bool]]:
@@ -66,6 +86,10 @@ def _filtro_candidatas(
         func.coalesce(m.unit_cost_final, m.unit_cost) > 0,
         movement_business_time(m) < fin_del_corte,
     ]
+
+
+#: Público para el costeo de ventas (M·2d-2): el mismo filtro de candidatas.
+filtro_de_fuentes = _filtro_candidatas
 
 
 def _columnas_candidata() -> list[Any]:

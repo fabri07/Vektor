@@ -3,7 +3,9 @@
 Puro: sin sesión ni ORM. Responde «¿qué costo se lleva esta venta, a su fecha de
 negocio, y es una base comparable confirmada?». Lo escribe el servidor al
 confirmar la venta (``persistence/costeo_de_ventas.py``) y no se revalúa: una
-compra posterior no cambia una venta pasada.
+compra posterior no cambia una venta pasada. Única excepción (M·2d-2): una venta
+``sin_costo`` se costea cuando aparece su fuente con fecha anterior (la fecha del
+documento no es la de carga), con esta misma regla.
 
 - **La fuente es la elegible al DÍA de la venta**, con la misma regla que el costo
   vigente (M·1c, ``decidir_costo_vigente``): la más reciente entre la última
@@ -48,6 +50,16 @@ MOTIVO_UNIDAD_DUDOSA: Final = (
     "la cantidad no está confirmada en unidades base para un producto fraccionado"
 )
 MOTIVO_EDICION: Final = "el costo sale de una carga manual o del catálogo, no de una compra"
+
+
+def es_unidad_dudosa(motivo: str | None) -> bool:
+    """¿El snapshot dice que la unidad no está confirmada?
+
+    Por CONTENIDO y no por igualdad: el costeo retroactivo (M·2c) antepone su
+    propio motivo («costeado después de la venta…; <motivo>») y la comparación
+    exacta dejaba a esas ventas con costo promedio.
+    """
+    return bool(motivo) and MOTIVO_UNIDAD_DUDOSA in str(motivo)
 
 
 @dataclass(frozen=True)
