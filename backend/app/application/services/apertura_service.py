@@ -18,6 +18,13 @@ sólo mira ventas nuevas o editadas). Atrasarla deja ventas YA costeadas con el
 stock inicial y anteriores a la fecha nueva: su costo no se revalúa (M·2a), pero
 se informan (cantidad e ids) en la respuesta y en ``decision_audit_log``.
 
+**La fecha de la fila (M·2d-1b).** Un import fecha la apertura con la fecha
+propia de la fila (``acquired_at``) y la deja con ``opening_date_source='archivo'``
+SIN confirmar; sin fecha propia, queda pendiente en la hora de carga. Confirmar
+por archivo con ``aceptar_fechas_de_filas`` confirma las de la fila con SU fecha
+(no se mueven: ya costearon sus ventas al importarse) y le da ``fecha`` al resto;
+sin aceptarlas, ``fecha`` pisa todas.
+
 **Locks:** siempre el producto antes que sus movimientos, en orden de id, en los
 dos caminos: así dos confirmaciones (o una y un PATCH de costo, que recalcula el
 mismo costo vigente) no se cruzan ni se pisan.
@@ -29,15 +36,17 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Final
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service
 from app.application.services.costo_vigente_service import recalcular_costo_vigente
 from app.application.services.inventory_movement_origin import (
+    FECHA_DE_ARCHIVO,
     FECHA_DE_USUARIO,
     SOURCE_CATALOG_INITIAL_STOCK,
     columnas_de_apertura_confirmada,
@@ -55,6 +64,10 @@ MAX_IDS: Final = 200
 
 class SinAperturaError(Exception):
     """El producto (o el archivo) no tiene stock inicial vivo."""
+
+
+class FechaRequeridaError(Exception):
+    """Hay stock inicial sin fecha propia y no se dio una fecha."""
 
 
 class AperturaAmbiguaError(Exception):
@@ -77,13 +90,46 @@ class ResultadoConfirmacion:
     venta_ids: list[uuid.UUID] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ResumenAperturasDeArchivo:
+    """El stock inicial sin confirmar de UN archivo, para pedir la fecha al
+    terminar de importarlo (M·2d-1b). Lo que se cargó de verdad, leído de la base."""
+
+    aperturas: int
+    productos: int
+    #: En unidades de VENTA (``qty`` del ledger está en unidades base).
+    unidades: Decimal
+    #: Sin fecha propia: figuran desde la hora de carga.
+    pendientes: int
+    #: Con la fecha de su fila (``opening_date_source='archivo'``), sin aceptar.
+    con_fecha_de_fila: int
+    fecha_de_fila_min: date | None
+    fecha_de_fila_max: date | None
+    #: El momento cero (primer día de ventas o gastos): una SUGERENCIA, nunca fecha.
+    fecha_sugerida: date | None
+
+
 def filtro_aperturas_vivas(tenant_id: uuid.UUID) -> list[ColumnElement[bool]]:
+    """Stock inicial vivo de productos ACTIVOS: los INGRESOS.
+
+    Un catálogo con menos stock que el actual escribe un ajuste
+    ``catalog_initial_stock`` negativo: es una baja, no stock inicial, y no tiene
+    "desde cuándo" que confirmar. Un producto dado de baja no anula sus
+    movimientos: sin este filtro, su apertura seguiría en el aviso y bloquearía
+    la confirmación de todo su archivo.
+    """
     m = InventoryMovement
     return [
         m.tenant_id == tenant_id,
         m.movement_type == "adjustment",
         m.source_type == SOURCE_CATALOG_INITIAL_STOCK,
         m.voided_at.is_(None),
+        m.qty > 0,
+        m.product_id.in_(
+            select(Product.id).where(
+                Product.tenant_id == tenant_id, Product.is_active.is_(True)
+            )
+        ),
     ]
 
 
@@ -122,16 +168,30 @@ async def confirmar_apertura_de_producto(
         )
     if len(aperturas) > 1:
         raise AperturaAmbiguaError(len(aperturas))
-    return await _confirmar(session, tenant_id, aperturas, fecha, user_id, alcance="producto")
+    return await _confirmar(
+        session, tenant_id, [(m, fecha) for m in aperturas], user_id, alcance="producto"
+    )
 
 
 async def confirmar_aperturas_de_archivo(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     upload_id: uuid.UUID,
-    fecha: datetime,
+    fecha: datetime | None,
     user_id: uuid.UUID,
+    *,
+    aceptar_fechas_de_filas: bool = False,
 ) -> ResultadoConfirmacion:
+    """Todas las aperturas vivas del archivo, en una transacción.
+
+    Con ``aceptar_fechas_de_filas`` las que traen fecha de su fila se confirman
+    con esa fecha y el resto toma ``fecha``; sin ``fecha`` y con alguna sin fecha
+    propia → ``FechaRequeridaError``. Sin aceptarlas, ``fecha`` (obligatoria) es
+    la de todas.
+    """
+    from app.application.services.facts_provider import _dia_de_negocio  # noqa: PLC0415
+    from app.domain.business_time import today_ar  # noqa: PLC0415
+
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
     del_archivo = (
         *filtro_aperturas_vivas(tenant_id),
@@ -158,7 +218,27 @@ async def confirmar_aperturas_de_archivo(
     )
     if not aperturas:
         raise SinAperturaError("El archivo no tiene stock inicial cargado.")
-    return await _confirmar(session, tenant_id, aperturas, fecha, user_id, alcance="archivo")
+
+    def conserva(m: InventoryMovement) -> bool:
+        # Defensa: una fecha de fila futura nunca se confirma (la ingesta no la
+        # persiste; si llegara, se trata como sin fecha y se pide una).
+        dia = _dia_de_negocio(m.occurred_at)
+        return (
+            aceptar_fechas_de_filas
+            and m.opening_date_source == FECHA_DE_ARCHIVO
+            and dia is not None
+            and dia <= today_ar()
+        )
+
+    # ``None`` = confirmar con la fecha que ya tiene (la de su fila).
+    plan = [(m, None if conserva(m) else fecha) for m in aperturas]
+    if any(f is None and not conserva(m) for m, f in plan):
+        raise FechaRequeridaError(
+            "Indicá desde qué fecha tenías el stock que no trae fecha en el archivo."
+            if aceptar_fechas_de_filas
+            else "Indicá desde qué fecha tenías este stock."
+        )
+    return await _confirmar(session, tenant_id, plan, user_id, alcance="archivo")
 
 
 async def _bloquear_productos(
@@ -189,30 +269,44 @@ async def _bloquear_productos(
 async def _confirmar(
     session: AsyncSession,
     tenant_id: uuid.UUID,
-    aperturas: list[InventoryMovement],
-    fecha: datetime,
+    plan: list[tuple[InventoryMovement, datetime | None]],
     user_id: uuid.UUID,
     *,
     alcance: str,
 ) -> ResultadoConfirmacion:
-    nueva = momento_de_negocio_rotulado(fecha)
+    """Confirma cada apertura con su fecha: la dada (``usuario``) o, con
+    ``None``, la que ya tiene de su fila (``archivo``)."""
     ahora = datetime.now(UTC)
     anteriores: dict[str, str] = {}
-    for mov in aperturas:
+    de_archivo: list[str] = []
+    #: La fecha que quedó, por producto (la más temprana si hay varias).
+    por_producto: dict[uuid.UUID, datetime] = {}
+    nuevas: set[str] = set()
+    for mov, fecha in plan:
         previa = mov.occurred_at or mov.created_at
         anteriores[str(mov.id)] = previa.isoformat() if previa is not None else ""
-        mov.occurred_at = nueva
-        for columna, valor in columnas_de_apertura_confirmada(
-            FECHA_DE_USUARIO, user_id, ahora
-        ).items():
+        if fecha is None:
+            fuente = FECHA_DE_ARCHIVO
+            de_archivo.append(str(mov.id))
+        else:
+            fuente = FECHA_DE_USUARIO
+            mov.occurred_at = momento_de_negocio_rotulado(fecha)
+        for columna, valor in columnas_de_apertura_confirmada(fuente, user_id, ahora).items():
             setattr(mov, columna, valor)
-    product_ids = sorted({m.product_id for m in aperturas})
+        queda = mov.occurred_at
+        assert queda is not None  # la de la fila o la recién puesta
+        if queda.tzinfo is None:  # SQLite la devuelve sin zona
+            queda = queda.replace(tzinfo=UTC)
+        nuevas.add(queda.isoformat())
+        if mov.product_id not in por_producto or queda < por_producto[mov.product_id]:
+            por_producto[mov.product_id] = queda
+    product_ids = sorted(por_producto)
     await session.flush()
     await recalcular_costo_vigente(session, tenant_id, product_ids)
 
-    total, ids = await _ventas_costeadas_antes(session, tenant_id, product_ids, nueva)
+    total, ids = await _ventas_costeadas_antes(session, tenant_id, por_producto)
     resultado = ResultadoConfirmacion(
-        aperturas=len(aperturas),
+        aperturas=len(plan),
         productos=len(product_ids),
         ventas_costeadas_antes=total,
         venta_ids=ids,
@@ -223,8 +317,9 @@ async def _confirmar(
             decision_type=DECISION_TYPE,
             decision_data={
                 "alcance": alcance,
-                "fecha_nueva": nueva.isoformat(),
+                "fechas_nuevas": sorted(nuevas),
                 "fechas_anteriores": anteriores,
+                "con_fecha_de_su_fila": de_archivo,
                 "productos": [str(p) for p in product_ids],
                 "ventas_costeadas_antes": total,
                 "venta_ids": [str(v) for v in ids],
@@ -241,19 +336,30 @@ async def _confirmar(
 async def _ventas_costeadas_antes(
     session: AsyncSession,
     tenant_id: uuid.UUID,
-    product_ids: list[uuid.UUID],
-    fecha: datetime,
+    por_producto: dict[uuid.UUID, datetime],
 ) -> tuple[int, list[uuid.UUID]]:
-    """Ventas vivas costeadas con el stock inicial y anteriores a ``fecha``.
+    """Ventas vivas costeadas con el stock inicial y anteriores a la fecha que
+    quedó en su producto.
 
     Su costo salió de una apertura que ahora resulta posterior. No se tocan.
+    Una condición por día (suele ser uno solo por confirmación).
     """
+    por_dia: dict[date, list[uuid.UUID]] = {}
+    for pid, fecha in por_producto.items():
+        por_dia.setdefault(fecha.date(), []).append(pid)
     condiciones = (
         SaleEntry.tenant_id == tenant_id,
-        SaleEntry.product_id.in_(product_ids),
         SaleEntry.voided_at.is_(None),
         SaleEntry.cost_origin == "stock_inicial",
-        func.date(SaleEntry.transaction_date) < fecha.date(),
+        or_(
+            *(
+                and_(
+                    SaleEntry.product_id.in_(pids),
+                    func.date(SaleEntry.transaction_date) < dia,
+                )
+                for dia, pids in por_dia.items()
+            )
+        ),
     )
     total = (
         await session.execute(select(func.count()).select_from(SaleEntry).where(*condiciones))
@@ -271,11 +377,60 @@ async def _ventas_costeadas_antes(
     return int(total), ids
 
 
+async def resumen_de_archivo(
+    session: AsyncSession, tenant_id: uuid.UUID, upload_id: uuid.UUID
+) -> ResumenAperturasDeArchivo | None:
+    """El stock inicial sin confirmar del archivo, para pedir la fecha al terminar
+    de importarlo. SELECT-only; ``None`` si no hay nada que confirmar."""
+    from app.application.services.facts_provider import _dia_de_negocio  # noqa: PLC0415
+    from app.application.services.ingestion_import_service import (  # noqa: PLC0415
+        _opening_stock_date,
+    )
+
+    m = InventoryMovement
+    filas = (
+        await session.execute(
+            select(m.product_id, m.qty, m.opening_date_source, m.occurred_at,
+                   Product.base_units_per_sale_unit)
+            .join(Product, (Product.id == m.product_id) & (Product.tenant_id == tenant_id))
+            .where(
+                *filtro_aperturas_vivas(tenant_id),
+                m.source_upload_id == upload_id,
+                m.opening_confirmed_at.is_(None),
+            )
+        )
+    ).all()
+    if not filas:
+        return None
+    unidades = sum(
+        (Decimal(qty) / Decimal(factor or 1) for _, qty, _, _, factor in filas), Decimal(0)
+    )
+    dias_de_fila = [
+        d
+        for _, _, fuente, ocurrio, _ in filas
+        if fuente == FECHA_DE_ARCHIVO and (d := _dia_de_negocio(ocurrio)) is not None
+    ]
+    sugerida = await _opening_stock_date(session, tenant_id, [])
+    return ResumenAperturasDeArchivo(
+        aperturas=len(filas),
+        productos=len({f[0] for f in filas}),
+        unidades=unidades.quantize(Decimal("0.001")),
+        pendientes=len(filas) - len(dias_de_fila),
+        con_fecha_de_fila=len(dias_de_fila),
+        fecha_de_fila_min=min(dias_de_fila, default=None),
+        fecha_de_fila_max=max(dias_de_fila, default=None),
+        fecha_sugerida=sugerida.date() if sugerida is not None else None,
+    )
+
+
 __all__ = [
     "AperturaAmbiguaError",
+    "FechaRequeridaError",
+    "ResumenAperturasDeArchivo",
     "ResultadoConfirmacion",
     "SinAperturaError",
     "confirmar_apertura_de_producto",
     "confirmar_aperturas_de_archivo",
     "filtro_aperturas_vivas",
+    "resumen_de_archivo",
 ]

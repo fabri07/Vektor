@@ -108,6 +108,7 @@ from app.application.services.ingestion_import_service import (
 from app.application.services.ingestion_schema_decision_service import (
     lookup_remembered_decisions_for_contexts,
 )
+from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
 from app.application.services.inventory_replay_service import run_inventory_replay
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
@@ -1216,6 +1217,36 @@ async def _descartar_pendientes_de_contextos_no_importados(
     ]
 
 
+async def _restaurar_confirmaciones(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    confirmaciones: dict[str, dict[str, Any]],
+) -> None:
+    """Le devuelve a cada stock inicial recreado la fecha que el usuario ya había
+    confirmado para la MISMA fila (M·2d-1b). Por ORM y antes del commit: el
+    costeo de las ventas recreadas (``before_commit``) ya ve la fecha buena."""
+    recreadas = (
+        await session.execute(
+            select(InventoryMovement).where(
+                InventoryMovement.tenant_id == tenant_id,
+                InventoryMovement.source_upload_id == file_id,
+                InventoryMovement.voided_at.is_(None),
+                InventoryMovement.movement_type == "adjustment",
+                InventoryMovement.source_type == SOURCE_CATALOG_INITIAL_STOCK,
+                InventoryMovement.qty > 0,
+                InventoryMovement.opening_confirmed_at.is_(None),
+                InventoryMovement.source_row_hash.in_(list(confirmaciones)),
+            )
+        )
+    ).scalars()
+    for mov in recreadas:
+        assert mov.source_row_hash is not None
+        for columna, valor in confirmaciones[mov.source_row_hash].items():
+            setattr(mov, columna, valor)
+    await session.flush()
+
+
 async def _reconcile(
     session: AsyncSession,
     file: UploadedFile,
@@ -1393,6 +1424,12 @@ async def _reconcile(
         )
     )
     movimientos_preservados: set[uuid.UUID] = set()
+    #: M·2d-1b: la fecha que el usuario confirmó para cada stock inicial, por la
+    #: identidad de su fila (``source_row_hash`` excluye la fecha, F6-C3). El
+    #: reimport recrea la apertura sin confirmar; si la fila no cambió, recupera
+    #: la confirmación. Una fila distinta (otra cantidad u otro costo) vuelve a
+    #: pedirla.
+    confirmaciones: dict[str, dict[str, Any]] = {}
     for mov in prev_movements_res.scalars().all():
         # No voidear el movimiento de una fila editada preservada: el reimport la saltea,
         # así que su stock debe quedar intacto (si no, se subestimaría). Las dos
@@ -1404,6 +1441,22 @@ async def _reconcile(
         if mov.source_event_id and mov.source_event_id in preserved_sale_events:
             movimientos_preservados.add(mov.id)
             continue
+        if (
+            mov.movement_type == "adjustment"
+            and mov.source_type == SOURCE_CATALOG_INITIAL_STOCK
+            and mov.qty > 0
+            and mov.opening_confirmed_at is not None
+            and mov.source_row_hash
+        ):
+            confirmaciones.setdefault(
+                mov.source_row_hash,
+                {
+                    "occurred_at": mov.occurred_at,
+                    "opening_confirmed_at": mov.opening_confirmed_at,
+                    "opening_confirmed_by_user_id": mov.opening_confirmed_by_user_id,
+                    "opening_date_source": mov.opening_date_source,
+                },
+            )
         mov_snap = _snapshot_movement(mov)
         # `lock_held`: `apply_reread` —único caller de `_reconcile`— toma el shared
         # lock del tenant en su primera línea, y `pg_advisory_xact_lock_shared` se
@@ -1492,6 +1545,8 @@ async def _reconcile(
         stamp_product_updated_at=not dry_run,
     )
     await session.flush()
+    if confirmaciones:
+        await _restaurar_confirmaciones(session, tenant_id, file_id, confirmaciones)
 
     # El invariante de "lo no seleccionado no deja rastro" tiene dos mitades: el
     # import ya no captura las hojas excluidas/derivadas, y esto limpia lo que

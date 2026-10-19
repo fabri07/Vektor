@@ -257,7 +257,11 @@ from app.schemas.ingestion import (
     TenantColumnMappingResponse,
     UploadResponse,
 )
-from app.schemas.product import ConfirmarAperturaRequest, ConfirmarAperturaResponse
+from app.schemas.product import (
+    ConfirmarAperturaDeArchivoRequest,
+    ConfirmarAperturaResponse,
+    ResumenAperturasDeArchivoResponse,
+)
 
 router = APIRouter()
 
@@ -3092,6 +3096,7 @@ async def confirm_file(
     # (async-aware, sin `session.rollback()` manual — que rompería el re-arme del
     # savepoint del request), dejando la sesión viva para el UPDATE de
     # compensación. El commit final del request cierra la transacción completa.
+    _aperturas: ResumenAperturasDeArchivoResponse | None = None
     _import_sp = await session.begin_nested()
     try:
         # E7-review #1: ¿el archivo sigue en la REVISIÓN que se confirmó?
@@ -3694,6 +3699,21 @@ async def confirm_file(
                     "archivos": dict(_solapamiento.por_archivo),
                 },
             )
+        # M·2d-1b: el stock inicial que cargó este archivo queda sin confirmar; la
+        # pantalla de resultado pide la fecha con estos números, leídos de lo recién
+        # persistido. En un savepoint anidado: en Postgres una consulta que falla
+        # aborta la transacción, y un aviso nunca debe tumbar el import.
+        try:
+            from app.application.services.apertura_service import (  # noqa: PLC0415
+                resumen_de_archivo,
+            )
+
+            async with session.begin_nested():
+                _resumen = await resumen_de_archivo(session, tenant.tenant_id, record.id)
+            if _resumen is not None:
+                _aperturas = ResumenAperturasDeArchivoResponse(**vars(_resumen))
+        except Exception:  # noqa: BLE001 — un aviso no puede tumbar el import
+            logger.warning("ingestion.confirm.aperturas_resumen_failed", file_id=str(record.id))
         # Import OK: liberar el savepoint (los cambios quedan en la transacción del
         # request, que los commitea al final).
         await _import_sp.commit()
@@ -4093,8 +4113,9 @@ async def confirm_file(
     if counts.get("historial_sin_fecha"):
         warnings.append(
             f"{counts['historial_sin_fecha']} venta(s) corresponden a productos que este "
-            "archivo declara sin fecha de adquisición. Se vincularon igual; verificar el "
-            "stock a la fecha de cada venta necesitaría esa fecha o la compra original."
+            "archivo declara sin fecha de adquisición. Se vincularon igual; para saber si "
+            "había stock al vender, indicá desde qué fecha tenías ese stock (o cargá la "
+            "compra original)."
         )
 
     # Aviso temporal (human-in-the-loop): si las ventas recién importadas dejan el stock
@@ -4167,6 +4188,7 @@ async def confirm_file(
             InventoryImpactItem(**fila) for fila in _impacto_filas[:_MAX_IMPACTO_LISTADO]
         ],
         inventory_impact_total=len(_impacto_filas),
+        aperturas_por_confirmar=_aperturas,
     )
 
 
@@ -4749,7 +4771,7 @@ async def reread_undo(
 )
 async def confirm_file_opening(
     file_id: uuid.UUID,
-    body: ConfirmarAperturaRequest,
+    body: ConfirmarAperturaDeArchivoRequest,
     tenant: Tenant = Depends(get_current_tenant),
     # Mueve fechas del ledger en masa: PIN, como la relectura y el replay. La
     # auth va ANTES que el guard 423 (ver nota en products.create_product).
@@ -4760,6 +4782,9 @@ async def confirm_file_opening(
     """Fija desde cuándo el negocio tiene el stock inicial que cargó este archivo.
 
     Mueve y confirma TODAS las aperturas vivas del archivo en una transacción.
+    Con ``aceptar_fechas_de_filas`` las que traen fecha en su fila se confirman
+    con esa fecha (M·2d-1b) y ``fecha`` es la del resto; sin ``fecha`` y con
+    alguna sin fecha propia → 422 ``FECHA_STOCK_INICIAL_REQUERIDA``.
     404 si el archivo no es del tenant o no cargó stock inicial. Las ventas ya
     costeadas con el stock inicial y anteriores a la fecha nueva no cambian de
     costo: se devuelven para revisarlas.
@@ -4771,10 +4796,20 @@ async def confirm_file_opening(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
     try:
         r = await apertura_service.confirmar_aperturas_de_archivo(
-            session, tenant.tenant_id, file_id, body.fecha, user.user_id
+            session,
+            tenant.tenant_id,
+            file_id,
+            body.fecha,
+            user.user_id,
+            aceptar_fechas_de_filas=body.aceptar_fechas_de_filas,
         )
     except apertura_service.SinAperturaError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except apertura_service.FechaRequeridaError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "FECHA_STOCK_INICIAL_REQUERIDA", "message": str(exc)},
+        ) from exc
     trigger_score_recalculation_after_commit(
         session, str(tenant.tenant_id), "opening_confirmed"
     )

@@ -49,9 +49,10 @@ SOURCE_TYPES: frozenset[str] = frozenset(
 
 # ── M·2d: confirmación del stock inicial ────────────────────────────────────────
 # Una apertura (``adjustment`` + ``catalog_initial_stock``) tiene fecha confirmada
-# sólo si la dio el usuario (``usuario``) o la traía la fila del archivo y el
-# confirm se la mostró (``archivo``). Sin eso queda PENDIENTE: ``occurred_at``
-# NULL, y su fecha de negocio es la de carga. Nunca se infiere una fecha anterior.
+# sólo con ``opening_confirmed_at``: la dio el usuario (``usuario``) o aceptó la que
+# traía su fila (``archivo``). El import deja la de la fila como ``archivo`` SIN
+# confirmar, y la que no trae fecha PENDIENTE en la hora de carga (hora AR
+# rotulada, M·2d-1b). Nunca se infiere una fecha anterior.
 FECHA_DE_USUARIO = "usuario"
 FECHA_DE_ARCHIVO = "archivo"
 FUENTES_DE_FECHA_DE_APERTURA: frozenset[str] = frozenset({FECHA_DE_USUARIO, FECHA_DE_ARCHIVO})

@@ -44,6 +44,7 @@ from app.application.services.ingestion_schema_decision_service import (
     record_context_decisions,
 )
 from app.application.services.inventory_movement_origin import (
+    FECHA_DE_ARCHIVO,
     SOURCE_CATALOG_INITIAL_STOCK,
     SOURCE_PURCHASE_IMPORT,
     SOURCE_RECEIPT,
@@ -2564,6 +2565,7 @@ async def _record_stock_movement(
     occurred_at: datetime | None = None,
     contrato: ContratoDeCosto | None = None,
     movement_id: uuid.UUID | None = None,
+    opening_date_source: str | None = None,
 ) -> None:
     """FASE 3: registra un InventoryMovement (audit insert-only) y sincroniza el
     `InventoryBalance` por el import, dentro de la misma transacción.
@@ -2625,6 +2627,9 @@ async def _record_stock_movement(
             source_row_ref=source_row_ref,
             source_row_hash=source_row_hash,
             occurred_at=ensure_utc(occurred_at),
+            # M·2d-1b: la fecha del stock inicial vino de la fila del archivo. Sin
+            # ``opening_confirmed_at``: el usuario la acepta (o la pisa) después.
+            opening_date_source=opening_date_source,
             # M·1b: el contrato del costo, sólo en las compras que lo declaran.
             # Sin contrato las columnas quedan NULL = desconocido.
             **(contrato.columnas() if contrato is not None else {}),
@@ -3273,7 +3278,9 @@ async def _opening_stock_date(
     """Momento cero: primer día registrado en el archivo o en los libros vigentes.
 
     Sólo fechas de negocio de ventas/gastos reales, nunca timestamps de carga.
-    Sin evidencia se devuelve None para conservar el fallback del importador.
+    Desde M·2d-1b es SÓLO una sugerencia que la pantalla ofrece al pedir la fecha
+    del stock inicial (``apertura_service.resumen_de_archivo``): nunca fecha una
+    apertura. Sin evidencia devuelve None.
     """
     from sqlalchemy import func, select, union_all  # noqa: PLC0415
 
@@ -3326,9 +3333,12 @@ async def _apply_catalog_stock(
 
     - ``is_purchase=False`` (saldo de apertura, DEFAULT): el stock entra al inventario
       como **ajuste** (``movement_type='adjustment'``), SIN ``ExpenseEntry`` ni salida
-      de caja. Se fecha en ``opening_date`` cuando se conoce (fecha explícita del
-      catálogo o primer día de los registros); sin evidencia se conserva ``tx_date``.
-      No cuenta como "comprado".
+      de caja. No cuenta como "comprado". La fecha la confirma el USUARIO (M·2d-1b):
+      ``opening_date`` es sólo la fecha propia de la fila (``acquired_at``), que queda
+      con ``opening_date_source='archivo'`` sin confirmar; sin ella la apertura queda
+      pendiente en ``tx_date`` (la hora de carga en hora argentina, el único momento
+      en que seguro existía). El momento cero NUNCA la fecha: es una sugerencia que
+      la pantalla de resultado ofrece al pedir la fecha.
     - ``is_purchase=True`` (compra): ``movement_type='purchase'`` + su COGS
       (``ExpenseEntry`` INVENTORY/COGS) cuando hay costo — como un libro de compras.
 
@@ -3347,7 +3357,7 @@ async def _apply_catalog_stock(
     if delta == 0:
         return
     # F6-C3: NO incluir la fecha en el hash de identidad de la fila de catálogo.
-    # La fecha puede venir del momento cero de los libros o del fallback de carga.
+    # La fecha puede venir de la fila o del fallback de carga.
     # Cambiar esa evidencia temporal no cambia la identidad de la fila. Incluir
     # el fallback de carga hacía que el MISMO catálogo, releído otro día, produjera
     # un ``source_row_hash`` distinto.
@@ -3386,6 +3396,11 @@ async def _apply_catalog_stock(
         source_row_ref=source_row_ref,
         source_row_hash=_row_hash,
         occurred_at=(opening_date or tx_date) if not is_purchase else tx_date,
+        opening_date_source=(
+            FECHA_DE_ARCHIVO
+            if (not is_purchase and delta > 0 and opening_date is not None)
+            else None
+        ),
     )
     # Solo una COMPRA genera gasto de mercadería + baja de caja. El saldo de apertura
     # es un activo que el negocio ya tenía → no toca caja ni COGS.
@@ -5236,15 +5251,6 @@ async def _insert_confirmed_data_impl(
             and (summary.get("has_producto") or inferred_type == "stock")
             and nombre_col
         )
-        _opening_date = None
-        if wants_productos and not stock_is_purchase:
-            _opening_dates = []
-            if (wants_ventas or wants_gastos) and fecha_col:
-                for row in rows:
-                    _date = _parse_date(row.get(fecha_col))
-                    if _date is not None:
-                        _opening_dates.append(_date)
-            _opening_date = await _opening_stock_date(session, tenant_id, _opening_dates)
 
         # FASE 3: índice de catálogo en memoria para el LINK de ventas/gastos/compras
         # (tiers sku exacto → nombre → tokens, con SKU-que-gana-sobre-nombre). Una
@@ -6495,7 +6501,7 @@ async def _insert_confirmed_data_impl(
                             unit_cost=cost,
                             store_name=store_name,
                             tx_date=today,
-                            opening_date=_acquired or _opening_date,
+                            opening_date=_acquired,
                             uploaded_file_id=uploaded_file_id,
                             source_row_ref=_prod_row_ref,
                             balance_index=_balance_index,
@@ -6757,7 +6763,7 @@ async def _insert_confirmed_data_impl(
                         unit_cost=cost,
                         store_name=store_name,
                         tx_date=today,
-                        opening_date=_acquired or _opening_date,
+                        opening_date=_acquired,
                         uploaded_file_id=uploaded_file_id,
                         source_row_ref=_prod_row_ref,
                         balance_index=_balance_index,
@@ -7394,7 +7400,6 @@ async def _insert_multisheet_data(
 
     confirmed_fields = confirmed_fields or {}
     context_mappings = context_mappings or {}
-    _opening_date: datetime | None = None
     _flush_every = 500  # enviar a DB en batches para no acumular en memoria
     # F-H6.c: avisos sobre el costo que la persona tiene que ver — celdas de
     # ajuste ilegibles y columnas mapeadas que no movieron ningún número. Viajan
@@ -8614,7 +8619,7 @@ async def _insert_multisheet_data(
                     unit_cost=cost,
                     store_name=store_name,
                     tx_date=today,
-                    opening_date=_acquired or _opening_date,
+                    opening_date=_acquired,
                     uploaded_file_id=uploaded_file_id,
                     source_row_ref=row_ref,
                     balance_index=_balance_index,
@@ -8894,13 +8899,10 @@ async def _insert_multisheet_data(
                     )
 
             async def _post_alta_de_catalogo(_resolved: Any) -> None:
-                # La apertura sin fecha explícita declara disponibilidad desde el
-                # momento cero. Sin registros fechados sigue siendo desconocida.
-                # Una compra no hereda la fecha inicial del negocio.
-                _declarar_evidencia(
-                    _new_id,
-                    (_acquired or _opening_date) if not stock_is_purchase else _acquired,
-                )
+                # Sólo la fecha propia de la fila prueba disponibilidad (M·2d-1b).
+                # El momento cero sale de las ventas de este mismo archivo: con él
+                # cada venta se justificaba sola. Sin fecha → ``historial_sin_fecha``.
+                _declarar_evidencia(_new_id, _acquired)
                 # F-H3.b: producto NUEVO → el saldo previo al archivo es 0, y el
                 # catálogo declara el absoluto (ver el caso análogo en _merge_into_existing).
                 if proyeccion is not None:
@@ -8917,7 +8919,7 @@ async def _insert_multisheet_data(
                     unit_cost=cost,
                     store_name=store_name,
                     tx_date=today,
-                    opening_date=_acquired or _opening_date,
+                    opening_date=_acquired,
                     uploaded_file_id=uploaded_file_id,
                     source_row_ref=row_ref,
                     balance_index=_balance_index,
@@ -9097,46 +9099,6 @@ async def _insert_multisheet_data(
                 return bool(context_confirmed.get(str(ctx.get("context_id") or "")))
             return bool(confirmed_fields.get(entity_confirm_key.get(_ent or "", "")))
 
-        if any(
-            _entidad_de(ctx) == "product"
-            and _hoja_incluida(ctx)
-            and not stock_is_purchase_for(ctx.get("context_id"))
-            for ctx in contexts
-        ):
-            _opening_dates = []
-            for ctx in contexts:
-                _entity = _entidad_de(ctx)
-                if (
-                    _entity not in {"sale", "expense"}
-                    or not _hoja_incluida(ctx)
-                    or ctx.get("is_summary_or_derived")
-                ):
-                    continue
-                # Misma preparación que la inserción: columnas ignoradas y convenio
-                # de fechas por columna. No usar preview_rows (puede estar truncado).
-                _cid = ctx.get("context_id")
-                _mapping = context_mappings.get(_cid or "", {})
-                _cols, _, _, _ignored = _resolve_target_cols(_mapping)
-                _rows, _ = preparar_filas_de_hoja(
-                    [
-                        r for r in summary.get(_bucket_key_for_context(ctx), [])
-                        if r.get("__context__") == _cid
-                    ],
-                    _cols,
-                    _ignored,
-                )
-                _date_keys = (
-                    ("transaction_date", "expense_date")
-                    if _entity == "sale"
-                    else ("expense_date", "transaction_date")
-                )
-                for row in _rows:
-                    _date = _parse_date(
-                        _val(row, _cols.get(_date_keys[0]) or _cols.get(_date_keys[1]), _FECHA_COLS)
-                    )
-                    if _date is not None:
-                        _opening_dates.append(_date)
-            _opening_date = await _opening_stock_date(session, tenant_id, _opening_dates)
 
         async def _ventas_sin_stock_que_las_respalde() -> dict[tuple[str, int], UnbackedRow]:
             """F-H3.d.3 — qué filas de venta no se pueden importar por falta de stock.
@@ -9573,17 +9535,6 @@ async def _insert_multisheet_data(
             )
             return filas
 
-        if confirmed_fields.get("productos") and not stock_is_purchase_for(None):
-            _opening_dates = []
-            for _field, _bucket in (
-                ("ventas", "ventas_detectadas"), ("gastos", "gastos_detectados")
-            ):
-                if confirmed_fields.get(_field):
-                    for row in _filas_legacy(_bucket):
-                        _date = _parse_date(_row_val(row, _FECHA_COLS))
-                        if _date is not None:
-                            _opening_dates.append(_date)
-            _opening_date = await _opening_stock_date(session, tenant_id, _opening_dates)
 
         if confirmed_fields.get("ventas"):
             for _i, row in enumerate(_filas_legacy("ventas_detectadas")):

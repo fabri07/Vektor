@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.schemas.product import ResumenAperturasDeArchivoResponse
+
 
 class UploadResponse(BaseModel):
     file_id: UUID
@@ -745,6 +747,9 @@ class ConfirmIngestionResponse(BaseModel):
     inventory_impact: list[InventoryImpactItem] = Field(default_factory=list)
     #: Cuántos productos tienen impacto en total, incluidos los que no se listan.
     inventory_impact_total: int = 0
+    #: M·2d-1b: el stock inicial que cargó el archivo, sin confirmar. La pantalla
+    #: pide desde qué fecha lo tenía con estos números. ``None`` = nada que pedir.
+    aperturas_por_confirmar: ResumenAperturasDeArchivoResponse | None = None
 
 
 class RegistrarImportacionRequest(ConfirmIngestionRequest):

@@ -33,6 +33,8 @@ import {
 import { Button } from "@/components/ui/Button";
 import { humanizeColumnLabel } from "@/lib/columnLabels";
 import { InventoryImpactPanel } from "./InventoryImpactPanel";
+import { ConfirmarAperturaDeArchivo } from "@/features/dashboard/AperturasPorConfirmar";
+import type { ResumenAperturasDeArchivo } from "@/types/api";
 import { StockTreatmentChoice, summaryHasStock } from "./stockTreatment";
 import { InventoryEffectChoice } from "./InventoryEffectChoice";
 import { ShippingDecisionChoice } from "./ShippingDecisionChoice";
@@ -396,34 +398,73 @@ function UnmappedModal({
  * Cuando hay impacto el panel NO se cierra: una tabla de saldo inicial →
  * movimientos → saldo final no entra en un toast, y es exactamente lo que hay
  * que mirar para decidir si aplicar esa historia.
+ *
+ * M·2d-1b: tampoco se cierra si el archivo cargó stock inicial sin confirmar:
+ * se pide desde qué fecha lo tenía, con lo que se cargó de verdad. «Lo indico
+ * después» cierra; queda pendiente en la tarjeta de Margen.
  */
 function useImpactoPostConfirm(onDone: () => void, fileId: string) {
   const [impacto, setImpacto] = useState<InventoryImpactItem[]>([]);
   const [impactoTotal, setImpactoTotal] = useState(0);
+  const [aperturas, setAperturas] = useState<ResumenAperturasDeArchivo | null>(null);
+  const [confirmada, setConfirmada] = useState(false);
 
   /** `true` si hay algo que mostrar (y por lo tanto NO hay que cerrar). */
   function registrar(result: ConfirmIngestionResult): boolean {
     const items = result.inventory_impact ?? [];
-    if (items.length === 0) return false;
+    const pendiente = result.aperturas_por_confirmar ?? null;
+    if (items.length === 0 && !pendiente) return false;
     setImpacto(items);
     setImpactoTotal(result.inventory_impact_total ?? items.length);
+    setAperturas(pendiente);
     return true;
   }
 
   const vista =
-    impacto.length > 0 ? (
+    impacto.length > 0 || aperturas ? (
       <div className="ml-2 mt-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-4">
         <p className="text-sm font-semibold text-vk-text-primary">
           Datos importados
         </p>
-        <InventoryImpactPanel
-          items={impacto}
-          total={impactoTotal}
-          fileId={fileId}
-        />
+        {aperturas && (
+          <section aria-label="Fecha del stock inicial" className="mt-3 space-y-2">
+            <p className="text-sm text-vk-text-primary">
+              ¿Desde qué fecha tenías este stock? {aperturas.productos}{" "}
+              {aperturas.productos === 1 ? "producto" : "productos"},{" "}
+              {Number(aperturas.unidades).toLocaleString("es-AR")} unidades.
+            </p>
+            <p className="text-xs text-vk-text-secondary">
+              El costo de cada venta sale del stock que tenías ese día: lo que no
+              trae fecha en el archivo figura desde hoy, y sus ventas anteriores quedan
+              sin costo hasta que lo indiques.
+            </p>
+            <ul>
+              <ConfirmarAperturaDeArchivo
+                uploadId={fileId}
+                titulo="este archivo"
+                detalle={
+                  aperturas.con_fecha_de_fila > 0
+                    ? `${aperturas.pendientes} sin fecha en el archivo`
+                    : "Ninguna fila trae fecha propia"
+                }
+                conFechaDeFila={aperturas.con_fecha_de_fila}
+                pendientes={aperturas.pendientes}
+                fechaSugerida={aperturas.fecha_sugerida}
+                onConfirmado={() => setConfirmada(true)}
+              />
+            </ul>
+          </section>
+        )}
+        {impacto.length > 0 && (
+          <InventoryImpactPanel
+            items={impacto}
+            total={impactoTotal}
+            fileId={fileId}
+          />
+        )}
         <div className="mt-3">
           <Button size="sm" onClick={onDone}>
-            Listo
+            {aperturas && !confirmada ? "Lo indico después" : "Listo"}
           </Button>
         </div>
       </div>

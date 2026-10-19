@@ -330,6 +330,40 @@ class ConfirmarAperturaRequest(BaseModel):
         return resultado
 
 
+class ConfirmarAperturaDeArchivoRequest(BaseModel):
+    """M·2d-1b: la fecha del stock inicial de un archivo.
+
+    ``aceptar_fechas_de_filas`` confirma con SU fecha las aperturas que la traen
+    en su fila; ``fecha`` es la del resto (sin ella, y con alguna sin fecha
+    propia → 422). Sin aceptarlas, ``fecha`` es obligatoria y vale para todas.
+    """
+
+    fecha: datetime | None = None
+    aceptar_fechas_de_filas: bool = False
+
+    @field_validator("fecha")
+    @classmethod
+    def _no_futura(cls, v: datetime | None) -> datetime | None:
+        return _validar_acquired_at(v)
+
+
+class ResumenAperturasDeArchivoResponse(BaseModel):
+    """El stock inicial sin confirmar que acaba de cargar un archivo."""
+
+    aperturas: int
+    productos: int
+    #: En unidades de venta.
+    unidades: Decimal
+    #: Sin fecha propia: figuran desde la hora de carga hasta que se confirme.
+    pendientes: int
+    #: Traen la fecha de su fila; se aceptan o se pisan al confirmar.
+    con_fecha_de_fila: int
+    fecha_de_fila_min: date | None = None
+    fecha_de_fila_max: date | None = None
+    #: Primer día de ventas o gastos registrado: una SUGERENCIA, nunca la fecha.
+    fecha_sugerida: date | None = None
+
+
 class ConfirmarAperturaResponse(BaseModel):
     aperturas: int
     productos: int

@@ -546,6 +546,8 @@ class AperturaPorConfirmarOut(BaseModel):
     aperturas: int
     productos: int
     fecha_actual: date | None
+    #: Traen la fecha de su fila: se pueden aceptar al confirmar (M·2d-1b).
+    con_fecha_de_fila: int = 0
 
 
 class AperturaManualPorConfirmarOut(BaseModel):
@@ -661,6 +663,7 @@ async def get_margins(
                 AperturaPorConfirmarOut(
                     upload_id=a.upload_id, archivo=a.archivo, aperturas=a.aperturas,
                     productos=a.productos, fecha_actual=a.fecha_actual,
+                    con_fecha_de_fila=a.con_fecha_de_fila,
                 )
                 for a in ap.por_archivo
             ],

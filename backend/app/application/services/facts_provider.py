@@ -786,8 +786,11 @@ class AperturaPorConfirmar:
     aperturas: int
     productos: int
     #: La fecha de negocio que tienen hoy (la más temprana): hora de carga si
-    #: está pendiente, o la que se infirió antes de M·2d.
+    #: está pendiente, la de su fila, o la que se infirió antes de M·2d.
     fecha_actual: date | None
+    #: Traen la fecha de su fila (``opening_date_source='archivo'``, M·2d-1b):
+    #: se pueden aceptar tal cual al confirmar.
+    con_fecha_de_fila: int = 0
 
 
 @dataclass(frozen=True)
@@ -853,6 +856,9 @@ async def aperturas_por_confirmar(
     from app.application.services.apertura_service import (  # noqa: PLC0415
         filtro_aperturas_vivas,
     )
+    from app.application.services.inventory_movement_origin import (  # noqa: PLC0415
+        FECHA_DE_ARCHIVO,
+    )
     from app.domain.costo_de_venta import MOTIVO_UNIDAD_DUDOSA  # noqa: PLC0415
     from app.persistence.models.file import UploadedFile  # noqa: PLC0415
     from app.persistence.models.inventory import (  # noqa: PLC0415
@@ -871,6 +877,7 @@ async def aperturas_por_confirmar(
                 func.count(),
                 func.count(func.distinct(m.product_id)),
                 func.min(momento),
+                func.count().filter(m.opening_date_source == FECHA_DE_ARCHIVO),
             )
             .outerjoin(
                 UploadedFile,
@@ -945,7 +952,7 @@ async def aperturas_por_confirmar(
         por_archivo=tuple(
             AperturaPorConfirmar(
                 upload_id=f[0], archivo=f[1], aperturas=int(f[2]), productos=int(f[3]),
-                fecha_actual=_dia_de_negocio(f[4]),
+                fecha_actual=_dia_de_negocio(f[4]), con_fecha_de_fila=int(f[5]),
             )
             for f in filas
             if f[0] is not None

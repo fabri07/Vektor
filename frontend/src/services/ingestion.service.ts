@@ -1,5 +1,6 @@
 import { api } from "@/lib/api";
 import type { AxiosError } from "axios";
+import type { ResumenAperturasDeArchivo } from "@/types/api";
 
 // El preview estima en memoria (sub-segundo) y el undo es acotado; igual se da
 // margen sobre el timeout global de 15s del cliente. El APPLY ya NO va por acá:
@@ -293,6 +294,8 @@ export interface ConfirmIngestionResult {
   // `inventory_impact_total` antes de decir "estos son todos".
   inventory_impact?: InventoryImpactItem[];
   inventory_impact_total?: number;
+  // M·2d-1b: el stock inicial que cargó, sin confirmar: se pide la fecha.
+  aperturas_por_confirmar?: ResumenAperturasDeArchivo | null;
 }
 
 /**
