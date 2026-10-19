@@ -3635,3 +3635,55 @@ async def test_label_ambiguo_no_descarta_nada(
     estados = await _pendientes(db_session, tenant)
     assert estados["Fila sin monto: no se pudo registrar"] == UNCLASSIFIED_STATUS_PENDING
     assert result.otros_descartados == []
+
+
+@pytest.mark.parametrize("cambia", [False, True])
+async def test_reread_conserva_la_fecha_confirmada_del_stock_inicial(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch, cambia: bool
+) -> None:
+    """M·2d-1b: la relectura anula y recrea el stock inicial del archivo. Si la
+    fila no cambió, la apertura recreada recupera la fecha que el usuario ya
+    había confirmado; si cambió (otra cantidad), vuelve a pedirla."""
+    from datetime import UTC, datetime
+
+    from app.application.services.apertura_service import confirmar_aperturas_de_archivo
+    from app.application.services.ingestion_import_service import insert_confirmed_data
+
+    file = await _make_stock_file(db_session, tenant)
+    fila = {"producto": "Vela", "precio": "100", "costo": "60", "stock": "10"}
+    original = {"file_type": "spreadsheet", "inferred_type": "stock", "stock_detectado": [fila]}
+    await insert_confirmed_data(
+        db_session, tenant.tenant_id, original, {"productos": True}, uploaded_file_id=file.id
+    )
+    await db_session.commit()
+    await confirmar_aperturas_de_archivo(
+        db_session, tenant.tenant_id, file.id, datetime(2026, 6, 1, 9), uuid.uuid4()
+    )
+    await db_session.commit()
+
+    fresh = {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "stock_detectado": [dict(fila, stock="12" if cambia else "10")],
+    }
+    _patch_reread_fresh_summary(monkeypatch, fresh)
+    await reread_service.apply_reread(db_session, file.id, tenant.tenant_id)
+    await db_session.commit()
+
+    vivas = (
+        await db_session.execute(
+            select(InventoryMovement)
+            .where(
+                InventoryMovement.source_upload_id == file.id,
+                InventoryMovement.voided_at.is_(None),
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    (apertura,) = vivas
+    if cambia:
+        assert apertura.opening_confirmed_at is None
+    else:
+        assert apertura.opening_confirmed_at is not None
+        assert apertura.occurred_at is not None
+        assert apertura.occurred_at.replace(tzinfo=UTC).date() == datetime(2026, 6, 1).date()

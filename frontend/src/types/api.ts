@@ -218,6 +218,23 @@ export interface AperturaPorConfirmar {
   productos: number;
   /** La fecha que tiene hoy (la de carga si está pendiente). */
   fecha_actual: string | null;
+  /** Traen la fecha de su fila (M·2d-1b): se pueden aceptar al confirmar. */
+  con_fecha_de_fila?: number;
+}
+
+/** M·2d-1b: el stock inicial sin confirmar que acaba de cargar un archivo. */
+export interface ResumenAperturasDeArchivo {
+  aperturas: number;
+  productos: number;
+  /** En unidades de venta (decimal serializado como texto). */
+  unidades: string;
+  /** Sin fecha propia: figuran desde la hora de carga. */
+  pendientes: number;
+  con_fecha_de_fila: number;
+  fecha_de_fila_min: string | null;
+  fecha_de_fila_max: string | null;
+  /** Primer día de ventas o gastos: una sugerencia, nunca la fecha. */
+  fecha_sugerida: string | null;
 }
 
 /** M·2d: un stock inicial cargado a mano sin fecha confirmada. */

@@ -148,9 +148,9 @@ class InventoryMovement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     cost_contract_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     # M·2d — confirmación del stock inicial (mig 20261019_0001). Sólo en aperturas
     # (``adjustment`` + ``catalog_initial_stock``). NULL = sin confirmar: la fecha
-    # no la dio el usuario. Una apertura PENDIENTE lleva además ``occurred_at``
-    # NULL (su fecha de negocio es la de carga). ``opening_date_source``:
-    # ``usuario`` | ``archivo`` (la fecha de la fila, mostrada en el confirm).
+    # no la confirmó el usuario. Una apertura PENDIENTE lleva en ``occurred_at``
+    # la hora de carga (hora AR rotulada UTC, M·2d-1b). ``opening_date_source``:
+    # ``usuario`` | ``archivo`` (la fecha de su fila; puede estar sin confirmar).
     opening_confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

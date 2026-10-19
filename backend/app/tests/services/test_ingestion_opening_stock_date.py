@@ -1,4 +1,10 @@
-"""La apertura sin fecha pertenece al primer día registrado, sin afectar caja."""
+"""La fecha del stock inicial importado (M·2d-1b).
+
+Sin fecha propia en la fila, la apertura queda SIN CONFIRMAR en la hora de carga:
+el momento cero (primer día de ventas o gastos) es sólo una sugerencia, nunca la
+fecha. Con fecha propia, usa la de la fila y queda ``opening_date_source='archivo'``
+sin confirmar. Ninguna toca la caja.
+"""
 
 from datetime import datetime
 from decimal import Decimal
@@ -39,9 +45,11 @@ async def _movement(session):
 
 @pytest.mark.parametrize("mode", ["flat", "contexts", "legacy"])
 @pytest.mark.parametrize("book", [SaleEntry, ExpenseEntry])
-async def test_catalogo_posterior_usa_historial_vigente_del_tenant(
-    db_session, sample_tenant, second_tenant, mode, book
+async def test_el_historial_del_tenant_no_fecha_la_apertura(
+    db_session, sample_tenant, second_tenant, monkeypatch, mode, book
 ):
+    today = datetime(2026, 9, 14, 15, 30)
+    monkeypatch.setattr(importer, "now_ar_naive", lambda: today)
     tid = sample_tenant.tenant_id
     for tenant, day, provenance, void in [
         (tid, datetime(2025, 1, 3, 18), "REAL", False),
@@ -64,7 +72,10 @@ async def test_catalogo_posterior_usa_historial_vigente_del_tenant(
     await db_session.flush()
     await importer.insert_confirmed_data(db_session, tid, _catalog(mode), {"productos": True})
     movement = await _movement(db_session)
-    assert movement.occurred_at.replace(tzinfo=None) == datetime(2025, 1, 3)
+    # Antes: el 3/1/2025 (momento cero). Ahora la hora de carga, sin confirmar.
+    assert movement.occurred_at.replace(tzinfo=None) == today
+    assert movement.opening_confirmed_at is None
+    assert movement.opening_date_source is None
     assert movement.movement_type == "adjustment"
     assert movement.qty == 10
     expenses = (await db_session.execute(select(ExpenseEntry))).scalars().all()
@@ -96,7 +107,7 @@ async def test_sin_fecha_conserva_fallback_y_compra_conserva_gasto(
 
 @pytest.mark.parametrize("purchase", [False, True])
 @pytest.mark.parametrize("previous", [None, datetime(2024, 12, 20), datetime(2025, 3, 1)])
-async def test_momento_cero_lee_todas_las_hojas_incluidas_y_su_mapeo(
+async def test_las_ventas_del_archivo_no_fechan_la_apertura(
     db_session, sample_tenant, monkeypatch, purchase, previous
 ):
     today = datetime(2026, 9, 14, 15, 30)
@@ -144,13 +155,19 @@ async def test_momento_cero_lee_todas_las_hojas_incluidas_y_su_mapeo(
         stock_treatment="purchase" if purchase else "opening_balance",
     )
     movement = await _movement(db_session)
-    opening = min(previous, datetime(2025, 1, 1)) if previous else datetime(2025, 1, 1)
-    assert movement.occurred_at.replace(tzinfo=None) == (today if purchase else opening)
+    assert movement.occurred_at.replace(tzinfo=None) == today
+    assert movement.opening_confirmed_at is None
     assert movement.movement_type == ("purchase" if purchase else "adjustment")
     assert result["ventas"] == 2
     if not purchase:
-        assert result["historial_sin_fecha"] == 0
+        # Sin fecha de stock no se puede afirmar que había stock al vender: el
+        # momento cero sale de estas mismas ventas, no las justifica.
+        assert result["historial_sin_fecha"] == 2
         assert result["historial_insuficiente"] == 0
+    # La sugerencia sí lee todas las hojas incluidas y su mapeo.
+    sugerida = await importer._opening_stock_date(db_session, sample_tenant.tenant_id, [])
+    opening = min(previous, datetime(2025, 1, 1)) if previous else datetime(2025, 1, 1)
+    assert sugerida == opening
     sales = (await db_session.execute(select(SaleEntry))).scalars().all()
     expected_dates = {datetime(2025, 1, 2), datetime(2025, 2, 15)}
     if previous:
@@ -209,6 +226,47 @@ async def test_apertura_actualiza_producto_existente_y_respeta_fecha_explicita(
     movement = await _movement(db_session)
     assert movement.qty == 5
     assert movement.occurred_at.replace(tzinfo=None) == datetime(2025, 2, 10)
+    # La fecha vino de la fila: queda rotulada, pero sin confirmar.
+    assert movement.opening_date_source == "archivo"
+    assert movement.opening_confirmed_at is None
     product = (await db_session.execute(select(Product))).scalar_one()
     assert product.stock_units == 10
     assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
+
+
+@pytest.mark.parametrize("mode", ["flat", "contexts", "legacy"])
+async def test_carga_de_noche_queda_en_su_dia_de_negocio(
+    db_session, sample_tenant, monkeypatch, mode
+):
+    """Pendiente = hora de carga en hora argentina, no ``created_at`` (UTC real):
+    a las 23:30 AR ya es el día siguiente en UTC."""
+    today = datetime(2026, 9, 14, 23, 30)
+    monkeypatch.setattr(importer, "now_ar_naive", lambda: today)
+    await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, _catalog(mode), {"productos": True}
+    )
+    movement = await _movement(db_session)
+    assert movement.occurred_at is not None
+    assert movement.occurred_at.replace(tzinfo=None).date() == today.date()
+
+
+async def test_una_baja_de_catalogo_no_es_stock_inicial_con_fecha_de_archivo(
+    db_session, sample_tenant
+):
+    db_session.add(
+        Product(
+            tenant_id=sample_tenant.tenant_id,
+            name="Vela",
+            stock_units=15,
+            sale_price_ars=Decimal("200"),
+        )
+    )
+    await db_session.flush()
+    summary = _catalog("flat")
+    summary["stock_detectado"][0]["fecha_adquisicion"] = "2025-02-10"
+    await importer.insert_confirmed_data(
+        db_session, sample_tenant.tenant_id, summary, {"productos": True}
+    )
+    movement = await _movement(db_session)
+    assert movement.qty == -5
+    assert movement.opening_date_source is None

@@ -26,13 +26,18 @@ export async function fetchMargins(range?: { from: string; to: string }): Promis
  * (todas las cargas de ese archivo) o por producto (las cargadas a mano). Pide
  * PIN (lo resuelve el interceptor de `api`).
  */
+/**
+ * M·2d-1b: `aceptarFechasDeFilas` confirma con su fecha el stock que la trae en
+ * su fila; `fecha` es la del resto (sin ella y con alguno sin fecha → 422).
+ */
 export async function confirmarAperturaDeArchivo(
   uploadId: string,
-  fecha: string,
+  fecha: string | null,
+  aceptarFechasDeFilas = false,
 ): Promise<ConfirmarAperturaResponse> {
   const { data } = await api.post<ConfirmarAperturaResponse>(
     `/ingestion/files/${uploadId}/opening-confirmation`,
-    { fecha },
+    { fecha, aceptar_fechas_de_filas: aceptarFechasDeFilas },
   );
   return data;
 }

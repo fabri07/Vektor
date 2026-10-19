@@ -38,6 +38,12 @@ jest.mock("@/services/ingestion.service", () => ({
   },
 }));
 
+// M·2d-1b: el bloque de la fecha del stock inicial confirma por este servicio.
+const mockConfirmarApertura = jest.fn();
+jest.mock("@/services/dashboard.service", () => ({
+  confirmarAperturaDeArchivo: (...a: unknown[]) => mockConfirmarApertura(...a),
+}));
+
 const mockGetPreview = ingestionService.getPreview as jest.Mock;
 const mockGetColumnMappings = ingestionService.getColumnMappings as jest.Mock;
 const mockGetFieldCatalog = ingestionService.getFieldCatalog as jest.Mock;
@@ -3144,5 +3150,77 @@ describe("ColumnMapperPanel — F-A: cambiar de propósito (camino plano) conser
     });
     expect(selectDe("Detalle").value).toBe("category");
     expect(selectDe("Monto").value).toBe("amount");
+  });
+});
+
+
+describe("ColumnMapperPanel — fecha del stock inicial después de importar (M·2d-1b)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    window.localStorage.clear();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
+    mockRegistrarImportacion.mockRejectedValue({ response: { status: 404 } });
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockGetPreview.mockResolvedValue({
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: ["Fecha", "Monto"] },
+      columns_at_risk: [],
+    });
+    mockGetColumnMappings.mockResolvedValue([
+      {
+        source_column: "Fecha", normalized_column: "fecha", sample_values: ["01/02/2026"],
+        target_field: "transaction_date", confidence: 0.9, source: "heuristic", status: "mapped",
+      },
+      {
+        source_column: "Monto", normalized_column: "monto", sample_values: ["1500"],
+        target_field: "amount", confidence: 0.9, source: "heuristic", status: "mapped",
+      },
+    ]);
+  });
+
+  async function confirmar() {
+    const boton = await screen.findByRole("button", { name: /Confirmar importación/i });
+    await waitFor(() => expect(boton).toBeEnabled());
+    fireEvent.click(boton);
+  }
+
+  test("con stock inicial sin confirmar el panel queda abierto y pide la fecha", async () => {
+    mockConfirmFile.mockResolvedValue({
+      file_id: "file-1",
+      status: "DONE",
+      message: "ok",
+      warnings: [],
+      inventory_impact: [],
+      inventory_impact_total: 0,
+      aperturas_por_confirmar: {
+        aperturas: 3, productos: 3, unidades: "20.000", pendientes: 2,
+        con_fecha_de_fila: 1, fecha_de_fila_min: "2026-08-01", fecha_de_fila_max: "2026-08-01",
+        fecha_sugerida: "2026-07-01",
+      },
+    });
+    const { onDone } = renderPanel();
+    await confirmar();
+
+    expect(
+      await screen.findByText(/¿Desde qué fecha tenías este stock\? 3 productos, 20 unidades/),
+    ).toBeInTheDocument();
+    expect(onDone).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Lo indico después" }));
+    expect(onDone).toHaveBeenCalled();
+    expect(mockConfirmarApertura).not.toHaveBeenCalled();
+  });
+
+  test("sin stock inicial por confirmar se cierra como siempre", async () => {
+    mockConfirmFile.mockResolvedValue({
+      file_id: "file-1", status: "DONE", message: "ok", warnings: [],
+      inventory_impact: [], inventory_impact_total: 0, aperturas_por_confirmar: null,
+    });
+    const { onDone } = renderPanel();
+    await confirmar();
+    await waitFor(() => expect(onDone).toHaveBeenCalled());
   });
 });
