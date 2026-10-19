@@ -21,9 +21,11 @@ from app.application.services.costo_vigente_service import (
     recalcular_costo_vigente,
 )
 from app.application.services.inventory_movement_origin import (
+    FECHA_DE_USUARIO,
     SOURCE_CATALOG_INITIAL_STOCK,
     SOURCE_MANUAL_ADJUSTMENT,
     SOURCE_RECONCILIATION,
+    columnas_de_apertura_confirmada,
     ensure_utc,
     momento_de_negocio_rotulado,
 )
@@ -734,6 +736,8 @@ async def registrar_apertura_manual(
     contrato: ContratoDeCosto,
     db: AsyncSession,
     *,
+    fecha: datetime,
+    confirmado_por: uuid.UUID | None,
     source_upload_id: uuid.UUID | None = None,
 ) -> InventoryMovement:
     """Stock inicial cargado a mano en el alta de un producto (M·P2c).
@@ -747,6 +751,10 @@ async def registrar_apertura_manual(
     ``source_upload_id``: el archivo del que vino el registro (alta desde
     «Otros»). Así borrar ese archivo anula también esta apertura, como pasa con
     el stock de un catálogo importado.
+
+    ``fecha`` (M·2d): desde cuándo el negocio tiene ese stock, la que tipeó el
+    usuario. La apertura nace CONFIRMADA en esa fecha de negocio (no en la de la
+    carga): una venta anterior a la carga y posterior a esa fecha tiene fuente.
     """
     if qty <= 0:
         raise ValueError("El stock inicial tiene que ser positivo.")
@@ -764,8 +772,9 @@ async def registrar_apertura_manual(
         source_event_id=f"manual:alta:{product_id}",
         source_type=SOURCE_CATALOG_INITIAL_STOCK,
         source_upload_id=source_upload_id,
-        occurred_at=momento_de_negocio_rotulado(None),
+        occurred_at=momento_de_negocio_rotulado(fecha),
         **contrato.columnas(),
+        **columnas_de_apertura_confirmada(FECHA_DE_USUARIO, confirmado_por),
     )
     db.add(movement)
     await db.flush()

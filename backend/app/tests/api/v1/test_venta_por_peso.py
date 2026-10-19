@@ -42,7 +42,7 @@ async def _queso(
             "name": f"Queso {uuid.uuid4().hex[:4]}",
             "sale_price_ars": "10000.00",
             "unit_cost_ars": "800.00",
-            "stock_units": stock_g,
+            "stock_units": stock_g, "acquired_at": "2026-01-01T09:00:00",
             "sale_unit": "gram",
             "base_units_per_sale_unit": 1000,
             **extra,

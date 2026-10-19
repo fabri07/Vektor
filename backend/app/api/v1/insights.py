@@ -540,6 +540,33 @@ class MarginFactOut(BaseModel):
     costo_desactualizado_umbral_dias: int | None = None
 
 
+class AperturaPorConfirmarOut(BaseModel):
+    upload_id: UUID
+    archivo: str | None
+    aperturas: int
+    productos: int
+    fecha_actual: date | None
+
+
+class AperturaManualPorConfirmarOut(BaseModel):
+    product_id: UUID
+    producto: str
+    fecha_actual: date | None
+
+
+class AperturasPorConfirmarOut(BaseModel):
+    """M·2d: lo que el usuario tiene que confirmar del stock inicial (pedir datos,
+    no una conclusión: sale también con ``sin_datos``)."""
+
+    sin_confirmar: int
+    por_archivo: list[AperturaPorConfirmarOut]
+    manuales: list[AperturaManualPorConfirmarOut]
+    ventas_sin_costo_antes: int
+    #: Sin costo y posteriores al stock inicial: quedan así hasta recostear.
+    ventas_sin_costo_con_fuente: int
+    ventas_costeadas_antes: int
+
+
 class MarginsResponse(BaseModel):
     #: La completitud de los datos no llega a 50: estado vacío (no-invention).
     sin_datos: bool = False
@@ -553,6 +580,8 @@ class MarginsResponse(BaseModel):
     #: Un punto por mes CERRADO del período (el neto es de mes cerrado).
     serie_neto: list[MarginFactOut] = []
     por_categoria: list[MarginFactOut] = []
+    #: ``None`` = no hay nada que confirmar.
+    aperturas_por_confirmar: AperturasPorConfirmarOut | None = None
 
 
 def _num(v: object) -> float | None:
@@ -605,6 +634,7 @@ async def get_margins(
     """
     from app.application.services.facts_provider import (  # noqa: PLC0415
         MOTIVO_SIN_RUBRO,
+        aperturas_por_confirmar,
         margenes_para_pantalla,
     )
     from app.domain.business_time import today_ar  # noqa: PLC0415
@@ -623,11 +653,39 @@ async def get_margins(
             detail="El período no puede superar los 3 años",
         )
     m = await margenes_para_pantalla(session, tenant.tenant_id, desde=desde, hasta=hasta)
+    ap = await aperturas_por_confirmar(session, tenant.tenant_id)
+    aperturas = (
+        AperturasPorConfirmarOut(
+            sin_confirmar=ap.sin_confirmar,
+            por_archivo=[
+                AperturaPorConfirmarOut(
+                    upload_id=a.upload_id, archivo=a.archivo, aperturas=a.aperturas,
+                    productos=a.productos, fecha_actual=a.fecha_actual,
+                )
+                for a in ap.por_archivo
+            ],
+            manuales=[
+                AperturaManualPorConfirmarOut(
+                    product_id=a.product_id, producto=a.producto, fecha_actual=a.fecha_actual
+                )
+                for a in ap.manuales
+            ],
+            ventas_sin_costo_antes=ap.ventas_sin_costo_antes,
+            ventas_sin_costo_con_fuente=ap.ventas_sin_costo_con_fuente,
+            ventas_costeadas_antes=ap.ventas_costeadas_antes,
+        )
+        if ap.hay_algo
+        else None
+    )
     if m is None:
-        return MarginsResponse(sin_datos=True, motivo=MOTIVO_SIN_RUBRO)
+        return MarginsResponse(
+            sin_datos=True, motivo=MOTIVO_SIN_RUBRO, aperturas_por_confirmar=aperturas
+        )
     if m.sin_datos:
         return MarginsResponse(
-            sin_datos=True, motivo="faltan datos del negocio para medir el margen"
+            sin_datos=True,
+            motivo="faltan datos del negocio para medir el margen",
+            aperturas_por_confirmar=aperturas,
         )
 
     def out(f: Any) -> MarginFactOut:
@@ -648,4 +706,5 @@ async def get_margins(
         serie_bruto=[out(f) for f in m.serie_bruto],
         serie_neto=[out(f) for f in m.serie_neto],
         por_categoria=[out(f) for f in m.por_categoria],
+        aperturas_por_confirmar=aperturas,
     )

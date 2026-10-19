@@ -40,7 +40,7 @@ _PRODUCT_PAYLOAD = {
     "name": "Producto Idem",
     "sku": "IDEM-001",
     "sale_price_ars": "100.00",
-    "stock_units": 5,
+    "stock_units": 5, "acquired_at": "2026-01-01T09:00:00",
     # M·P2c: el stock cargado a mano lleva precio de compra.
     "unit_cost_ars": "50.00",
 }

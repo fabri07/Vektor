@@ -54,7 +54,7 @@ async def _producto(client: AsyncClient, headers: dict[str, str], *, stock: int 
             "sale_price_ars": "100.00",
             "stock_units": stock,
             # M·P2c: el stock cargado a mano lleva precio de compra.
-            **({"unit_cost_ars": "50.00"} if stock else {}),
+            **({"unit_cost_ars": "50.00", "acquired_at": "2026-01-01T09:00:00"} if stock else {}),
         },
         headers=headers,
     )

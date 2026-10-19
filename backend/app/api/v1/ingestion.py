@@ -257,6 +257,7 @@ from app.schemas.ingestion import (
     TenantColumnMappingResponse,
     UploadResponse,
 )
+from app.schemas.product import ConfirmarAperturaRequest, ConfirmarAperturaResponse
 
 router = APIRouter()
 
@@ -4738,6 +4739,50 @@ async def reread_undo(
         removed=result["removed"],
         status=result["status"],
         not_reverted_entities=result.get("not_reverted_entities", []),
+    )
+
+
+@router.post(
+    "/files/{file_id}/opening-confirmation",
+    response_model=ConfirmarAperturaResponse,
+    summary="Confirmar o corregir la fecha del stock inicial de un archivo (M·2d)",
+)
+async def confirm_file_opening(
+    file_id: uuid.UUID,
+    body: ConfirmarAperturaRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    # Mueve fechas del ledger en masa: PIN, como la relectura y el replay. La
+    # auth va ANTES que el guard 423 (ver nota en products.create_product).
+    user: User = Depends(require_modify_access),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+    session: AsyncSession = Depends(get_db_session),
+) -> ConfirmarAperturaResponse:
+    """Fija desde cuándo el negocio tiene el stock inicial que cargó este archivo.
+
+    Mueve y confirma TODAS las aperturas vivas del archivo en una transacción.
+    404 si el archivo no es del tenant o no cargó stock inicial. Las ventas ya
+    costeadas con el stock inicial y anteriores a la fecha nueva no cambian de
+    costo: se devuelven para revisarlas.
+    """
+    from app.application.services import apertura_service  # noqa: PLC0415
+
+    record = await FileRepository(session).get_by_id(file_id, tenant.tenant_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado.")
+    try:
+        r = await apertura_service.confirmar_aperturas_de_archivo(
+            session, tenant.tenant_id, file_id, body.fecha, user.user_id
+        )
+    except apertura_service.SinAperturaError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "opening_confirmed"
+    )
+    return ConfirmarAperturaResponse(
+        aperturas=r.aperturas,
+        productos=r.productos,
+        ventas_costeadas_antes=r.ventas_costeadas_antes,
+        venta_ids=r.venta_ids,
     )
 
 

@@ -8,6 +8,13 @@ import type { TratamientoEnvio } from "@/services/products.service";
 export const COSTO_REQUERIDO_CON_STOCK =
   "Para cargar stock hace falta el precio de compra (el costo por unidad). Si incluye el envío o no, es opcional.";
 
+/**
+ * M·2d: el stock inicial dice desde cuándo lo tiene el negocio. La fecha la da
+ * el usuario: el costo de las ventas sigue a esa fecha, no a la de la carga.
+ */
+export const FECHA_STOCK_INICIAL_REQUERIDA =
+  "Indicá desde qué fecha tenés este stock inicial.";
+
 export const OPCIONES_ENVIO: { value: TratamientoEnvio | ""; label: string }[] = [
   { value: "", label: "No sé" },
   { value: "incluido", label: "Sí, el precio incluye el envío" },

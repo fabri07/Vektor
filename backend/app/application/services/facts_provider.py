@@ -28,8 +28,8 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Final
+from datetime import UTC, date, datetime
+from typing import Any, Final
 
 import pandas as pd
 from sqlalchemy import func, select
@@ -769,3 +769,194 @@ async def leer_margenes(
     if margenes is None:
         return LecturaDeMargenes(None, MOTIVO_SIN_RUBRO)
     return LecturaDeMargenes(margenes)
+
+
+# ── M·2d: stock inicial por confirmar ───────────────────────────────────────────
+
+#: Cuántos archivos y productos se listan (las cantidades van siempre enteras).
+MAX_APERTURAS_LISTADAS: Final = 50
+
+
+@dataclass(frozen=True)
+class AperturaPorConfirmar:
+    """Las aperturas sin confirmar de UN archivo."""
+
+    upload_id: uuid.UUID
+    archivo: str | None
+    aperturas: int
+    productos: int
+    #: La fecha de negocio que tienen hoy (la más temprana): hora de carga si
+    #: está pendiente, o la que se infirió antes de M·2d.
+    fecha_actual: date | None
+
+
+@dataclass(frozen=True)
+class AperturaManualPorConfirmar:
+    """Un stock inicial cargado a mano (sin archivo): se confirma por producto."""
+
+    product_id: uuid.UUID
+    producto: str
+    fecha_actual: date | None
+
+
+@dataclass(frozen=True)
+class AperturasPorConfirmar:
+    """Lo que el usuario tiene que confirmar del stock inicial. Sólo LECTURA:
+    nada se mueve solo; la pantalla pide la fecha y la manda a
+    ``.../opening-confirmation``."""
+
+    sin_confirmar: int = 0
+    #: Las de archivos, una fila por archivo.
+    por_archivo: tuple[AperturaPorConfirmar, ...] = ()
+    #: Las cargadas a mano, una fila por producto.
+    manuales: tuple[AperturaManualPorConfirmar, ...] = ()
+    #: Ventas sin costo ANTERIORES al stock inicial de su producto: la fecha
+    #: real del stock inicial puede ser anterior a ellas.
+    ventas_sin_costo_antes: int = 0
+    #: Ventas sin costo POSTERIORES al stock inicial de su producto: ya tienen
+    #: una fuente y quedan sin costo hasta recostearlas (M·2d-2).
+    ventas_sin_costo_con_fuente: int = 0
+    #: Ventas costeadas con el stock inicial y anteriores a él (la fecha se
+    #: corrigió después): su costo no se revalúa. Informativo.
+    ventas_costeadas_antes: int = 0
+
+    @property
+    def hay_algo(self) -> bool:
+        # ``ventas_costeadas_antes`` sola no es motivo para el aviso: es un
+        # resultado de corregir la fecha, no algo que el usuario pueda resolver.
+        return bool(
+            self.sin_confirmar or self.ventas_sin_costo_antes or self.ventas_sin_costo_con_fuente
+        )
+
+
+def _dia_de_negocio(valor: object) -> date | None:
+    """El día de negocio de ``COALESCE(occurred_at, created_at)`` leído en Python.
+
+    El ledger guarda la hora argentina rotulada UTC: el día es el de ese valor
+    EN UTC. Se calcula acá y no con ``date()`` en SQL, que en Postgres depende
+    del ``TimeZone`` de la sesión.
+    """
+    if valor is None:
+        return None
+    if isinstance(valor, datetime):
+        if valor.tzinfo is not None:
+            valor = valor.astimezone(UTC)
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    return datetime.fromisoformat(str(valor)).date()
+
+
+async def aperturas_por_confirmar(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> AperturasPorConfirmar:
+    from app.application.services.apertura_service import (  # noqa: PLC0415
+        filtro_aperturas_vivas,
+    )
+    from app.domain.costo_de_venta import MOTIVO_UNIDAD_DUDOSA  # noqa: PLC0415
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+    from app.persistence.models.inventory import (  # noqa: PLC0415
+        InventoryMovement,
+        movement_business_time,
+    )
+
+    m = InventoryMovement
+    momento = movement_business_time(m)
+    sin_confirmar_ = (*filtro_aperturas_vivas(tenant_id), m.opening_confirmed_at.is_(None))
+    filas = (
+        await session.execute(
+            select(
+                m.source_upload_id,
+                UploadedFile.original_filename,
+                func.count(),
+                func.count(func.distinct(m.product_id)),
+                func.min(momento),
+            )
+            .outerjoin(
+                UploadedFile,
+                (UploadedFile.id == m.source_upload_id) & (UploadedFile.tenant_id == tenant_id),
+            )
+            .where(*sin_confirmar_)
+            .group_by(m.source_upload_id, UploadedFile.original_filename)
+            .order_by(func.count().desc())
+        )
+    ).all()
+    sin_confirmar = sum(int(f[2]) for f in filas)
+    manuales = (
+        await session.execute(
+            select(m.product_id, Product.name, func.min(momento))
+            .join(Product, (Product.id == m.product_id) & (Product.tenant_id == tenant_id))
+            .where(*sin_confirmar_, m.source_upload_id.is_(None))
+            .group_by(m.product_id, Product.name)
+            .order_by(Product.name)
+            .limit(MAX_APERTURAS_LISTADAS)
+        )
+    ).all()
+
+    # Primera apertura viva CON COSTO de cada producto (una sin costo no le da
+    # costo a ninguna venta, con ninguna fecha), agrupada por su día de negocio:
+    # suelen ser pocos días (uno por catálogo), así que es una consulta por día.
+    primeras = (
+        await session.execute(
+            select(m.product_id, func.min(momento))
+            .where(
+                *filtro_aperturas_vivas(tenant_id),
+                func.coalesce(m.unit_cost_final, m.unit_cost) > 0,
+            )
+            .group_by(m.product_id)
+        )
+    ).all()
+    por_dia: dict[date, list[uuid.UUID]] = {}
+    for pid, valor in primeras:
+        dia = _dia_de_negocio(valor)
+        if dia is not None:
+            por_dia.setdefault(dia, []).append(pid)
+
+    sin_costo = (
+        SaleEntry.cost_origin == "sin_costo",
+        # Una venta con la unidad dudosa no se costea con ninguna fecha.
+        func.coalesce(SaleEntry.cost_reason, "").not_like(f"%{MOTIVO_UNIDAD_DUDOSA}%"),
+    )
+
+    async def contar(*condiciones: Any) -> int:
+        total = await session.execute(
+            select(func.count()).select_from(SaleEntry).where(
+                SaleEntry.tenant_id == tenant_id, SaleEntry.voided_at.is_(None), *condiciones
+            )
+        )
+        return int(total.scalar_one())
+
+    antes = con_fuente = costeadas = 0
+    for dia, pids in por_dia.items():
+        # ``transaction_date`` es hora argentina sin zona: comparar con el
+        # inicio del día es comparar días de negocio.
+        inicio = datetime.combine(dia, datetime.min.time())
+        delproducto = SaleEntry.product_id.in_(pids)
+        antes += await contar(delproducto, SaleEntry.transaction_date < inicio, *sin_costo)
+        con_fuente += await contar(delproducto, SaleEntry.transaction_date >= inicio, *sin_costo)
+        costeadas += await contar(
+            delproducto,
+            SaleEntry.transaction_date < inicio,
+            SaleEntry.cost_origin == "stock_inicial",
+        )
+
+    return AperturasPorConfirmar(
+        sin_confirmar=sin_confirmar,
+        por_archivo=tuple(
+            AperturaPorConfirmar(
+                upload_id=f[0], archivo=f[1], aperturas=int(f[2]), productos=int(f[3]),
+                fecha_actual=_dia_de_negocio(f[4]),
+            )
+            for f in filas
+            if f[0] is not None
+        )[:MAX_APERTURAS_LISTADAS],
+        manuales=tuple(
+            AperturaManualPorConfirmar(
+                product_id=f[0], producto=f[1], fecha_actual=_dia_de_negocio(f[2])
+            )
+            for f in manuales
+        ),
+        ventas_sin_costo_antes=antes,
+        ventas_sin_costo_con_fuente=con_fuente,
+        ventas_costeadas_antes=costeadas,
+    )

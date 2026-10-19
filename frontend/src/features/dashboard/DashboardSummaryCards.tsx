@@ -14,6 +14,7 @@ import type { ProductResponse } from "@/services/products.service";
 import type { SaleEntryResponse } from "@/services/sales.service";
 import type { SupplierResponse } from "@/services/suppliers.service";
 import { fetchMargins } from "@/services/dashboard.service";
+import { AperturasPorConfirmarAviso } from "@/features/dashboard/AperturasPorConfirmar";
 import { avisoCostoDesactualizado, describirMargen, nombreDelMes } from "@/features/dashboard/marginText";
 import type { MarginFact } from "@/types/api";
 import {
@@ -111,6 +112,11 @@ export function MarginCard() {
             </ul>
           )}
         </div>
+      )}
+      {/* M·2d: pedir la fecha del stock inicial es pedir datos, no una
+          conclusión: sale también sin datos suficientes. */}
+      {data?.aperturas_por_confirmar && (
+        <AperturasPorConfirmarAviso datos={data.aperturas_por_confirmar} />
       )}
     </article>
   );

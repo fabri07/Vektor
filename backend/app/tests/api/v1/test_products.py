@@ -10,7 +10,7 @@ _PRODUCT_PAYLOAD = {
     "category": "bebidas",
     "unit_cost_ars": "80.00",
     "sale_price_ars": "150.00",
-    "stock_units": 50,
+    "stock_units": 50, "acquired_at": "2026-01-01T09:00:00",
     "low_stock_threshold_units": 10,
 }
 
@@ -33,8 +33,8 @@ class TestProductsCRUD:
         assert "margin_pct" in data
         assert abs(data["margin_pct"] - 46.67) < 0.1
         assert data["is_low_stock"] is False
-        # acquired_at por defecto None; created_at siempre presente.
-        assert data["acquired_at"] is None
+        # M·2d: con stock inicial, acquired_at es la fecha desde la que se tiene.
+        assert data["acquired_at"].startswith("2026-01-01T09:00")
         assert data["created_at"] is not None
 
     async def test_create_product_rechaza_nombre_solo_espacios(
