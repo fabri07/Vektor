@@ -310,6 +310,22 @@ SHA: `main` `4abdd0d4` (#94), desplegado en Railway y Vercel (deployment statuse
 
 **Cierre de la fase 3:** suites completas y `-m postgres`. Smoke de import con totales, varias hojas, «Otros», campos cruzados, código y alias: comparar los datos antes y después, y probar deshacer.
 
+### Plan detallado de la fase 3 (2026-10-20, verificado sobre `main` = `82581af1`)
+
+**Decisiones del dueño (2026-10-20):** B·6 revierte con acciones nuevas (`UPDATE_CUSTOMER_CROSS_FIELD` / `UPDATE_SUPPLIER_CROSS_FIELD`, migración aditiva al CHECK de `data_repair_items`), porque con `UPDATE_*` un cliente con ventas de otra fuente se conserva entero y el campo no se revierte. F-N entra sólo como **sugerencia** de separar nombre y apellido en el preview de clientes (lo de «completar sólo lo vacío» ya lo hace E6a con `_solo_completar`).
+
+Un PR por paso, en serie:
+- **B·4a — filas de total.** `domain/fila_de_total.py`: etiqueta exacta + forma de agregado, a «Otros» con su motivo en una hoja, varias hojas y catálogo; fuera del plan de costo y del cobro de envíos. En el Libro Diario el prefijo (total/subtotal/saldo/acumulado) deja de descartar en silencio y va a «Otros». **Implementado (PR B·4a).**
+- **B·4b — F-N:** `domain/name_split.py` + `PreviewItem.name_split_suggestion` (sólo `create`, `name` sin `last_name`) + «Aplicar» por fila en `CustomerFileModal.tsx`. Nunca se aplica sola; proveedores no (no tiene preview).
+- **B·5 — «Otros»:** `GET /others/summary` por `uploaded_file_id × context_id × suggested_entity × status` (el label se muestra, no es identidad); descarte por grupo con preview y `expected_count` (409 `GROUP_CHANGED`), auditado, con `require_modify_access` y gate; el de a uno también se audita. La compra resuelta pasa por un solo camino con el contrato de M·1: `resolve-purchase` pide envío e IVA y registra `source_upload_id` + `source_row_ref` (hoy F11 no la revierte); `reclassify` como gasto de mercadería → 422 `USE_RESOLVE_PURCHASE`; `bulk-import` deja las compras para resolver de a una. Un frontend viejo sigue funcionando (envío e IVA `desconocido`).
+- **B·6 — F-D:** venta → cliente y compra → proveedor (`product:*` queda afuera: toca el motor de costo y la sugerencia de categoría). 422 para un target cruzado fuera de la lista; buffer sólo sobre una referencia `matched` (nunca el centinela ni una entidad creada), primera fila gana; completa sólo lo vacío, una vez por entidad, respetando `has_user_edits`; reversión propia, campo por campo, que conserva lo editado después (`CAMPO_MODIFICADO_POSTERIORMENTE`).
+- **B·7 — código:** `customer_external_code` en venta y `supplier_external_code` en compra, pasados a `_customer_reference_record` / `_supplier_reference_record`; el código va primero, uno desconocido no crea maestro y avisa, un conflicto con otra clave no vincula; en el modo proveedor `legacy` el código va antes de crear por nombre.
+- **B·8a — cola y alias (backend):** `sales_entries.product_reference_raw` (el camino de una hoja hoy no guarda el texto del producto) + tabla `product_aliases` (único `(tenant_id, alias_normalizado)`, `origin=manual`). El alias va después de barcode y SKU en `_resolve_product` y `_resolve_product_identity`, nunca en el scan del POS; alias y nombre en desacuerdo = conflicto. `GET /sales/unmatched` + `POST /sales/unmatched/link` de a una referencia, por ORM (el listener costea las `sin_costo`), sin mover stock ni marcar la unidad dudosa; la fusión mueve los alias y la reversa los restaura; F11 no borra un alias manual.
+- **B·8b — pantalla de la cola**, de a una referencia, con conflictos y costo pendiente; sin acción masiva.
+- **B·9 — acciones masivas inocuas:** «Guardar como campo propio» (mismas exclusiones que `auto_custom`, respeta el touched-set, slugs desambiguados) e «Ignorar vacías» sólo con `empty_in_file` del backend (la muestra son 10 filas); ninguna marca `user_selected` ni toca F8.
+
+Migraciones esperadas: B·6 (CHECK), B·8a (`product_reference_raw` + `product_aliases`), B·5 sólo si falta `source_row_ref`.
+
 ## Fase 4: D·6, D·7 y cierre
 18. **D·6, mercadería aportada**: el stock de apertura y el aporte valorizado van atómicos.
     - Sin gasto ni salida de dinero. Al venderse entra en el costo vendido.
