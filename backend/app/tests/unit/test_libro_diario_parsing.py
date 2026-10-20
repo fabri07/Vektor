@@ -26,10 +26,12 @@ from app.application.services.file_parsing import (
     parse_uploaded_content,
 )
 from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.domain.comprobante_de_compra import MOTIVO_COMPRA_SIN_ARTICULOS
 from app.domain.expense_categories import classify_expense_with_vertical
 from app.domain.verticals import Vertical
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -192,7 +194,9 @@ def test_csv_libro_diario_detected() -> None:
 async def test_libro_diario_insert_end_to_end(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Parseo + inserción: venta, compra INVENTORY/COGS, OPEX y cta. cte."""
+    """Parseo + inserción: venta y OPEX entran; B·5b-2: las compras de mercadería
+    del libro no dicen qué artículos son, así que van a «Otros» (con su motivo)
+    para resolverlas por líneas, contado o fiadas."""
     content = _build_libro_diario_xlsx()
     summary = parse_uploaded_content(content, _XLSX_MIME, "asteria.xlsx")
 
@@ -203,9 +207,10 @@ async def test_libro_diario_insert_end_to_end(
         {"ventas": True, "gastos": True},
     )
     assert counts["ventas"] == 1
-    assert counts["gastos"] == 3
-    # El movimiento ambiguo y el «Total mes» (B·4) van a la bandeja "Otros".
-    assert counts["otros"] == 2
+    assert counts["gastos"] == 1
+    assert counts["compras_sin_articulos"] == 2
+    # El ambiguo, el «Total mes» (B·4) y las dos compras van a la bandeja "Otros".
+    assert counts["otros"] == 4
 
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
     assert sale.amount == Decimal("120000")
@@ -217,16 +222,16 @@ async def test_libro_diario_insert_end_to_end(
         .all()
     )
     by_desc = {e.description: e for e in expenses}
-    compra = by_desc["Compra proveedor textiles"]
-    assert compra.category == "INVENTORY"
-    assert compra.expense_type == "COGS"
+    assert set(by_desc) == {"Pago luz"}
     luz = by_desc["Pago luz"]
     assert luz.category == "UTILITIES"  # "luz" matchea el alias del catálogo
     assert luz.expense_type == "OPEX"
-    fiada = by_desc["Compra fiada almacén"]
-    assert fiada.category == "INVENTORY"
-    assert fiada.expense_type == "COGS"
-    assert fiada.payment_method == "account"  # "cuenta corriente" → canónico
+    motivos = {
+        r.row_data.get("detalle"): r.context_label
+        for r in (await db_session.execute(select(UnclassifiedRecord))).scalars()
+    }
+    assert motivos["Compra proveedor textiles"] == MOTIVO_COMPRA_SIN_ARTICULOS
+    assert motivos["Compra fiada almacén"] == MOTIVO_COMPRA_SIN_ARTICULOS
 
 
 # ── Una entrada de plata no es siempre una venta (D0, 2026-10-06) ─────────────

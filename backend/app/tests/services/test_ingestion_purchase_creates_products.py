@@ -135,11 +135,12 @@ async def test_service_expenses_do_not_create_products(
     assert movements == []
 
 
-async def test_merchandise_without_quantity_does_not_create_product(
+async def test_merchandise_without_quantity_goes_to_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    # Mercadería (COGS) PERO sin cantidad → gate estricto no crea producto.
-    # El gasto sigue siendo COGS; simplemente no hay lado de inventario.
+    # B·5b-2: mercadería sin cantidad no dice cuánto se compró: no es un dato útil
+    # como gasto COGS suelto. Va a «Otros» para resolverla por líneas, sin crear
+    # producto ni gasto.
     summary = {
         "file_type": "spreadsheet",
         "inferred_type": "gastos",
@@ -153,10 +154,9 @@ async def test_merchandise_without_quantity_does_not_create_product(
         db_session, sample_tenant.tenant_id, summary, {"gastos": True}
     )
 
-    assert counts["gastos"] == 1
-    expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
-    assert expense.expense_type == "COGS"  # sigue siendo mercadería
-    assert expense.product_id is None  # pero sin cantidad → no se crea producto
+    assert counts["gastos"] == 0
+    assert counts["compras_sin_articulos"] == 1
+    assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
     products = (await db_session.execute(select(Product))).scalars().all()
     assert products == []
 

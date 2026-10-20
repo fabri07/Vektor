@@ -346,7 +346,8 @@ async def test_el_libro_mixto_importa_ventas_y_gastos_y_deja_el_resto_en_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """De punta a punta con el importador real: Σ ventas == Σ de las filas
-    reales de venta; la compra entra como COGS; nada de capital se importa."""
+    reales de venta; nada de capital se importa. B·5b-2: la compra mayorista no
+    dice qué artículos son, así que va a «Otros» para resolverla por líneas."""
     summary = parse_uploaded_content(
         _libro({"2. Movimientos": _LIBRO_MIXTO, "Notas": _NOTAS}), _XLSX, "x.xlsx"
     )
@@ -354,14 +355,14 @@ async def test_el_libro_mixto_importa_ventas_y_gastos_y_deja_el_resto_en_otros(
         db_session, sample_tenant.tenant_id, summary, {"ventas": True, "gastos": True}
     )
     assert counts["ventas"] == 2
-    assert counts["gastos"] == 2
+    assert counts["gastos"] == 1
+    assert counts["compras_sin_articulos"] == 1
     ventas = (await db_session.execute(select(SaleEntry))).scalars().all()
     assert sum(v.amount for v in ventas) == Decimal("20000.50")
     gastos = {
         g.description: g for g in (await db_session.execute(select(ExpenseEntry))).scalars()
     }
-    assert gastos["compra mayorista"].expense_type == "COGS"
-    assert gastos["compra mayorista"].amount == Decimal("30000")
+    assert "compra mayorista" not in gastos
     pendientes = (
         (
             await db_session.execute(
@@ -373,8 +374,8 @@ async def test_el_libro_mixto_importa_ventas_y_gastos_y_deja_el_resto_en_otros(
         .scalars()
         .all()
     )
-    # 6 del libro mixto + 2 notas sin clasificar.
-    assert len(pendientes) == 8
+    # 6 del libro mixto + 2 notas sin clasificar + la compra sin artículos.
+    assert len(pendientes) == 9
 
 
 # ── F2d: lo que el archivo declara no real no entra como real ────────────────
@@ -526,4 +527,6 @@ async def test_libro_con_forma_de_asteria_de_punta_a_punta(
     # Sólo las dos ventas reales: ni la simulada ni el resumen suman otra vez.
     assert len(ventas) == 2
     assert sum(v.amount for v in ventas) == Decimal("20000.50")
-    assert counts["gastos"] == 2
+    # B·5b-2: la compra mayorista no dice qué artículos son → «Otros».
+    assert counts["gastos"] == 1
+    assert counts["compras_sin_articulos"] == 1
