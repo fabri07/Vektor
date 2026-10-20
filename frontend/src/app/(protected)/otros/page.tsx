@@ -17,6 +17,7 @@ import {
   type OthersGroup,
   type ProductMatchCandidate,
   type ReclassifyEntityType,
+  type ResolvePurchasePayload,
   type UnclassifiedRecordResponse,
 } from "@/services/others.service";
 import { productsService, type ProductCategoryOption } from "@/services/products.service";
@@ -115,7 +116,7 @@ export default function OtrosPage() {
         `${total} registro(s) importados (${result.imported_sales} ventas, ` +
         `${result.imported_expenses} gastos)` +
         (result.needs_manual > 0
-          ? `; ${result.needs_manual} requieren completar la fecha o el monto a mano.`
+          ? `; ${result.needs_manual} hay que resolverlos de a uno (sin fecha o monto legible, o compras de mercadería, que van con sus artículos).`
           : ".");
       toast(msg, "success");
       await invalidate();
@@ -187,6 +188,16 @@ export default function OtrosPage() {
         if (igual) {
           reclassifyMutation.mutate({ ...vars, pesesAlConflicto: true });
         }
+      } else if (code === "RECORD_ALREADY_RESOLVED") {
+        toast("Esta fila ya se había resuelto. Actualizamos la lista.", "info");
+        setReclassifying(null);
+        await invalidate();
+      } else if (code === "PURCHASE_NEEDS_ITEMS") {
+        // B·5b: una compra de mercadería se registra con sus artículos.
+        toast(
+          "Una compra de mercadería se registra con sus artículos: elegí «Compra de mercadería».",
+          "error",
+        );
       } else if (code === "INVALID_TARGET_PRODUCT") {
         // El candidato ya no está disponible (borrado/inactivo): cerrar y refrescar.
         toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");
@@ -199,51 +210,36 @@ export default function OtrosPage() {
   });
 
   const resolvePurchaseMutation = useMutation({
-    mutationFn: ({
-      id,
-      targetProductId,
-      fields,
-    }: {
-      id: string;
-      targetProductId: string;
-      fields: {
-        amount: number;
-        quantity: number;
-        unitCost?: number;
-        transactionDate: string;
-        paymentMethod: string;
-        category: string;
-        description: string;
-      };
-    }) =>
-      othersService.resolvePurchase(id, {
-        target_product_id: targetProductId,
-        amount: fields.amount,
-        quantity: fields.quantity,
-        ...(fields.unitCost !== undefined ? { unit_cost: fields.unitCost } : {}),
-        transaction_date: fields.transactionDate,
-        payment_method: fields.paymentMethod,
-        category: fields.category,
-        description: fields.description || undefined,
-      }),
+    mutationFn: ({ id, payload }: { id: string; payload: ResolvePurchasePayload }) =>
+      othersService.resolvePurchase(id, payload),
     onSuccess: async () => {
       setReclassifying(null);
-      toast("Compra registrada.", "success");
+      toast("Compra registrada con sus artículos.", "success");
       await invalidate();
     },
-    onError: async (error) => {
+    onError: async (error, vars) => {
       const code = errorCode(error);
-      const httpStatus = (error as AxiosError)?.response?.status;
-      if (code === "INVALID_TARGET_PRODUCT" || code === "TARGET_NOT_A_CANDIDATE") {
-        toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");
+      const detail = (error as AxiosError<{ detail?: { message?: string } }>)?.response?.data
+        ?.detail;
+      if (code === "RECORD_ALREADY_RESOLVED") {
+        toast("Esta fila ya se había resuelto. Actualizamos la lista.", "info");
         setReclassifying(null);
         await invalidate();
-      } else if (httpStatus === 409) {
-        toast("Esta compra ya había sido registrada. Actualizamos la lista.", "info");
-        setReclassifying(null);
-        await invalidate();
+      } else if (code === "IMPORT_IDENTITY_TAKEN") {
+        const igual = window.confirm(
+          "Esta fila tiene el mismo comprobante que una operación ya cargada. " +
+            "Si la registrás vas a quedar con las dos. ¿La registramos igual?",
+        );
+        if (igual) {
+          resolvePurchaseMutation.mutate({
+            ...vars,
+            payload: { ...vars.payload, aplicar_pese_al_conflicto: true },
+          });
+        }
+      } else if (detail?.message) {
+        toast(detail.message, "error");
       } else {
-        toast("No se pudo registrar la compra. Revisá los campos.", "error");
+        toast("No se pudo registrar la compra. Revisá los artículos.", "error");
       }
     },
   });
@@ -478,9 +474,8 @@ export default function OtrosPage() {
             targetProductId,
           })
         }
-        onResolvePurchase={(targetProductId, fields) =>
-          reclassifying &&
-          resolvePurchaseMutation.mutate({ id: reclassifying.id, targetProductId, fields })
+        onResolvePurchase={(payload) =>
+          reclassifying && resolvePurchaseMutation.mutate({ id: reclassifying.id, payload })
         }
       />
     </PageWrapper>

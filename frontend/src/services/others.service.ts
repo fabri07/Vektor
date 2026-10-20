@@ -55,16 +55,20 @@ export interface ReclassifyPayload {
   aplicar_pese_al_conflicto?: boolean;
 }
 
+/**
+ * B·5b: una compra de mercadería se resuelve diciendo qué artículos la componen.
+ * `amount` es lo que dice el comprobante para cada línea; `tax` dice si incluye
+ * IVA y `shipping` qué se hace con el envío (los dos opcionales: sin ellos,
+ * «desconocido»).
+ */
 export interface ResolvePurchasePayload {
-  target_product_id: string;
-  amount: number;
-  quantity: number;
-  unit_cost?: number;
+  lines: { product_id: string; quantity: number; amount: number }[];
   transaction_date: string;
   payment_method: string;
-  category?: string;
-  description?: string;
   supplier_name?: string;
+  shipping?: { amount: number; mode: string };
+  tax?: { treatment: string; rate?: number };
+  aplicar_pese_al_conflicto?: boolean;
 }
 
 /**

@@ -536,8 +536,14 @@ async def increment_stock(
     occurred_at: datetime | None = None,
     defer_event: bool = False,
     contrato: ContratoDeCosto | None = None,
+    source_upload_id: uuid.UUID | None = None,
+    source_row_ref: str | None = None,
 ) -> InventoryMovement:
     """Suma stock por una compra y deja su movimiento ``purchase``.
+
+    ``source_upload_id`` / ``source_row_ref`` (B·5b): la procedencia de una compra
+    que se resolvió desde una fila de un archivo («Otros»). Sin ellas, borrar el
+    archivo (F11) no alcanzaba al movimiento y el stock sobrevivía sin rastro.
 
     ``contrato`` (M·1b): lo que la ruta sabe del costo de esta compra. ``None``
     deja el contrato vacío (NULL = desconocido), que es lo que corresponde a un
@@ -582,6 +588,8 @@ async def increment_stock(
         # Fecha de NEGOCIO de la compra: si el caller la conoce, se usa esa; si no,
         # el momento del registro. En hora AR rotulada UTC, como la ingesta (M·1b).
         occurred_at=momento_de_negocio_rotulado(occurred_at),
+        source_upload_id=source_upload_id,
+        source_row_ref=source_row_ref,
         **(contrato.columnas() if contrato is not None else {}),
     )
     db.add(movement)

@@ -395,20 +395,27 @@ async def _execute_local_action(
     db: AsyncSession,
     redis: Redis,
 ) -> dict[str, Any] | None:
-    if await _register_operation_fingerprint(action=action, tenant_id=tenant_id, db=db):
-        action.execution_status = "SUCCEEDED"
-        action.executed_at = datetime.now(UTC)
-        return {
-            "status": "duplicate",
-            "message": "Esta operación ya fue registrada.",
-            "execution_status": "DUPLICATE",
-        }
-
     # Savepoint: si execute_pending_action falla a mitad, el rollback es atómico
     # y no deja registros huérfanos (ej. expense persistida con status=FAILED).
+    # La huella de idempotencia se reclama ADENTRO del mismo savepoint (B·5b): si
+    # la acción falla —p. ej. una compra sin artículos—, el rollback la libera y
+    # el reintento corregido (mismo monto y fecha) no sale como «ya registrada».
+    duplicada = False
     try:
         async with db.begin_nested():
-            await execute_pending_action(action, db, redis=redis)
+            duplicada = await _register_operation_fingerprint(
+                action=action, tenant_id=tenant_id, db=db
+            )
+            if not duplicada:
+                await execute_pending_action(action, db, redis=redis)
+        if duplicada:
+            action.execution_status = "SUCCEEDED"
+            action.executed_at = datetime.now(UTC)
+            return {
+                "status": "duplicate",
+                "message": "Esta operación ya fue registrada.",
+                "execution_status": "DUPLICATE",
+            }
         action.execution_status = "SUCCEEDED"
         action.executed_at = datetime.now(UTC)
         return None

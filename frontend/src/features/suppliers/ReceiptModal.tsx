@@ -1,7 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { PurchaseTermsFields } from "@/features/purchases/PurchaseTermsFields";
+import {
+  EMPTY_TERMS,
+  termsError,
+  termsPayload,
+  type PurchaseTerms,
+} from "@/features/purchases/purchaseTerms";
 import { useMutation } from "@tanstack/react-query";
+import type { AxiosError } from "axios";
 import { AlertTriangle, FileUp, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -62,6 +70,9 @@ export function ReceiptModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [lines, setLines] = useState<ReceiptLineForm[]>(() => [emptyReceiptLine()]);
   const [shipping, setShipping] = useState("");
+  // B·5b / F6: la fecha la dice el remito; no se asume «hoy».
+  const [fecha, setFecha] = useState("");
+  const [terms, setTerms] = useState<PurchaseTerms>(EMPTY_TERMS);
   const [error, setError] = useState<string | null>(null);
   const [extraction, setExtraction] = useState<ReceiptExtraction | null>(null);
 
@@ -69,6 +80,8 @@ export function ReceiptModal({
     if (isOpen) {
       setLines([emptyReceiptLine()]);
       setShipping("");
+      setFecha("");
+      setTerms(EMPTY_TERMS);
       setError(null);
       setExtraction(null);
     }
@@ -107,6 +120,8 @@ export function ReceiptModal({
       lines: ReceiptLinePayload[];
       shipping_cost?: number;
       source_upload_id?: string;
+      transaction_date: string;
+      tax?: { treatment: string; rate?: number };
     }) =>
       suppliersService.uploadReceipt(
         supplier.id,
@@ -116,7 +131,21 @@ export function ReceiptModal({
     onSuccess: () => {
       void onUploaded();
     },
-    onError: () => toast("No se pudo cargar el remito.", "error"),
+    onError: (err) => {
+      // El motivo lo dice el backend (fecha, precio, IVA): mostrarlo en vez de
+      // un genérico que no dice qué corregir.
+      const detail = (err as AxiosError<{ detail?: unknown }>)?.response?.data?.detail;
+      const msg =
+        typeof detail === "string"
+          ? detail
+          : detail && typeof detail === "object" && "message" in detail
+            ? String((detail as { message: unknown }).message)
+            : Array.isArray(detail) && detail[0] && typeof detail[0] === "object"
+              ? String((detail[0] as { msg?: unknown }).msg ?? "")
+              : "";
+      setError(msg || "No se pudo cargar el remito.");
+      toast("No se pudo cargar el remito.", "error");
+    },
   });
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -168,8 +197,9 @@ export function ReceiptModal({
         return;
       }
       const unitPrice = Number(line.unit_price);
-      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-        setError(`Precio unitario inválido en "${name}".`);
+      // B·5b: una línea en 0 no es una compra (una bonificación es menor precio).
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+        setError(`El precio de "${name}" tiene que ser mayor que cero.`);
         return;
       }
       const sku = line.sku.trim();
@@ -196,9 +226,21 @@ export function ReceiptModal({
       shippingCost = value;
     }
 
+    if (!fecha) {
+      setError("Indicá la fecha del remito.");
+      return;
+    }
+    const errorDeIva = termsError(terms);
+    if (errorDeIva) {
+      setError(errorDeIva);
+      return;
+    }
     const sourceUploadId = extraction?.source_upload_id ?? undefined;
+    const { tax } = termsPayload(terms);
     uploadMutation.mutate({
       lines: parsed,
+      transaction_date: `${fecha}T00:00:00`,
+      ...(tax ? { tax } : {}),
       ...(shippingCost !== undefined ? { shipping_cost: shippingCost } : {}),
       ...(sourceUploadId ? { source_upload_id: sourceUploadId } : {}),
     });
@@ -350,6 +392,21 @@ export function ReceiptModal({
             Agregar línea
           </Button>
         </div>
+
+        <div className="max-w-xs">
+          <Input
+            label="Fecha del remito"
+            type="date"
+            required
+            value={fecha}
+            onChange={(e) => {
+              setFecha(e.target.value);
+              if (error) setError(null);
+            }}
+          />
+        </div>
+
+        <PurchaseTermsFields value={terms} onChange={setTerms} showShippingModes={false} />
 
         <div className="max-w-xs">
           <Input

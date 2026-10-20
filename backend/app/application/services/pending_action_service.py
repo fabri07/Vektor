@@ -27,7 +27,7 @@ import app.application.services.cash_service as cash_service
 import app.application.services.stock_service as stock_service
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.schemas import ActionType
-from app.application.services import subscription_service
+from app.application.services import compra_service, subscription_service
 from app.application.services.automation_service import determine_external_system
 from app.application.services.chat_memory_service import ChatMemoryService
 from app.application.services.ingestion_import_service import (
@@ -36,11 +36,13 @@ from app.application.services.ingestion_import_service import (
     insert_confirmed_data,
 )
 from app.domain.business_time import now_ar_naive
+from app.domain.comprobante_de_compra import ComprobanteInvalidoError, LineaDeCompra
 from app.domain.contrato_de_costo import contrato_declarado
 from app.domain.costo_vigente import (
     conservar_claves_del_costo,
     custom_fields_tras_editar_costo,
 )
+from app.domain.expense_categories import normalize_expense_category
 from app.domain.ingestion_version import INGESTION_VERSION
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
@@ -610,6 +612,62 @@ async def _ajuste_manual_por_chat(
     )
 
 
+def _rechazar_mercaderia_por_chat(category: object) -> None:
+    """B·5b: por chat, un gasto o una salida de caja no puede ser mercadería: eso
+    es una compra, y una compra dice qué artículos y cuántos."""
+    code, _label = normalize_expense_category(category)  # type: ignore[arg-type]
+    if code == "INVENTORY":
+        raise compra_service.CompraSinArticulosError()
+
+
+class CompraPorChatInvalidaError(Exception):
+    """La compra que armó el chat no se puede registrar; ``user_message`` dice por qué."""
+
+    def __init__(self, user_message: str) -> None:
+        super().__init__(user_message)
+        self.user_message = user_message
+
+
+async def _registrar_compra_por_chat(
+    action: PendingAction, payload: dict[str, Any], db: AsyncSession
+) -> None:
+    product_id_str = payload.get("product_id")
+    qty = int(payload.get("qty") or 0)
+    if not product_id_str or qty <= 0:
+        raise compra_service.CompraSinArticulosError()
+    try:
+        product_id = uuid.UUID(str(product_id_str))
+    except ValueError as exc:
+        raise compra_service.CompraSinArticulosError() from exc
+    amount_raw = payload.get("amount")
+    unit_cost_raw = payload.get("unit_cost")
+    importe: Decimal | None = None
+    if amount_raw not in (None, ""):
+        importe = Decimal(str(amount_raw))
+    elif unit_cost_raw not in (None, ""):
+        importe = (Decimal(str(unit_cost_raw)) * qty).quantize(Decimal("0.01"))
+    if importe is None:
+        raise CompraPorChatInvalidaError(
+            "Me falta cuánto pagaste por la compra. Decime el monto y la registro."
+        )
+    try:
+        await compra_service.registrar_compra(
+            db,
+            action.tenant_id,
+            action.user_id,
+            lineas=[LineaDeCompra(product_id=product_id, cantidad=qty, importe=importe)],
+            fecha=cash_service._coerce_transaction_date(
+                payload.get("transaction_date") or payload.get("date")
+            ),
+            medio_de_pago=cash_service._normalize_payment_method(payload.get("payment_method")),
+            supplier_name=payload.get("supplier_name"),
+            source_event_id=str(action.id),
+            triggered_by="chat:register_purchase",
+        )
+    except ComprobanteInvalidoError as exc:
+        raise CompraPorChatInvalidaError(str(exc)) from exc
+
+
 async def execute_pending_action(
     action: PendingAction,
     db: AsyncSession,
@@ -685,6 +743,7 @@ async def execute_pending_action(
             )
 
     elif action.action_type == ActionType.REGISTER_EXPENSE:
+        _rechazar_mercaderia_por_chat(payload.get("category"))
         expense = await cash_service.save_expense(payload, action.tenant_id, db)
         if payload.get("conversation_id"):
             await mem.record(
@@ -717,44 +776,14 @@ async def execute_pending_action(
             )
 
     elif action.action_type == ActionType.REGISTER_PURCHASE:
-        # Compra de mercadería: categoría canónica + COGS (muere el literal
-        # "compra_proveedor", que quedaba fuera del catálogo).
-        purchase_payload = {**payload, "category": "INVENTORY", "expense_type": "COGS"}
-        purchase_expense = await cash_service.save_expense(
-            purchase_payload, action.tenant_id, db
-        )
-
-        product_id_str = payload.get("product_id")
-        qty = int(payload.get("qty") or 0)
-        if product_id_str and qty > 0:
-            from decimal import Decimal  # noqa: PLC0415
-
-            product_uuid = uuid.UUID(product_id_str)
-            unit_cost_raw = payload.get("unit_cost")
-            unit_cost = Decimal(str(unit_cost_raw)) if unit_cost_raw is not None else None
-            await stock_service.increment_stock(
-                product_id=product_uuid,
-                tenant_id=action.tenant_id,
-                qty=qty,
-                unit_cost=unit_cost,
-                source_event_id=str(action.id),
-                db=db,
-                # Fecha de negocio de la compra: la misma que quedó en el gasto
-                # COGS recién creado (ya coercionada por cash_service).
-                occurred_at=purchase_expense.transaction_date,
-                # M·1b: compra declarada por chat; envío e impuesto, desconocidos.
-                # (UPDATE_STOCK, más abajo, no es una compra declarada: sin contrato.)
-                # Un costo negativo (payload del LLM) no es un costo: sin
-                # contrato, en vez de un ValueError después de crear el gasto.
-                contrato=(
-                    contrato_declarado(unit_cost)
-                    if unit_cost is None or unit_cost >= 0
-                    else None
-                ),
-            )
+        # B·5b: una compra de mercadería = artículos. Sin producto o sin cantidad no
+        # se registra nada (antes quedaba un gasto COGS suelto, y aun con producto
+        # el gasto perdía el producto y el proveedor). Pasa por la regla única.
+        await _registrar_compra_por_chat(action, payload, db)
 
     elif action.action_type == ActionType.REGISTER_CASH_OUTFLOW:
         outflow_payload = {**payload, "category": payload.get("category", "salida_caja")}
+        _rechazar_mercaderia_por_chat(outflow_payload["category"])
         await cash_service.save_expense(outflow_payload, action.tenant_id, db)
 
     elif action.action_type == ActionType.UPDATE_STOCK:

@@ -208,7 +208,8 @@ class TestExpenseSupplierLink:
             "/api/v1/expenses",
             json={
                 "amount": "2500.00",
-                "category": "INVENTORY",
+                # B·5b: mercadería va por «Registrar compra»; acá importa el proveedor.
+                "category": "OTHER",
                 "expense_date": _TODAY,
                 "payment_method": "transfer",
                 "supplier_id": sid,
@@ -341,6 +342,8 @@ class TestSupplierFiscalFields:
 
 _RECEIPT_PAYLOAD = {
     "currency": "ARS",
+    # B·5b / F6: la fecha del remito es obligatoria (nunca «hoy» en silencio).
+    "transaction_date": f"{_TODAY}T10:00:00",
     "shipping_cost": "1500.00",
     "lines": [
         {"product_name": "Yerba Playadito", "qty": 10, "unit_price": "800.00"},

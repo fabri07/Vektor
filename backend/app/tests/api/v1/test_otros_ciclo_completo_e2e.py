@@ -183,7 +183,9 @@ async def test_borrar_el_archivo_alcanza_al_gasto_clasificado_a_mano(
             "fields": {
                 "amount": "3600.00",
                 "expense_date": "2024-03-06T00:00:00",
-                "category": "INVENTORY",
+                # B·5b: una compra de mercadería se resuelve con artículos; acá
+                # importa la procedencia del gasto clasificado a mano.
+                "category": "OTHER",
                 "description": "Difusor bambu",
             },
         },
@@ -244,7 +246,9 @@ async def test_un_gasto_clasificado_sin_archivo_no_se_promete_revertido(
             "fields": {
                 "amount": "3600.00",
                 "expense_date": "2024-03-06T00:00:00",
-                "category": "INVENTORY",
+                # B·5b: una compra de mercadería se resuelve con artículos; acá
+                # importa la procedencia del gasto clasificado a mano.
+                "category": "OTHER",
                 "description": "Difusor bambu",
             },
         },

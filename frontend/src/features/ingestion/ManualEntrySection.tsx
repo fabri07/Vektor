@@ -34,6 +34,13 @@ import {
   useOfflineSubmit,
   useOnlineStatus,
 } from "./useOfflineSubmit";
+import { PurchaseTermsFields } from "@/features/purchases/PurchaseTermsFields";
+import {
+  EMPTY_TERMS,
+  termsError,
+  termsPayload,
+  type PurchaseTerms,
+} from "@/features/purchases/purchaseTerms";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -767,6 +774,8 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showNewSupplier, setShowNewSupplier] = useState(false);
+  // B·5b: IVA y envío del comprobante, con la misma regla que «Otros» y el remito.
+  const [terms, setTerms] = useState<PurchaseTerms>(EMPTY_TERMS);
 
   // Crear categoría nueva (compartida por todas las líneas).
   const [newCat, setNewCat] = useState("");
@@ -815,6 +824,7 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
   }, 0);
 
   function reset() {
+    setTerms(EMPTY_TERMS);
     setSupplierId("");
     setPaymentMethod("cash");
     setTransactionDate(nowStr());
@@ -860,6 +870,11 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
         update_price: !isNew && l.update_price,
       });
     }
+    const errorDeTerminos = termsError(terms);
+    if (errorDeTerminos) {
+      setError(errorDeTerminos);
+      return;
+    }
     setSubmitting(true);
     await submit(
       "purchase",
@@ -868,6 +883,7 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
         payment_method: paymentMethod,
         transaction_date: transactionDate,
         lines: payloadLines,
+        ...termsPayload(terms),
       },
       {
         onSuccess: () => {
@@ -1118,6 +1134,8 @@ function ProductTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
           <Plus className="h-4 w-4" /> Agregar producto
         </button>
       </div>
+
+      <PurchaseTermsFields value={terms} onChange={setTerms} />
 
       <FieldError msg={error ?? undefined} />
 

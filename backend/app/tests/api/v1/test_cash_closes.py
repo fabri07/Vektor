@@ -59,7 +59,8 @@ class TestCashClosePreview:
             "/api/v1/expenses",
             json={
                 "amount": "3000.00",
-                "category": "INVENTORY",
+                # B·5b: mercadería va por «Registrar compra»; acá importa el efectivo.
+                "category": "UTILITIES",
                 "expense_date": _TODAY,
                 "payment_method": "cash",
             },

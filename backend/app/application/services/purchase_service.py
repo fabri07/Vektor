@@ -14,28 +14,34 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import (
+    compra_service,
     maintenance_lock_service,
-    stock_service,
     tenant_categories_service,
 )
 from app.application.services.product_identity import (
     ProductIdentityConflictError,
     add_product_or_reuse,
 )
-from app.domain.contrato_de_costo import contrato_declarado
+from app.domain.comprobante_de_compra import (
+    ComprobanteInvalidoError,
+    Envio,
+    Iva,
+    LineaDeCompra,
+    ModoEnvio,
+    TratamientoIva,
+)
 from app.domain.product_categories import normalize_product_category
-from app.domain.sale_unit import a_unidades_base
 from app.domain.verticals import Vertical, parse_vertical
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.product import Product
 from app.persistence.models.supplier import Supplier
-from app.persistence.models.transaction import ExpenseEntry
 from app.schemas.purchase import (
     ManualPurchaseRequest,
     ManualPurchaseResponse,
@@ -96,7 +102,12 @@ async def register_manual_purchase(
     body: ManualPurchaseRequest,
     actor_user_id: uuid.UUID,
 ) -> ManualPurchaseResponse:
-    # Proveedor obligatorio y del tenant.
+    """«Registrar compra»: resuelve o crea los productos de cada línea y registra
+    la compra con la regla única (``compra_service.registrar_compra``, B·5b)."""
+    # F3 review final: el advisory shared SIEMPRE antes que cualquier FOR UPDATE de
+    # fila — si no, deadlockea AB-BA contra el exclusive del script de dedup.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+
     supplier = (
         await session.execute(
             select(Supplier).where(
@@ -107,83 +118,64 @@ async def register_manual_purchase(
     if supplier is None:
         raise PurchaseError("Proveedor no encontrado para este negocio.")
 
-    # F3 review final: el advisory shared SIEMPRE antes que cualquier FOR UPDATE de fila
-    # (acá abajo) — si no, deadlockea AB-BA contra el exclusive del script de dedup. Antes
-    # el shared recién se tomaba en increment_stock, después del FOR UPDATE de este método.
-    # Idempotente dentro de la txn: no molesta que stock_service lo pida de nuevo.
-    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
-
-    # Rechazar productos existentes repetidos en el comprobante.
     existing_ids = [line.product_id for line in body.lines if line.product_id is not None]
     if len(set(existing_ids)) != len(existing_ids):
         raise PurchaseError(
             "Hay productos repetidos en el comprobante. Unificá la cantidad en una sola línea."
         )
-    # Bloquear las filas de productos existentes (orden estable) — anti-deadlock.
-    if existing_ids:
-        await session.execute(
-            select(Product)
-            .where(
-                Product.tenant_id == tenant_id,
-                Product.id.in_(existing_ids),
-                Product.is_active.is_(True),
-            )
-            .order_by(Product.id)
-            .with_for_update()
-        )
 
     vertical = await _tenant_vertical(session, tenant_id)
-    group_id = uuid.uuid4()
-    source_event = f"manual_purchase:{group_id}"
+    resueltos: list[tuple[Product, bool, PurchaseLine]] = []
+    for line in body.lines:
+        product, created = await _resolve_product(session, tenant_id, vertical, line)
+        resueltos.append((product, created, line))
+
+    try:
+        compra = await compra_service.registrar_compra(
+            session,
+            tenant_id,
+            actor_user_id,
+            lineas=[
+                LineaDeCompra(
+                    product_id=product.id,
+                    cantidad=line.quantity,
+                    importe=(line.unit_cost * line.quantity).quantize(Decimal("0.01")),
+                )
+                for product, _created, line in resueltos
+            ],
+            fecha=body.transaction_date,
+            medio_de_pago=body.payment_method,
+            envio=(
+                Envio(monto=body.shipping.amount, modo=cast(ModoEnvio, body.shipping.mode))
+                if body.shipping
+                else None
+            ),
+            iva=(
+                Iva(
+                    tratamiento=cast(TratamientoIva, body.tax.treatment),
+                    alicuota=body.tax.rate,
+                )
+                if body.tax
+                else None
+            ),
+            supplier_id=supplier.id,
+            document_ref=body.document_ref,
+            descripciones={
+                product.id: line.description
+                for product, _created, line in resueltos
+                if line.description
+            },
+            triggered_by="ui:manual_purchase",
+        )
+    except ComprobanteInvalidoError as exc:
+        raise PurchaseError(str(exc)) from exc
 
     results: list[PurchaseLineResult] = []
     products_created: list[uuid.UUID] = []
-    expense_ids: list[uuid.UUID] = []
-    total_cogs = Decimal("0")
-
-    for line in body.lines:
-        product, created = await _resolve_product(session, tenant_id, vertical, line)
-
-        await stock_service.increment_stock(
-            product.id,
-            tenant_id,
-            # La compra se carga en la unidad de VENTA ("5" de queso = 5 kg) y el
-            # stock vive en unidades base; el costo es por unidad de venta, así
-            # que el COGS de abajo (costo × cantidad) no cambia.
-            a_unidades_base(line.quantity, product.base_units_per_sale_unit or 1),
-            line.unit_cost,
-            source_event,
-            session,
-            supplier_id=body.supplier_id,
-            # M·1c: el costo lo decide `recalcular_costo_vigente` (la fuente más
-            # reciente por fecha); `update_price` gobierna sólo el precio de venta.
-            occurred_at=body.transaction_date,
-            # M·1b: el costo por unidad que se declaró en el comprobante; envío e
-            # impuesto quedan desconocidos hasta que la pantalla los pida (M·3/B·5).
-            contrato=contrato_declarado(line.unit_cost),
-        )
+    for (product, created, line), expense_id in zip(resueltos, compra.expense_ids, strict=True):
         # Precio de venta: nuevo siempre; existente solo si lo confirma.
         if (created or line.update_price) and line.sale_price_ars > 0:
             product.sale_price_ars = line.sale_price_ars
-
-        line_cogs = (line.unit_cost * line.quantity).quantize(Decimal("0.01"))
-        expense = ExpenseEntry(
-            tenant_id=tenant_id,
-            product_id=product.id,
-            supplier_id=body.supplier_id,
-            amount=line_cogs,
-            category="INVENTORY",
-            expense_type="COGS",
-            transaction_date=body.transaction_date,
-            description=line.description or f"Compra: {product.name}",
-            payment_method=body.payment_method,
-            supplier_name=supplier.name,
-            custom_fields={"purchase_group_id": str(group_id)},
-        )
-        session.add(expense)
-        await session.flush()
-
-        # Auditar: alta/actualización de producto + alta de gasto COGS (mismo group_id).
         _audit(
             session,
             tenant_id,
@@ -191,7 +183,7 @@ async def register_manual_purchase(
             "DATA_RECORD_CREATED" if created else "DATA_RECORD_UPDATED",
             "product",
             str(product.id),
-            group_id,
+            compra.group_id,
         )
         _audit(
             session,
@@ -199,12 +191,9 @@ async def register_manual_purchase(
             actor_user_id,
             "DATA_RECORD_CREATED",
             "expense",
-            str(expense.id),
-            group_id,
+            str(expense_id),
+            compra.group_id,
         )
-
-        total_cogs += line_cogs
-        expense_ids.append(expense.id)
         if created:
             products_created.append(product.id)
         results.append(
@@ -212,7 +201,7 @@ async def register_manual_purchase(
                 product_id=product.id,
                 product_name=product.name,
                 created=created,
-                expense_id=expense.id,
+                expense_id=expense_id,
                 new_stock_units=product.stock_units,
                 margin_pct=_margin_pct(line.unit_cost, product.sale_price_ars),
             )
@@ -221,10 +210,10 @@ async def register_manual_purchase(
     return ManualPurchaseResponse(
         lines=len(body.lines),
         products_created=products_created,
-        expense_ids=expense_ids,
-        total_cogs=float(total_cogs),
+        expense_ids=compra.expense_ids,
+        total_cogs=float(compra.total),
         results=results,
-        meta={"purchase_group_id": str(group_id), "supplier_name": supplier.name},
+        meta={"purchase_group_id": str(compra.group_id), "supplier_name": supplier.name},
     )
 
 

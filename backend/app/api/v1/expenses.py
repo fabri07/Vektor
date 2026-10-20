@@ -195,6 +195,27 @@ async def list_expenses(
     )
 
 
+def _rechazar_mercaderia_sin_articulos(
+    category: str | None, expense_type: str | None = None
+) -> None:
+    """B·5b (decisión del dueño, 2026-10-20): una compra de mercadería que no dice
+    qué artículos la componen no es un dato útil. Se carga en «Registrar compra»
+    (`POST /purchases/manual`), con productos y cantidades."""
+    # Mercadería por categoría o por tipo: un gasto COGS a mano también es una
+    # compra de mercadería sin artículos (la otra puerta que dejaba abierta).
+    if category == "INVENTORY" or expense_type == "COGS":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "PURCHASE_NEEDS_ITEMS",
+                "message": (
+                    "Una compra de mercadería se carga en «Registrar compra», "
+                    "diciendo qué artículos compraste y cuántos."
+                ),
+            },
+        )
+
+
 @router.post(
     "",
     response_model=ExpenseEntryResponse,
@@ -212,6 +233,7 @@ async def create_expense(
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ExpenseEntry:
+    _rechazar_mercaderia_sin_articulos(body.category, body.expense_type)
     # Idempotencia opcional: si llega la key, reclamarla ANTES de crear. Comparte
     # transacción con la creación (commit único en get_db_session), por lo que si
     # la creación falla el claim se revierte y un reintento futuro puede entrar.
@@ -396,9 +418,19 @@ async def update_expense(
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found.")
     before = _expense_snapshot(entry)
+    if body.category is not None and body.category != entry.category:
+        # B·5b: un gasto no se convierte en una compra de mercadería sin artículos.
+        # Uno que YA es mercadería se puede editar (monto, fecha, descripción).
+        _rechazar_mercaderia_sin_articulos(body.category)
+    if body.expense_type == "COGS" and entry.expense_type != "COGS":
+        _rechazar_mercaderia_sin_articulos(None, body.expense_type)
     if body.amount is not None:
         entry.amount = body.amount
     if body.category is not None:
+        if body.category != entry.category and body.expense_type is None:
+            # El discriminador sigue a la categoría: antes, sacar un gasto de
+            # mercadería lo dejaba COGS (y ponerlo, OPEX).
+            entry.expense_type = infer_expense_type(body.category, product_id=entry.product_id)
         entry.category = body.category
     if body.expense_type is not None:
         entry.expense_type = body.expense_type

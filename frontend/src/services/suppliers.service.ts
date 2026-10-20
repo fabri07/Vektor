@@ -82,8 +82,11 @@ export interface UploadReceiptPayload {
   lines: ReceiptLinePayload[];
   shipping_cost?: number;
   currency: "ARS";
+  /** B·5b / F6: obligatoria — el backend responde 422 RECEIPT_DATE_REQUIRED sin ella. */
   transaction_date?: string;
   source_upload_id?: string;
+  /** B·5b: qué es el precio de las líneas respecto del IVA. */
+  tax?: { treatment: string; rate?: number };
 }
 
 /** Línea extraída por IA/parser de un remito. Las cantidades/precios son sugerencias editables. */

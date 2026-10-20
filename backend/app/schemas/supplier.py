@@ -26,6 +26,7 @@ from app.persistence.models.supplier import BRAND_COLLAPSED_FLAG_KEY, PROVISIONA
 from app.schemas._ar_fiscal import validate_cuit as _validate_cuil
 from app.schemas._ar_fiscal import validate_cuit as _validate_cuit
 from app.schemas._ar_fiscal import validate_iva_condition as _validate_iva
+from app.schemas.purchase import PurchaseTax
 
 
 class SupplierResponse(BaseModel):
@@ -189,8 +190,12 @@ class ReceiptLineRequest(BaseModel):
     @field_validator("unit_price")
     @classmethod
     def _check_unit_price(cls, v: Decimal) -> Decimal:
-        if v < 0:
-            raise PydanticCustomError("unit_price_negative", "unit_price debe ser >= 0.")
+        # B·5b: una línea en 0 no es una compra (una bonificación es menor precio
+        # de la línea pagada). Antes entraba como stock a costo 0.
+        if v <= 0:
+            raise PydanticCustomError(
+                "unit_price_positive", "El precio de cada línea tiene que ser mayor que cero."
+            )
         return v
 
 
@@ -203,7 +208,11 @@ class CreateReceiptRequest(BaseModel):
     lines: list[ReceiptLineRequest] = Field(min_length=1)
     shipping_cost: Decimal | None = None
     currency: str
+    # B·5b: obligatoria en el endpoint (nunca «hoy» en silencio, F6). Queda
+    # opcional en el schema para devolver un 422 con código propio.
     transaction_date: datetime | None = None
+    # B·5b: qué es el precio de las líneas respecto del IVA (opcional).
+    tax: PurchaseTax | None = None
     # Archivo de origen del remito (de POST .../receipts/extract): liga los gastos
     # creados al UploadedFile para trazabilidad import → archivo.
     source_upload_id: UUID | None = None

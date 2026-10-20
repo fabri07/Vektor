@@ -53,6 +53,17 @@ async def test_bulk_import_sales_and_expenses(
                 },
                 "expense",
             ),
+            _record(
+                tid,
+                {
+                    "fecha": "2026-05-02",
+                    "detalle": "Pago luz",
+                    "monto": "15000",
+                    "categoria": "Luz",
+                    "forma_pago": "cuenta corriente",
+                },
+                "expense",
+            ),
             # Sin monto parseable → queda PENDING.
             _record(tid, {"fecha": "2026-05-03", "detalle": "Sin monto"}, "sale"),
             # Sugerido producto → nunca entra al bulk.
@@ -63,12 +74,13 @@ async def test_bulk_import_sales_and_expenses(
 
     counts = await bulk_import_unclassified(db_session, tid)
     # F6-A5: el "sin monto" no parsea → needs_manual (requiere el modal), NO skipped
-    # (que ahora es solo "ya importado").
+    # (que ahora es solo "ya importado"). B·5b: la compra de mercadería tampoco
+    # entra en lote: se resuelve de a una, diciendo qué artículos la componen.
     assert counts == {
         "imported_sales": 1,
         "imported_expenses": 1,
         "skipped": 0,
-        "needs_manual": 1,
+        "needs_manual": 2,
     }
 
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
@@ -77,16 +89,16 @@ async def test_bulk_import_sales_and_expenses(
     assert sale.notes == "Venta del día"
 
     expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
-    assert expense.category == "INVENTORY"
-    assert expense.expense_type == "COGS"
+    assert expense.category == "UTILITIES"
+    assert expense.expense_type == "OPEX"
     assert expense.payment_method == "account"
 
     records = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
     by_status: dict[str, int] = {}
     for r in records:
         by_status[r.status] = by_status.get(r.status, 0) + 1
-    # 2 importados; el sin-monto y el producto siguen PENDING.
-    assert by_status == {"IMPORTED": 2, "PENDING": 2}
+    # 2 importados; la compra, el sin-monto y el producto siguen PENDING.
+    assert by_status == {"IMPORTED": 2, "PENDING": 3}
 
 
 async def test_bulk_import_entity_filter(

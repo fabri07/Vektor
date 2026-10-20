@@ -82,10 +82,16 @@ from app.config.ingestion_schema_decisions_rollout import (
 from app.config.product_supplier_links_rollout import product_supplier_links_enabled_for
 from app.config.settings import get_settings
 from app.domain.business_time import a_hora_de_negocio, now_ar_naive
+from app.domain.comprobante_de_compra import (
+    ComprobanteInvalidoError,
+    Envio,
+    Iva,
+    LineaDeCompra,
+    costear_comprobante,
+)
 from app.domain.contrato_de_costo import (
     ContratoDeCosto,
     contrato_de_linea_importada,
-    contrato_declarado,
 )
 from app.domain.costo_vigente import (
     CATALOGO_FIELD,
@@ -3087,8 +3093,9 @@ async def _apply_purchase_to_stock(
     """FASE D: una compra de mercadería importada suma stock.
 
     ``contrato`` (M·1b): el contrato del costo que arma el caller (ingesta:
-    ``contrato_de_linea_importada``; remito: ``contrato_declarado``). Se guarda
-    en el movimiento ``purchase`` tal cual.
+    ``contrato_de_linea_importada``; remito:
+    ``comprobante_de_compra.costear_comprobante``). Se guarda en el movimiento
+    ``purchase`` tal cual.
 
     Gate doble contra falsos positivos / doble conteo:
       - el gasto debe tener producto del catálogo resuelto (`product_id`); y
@@ -9926,6 +9933,11 @@ async def bulk_import_unclassified(
         else:
             cat_raw_otros = _clean_str(_row_val_categoria(row), 99)
             cat_code, cat_label, _ = classify_expense_with_vertical(cat_raw_otros, _vertical)
+            if cat_code == "INVENTORY":
+                # B·5b: una compra de mercadería se resuelve de a una, diciendo qué
+                # artículos la componen. En lote se crearía un gasto sin stock.
+                counts["needs_manual"] += 1
+                continue
             expense = ExpenseEntry(
                 tenant_id=tenant_id,
                 amount=amount,
@@ -9998,6 +10010,7 @@ async def import_receipt(
     shipping_cost: Decimal | None = None,
     transaction_date: datetime | None = None,
     source_upload_id: uuid.UUID | None = None,
+    iva: Iva | None = None,
 ) -> dict[str, Any]:
     """Registra un remito ya validado: por cada línea, producto (alta/stock) +
     ``ExpenseEntry`` COGS; el envío → un ``ExpenseEntry`` OPEX ``LOGISTICS``.
@@ -10026,6 +10039,10 @@ async def import_receipt(
     expense_ids: list[str] = []
     total_cogs = Decimal("0")
 
+    # B·5b: primero se resuelve el artículo de cada línea y después se costea el
+    # comprobante entero con la regla única (`domain/comprobante_de_compra`): el
+    # mismo remito cargado a mano daría el mismo costo y el mismo contrato.
+    resueltas: list[tuple[ReceiptLine, uuid.UUID]] = []
     for line in lines:
         # Resolver producto del catálogo; si no existe, crearlo incompleto.
         product_id = _resolve_product(by_sku, by_name, line.product_name, line.sku, by_token)
@@ -10043,7 +10060,31 @@ async def import_receipt(
             )
             if product_id is not None:
                 created_product_ids.append(str(product_id))
-        line_total = (line.unit_price * line.qty).quantize(Decimal("0.01"))
+        if product_id is None:
+            raise ComprobanteInvalidoError(
+                f"No se pudo identificar ni crear el artículo «{line.product_name}»."
+            )
+        resueltas.append((line, product_id))
+    hay_envio = shipping_cost is not None and shipping_cost > 0
+    costeado = costear_comprobante(
+        [
+            LineaDeCompra(
+                product_id=pid,
+                cantidad=line.qty,
+                importe=(line.unit_price * line.qty).quantize(Decimal("0.01")),
+            )
+            for line, pid in resueltas
+        ],
+        # El envío del remito va como gasto de logística aparte, como siempre.
+        envio=Envio(monto=shipping_cost, modo="gasto_aparte")
+        if hay_envio and shipping_cost is not None
+        else None,
+        iva=iva,
+        permitir_repetidos=True,
+    )
+
+    for (line, product_id), costeada in zip(resueltas, costeado.lineas, strict=True):
+        line_total = costeada.importe_gasto
         total_cogs += line_total
         expense = ExpenseEntry(
             tenant_id=tenant_id,
@@ -10068,21 +10109,12 @@ async def import_receipt(
             tenant_id,
             expense,
             line.qty,
-            line.unit_price,
+            costeada.costo_unitario,
             balance_index=balance_index,
             product_cache=product_cache,
             # A2: el movimiento de un remito lleva origen ``receipt`` (no import).
             source_type=SOURCE_RECEIPT,
-            # M·1b: el costo es el que se declaró; el envío del remito, si lo
-            # hay, va como gasto de logística aparte (no entra al costo).
-            contrato=contrato_declarado(
-                line.unit_price,
-                envio=(
-                    "adicional"
-                    if shipping_cost is not None and shipping_cost > 0
-                    else "desconocido"
-                ),
-            ),
+            contrato=costeada.contrato,
         )
 
     shipping_expense_id: str | None = None
