@@ -67,6 +67,28 @@ export interface ResolvePurchasePayload {
   supplier_name?: string;
 }
 
+/**
+ * B·5a: un grupo de «Otros» — archivo × hoja × motivo × sugerencia. La clave es
+ * opaca: la arma el backend y se le devuelve tal cual.
+ */
+export interface OthersGroup {
+  group_key: string;
+  uploaded_file_id: string | null;
+  file_name: string | null;
+  context_id: string | null;
+  motivo: string | null;
+  suggested_entity: "sale" | "expense" | "product" | null;
+  status: "PENDING" | "IMPORTED" | "DISMISSED";
+  count: number;
+}
+
+export interface DismissGroupPreview {
+  count: number;
+  samples: Record<string, string>[];
+  /** Huella del conjunto exacto: el descarte la exige y da 409 si cambió. */
+  group_token: string;
+}
+
 export interface BulkImportResult {
   imported_sales: number;
   imported_expenses: number;
@@ -75,9 +97,33 @@ export interface BulkImportResult {
 }
 
 export const othersService = {
-  async getPending(offset = 0, limit = 50): Promise<UnclassifiedRecordResponse[]> {
+  async getPending(
+    offset = 0,
+    limit = 50,
+    group?: string,
+  ): Promise<UnclassifiedRecordResponse[]> {
     const res = await api.get<UnclassifiedRecordResponse[]>("/others", {
-      params: { status: "PENDING", limit, offset },
+      params: { status: "PENDING", limit, offset, ...(group ? { group } : {}) },
+    });
+    return res.data;
+  },
+
+  async getSummary(): Promise<OthersGroup[]> {
+    const res = await api.get<OthersGroup[]>("/others/summary");
+    return res.data;
+  },
+
+  async previewDismissGroup(groupKey: string): Promise<DismissGroupPreview> {
+    const res = await api.post<DismissGroupPreview>("/others/dismiss-group/preview", {
+      group_key: groupKey,
+    });
+    return res.data;
+  },
+
+  async dismissGroup(groupKey: string, groupToken: string): Promise<{ dismissed: number }> {
+    const res = await api.post<{ dismissed: number }>("/others/dismiss-group", {
+      group_key: groupKey,
+      group_token: groupToken,
     });
     return res.data;
   },
