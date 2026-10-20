@@ -353,3 +353,42 @@ async def test_gasto_de_mercaderia_por_chat_se_rechaza(
                 {"amount": 900, "category": "mercadería"},
             )
     assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
+
+async def test_compra_por_chat_rechazada_no_bloquea_el_reintento_corregido(
+    db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
+) -> None:
+    """Revisión B·5b-1: la huella de idempotencia del chat se reclamaba ANTES de
+    ejecutar. Una compra rechazada por no traer artículos la dejaba tomada y el
+    reintento corregido (mismo monto y fecha) salía «ya fue registrada»."""
+    from app.api.v1.agent import _execute_local_action
+
+    p = await _producto(db_session, sample_tenant)
+    base = {"amount": 1600, "transaction_date": today_ar().isoformat()}
+
+    async def _ejecutar(payload: dict[str, Any]) -> dict[str, Any] | None:
+        action = PendingAction(
+            tenant_id=sample_tenant.tenant_id,
+            user_id=sample_user.user_id,
+            action_type="REGISTER_PURCHASE",
+            payload=payload,
+            risk_level="MEDIUM",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        db_session.add(action)
+        await db_session.flush()
+        with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+            return await _execute_local_action(
+                action=action, tenant_id=sample_tenant.tenant_id, db=db_session, redis=None  # type: ignore[arg-type]
+            )
+
+    primero = await _ejecutar(base)
+    assert primero is not None and primero["status"] == "failed"
+    segundo = await _ejecutar({**base, "product_id": str(p.id), "qty": 2})
+    assert segundo is None, segundo  # se ejecutó
+    gastos = (
+        await db_session.execute(select(ExpenseEntry).where(ExpenseEntry.product_id == p.id))
+    ).scalars().all()
+    assert len(gastos) == 1
+    # Y una compra realmente repetida sigue saliendo como duplicada.
+    tercero = await _ejecutar({**base, "product_id": str(p.id), "qty": 2})
+    assert tercero is not None and tercero["status"] == "duplicate"

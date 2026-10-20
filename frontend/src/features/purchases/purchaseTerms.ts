@@ -44,8 +44,10 @@ export function termsError(t: PurchaseTerms): string | null {
   const conAlicuota = t.taxTreatment === "incluido" || t.taxTreatment === "adicional";
   if (conAlicuota) {
     const r = num(t.taxRatePct);
-    if (!t.taxRatePct || !Number.isFinite(r) || r <= 0 || r >= 100) {
-      return "Indicá la alícuota del IVA (por ejemplo 21).";
+    // Mismos límites que el backend (fracción > 0 y < 1, con 4 decimales):
+    // 0,01 % a 99,99 %. Fuera de eso el redondeo daría 0 o 1 y un 422.
+    if (!t.taxRatePct || !Number.isFinite(r) || r < 0.01 || r > 99.99) {
+      return "Indicá la alícuota del IVA entre 0,01 y 99,99 (por ejemplo 21).";
     }
   }
   const monto = t.shippingAmount ? num(t.shippingAmount) : 0;

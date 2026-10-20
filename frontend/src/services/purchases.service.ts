@@ -17,6 +17,10 @@ export interface ManualPurchasePayload {
   payment_method: string;
   transaction_date: string;
   lines: PurchaseLinePayload[];
+  /** B·5b: qué se hace con el envío del comprobante (opcional). */
+  shipping?: { amount: number; mode: string };
+  /** B·5b: qué es el importe de las líneas respecto del IVA (opcional). */
+  tax?: { treatment: string; rate?: number };
 }
 
 export interface PurchaseLineResult {

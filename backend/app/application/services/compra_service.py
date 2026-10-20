@@ -31,6 +31,7 @@ from app.domain.comprobante_de_compra import (
     LineaDeCompra,
     costear_comprobante,
 )
+from app.domain.product_completion import recompute_requires_completion
 from app.domain.sale_unit import a_unidades_base
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.product import Product
@@ -171,6 +172,9 @@ async def registrar_compra(
             source_row_ref=source_row_ref,
         )
         movement_ids.append(movimiento.id)
+        # Comprar un producto creado incompleto por un import le da costo y stock:
+        # se recalcula si sigue «por completar» (antes lo hacía resolve-purchase).
+        recompute_requires_completion(producto)
         gasto = ExpenseEntry(
             tenant_id=tenant_id,
             product_id=producto.id,

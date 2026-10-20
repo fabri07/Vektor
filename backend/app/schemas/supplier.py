@@ -190,8 +190,12 @@ class ReceiptLineRequest(BaseModel):
     @field_validator("unit_price")
     @classmethod
     def _check_unit_price(cls, v: Decimal) -> Decimal:
-        if v < 0:
-            raise PydanticCustomError("unit_price_negative", "unit_price debe ser >= 0.")
+        # B·5b: una línea en 0 no es una compra (una bonificación es menor precio
+        # de la línea pagada). Antes entraba como stock a costo 0.
+        if v <= 0:
+            raise PydanticCustomError(
+                "unit_price_positive", "El precio de cada línea tiene que ser mayor que cero."
+            )
         return v
 
 

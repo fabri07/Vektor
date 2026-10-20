@@ -9,6 +9,7 @@ import {
   type PurchaseTerms,
 } from "@/features/purchases/purchaseTerms";
 import { useMutation } from "@tanstack/react-query";
+import type { AxiosError } from "axios";
 import { AlertTriangle, FileUp, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -130,7 +131,21 @@ export function ReceiptModal({
     onSuccess: () => {
       void onUploaded();
     },
-    onError: () => toast("No se pudo cargar el remito.", "error"),
+    onError: (err) => {
+      // El motivo lo dice el backend (fecha, precio, IVA): mostrarlo en vez de
+      // un genérico que no dice qué corregir.
+      const detail = (err as AxiosError<{ detail?: unknown }>)?.response?.data?.detail;
+      const msg =
+        typeof detail === "string"
+          ? detail
+          : detail && typeof detail === "object" && "message" in detail
+            ? String((detail as { message: unknown }).message)
+            : Array.isArray(detail) && detail[0] && typeof detail[0] === "object"
+              ? String((detail[0] as { msg?: unknown }).msg ?? "")
+              : "";
+      setError(msg || "No se pudo cargar el remito.");
+      toast("No se pudo cargar el remito.", "error");
+    },
   });
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -182,8 +197,9 @@ export function ReceiptModal({
         return;
       }
       const unitPrice = Number(line.unit_price);
-      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-        setError(`Precio unitario inválido en "${name}".`);
+      // B·5b: una línea en 0 no es una compra (una bonificación es menor precio).
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+        setError(`El precio de "${name}" tiene que ser mayor que cero.`);
         return;
       }
       const sku = line.sku.trim();

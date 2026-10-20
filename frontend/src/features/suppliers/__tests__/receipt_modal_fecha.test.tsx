@@ -71,3 +71,27 @@ test("con fecha e IVA incluido, los manda", async () => {
     ),
   );
 });
+
+test("un precio en 0 no se manda y dice por qué", () => {
+  pintar();
+  fireEvent.change(screen.getByLabelText("Fecha del remito"), {
+    target: { value: "2026-09-15" },
+  });
+  const [, precio] = screen.getAllByPlaceholderText("0");
+  fireEvent.change(precio!, { target: { value: "0" } });
+  fireEvent.click(screen.getByRole("button", { name: "Guardar remito" }));
+  expect(screen.getByText(/tiene que ser mayor que cero/)).toBeInTheDocument();
+  expect(upload).not.toHaveBeenCalled();
+});
+
+test("si el backend rechaza, muestra su motivo", async () => {
+  upload.mockRejectedValue({
+    response: { status: 422, data: { detail: { code: "INVALID_PURCHASE", message: "Motivo del backend." } } },
+  });
+  pintar();
+  fireEvent.change(screen.getByLabelText("Fecha del remito"), {
+    target: { value: "2026-09-15" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Guardar remito" }));
+  expect(await screen.findByText("Motivo del backend.")).toBeInTheDocument();
+});

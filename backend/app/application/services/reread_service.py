@@ -1013,15 +1013,24 @@ async def _superseder_clasificados_de_otros(
         rec.void_reason = VOID_REASON_REREAD
         rec.voided_by_repair_run_id = run.id
         reemplazados += 1
-        if isinstance(rec, SaleEntry):
+        if isinstance(rec, SaleEntry) or rec.source_row_ref:
+            # B·5b: una compra resuelta desde «Otros» deja sus movimientos con la
+            # MISMA procedencia de la fila (`source_row_ref`) que sus gastos. Sin
+            # anularlos, el reimport cargaba otro movimiento y el stock y el
+            # costo quedaban duplicados. Varios gastos comparten la ref: el
+            # primero anula y los demás no encuentran nada vivo.
+            filtro_mov = (
+                InventoryMovement.source_event_id == sale_source_event_id(rec.id)
+                if isinstance(rec, SaleEntry)
+                else InventoryMovement.source_row_ref == rec.source_row_ref
+            )
             movimientos = (
                 (
                     await session.execute(
                         select(InventoryMovement).where(
                             InventoryMovement.tenant_id == tenant_id,
                             InventoryMovement.source_upload_id == file_id,
-                            InventoryMovement.source_event_id
-                            == sale_source_event_id(rec.id),
+                            filtro_mov,
                             InventoryMovement.voided_at.is_(None),
                         )
                     )

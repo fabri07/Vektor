@@ -1078,7 +1078,10 @@ async def resolve_purchase(
     if record.suggested_entity not in ("expense", None):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "NOT_A_PURCHASE"},
+            detail={
+                "code": "NOT_A_PURCHASE",
+                "message": "Esta fila no es un gasto: importala como lo que es.",
+            },
         )
     _clave_identidad = str(record.row_data.get(IDENTITY_REF_KEY) or "")
     if (

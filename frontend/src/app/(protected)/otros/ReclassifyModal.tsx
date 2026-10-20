@@ -68,6 +68,10 @@ export function ReclassifyModal({
   const [lineas, setLineas] = useState<LineaDeCompra[]>([NUEVA_LINEA]);
   const [supplierName, setSupplierName] = useState("");
   const [terms, setTerms] = useState<PurchaseTerms>(EMPTY_TERMS);
+  // Búsqueda de artículos: un negocio puede tener miles y un <select> solo no escala.
+  const [busqueda, setBusqueda] = useState("");
+  // El error de la compra se muestra después del primer intento, no al abrir.
+  const [intento, setIntento] = useState(false);
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState("");
   const [text, setText] = useState("");
@@ -77,7 +81,7 @@ export function ReclassifyModal({
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
 
-  const { data: productos = [] } = useQuery({
+  const { data: productos = [], isError: productosError } = useQuery({
     queryKey: ["products-list"],
     queryFn: () => productsService.getAllProducts({ is_active: true }),
     enabled: !!record && entityType === "purchase",
@@ -103,6 +107,8 @@ export function ReclassifyModal({
     ]);
     setSupplierName("");
     setTerms(EMPTY_TERMS);
+    setBusqueda("");
+    setIntento(false);
     setAmount(pre.amount.replace(/[^\d.,]/g, ""));
     setDate(pre.date.slice(0, 10));
     setText(pre.text);
@@ -152,6 +158,7 @@ export function ReclassifyModal({
     const num = Number(amount.replace(",", "."));
     const isoDate = `${date}T00:00:00`;
     if (entityType === "purchase") {
+      setIntento(true);
       if (errorDeCompra) return;
       onResolvePurchase({
         lines: lineas.map((l) => ({
@@ -268,7 +275,10 @@ export function ReclassifyModal({
             onChange={(e) => setEntityType(e.target.value as Destino)}
           >
             <option value="sale">Venta</option>
-            <option value="purchase">Compra de mercadería</option>
+            {/* Sólo una fila de gasto (o sin sugerencia) se resuelve como compra. */}
+            {record.suggested_entity === "expense" || record.suggested_entity === null ? (
+              <option value="purchase">Compra de mercadería</option>
+            ) : null}
             <option value="expense">Gasto</option>
             <option value="product">Producto</option>
             <option value="customer">Cliente</option>
@@ -319,17 +329,39 @@ export function ReclassifyModal({
               ¿Qué artículos compraste? Una compra de mercadería sin artículos no se puede usar
               para calcular costos ni márgenes.
             </p>
+            <label className="grid gap-1 text-sm text-vektor-body">
+              Buscar artículo
+              <input
+                className={inputCls}
+                value={busqueda}
+                placeholder="Nombre del artículo"
+                onChange={(e) => setBusqueda(e.target.value)}
+              />
+            </label>
+            {productosError ? (
+              <p className="text-xs text-vk-danger">
+                No pudimos cargar tus artículos. Cerrá y volvé a abrir para reintentar.
+              </p>
+            ) : null}
             {lineas.map((l, i) => (
               <div key={i} className="grid grid-cols-[1fr_5rem_7rem_2rem] items-end gap-2">
                 <label className="grid gap-1 text-sm text-vektor-body">
                   Artículo
                   <select
                     className={inputCls}
+                    aria-label={`Artículo de la línea ${i + 1}`}
                     value={l.productId}
                     onChange={(e) => setLinea(i, { productId: e.target.value })}
                   >
                     <option value="">Elegí un artículo…</option>
-                    {productos.map((p) => (
+                    {productos
+                      .filter(
+                        (p) =>
+                          p.id === l.productId ||
+                          !busqueda.trim() ||
+                          p.name.toLowerCase().includes(busqueda.trim().toLowerCase()),
+                      )
+                      .map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name}
                       </option>
@@ -347,6 +379,7 @@ export function ReclassifyModal({
                   Cantidad
                   <input
                     className={inputCls}
+                    aria-label={`Cantidad de la línea ${i + 1}`}
                     type="number"
                     min={1}
                     step={1}
@@ -358,6 +391,7 @@ export function ReclassifyModal({
                   Importe
                   <input
                     className={inputCls}
+                    aria-label={`Importe de la línea ${i + 1}`}
                     type="number"
                     min={0}
                     step="0.01"
@@ -367,7 +401,7 @@ export function ReclassifyModal({
                 </label>
                 <button
                   type="button"
-                  aria-label="Quitar artículo"
+                  aria-label={`Quitar la línea ${i + 1}`}
                   disabled={lineas.length === 1}
                   onClick={() => setLineas((prev) => prev.filter((_, j) => j !== i))}
                   className="mb-1 inline-flex h-8 w-8 items-center justify-center rounded border border-vk-border-w disabled:opacity-40"
@@ -392,7 +426,14 @@ export function ReclassifyModal({
               />
             </label>
             <PurchaseTermsFields value={terms} onChange={setTerms} />
-            {errorDeCompra ? <p className="text-xs text-vk-danger">{errorDeCompra}</p> : null}
+            {intento && errorDeCompra ? (
+              <p id="error-de-compra" role="alert" className="text-xs text-vk-danger">
+                {errorDeCompra}
+              </p>
+            ) : null}
+            {!date ? (
+              <p className="text-xs text-vk-text-muted">Falta la fecha de la compra.</p>
+            ) : null}
           </div>
         ) : null}
         {!isPurchaseResolution ? (
@@ -492,7 +533,7 @@ export function ReclassifyModal({
             type="submit"
             // Fecha obligatoria para venta/gasto: sin ella no se puede importar
             // (no se inventa "hoy" — F6). Refuerza el `required` del <input>.
-            disabled={saving || (needsDate && !date) || (isPurchaseResolution && !!errorDeCompra)}
+            disabled={saving || (needsDate && !date)}
             className="rounded bg-vk-blue px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
             {saving ? "Importando..." : isPurchaseResolution ? "Registrar compra" : "Importar"}

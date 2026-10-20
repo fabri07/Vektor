@@ -462,3 +462,144 @@ async def test_envio_o_iva_incoherente_422_sin_efectos(
     )
     assert resp.status_code in (400, 422), resp.text
     assert await _movimientos(db_session, a.id) == []
+
+
+# ── Revisión de B·5b-1 ────────────────────────────────────────────────────────
+
+
+async def test_relectura_que_ya_lee_la_fila_anula_tambien_el_stock_de_la_compra(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    archivo: UploadedFile,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-O.2 con compras: si la relectura ya sabe leer la fila, reemplaza la compra
+    resuelta desde «Otros». Antes anulaba sus gastos pero no sus movimientos: el
+    reimport cargaba otro y el stock quedaba duplicado."""
+    from app.application.services import reread_service
+    from app.integrations.s3 import S3Client
+
+    tid = sample_tenant.tenant_id
+    resp = await client.post(
+        f"/api/v1/ingestion/files/{archivo.id}/confirm",
+        json={
+            "column_mappings": [
+                {"source_column": "fecha", "target_field": "expense_date"},
+                {"source_column": "articulo", "target_field": "product_name"},
+                {"source_column": "cantidad", "target_field": "quantity"},
+                {"source_column": "total", "target_field": "amount"},
+                {"source_column": "proveedor", "target_field": "supplier_name"},
+            ],
+            "confirmed_fields": {"gastos": True},
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    fila = (
+        await db_session.execute(
+            select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tid)
+        )
+    ).scalar_one()
+    vela = await _producto(db_session, tid, "Vela de soja")
+    vela_id = vela.id
+    ok = await client.post(
+        f"/api/v1/others/{fila.id}/resolve-purchase",
+        json={
+            "transaction_date": "2024-03-06T00:00:00",
+            "lines": [{"product_id": str(vela_id), "quantity": 2, "amount": "600.00"}],
+        },
+        headers=auth_headers,
+    )
+    assert ok.status_code == 200, ok.text
+    await db_session.commit()
+    assert len(await _movimientos(db_session, vela_id)) == 1
+
+    wb = Workbook()
+    hoja = wb.active
+    hoja.title = "Compras"
+    hoja.append(["fecha", "articulo", "cantidad", "total", "proveedor"])
+    hoja.append(["2024-03-05", "Vela aromatica 200g", 5, 6000, "Distribuidora Sur"])
+    hoja.append(["2024-03-06", "Difusor bambu", 3, 3600, "Distribuidora Sur"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    corregido = buf.getvalue()
+
+    async def _bajar(self: S3Client, key: str) -> bytes:  # noqa: ARG001
+        return corregido
+
+    monkeypatch.setattr(S3Client, "download", _bajar)
+    await reread_service.apply_reread(db_session, archivo.id, tid)
+    await db_session.commit()
+    db_session.expire_all()
+
+    assert await _movimientos(db_session, vela_id) == [], "quedó el stock de la compra reemplazada"
+    v = await db_session.get(Product, vela_id)
+    assert v is not None and v.stock_units == 0
+
+
+async def test_compra_desde_otros_completa_un_producto_incompleto(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    tid = sample_tenant.tenant_id
+    p = await _producto(db_session, tid, "Incompleto")
+    p.requires_completion = True
+    p.unit_cost_ars = None
+    await db_session.commit()
+    rec = UnclassifiedRecord(
+        tenant_id=tid, source="ingestion", context_label="x",
+        row_data={"monto": "500"}, suggested_entity="expense", status="PENDING",
+    )
+    db_session.add(rec)
+    await db_session.commit()
+    resp = await client.post(
+        f"/api/v1/others/{rec.id}/resolve-purchase",
+        json={
+            "transaction_date": _HOY,
+            "lines": [{"product_id": str(p.id), "quantity": 5, "amount": "500.00"}],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    await db_session.commit()
+    await db_session.refresh(p)
+    assert p.requires_completion is False
+
+
+async def test_remito_con_precio_cero_422_con_motivo(
+    client: AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    sid = await _proveedor(client, auth_headers)
+    resp = await client.post(
+        f"/api/v1/suppliers/{sid}/receipts",
+        json={
+            "currency": "ARS",
+            "transaction_date": _HOY,
+            "lines": [{"product_name": "X", "qty": 1, "unit_price": "0"}],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+    assert "mayor que cero" in resp.text
+
+
+async def test_gasto_cogs_a_mano_con_otra_categoria_tambien_se_rechaza(
+    client: AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    resp = await client.post(
+        "/api/v1/expenses",
+        json={
+            "amount": "100",
+            "category": "OTHER",
+            "expense_type": "COGS",
+            "expense_date": _HOY,
+            "payment_method": "cash",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "PURCHASE_NEEDS_ITEMS"

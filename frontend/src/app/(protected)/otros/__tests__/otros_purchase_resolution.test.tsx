@@ -84,9 +84,12 @@ describe("resolución de compra ambigua (B·5b: con sus artículos)", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /agregar artículo/i }));
     await screen.findAllByRole("option", { name: "Soda" });
-    const articulos = screen.getAllByLabelText("Artículo");
-    fireEvent.change(articulos[1]!, { target: { value: "product-2" } });
-    fireEvent.change(screen.getAllByLabelText("Importe")[1]!, { target: { value: "300" } });
+    fireEvent.change(screen.getByLabelText("Artículo de la línea 2"), {
+      target: { value: "product-2" },
+    });
+    fireEvent.change(screen.getByLabelText("Importe de la línea 2"), {
+      target: { value: "300" },
+    });
     fireEvent.change(screen.getByLabelText("IVA"), { target: { value: "incluido" } });
     fireEvent.change(screen.getByLabelText("Alícuota (%)"), { target: { value: "21" } });
     fireEvent.click(screen.getByRole("button", { name: /registrar compra/i }));
@@ -173,5 +176,20 @@ describe("resolución de venta/gasto sin fecha (F6)", () => {
         expect.objectContaining({ transaction_date: "2024-03-05T00:00:00" }),
       ),
     );
+  });
+
+  it("una fila sugerida como venta no ofrece «Compra de mercadería»", () => {
+    render(
+      <ReclassifyModal
+        record={{ ...record, suggested_entity: "sale", match_candidates: null }}
+        productCategories={[]}
+        saving={false}
+        onClose={jest.fn()}
+        onSave={jest.fn()}
+        onLink={jest.fn()}
+        onResolvePurchase={jest.fn()}
+      />,
+    );
+    expect(screen.queryByRole("option", { name: "Compra de mercadería" })).not.toBeInTheDocument();
   });
 });

@@ -116,7 +116,7 @@ export default function OtrosPage() {
         `${total} registro(s) importados (${result.imported_sales} ventas, ` +
         `${result.imported_expenses} gastos)` +
         (result.needs_manual > 0
-          ? `; ${result.needs_manual} requieren completar la fecha o el monto a mano.`
+          ? `; ${result.needs_manual} hay que resolverlos de a uno (sin fecha o monto legible, o compras de mercadería, que van con sus artículos).`
           : ".");
       toast(msg, "success");
       await invalidate();
@@ -188,6 +188,10 @@ export default function OtrosPage() {
         if (igual) {
           reclassifyMutation.mutate({ ...vars, pesesAlConflicto: true });
         }
+      } else if (code === "RECORD_ALREADY_RESOLVED") {
+        toast("Esta fila ya se había resuelto. Actualizamos la lista.", "info");
+        setReclassifying(null);
+        await invalidate();
       } else if (code === "PURCHASE_NEEDS_ITEMS") {
         // B·5b: una compra de mercadería se registra con sus artículos.
         toast(
