@@ -184,8 +184,9 @@ class CustomerImportRow(BaseModel):
     """
 
     customer_type: str | None = None
-    name: str | None = None
-    last_name: str | None = None
+    # Largo de las columnas: un valor más largo da 422 y no un 500 del confirm.
+    name: str | None = Field(default=None, max_length=300)
+    last_name: str | None = Field(default=None, max_length=200)
     doc_type: str | None = None
     dni: str | None = None
     cuit: str | None = None

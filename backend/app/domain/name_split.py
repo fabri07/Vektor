@@ -21,6 +21,11 @@ NameSplitStatus = Literal["proposed", "not_applicable", "ambiguous"]
 
 _PARTICLES = frozenset({"de", "del", "van"})
 
+#: Largo de las columnas (`customers.name` 300, `customers.last_name` 200). Una
+#: propuesta que no entra no se ofrece: «Aplicar» haría fallar el confirm entero.
+MAX_FIRST_NAME = 300
+MAX_LAST_NAME = 200
+
 
 @dataclass(frozen=True)
 class NameSplitProposal:
@@ -43,6 +48,14 @@ class NameSplitProposal:
 def _split_by_comma(full_name: str) -> NameSplitProposal | None:
     if "," not in full_name:
         return None
+    if full_name.count(",") > 1:
+        return NameSplitProposal(
+            status="ambiguous",
+            first_name=None,
+            last_name=None,
+            reason="Hay más de una coma: no se sabe cuál separa el apellido.",
+            confidence_basis="varias comas",
+        )
     apellido, _, nombre = full_name.partition(",")
     apellido = apellido.strip()
     nombre = nombre.strip()
@@ -113,7 +126,7 @@ _SIN_EVIDENCIA = NameSplitProposal(
 )
 
 
-def propose_name_split(
+def _propose_name_split(
     full_name: str,
     *,
     customer_type: str | None = None,
@@ -160,3 +173,28 @@ def propose_name_split(
         return por_coma
     basis = "customer_type=person" if ctype == "person" else "doc_type=dni (tipo desconocido)"
     return _split_first_word(full_name, confidence_basis=basis)
+
+
+_DEMASIADO_LARGO = NameSplitProposal(
+    status="ambiguous",
+    first_name=None,
+    last_name=None,
+    reason="La parte que sería el apellido es más larga de lo que admite la ficha.",
+    confidence_basis="apellido demasiado largo",
+)
+
+
+def propose_name_split(
+    full_name: str,
+    *,
+    customer_type: str | None = None,
+    doc_type: str | None = None,
+) -> NameSplitProposal:
+    """Ver :func:`_propose_name_split`; además, nunca propone algo que no entra
+    en las columnas de la ficha."""
+    p = _propose_name_split(full_name, customer_type=customer_type, doc_type=doc_type)
+    if p.status == "proposed" and (
+        len(p.last_name or "") > MAX_LAST_NAME or len(p.first_name or "") > MAX_FIRST_NAME
+    ):
+        return _DEMASIADO_LARGO
+    return p

@@ -96,3 +96,38 @@ class TestExtremoAExtremoConElParserReal:
         assert item.name_split_suggestion.first_name == "Juan"
         assert item.name_split_suggestion.last_name == "Perez"
         assert "dni" in item.name_split_suggestion.confidence_basis.lower()
+
+
+class TestPorHttp:
+    """Revisión de B·4b: el campo viaja por el endpoint, no sólo en el servicio."""
+
+    async def test_el_preview_devuelve_la_propuesta(
+        self, client: Any, auth_headers: dict[str, Any]
+    ) -> None:
+        import unittest.mock
+
+        csv = b"nombre,dni\nJuan Perez,30111222\n"
+        with unittest.mock.patch(
+            "app.integrations.s3.S3Client.upload",
+            new_callable=unittest.mock.AsyncMock,
+            return_value="tenants/test/customer-file",
+        ):
+            resp = await client.post(
+                "/api/v1/customers/import/preview",
+                files={"file": ("clientes.csv", csv, "text/csv")},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200, resp.text
+        sug = resp.json()["items"][0]["name_split_suggestion"]
+        assert sug["status"] == "proposed"
+        assert (sug["first_name"], sug["last_name"]) == ("Juan", "Perez")
+
+    async def test_el_confirm_rechaza_un_apellido_que_no_entra(
+        self, client: Any, auth_headers: dict[str, Any]
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/customers/import/confirm",
+            json={"rows": [{"name": "Juan", "last_name": "X" * 201, "dni": "30111222"}]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422

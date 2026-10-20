@@ -73,6 +73,7 @@ export function CustomerFileModal({
     mutationFn: (file: File) => customersService.importPreview(file),
     onSuccess: (result) => {
       setPreview(result);
+      setAplicadas({});
       setError(null);
     },
     onError: () => toast("No se pudo leer la planilla de clientes.", "error"),
@@ -98,23 +99,52 @@ export function CustomerFileModal({
   });
 
   // F-N: acepta la propuesta de split para ESA fila — nunca se aplica sola.
-  // Actualiza el `customer` local (lo que viaja a confirm), y limpia la
-  // propuesta para que la fila deje de mostrar el hint una vez aceptada.
+  // Actualiza el `customer` local (lo que viaja a confirm) y guarda la fila
+  // original para poder deshacerlo. Separar nombre y apellido es decir que es
+  // una persona: si la fila no traía tipo, queda «person» (sin eso la ficha
+  // quedaría con apellido y sin tipo).
+  const [aplicadas, setAplicadas] = useState<Record<number, CustomerImportPreviewItem>>({});
+
   function applyNameSplitSuggestion(rowIndex: number) {
-    setPreview((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        items: prev.items.map((it) => {
-          if (it.row_index !== rowIndex || !it.name_split_suggestion) return it;
-          const { first_name, last_name } = it.name_split_suggestion;
-          return {
-            ...it,
-            customer: { ...it.customer, name: first_name, last_name },
-            name_split_suggestion: null,
-          };
-        }),
-      };
+    const original = preview?.items.find((it) => it.row_index === rowIndex);
+    const s = original?.name_split_suggestion;
+    if (!original || !s) return;
+    const aplicado: CustomerImportPreviewItem = {
+      ...original,
+      customer: {
+        ...original.customer,
+        name: s.first_name,
+        last_name: s.last_name,
+        customer_type: original.customer.customer_type ?? "person",
+      },
+      name_split_suggestion: null,
+    };
+    setAplicadas((a) => ({ ...a, [rowIndex]: original }));
+    setPreview((prev) =>
+      prev
+        ? {
+            ...prev,
+            items: prev.items.map((it) => (it.row_index === rowIndex ? aplicado : it)),
+          }
+        : prev,
+    );
+  }
+
+  function undoNameSplit(rowIndex: number) {
+    const original = aplicadas[rowIndex];
+    if (!original) return;
+    setPreview((prev) =>
+      prev
+        ? {
+            ...prev,
+            items: prev.items.map((it) => (it.row_index === rowIndex ? original : it)),
+          }
+        : prev,
+    );
+    setAplicadas((a) => {
+      const rest = { ...a };
+      delete rest[rowIndex];
+      return rest;
     });
   }
 
@@ -258,7 +288,24 @@ export function CustomerFileModal({
                       </td>
                       <td className="px-3 py-1.5 text-vk-text-primary">
                         {it.customer.name ?? "—"}
-                        <NameSplitHint item={it} onApply={applyNameSplitSuggestion} />
+                        {it.customer.last_name ? ` ${it.customer.last_name}` : ""}
+                        {aplicadas[it.row_index] ? (
+                          <p className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-vk-text-muted">
+                            <span>
+                              Nombre: <strong>{it.customer.name}</strong> / Apellido:{" "}
+                              <strong>{it.customer.last_name}</strong>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => undoNameSplit(it.row_index)}
+                              className="rounded border border-vk-border px-1.5 py-0.5 hover:bg-vk-surface"
+                            >
+                              Deshacer
+                            </button>
+                          </p>
+                        ) : (
+                          <NameSplitHint item={it} onApply={applyNameSplitSuggestion} />
+                        )}
                       </td>
                       <td className="px-3 py-1.5 text-vk-text-secondary">
                         {it.customer.cuit ?? it.customer.dni ?? "—"}
@@ -355,6 +402,9 @@ function NameSplitHint({
       <span>
         ¿Nombre: <strong>{s.first_name}</strong> / Apellido:{" "}
         <strong>{s.last_name}</strong>?
+        {s.confidence_basis.startsWith("doc_type=dni") && (
+          <> Lo sugerimos por el DNI: revisá que sea una persona.</>
+        )}
       </span>
       <button
         type="button"

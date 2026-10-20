@@ -118,3 +118,18 @@ class TestCasosBorde:
         assert p.status == "proposed"
         assert p.first_name == "Juan"
         assert p.last_name == "de la Torre"
+
+
+class TestRevisionB4b:
+    def test_varias_comas_es_ambiguo(self) -> None:
+        p = propose_name_split("Perez, Juan, Jr", customer_type="person")
+        assert p.status == "ambiguous"
+
+    def test_un_apellido_que_no_entra_en_la_ficha_no_se_propone(self) -> None:
+        p = propose_name_split("Juan " + "X" * 295, customer_type="person")
+        assert p.status == "ambiguous"
+        assert p.last_name is None
+
+    def test_el_limite_exacto_si_se_propone(self) -> None:
+        p = propose_name_split("Juan " + "X" * 200, customer_type="person")
+        assert p.status == "proposed"

@@ -237,4 +237,54 @@ describe("CustomerFileModal — F-N: propuesta de split nombre/apellido", () => 
     expect(fila0.name).toBe("Juan");
     expect(fila0.last_name).toBe("Perez");
   });
+
+  it("«Deshacer» vuelve la fila al nombre entero y lo que viaja al confirm también", async () => {
+    renderModal();
+    await uploadBulkFile();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Aplicar" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Deshacer" }));
+    expect(await screen.findByRole("button", { name: "Aplicar" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Importar 3 clientes/ }));
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalled());
+    const fila0 = mockConfirm.mock.calls[0]?.[0].find(
+      (r: { dni?: string }) => r.dni === "30111222",
+    );
+    expect(fila0.name).toBe("Juan Perez");
+    expect(fila0.last_name).toBeUndefined();
+  });
+
+  it("aplicar una propuesta por DNI avisa la confianza baja y fija el tipo persona", async () => {
+    mockPreview.mockResolvedValue({
+      ...PREVIEW_CON_PROPUESTA,
+      items: [
+        {
+          row_index: 0,
+          status: "create",
+          customer: { name: "Ana Gomez", dni: "30111223" },
+          existing_id: null,
+          existing_name: null,
+          issues: [],
+          name_split_suggestion: {
+            status: "proposed",
+            first_name: "Ana",
+            last_name: "Gomez",
+            reason: "Sin coma.",
+            confidence_basis: "doc_type=dni (tipo desconocido)",
+          },
+        },
+      ],
+      to_create: 1,
+    });
+    renderModal();
+    await uploadBulkFile();
+
+    expect(await screen.findByText(/Lo sugerimos por el DNI/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Aplicar" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Importar 1 cliente/ }));
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalled());
+    const fila = mockConfirm.mock.calls[0]?.[0][0];
+    expect(fila).toMatchObject({ name: "Ana", last_name: "Gomez", customer_type: "person" });
+  });
 });
