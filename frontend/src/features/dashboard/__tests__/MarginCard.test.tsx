@@ -67,6 +67,42 @@ describe("MarginCard", () => {
     expect(await screen.findByText("Todavía no hay datos para medir el margen")).toBeInTheDocument();
   });
 
+  it("M·2d-3: los retiros que superan el resultado salen como dato, no como alerta", async () => {
+    mockFetch.mockResolvedValue(respuesta({
+      retiros_vs_resultado: {
+        periodo: "mes_2026_09", desde: "2026-09-01", hasta: "2026-09-30",
+        retiros_ars: 5500, resultado_ars: 5000, estimado: false,
+      },
+    }));
+    renderCard();
+    const linea = await screen.findByText(/retiraste/);
+    expect(linea.textContent?.replace(/\s+/g, " ")).toMatch(
+      /^En septiembre 2026 retiraste \$\s?5\.500 y el negocio dejó \$\s?5\.000\.$/,
+    );
+    expect(linea.className).not.toMatch(/red|danger|amber/);
+  });
+
+  it("M·2d-3: sobre un neto estimado, el resultado dice «aprox.»", async () => {
+    mockFetch.mockResolvedValue(respuesta({
+      retiros_vs_resultado: {
+        periodo: "mes_2026_09", desde: "2026-09-01", hasta: "2026-09-30",
+        retiros_ars: 100, resultado_ars: -2000, estimado: true,
+      },
+    }));
+    renderCard();
+    // Resultado negativo: «perdió», sin un «dejó -$».
+    expect((await screen.findByText(/retiraste/)).textContent?.replace(/\s+/g, " ")).toMatch(
+      /el negocio perdió aprox\. \$\s?2\.000\.$/,
+    );
+  });
+
+  it("M·2d-3: sin señal no hay línea de retiros", async () => {
+    mockFetch.mockResolvedValue(respuesta({}));
+    renderCard();
+    await screen.findByText("Margen neto · septiembre 2026");
+    expect(screen.queryByText(/retiraste/)).not.toBeInTheDocument();
+  });
+
   it("error: lo dice, sin números", async () => {
     mockFetch.mockRejectedValue(new Error("500"));
     renderCard();

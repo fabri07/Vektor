@@ -69,7 +69,7 @@ function describeRisk(riskCode: string, fallback?: string | null): string {
     return "Estás muy concentrado en pocos proveedores, lo que te expone a faltantes y subas de precio. Te conviene sumar al menos un proveedor alternativo para tus insumos principales.";
   }
   if (key.includes("growth") || key.includes("crecimiento")) {
-    return "Tus ventas vienen cayendo respecto al mes anterior. Por el patrón de tus datos parece una baja de demanda más que estacional. Te sugiero reactivar a tus clientes habituales con una promo o contacto directo.";
+    return "Tus ventas son lo más flojo de tu salud: no crecen como el resto contra los 30 días anteriores. Te sugiero mirar qué productos dejaron de moverse y reactivar a tus clientes habituales.";
   }
   return "Hoy tu negocio muestra señales mixtas entre liquidez, margen y operación. El factor de mayor impacto ahora es el que más baja tu score: empezá por ahí para recuperar estabilidad.";
 }

@@ -43,7 +43,10 @@ from app.application.services.facts_service import (
     Granularidad,
     Period,
     Provenance,
+    RetirosVsResultado,
     SeverityThresholds,
+    capital_de_socios,
+    retiros_vs_resultado,
 )
 from app.config.avg_cost_display_rollout import avg_cost_display_enabled_for
 from app.domain.business_time import AR_TZ
@@ -615,6 +618,8 @@ class MargenesDePantalla:
     serie_neto: tuple[BusinessFact, ...] = ()
     por_categoria: tuple[BusinessFact, ...] = ()
     granularidad: Granularidad = "dia"
+    #: M·2d-3: los retiros del mes cerrado superan su resultado (informativo).
+    retiros_vs_resultado: RetirosVsResultado | None = None
 
 
 def granularidad_para(desde: date, hasta: date) -> Granularidad:
@@ -688,6 +693,16 @@ async def margenes_para_pantalla(
         fiscal_condition_crudo=await _regimen_crudo(session, tenant_id),
     )
     tid = str(tenant_id)
+    # El capital es async: se lee antes del threadpool, en su SAVEPOINT (en
+    # Postgres una consulta fallida aborta la transacción). Un error suyo no
+    # tumba la tarjeta, sólo apaga la señal de retiros (M·2d-3).
+    capital_frame: pd.DataFrame | None
+    try:
+        async with session.begin_nested():
+            capital_frame = await load_capital_frame(session, tenant_id, mes_cerrado.end)
+    except Exception as exc:  # noqa: BLE001 — la señal es accesoria
+        logger.warning("retiros_vs_resultado_fallo", tenant_id=tid, error=str(exc))
+        capital_frame = None
 
     def calcular() -> MargenesDePantalla:
         def pieza(metric: str, periodo_: Period, f: Callable[[], BusinessFact]) -> BusinessFact:
@@ -700,12 +715,20 @@ async def margenes_para_pantalla(
                 logger.warning(f"{nombre}_fallo", tenant_id=tid, error=str(exc))
                 return ()
 
+        neto = pieza(
+            "margen_neto", mes_cerrado,
+            lambda: svc.margen_neto(tid, mes_cerrado, include_demo=include_demo),
+        )
+        senal: RetirosVsResultado | None = None
+        if capital_frame is not None:
+            try:
+                senal = retiros_vs_resultado(neto, capital_de_socios(capital_frame, mes_cerrado))
+            except Exception as exc:  # noqa: BLE001 — la señal no tumba la tarjeta
+                logger.warning("retiros_vs_resultado_fallo", tenant_id=tid, error=str(exc))
         return MargenesDePantalla(
             sin_datos=False,
-            neto_mes_cerrado=pieza(
-                "margen_neto", mes_cerrado,
-                lambda: svc.margen_neto(tid, mes_cerrado, include_demo=include_demo),
-            ),
+            neto_mes_cerrado=neto,
+            retiros_vs_resultado=senal,
             bruto_mes_en_curso=pieza(
                 "margen_bruto", mes_en_curso,
                 lambda: svc.margen_bruto(tid, mes_en_curso, include_demo=include_demo),

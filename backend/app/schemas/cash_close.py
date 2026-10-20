@@ -32,7 +32,10 @@ class CashClosePreviewResponse(BaseModel):
 
 class CreateCashCloseRequest(BaseModel):
     close_date: date
-    counted_total_ars: Decimal = Field(ge=0)
+    # Neto del día SIN el fondo, contra un esperado que también lo es: puede ser
+    # negativo (M·2d-3) — un retiro en efectivo mayor que lo que entró da un
+    # esperado < 0, y contar exactamente eso es «caja cuadrada».
+    counted_total_ars: Decimal
     # Opcional: contado desglosado por método de pago.
     counted_by_method: dict[str, Decimal] | None = None
     notes: str | None = Field(default=None, max_length=500)

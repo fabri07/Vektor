@@ -1293,3 +1293,47 @@ def capital_de_socios(frame: pd.DataFrame, p: Period) -> CapitalDeSocios:
         ),
         capital_inicial_declarado=inicial,
     )
+
+
+# ── M·2d-3: los retiros del socio contra el resultado del mes cerrado ─────────
+#
+# Señal económica INFORMATIVA, separada del arqueo (que puede dar negativo y
+# cerrar cuadrado) y fuera del score: el dueño sacó del negocio más de lo que
+# el negocio dejó en el mes. Cuentan los retiros en dinero y en especie; las
+# devoluciones de préstamo no (no es sacar ganancia, es pagar una deuda).
+
+
+@dataclass(frozen=True)
+class RetirosVsResultado:
+    periodo: str
+    desde: date
+    hasta: date
+    retiros_ars: float
+    resultado_ars: float
+    #: El neto del mes es estimado → el resultado también: se dice «aprox.».
+    estimado: bool
+
+
+def retiros_vs_resultado(neto: BusinessFact, capital: CapitalDeSocios) -> RetirosVsResultado | None:
+    """La señal, o ``None`` si no corresponde.
+
+    Sin resultado medido (neto ausente, mes incompleto) no hay con qué comparar:
+    nada. Sin retiros, nada. Con un resultado negativo cualquier retiro lo supera.
+    """
+    d = neto.detail or {}
+    resultado = d.get("resultado_ars")
+    if resultado is None or capital.totales is None:
+        return None
+    r = capital.totales.retiros
+    retiros = _ars0(r.dinero + r.especie)
+    resultado_f = float(str(resultado))
+    if retiros <= 0 or retiros <= resultado_f:
+        return None
+    return RetirosVsResultado(
+        periodo=neto.period or f"mes_{capital.start:%Y_%m}",
+        desde=capital.start,
+        hasta=capital.end,
+        retiros_ars=retiros,
+        resultado_ars=resultado_f,
+        estimado=d.get("estado") == "estimado",
+    )

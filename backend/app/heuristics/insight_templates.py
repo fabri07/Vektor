@@ -83,6 +83,17 @@ TEMPLATES: dict[str, InsightTemplate] = {
         ),
         action_tpl="Buscá al menos un proveedor alternativo para tus productos clave.",
     ),
+    "GROWTH_STAGNANT": InsightTemplate(
+        title_tpl="Tus ventas {titulo_variacion}",
+        description_tpl=(
+            "En los últimos 30 días estimamos ventas por {ventas_ars}, contra "
+            "{ventas_prev_ars} de los 30 días anteriores ({variacion_pct}%)."
+        ),
+        action_tpl=(
+            "Mirá qué productos dejaron de moverse y si cambió algo en precios, "
+            "horarios o reposición."
+        ),
+    ),
 }
 
 
@@ -179,6 +190,37 @@ def render_insight(
             "n_productos": str(n),
             "lista_productos_criticos": lista,
         }
+
+    elif risk_code == "GROWTH_STAGNANT":
+        # Sólo con período anterior: sin historial el health engine no lo elige
+        # como riesgo. El título dice lo que pasó, nunca «caída» si no cayó.
+        actual = Decimal(str(state.monthly_sales_est))
+        previo = Decimal(str(state.prev_monthly_sales_est))
+        variacion = (actual - previo) / previo * 100 if previo > 0 else None
+        def _pct(v: Decimal) -> str:
+            return str(round(v, 1)).replace(".", ",")
+
+        if variacion is None:
+            titulo = "no tienen un período anterior con qué compararse"
+        elif variacion <= -10:
+            titulo = f"cayeron {_pct(abs(variacion))}% contra los 30 días anteriores"
+        elif variacion < 5:
+            titulo = "están estancadas contra los 30 días anteriores"
+        else:
+            titulo = f"crecieron {_pct(variacion)}%, menos que el resto de tu salud"
+        vars_ = {
+            "titulo_variacion": titulo,
+            "ventas_ars": _fmt_ars(actual),
+            "ventas_prev_ars": _fmt_ars(previo),
+            "variacion_pct": (
+                "" if variacion is None else ("+" if variacion > 0 else "") + _pct(variacion)
+            ),
+        }
+        if variacion is None:
+            description_override = (
+                f"En los últimos 30 días estimamos ventas por {_fmt_ars(actual)}. "
+                "Todavía no hay 30 días anteriores para comparar."
+            )
 
     else:  # SUPPLIER_DEPENDENCY — no dynamic vars
         vars_ = {}
