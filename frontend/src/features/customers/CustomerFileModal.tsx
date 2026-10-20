@@ -10,6 +10,7 @@ import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/constants/upload";
 import {
   customersService,
   type CustomerExtractionResponse,
+  type CustomerImportPreviewItem,
   type CustomerImportPreviewResponse,
 } from "@/services/customers.service";
 import { useToastStore } from "@/stores/toastStore";
@@ -72,6 +73,7 @@ export function CustomerFileModal({
     mutationFn: (file: File) => customersService.importPreview(file),
     onSuccess: (result) => {
       setPreview(result);
+      setAplicadas({});
       setError(null);
     },
     onError: () => toast("No se pudo leer la planilla de clientes.", "error"),
@@ -95,6 +97,56 @@ export function CustomerFileModal({
     },
     onError: () => toast("No se pudo confirmar el import.", "error"),
   });
+
+  // F-N: acepta la propuesta de split para ESA fila — nunca se aplica sola.
+  // Actualiza el `customer` local (lo que viaja a confirm) y guarda la fila
+  // original para poder deshacerlo. Separar nombre y apellido es decir que es
+  // una persona: si la fila no traía tipo, queda «person» (sin eso la ficha
+  // quedaría con apellido y sin tipo).
+  const [aplicadas, setAplicadas] = useState<Record<number, CustomerImportPreviewItem>>({});
+
+  function applyNameSplitSuggestion(rowIndex: number) {
+    const original = preview?.items.find((it) => it.row_index === rowIndex);
+    const s = original?.name_split_suggestion;
+    if (!original || !s) return;
+    const aplicado: CustomerImportPreviewItem = {
+      ...original,
+      customer: {
+        ...original.customer,
+        name: s.first_name,
+        last_name: s.last_name,
+        customer_type: original.customer.customer_type ?? "person",
+      },
+      name_split_suggestion: null,
+    };
+    setAplicadas((a) => ({ ...a, [rowIndex]: original }));
+    setPreview((prev) =>
+      prev
+        ? {
+            ...prev,
+            items: prev.items.map((it) => (it.row_index === rowIndex ? aplicado : it)),
+          }
+        : prev,
+    );
+  }
+
+  function undoNameSplit(rowIndex: number) {
+    const original = aplicadas[rowIndex];
+    if (!original) return;
+    setPreview((prev) =>
+      prev
+        ? {
+            ...prev,
+            items: prev.items.map((it) => (it.row_index === rowIndex ? original : it)),
+          }
+        : prev,
+    );
+    setAplicadas((a) => {
+      const rest = { ...a };
+      delete rest[rowIndex];
+      return rest;
+    });
+  }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -236,6 +288,24 @@ export function CustomerFileModal({
                       </td>
                       <td className="px-3 py-1.5 text-vk-text-primary">
                         {it.customer.name ?? "—"}
+                        {it.customer.last_name ? ` ${it.customer.last_name}` : ""}
+                        {aplicadas[it.row_index] ? (
+                          <p className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-vk-text-muted">
+                            <span>
+                              Nombre: <strong>{it.customer.name}</strong> / Apellido:{" "}
+                              <strong>{it.customer.last_name}</strong>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => undoNameSplit(it.row_index)}
+                              className="rounded border border-vk-border px-1.5 py-0.5 hover:bg-vk-surface"
+                            >
+                              Deshacer
+                            </button>
+                          </p>
+                        ) : (
+                          <NameSplitHint item={it} onApply={applyNameSplitSuggestion} />
+                        )}
                       </td>
                       <td className="px-3 py-1.5 text-vk-text-secondary">
                         {it.customer.cuit ?? it.customer.dni ?? "—"}
@@ -302,6 +372,48 @@ function SummaryCard({
       <p className="text-lg font-semibold">{value}</p>
       <p className="text-[11px] uppercase tracking-wide">{label}</p>
     </div>
+  );
+}
+
+/**
+ * F-N: propuesta de split nombre/apellido — nunca se aplica sola. Sólo
+ * aparece para filas "create" sin `last_name` propio (el backend no la
+ * calcula para el resto). `not_applicable` (razón social / una sola
+ * palabra) no muestra nada — no hay nada que ofrecer.
+ */
+function NameSplitHint({
+  item,
+  onApply,
+}: {
+  item: CustomerImportPreviewItem;
+  onApply: (rowIndex: number) => void;
+}) {
+  const s = item.name_split_suggestion;
+  if (!s || s.status === "not_applicable") return null;
+  if (s.status === "ambiguous") {
+    return (
+      <p className="mt-0.5 text-[11px] text-vk-text-muted" title={s.reason}>
+        ¿Nombre y apellido? No está claro — revisalo si hace falta.
+      </p>
+    );
+  }
+  return (
+    <p className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-vk-text-muted">
+      <span>
+        ¿Nombre: <strong>{s.first_name}</strong> / Apellido:{" "}
+        <strong>{s.last_name}</strong>?
+        {s.confidence_basis.startsWith("doc_type=dni") && (
+          <> Lo sugerimos por el DNI: revisá que sea una persona.</>
+        )}
+      </span>
+      <button
+        type="button"
+        onClick={() => onApply(item.row_index)}
+        className="rounded border border-vk-blue/40 px-1.5 py-0.5 text-vk-blue hover:bg-vk-blue/10"
+      >
+        Aplicar
+      </button>
+    </p>
   );
 }
 
