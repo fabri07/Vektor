@@ -126,9 +126,13 @@ def test_parse_libro_diario_classifies_rows() -> None:
     assert fiada["forma_pago"] == "cuenta corriente"
     assert fiada["fecha"] == "2026-05-02"
 
-    # Ambiguo → otros; subtotal ("Total mes") → descartado.
+    # Ambiguo → otros; subtotal ("Total mes") → «Otros» con su motivo (B·4):
+    # no se importa, pero tampoco desaparece en silencio.
     assert len(parsed["otros"]) == 1
     assert parsed["otros"][0]["detalle"] == "Movimiento raro"
+    assert [(f["detalle"], f["motivo"]) for f in parsed["no_ventas"]] == [
+        ("Total mes", "Fila de total, subtotal o saldo del libro: no es un movimiento")
+    ]
 
 
 # ── Integración con _parse_spreadsheet ────────────────────────────────────────
@@ -144,7 +148,8 @@ def test_xlsx_libro_diario_single_sheet_summary() -> None:
     assert summary["has_gasto"] is True
     assert len(summary["ventas_detectadas"]) == 1
     assert len(summary["gastos_detectados"]) == 3
-    assert len(summary["otros_detectados"]) == 1
+    # El ambiguo y el «Total mes» (B·4).
+    assert len(summary["otros_detectados"]) == 2
 
     by_entity = {c["entity_type"]: c for c in summary["mapping_contexts"]}
     assert by_entity["sale"]["row_count"] == 1
@@ -199,7 +204,8 @@ async def test_libro_diario_insert_end_to_end(
     )
     assert counts["ventas"] == 1
     assert counts["gastos"] == 3
-    assert counts["otros"] == 1  # el movimiento ambiguo va a la bandeja "Otros"
+    # El movimiento ambiguo y el «Total mes» (B·4) van a la bandeja "Otros".
+    assert counts["otros"] == 2
 
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
     assert sale.amount == Decimal("120000")

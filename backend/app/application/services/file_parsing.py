@@ -852,8 +852,10 @@ _LD_GRUPO_MERCADERIA = {"mercaderia", "mercaderias", "stock", "inventario"}
 _LD_SUB_INGRESO = {"ingreso", "ingresos", "entrada", "entradas"}
 _LD_SUB_EGRESO = {"egreso", "egresos", "salida", "salidas"}
 _LD_DETALLE_KEYS = {"detalle", "descripcion", "concepto", "glosa", "movimiento", "observa"}
-# Filas de cierre que no son movimientos (subtotales del libro).
+# Filas de cierre que no son movimientos (subtotales del libro). B·4: van a
+# «Otros» con este motivo, no se descartan.
 _LD_TOTAL_PREFIXES = ("total", "subtotal", "saldo", "acumulado")
+_LD_MOTIVO_TOTAL = "Fila de total, subtotal o saldo del libro: no es un movimiento"
 # Hojas DERIVADAS: agregados que Véktor recalcula solo desde los movimientos
 # (resúmenes por medio de pago, ganancias, balances). Importarlas además de las
 # hojas de movimientos del mismo archivo suma esos totales por segunda vez —
@@ -1077,9 +1079,6 @@ def parse_libro_diario(
             if detalle_raw is not None and str(detalle_raw).strip()
             else None
         )
-        if detalle and _ld_norm_cell(detalle).startswith(_LD_TOTAL_PREFIXES):
-            continue  # subtotales/saldos del libro: no son movimientos
-
         din_in = _ld_amount(_ld_cell(cells, col_map, "dinero_ingreso"))
         din_out = _ld_amount(_ld_cell(cells, col_map, "dinero_egreso"))
         mer_in = _ld_amount(_ld_cell(cells, col_map, "mercaderia_ingreso"))
@@ -1089,6 +1088,30 @@ def parse_libro_diario(
 
         fecha = str(last_fecha).strip() if last_fecha is not None else None
         base: dict[str, Any] = {"fecha": fecha, "detalle": detalle}
+
+        if detalle and _ld_norm_cell(detalle).startswith(_LD_TOTAL_PREFIXES):
+            # B·4: un total, subtotal o saldo del libro no es un movimiento, pero
+            # tampoco desaparece en silencio: el prefijo atrapa también «Saldo
+            # inicial» (que tiene su propio motivo) o un detalle real que empieza
+            # igual. Va a «Otros» con su motivo y el usuario decide; importarlo
+            # sumaría dos veces lo de arriba.
+            tipo = clasificar_tipo(detalle)
+            motivo = (
+                tipo.motivo
+                if tipo.destino == "otros" and es_tipo_reconocido(detalle)
+                else _LD_MOTIVO_TOTAL
+            )
+            no_ventas.append(
+                {
+                    **base,
+                    "dinero_ingreso": str(din_in) if din_in else None,
+                    "dinero_egreso": str(din_out) if din_out else None,
+                    "mercaderia_ingreso": str(mer_in) if mer_in else None,
+                    "mercaderia_egreso": str(mer_out) if mer_out else None,
+                    "motivo": motivo,
+                }
+            )
+            continue
 
         if din_in and (din_out or mer_in):
             # Plata que entra y sale (o venta + compra) en la misma fila →
@@ -1228,9 +1251,9 @@ def _append_libro_diario_contexts(
     if por_motivo:
         total = sum(len(f) for f in por_motivo.values())
         summary["warnings"].append(
-            f"{total} entrada(s) de dinero de '{sheet_label}' no son ventas según su "
-            "detalle (aporte, préstamo, devolución, ajuste…) y quedaron en «Otros» "
-            "con su motivo."
+            f"{total} fila(s) de '{sheet_label}' no son ventas ni gastos según su "
+            "detalle (aporte, préstamo, devolución, ajuste, total o saldo del "
+            "libro…) y quedaron en «Otros» con su motivo."
         )
 
 

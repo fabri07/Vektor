@@ -106,6 +106,7 @@ from app.domain.expense_categories import (
     infer_expense_type,
     resolve_tax_kind,
 )
+from app.domain.fila_de_total import MOTIVO_FILA_DE_TOTAL, es_fila_de_total_dict
 from app.domain.ingestion_limits import (
     TEXTO_FORMULA_SIN_RESULTADO,
     es_formula_sin_resultado,
@@ -3782,6 +3783,11 @@ def _planificar_costos_de_la_hoja(
     lineas: list[CostLine] = []
     del_grupo: list[GroupLine] = []
     for _idx, _row in enumerate(rows):
+        if es_fila_de_total_dict(_row):
+            # B·4: el total de la hoja no es una línea de compra. Dentro del grupo
+            # se llevaría una parte del envío repartido (su subtotal es la suma
+            # de todas) y el resto de las líneas quedaría con costo de menos.
+            continue
         _monto = _parse_amount(_row.get(_monto_col)) if _monto_col else None
         # El grupo se arma con TODAS las filas, tengan monto o no: el envío del
         # comprobante se reparte entre todas sus líneas, y una fila sin monto
@@ -5513,6 +5519,12 @@ async def _insert_confirmed_data_impl(
         _efectos_de_la_fila_plano: list[tuple[str, uuid.UUID]] = []
 
         for row_index, row in enumerate(rows):
+            # B·4: una fila de total va a «Otros» (abajo). Se anota ANTES del
+            # chequeo de huella: en una reconfirmación la fila se saltea por la
+            # huella y, sin esta marca, el bucle de productos la crearía.
+            _es_fila_de_total = es_fila_de_total_dict(row)
+            if _es_fila_de_total:
+                _captured_to_otros_rows.add(row_index)
             # B1: idempotencia. Si esta fila (archivo+índice) ya se importó en una
             # corrida previa, saltarla (re-subir el mismo archivo = 0 filas nuevas).
             # Chequeo READ-ONLY: la huella se registra recién al final de la fila y
@@ -5536,6 +5548,22 @@ async def _insert_confirmed_data_impl(
             # como output persistido (registra fingerprint) sin usar `continue`,
             # para no saltear el bloque de idempotencia del final de la iteración.
             _captured_to_otros = False
+            if _es_fila_de_total:
+                # B·4: «Total» / «Subtotal» con forma de agregado (ver
+                # `domain/fila_de_total.py`). Importarla sumaría dos veces lo de
+                # arriba; descartarla escondería un error de Véktor. A «Otros».
+                counts["otros"] += _capture_unclassified(
+                    session,
+                    tenant_id,
+                    rows=[row],
+                    headers=headers,
+                    source=source,
+                    uploaded_file_id=uploaded_file_id,
+                    context_label=MOTIVO_FILA_DE_TOTAL,
+                    row_ref=_source_row_ref(_row_anchor),
+                )
+                counts["filas_de_total"] = counts.get("filas_de_total", 0) + 1
+                _captured_to_otros = True
 
             # E6b — la decisión de identidad, ANTES de escribir nada. Una fila
             # puede producir venta y gasto, así que se resuelve por separado: que
@@ -5555,7 +5583,7 @@ async def _insert_confirmed_data_impl(
                 if _dec_gasto == DECISION_CONFLICTO
                 else None
             )
-            if _motivo_conflicto is not None:
+            if _motivo_conflicto is not None and not _captured_to_otros:
                 # Misma identidad, contenido distinto: puede ser una corrección o
                 # un error de carga. A "Otros" con el motivo — omitirla escondería
                 # la corrección y aplicarla duplicaría el efecto.
@@ -5588,7 +5616,7 @@ async def _insert_confirmed_data_impl(
             # ni gasto, ni producto, ni proveedor). Filas sin monto (o de producto
             # puro, que no necesita fecha) NO se rutean: tx_date=None nunca llega a
             # un registro porque el `if amount:` interno de cada bloque lo protege.
-            if tx_date is None:
+            if tx_date is None and not _captured_to_otros:
                 # F-H4: el monto de una venta puede ser una CUENTA, así que acá hay
                 # que resolverlo igual que abajo. Leer sólo la columna rompe el
                 # invariante que este bloque declara: en una hoja de precio ×
@@ -7169,6 +7197,8 @@ async def cobrar_envios_de_la_hoja(
     def _leer_envios(col: str) -> list[ShippingLine]:
         leidas: list[ShippingLine] = []
         for _idx, _row in enumerate(rows):
+            if es_fila_de_total_dict(_row):
+                continue  # B·4: el total del envío no es otro envío
             _monto = _parse_amount(_row.get(col))
             if _monto is None:
                 continue
@@ -9353,6 +9383,42 @@ async def _insert_multisheet_data(
                     if uploaded_file_id is not None
                     else None
                 )
+                if es_fila_de_total_dict(row):
+                    # B·4: gemelo del camino plano. La fila de total va a «Otros»
+                    # y quema su huella (la de la hoja, o la de captura de
+                    # producto) para que reconfirmar no la duplique en la bandeja.
+                    _total_anchor = (
+                        _ctx_anchor
+                        if entity in ("sale", "expense")
+                        else _import_row_anchor(
+                            tenant_id, uploaded_file_id, f"producto:{ctx_id}", _i
+                        )
+                        if uploaded_file_id is not None
+                        else None
+                    )
+                    if (
+                        entity not in ("sale", "expense")
+                        and _total_anchor is not None
+                        and await _import_row_seen(session, tenant_id, _total_anchor, seen_fp)
+                    ):
+                        continue
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        rows=[row],
+                        headers=ctx.get("headers"),
+                        source=source,
+                        uploaded_file_id=uploaded_file_id,
+                        context_label=MOTIVO_FILA_DE_TOTAL,
+                        row_ref=_row_ref,
+                        context_id=str(ctx_id) if ctx_id else None,
+                    )
+                    counts["filas_de_total"] = counts.get("filas_de_total", 0) + 1
+                    if _total_anchor is not None:
+                        await _register_import_row_fingerprint(
+                            session, tenant_id, _total_anchor, seen_fp
+                        )
+                    continue
                 # E6b — la decisión de identidad, antes de cualquier escritura.
                 _dec_ident = _plan_ident.decision.get(_i)
                 if _dec_ident == DECISION_YA_APLICADA:
