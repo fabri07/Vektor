@@ -12,6 +12,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
@@ -105,7 +106,7 @@ async def test_dos_resoluciones_simultaneas_dan_una_compra_y_un_409(
 ) -> None:
     fabrica, tid, uid, pid, rid = escenario
     body = others.ResolvePurchaseRequest(
-        transaction_date=f"{today_ar().isoformat()}T10:00:00",  # type: ignore[arg-type]
+        transaction_date=datetime.fromisoformat(f"{today_ar().isoformat()}T10:00:00"),
         lines=[others.ResolvePurchaseLine(product_id=pid, quantity=4, amount=Decimal("1000.00"))],
     )
 
