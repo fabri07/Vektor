@@ -9,10 +9,12 @@ import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { ReclassifyModal } from "./ReclassifyModal";
+import { OthersGroups } from "./OthersGroups";
 import { prefill, rowPreview } from "./helpers";
 import { Table } from "@/components/ui/Table";
 import {
   othersService,
+  type OthersGroup,
   type ProductMatchCandidate,
   type ReclassifyEntityType,
   type UnclassifiedRecordResponse,
@@ -47,12 +49,15 @@ const PAGE_SIZE = 50;
 export default function OtrosPage() {
   const [reclassifying, setReclassifying] = useState<UnclassifiedRecordResponse | null>(null);
   const [page, setPage] = useState(0);
+  // B·5a: grupo elegido en «Por archivo y motivo» (filtra la tabla).
+  const [group, setGroup] = useState<OthersGroup | null>(null);
+  const [toDismiss, setToDismiss] = useState<UnclassifiedRecordResponse | null>(null);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
 
   const { data: records = [], isLoading, isError } = useQuery({
-    queryKey: ["others-pending", page],
-    queryFn: () => othersService.getPending(page * PAGE_SIZE, PAGE_SIZE),
+    queryKey: ["others-pending", page, group?.group_key ?? null],
+    queryFn: () => othersService.getPending(page * PAGE_SIZE, PAGE_SIZE, group?.group_key),
     staleTime: 60 * 1000,
   });
 
@@ -74,16 +79,28 @@ export default function OtrosPage() {
     staleTime: 30 * 60 * 1000,
   });
 
-  const totalPages = Math.max(1, Math.ceil(pendingTotal / PAGE_SIZE));
+  // El conteo del grupo sale del resumen ACTUAL, no de la copia guardada al
+  // elegirlo: después de descartar o importar dentro del grupo, quedaría viejo.
+  const { data: summary } = useQuery({
+    queryKey: ["others-summary"],
+    queryFn: () => othersService.getSummary(),
+    staleTime: 60 * 1000,
+  });
+  const groupCount = group
+    ? (summary?.find((g) => g.group_key === group.group_key)?.count ?? 0)
+    : pendingTotal;
+  const totalPages = Math.max(1, Math.ceil(groupCount / PAGE_SIZE));
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["others-pending"] });
     await queryClient.invalidateQueries({ queryKey: ["others-pending-count"] });
+    await queryClient.invalidateQueries({ queryKey: ["others-summary"] });
   };
 
   const dismissMutation = useMutation({
     mutationFn: (id: string) => othersService.dismiss(id),
     onSuccess: async () => {
+      setToDismiss(null);
       toast("Registro descartado.", "success");
       await invalidate();
     },
@@ -273,6 +290,18 @@ export default function OtrosPage() {
       },
     },
     {
+      key: "context_label",
+      header: "Motivo",
+      render: (_: unknown, row: UnclassifiedRecordResponse) =>
+        row.context_label ? (
+          <span className="block max-w-xs truncate" title={row.context_label}>
+            {row.context_label}
+          </span>
+        ) : (
+          <span className="text-vk-text-muted">—</span>
+        ),
+    },
+    {
       key: "suggested_entity",
       header: "Destino sugerido",
       render: (_: unknown, row: UnclassifiedRecordResponse) =>
@@ -305,9 +334,7 @@ export default function OtrosPage() {
             title="Descartar"
             aria-label="Descartar registro"
             disabled={dismissMutation.isPending}
-            onClick={() => {
-              if (confirm("¿Descartar este registro?")) dismissMutation.mutate(row.id);
-            }}
+            onClick={() => setToDismiss(row)}
             className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
           >
             <Trash2 className="h-4 w-4" />
@@ -324,6 +351,15 @@ export default function OtrosPage() {
         venta, gasto o producto. Revisá la categoría recomendada, editala si hace falta e
         importalos — o descartalos.
       </p>
+
+      <OthersGroups
+        selected={group?.group_key ?? null}
+        onSelect={(g) => {
+          setGroup(g);
+          setPage(0);
+        }}
+        onDismissed={invalidate}
+      />
 
       {isError ? (
         <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
@@ -395,6 +431,34 @@ export default function OtrosPage() {
           ) : null}
         </>
       )}
+
+      <Modal
+        isOpen={toDismiss !== null}
+        onClose={() => setToDismiss(null)}
+        title="Descartar el registro"
+        size="sm"
+      >
+        <p className="text-sm text-vk-text-primary">
+          El registro no se importa a ninguna sección. {toDismiss ? rowPreview(toDismiss) : ""}
+        </p>
+        <div className="mt-3 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setToDismiss(null)}
+            className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            disabled={dismissMutation.isPending}
+            onClick={() => toDismiss && dismissMutation.mutate(toDismiss.id)}
+            className="rounded border border-vk-danger/40 bg-vk-danger-bg px-3 py-1.5 text-sm text-vk-danger disabled:opacity-50"
+          >
+            Descartar
+          </button>
+        </div>
+      </Modal>
 
       <ReclassifyModal
         record={reclassifying}

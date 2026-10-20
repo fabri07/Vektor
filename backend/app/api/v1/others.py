@@ -5,9 +5,14 @@ venta/gasto/producto queda en ``unclassified_records``. Desde acá el tenant:
   - lista lo pendiente (`GET /others`),
   - lo importa como venta/gasto/producto (`POST /others/{id}/reclassify`,
     valida con los mismos schemas que los endpoints de creación), o
-  - lo descarta (`POST /others/{id}/dismiss`).
+  - lo descarta (`POST /others/{id}/dismiss`), o
+  - descarta un GRUPO entero (B·5a: `GET /others/summary` →
+    `POST /others/dismiss-group/preview` → `POST /others/dismiss-group`).
 """
 
+import base64
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -28,6 +33,7 @@ from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
     require_active_subscription,
+    require_modify_access,
     require_role,
 )
 from app.api.v1.expenses import _apply_category_label
@@ -81,7 +87,9 @@ from app.domain.product_categories import (
 from app.domain.product_completion import recompute_requires_completion
 from app.domain.sale_unit import a_unidades_base
 from app.persistence.db.session import get_db_session
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
+from app.persistence.models.file import UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.supplier import Supplier
@@ -194,6 +202,8 @@ async def list_unclassified(
     record_status: str = Query(default=UNCLASSIFIED_STATUS_PENDING, alias="status"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    # B·5a: la clave opaca de `GET /others/summary` para ver un solo grupo.
+    group: str | None = Query(default=None, max_length=4000),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[UnclassifiedRecordResponse]:
@@ -203,12 +213,17 @@ async def list_unclassified(
         _row_val_categoria,
     )
 
-    q = (
-        select(UnclassifiedRecord)
-        .where(
+    filtros = (
+        _group_filter(tenant.tenant_id, group, record_status)
+        if group
+        else [
             UnclassifiedRecord.tenant_id == tenant.tenant_id,
             UnclassifiedRecord.status == record_status,
-        )
+        ]
+    )
+    q = (
+        select(UnclassifiedRecord)
+        .where(*filtros)
         .order_by(UnclassifiedRecord.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -241,6 +256,273 @@ async def list_unclassified(
             ].get(code, code)
         responses.append(resp)
     return responses
+
+
+# ── B·5a: «Otros» por grupo ──────────────────────────────────────────────────
+#
+# Un grupo es lo que comparte archivo, hoja (`context_id`), motivo
+# (`context_label`) y sugerencia de destino. El motivo agrupa —«Fila de total»,
+# «Venta sin stock que la respalde»— pero no identifica una hoja: por eso la
+# hoja va aparte, y una captura vieja sin `context_id` forma su propio grupo.
+# El cliente no arma la clave: la recibe opaca del resumen y la devuelve.
+
+_GROUP_IDS_EN_AUDITORIA = 200
+_GROUP_MUESTRAS = 5
+
+
+def _encode_group_key(
+    uploaded_file_id: UUID | None,
+    context_id: str | None,
+    context_label: str | None,
+    suggested_entity: str | None,
+) -> str:
+    raw = json.dumps(
+        [
+            str(uploaded_file_id) if uploaded_file_id else None,
+            context_id,
+            context_label,
+            suggested_entity,
+        ],
+        ensure_ascii=False,
+    )
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_group_key(key: str) -> tuple[UUID | None, str | None, str | None, str | None]:
+    try:
+        padded = key + "=" * (-len(key) % 4)
+        file_raw, ctx, label, entity = json.loads(base64.urlsafe_b64decode(padded))
+        if file_raw is not None and not isinstance(file_raw, str):
+            raise TypeError("uploaded_file_id")
+        file_id = UUID(file_raw) if file_raw else None
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "INVALID_GROUP_KEY"},
+        ) from exc
+    for part in (ctx, label, entity):
+        if part is not None and not isinstance(part, str):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "INVALID_GROUP_KEY"},
+            )
+    return file_id, ctx, label, entity
+
+
+def _group_filter(tenant_id: uuid.UUID, key: str, record_status: str) -> list[Any]:
+    file_id, ctx, label, entity = _decode_group_key(key)
+
+    def _eq(col: Any, value: Any) -> Any:
+        return col.is_(None) if value is None else col == value
+
+    return [
+        UnclassifiedRecord.tenant_id == tenant_id,
+        UnclassifiedRecord.status == record_status,
+        _eq(UnclassifiedRecord.uploaded_file_id, file_id),
+        _eq(UnclassifiedRecord.context_id, ctx),
+        _eq(UnclassifiedRecord.context_label, label),
+        _eq(UnclassifiedRecord.suggested_entity, entity),
+    ]
+
+
+def _group_token(ids: list[UUID]) -> str:
+    """Huella del CONJUNTO exacto de filas, no de su cantidad: si salen dos y
+    entran otras dos entre la vista previa y el descarte, el conteo es el mismo
+    y el token no."""
+    return hashlib.sha256(",".join(sorted(str(i) for i in ids)).encode()).hexdigest()
+
+
+def _visible_row(row: dict[str, Any] | None) -> dict[str, Any]:
+    return {k: v for k, v in (row or {}).items() if not k.startswith("__")}
+
+
+class OthersGroupResponse(BaseModel):
+    group_key: str
+    uploaded_file_id: UUID | None
+    file_name: str | None
+    context_id: str | None
+    motivo: str | None
+    suggested_entity: str | None
+    status: str
+    count: int
+
+
+class DismissGroupPreviewRequest(BaseModel):
+    group_key: str = Field(min_length=1, max_length=4000)
+
+
+class DismissGroupPreviewResponse(BaseModel):
+    count: int
+    samples: list[dict[str, Any]]
+    group_token: str
+
+
+class DismissGroupRequest(BaseModel):
+    group_key: str = Field(min_length=1, max_length=4000)
+    group_token: str = Field(min_length=64, max_length=64)
+
+
+class DismissGroupResponse(BaseModel):
+    dismissed: int
+
+
+@router.get(
+    "/summary",
+    response_model=list[OthersGroupResponse],
+    summary="Otros agrupado por archivo, hoja, motivo y sugerencia",
+)
+async def others_summary(
+    record_status: str = Query(default=UNCLASSIFIED_STATUS_PENDING, alias="status"),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[OthersGroupResponse]:
+    """El conteo de cada grupo es el del grupo COMPLETO, no el de una página."""
+    rows = (
+        await session.execute(
+            select(
+                UnclassifiedRecord.uploaded_file_id,
+                UnclassifiedRecord.context_id,
+                UnclassifiedRecord.context_label,
+                UnclassifiedRecord.suggested_entity,
+                func.count(UnclassifiedRecord.id),
+                func.max(UnclassifiedRecord.created_at),
+                UploadedFile.original_filename,
+            )
+            .outerjoin(
+                UploadedFile,
+                (UploadedFile.id == UnclassifiedRecord.uploaded_file_id)
+                & (UploadedFile.tenant_id == UnclassifiedRecord.tenant_id),
+            )
+            .where(
+                UnclassifiedRecord.tenant_id == tenant.tenant_id,
+                UnclassifiedRecord.status == record_status,
+            )
+            .group_by(
+                UnclassifiedRecord.uploaded_file_id,
+                UnclassifiedRecord.context_id,
+                UnclassifiedRecord.context_label,
+                UnclassifiedRecord.suggested_entity,
+                UploadedFile.original_filename,
+            )
+            .order_by(func.max(UnclassifiedRecord.created_at).desc())
+        )
+    ).all()
+    return [
+        OthersGroupResponse(
+            group_key=_encode_group_key(file_id, ctx, label, entity),
+            uploaded_file_id=file_id,
+            file_name=file_name,
+            context_id=ctx,
+            motivo=label,
+            suggested_entity=entity,
+            status=record_status,
+            count=int(count),
+        )
+        for file_id, ctx, label, entity, count, _ultimo, file_name in rows
+    ]
+
+
+@router.post(
+    "/dismiss-group/preview",
+    response_model=DismissGroupPreviewResponse,
+    summary="Vista previa del descarte de un grupo de Otros",
+)
+async def dismiss_group_preview(
+    body: DismissGroupPreviewRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    # El MISMO permiso que el descarte: quien no puede descartar no tiene por qué
+    # ver una confirmación que después le da 403 (el PIN se pide acá, una vez).
+    _: User = Depends(require_modify_access),
+    session: AsyncSession = Depends(get_db_session),
+) -> DismissGroupPreviewResponse:
+    filtros = _group_filter(tenant.tenant_id, body.group_key, UNCLASSIFIED_STATUS_PENDING)
+    ids = list((await session.execute(select(UnclassifiedRecord.id).where(*filtros))).scalars())
+    muestras = (
+        await session.execute(
+            select(UnclassifiedRecord.row_data)
+            .where(*filtros)
+            .order_by(UnclassifiedRecord.created_at)
+            .limit(_GROUP_MUESTRAS)
+        )
+    ).scalars()
+    return DismissGroupPreviewResponse(
+        count=len(ids),
+        samples=[_visible_row(r) for r in muestras],
+        group_token=_group_token(ids),
+    )
+
+
+@router.post(
+    "/dismiss-group",
+    response_model=DismissGroupResponse,
+    summary="Descartar un grupo de Otros (exactamente las filas de la vista previa)",
+)
+async def dismiss_group(
+    body: DismissGroupRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    # PIN antes que el guard 423 (mismo orden que el resto de las escrituras).
+    user: User = Depends(require_modify_access),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+    session: AsyncSession = Depends(get_db_session),
+) -> DismissGroupResponse:
+    """Descarta las filas del grupo SÓLO si son exactamente las de la vista previa.
+
+    Se toman con `FOR UPDATE` y se recalcula el token sobre lo que hay ahora: si
+    entre la vista previa y la confirmación entró o salió una fila (un import, una
+    relectura, otra sesión que resolvió una), el conjunto ya no es el que el
+    usuario vio y se responde 409 sin tocar nada.
+    """
+    records = list(
+        (
+            await session.execute(
+                select(UnclassifiedRecord)
+                .where(
+                    *_group_filter(
+                        tenant.tenant_id, body.group_key, UNCLASSIFIED_STATUS_PENDING
+                    )
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not records or _group_token([r.id for r in records]) != body.group_token:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "GROUP_CHANGED",
+                "message": (
+                    "El grupo cambió desde que lo revisaste. Volvé a abrir la "
+                    "vista previa antes de descartarlo."
+                ),
+            },
+        )
+    ahora = datetime.now(UTC)
+    for rec in records:
+        rec.status = UNCLASSIFIED_STATUS_DISMISSED
+        rec.resolved_at = ahora
+    file_id, ctx, label, entity = _decode_group_key(body.group_key)
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant.tenant_id,
+            decision_type="OTHERS_GROUP_DISMISSED",
+            decision_data={
+                "uploaded_file_id": str(file_id) if file_id else None,
+                "context_id": ctx,
+                "motivo": label,
+                "suggested_entity": entity,
+                "cantidad": len(records),
+                "group_token": body.group_token,
+                "record_ids": [str(r.id) for r in records[:_GROUP_IDS_EN_AUDITORIA]],
+            },
+            triggered_by="ui:others_dismiss_group",
+            actor_user_id=user.user_id,
+            created_at=ahora,
+        )
+    )
+    await session.flush()
+    return DismissGroupResponse(dismissed=len(records))
 
 
 @router.get("/count", summary="Cantidad de registros pendientes en Otros")
@@ -436,7 +718,12 @@ async def reclassify_record(
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
-    record = await _get_pending_record(session, tenant.tenant_id, record_id)
+    # B·5a: con `FOR UPDATE`, igual que el descarte (de a uno y por grupo): si no,
+    # una fila que otra sesión acaba de descartar se importaría igual y su estado
+    # quedaría pisado con IMPORTED.
+    record = await _get_pending_record(
+        session, tenant.tenant_id, record_id, for_update=True
+    )
 
     # Procedencia de la fila: sin esto, el registro que nace de clasificar a mano
     # una fila de "Otros" queda HUÉRFANO de su archivo — borrar el archivo no lo
@@ -859,11 +1146,31 @@ async def bulk_import_records(
 async def dismiss_record(
     record_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
-    record = await _get_pending_record(session, tenant.tenant_id, record_id)
+    record = await _get_pending_record(
+        session, tenant.tenant_id, record_id, for_update=True
+    )
+    ahora = datetime.now(UTC)
     record.status = UNCLASSIFIED_STATUS_DISMISSED
-    record.resolved_at = datetime.now(UTC)
+    record.resolved_at = ahora
+    # B·5a: el descarte de a uno también deja rastro (el de grupo ya lo dejaba).
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant.tenant_id,
+            decision_type="OTHERS_RECORD_DISMISSED",
+            decision_data={
+                "record_id": str(record.id),
+                "uploaded_file_id": (
+                    str(record.uploaded_file_id) if record.uploaded_file_id else None
+                ),
+                "motivo": record.context_label,
+            },
+            triggered_by="ui:others_dismiss",
+            actor_user_id=user.user_id,
+            created_at=ahora,
+        )
+    )
     await session.flush()
     return MessageResponse(message="Registro descartado.")

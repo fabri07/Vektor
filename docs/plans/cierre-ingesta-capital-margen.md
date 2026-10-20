@@ -326,6 +326,18 @@ Un PR por paso, en serie:
 
 Migraciones esperadas: B·6 (CHECK), B·8a (`product_reference_raw` + `product_aliases`), B·5 sólo si falta `source_row_ref`.
 
+#### B·5 ampliado (decisiones del dueño, 2026-10-20)
+
+Al planear B·5 el dueño fijó reglas de base que reemplazan el B·5 de arriba:
+1. **Una compra de mercadería sin los artículos que la componen no es un dato útil**: carga manual, chat, «Otros», Libro Diario y hojas de compras → se resuelve por líneas (producto, cantidad, importe) o va a «Otros».
+2. **Toda venta conlleva una compra previa** (compra o stock inicial con costo, a su fecha); si no, va a «Otros». **También el POS** (online 409; una venta sin red ya hecha no se pierde: va a «Otros»). Una edición manual o un costo de catálogo solos no alcanzan.
+3. **El stock inicial es mercadería que compraron el dueño o los socios**, valuada al costo y vendida a otro precio: costo obligatorio, precio de venta aparte, cuenta como compra previa. Se puede cargar a mano desde el primer día (por producto y en tabla), no sólo por archivo. El aporte en especie sigue en D·6.
+4. **Una columna con ≥ 40 % de nulos no se importa** y se avisa; si el usuario la mapea a mano se respeta. Reemplaza «un % de nulos es diagnóstico, nunca decisión».
+5. **No se borra un archivo (ni se anula una compra) cuya compra respalda ventas** (409); hace falta `sales_entries.cost_source_movement_id`.
+6. Las ventas `sin_costo` históricas: diagnóstico + script con `--apply` del dueño.
+
+Pasos, en serie: **B·5a** «Otros» por grupo (descarte con token del conjunto) → **B·5b** compra = artículos en todos los caminos (`compra_service.registrar_compra` único, IVA y envío en el contrato con el motor de `purchase_cost`, idempotencia y `FOR UPDATE`, procedencia por línea, todos los clientes de los 422 en el mismo PR, tests de efecto económico con valores) → **B·5c** stock inicial a mano, backend (`POST /products/{id}/opening`, batch en dos pasos con token) → **B·5d** su pantalla (tabla en la carga manual y en el onboarding) → **B·5e** venta con compra previa (+ bloqueo del borrado) → **B·5f** columnas con ≥ 40 % de nulos → **B·5g** históricas. **B·5a implementado (PR B·5a).**
+
 ## Fase 4: D·6, D·7 y cierre
 18. **D·6, mercadería aportada**: el stock de apertura y el aporte valorizado van atómicos.
     - Sin gasto ni salida de dinero. Al venderse entra en el costo vendido.
