@@ -3928,6 +3928,14 @@ async def confirm_file(
             "utilizable: falta el total (o el precio unitario y la cantidad para "
             "calcularlo), o el valor no se pudo interpretar."
         )
+    if counts.get("filas_de_total"):
+        # B·4: el pie «Total» / «Subtotal» de la planilla no se importa (sumaría
+        # dos veces lo de arriba), pero el usuario tiene que saber dónde quedó.
+        warnings.append(
+            f"{counts['filas_de_total']} fila(s) de total o subtotal de la planilla "
+            "quedaron en «Otros»: no se importan porque sumarían dos veces lo de "
+            "arriba. Si alguna es un dato real, clasificala desde ahí."
+        )
     if counts.get("filas_sin_cantidad"):
         # E4: la fila traía cantidad y no se pudo usar. Antes entraba como 1
         # unidad y no había nada que avisar porque no había nada que revisar.

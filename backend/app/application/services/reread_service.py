@@ -122,6 +122,7 @@ from app.application.services.stock_service import (
     void_movement,
 )
 from app.domain.expense_categories import classify_expense_with_vertical
+from app.domain.fila_de_total import es_fila_de_total_dict
 from app.domain.import_receipt import build_import_receipt
 from app.domain.ingestion_version import INGESTION_VERSION
 from app.domain.inventory_effect import (
@@ -1942,6 +1943,8 @@ def _iter_importable_fresh_rows(
         if not _kind_ok(kind):
             return out
         for idx, row in enumerate(rows):
+            if isinstance(row, dict) and es_fila_de_total_dict(row):
+                continue  # B·4: el import la manda a «Otros», no produce operación
             if isinstance(row, dict) and (not exigir_monto or _row_amount(row, kind) is not None):
                 out.append((None, idx, row, kind))
         return out
@@ -1966,6 +1969,8 @@ def _iter_importable_fresh_rows(
                 ctx = row.get("__context__")
                 idx = per_ctx.get(ctx, 0)
                 per_ctx[ctx] = idx + 1
+                if es_fila_de_total_dict(row):
+                    continue  # B·4: ver el camino de una hoja
                 if not exigir_monto or _row_amount(row, kind) is not None:
                     out.append((ctx, idx, row, kind))
     else:

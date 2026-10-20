@@ -9666,6 +9666,24 @@ async def _insert_multisheet_data(
                     session, tenant_id, _prod_cap_anchor, seen_fp
                 ):
                     continue
+                if es_fila_de_total_dict(row):
+                    # B·4: gemelo de los caminos por hoja.
+                    counts["otros"] += _capture_unclassified(
+                        session,
+                        tenant_id,
+                        rows=[row],
+                        headers=None,
+                        source=source,
+                        uploaded_file_id=uploaded_file_id,
+                        context_label=MOTIVO_FILA_DE_TOTAL,
+                        row_ref=_p_ref,
+                    )
+                    counts["filas_de_total"] = counts.get("filas_de_total", 0) + 1
+                    if _prod_cap_anchor is not None:
+                        await _register_import_row_fingerprint(
+                            session, tenant_id, _prod_cap_anchor, seen_fp
+                        )
+                    continue
                 if (
                     await _add_product(
                         row, {}, {}, _p_ref, capture_anchor=_prod_cap_anchor

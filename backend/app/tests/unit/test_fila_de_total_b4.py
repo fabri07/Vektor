@@ -75,10 +75,15 @@ def test_no_son_etiquetas_de_total(etiqueta: str) -> None:
 
 
 def test_fila_de_total_exige_forma_de_agregado() -> None:
-    # Etiqueta + montos (+ fecha) → total.
+    # Etiqueta + montos → total.
     assert es_fila_de_total(["Total", "1.234,50", None, ""])
-    assert es_fila_de_total([date(2026, 3, 31), "TOTAL", Decimal("900")])
+    assert es_fila_de_total(["TOTAL", Decimal("900")])
     assert es_fila_de_total(["Subtotal", 12, "1.234.567", "45%"])
+    # Con fecha NO: una planilla de cierre diario es un renglón de ventas por día.
+    assert not es_fila_de_total([date(2026, 3, 31), "Total del día", Decimal("900")])
+    assert not es_fila_de_total(["31/03/2026", "TOTAL", "900"])
+    # Un código, aunque sea numérico, dice qué es la fila.
+    assert not es_fila_de_total(["Total", "3"], identificadores=1)
     # Sin ningún número no hay agregado: es un rótulo, no un total.
     assert not es_fila_de_total(["Total", None, ""])
     # Otra celda de texto (SKU, cliente, descripción) → es un dato.
@@ -142,8 +147,8 @@ def _ventas_summary() -> dict[str, Any]:
     rows = [
         {"fecha": "2026-03-30", "producto": "Yerba", "monto": "600"},
         {"fecha": "2026-03-31", "producto": "Azúcar", "monto": "400"},
-        # Con fecha y monto: antes entraba como una venta de $1.000 más.
-        {"fecha": "2026-03-31", "producto": "TOTAL", "monto": "1000"},
+        # El pie de la planilla: va a «Otros» como total, no como fila sin fecha.
+        {"fecha": None, "producto": "TOTAL", "monto": "1000"},
     ]
     return {
         "file_type": "spreadsheet",
@@ -199,6 +204,8 @@ def _catalogo_summary() -> dict[str, Any]:
         "stock_detectado": [
             {"producto": "Total Clean", "stock": "3"},
             {"producto": "Total", "sku": "T-1", "stock": "2"},
+            # Un EAN es un número, pero identifica: es un producto.
+            {"producto": "Total", "codigo_barras": "7790001001", "stock": "4"},
             {"producto": "Totales", "stock": "5"},
         ],
     }
@@ -209,7 +216,12 @@ async def test_catalogo_total_clean_es_producto_y_totales_va_a_otros(
 ) -> None:
     tid = sample_tenant.tenant_id
     upload_id = await _upload(db_session, tid)
-    mappings = {"producto": "name", "sku": "sku", "stock": "stock_units"}
+    mappings = {
+        "producto": "name",
+        "sku": "sku",
+        "codigo_barras": "barcode",
+        "stock": "stock_units",
+    }
     for _ in range(2):  # la segunda es una reconfirmación: no crea el «Totales»
         await insert_confirmed_data(
             db_session,
@@ -228,6 +240,12 @@ async def test_catalogo_total_clean_es_producto_y_totales_va_a_otros(
     # «Total Clean» no es una etiqueta exacta; «Total» con SKU tiene otra celda de
     # texto: los dos son productos. «Totales» con sólo un número es el total.
     assert {"Total Clean", "Total"} <= nombres
+    totales_reales = (
+        await db_session.execute(
+            select(Product).where(Product.tenant_id == tid, Product.name == "Total")
+        )
+    ).scalars().all()
+    assert {p.barcode for p in totales_reales if p.barcode} == {"7790001001"}
     assert "Totales" not in nombres
     otros = await _otros(db_session, tid)
     assert [o.context_label for o in otros] == [MOTIVO_FILA_DE_TOTAL]
@@ -257,7 +275,7 @@ def _multihoja_summary() -> dict[str, Any]:
             for f, d, m in (
                 ("2026-03-30", "Mostrador", "700"),
                 ("2026-03-31", "Mostrador", "300"),
-                ("2026-03-31", "Subtotal marzo", "1000"),
+                ("", "Subtotal marzo", "1000"),
             )
         ],
         "gastos_detectados": [],
@@ -314,3 +332,27 @@ def test_el_total_de_la_hoja_no_entra_al_reparto_del_envio() -> None:
     assert 2 not in costos
     assert costos[0].shipping_allocated + costos[1].shipping_allocated == Decimal("40")
     assert costos[0].shipping_allocated == Decimal("10")
+
+
+async def test_planilla_de_cierre_diario_no_se_pierde(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión de B·4a: un renglón por día «fecha | Total del día | monto» son
+    las ventas del kiosco, no un pie de planilla."""
+    tid = sample_tenant.tenant_id
+    rows = [
+        {"fecha": f"2026-03-{d:02d}", "concepto": "Total del día", "monto": "150000"}
+        for d in (28, 29, 30)
+    ]
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "ventas",
+        "row_count": len(rows),
+        "ventas_detectadas": rows,
+        "gastos_detectados": [],
+        "stock_detectado": [],
+    }
+    counts = await insert_confirmed_data(db_session, tid, summary, {"ventas": True})
+    assert counts["ventas"] == 3
+    assert counts.get("filas_de_total", 0) == 0
+    assert await _otros(db_session, tid) == []

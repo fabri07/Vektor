@@ -12,9 +12,12 @@ Por eso hacen falta las DOS cosas:
    ``total`` / ``subtotal`` / ``totales`` / ``total general``, con a lo sumo un
    sufijo de período («total mes», «total enero», «total 2026», «subtotal
    03/2026»). «Total Clean» no lo es.
-2. **La fila tiene forma de agregado:** esa es la ÚNICA celda de texto (el
-   resto son números, fechas o están vacías) y hay al menos un número. Una fila
-   que además trae un SKU, un cliente o una descripción no es un total.
+2. **La fila tiene forma de agregado:** esa es la ÚNICA celda de texto, hay al
+   menos un número y **no tiene fecha**. Una fila que además trae un SKU, un
+   código (aunque sea numérico), un cliente o una descripción no es un total.
+   La fecha descarta a propósito: un pie de planilla no la trae, y una planilla
+   de cierre diario (``fecha | Total del día | 150000``) es justamente un
+   renglón de ventas por día que no se puede perder.
 
 Lo que cumple las dos no se descarta: va a «Otros» con su motivo, para que el
 usuario lo vea y, si se equivocó Véktor, lo clasifique a mano. Ante la duda,
@@ -86,8 +89,15 @@ def _es_fecha(value: Any) -> bool:
     return bool(_FECHA_TEXTO.match(str(value).strip().lower()))
 
 
-def es_fila_de_total(valores: list[Any]) -> bool:
-    """Las celdas de una fila (sin las claves del sistema) → ¿es un total?"""
+def es_fila_de_total(valores: list[Any], *, identificadores: int = 0) -> bool:
+    """Las celdas de una fila (sin las claves del sistema) → ¿es un total?
+
+    ``identificadores``: cuántas celdas no vacías vinieron de una columna de
+    código (SKU, código de barras, código interno). Un código numérico parece un
+    número, pero dice qué es la fila: con uno, no es un total.
+    """
+    if identificadores:
+        return False
     textos: list[str] = []
     numeros = 0
     for v in valores:
@@ -98,10 +108,19 @@ def es_fila_de_total(valores: list[Any]) -> bool:
         if _es_numero(v):
             numeros += 1
         elif _es_fecha(v):
-            continue
+            return False
         else:
             textos.append(str(v))
     return numeros >= 1 and len(textos) == 1 and es_etiqueta_de_total(textos[0])
+
+
+_COLUMNA_DE_CODIGO = re.compile(
+    r"(^|[^a-z])(sku|ean|gtin|upc|barcode|codigo|cod|code|plu|id)([^a-z]|$)"
+)
+
+
+def _es_columna_de_codigo(clave: str) -> bool:
+    return bool(_COLUMNA_DE_CODIGO.search(normalizar_etiqueta(clave).replace(" ", "_")))
 
 
 def es_fila_de_total_dict(row: dict[str, Any]) -> bool:
@@ -109,4 +128,13 @@ def es_fila_de_total_dict(row: dict[str, Any]) -> bool:
 
     Las claves ``__`` son del sistema (contexto, referencias) y no cuentan.
     """
-    return es_fila_de_total([v for k, v in row.items() if not str(k).startswith("__")])
+    valores: list[Any] = []
+    identificadores = 0
+    for k, v in row.items():
+        if str(k).startswith("__"):
+            continue
+        lleno = v is not None and str(v).strip().lower() not in _VACIOS
+        if lleno and _es_columna_de_codigo(str(k)):
+            identificadores += 1
+        valores.append(v)
+    return es_fila_de_total(valores, identificadores=identificadores)
