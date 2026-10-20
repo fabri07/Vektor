@@ -17,6 +17,12 @@ const ENTITY: Record<string, string> = {
   product: "Producto",
 };
 
+/** El `context_id` de una hoja es `sheet:<nombre>[:<subcontexto>]`. */
+function hoja(contextId: string | null): string | null {
+  if (!contextId?.startsWith("sheet:")) return null;
+  return contextId.slice("sheet:".length).split(":")[0] || null;
+}
+
 /**
  * B·5a: la bandeja agrupada por archivo × hoja × motivo × sugerencia. Cada grupo
  * se puede ver (filtra la tabla) o descartar entero. El descarte pasa siempre
@@ -70,7 +76,9 @@ export function OthersGroups({
     },
   });
 
-  if (groups.length <= 1) return null;
+  // Con un solo grupo no hay nada que agrupar, salvo que haya uno elegido: si
+  // no, al vaciarse el grupo filtrado desaparecería con él el «Ver todos».
+  if (groups.length <= 1 && selected === null) return null;
 
   const abrir = (g: OthersGroup) => {
     setDiscarding(g);
@@ -94,6 +102,7 @@ export function OthersGroups({
                 {g.file_name ?? "Sin archivo"}
               </span>
               <span className="text-vk-text-muted">
+                {hoja(g.context_id) ? ` · hoja ${hoja(g.context_id)}` : ""}
                 {" · "}
                 {g.motivo ?? "Sin motivo"}
                 {g.suggested_entity ? ` · ${ENTITY[g.suggested_entity] ?? g.suggested_entity}` : ""}

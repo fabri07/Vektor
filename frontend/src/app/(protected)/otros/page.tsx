@@ -79,7 +79,17 @@ export default function OtrosPage() {
     staleTime: 30 * 60 * 1000,
   });
 
-  const totalPages = Math.max(1, Math.ceil((group?.count ?? pendingTotal) / PAGE_SIZE));
+  // El conteo del grupo sale del resumen ACTUAL, no de la copia guardada al
+  // elegirlo: después de descartar o importar dentro del grupo, quedaría viejo.
+  const { data: summary } = useQuery({
+    queryKey: ["others-summary"],
+    queryFn: () => othersService.getSummary(),
+    staleTime: 60 * 1000,
+  });
+  const groupCount = group
+    ? (summary?.find((g) => g.group_key === group.group_key)?.count ?? 0)
+    : pendingTotal;
+  const totalPages = Math.max(1, Math.ceil(groupCount / PAGE_SIZE));
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["others-pending"] });

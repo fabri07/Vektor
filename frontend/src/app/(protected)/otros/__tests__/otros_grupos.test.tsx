@@ -104,3 +104,20 @@ test("si el grupo cambió, vuelve a mostrar la vista previa y no descarta", asyn
   expect(svc.previewDismissGroup).toHaveBeenCalledTimes(2);
   expect(onDismissed).not.toHaveBeenCalled();
 });
+
+test("con un solo grupo pero elegido sigue visible para volver a «Ver todos»", async () => {
+  svc.getSummary.mockResolvedValue([GRUPOS[1]]);
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const onSelect = jest.fn();
+  render(
+    <QueryClientProvider client={qc}>
+      <OthersGroups selected="k-total" onSelect={onSelect} onDismissed={jest.fn()} />
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText(/Fila sin fecha reconocible/)).toBeInTheDocument();
+});
+
+test("muestra la hoja del grupo", async () => {
+  pintar();
+  expect(await screen.findByText(/hoja Ventas/)).toBeInTheDocument();
+});

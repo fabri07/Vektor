@@ -265,3 +265,31 @@ async def test_descarte_de_a_uno_queda_auditado(
         )
     ).scalar_one()
     assert audit.decision_data["record_id"] == str(grupo[0].id)
+
+
+async def test_clave_con_un_id_que_no_es_texto_da_422_no_500(
+    client: AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    import base64
+    import json
+
+    key = base64.urlsafe_b64encode(json.dumps([5, None, None, None]).encode()).decode()
+    resp = await client.post(
+        "/api/v1/others/dismiss-group/preview", json={"group_key": key}, headers=auth_headers
+    )
+    assert resp.status_code == 422
+
+
+async def test_la_vista_previa_pide_el_mismo_permiso_que_el_descarte(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    viewer_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    await _sembrar(db_session, sample_tenant.tenant_id)
+    key = _grupo_total(await _resumen(client, auth_headers))["group_key"]
+    resp = await client.post(
+        "/api/v1/others/dismiss-group/preview", json={"group_key": key}, headers=viewer_headers
+    )
+    assert resp.status_code == 403

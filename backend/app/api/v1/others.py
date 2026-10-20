@@ -292,8 +292,10 @@ def _decode_group_key(key: str) -> tuple[UUID | None, str | None, str | None, st
     try:
         padded = key + "=" * (-len(key) % 4)
         file_raw, ctx, label, entity = json.loads(base64.urlsafe_b64decode(padded))
+        if file_raw is not None and not isinstance(file_raw, str):
+            raise TypeError("uploaded_file_id")
         file_id = UUID(file_raw) if file_raw else None
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, AttributeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "INVALID_GROUP_KEY"},
@@ -428,28 +430,25 @@ async def others_summary(
 async def dismiss_group_preview(
     body: DismissGroupPreviewRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    # El MISMO permiso que el descarte: quien no puede descartar no tiene por qué
+    # ver una confirmación que después le da 403 (el PIN se pide acá, una vez).
+    _: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
 ) -> DismissGroupPreviewResponse:
-    records = list(
-        (
-            await session.execute(
-                select(UnclassifiedRecord)
-                .where(
-                    *_group_filter(
-                        tenant.tenant_id, body.group_key, UNCLASSIFIED_STATUS_PENDING
-                    )
-                )
-                .order_by(UnclassifiedRecord.created_at)
-            )
+    filtros = _group_filter(tenant.tenant_id, body.group_key, UNCLASSIFIED_STATUS_PENDING)
+    ids = list((await session.execute(select(UnclassifiedRecord.id).where(*filtros))).scalars())
+    muestras = (
+        await session.execute(
+            select(UnclassifiedRecord.row_data)
+            .where(*filtros)
+            .order_by(UnclassifiedRecord.created_at)
+            .limit(_GROUP_MUESTRAS)
         )
-        .scalars()
-        .all()
-    )
+    ).scalars()
     return DismissGroupPreviewResponse(
-        count=len(records),
-        samples=[_visible_row(r.row_data) for r in records[:_GROUP_MUESTRAS]],
-        group_token=_group_token([r.id for r in records]),
+        count=len(ids),
+        samples=[_visible_row(r) for r in muestras],
+        group_token=_group_token(ids),
     )
 
 
@@ -719,7 +718,12 @@ async def reclassify_record(
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
-    record = await _get_pending_record(session, tenant.tenant_id, record_id)
+    # B·5a: con `FOR UPDATE`, igual que el descarte (de a uno y por grupo): si no,
+    # una fila que otra sesión acaba de descartar se importaría igual y su estado
+    # quedaría pisado con IMPORTED.
+    record = await _get_pending_record(
+        session, tenant.tenant_id, record_id, for_update=True
+    )
 
     # Procedencia de la fila: sin esto, el registro que nace de clasificar a mano
     # una fila de "Otros" queda HUÉRFANO de su archivo — borrar el archivo no lo
