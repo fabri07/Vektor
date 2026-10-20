@@ -16,7 +16,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -43,7 +43,7 @@ from app.api.v1.products import (
     _identity_conflict_from_db,
     _tenant_vertical,
 )
-from app.application.services import maintenance_lock_service, stock_service
+from app.application.services import compra_service, maintenance_lock_service
 from app.application.services._ledger_restore import snapshot_master
 from app.application.services.file_deletion_service import (
     ACTION_CREATE_CUSTOMER,
@@ -67,7 +67,15 @@ from app.domain.business_time import (
     now_ar_naive,
     today_ar,
 )
-from app.domain.contrato_de_costo import contrato_declarado
+from app.domain.comprobante_de_compra import (
+    MOTIVO_COMPRA_SIN_ARTICULOS,
+    ComprobanteInvalidoError,
+    Envio,
+    Iva,
+    LineaDeCompra,
+    ModoEnvio,
+    TratamientoIva,
+)
 from app.domain.costo_vigente import (
     conservar_claves_del_costo,
     custom_fields_tras_editar_costo,
@@ -107,6 +115,7 @@ from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
 from app.schemas.customer import CreateCustomerRequest
 from app.schemas.product import CreateProductRequest, UpdateProductRequest
+from app.schemas.purchase import PurchaseShipping, PurchaseTax
 from app.schemas.supplier import CreateSupplierRequest
 from app.schemas.transaction import (
     PAYMENT_METHOD_PATTERN,
@@ -161,16 +170,37 @@ class ReclassifyRequest(BaseModel):
     aplicar_pese_al_conflicto: bool = False
 
 
-class ResolvePurchaseRequest(BaseModel):
-    target_product_id: UUID
+class ResolvePurchaseLine(BaseModel):
+    product_id: UUID
+    quantity: int = Field(ge=1)
+    #: Lo que dice el comprobante para esta línea (ver `domain/comprobante_de_compra`).
     amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-    quantity: int = Field(gt=0)
+
+
+class ResolvePurchaseRequest(BaseModel):
+    """B·5b: la compra se resuelve diciendo QUÉ artículos la componen (`lines`).
+
+    El body de un solo producto (`target_product_id` + `amount` + `quantity`) se
+    sigue aceptando para un frontend viejo durante el deploy en paralelo: es una
+    compra de una línea, con envío e IVA desconocidos como antes.
+    """
+
+    lines: list[ResolvePurchaseLine] | None = Field(default=None, min_length=1, max_length=200)
+    # Body viejo (una línea).
+    target_product_id: UUID | None = None
+    amount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    quantity: int | None = Field(default=None, gt=0)
     unit_cost: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
     transaction_date: datetime
     payment_method: str = Field(pattern=PAYMENT_METHOD_PATTERN, default="transfer")
     category: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=500)
     supplier_name: str | None = Field(default=None, max_length=300)
+    shipping: PurchaseShipping | None = None
+    tax: PurchaseTax | None = None
+    document_ref: str | None = Field(default=None, max_length=100)
+    # E6b: misma regla que `reclassify` para una fila con el comprobante tomado.
+    aplicar_pese_al_conflicto: bool = False
 
     @field_validator("transaction_date")
     @classmethod
@@ -696,7 +726,10 @@ async def _get_pending_record(
     if record.status != UNCLASSIFIED_STATUS_PENDING:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="El registro ya fue importado o descartado.",
+            detail={
+                "code": "RECORD_ALREADY_RESOLVED",
+                "message": "El registro ya fue importado o descartado.",
+            },
         )
     return record
 
@@ -796,6 +829,16 @@ async def reclassify_record(
             raw_fields = dict(body.fields)
             raw_category = raw_fields.get("category")
             code, cat_label = normalize_expense_category(raw_category)
+            if code == "INVENTORY":
+                # B·5b: una compra de mercadería sin artículos no es un dato útil.
+                # Se resuelve con `resolve-purchase`, diciendo qué productos y cuántos.
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "code": "PURCHASE_NEEDS_ITEMS",
+                        "message": MOTIVO_COMPRA_SIN_ARTICULOS,
+                    },
+                )
             raw_fields["category"] = code
             if cat_label and not raw_fields.get("category_label"):
                 raw_fields["category_label"] = cat_label
@@ -1008,7 +1051,7 @@ async def reclassify_record(
     "/{record_id}/resolve-purchase",
     dependencies=[Depends(require_active_subscription)],
     response_model=MessageResponse,
-    summary="Resolver una compra ambigua vinculándola a un producto",
+    summary="Resolver una compra de Otros diciendo qué artículos la componen",
 )
 async def resolve_purchase(
     record_id: UUID,
@@ -1016,97 +1059,111 @@ async def resolve_purchase(
     tenant: Tenant = Depends(get_current_tenant),
     # F3-T3 review: auth ANTES que el guard 423 — si no, un VIEWER con el tenant
     # lockeado recibiría 423 en vez de 403.
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(require_role("OWNER", "ADMIN")),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
+    """B·5b: una compra de mercadería = artículos. Cualquier producto activo del
+    negocio (no sólo los candidatos que sugirió el import), con envío e IVA por la
+    regla única (`compra_service.registrar_compra`).
+
+    Idempotente por el registro: se toma con `FOR UPDATE` y tiene que estar
+    PENDING; dos sesiones a la vez dan una compra y un 409. La compra lleva la
+    procedencia de la fila (`source_upload_id` + `source_row_ref`), así que
+    borrar el archivo la revierte entera (gasto, stock y costo).
+    """
     record = await _get_pending_record(
         session, tenant.tenant_id, record_id, for_update=True
     )
-    candidates = record.match_candidates or []
-    if record.suggested_entity != "expense" or not candidates:
+    if record.suggested_entity not in ("expense", None):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "NOT_AMBIGUOUS_PURCHASE"},
+            detail={"code": "NOT_A_PURCHASE"},
         )
-    candidate_ids = {str(candidate.get("id")) for candidate in candidates if candidate.get("id")}
-    if str(body.target_product_id) not in candidate_ids:
+    _clave_identidad = str(record.row_data.get(IDENTITY_REF_KEY) or "")
+    if (
+        _clave_identidad
+        and not body.aplicar_pese_al_conflicto
+        and await identidad_tomada(session, tenant.tenant_id, _clave_identidad) is not None
+    ):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "TARGET_NOT_A_CANDIDATE"},
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "IMPORT_IDENTITY_TAKEN",
+                "message": (
+                    "Esta fila tiene el mismo comprobante que una operación ya "
+                    "cargada. Si la registrás igual vas a tener las dos."
+                ),
+            },
         )
 
-    target = await ProductRepository(session).get_by_id(
-        body.target_product_id, tenant.tenant_id
-    )
-    if target is None or not target.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "INVALID_TARGET_PRODUCT"},
-        )
-
-    unit_cost = body.unit_cost
-    if unit_cost is None:
-        unit_cost = (body.amount / body.quantity).quantize(Decimal("0.01"))
-
-    code, category_label = normalize_expense_category(body.category or "INVENTORY")
-    supplier_index: dict[str, UUID]
-    if body.supplier_name and body.supplier_name.strip():
-        from app.application.services.ingestion_import_service import (  # noqa: PLC0415
-            _load_supplier_index,
-            _resolve_or_create_supplier,
-        )
-
-        supplier_index = await _load_supplier_index(session, tenant.tenant_id)
-        supplier_id, supplier_name = await _resolve_or_create_supplier(
-            session, tenant.tenant_id, body.supplier_name, supplier_index
-        )
+    if body.lines:
+        lineas = [
+            LineaDeCompra(product_id=ln.product_id, cantidad=ln.quantity, importe=ln.amount)
+            for ln in body.lines
+        ]
+    elif body.target_product_id and body.amount is not None and body.quantity:
+        if body.unit_cost is not None and abs(
+            body.unit_cost * body.quantity - body.amount
+        ) > Decimal("0.01") * body.quantity:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "AMOUNT_MISMATCH",
+                    "message": "El monto no coincide con el costo unitario por la cantidad.",
+                },
+            )
+        lineas = [
+            LineaDeCompra(
+                product_id=body.target_product_id,
+                cantidad=body.quantity,
+                importe=body.amount,
+            )
+        ]
     else:
-        from app.application.services.ingestion_import_service import (  # noqa: PLC0415
-            _resolve_or_create_sentinel_supplier,
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "PURCHASE_NEEDS_ITEMS", "message": MOTIVO_COMPRA_SIN_ARTICULOS},
         )
 
-        supplier_id = await _resolve_or_create_sentinel_supplier(
-            session, tenant.tenant_id, {}
+    _upload_id = record.uploaded_file_id
+    try:
+        await compra_service.registrar_compra(
+            session,
+            tenant.tenant_id,
+            user.user_id,
+            lineas=lineas,
+            fecha=body.transaction_date,
+            medio_de_pago=body.payment_method,
+            envio=(
+                Envio(monto=body.shipping.amount, modo=cast(ModoEnvio, body.shipping.mode))
+                if body.shipping
+                else None
+            ),
+            iva=(
+                Iva(tratamiento=cast(TratamientoIva, body.tax.treatment), alicuota=body.tax.rate)
+                if body.tax
+                else None
+            ),
+            supplier_name=body.supplier_name,
+            document_ref=body.document_ref,
+            source_event_id=f"others:{record_id}",
+            source_upload_id=_upload_id,
+            source_row_ref=unclassified_row_ref(record.id) if _upload_id else None,
+            triggered_by="ui:others_resolve_purchase",
         )
-        supplier_name = None
-
-    session.add(
-        ExpenseEntry(
-            tenant_id=tenant.tenant_id,
-            amount=body.amount,
-            category=code,
-            expense_type=infer_expense_type(code, product_id=target.id),
-            transaction_date=body.transaction_date,
-            description=body.description or "Compra de mercadería",
-            payment_method=body.payment_method,
-            product_id=target.id,
-            supplier_id=supplier_id,
-            supplier_name=supplier_name,
-            custom_fields=_apply_category_label({}, code, category_label),
-            provenance="REAL",
-        )
-    )
+    except ComprobanteInvalidoError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "INVALID_PURCHASE", "message": str(exc)},
+        ) from exc
     record.status = UNCLASSIFIED_STATUS_IMPORTED
     record.resolved_at = datetime.now(UTC)
-    await stock_service.increment_stock(
-        target.id,
-        tenant.tenant_id,
-        # La cantidad de una compra está en la unidad de VENTA del producto ("5"
-        # de queso = 5 kg) y el stock en unidades base; el costo, por unidad de
-        # venta (monto / cantidad). Con factor 1 no cambia nada.
-        a_unidades_base(body.quantity, target.base_units_per_sale_unit or 1),
-        unit_cost,
-        source_event_id=f"others:{record_id}",
-        db=session,
-        supplier_id=supplier_id,
-        occurred_at=body.transaction_date,
-        defer_event=True,
-        # M·1b: el costo que el usuario declaró; envío e impuesto, desconocidos.
-        contrato=contrato_declarado(unit_cost),
+    await session.flush()
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "unclassified_purchase_resolved"
     )
-    recompute_requires_completion(target)
-    return MessageResponse(message="Compra registrada y vinculada al producto.")
+    return MessageResponse(message="Compra registrada con sus artículos.")
 
 
 @router.post(

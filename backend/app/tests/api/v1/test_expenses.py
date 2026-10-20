@@ -32,24 +32,29 @@ class TestExpensesCRUD:
         # transaction_date ahora es datetime ISO; chequear solo la parte de fecha.
         assert data["transaction_date"].startswith(_TODAY)
 
-    async def test_merchandise_expense_without_type_infers_cogs(
+    async def test_merchandise_expense_without_items_is_rejected(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        """Gasto manual de mercadería (INVENTORY) sin expense_type explícito → COGS
-        (antes defaulteaba a OPEX y quedaba mal clasificado)."""
-        payload = {**_EXPENSE_PAYLOAD, "category": "INVENTORY"}
-        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
-        assert resp.status_code == 201
-        assert resp.json()["expense_type"] == "COGS"
+        """B·5b: una compra de mercadería sin artículos no es un dato útil. Con o
+        sin tipo explícito, se manda a «Registrar compra»."""
+        for extra in ({}, {"expense_type": "OPEX"}, {"expense_type": "COGS"}):
+            payload = {**_EXPENSE_PAYLOAD, "category": "INVENTORY", **extra}
+            resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
+            assert resp.status_code == 422
+            assert resp.json()["detail"]["code"] == "PURCHASE_NEEDS_ITEMS"
 
-    async def test_explicit_type_wins_over_inference(
+    async def test_patch_to_merchandise_is_rejected_and_type_follows_category(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        """Un expense_type explícito gana sobre la inferencia (INVENTORY + OPEX → OPEX)."""
-        payload = {**_EXPENSE_PAYLOAD, "category": "INVENTORY", "expense_type": "OPEX"}
-        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
-        assert resp.status_code == 201
-        assert resp.json()["expense_type"] == "OPEX"
+        created = await client.post(
+            "/api/v1/expenses", json=_EXPENSE_PAYLOAD, headers=auth_headers
+        )
+        eid = created.json()["id"]
+        resp = await client.patch(
+            f"/api/v1/expenses/{eid}", json={"category": "INVENTORY"}, headers=auth_headers
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "PURCHASE_NEEDS_ITEMS"
 
     async def test_non_merchandise_expense_defaults_to_opex(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -69,7 +74,8 @@ class TestExpensesCRUD:
     async def test_all_valid_categories_accepted(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        for cat in ("RENT", "UTILITIES", "PAYROLL", "INVENTORY", "MARKETING", "OTHER"):
+        # INVENTORY no: es una compra y va por «Registrar compra» (B·5b).
+        for cat in ("RENT", "UTILITIES", "PAYROLL", "MARKETING", "OTHER"):
             resp = await client.post(
                 "/api/v1/expenses",
                 json={**_EXPENSE_PAYLOAD, "category": cat},

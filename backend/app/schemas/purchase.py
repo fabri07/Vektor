@@ -49,11 +49,35 @@ class PurchaseLine(BaseModel):
         return _reject_nan_inf(v, "amount")
 
 
+class PurchaseShipping(BaseModel):
+    """B·5b: el envío del comprobante (``domain/comprobante_de_compra.py``)."""
+
+    amount: Decimal = Field(default=Decimal("0"), ge=0, le=_MAX_AMOUNT, decimal_places=2)
+    mode: str = Field(
+        default="desconocido", pattern=r"^(repartir|gasto_aparte|no_hubo|desconocido)$"
+    )
+
+
+class PurchaseTax(BaseModel):
+    """B·5b: qué es el importe de las líneas respecto del IVA. Nunca 21 % por defecto."""
+
+    treatment: str = Field(
+        default="desconocido", pattern=r"^(incluido|adicional|no_aplica|desconocido)$"
+    )
+    #: Fracción: 0,21 = 21 %. Sólo con ``incluido`` / ``adicional``.
+    rate: Decimal | None = Field(default=None, gt=0, lt=1, decimal_places=4)
+
+
 class ManualPurchaseRequest(BaseModel):
     supplier_id: UUID
     payment_method: str = Field(pattern=_PAYMENT_PATTERN, default="cash")
     transaction_date: datetime
     lines: list[PurchaseLine] = Field(min_length=1)
+    # B·5b: opcionales; sin ellos, envío e IVA quedan «desconocido» como antes,
+    # así un frontend viejo sigue funcionando igual.
+    shipping: PurchaseShipping | None = None
+    tax: PurchaseTax | None = None
+    document_ref: str | None = Field(default=None, max_length=100)
 
     @field_validator("transaction_date")
     @classmethod

@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.compra_service import CompraSinArticulosError
 from app.application.services.ingestion_import_service import insert_confirmed_data
 from app.application.services.pending_action_service import execute_pending_action
 from app.domain.business_time import today_ar
@@ -28,6 +29,7 @@ from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.persistence.models.transaction import ExpenseEntry
 from app.persistence.models.user import User
 
 _CTX = "table"
@@ -302,12 +304,11 @@ async def test_stock_fijado_por_chat_con_update_product_deja_el_delta(
     assert p.sale_price_ars == Decimal("2600")
 
 
-async def test_compra_por_chat_con_costo_negativo_no_rompe_ni_inventa_contrato(
+async def test_compra_por_chat_con_costo_negativo_toma_el_monto(
     db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
 ) -> None:
-    """Revisión M·1b: un ``unit_cost`` negativo del LLM no es un costo. Antes de
-    M·1b se guardaba igual; ahora no puede convertirse en un 500 a mitad de la
-    acción (con el gasto ya creado) ni en un contrato: queda sin contrato."""
+    """B·5b: la compra por chat pasa por la regla única. El importe es el monto;
+    un ``unit_cost`` negativo del LLM no se usa (antes quedaba sin contrato)."""
     p = await _producto(db_session, sample_tenant)
     await _accion(
         db_session, sample_tenant, sample_user, "REGISTER_PURCHASE",
@@ -319,5 +320,36 @@ async def test_compra_por_chat_con_costo_negativo_no_rompe_ni_inventa_contrato(
             select(InventoryMovement).where(InventoryMovement.product_id == p.id)
         )
     ).scalar_one()
-    assert mov.cost_contract_version is None
-    assert mov.unit_cost_final is None
+    assert mov.cost_contract_version == CONTRATO_VERSION
+    assert mov.unit_cost_final == Decimal("1600")
+    gasto = (
+        await db_session.execute(select(ExpenseEntry).where(ExpenseEntry.product_id == p.id))
+    ).scalar_one()
+    # Antes el gasto del chat perdía el producto: ahora queda vinculado.
+    assert (gasto.amount, gasto.expense_type) == (Decimal("1600.00"), "COGS")
+
+
+async def test_compra_por_chat_sin_articulo_no_registra_nada(
+    db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
+) -> None:
+    """B·5b: sin producto o sin cantidad no hay compra (antes quedaba un gasto
+    COGS suelto)."""
+    for payload in (
+        {"amount": 1600, "transaction_date": today_ar().isoformat()},
+        {"amount": 1600, "product_id": str(uuid.uuid4()), "qty": 0},
+    ):
+        with pytest.raises(CompraSinArticulosError):
+            await _accion(db_session, sample_tenant, sample_user, "REGISTER_PURCHASE", payload)
+    assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
+
+
+async def test_gasto_de_mercaderia_por_chat_se_rechaza(
+    db_session: AsyncSession, sample_tenant: Tenant, sample_user: User
+) -> None:
+    for tipo in ("REGISTER_EXPENSE", "REGISTER_CASH_OUTFLOW"):
+        with pytest.raises(CompraSinArticulosError):
+            await _accion(
+                db_session, sample_tenant, sample_user, tipo,
+                {"amount": 900, "category": "mercadería"},
+            )
+    assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []

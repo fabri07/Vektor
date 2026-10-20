@@ -158,12 +158,14 @@ async def test_resolve_purchase_creates_expense_movement_and_sentinel_once(
     ) == 1
 
 
-async def test_resolve_purchase_rejects_target_outside_candidates_without_effects(
+async def test_resolve_purchase_accepts_any_active_product_not_only_candidates(
     client: AsyncClient,
     db_session: AsyncSession,
     auth_headers: dict[str, Any],
     sample_tenant: Tenant,
 ) -> None:
+    """B·5b: el usuario dice qué artículo es; no está limitado a lo que sugirió
+    el import."""
     candidate = await _product(db_session, sample_tenant.tenant_id)
     other = await _product(db_session, sample_tenant.tenant_id, name="Otra")
     record = await _record(db_session, sample_tenant.tenant_id, candidate.id)
@@ -173,10 +175,11 @@ async def test_resolve_purchase_rejects_target_outside_candidates_without_effect
         json=_payload(other.id),
         headers=auth_headers,
     )
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "TARGET_NOT_A_CANDIDATE"
+    assert response.status_code == 200, response.text
+    await db_session.refresh(other)
+    assert other.stock_units == 7
     await db_session.refresh(record)
-    assert record.status == UNCLASSIFIED_STATUS_PENDING
+    assert record.status == UNCLASSIFIED_STATUS_IMPORTED
 
 
 async def test_resolve_purchase_rejects_candidate_from_other_tenant(
@@ -202,7 +205,7 @@ async def test_resolve_purchase_rejects_candidate_from_other_tenant(
         headers=auth_headers,
     )
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "INVALID_TARGET_PRODUCT"
+    assert response.json()["detail"]["code"] == "INVALID_PURCHASE"
     await db_session.refresh(record)
     assert record.status == UNCLASSIFIED_STATUS_PENDING
 
@@ -239,15 +242,16 @@ async def test_resolve_purchase_rejects_zero_quantity(
     assert record.status == UNCLASSIFIED_STATUS_PENDING
 
 
-async def test_resolve_purchase_honors_explicit_unit_cost_divergent_from_total(
+async def test_resolve_purchase_legacy_unit_cost_divergent_from_total_is_rejected(
     client: AsyncClient,
     db_session: AsyncSession,
     auth_headers: dict[str, Any],
     sample_tenant: Tenant,
 ) -> None:
-    # amount (total contable) y unit_cost (valorización de inventario) pueden diferir:
-    # el total puede incluir impuestos/flete. Se respeta el unit_cost informado, no
-    # se deriva amount/quantity (600/4 = 150).
+    """B·5b: antes un costo unitario distinto del total/cantidad se respetaba
+    («el total puede incluir impuestos o flete»). Ahora el IVA y el envío tienen
+    su campo y entran por la regla única; con el body viejo, una divergencia es
+    ambigua y se rechaza sin efectos."""
     target = await _product(db_session, sample_tenant.tenant_id)
     record = await _record(db_session, sample_tenant.tenant_id, target.id)
 
@@ -256,17 +260,10 @@ async def test_resolve_purchase_honors_explicit_unit_cost_divergent_from_total(
         json={**_payload(target.id), "unit_cost": "100.00"},
         headers=auth_headers,
     )
-    assert response.status_code == 200, response.text
-
-    movement = (
-        await db_session.execute(
-            select(InventoryMovement).where(InventoryMovement.product_id == target.id)
-        )
-    ).scalar_one()
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "AMOUNT_MISMATCH"
     await db_session.refresh(target)
-    assert movement.unit_cost == Decimal("100.00")
-    assert target.unit_cost_ars == Decimal("100.00")
-    assert target.stock_units == 7
+    assert target.stock_units == 3
 
 
 async def test_resolve_purchase_rejects_inactive_candidate(
@@ -286,22 +283,26 @@ async def test_resolve_purchase_rejects_inactive_candidate(
         headers=auth_headers,
     )
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "INVALID_TARGET_PRODUCT"
+    assert response.json()["detail"]["code"] == "INVALID_PURCHASE"
     await db_session.refresh(record)
     assert record.status == UNCLASSIFIED_STATUS_PENDING
 
 
 @pytest.mark.parametrize(
-    ("suggested_entity", "candidates"), [("product", True), ("expense", False)]
+    ("suggested_entity", "candidates", "esperado"),
+    [("product", True, 422), ("expense", False, 200)],
 )
-async def test_resolve_purchase_rejects_non_ambiguous_record(
+async def test_resolve_purchase_record_kinds(
     client: AsyncClient,
     db_session: AsyncSession,
     auth_headers: dict[str, Any],
     sample_tenant: Tenant,
     suggested_entity: str,
     candidates: bool,
+    esperado: int,
 ) -> None:
+    """B·5b: cualquier fila de gasto se puede resolver como compra (no sólo las
+    ambiguas); una sugerida como producto no es una compra."""
     target = await _product(db_session, sample_tenant.tenant_id)
     record = await _record(
         db_session,
@@ -315,5 +316,6 @@ async def test_resolve_purchase_rejects_non_ambiguous_record(
         json=_payload(target.id),
         headers=auth_headers,
     )
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "NOT_AMBIGUOUS_PURCHASE"
+    assert response.status_code == esperado, response.text
+    if esperado == 422:
+        assert response.json()["detail"]["code"] == "NOT_A_PURCHASE"

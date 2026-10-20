@@ -64,6 +64,8 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **Auto-ejecución:** `REGISTER_EXPENSE` sin confirmación (`_AUTO_EXECUTE_ACTION_TYPES` en `api/v1/agent.py`). Prefijo "Gasto registrado.".
 
+**Compras por chat (B·5b-1):** `REGISTER_PURCHASE` pasa por `compra_service.registrar_compra` (la regla única de compra): sin producto o sin cantidad no registra nada (`CompraSinArticulosError`, que el chat muestra tal cual), y el gasto queda con producto y proveedor. `REGISTER_EXPENSE` y `REGISTER_CASH_OUTFLOW` con categoría mercadería se rechazan igual: una compra de mercadería dice qué artículos y cuántos. El catálogo de `ActionType` no cambia.
+
 **Deduplicación por fingerprint** (`operation_fingerprints`): SHA-256 de `{tenant_id}:{action_type}:{amount}:{date}` para `REGISTER_SALE/EXPENSE/PURCHASE`. Duplicado → `execution_status: "DUPLICATE"`.
 
 **Rate limit:** 50 mensajes/día por tenant. Redis key: `rate:chat:{tenant_id}:{date}`. Compartido entre `/chat` y `/chat/stream`.

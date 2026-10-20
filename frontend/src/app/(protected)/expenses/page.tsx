@@ -440,8 +440,12 @@ function ExpenseEditModal({
       <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); onSave(form); }}>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vektor-body">Fecha y hora<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} /></label>
-          <label className="grid gap-1 text-sm text-vektor-body">Categoría<select className="rounded border border-vk-border-w px-3 py-2" value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Categoría<select className="rounded border border-vk-border-w px-3 py-2" value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.filter((cat) => cat !== "INVENTORY" || expense?.category === "INVENTORY").map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
         </div>
+        {/* B·5b: un gasto no se convierte en compra de mercadería; esa va con sus artículos. */}
+        {expense?.category !== "INVENTORY" && (
+          <p className="text-xs text-vk-text-muted">Para cargar una compra de mercadería usá «Registrar compra», con los artículos y las cantidades.</p>
+        )}
         {form.category === "TAXES" && (
           <label className="grid gap-1 text-sm text-vektor-body">Tipo de impuesto<select className="rounded border border-vk-border-w px-3 py-2" value={form.tax_kind ?? ""} onChange={(e) => set("tax_kind", e.target.value || null)}><option value="">Sin especificar</option>{TAX_KINDS.map((k) => <option key={k} value={k}>{TAX_KIND_LABELS[k]}</option>)}</select></label>
         )}

@@ -180,7 +180,7 @@ class TestCompras:
         sid = await self._proveedor(client, auth_headers)
         resp = await client.post(
             f"/api/v1/suppliers/{sid}/receipts",
-            json={"currency": "ARS",
+            json={"currency": "ARS", "transaction_date": "2026-09-15T10:00:00",
                   "lines": [{"product_name": p["name"], "qty": 5, "unit_price": "800.00"}]},
             headers=auth_headers,
         )

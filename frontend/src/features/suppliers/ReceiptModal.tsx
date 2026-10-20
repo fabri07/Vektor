@@ -1,6 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { PurchaseTermsFields } from "@/features/purchases/PurchaseTermsFields";
+import {
+  EMPTY_TERMS,
+  termsError,
+  termsPayload,
+  type PurchaseTerms,
+} from "@/features/purchases/purchaseTerms";
 import { useMutation } from "@tanstack/react-query";
 import { AlertTriangle, FileUp, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -62,6 +69,9 @@ export function ReceiptModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [lines, setLines] = useState<ReceiptLineForm[]>(() => [emptyReceiptLine()]);
   const [shipping, setShipping] = useState("");
+  // B·5b / F6: la fecha la dice el remito; no se asume «hoy».
+  const [fecha, setFecha] = useState("");
+  const [terms, setTerms] = useState<PurchaseTerms>(EMPTY_TERMS);
   const [error, setError] = useState<string | null>(null);
   const [extraction, setExtraction] = useState<ReceiptExtraction | null>(null);
 
@@ -69,6 +79,8 @@ export function ReceiptModal({
     if (isOpen) {
       setLines([emptyReceiptLine()]);
       setShipping("");
+      setFecha("");
+      setTerms(EMPTY_TERMS);
       setError(null);
       setExtraction(null);
     }
@@ -107,6 +119,8 @@ export function ReceiptModal({
       lines: ReceiptLinePayload[];
       shipping_cost?: number;
       source_upload_id?: string;
+      transaction_date: string;
+      tax?: { treatment: string; rate?: number };
     }) =>
       suppliersService.uploadReceipt(
         supplier.id,
@@ -196,9 +210,21 @@ export function ReceiptModal({
       shippingCost = value;
     }
 
+    if (!fecha) {
+      setError("Indicá la fecha del remito.");
+      return;
+    }
+    const errorDeIva = termsError(terms);
+    if (errorDeIva) {
+      setError(errorDeIva);
+      return;
+    }
     const sourceUploadId = extraction?.source_upload_id ?? undefined;
+    const { tax } = termsPayload(terms);
     uploadMutation.mutate({
       lines: parsed,
+      transaction_date: `${fecha}T00:00:00`,
+      ...(tax ? { tax } : {}),
       ...(shippingCost !== undefined ? { shipping_cost: shippingCost } : {}),
       ...(sourceUploadId ? { source_upload_id: sourceUploadId } : {}),
     });
@@ -350,6 +376,21 @@ export function ReceiptModal({
             Agregar línea
           </Button>
         </div>
+
+        <div className="max-w-xs">
+          <Input
+            label="Fecha del remito"
+            type="date"
+            required
+            value={fecha}
+            onChange={(e) => {
+              setFecha(e.target.value);
+              if (error) setError(null);
+            }}
+          />
+        </div>
+
+        <PurchaseTermsFields value={terms} onChange={setTerms} showShippingModes={false} />
 
         <div className="max-w-xs">
           <Input

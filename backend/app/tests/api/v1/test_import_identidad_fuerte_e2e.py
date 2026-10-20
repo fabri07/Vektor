@@ -457,7 +457,8 @@ async def test_un_conflicto_no_se_puede_importar_desde_otros_sin_decidir(
         "entity_type": "expense",
         "fields": {
             "amount": "6500",
-            "category": "INVENTORY",
+            # B·5b: mercadería se resuelve con artículos; acá importa el candado.
+            "category": "OTHER",
             "expense_date": "2024-03-05T00:00:00",
             "description": "Vela aromatica",
         },

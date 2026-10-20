@@ -113,7 +113,8 @@ class TestSupplierLinkBehaviour:
             "/api/v1/expenses",
             json={
                 "amount": "500.00",
-                "category": "INVENTORY",
+                # B·5b: mercadería va por «Registrar compra»; acá importa el proveedor.
+                "category": "OTHER",
                 "expense_date": _TODAY,
                 "payment_method": "transfer",
                 "supplier_id": sid,

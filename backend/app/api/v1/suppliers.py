@@ -1,7 +1,7 @@
 """Supplier (proveedores) CRUD endpoints."""
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import (
@@ -38,6 +38,7 @@ from app.application.services.ingestion_import_service import (
     import_receipt,
 )
 from app.application.services.remito_extraction_service import extract_remito
+from app.domain.comprobante_de_compra import ComprobanteInvalidoError, Iva, TratamientoIva
 from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
@@ -284,6 +285,16 @@ async def create_receipt(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No se puede cargar un remito contra el proveedor 'No identificado'.",
         )
+    if body.transaction_date is None:
+        # B·5b / F6: la fecha de la compra la dice el comprobante; «hoy» sería
+        # inventarla (y correría el costo de referencia de esas compras).
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "RECEIPT_DATE_REQUIRED",
+                "message": "Indicá la fecha del remito.",
+            },
+        )
     # Idempotencia: reclamar la key ANTES de escribir (comparte transacción).
     if idempotency_key is not None and not await claim_idempotency_key(
         session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_RECEIPT"
@@ -299,15 +310,29 @@ async def create_receipt(
         )
         for ln in body.lines
     ]
-    summary = await import_receipt(
-        session,
-        tenant.tenant_id,
-        supplier_id,
-        lines,
-        shipping_cost=body.shipping_cost,
-        transaction_date=body.transaction_date,
-        source_upload_id=body.source_upload_id,
-    )
+    try:
+        summary = await import_receipt(
+            session,
+            tenant.tenant_id,
+            supplier_id,
+            lines,
+            shipping_cost=body.shipping_cost,
+            transaction_date=body.transaction_date,
+            source_upload_id=body.source_upload_id,
+            iva=(
+                Iva(
+                    tratamiento=cast(TratamientoIva, body.tax.treatment),
+                    alicuota=body.tax.rate,
+                )
+                if body.tax
+                else None
+            ),
+        )
+    except ComprobanteInvalidoError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "INVALID_PURCHASE", "message": str(exc)},
+        ) from exc
     _audit_data_change(
         session,
         tenant_id=tenant.tenant_id,
