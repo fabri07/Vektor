@@ -3936,6 +3936,14 @@ async def confirm_file(
             "quedaron en «Otros»: no se importan porque sumarían dos veces lo de "
             "arriba. Si alguna es un dato real, clasificala desde ahí."
         )
+    if counts.get("compras_sin_articulos"):
+        # B·5b-2: sin este aviso, el resultado del período «sube» y no se entiende
+        # por qué: esas compras ya no restan como gasto hasta que se resuelvan.
+        warnings.append(
+            f"{counts['compras_sin_articulos']} compra(s) de mercadería quedaron en "
+            "«Otros» porque no dicen qué artículos y cuántos. Hasta que las resuelvas "
+            "desde ahí no cuentan como gasto ni suman stock."
+        )
     if counts.get("filas_sin_cantidad"):
         # E4: la fila traía cantidad y no se pudo usar. Antes entraba como 1
         # unidad y no había nada que avisar porque no había nada que revisar.

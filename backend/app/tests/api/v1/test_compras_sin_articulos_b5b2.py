@@ -7,6 +7,8 @@ venta 120.000 en efectivo, compra de mercadería 50.000 por transferencia, luz
 | métrica                                  | antes   | después |
 |------------------------------------------|---------|---------|
 | Resultado del Resumen económico          | 55.000  | 105.000 |
+(el test suma además un gasto histórico de 7.000 en efectivo que no se toca:
+98.000 de resultado, 22.000 de salida líquida y 113.000 de efectivo esperado)
 | Salida líquida estimada (BSL)            | 65.000  | 15.000  |
 | Costo de inventario real del BSL         | 50.000  | 0       |
 | Efectivo esperado del arqueo             | 120.000 | 120.000 |
@@ -158,3 +160,104 @@ async def test_un_gasto_que_solo_se_parece_a_un_producto_no_pasa_a_mercaderia(
     await insert_confirmed_data(db_session, tid, summary, {"gastos": True})
     gasto = (await db_session.execute(select(ExpenseEntry))).scalar_one()
     assert (gasto.category, gasto.expense_type, gasto.product_id) == ("UTILITIES", "OPEX", None)
+
+
+# ── Revisión de B·5b-2 ────────────────────────────────────────────────────────
+
+
+def _gastos_planos(filas: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "has_gasto": True,
+        "gastos_detectados": filas,
+    }
+
+
+async def _otros_de(db: AsyncSession, tid: Any) -> list[UnclassifiedRecord]:
+    return list(
+        (
+            await db.execute(
+                select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tid)
+            )
+        ).scalars()
+    )
+
+
+async def test_una_hoja_mercaderia_sin_cantidad_va_a_otros(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El camino de tabla suelta, con su propia aserción."""
+    tid = sample_tenant.tenant_id
+    counts = await insert_confirmed_data(
+        db_session,
+        tid,
+        _gastos_planos(
+            [{"fecha": _HOY, "gasto": "9000", "producto": "Fardo", "categoria": "Mercadería"}]
+        ),
+        {"gastos": True},
+    )
+    assert counts["compras_sin_articulos"] == 1
+    assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
+    assert [o.context_label for o in await _otros_de(db_session, tid)] == [
+        MOTIVO_COMPRA_SIN_ARTICULOS
+    ]
+
+
+async def test_cantidad_con_decimales_de_un_producto_nuevo_no_deja_un_cogs_suelto(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión: «2,5» pasaba el primer filtro pero no creaba el producto nuevo, y
+    quedaba un gasto COGS sin producto ni stock. El control final lo manda a «Otros»."""
+    tid = sample_tenant.tenant_id
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "mixed",
+        "multi_sheet": True,
+        "mapping_contexts": [
+            {"context_id": "sheet:Compras", "entity_type": "expense", "source_kind": "sheet",
+             "headers": ["fecha", "producto", "cantidad", "monto", "categoria"],
+             "fields": None, "preview_rows": [], "row_count": 1},
+        ],
+        "gastos_detectados": [
+            {"fecha": _HOY, "producto": "Queso cremoso", "cantidad": Decimal("2.5"),
+             "monto": "2000", "categoria": "Mercadería", "__context__": "sheet:Compras"}
+        ],
+        "ventas_detectadas": [],
+        "stock_detectado": [],
+    }
+    counts = await insert_confirmed_data(
+        db_session,
+        tid,
+        summary,
+        {"gastos": True},
+        context_mappings={
+            "sheet:Compras": {"fecha": "expense_date", "producto": "product_name",
+                              "cantidad": "quantity", "monto": "amount",
+                              "categoria": "category"},
+        },
+    )
+    assert counts["compras_sin_articulos"] == 1
+    assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []
+
+
+async def test_sku_exacto_sin_cantidad_es_una_compra_sin_cantidad(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión: un SKU exacto sin categoría ni cantidad es mercadería sin cuántos
+    → «Otros»; antes se desvinculaba y quedaba OPEX, esquivando la regla."""
+    from app.persistence.models.product import Product
+
+    tid = sample_tenant.tenant_id
+    db_session.add(
+        Product(tenant_id=tid, name="Coca 500", sku="CC-1", sale_price_ars=Decimal("100"))
+    )
+    await db_session.commit()
+    counts = await insert_confirmed_data(
+        db_session,
+        tid,
+        _gastos_planos([{"fecha": _HOY, "gasto": "500", "sku": "CC-1", "producto": "Coca 500"}]),
+        {"gastos": True},
+    )
+    assert counts["compras_sin_articulos"] == 1
+    assert (await db_session.execute(select(ExpenseEntry))).scalars().all() == []

@@ -1616,6 +1616,27 @@ def _fila_con_articulo(nombre: Any, cantidad: Any) -> bool:
     return bool(_clean_str(nombre, 299)) and _hay_cantidad(cantidad)
 
 
+def _vinculo_fuerte(
+    by_sku: dict[str, uuid.UUID],
+    by_name: dict[str, uuid.UUID | None],
+    name: Any,
+    sku: Any,
+    by_barcode: dict[str, list[uuid.UUID]] | None,
+    barcode: Any,
+) -> uuid.UUID | None:
+    """El producto por código de barras, SKU o nombre exacto, sin el nivel de
+    palabras (B·5b-2): un vínculo que no es un parecido de texto."""
+    return _resolve_product(
+        by_sku,
+        by_name,
+        str(name) if name is not None else None,
+        str(sku) if sku is not None else None,
+        None,
+        by_barcode=by_barcode,
+        barcode=str(barcode) if barcode is not None else None,
+    )
+
+
 def _hay_cantidad(cantidad: Any) -> bool:
     """Una cantidad legible > 0, entera o con decimales («2,5» kg de un producto
     por peso es una cantidad: `_parse_qty` sola la redondearía)."""
@@ -5998,8 +6019,21 @@ async def _insert_confirmed_data_impl(
                     exp_qty_raw = (
                         row.get(qty_col) if qty_col else _row_val(row, _CANTIDAD_COLS)
                     )
-                    if cat_code != "INVENTORY" and not _hay_cantidad(exp_qty_raw):
-                        # B·5b-2: ver el gemelo multihoja (vínculo medio adivinado).
+                    if (
+                        cat_code != "INVENTORY"
+                        and expense.product_id is not None
+                        and not _hay_cantidad(exp_qty_raw)
+                        and _vinculo_fuerte(
+                            _by_sku,
+                            _by_name,
+                            _exp_name,
+                            _exp_sku,
+                            _identity_indexes.by_barcode,
+                            _exp_barcode,
+                        )
+                        is None
+                    ):
+                        # B·5b-2: ver el gemelo multihoja (vínculo por palabras).
                         expense.product_id = None
                     # Costo unitario: solo de una columna inequívoca y DISTINTA
                     # de la del monto — "costo" suele ser el total de la línea y
@@ -6102,6 +6136,29 @@ async def _insert_confirmed_data_impl(
                                     barcode=_exp_barcode,
                                     by_barcode=_identity_indexes.by_barcode,
                                 )
+                    if (
+                        not _captured_to_otros
+                        and infer_expense_type(cat_code, product_id=expense.product_id)
+                        == "COGS"
+                        and (expense.product_id is None or not _hay_cantidad(exp_qty_raw))
+                    ):
+                        # B·5b-2, control final: ver el gemelo multihoja.
+                        counts["otros"] += _capture_unclassified(
+                            session,
+                            tenant_id,
+                            rows=[row],
+                            headers=headers,
+                            source=source,
+                            uploaded_file_id=uploaded_file_id,
+                            context_label=MOTIVO_COMPRA_SIN_ARTICULOS,
+                            suggested_entity="expense",
+                            row_ref=_source_row_ref(_row_anchor),
+                        )
+                        counts["compras_sin_articulos"] = (
+                            counts.get("compras_sin_articulos", 0) + 1
+                        )
+                        _captured_to_otros_rows.add(row_index)
+                        _captured_to_otros = True
                     # Review F2 #4: la cola de "aplicar el gasto" se saltea SIN
                     # `continue` (así el bloque de fingerprint del final igual corre).
                     if not _captured_to_otros:
@@ -8243,11 +8300,21 @@ async def _insert_multisheet_data(
         if costo_calculado is not None and costo_calculado.unit_cost_final:
             _costo_final = costo_calculado.unit_cost_final
         exp_qty_raw = _val(row, cols.get("quantity"), _CANTIDAD_COLS)
-        if cat_code != "INVENTORY" and not _hay_cantidad(exp_qty_raw):
-            # B·5b-2: sin cantidad, que el texto del gasto se parezca al nombre de
-            # un producto («Pago luz», «Alquiler local») no lo convierte en una
-            # compra de mercadería: el vínculo era medio adivinado y lo pasaba a
-            # COGS sin artículos. La categoría manda.
+        if (
+            cat_code != "INVENTORY"
+            and expense.product_id is not None
+            and not _hay_cantidad(exp_qty_raw)
+            and _vinculo_fuerte(
+                _by_sku, _by_name, _exp_name, _exp_sku, _identity_indexes.by_barcode, _exp_barcode
+            )
+            is None
+        ):
+            # B·5b-2: sin cantidad, que el texto del gasto se PAREZCA al nombre de
+            # un producto («Pago luz» ~ «Lámpara luz») no lo convierte en una
+            # compra de mercadería: el vínculo por palabras era medio adivinado y
+            # lo pasaba a COGS. La categoría manda. Un vínculo fuerte (código de
+            # barras, SKU, nombre exacto) sin cantidad sí es una compra sin
+            # cantidad: lo frena el control de abajo.
             expense.product_id = None
         # Compra de mercadería = gasto COGS+caja Y alta/reposición de producto. Señal
         # de fila: nombre de producto + cantidad>0 (libro de compras). Se CREA el
@@ -8332,6 +8399,27 @@ async def _insert_multisheet_data(
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
+        if expense.expense_type == "COGS" and (
+            expense.product_id is None or not _hay_cantidad(exp_qty_raw)
+        ):
+            # B·5b-2, control final: después de resolver el producto, una compra de
+            # mercadería que sigue sin artículo (una cantidad con decimales de un
+            # producto nuevo no lo crea) o sin cantidad (vínculo fuerte, sin cuántos)
+            # no se registra como gasto COGS suelto: va a «Otros».
+            counts["otros"] += _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[row],
+                headers=None,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=MOTIVO_COMPRA_SIN_ARTICULOS,
+                suggested_entity="expense",
+                row_ref=row_ref,
+                context_id=context_id,
+            )
+            counts["compras_sin_articulos"] = counts.get("compras_sin_articulos", 0) + 1
+            return True
         # Sentinela: compra de mercadería (con product_id) SIN proveedor informado
         # → "No identificado" (UNO por tenant). No aplica a OPEX sin producto.
         if expense.supplier_id is None and expense.product_id is not None:
