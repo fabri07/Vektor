@@ -158,7 +158,9 @@ async def test_expense_linked_to_product_by_sku(
         "inferred_type": "gastos",
         "has_gasto": True,
         "gastos_detectados": [
-            {"fecha": "2024-01-15", "gasto": "500", "producto": "otra cosa", "sku": "INS-1"},
+            # B·5b-2: con cantidad: sin ella el vínculo no es una compra.
+            {"fecha": "2024-01-15", "gasto": "500", "producto": "otra cosa", "sku": "INS-1",
+             "cantidad": "2"},
         ],
     }
     await importer.insert_confirmed_data(
@@ -179,7 +181,7 @@ async def test_expense_linked_to_product_by_normalized_name(
         "inferred_type": "gastos",
         "has_gasto": True,
         "gastos_detectados": [
-            {"fecha": "2024-01-15", "gasto": "800", "producto": "Harina-000"},
+            {"fecha": "2024-01-15", "gasto": "800", "producto": "Harina-000", "cantidad": "1"},
         ],
     }
     await importer.insert_confirmed_data(

@@ -143,7 +143,8 @@ export function ReceiptModal({
             : Array.isArray(detail) && detail[0] && typeof detail[0] === "object"
               ? String((detail[0] as { msg?: unknown }).msg ?? "")
               : "";
-      setError(msg || "No se pudo cargar el remito.");
+      // Pydantic antepone «Value error,» a los mensajes de un validator.
+      setError(msg.replace(/^Value error,\s*/, "") || "No se pudo cargar el remito.");
       toast("No se pudo cargar el remito.", "error");
     },
   });
