@@ -42,6 +42,7 @@ _RISK_CODE_TO_METRICS: dict[str, list[str]] = {
     "MARGIN_LOW": ["margen_neto", "margen_bruto"],
     "STOCK_CRITICAL": ["valor_stock"],
     "SUPPLIER_DEPENDENCY": [],
+    "GROWTH_STAGNANT": ["ventas_totales"],
 }
 
 # Significado funcional de cada alerta (fallback determinístico si el manual
@@ -64,6 +65,11 @@ _ALERT_MEANING: dict[str, str] = {
         "Dependencia de proveedor: una parte grande de las compras se concentra "
         "en un solo proveedor. Véktor lo marca porque si ese proveedor falla o "
         "sube precios, pega directo en el negocio."
+    ),
+    "GROWTH_STAGNANT": (
+        "Ventas estancadas: lo vendido en los últimos 30 días no crece contra los "
+        "30 anteriores, o cae. Véktor lo marca porque con costos que suben, vender "
+        "lo mismo es ganar menos."
     ),
 }
 

@@ -10,7 +10,11 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, require_active_subscription_for_insights
+from app.api.v1.deps import (
+    get_current_tenant,
+    get_current_user,
+    require_active_subscription_for_insights,
+)
 from app.domain.product import DEFAULT_LOW_STOCK_THRESHOLD_UNITS
 from app.domain.sale_unit import formatear_cantidad, valor_de_stock
 from app.persistence.db.session import get_db_session
@@ -18,6 +22,7 @@ from app.persistence.models.business import ActionSuggestion, Insight
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.persistence.models.user import User
 from app.persistence.repositories.inventory_repository import InventoryRepository
 from app.persistence.repositories.transaction_repository import ExpenseRepository, SaleRepository
 
@@ -569,6 +574,21 @@ class AperturasPorConfirmarOut(BaseModel):
     ventas_costeadas_antes: int
 
 
+class RetirosVsResultadoOut(BaseModel):
+    """M·2d-3: en el mes cerrado se retiró más de lo que dejó el negocio.
+
+    Informativo (no es una alerta ni entra al score). ``estimado`` = el resultado
+    sale de un neto estimado: se muestra como aproximado.
+    """
+
+    periodo: str
+    desde: date
+    hasta: date
+    retiros_ars: float
+    resultado_ars: float
+    estimado: bool
+
+
 class MarginsResponse(BaseModel):
     #: La completitud de los datos no llega a 50: estado vacío (no-invention).
     sin_datos: bool = False
@@ -584,6 +604,9 @@ class MarginsResponse(BaseModel):
     por_categoria: list[MarginFactOut] = []
     #: ``None`` = no hay nada que confirmar.
     aperturas_por_confirmar: AperturasPorConfirmarOut | None = None
+    #: ``None`` = los retiros del mes cerrado no superan su resultado (o no hay
+    #: resultado medido).
+    retiros_vs_resultado: RetirosVsResultadoOut | None = None
 
 
 def _num(v: object) -> float | None:
@@ -627,6 +650,7 @@ async def get_margins(
     from_date: date | None = Query(default=None, description="Inicio del período (inclusive)"),
     to_date: date | None = Query(default=None, description="Fin del período (inclusive)"),
     tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> MarginsResponse:
     """Todo sale de FactsService (invariante 2c): el front no calcula ningún margen.
@@ -710,4 +734,18 @@ async def get_margins(
         serie_neto=[out(f) for f in m.serie_neto],
         por_categoria=[out(f) for f in m.por_categoria],
         aperturas_por_confirmar=aperturas,
+        # Los retiros del socio son capital: los ve quien ve el capital
+        # (OWNER/ADMIN, como `/capital-movements`), no cualquier lector del margen.
+        retiros_vs_resultado=(
+            RetirosVsResultadoOut(
+                periodo=m.retiros_vs_resultado.periodo,
+                desde=m.retiros_vs_resultado.desde,
+                hasta=m.retiros_vs_resultado.hasta,
+                retiros_ars=m.retiros_vs_resultado.retiros_ars,
+                resultado_ars=m.retiros_vs_resultado.resultado_ars,
+                estimado=m.retiros_vs_resultado.estimado,
+            )
+            if m.retiros_vs_resultado is not None and user.role_code in ("OWNER", "ADMIN")
+            else None
+        ),
     )

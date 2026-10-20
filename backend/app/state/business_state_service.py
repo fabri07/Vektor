@@ -174,11 +174,12 @@ def _make_fingerprint(
     confirmed_cost_count: int = 0,
     dia_ar: str = "",
     neto_marca: str = "",
+    arqueo: str = "",
 ) -> str:
     raw = (
         f"{sale_count}:{expense_count}:{product_count}:"
         f"{profile_updated_at.isoformat()}:{prev_sales_amount}:{capital_liquid_out}:"
-        f"{sold_cost}:{confirmed_cost_count}:{dia_ar}:{neto_marca}"
+        f"{sold_cost}:{confirmed_cost_count}:{dia_ar}:{neto_marca}:{arqueo}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -722,6 +723,8 @@ async def compute_business_state(
         # margen cambia aunque no cambie ningún dato.
         dia_ar=today_ar().isoformat(),
         neto_marca=await _marca_del_neto(session, tenant_id),
+        # El último arqueo define la caja (M·2d-3): uno nuevo invalida el caché.
+        arqueo=str(latest_counted_cash),
     )
     cached_hash: str | None = await redis.get(_hash_key(tenant_id))
     if cached_hash == fingerprint:
@@ -777,7 +780,11 @@ async def compute_business_state(
     #   3. flujo        → hay movimientos líquidos pero no saldo → modo cobertura
     #   4. desconocido  → sin nada → caja excluida del score (no-invention)
     has_liquid_movements = liquid_inflow_est > 0 or liquid_outflow_est > 0
-    if latest_counted_cash is not None:
+    # El contado del arqueo es el neto del día sin el fondo: un negativo es un
+    # cierre válido (M·2d-3: se retiró más de lo que entró), pero no un saldo —
+    # en el cajón quedó el fondo menos esa diferencia. La caja se mide con el
+    # tier siguiente; el arqueo sigue contando como dato observado.
+    if latest_counted_cash is not None and latest_counted_cash >= 0:
         cash_on_hand_est = Decimal(str(latest_counted_cash))
         cash_source = "arqueo"
     elif onboarding_recent and profile.cash_on_hand_estimate_ars is not None:
@@ -802,7 +809,8 @@ async def compute_business_state(
     has_inventory_cost = monthly_inventory_cost_est > 0
     has_fixed_expenses = monthly_fixed_expenses_est > 0
     # Caja "presente" si hay cualquier fuente real (arqueo, estimado o flujo líquido).
-    has_cash_on_hand = cash_source != "desconocido"
+    # Un arqueo negativo no es saldo (M·2d-3) pero sigue siendo caja observada.
+    has_cash_on_hand = cash_source != "desconocido" or latest_counted_cash is not None
 
     # Procedencia de cada input: ¿lo respalda un dato del negocio, o sólo la
     # respuesta del dueño en el alta? Es la distinción que `_compute_completeness`

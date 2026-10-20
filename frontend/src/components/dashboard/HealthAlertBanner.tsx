@@ -49,6 +49,14 @@ const ALERT_MAP: Record<string, AlertConfig> = {
     colorClass: "border-yellow-500/60 bg-yellow-500/10 text-yellow-400",
     chatPrompt: "Explicame esta alerta de dependencia de proveedor",
   },
+  GROWTH_STAGNANT: {
+    icon: <TrendingDown className="h-4 w-4" />,
+    title: "Ventas estancadas",
+    body: "Lo que vendiste en los últimos 30 días no crece contra los 30 anteriores.",
+    href: "/sales",
+    colorClass: "border-amber-500/60 bg-amber-500/10 text-amber-400",
+    chatPrompt: "Explicame por qué mis ventas están estancadas",
+  },
 };
 
 interface Props {

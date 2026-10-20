@@ -200,7 +200,13 @@ async def _run(tenant_id_str: str) -> None:
                                         f"  - Inventario: {snapshot.score_stock or 0}/100\n"
                                         f"  - Proveedores: {snapshot.score_supplier or 0}/100\n"
                                         f"  - Margen comercial: {margen_txt}\n"
+                                        f"  - Crecimiento de ventas: "
+                                        f"{snapshot.score_growth or 0}/100\n"
                                         f"Riesgo principal: {risk_code}\n"
+                                        # Lo que ya calculó Véktor: el LLM narra
+                                        # sobre esos números, nunca inventa otros.
+                                        f"Diagnóstico calculado (números exactos, no "
+                                        f"los cambies): {title}. {description}\n"
                                         f"Confianza de datos: {confidence}"
                                     ),
                                 }

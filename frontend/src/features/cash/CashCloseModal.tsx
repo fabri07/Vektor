@@ -87,6 +87,10 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
   }, 0);
 
   const expected = preview?.expected_total_ars ?? 0;
+  // M·2d-3: un retiro o gasto en efectivo mayor que lo cobrado deja el esperado
+  // de efectivo negativo. Es válido: contar exactamente eso es caja cuadrada.
+  const expectedCash =
+    preview?.breakdown.find((b) => b.payment_method === "cash")?.expected_ars ?? 0;
   const countedNum = simpleMode ? parseFloat(counted) : cashNet + digitalSum;
   const hasCounted = simpleMode
     ? !isNaN(parseFloat(counted))
@@ -123,7 +127,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
       return cashCloseService.createClose({
         close_date: closeDate,
         // El backend recomputa el contado server-side desde el arqueo.
-        counted_total_ars: Math.max(0, countedNum),
+        counted_total_ars: countedNum,
         counted_by_method: Object.keys(byMethod).length > 0 ? byMethod : undefined,
         opening_float_ars: parseFloat(openingFloat) || 0,
         cash_denominations: cashDenoms,
@@ -194,6 +198,14 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
                     {formatARS(expected)}
                   </span>
                 </div>
+                {expectedCash < 0 && (
+                  <p className="pt-1 text-xs text-vk-text-muted">
+                    Hoy salió más efectivo del que entró (retiros o gastos).{" "}
+                    {simpleMode
+                      ? "Si cargás el total sin el fondo y da negativo, cargalo con el signo menos: así cierra cuadrada."
+                      : "Si en la caja hay el fondo menos esa diferencia, cierra cuadrada."}
+                  </p>
+                )}
               </div>
             ) : (
               <p className="text-sm text-vk-text-muted">
@@ -218,7 +230,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
                 htmlFor="counted"
                 className="mb-1.5 block text-sm font-medium text-vektor-white"
               >
-                ¿Cuánto contaste en caja?
+                ¿Cuánto contaste en caja, sin contar el fondo?
               </label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-vk-text-muted">
@@ -324,7 +336,7 @@ export function CashCloseModal({ isOpen, onClose }: CashCloseModalProps) {
                               [b.payment_method]: e.target.value,
                             }))
                           }
-                          placeholder={String(b.expected_ars)}
+                          placeholder={b.expected_ars > 0 ? String(b.expected_ars) : "0"}
                           className={inputCls}
                         />
                       </div>

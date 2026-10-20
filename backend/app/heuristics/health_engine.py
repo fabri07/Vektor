@@ -43,7 +43,7 @@ _RISK_DESCRIPTIONS: dict[str, str] = {
     "MARGIN_LOW": "Margen por debajo del umbral saludable para el vertical",
     "STOCK_CRITICAL": "Más del 30% de productos con stock crítico",
     "SUPPLIER_DEPENDENCY": "Alta dependencia de un único proveedor",
-    "GROWTH_STAGNANT": "Las ventas muestran caída o estancamiento respecto al período anterior",
+    "GROWTH_STAGNANT": "Las ventas son la dimensión más floja: crecen poco, no crecen o caen",
 }
 
 # Tie-break order: earlier index wins
@@ -432,7 +432,14 @@ def calculate_health_score(
     elif state.data_completeness_score < 60:
         total = min(total, 75)
 
-    weakest_dim = _primary_risk(present)
+    # Sin período anterior el crecimiento es un 50 neutro, no una medición: no
+    # puede ser el riesgo principal (diría «caída» sin con qué comparar).
+    candidatos = (
+        {d: v for d, v in present.items() if d != "growth"}
+        if state.prev_monthly_sales_est <= 0 and len(present) > 1
+        else present
+    )
+    weakest_dim = _primary_risk(candidatos)
     risk_code = _DIMENSION_RISK_CODE[weakest_dim]
 
     benchmark_confidence = benchmark.confidence

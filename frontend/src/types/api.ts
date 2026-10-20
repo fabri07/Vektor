@@ -208,6 +208,19 @@ export interface MarginsResponse {
   por_categoria: MarginFact[];
   /** M·2d: stock inicial por confirmar. null = nada que confirmar. */
   aperturas_por_confirmar?: AperturasPorConfirmar | null;
+  /** M·2d-3: los retiros del mes cerrado superan su resultado (informativo). */
+  retiros_vs_resultado?: RetirosVsResultado | null;
+}
+
+/** M·2d-3: en el mes cerrado se retiró más de lo que dejó el negocio. */
+export interface RetirosVsResultado {
+  periodo: string;
+  desde: string;
+  hasta: string;
+  retiros_ars: number;
+  resultado_ars: number;
+  /** El resultado sale de un neto estimado: se muestra como aproximado. */
+  estimado: boolean;
 }
 
 /** M·2d: un archivo que cargó stock inicial sin fecha confirmada. */

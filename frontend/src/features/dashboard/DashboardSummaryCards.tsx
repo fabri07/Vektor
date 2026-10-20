@@ -91,6 +91,16 @@ export function MarginCard() {
             titulo={`Margen neto · ${data.neto_mes_cerrado ? nombreDelMes(data.neto_mes_cerrado) : "mes cerrado"}`}
             fact={data.neto_mes_cerrado}
           />
+          {/* M·2d-3: informativo, no una alerta: sin color de riesgo. */}
+          {data.retiros_vs_resultado && (
+            <p className="px-1 text-xs text-vektor-body">
+              En {nombreDelMes(data.retiros_vs_resultado)} retiraste{" "}
+              {formatARS(data.retiros_vs_resultado.retiros_ars)} y el negocio{" "}
+              {data.retiros_vs_resultado.resultado_ars < 0 ? "perdió" : "dejó"}{" "}
+              {data.retiros_vs_resultado.estimado ? "aprox. " : ""}
+              {formatARS(Math.abs(data.retiros_vs_resultado.resultado_ars))}.
+            </p>
+          )}
           <MarginLine
             titulo={`Margen bruto · ${data.bruto_mes_en_curso ? nombreDelMes(data.bruto_mes_en_curso) : "mes"} (en curso)`}
             fact={data.bruto_mes_en_curso}
