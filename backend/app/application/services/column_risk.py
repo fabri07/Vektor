@@ -261,6 +261,68 @@ def _rows_for_context(summary: dict[str, Any], context_id: str) -> list[dict[str
     return rows
 
 
+# ── B·5f: una columna con ≥ 40 % de celdas vacías no se carga ────────────────
+#
+# Decisión del dueño (2026-10-20): una columna con al menos 40 % de vacíos no
+# se importa, y la ingesta avisa que esos datos no se cargan. Si el usuario la
+# mapea a mano, se respeta (y se avisa). Se mide sobre TODAS las filas de su
+# hoja/contexto (``_rows_for_context``) con la misma definición de vacío que F8.
+#
+# Sólo se excluyen solas las columnas INFORMATIVAS (contacto, notas, categoría,
+# descripción, vencimiento, precio de lista, campos propios): sacar una de
+# identidad, monto, fecha, cantidad, costo o medio de pago cambiaría los números
+# de las filas que SÍ la traen. Esas se cargan igual y se avisa; si a una fila le
+# falta un dato que la operación necesita, va a «Otros» por la regla de siempre.
+
+UMBRAL_COLUMNA_VACIA = NULL_COLUMN_WARN_THRESHOLD  # 0.40
+
+#: Destinos que una columna mayormente vacía pierde sin cambiar ningún número.
+DESTINOS_INFORMATIVOS: frozenset[str] = frozenset(
+    {
+        "address", "birthday", "category", "customer_email", "customer_phone",
+        "customer_type", "description", "email", "expiry_date", "is_recurring",
+        "list_price_ars", "locality", "notes", "phone", "postal_code", "province",
+        "supplier_email", "supplier_phone",
+    }
+)
+
+
+def destino_excluible_por_vacio(target_field: str | None) -> bool:
+    """Un destino que se puede dejar de cargar sin tocar montos ni identidad:
+    informativo, campo propio, o ninguno."""
+    target = parse_target(target_field)
+    if target.kind in ("none", "ignore", "custom"):
+        return True
+    return target.kind in ("canonical", "cross") and target.field in DESTINOS_INFORMATIVOS
+
+
+def columnas_vacias(
+    summary: dict[str, Any], context_id: str, columnas: list[str] | None = None
+) -> dict[str, float]:
+    """``{columna: proporción vacía}`` de las columnas del contexto con
+    ≥ ``UMBRAL_COLUMNA_VACIA`` de celdas vacías, sobre todas sus filas.
+
+    Sin filas (contexto desconocido o summary sin buckets) → ``{}``: sin medir no
+    se excluye nada.
+    """
+    rows = _rows_for_context(summary, context_id)
+    if not rows:
+        return {}
+    if columnas is None:
+        ctx = next(
+            (c for c in resolve_contexts(summary) if c.get("context_id") == context_id), None
+        )
+        columnas = [str(h) for h in (ctx or {}).get("headers") or []]
+    out: dict[str, float] = {}
+    total = len(rows)
+    for col in columnas:
+        vacias = sum(1 for r in rows if _is_null(r.get(col)))
+        proporcion = vacias / total
+        if proporcion >= UMBRAL_COLUMNA_VACIA:
+            out[col] = proporcion
+    return out
+
+
 def build_contextual_column_risk(
     summary: dict[str, Any],
     context_mappings: dict[str, list[MappingEntry]],
@@ -338,7 +400,7 @@ def build_contextual_column_risk(
 
             null_ratio = null_rows / row_count
             affected_rows = null_rows + invalid_rows
-            high_null = null_ratio > null_threshold
+            high_null = null_ratio >= null_threshold
 
             if target in required:
                 field_requirement = "required"

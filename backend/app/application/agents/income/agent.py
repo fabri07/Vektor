@@ -787,7 +787,7 @@ class AgentIncome(BaseAgent):
         """limpiar_normalizar_archivo: reporta columnas riesgosas y la política de imputación.
 
         Es honesto sobre lo que Véktor hace: no muta el archivo en el chat, pero
-        describe concretamente qué columnas conviene limpiar (umbral 35% de nulos,
+        describe concretamente qué columnas conviene limpiar (umbral 40% de nulos,
         de `file_parsing.flag_columns_at_risk`) y la estrategia de imputación que se
         aplica en la ingesta (`impute_column`: cantidad→0, numéricos→mediana,
         categóricos→None), y ofrece las acciones de limpieza disponibles.

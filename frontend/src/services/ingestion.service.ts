@@ -449,6 +449,11 @@ export interface ColumnMappingSuggestion {
   // mismo. Espejo de `ColumnMappingSuggestion` en `schemas/ingestion.py`.
   status: "mapped" | "unmapped" | "ambiguo" | "required_missing";
   context_id?: string | null;
+  // B·5f: % de celdas vacías (sobre todas las filas de la hoja) cuando es ≥ 40;
+  // y si por eso Véktor NO la mapeó sola. El aviso para la persona viaja en
+  // `duda`. Espejo de `ColumnMappingSuggestion` en `schemas/ingestion.py`.
+  vacia_pct?: number | null;
+  excluida_por_vacia?: boolean;
   // Candidatos entre los que elegir cuando `status === "ambiguo"`.
   options?: string[];
   // Por qué no alcanza, en castellano. Viaja también en `unmapped` cuando el

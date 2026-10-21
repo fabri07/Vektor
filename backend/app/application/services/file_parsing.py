@@ -241,8 +241,10 @@ AMOUNT_RE = re.compile(r"\$\s*[\d.,]+")
 # Strings que representan ausencia de valor en imports
 _NULL_STRINGS = {"", "nan", "none", "null", "n/a", "na", "-", "nd"}
 
-# Umbral de % de nulls por columna a partir del cual se advierte al usuario
-NULL_COLUMN_WARN_THRESHOLD = 0.35
+# Umbral de % de nulls por columna a partir del cual se advierte al usuario.
+# B·5f (decisión del dueño, 2026-10-20): ≥ 40 %, el MISMO umbral que hace que
+# una columna informativa no se cargue (``column_risk.UMBRAL_COLUMNA_VACIA``).
+NULL_COLUMN_WARN_THRESHOLD = 0.40
 
 
 def normalize_numeric(
@@ -357,7 +359,7 @@ def flag_columns_at_risk(
     return [
         {"column": col, "null_pct": round(pct, 4), "recommendation": "drop"}
         for col, pct in null_stats.items()
-        if pct > threshold
+        if pct >= threshold
     ]
 
 
@@ -2201,7 +2203,7 @@ def _parse_spreadsheet(
         if at_risk:
             summary["columns_at_risk"] = at_risk
             summary["warnings"].append(
-                f"{len(at_risk)} columna(s) con más del 35% de datos vacíos."
+                f"{len(at_risk)} columna(s) con 40% o más de datos vacíos."
             )
         csv_inferred = analysis.get("inferred_type", "general")
         # Sin truncamiento: todas las filas se guardan (el [:50] previo perdía datos).
@@ -2578,7 +2580,7 @@ def _parse_spreadsheet(
         if at_risk:
             summary["columns_at_risk"] = at_risk
             summary["warnings"].append(
-                f"{len(at_risk)} columna(s) con más del 35% de datos vacíos."
+                f"{len(at_risk)} columna(s) con 40% o más de datos vacíos."
             )
         inferred = analysis.get("inferred_type", "general")
         _store_rows_by_type(summary, all_dicts, inferred)

@@ -66,8 +66,10 @@ from app.application.services.column_risk import (
     MappingEntry,
     apply_column_risk_decisions,
     build_contextual_column_risk,
+    columnas_vacias,
     context_is_included,
     derive_context_mapping_entries,
+    destino_excluible_por_vacio,
     resolve_contexts,
     validate_column_risk_decisions,
 )
@@ -1921,9 +1923,37 @@ async def get_column_mappings(
         trace_id=record.trace_id or record.id,
         file_id=record.id,
     )
-    return [
-        ColumnMappingSuggestion(**{**s, "context_id": context_id}) for s in raw_suggestions
-    ]
+    # B·5f: una columna con ≥ 40 % de celdas vacías (sobre todas las filas de su
+    # contexto) no se mapea SOLA a un destino informativo: queda sin mapear con
+    # el porcentaje, para que la pantalla diga que no se carga. Con un destino
+    # que mueve números o identidad, la sugerencia queda y lleva el porcentaje.
+    vacias = columnas_vacias(summary, context_id or "table", [str(h) for h in headers])
+    out: list[ColumnMappingSuggestion] = []
+    for sug in raw_suggestions:
+        prop = vacias.get(str(sug.get("source_column")))
+        extra: dict[str, Any] = {"context_id": context_id}
+        if prop is not None:
+            pct = round(prop * 100)
+            extra["vacia_pct"] = pct
+            previa = sug.get("duda")
+            if destino_excluible_por_vacio(sug.get("target_field")):
+                aviso = (
+                    f"Está {pct}% vacía: no se carga. Si la querés igual, elegí el campo "
+                    "a mano y se respeta."
+                )
+                extra.update(
+                    target_field=None, status="unmapped", confidence=0.0, source="none",
+                    excluida_por_vacia=True, options=[],
+                )
+            else:
+                aviso = (
+                    f"Está {pct}% vacía: se carga igual porque trae datos de la operación; "
+                    "las filas a las que les falte un dato necesario van a «Otros»."
+                )
+            # La pantalla ya muestra `duda` en todos sus caminos (AmbiguityHint).
+            extra["duda"] = f"{previa} {aviso}" if previa else aviso
+        out.append(ColumnMappingSuggestion(**{**sug, **extra}))
+    return out
 
 
 @router.get(
@@ -2936,6 +2966,45 @@ async def confirm_file(
         if d.action == "drop_column"
     }
 
+    # ── B·5f: columnas con ≥ 40 % de celdas vacías ─────────────────────────────
+    # Una columna mayormente vacía mapeada SOLA (sugerencia, no elegida por el
+    # usuario) a un destino informativo no se carga: se suma a `_dropped_pairs`
+    # (mismo efecto que dropearla: no llega al importador ni crea campo propio).
+    # Elegida a mano, o con un destino que mueve números/identidad, se carga y
+    # se avisa. Sobre las filas COMPLETAS de su contexto.
+    _vacias_por_ctx: dict[str, dict[str, float]] = {}
+    _columnas_vacias_excluidas: dict[str, dict[str, float]] = defaultdict(dict)
+    _avisos_columnas_vacias: list[str] = []
+    for _m in body.column_mappings:
+        _cid = _m.context_id or "table"
+        if parse_target(_m.target_field).kind in ("ignore", "none"):
+            continue
+        if (_cid, _m.source_column) in _dropped_pairs:
+            continue
+        if _cid not in _vacias_por_ctx:
+            _vacias_por_ctx[_cid] = columnas_vacias(record.parsed_summary_json or {}, _cid)
+        _prop = _vacias_por_ctx[_cid].get(_m.source_column)
+        if _prop is None:
+            continue
+        _pct = round(_prop * 100)
+        if _m.user_selected:
+            _avisos_columnas_vacias.append(
+                f"La columna «{_m.source_column}» está {_pct}% vacía: se carga porque la "
+                "elegiste vos."
+            )
+        elif destino_excluible_por_vacio(_m.target_field):
+            _dropped_pairs.add((_cid, _m.source_column))
+            _columnas_vacias_excluidas[_cid][_m.source_column] = _prop
+            _avisos_columnas_vacias.append(
+                f"La columna «{_m.source_column}» no se carga: está {_pct}% vacía."
+            )
+        else:
+            _avisos_columnas_vacias.append(
+                f"La columna «{_m.source_column}» está {_pct}% vacía: se carga igual porque "
+                "trae datos de la operación; las filas a las que les falte un dato "
+                "necesario van a «Otros»."
+            )
+
     # ── Cambio 4: rechazar "Proveedor — Nombre" con el flag apagado ────────────
     # Reemplaza (para el caso de mapeo elegido EN esta llamada) el downgrade
     # silencioso a "marca" de _add_product — un payload viejo/replayado que no
@@ -3610,6 +3679,7 @@ async def confirm_file(
             dropped_columns=_applied.dropped_columns if _applied is not None else None,
             routed_rows=_applied.routed_rows if _applied is not None else None,
             external_code_conflicts=counts.get("external_code_conflict", 0),
+            columnas_vacias=dict(_columnas_vacias_excluidas),
         )
 
         await pipeline_event_service.emit_event(
@@ -3802,6 +3872,8 @@ async def confirm_file(
     # Avisos human-in-the-loop: el import no bloquea, pero le señala al usuario qué
     # quedó incompleto para que lo complete (proveedor, producto) o lo clasifique.
     warnings: list[str] = []
+    # B·5f: columnas con ≥ 40 % de vacíos (excluidas, o cargadas y por qué).
+    warnings.extend(_avisos_columnas_vacias)
     # Una columna que el usuario mapeó a otra sección y el importador NO escribió.
     # Pasa cuando el destino todavía no está implementado (F-D) o cuando el
     # rollout que lo habilita está apagado para el tenant. El contador existía
