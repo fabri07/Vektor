@@ -1010,6 +1010,7 @@ def _preview_de(analisis: list[stock_inicial_lote_service.FilaAnalizada]) -> lis
                     nombre=c.nombre,
                     por=c.por,
                     necesita_stock_inicial=c.necesita_stock_inicial,
+                    sale_unit=c.sale_unit,
                 )
                 for c in a.coincidencias
             ],
@@ -1135,11 +1136,13 @@ async def _ejecutar_lote(
             destino = await session.get(Product, destino_id)
             assert destino is not None  # bloqueado arriba
             no_aplicados = _campos_no_aplicados(f, destino)
+            # La fila dice kg / L en un producto por peso o volumen: el ledger
+            # cuenta unidades base (el mismo criterio que el alta y el PATCH).
             mov = await registrar_apertura_http(
                 session,
                 tid,
                 destino_id,
-                f.stock_units,
+                f.stock_units * (destino.base_units_per_sale_unit or 1),
                 costo=f.unit_cost_ars,
                 envio=f.costo_envio,
                 fecha=body.fecha,

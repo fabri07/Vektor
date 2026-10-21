@@ -409,6 +409,12 @@ export function StockInicialTabla({
                           onChange={() => setElecciones((prev) => ({ ...prev, [i]: c.product_id }))}
                         />
                         Es «{c.nombre}»{c.por !== "nombre" ? ` (mismo ${NOMBRES_DE_CAMPO[c.por]})` : ""}
+                        {c.sale_unit === "gram" || c.sale_unit === "milliliter" ? (
+                          <span className="text-vk-text-muted">
+                            {" "}— se vende por {c.sale_unit === "gram" ? "kg" : "litro"}: el stock de la fila va en{" "}
+                            {c.sale_unit === "gram" ? "kg" : "litros"}
+                          </span>
+                        ) : null}
                       </label>
                     ) : (
                       <p key={c.product_id} className="pl-5 text-vk-text-muted">

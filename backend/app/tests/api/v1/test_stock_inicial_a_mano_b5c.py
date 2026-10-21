@@ -670,3 +670,28 @@ async def test_apertura_en_dice_lo_que_no_aplico(
     assert r.json()["filas"][0]["campos_no_aplicados"] == ["sku", "sale_price_ars"]
     prod = await _leer(db_session, Product, p.id)
     assert (prod.sku, prod.sale_price_ars, prod.stock_units) == (None, Decimal("1000.00"), 10)
+
+
+async def test_apertura_en_un_producto_por_peso_lee_el_stock_en_kg(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """B·5d: la fila dice 3 (kg) sobre un producto que se vende por kilo: el
+    ledger cuenta gramos → 3.000, no 3 gramos."""
+    p = await _producto(
+        db_session, sample_tenant.tenant_id, name="Queso cremoso",
+        sale_unit="gram", base_units_per_sale_unit=1000,
+    )
+    filas = [_fila("Queso cremoso", stock_units=3)]
+    pv = await _preview(client, auth_headers, filas)
+    assert pv["filas"][0]["coincidencias"][0]["sale_unit"] == "gram"
+    r = await _confirmar(
+        client, auth_headers, filas, pv["preview_token"],
+        [{"fila": 0, "accion": "apertura_en", "product_id": str(p.id)}],
+    )
+    assert r.status_code == 201, r.text
+    (mov,) = await _aperturas(db_session, p.id)
+    assert mov.qty == 3000
+    assert (await _leer(db_session, Product, p.id)).stock_units == 3000

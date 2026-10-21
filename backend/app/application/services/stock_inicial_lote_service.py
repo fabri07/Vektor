@@ -42,6 +42,9 @@ class Coincidencia:
     nombre: str
     por: Por
     necesita_stock_inicial: bool
+    #: Unidad de venta del producto existente: en ``apertura_en`` el stock de la
+    #: fila se lee en ESA unidad (kg, L) y se pasa a unidades base.
+    sale_unit: str = "unit"
 
 
 @dataclass
@@ -126,6 +129,7 @@ async def analizar(
                     nombre=p.name,
                     por=por,
                     necesita_stock_inicial=p.id not in con_apertura,
+                    sale_unit=p.sale_unit or "unit",
                 )
             )
         a.coincidencias.sort(key=lambda c: (_ORDEN[c.por], str(c.product_id)))
