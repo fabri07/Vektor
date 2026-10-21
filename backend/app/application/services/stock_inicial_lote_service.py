@@ -42,6 +42,12 @@ class Coincidencia:
     nombre: str
     por: Por
     necesita_stock_inicial: bool
+    #: Unidad de venta del producto existente: en ``apertura_en`` el stock de la
+    #: fila se lee en ESA unidad (kg, L) y se pasa a unidades base.
+    sale_unit: str = "unit"
+    #: Factor unidad de venta → unidad base (1 o 1000). «gram» con factor 1 se
+    #: vende por gramo: la fila va en gramos, no en kg.
+    base_units_per_sale_unit: int = 1
 
 
 @dataclass
@@ -126,6 +132,8 @@ async def analizar(
                     nombre=p.name,
                     por=por,
                     necesita_stock_inicial=p.id not in con_apertura,
+                    sale_unit=p.sale_unit or "unit",
+                    base_units_per_sale_unit=p.base_units_per_sale_unit or 1,
                 )
             )
         a.coincidencias.sort(key=lambda c: (_ORDEN[c.por], str(c.product_id)))
@@ -136,8 +144,9 @@ async def analizar(
 def token(filas: list[FilaStockInicial], analisis: list[FilaAnalizada]) -> str:
     """Hash de lo que el usuario vio: las filas normalizadas y sus coincidencias.
 
-    Cambia si aparece o desaparece un producto que coincide, o si uno pasa a
-    tener stock inicial: la confirmación ya no es sobre lo que se eligió.
+    Cambia si aparece o desaparece un producto que coincide, si uno pasa a
+    tener stock inicial o si cambia su unidad de venta (la fila se lee en esa
+    unidad): la confirmación ya no es sobre lo que se eligió.
     """
     cuerpo = [
         {
@@ -149,7 +158,14 @@ def token(filas: list[FilaStockInicial], analisis: list[FilaAnalizada]) -> str:
             "envio": f.costo_envio,
             "categoria": (f.categoria or "").strip().lower(),
             "coincidencias": [
-                [str(c.product_id), c.por, c.necesita_stock_inicial] for c in a.coincidencias
+                [
+                    str(c.product_id),
+                    c.por,
+                    c.necesita_stock_inicial,
+                    c.sale_unit,
+                    c.base_units_per_sale_unit,
+                ]
+                for c in a.coincidencias
             ],
         }
         for f, a in zip(filas, analisis, strict=True)

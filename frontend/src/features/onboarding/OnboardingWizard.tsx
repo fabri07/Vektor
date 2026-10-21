@@ -10,6 +10,7 @@
  */
 
 import { useState } from "react";
+import axios from "axios";
 import { useQuery } from "@tanstack/react-query";
 import { ProgressBar } from "./ProgressBar";
 import { Step2Form, type MainConcern, type Step2Data } from "./Step2Form";
@@ -17,6 +18,7 @@ import { Step3Upload } from "./Step3Upload";
 import { Step4Loading } from "./Step4Loading";
 import { onboardingService } from "@/services/onboarding.service";
 import { ingestionService } from "@/services/ingestion.service";
+import { StockInicialTabla } from "@/features/products/StockInicialTabla";
 
 /** ¿Es una preocupación del catálogo cerrado? */
 function esMainConcern(valor: string | null | undefined): valor is MainConcern {
@@ -39,6 +41,11 @@ interface WizardState {
    * único camino por el que sus datos entran al sistema.
    */
   uploadedFileId: string | null;
+  /** B·5d: en el paso 2, la tabla de stock inicial en vez del archivo. Sólo
+   *  después del submit: el negocio tiene que existir antes de cargarle stock. */
+  stockInicialAMano: boolean;
+  /** La tabla terminó: se muestra su resumen y «Seguir» lleva al paso 3. */
+  stockInicialCargado: boolean;
 }
 
 
@@ -51,6 +58,8 @@ export function OnboardingWizard() {
     formSubmitted: false,
     pendingFile: null,
     uploadedFileId: null,
+    stockInicialAMano: false,
+    stockInicialCargado: false,
   });
 
   /*
@@ -85,51 +94,67 @@ export function OnboardingWizard() {
     setState((prev) => ({ ...prev, formData: data, step: 2, submitError: null }));
   }
 
+  /**
+   * Manda los datos principales si todavía no se mandaron. Lo usan el archivo y
+   * la tabla de stock inicial: los dos escriben sobre el negocio ya dado de alta.
+   * `false` = falló (el error ya quedó en el estado).
+   */
+  async function asegurarSubmit(): Promise<boolean> {
+    if (!state.formData) return false;
+    if (state.formSubmitted) return true;
+    try {
+      await onboardingService.submit({
+        weekly_sales_estimate_ars: state.formData.weekly_sales_estimate_ars,
+        monthly_inventory_cost_ars: state.formData.monthly_inventory_cost_ars,
+        monthly_fixed_expenses_ars: state.formData.monthly_fixed_expenses_ars,
+        cash_on_hand_ars: state.formData.cash_on_hand_ars,
+        product_count_estimate: state.formData.product_count_estimate,
+        supplier_count_estimate: state.formData.supplier_count_estimate,
+        // Solo si el usuario la contestó ACÁ. Si vino de la solicitud, se
+        // omite y el backend la toma del perfil: mandarla de vuelta sería
+        // hacerle un viaje de ida y vuelta a un dato que ya tiene.
+        ...(state.formData.main_concern
+          ? { main_concern: state.formData.main_concern }
+          : {}),
+        work_days: state.formData.work_days,
+        work_open_hour: state.formData.work_open_hour,
+        work_close_hour: state.formData.work_close_hour,
+        ...(state.formData.fiscal_condition
+          ? { fiscal_condition: state.formData.fiscal_condition }
+          : {}),
+        // Capital inicial (D·5): los dos juntos o ninguno.
+        ...(state.formData.initial_capital_ars !== null &&
+        state.formData.initial_capital_date !== null
+          ? {
+              initial_capital_ars: state.formData.initial_capital_ars,
+              initial_capital_date: state.formData.initial_capital_date,
+            }
+          : {}),
+      });
+      setState((prev) => ({ ...prev, formSubmitted: true }));
+      return true;
+    } catch (e) {
+      // 409 «Onboarding already completed»: un submit anterior ya entró (p. ej.
+      // la respuesta se perdió). Los datos están: se sigue como si hubiera salido.
+      if (axios.isAxiosError(e) && e.response?.status === 409) {
+        setState((prev) => ({ ...prev, formSubmitted: true }));
+        return true;
+      }
+      setState((prev) => ({
+        ...prev,
+        isSubmitting: false,
+        submitError: "Hubo un problema al enviar los datos. Intentá de nuevo.",
+      }));
+      return false;
+    }
+  }
+
   async function handleUploadNext(file: File | null) {
-    if (!state.formData) return;
+    if (!state.formData || state.isSubmitting) return;
 
     setState((prev) => ({ ...prev, isSubmitting: true, submitError: null }));
 
-    if (!state.formSubmitted) {
-      try {
-        await onboardingService.submit({
-          weekly_sales_estimate_ars: state.formData.weekly_sales_estimate_ars,
-          monthly_inventory_cost_ars: state.formData.monthly_inventory_cost_ars,
-          monthly_fixed_expenses_ars: state.formData.monthly_fixed_expenses_ars,
-          cash_on_hand_ars: state.formData.cash_on_hand_ars,
-          product_count_estimate: state.formData.product_count_estimate,
-          supplier_count_estimate: state.formData.supplier_count_estimate,
-          // Solo si el usuario la contestó ACÁ. Si vino de la solicitud, se
-          // omite y el backend la toma del perfil: mandarla de vuelta sería
-          // hacerle un viaje de ida y vuelta a un dato que ya tiene.
-          ...(state.formData.main_concern
-            ? { main_concern: state.formData.main_concern }
-            : {}),
-          work_days: state.formData.work_days,
-          work_open_hour: state.formData.work_open_hour,
-          work_close_hour: state.formData.work_close_hour,
-          ...(state.formData.fiscal_condition
-            ? { fiscal_condition: state.formData.fiscal_condition }
-            : {}),
-          // Capital inicial (D·5): los dos juntos o ninguno.
-          ...(state.formData.initial_capital_ars !== null &&
-          state.formData.initial_capital_date !== null
-            ? {
-                initial_capital_ars: state.formData.initial_capital_ars,
-                initial_capital_date: state.formData.initial_capital_date,
-              }
-            : {}),
-        });
-        setState((prev) => ({ ...prev, formSubmitted: true }));
-      } catch {
-        setState((prev) => ({
-          ...prev,
-          isSubmitting: false,
-          submitError: "Hubo un problema al enviar los datos. Intentá de nuevo.",
-        }));
-        return;
-      }
-    }
+    if (!(await asegurarSubmit())) return;
 
     let uploadedFileId: string | null = null;
     if (file) {
@@ -148,6 +173,13 @@ export function OnboardingWizard() {
     }
 
     setState((prev) => ({ ...prev, isSubmitting: false, step: 3, uploadedFileId }));
+  }
+
+  async function handleStockInicial() {
+    if (!state.formData || state.isSubmitting) return;
+    setState((prev) => ({ ...prev, isSubmitting: true, submitError: null }));
+    if (!(await asegurarSubmit())) return;
+    setState((prev) => ({ ...prev, isSubmitting: false, stockInicialAMano: true }));
   }
 
   async function handleRetryUpload() {
@@ -180,6 +212,8 @@ export function OnboardingWizard() {
     pendingFile,
     formSubmitted,
     uploadedFileId,
+    stockInicialAMano,
+    stockInicialCargado,
   } = state;
 
   return (
@@ -208,9 +242,49 @@ export function OnboardingWizard() {
                 />
               ))}
 
-            {step === 2 && (
+            {step === 2 && stockInicialAMano && (
               <>
-                <Step3Upload onNext={handleUploadNext} />
+                <h2 className="mb-1 text-xl font-semibold text-gray-900">Tu stock inicial</h2>
+                <p className="mb-4 text-sm text-gray-500">
+                  Cargá los productos que ya tenés, con su costo y su precio de venta.
+                </p>
+                {/* Al terminar queda el resumen de la tabla; «Seguir» va al paso
+                    3 como cuando no se sube archivo. */}
+                <StockInicialTabla
+                  onDone={() => setState((prev) => ({ ...prev, stockInicialCargado: true }))}
+                />
+                <div className="mt-4 flex items-center justify-between">
+                  {stockInicialCargado ? (
+                    <span />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setState((prev) => ({ ...prev, stockInicialAMano: false }))}
+                      className="text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
+                    >
+                      Volver a subir un archivo
+                    </button>
+                  )}
+                  {stockInicialCargado ? (
+                    <button
+                      type="button"
+                      onClick={() => goToStep(3)}
+                      className="h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
+                    >
+                      Seguir
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            )}
+
+            {step === 2 && !stockInicialAMano && (
+              <>
+                <Step3Upload
+                  onNext={handleUploadNext}
+                  onStockInicial={handleStockInicial}
+                  disabled={isSubmitting}
+                />
 
                 {submitError && (
                   <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">

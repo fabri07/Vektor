@@ -1010,6 +1010,8 @@ def _preview_de(analisis: list[stock_inicial_lote_service.FilaAnalizada]) -> lis
                     nombre=c.nombre,
                     por=c.por,
                     necesita_stock_inicial=c.necesita_stock_inicial,
+                    sale_unit=c.sale_unit,
+                    base_units_per_sale_unit=c.base_units_per_sale_unit,
                 )
                 for c in a.coincidencias
             ],
@@ -1135,11 +1137,13 @@ async def _ejecutar_lote(
             destino = await session.get(Product, destino_id)
             assert destino is not None  # bloqueado arriba
             no_aplicados = _campos_no_aplicados(f, destino)
+            # La fila dice kg / L en un producto por peso o volumen: el ledger
+            # cuenta unidades base (el mismo criterio que el alta y el PATCH).
             mov = await registrar_apertura_http(
                 session,
                 tid,
                 destino_id,
-                f.stock_units,
+                f.stock_units * (destino.base_units_per_sale_unit or 1),
                 costo=f.unit_cost_ars,
                 envio=f.costo_envio,
                 fecha=body.fecha,
@@ -1223,6 +1227,9 @@ async def confirm_initial_stock_batch(
             )
         elecciones[dada.fila] = dada
     plan: list[tuple[int, str, UUID | None]] = []
+    # Factor a unidades base por fila (auditoría): el de la coincidencia elegida
+    # en ``apertura_en``; un producto nuevo del lote se vende por unidad.
+    factor_de: dict[int, int] = {}
     for a in analisis:
         e = elecciones.get(a.fila)
         if e is None:
@@ -1254,6 +1261,7 @@ async def confirm_initial_stock_batch(
                 fila=a.fila,
             )
         plan.append((a.fila, "apertura_en", destino.product_id))
+        factor_de[a.fila] = destino.base_units_per_sale_unit
     destinos = [d for _, accion, d in plan if accion == "apertura_en" and d is not None]
     if len(set(destinos)) != len(destinos):
         raise _error_de_lote(
@@ -1281,7 +1289,10 @@ async def confirm_initial_stock_batch(
                         "accion": r.accion,
                         "product_id": str(r.product_id),
                         "movement_id": str(r.movement_id),
-                        "stock_units": body.filas[r.fila].stock_units,
+                        # Lo que entró al ledger (unidades base) y lo tipeado.
+                        "stock_units": body.filas[r.fila].stock_units
+                        * factor_de.get(r.fila, 1),
+                        "stock_units_fila": body.filas[r.fila].stock_units,
                         "unit_cost_ars": str(body.filas[r.fila].unit_cost_ars),
                     }
                     for r in resultados
