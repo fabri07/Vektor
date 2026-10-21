@@ -31,7 +31,9 @@ type PayloadFor<K extends QueuedKind> = K extends "sale"
 interface SubmitCallbacks {
   onSuccess?: () => void; // entró al servidor (o ya estaba: idempotente)
   onQueued?: () => void; // sin conexión → encolado, se sincroniza al volver online
-  onError?: () => void; // error real de validación/servidor (4xx/5xx)
+  // Error real de validación/servidor (4xx/5xx). `mensaje`: el del servidor si vino
+  // uno legible (B·5e: «no hay compra de X…»), para mostrarlo en vez del genérico.
+  onError?: (mensaje?: string) => void;
 }
 
 // Invalida las queries reales de cada dominio (match por prefijo en TanStack).
@@ -121,8 +123,21 @@ function isDuplicate(e: unknown): boolean {
   return errorCode(e) === "DUPLICATE_IDEMPOTENT";
 }
 
+/** El `detail.message` legible de un 4xx (los 422 de B·5e lo traen), o undefined. */
+export function mensajeDelServidor(e: unknown): string | undefined {
+  if (!axios.isAxiosError(e)) return undefined;
+  const detail = (e.response?.data as { detail?: unknown } | undefined)?.detail;
+  if (detail && typeof detail === "object" && "message" in detail) {
+    const m = (detail as { message?: unknown }).message;
+    if (typeof m === "string" && m.trim()) return m;
+  }
+  return undefined;
+}
+
 // Mensaje legible del error para guardarlo en el item de la cola (`lastError`).
 function errorMessage(e: unknown): string {
+  const delServidor = mensajeDelServidor(e);
+  if (delServidor) return delServidor;
   if (axios.isAxiosError(e)) {
     const status = e.response?.status;
     return status ? `Error ${status} del servidor` : "Sin conexión al sincronizar";
@@ -269,7 +284,7 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
             cb?.onError?.();
           }
         } else {
-          cb?.onError?.();
+          cb?.onError?.(mensajeDelServidor(e));
         }
       }
     },

@@ -29,6 +29,7 @@ from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
 )
+from app.tests._respaldo import producto_con_compra
 
 pytestmark = pytest.mark.asyncio
 
@@ -89,12 +90,14 @@ class TestProcedenciaDesdeOtros:
     ) -> None:
         archivo = await _archivo(db_session, sample_tenant)
         fila = await _fila(db_session, sample_tenant, archivo)
+        producto = await producto_con_compra(db_session, sample_tenant.tenant_id)
 
         resp = await client.post(
             f"/api/v1/others/{fila.id}/reclassify",
             json={
                 "entity_type": "sale",
                 "fields": {
+                    "product_id": str(producto.id),
                     "amount": "500.00",
                     "transaction_date": "2026-07-15T10:00:00",
                     "payment_method": "cash",

@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.respaldo_service import exigir_respaldo
 from app.domain.business_time import now_ar_naive
 from app.domain.date_parsing import parse_business_datetime
 from app.domain.expense_categories import (
@@ -111,14 +112,18 @@ async def save_sale(
         qty = max(1, int(float(str(entities.get("quantity") or 1))))
     except (ValueError, TypeError):
         qty = 1
+    transaction_date = _coerce_transaction_date(
+        entities.get("transaction_date") or entities.get("date")
+    )
+    # B·5e: «no se puede vender algo que no se compró». Las dos excepciones traen
+    # `user_message`, que el chat muestra tal cual.
+    await exigir_respaldo(db, tenant_id, [(product_id, transaction_date.date())])
     sale = SaleEntry(
         tenant_id=tenant_id,
         amount=Decimal(str(entities["amount"])),
         quantity=qty,
         product_id=product_id,
-        transaction_date=_coerce_transaction_date(
-            entities.get("transaction_date") or entities.get("date")
-        ),
+        transaction_date=transaction_date,
         payment_method=payment_method,
         notes=entities.get("product_description"),
         provenance="REAL",

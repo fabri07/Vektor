@@ -28,6 +28,7 @@ from app.persistence.db.session import get_db_session
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.tenant import Subscription, SubscriptionQuotaUsage
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.tests._respaldo import producto_con_compra
 from app.tests.conftest import add_business_profile
 
 from .conftest import FakeRedis, make_auth_headers, make_tenant, make_user
@@ -378,11 +379,13 @@ async def test_confirm_succeeds_and_marks_executed(auth_client, session: AsyncSe
 
     # Crear pending_action directamente en DB
     # payment_method ahora es obligatorio (save_sale rechaza ventas sin método).
+    # B·5e: y el producto, con compra previa.
+    producto = await producto_con_compra(session, tenant.tenant_id)
     action = PendingAction(
         tenant_id=tenant.tenant_id,
         user_id=user.user_id,
         action_type="REGISTER_SALE",
-        payload={"amount": 300, "payment_method": "cash"},
+        payload={"amount": 300, "payment_method": "cash", "product_id": str(producto.id)},
         risk_level="MEDIUM",
         status="PENDING",
         expires_at=datetime.now(UTC) + timedelta(minutes=10),

@@ -25,6 +25,7 @@ from app.application.services._savepoint import (
     guarded_savepoint,
     unique_violation_classifier,
 )
+from app.application.services.apertura_service import filtro_aperturas_vivas
 from app.application.services.cash_service import normalize_payment_method
 from app.application.services.costo_vigente_service import (
     marcar_para_recalcular,
@@ -74,6 +75,12 @@ from app.application.services.product_supplier_link_service import (
     link_product_to_declared_supplier,
     load_declared_link_index,
     reconcile_catalog_declared_links_for_upload,
+)
+from app.application.services.respaldo_service import (
+    MOTIVO_VENTA_SIN_COMPRA,
+    MOTIVO_VENTA_SIN_PRODUCTO,
+    primeros_dias_de_fuente,
+    respaldada,
 )
 from app.config.catalog_final_cost_rollout import catalog_final_cost_enabled_for
 from app.config.ingestion_schema_decisions_rollout import (
@@ -4654,6 +4661,13 @@ async def insert_confirmed_data(
     # ProductRepository.save). Shared lock ANTES de mutar. No-op en SQLite.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
 
+    # B·5e: las ventas que ya tenía este archivo (una relectura preserva las
+    # editadas) no se vuelven a juzgar; sólo las que nacen en esta corrida.
+    _ventas_previas = (
+        await _ids_de_ventas_del_archivo(session, tenant_id, uploaded_file_id)
+        if uploaded_file_id is not None
+        else set()
+    )
     counts = await _insert_confirmed_data_impl(
         session,
         tenant_id,
@@ -4679,6 +4693,13 @@ async def insert_confirmed_data(
         session, tenant_id, counts.get("product_details") if return_details else None
     )
     await assign_orphan_sales_to_local(session, tenant_id)
+    # B·5e: toda venta con compra previa. Al final, con las compras y aperturas
+    # del archivo ya escritas, para que el orden de las hojas o de las filas no
+    # decida nada.
+    if uploaded_file_id is not None:
+        await _ventas_sin_compra_a_otros(
+            session, tenant_id, uploaded_file_id, _ventas_previas, counts, source
+        )
     # Bloque 5: persistir las decisiones EXPLÍCITAS de esta corrida por huella
     # de esquema — nunca sugerencias. `context_mappings`/`context_entity`/
     # `context_confirmed`/`shipping_decisions` (y `stock_treatment` en su forma
@@ -4719,6 +4740,137 @@ async def insert_confirmed_data(
                 shipping_decision=(shipping_decisions or {}).get(_cid),
             )
     return counts
+
+
+async def _ids_de_ventas_del_archivo(
+    session: AsyncSession, tenant_id: uuid.UUID, uploaded_file_id: uuid.UUID
+) -> set[uuid.UUID]:
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    return set(
+        (
+            await session.execute(
+                select(SaleEntry.id).where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.source_upload_id == uploaded_file_id,
+                )
+            )
+        ).scalars()
+    )
+
+
+async def _ventas_sin_compra_a_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID,
+    previas: set[uuid.UUID],
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """B·5e: «toda venta conlleva una compra previa; si no, a Otros».
+
+    Una venta que nace en este import sin producto, o con un producto sin compra
+    ni stock inicial con costo a su fecha, no queda como venta: se saca (con su
+    descuento de stock, si lo hizo) y su fila va a «Otros» con el motivo, para
+    resolverla después con la compra cargada. Cuenta como respaldo el ledger
+    vivo —que ya incluye las compras de este archivo— y el stock inicial que
+    trae el MISMO archivo aunque todavía no tenga fecha confirmada (M·2d-1b: la
+    fecha la confirma el usuario después; sin esto, el primer import de un
+    catálogo con su historial de ventas mandaría todas a «Otros»).
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from app.persistence.models.inventory import InventoryMovement  # noqa: PLC0415
+    from app.persistence.models.product import Product  # noqa: PLC0415
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    nuevas = [
+        v
+        for v in (
+            await session.execute(
+                select(SaleEntry).where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.source_upload_id == uploaded_file_id,
+                    SaleEntry.voided_at.is_(None),
+                )
+            )
+        ).scalars()
+        if v.id not in previas
+    ]
+    if not nuevas:
+        return
+    pids = {v.product_id for v in nuevas if v.product_id is not None}
+    primeros = await primeros_dias_de_fuente(session, tenant_id, pids)
+    aperturas_del_archivo = set(
+        (
+            await session.execute(
+                select(InventoryMovement.product_id).where(
+                    *filtro_aperturas_vivas(tenant_id),
+                    InventoryMovement.source_upload_id == uploaded_file_id,
+                    func.coalesce(InventoryMovement.unit_cost_final, InventoryMovement.unit_cost)
+                    > 0,
+                )
+            )
+        ).scalars()
+    )
+    nombres: dict[uuid.UUID, str] = {}
+    if pids:
+        nombres = {
+            pid: name
+            for pid, name in (
+                await session.execute(
+                    select(Product.id, Product.name).where(
+                        Product.tenant_id == tenant_id, Product.id.in_(pids)
+                    )
+                )
+            ).all()
+        }
+    sin_producto = sin_compra = 0
+    for venta in nuevas:
+        dia = venta.transaction_date.date()
+        if venta.product_id is None:
+            motivo = (
+                f"{MOTIVO_VENTA_SIN_PRODUCTO}: elegí qué producto se vendió "
+                "(sin producto no hay compra previa ni costo)"
+            )
+            sin_producto += 1
+        elif venta.product_id in aperturas_del_archivo or respaldada(
+            primeros.get(venta.product_id), dia
+        ):
+            continue
+        else:
+            nombre = nombres.get(venta.product_id, "el producto")
+            motivo = f"{MOTIVO_VENTA_SIN_COMPRA}: cargá la compra o el stock inicial de {nombre}"
+            sin_compra += 1
+        fila = {
+            "fecha": dia.isoformat(),
+            "monto": str(venta.amount),
+            "cantidad": venta.quantity,
+            "producto": nombres.get(venta.product_id) if venta.product_id else None,
+            "medio_de_pago": venta.payment_method,
+            "detalle": venta.notes,
+        }
+        _capture_unclassified(
+            session,
+            tenant_id,
+            [{k: v for k, v in fila.items() if v not in (None, "")}],
+            None,
+            source,
+            uploaded_file_id,
+            context_label=motivo[:200],
+            suggested_entity="sale",
+            row_ref=venta.source_row_ref,
+            skip_blank_rows=False,
+        )
+        await stock_service.revert_sale_stock(venta.id, tenant_id, session)
+        await session.delete(venta)
+    if sin_producto or sin_compra:
+        await session.flush()
+        counts["ventas"] = max(0, int(counts.get("ventas", 0)) - sin_producto - sin_compra)
+        counts["ventas_sin_compra"] = counts.get("ventas_sin_compra", 0) + sin_compra
+        counts["ventas_sin_producto"] = counts.get("ventas_sin_producto", 0) + sin_producto
 
 
 async def _stamp_updated_at_on_product_details(

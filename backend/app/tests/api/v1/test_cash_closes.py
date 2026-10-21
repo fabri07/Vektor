@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.business_time import today_ar
 from app.persistence.models.business import BusinessProfile
+from app.tests._respaldo import producto_con_compra_http
 
 _TODAY = str(today_ar())
 
@@ -37,6 +38,7 @@ class TestCashClosePreview:
         await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "10000.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -47,6 +49,7 @@ class TestCashClosePreview:
         await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "5000.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -112,6 +115,7 @@ class TestCashCloseCreate:
         await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "10000.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,

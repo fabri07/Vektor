@@ -29,6 +29,7 @@ from app.persistence.models.pos_terminal import PosTerminal
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
+from app.tests._respaldo import producto_con_compra_http
 from app.tests.conftest import TEST_PIN, _pin_window_key
 from app.utils.security import create_access_token, hash_password
 
@@ -763,7 +764,8 @@ class TestFechaConZona:
         resp = await client.post(
             "/api/v1/sales",
             json={"amount": "100.00", "payment_method": "cash",
-                  "transaction_date": f"{hoy.isoformat()}T02:00:00Z"},
+                  "transaction_date": f"{hoy.isoformat()}T02:00:00Z",
+                  "product_id": await producto_con_compra_http(client, auth_headers)},
             headers=auth_headers,
         )
         assert resp.status_code == 201, resp.text

@@ -290,11 +290,14 @@ function SaleTab({ onToast, online }: { onToast: (t: ToastState) => void; online
           });
           reset();
         },
-        onError: () => {
+        onError: (mensaje) => {
+          // B·5e: «no se puede vender algo que no se compró» — el servidor dice
+          // de qué producto falta la compra o el stock inicial.
           onToast({
             type: "error",
-            message: "No se pudo registrar la venta. Revisá stock y datos.",
+            message: mensaje ?? "No se pudo registrar la venta. Revisá stock y datos.",
           });
+          if (mensaje) setError(mensaje);
         },
       },
     );

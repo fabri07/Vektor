@@ -38,6 +38,7 @@ from app.persistence.models.business import Insight, MomentumProfile
 from app.persistence.models.pos_operation import PosOperation, PosTender
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Subscription, Tenant
+from app.tests._respaldo import producto_con_compra_http
 from app.tests.api.v1.test_cashier_access import _cajero
 from app.tests.api.v1.test_grupo_c import _create_snapshot
 
@@ -415,7 +416,10 @@ async def test_en_solo_lectura_las_correcciones_siguen(
     """Corregir lo cargado no es ni un alta ni análisis."""
     venta = await client.post(
         f"{P}/sales",
-        json={"amount": "500.00", "transaction_date": _FECHA, "payment_method": "cash"},
+        json={
+            "amount": "500.00", "transaction_date": _FECHA, "payment_method": "cash",
+            "product_id": await producto_con_compra_http(client, auth_headers),
+        },
         headers=auth_headers,
     )
     assert venta.status_code == 201, venta.text

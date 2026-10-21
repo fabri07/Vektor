@@ -19,6 +19,7 @@ from app.domain.transaction import MIXED_PAYMENT_METHOD
 from app.persistence.db.session import get_db_session
 from app.persistence.models.pos_operation import PosOperationLine, PosTender
 from app.persistence.models.transaction import SaleEntry
+from app.tests._respaldo import producto_con_compra_http
 
 _FECHA = f"{today_ar().isoformat()}T10:00:00"
 # El cierre se pide por el día de la VENTA, no por `today_ar()` al momento de
@@ -456,7 +457,10 @@ class TestLineaDeCajaNoSeTocaSuelta:
         """El guard no puede alcanzar a lo que no es caja."""
         resp = await client.post(
             "/api/v1/sales",
-            json={"amount": "500.00", "transaction_date": _FECHA, "payment_method": "cash"},
+            json={
+                "amount": "500.00", "transaction_date": _FECHA, "payment_method": "cash",
+                "product_id": await producto_con_compra_http(client, auth_headers),
+            },
             headers=auth_headers,
         )
         assert resp.status_code == 201, resp.text
