@@ -338,6 +338,12 @@ export function ignorarLasVacias(
   for (const s of suggestions) {
     const col = s.source_column;
     if (!s.empty_in_file || isTouched(col) || mappings[col] === "ignore") continue;
+    // Revisión de B·9: nunca pisa un destino canónico. Puede cubrir un requerido
+    // (dejaría el confirm trabado) o tener una decisión de riesgo de F8 (la
+    // podaría). Las informativas vacías ya llegan en `ignore` por B·5f: acá
+    // quedan las sin destino y los campos propios.
+    const actual = mappings[col];
+    if (actual && !actual.startsWith("custom_field:")) continue;
     patch.mappings[col] = "ignore";
   }
   return patch;

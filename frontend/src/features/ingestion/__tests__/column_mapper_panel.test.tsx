@@ -3247,14 +3247,16 @@ describe("ColumnMapperPanel — B·9: acciones masivas inocuas", () => {
   // el slug); «Vacia», «Otra vacia» y «Tocada» están vacías en todo el archivo.
   // «Sucursal» trae `duda`: `auto_custom` no la archiva sola, pero la acción
   // masiva es explícita y sí la ofrece (el backend le manda `custom_slug`).
+  // «Fecha» también está vacía pero cubre un requerido: «Ignorar las vacías» no la
+  // toca (revisión de B·9: dejaría el confirm trabado y podaría su decisión F8).
   const SUGERENCIAS = [
-    sugerencia("Fecha", "transaction_date"),
+    sugerencia("Fecha", "transaction_date", { empty_in_file: true }),
     sugerencia("Monto", "amount"),
     sugerencia("Sucursal", null, {
       custom_slug: "sucursal",
       duda: "Esta hoja no tiene un campo para la sucursal.",
     }),
-    sugerencia("Vacia", "notes", { empty_in_file: true }),
+    sugerencia("Vacia", null, { empty_in_file: true, sample_values: [] }),
     sugerencia("Otra vacia", null, { empty_in_file: true, sample_values: [] }),
     sugerencia("Tocada", null, { custom_slug: "tocada", empty_in_file: true }),
   ];
@@ -3315,7 +3317,7 @@ describe("ColumnMapperPanel — B·9: acciones masivas inocuas", () => {
       mockGetColumnMappings.mockResolvedValue(SUGERENCIAS);
       renderPanel();
 
-      await waitFor(() => expect(selectDe("Vacia").value).toBe("notes"));
+      await waitFor(() => expect(selectDe("Fecha").value).toBe("transaction_date"));
       expect(
         screen.getByRole("button", {
           name: "Guardar las 2 columnas sin asignar como campos propios",
@@ -3359,7 +3361,9 @@ describe("ColumnMapperPanel — B·9: acciones masivas inocuas", () => {
       expect(por["Tocada"]).toEqual(
         expect.objectContaining({ target_field: "quantity", user_selected: true }),
       );
-      expect(por["Fecha"]?.user_selected).toBe(false);
+      expect(por["Fecha"]).toEqual(
+        expect.objectContaining({ target_field: "transaction_date", user_selected: false }),
+      );
       // Las acciones no tocan las decisiones de riesgo de F8.
       if (camino === "plano") expect(mockConfirmFile.mock.calls[0]![6]).toEqual([]);
     },

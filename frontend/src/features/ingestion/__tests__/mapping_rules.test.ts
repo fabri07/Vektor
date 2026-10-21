@@ -470,18 +470,28 @@ describe("B·9 — acciones masivas", () => {
     expect(customFieldCollisions({ Otra: "custom_field:obs", ...patch.mappings })).toEqual([]);
   });
 
-  test("ignorar las vacías: sólo `empty_in_file`, aunque tengan destino, salvo las tocadas", () => {
+  test("ignorar las vacías: sólo `empty_in_file`, nunca un destino canónico ni lo tocado", () => {
     const patch = ignorarLasVacias(
       [
-        { source_column: "Vacia", empty_in_file: true },
+        { source_column: "Sin destino", empty_in_file: true },
+        { source_column: "Propio", empty_in_file: true },
+        { source_column: "Fecha", empty_in_file: true },
         { source_column: "Ya ignorada", empty_in_file: true },
         { source_column: "Tocada", empty_in_file: true },
         { source_column: "Con datos", empty_in_file: false },
         { source_column: "Vieja" },
       ],
-      { Vacia: "notes", "Ya ignorada": "ignore", Tocada: "quantity" },
+      {
+        Propio: "custom_field:propio",
+        Fecha: "transaction_date",
+        "Ya ignorada": "ignore",
+        Tocada: "quantity",
+      },
       (col) => col === "Tocada",
     );
-    expect(patch).toEqual({ mappings: { Vacia: "ignore" }, labels: {} });
+    expect(patch).toEqual({
+      mappings: { "Sin destino": "ignore", Propio: "ignore" },
+      labels: {},
+    });
   });
 });
