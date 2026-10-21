@@ -76,6 +76,7 @@ def build_import_receipt(
     dropped_columns: dict[str, list[str]] | None = None,
     routed_rows: dict[str, dict[int, dict[str, Any]]] | None = None,
     external_code_conflicts: int = 0,
+    columnas_vacias: dict[str, dict[str, float]] | None = None,
 ) -> list[ColumnReceipt]:
     """Arma el comprobante columna por columna.
 
@@ -94,6 +95,8 @@ def build_import_receipt(
     """
     dropped_columns = dropped_columns or {}
     routed_rows = routed_rows or {}
+    # B·5f: columnas que no se cargaron por estar ≥ 40 % vacías (regla del sistema).
+    columnas_vacias = columnas_vacias or {}
     contexts_con_external_code = [
         ctx["context_id"]
         for ctx in contexts
@@ -111,8 +114,19 @@ def build_import_receipt(
         routed = routed_rows.get(cid, {})
         row_total = ctx.get("row_count")
 
+        vacias = columnas_vacias.get(cid, {})
         for col in headers:
             target = mapping.get(col)
+
+            if col in vacias:
+                entries.append(
+                    ColumnReceipt(
+                        cid, label, col, target, "excluido",
+                        f"No se cargó: la columna está {round(vacias[col] * 100)}% vacía.",
+                        "system_rule", None,
+                    )
+                )
+                continue
 
             if col in dropped:
                 entries.append(
