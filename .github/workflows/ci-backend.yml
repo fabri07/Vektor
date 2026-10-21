@@ -201,7 +201,11 @@ jobs:
           # rompe al cargar conftest, no por los tests).
           ENABLE_EMAIL_VERIFICATION: "false"
         run: |
+          # En el runner propio (la Mac del dev) `-n auto` abre un worker por
+          # núcleo y deja la máquina sin respuesta (load 149 en 8 núcleos):
+          # se limita a 4. En GitHub (ubuntu-latest) sigue en auto.
           pytest \
+            -n ${{ vars.CI_RUNNER == 'self-hosted' && '4' || 'auto' }} \
             --cov=app \
             --cov-report=term-missing \
             --cov-fail-under=60 \
