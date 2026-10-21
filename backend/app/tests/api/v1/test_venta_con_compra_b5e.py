@@ -277,10 +277,12 @@ async def test_el_import_manda_a_otros_la_venta_sin_compra_y_sin_producto(
     assert "Vela" in (vela.context_label or "")
     assert vela.row_data["monto"] == "2000.00"
     assert vela.uploaded_file_id == f.id
-    assert any(
-        (o.context_label or "").startswith((MOTIVO_VENTA_SIN_PRODUCTO, MOTIVO_VENTA_SIN_COMPRA))
-        for o in otros
+    sin_producto = next(
+        o for o in otros if (o.context_label or "").startswith(MOTIVO_VENTA_SIN_PRODUCTO)
     )
+    # Lo que decía el ARCHIVO: sin esto la fila no dice qué se vendió y no se
+    # puede resolver desde «Otros» (hotfix de B·5e).
+    assert sin_producto.row_data["producto"] == "Algo que no existe"
 
 
 async def test_el_stock_inicial_del_mismo_archivo_respalda_su_historial(

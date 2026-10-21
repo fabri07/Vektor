@@ -80,11 +80,15 @@ export function ReclassifyModal({
   const [paymentMethod, setPaymentMethod] = useState("cash");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
+  // B·5e: una venta lleva producto (y su compra previa); sin él el servidor la
+  // rechaza. Se elige acá, con la misma búsqueda que la compra.
+  const [ventaProducto, setVentaProducto] = useState("");
+  const [ventaCantidad, setVentaCantidad] = useState("1");
 
   const { data: productos = [], isError: productosError } = useQuery({
     queryKey: ["products-list"],
     queryFn: () => productsService.getAllProducts({ is_active: true }),
-    enabled: !!record && entityType === "purchase",
+    enabled: !!record && (entityType === "purchase" || entityType === "sale"),
     staleTime: 60 * 1000,
   });
 
@@ -124,6 +128,10 @@ export function ReclassifyModal({
     setPaymentMethod("cash");
     setEmail("");
     setPhone("");
+    setVentaProducto("");
+    setVentaCantidad(pre.quantity.replace(/[^\d]/g, "") || "1");
+    // Lo que decía el archivo (B·5e lo guarda en `producto`): arranca la búsqueda.
+    if (entity === "sale") setBusqueda(String(record.row_data?.producto ?? pre.text ?? ""));
   }, [record]);
 
   if (!record) return null;
@@ -174,10 +182,16 @@ export function ReclassifyModal({
       return;
     }
     if (entityType === "sale") {
+      if (!ventaProducto) {
+        setIntento(true);
+        return;
+      }
       onSave("sale", {
         amount: num,
         transaction_date: isoDate,
         payment_method: paymentMethod,
+        product_id: ventaProducto,
+        quantity: Math.max(1, Number(ventaCantidad) || 1),
         notes: text || null,
       });
     } else if (entityType === "expense") {
@@ -311,6 +325,59 @@ export function ReclassifyModal({
                 />
               </label>
             ) : null}
+          </div>
+        ) : null}
+        {entityType === "sale" ? (
+          <div className="grid gap-2">
+            <label className="grid gap-1 text-sm text-vektor-body">
+              ¿Qué producto se vendió?
+              <input
+                className={inputCls}
+                placeholder="Buscar producto"
+                value={busqueda}
+                onChange={(e) => setBusqueda(e.target.value)}
+              />
+            </label>
+            <div className="grid grid-cols-[1fr_6rem] gap-2">
+              <select
+                aria-label="Producto vendido"
+                className={inputCls}
+                value={ventaProducto}
+                onChange={(e) => setVentaProducto(e.target.value)}
+              >
+                <option value="">Elegí el producto</option>
+                {productos
+                  .filter(
+                    (p) =>
+                      p.id === ventaProducto ||
+                      !busqueda.trim() ||
+                      p.name.toLowerCase().includes(busqueda.trim().toLowerCase()),
+                  )
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+              </select>
+              <input
+                aria-label="Cantidad vendida"
+                className={inputCls}
+                type="number"
+                min={1}
+                step={1}
+                value={ventaCantidad}
+                onChange={(e) => setVentaCantidad(e.target.value)}
+              />
+            </div>
+            {intento && !ventaProducto ? (
+              <p role="alert" className="text-xs text-vk-danger">
+                Elegí qué producto se vendió: sin producto no hay compra previa ni costo.
+              </p>
+            ) : (
+              <p className="text-xs text-vk-text-muted">
+                El producto tiene que tener una compra o un stock inicial a esa fecha.
+              </p>
+            )}
           </div>
         ) : null}
         {isPurchaseResolution ? (

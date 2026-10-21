@@ -1,5 +1,6 @@
 "use client";
 
+import { mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AxiosError } from "axios";
@@ -206,6 +207,13 @@ export default function OtrosPage() {
         toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");
         setReclassifying(null);
         await invalidate();
+      } else if (
+        code === "SALE_WITHOUT_PURCHASE" ||
+        code === "SALE_NEEDS_PRODUCT" ||
+        code === "POS_SALE_ALREADY_RECORDED"
+      ) {
+        // B·5e: el servidor dice qué falta (la compra de X, el producto).
+        toast(mensajeDelServidor(error) ?? "Falta la compra o el producto.", "error");
       } else {
         toast("No se pudo importar el registro. Revisá los campos.", "error");
       }
