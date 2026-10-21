@@ -124,7 +124,9 @@ class SaleEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "void_reason IS NULL OR void_reason IN ("
             "'REPAIR_MISCLASSIFIED_IMPORT','USER_CANCELLED','DUPLICATE','MANUAL_ADMIN_VOID',"
-            "'REREAD_REIMPORT')",
+            # B·5g (mig `20261021_0002`): la venta histórica sin compra previa
+            # que el dueño mandó a «Otros» con `--apply`.
+            "'REREAD_REIMPORT','REPAIR_SALE_WITHOUT_PURCHASE')",
             name="ck_sales_entries_void_reason",
         ),
         CheckConstraint(
