@@ -9,9 +9,11 @@ interface Step3UploadProps {
   onNext: (file: File | null) => void;
   /** B·5d: en vez de un archivo, cargar el stock inicial en una tabla. */
   onStockInicial?: () => void;
+  /** Hay un envío en vuelo: no se dispara otro. */
+  disabled?: boolean;
 }
 
-export function Step3Upload({ onNext, onStockInicial }: Step3UploadProps) {
+export function Step3Upload({ onNext, onStockInicial, disabled = false }: Step3UploadProps) {
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,7 +121,8 @@ export function Step3Upload({ onNext, onStockInicial }: Step3UploadProps) {
           <button
             type="button"
             onClick={onStockInicial}
-            className="font-medium text-vk-navy underline underline-offset-2 hover:opacity-80"
+            disabled={disabled}
+            className="font-medium disabled:opacity-40 text-vk-navy underline underline-offset-2 hover:opacity-80"
           >
             Cargar mi stock inicial a mano
           </button>
@@ -138,7 +141,8 @@ export function Step3Upload({ onNext, onStockInicial }: Step3UploadProps) {
         <button
           type="button"
           onClick={() => onNext(null)}
-          className="text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
+          disabled={disabled}
+          className="disabled:opacity-40 text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
         >
           Saltar por ahora
         </button>
@@ -146,7 +150,8 @@ export function Step3Upload({ onNext, onStockInicial }: Step3UploadProps) {
         <button
           type="button"
           onClick={() => onNext(file)}
-          className="h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
+          disabled={disabled}
+          className="disabled:opacity-40 h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
         >
           {file ? "Continuar con archivo" : "Continuar"}
         </button>

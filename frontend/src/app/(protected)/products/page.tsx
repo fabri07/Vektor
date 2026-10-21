@@ -493,9 +493,10 @@ export default function ProductsPage() {
       });
       // B·5d: el stock inicial va DESPUÉS del PATCH (que no lleva stock) y por
       // su endpoint: es una apertura al costo, no un ajuste.
+      let abierta: Awaited<ReturnType<typeof productsService.registerOpening>> | null = null;
       if (apertura) {
         try {
-          await productsService.registerOpening(
+          abierta = await productsService.registerOpening(
             payload.id,
             {
               stock_units: apertura.stock_units,
@@ -509,13 +510,18 @@ export default function ProductsPage() {
           throw new AperturaFallida(causa);
         }
       }
-      return actualizado;
+      return { actualizado, abierta };
     },
-    onSuccess: async (_r, vars) => {
+    onSuccess: async ({ abierta }) => {
       setEditing(null);
       setErrorApertura(null);
+      const costeadas = abierta?.ventas_sin_costo_desde_la_fecha ?? 0;
       toast(
-        vars.apertura ? "Producto actualizado y stock inicial cargado." : "Producto actualizado.",
+        abierta
+          ? `Producto actualizado y stock inicial cargado.${
+              costeadas > 0 ? ` ${costeadas} venta(s) quedaron con costo.` : ""
+            }`
+          : "Producto actualizado.",
         "success",
       );
       await queryClient.invalidateQueries({ queryKey: ["products-list"] });
@@ -539,12 +545,12 @@ export default function ProductsPage() {
           });
           return;
         }
-        toast(
-          `Se guardaron los demás cambios, pero no el stock inicial: ${
-            info.message ?? "probá de nuevo."
-          }`,
-          "error",
-        );
+        // El 404 del servidor viene en inglés («Product not found.»).
+        const motivo =
+          info.status === 404
+            ? "el producto ya no existe o es de otro negocio."
+            : (info.message ?? "probá de nuevo.");
+        toast(`Se guardaron los demás cambios, pero no el stock inicial: ${motivo}`, "error");
         return;
       }
       const code = errorCode(e);
@@ -939,6 +945,11 @@ function ProductEditModal({
       );
     }
   }, [product]);
+  // Tras un OPENING_EXISTS el producto ya tiene stock inicial: la opción se
+  // retira (la lista se refresca aparte) y queda el aviso con los caminos.
+  useEffect(() => {
+    if (errorApertura) setMotivoSuba((m) => (m === "apertura" ? "" : m));
+  }, [errorApertura]);
   if (!form) return null;
   const set = (key: keyof ProductResponse, value: string | number | null) => {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
@@ -952,7 +963,7 @@ function ProductEditModal({
   const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
   const subeStock = !!product && stockBase !== null && stockBase > product.stock_units;
   const sinCosto = form.unit_cost_ars == null || Number(form.unit_cost_ars) <= 0;
-  const ofreceApertura = product?.needs_initial_stock === true;
+  const ofreceApertura = product?.needs_initial_stock === true && !errorApertura;
   const fechaAperturaError =
     fechaApertura === ""
       ? "Indicá desde qué fecha tenés este stock."

@@ -440,8 +440,10 @@ class CoincidenciaDeFila(BaseModel):
     por: Literal["sku", "barcode", "nombre"]
     necesita_stock_inicial: bool
     #: Unidad de venta del producto existente (``unit`` | ``gram`` | ``milliliter``):
-    #: en ``apertura_en`` el stock de la fila se lee en kg / L, no en gramos.
+    #: en ``apertura_en`` el stock de la fila se lee en esa unidad de venta.
     sale_unit: str = "unit"
+    #: 1000 = se vende por kg / L (la fila va en kg / L); 1 = por gramo / ml.
+    base_units_per_sale_unit: int = 1
 
 
 class FilaPreview(BaseModel):

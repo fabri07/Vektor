@@ -132,8 +132,10 @@ export interface CoincidenciaDeFila {
   nombre: string;
   por: "sku" | "barcode" | "nombre";
   necesita_stock_inicial: boolean;
-  /** Unidad de venta del existente: en `apertura_en` el stock de la fila va en kg / L. */
+  /** Unidad de venta del existente: en `apertura_en` el stock de la fila va en
+   *  ESA unidad (kg / L con factor 1000; gramos / ml con factor 1). */
   sale_unit?: "unit" | "gram" | "milliliter" | string;
+  base_units_per_sale_unit?: number;
 }
 
 export interface FilaPreview {

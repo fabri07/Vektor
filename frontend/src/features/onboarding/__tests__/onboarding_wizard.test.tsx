@@ -3,6 +3,7 @@ import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AxiosError, AxiosHeaders } from "axios";
 
 import { OnboardingWizard } from "../OnboardingWizard";
 import { onboardingService } from "@/services/onboarding.service";
@@ -344,12 +345,46 @@ describe("OnboardingWizard", () => {
       await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1));
       await user.click(await screen.findByText("tabla-de-stock-inicial"));
 
+      // El resumen de la tabla queda a la vista hasta «Seguir».
+      expect(screen.getByText("tabla-de-stock-inicial")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Seguir" }));
+
       // Paso 3, como cuando no se sube archivo.
       await waitFor(() =>
         expect(screen.queryByText("tabla-de-stock-inicial")).not.toBeInTheDocument(),
       );
       expect(screen.queryByText("Cargar mi stock inicial a mano")).not.toBeInTheDocument();
       expect(mockUpload).not.toHaveBeenCalled();
+    });
+
+    test("un 409 «already completed» del submit cuenta como hecho", async () => {
+      mockSubmit.mockRejectedValue(
+        new AxiosError("conflict", "409", undefined, undefined, {
+          status: 409,
+          statusText: "Conflict",
+          headers: {},
+          config: { headers: new AxiosHeaders() },
+          data: { detail: "Onboarding already completed." },
+        }),
+      );
+      const user = userEvent.setup({ delay: null });
+      renderWizard();
+      await completarDatos(user);
+      await user.click(screen.getByRole("button", { name: "Cargar mi stock inicial a mano" }));
+      expect(await screen.findByText("tabla-de-stock-inicial")).toBeInTheDocument();
+      expect(screen.queryByText(/Hubo un problema al enviar los datos/)).not.toBeInTheDocument();
+    });
+
+    test("con el submit en vuelo, los botones del paso quedan deshabilitados", async () => {
+      mockSubmit.mockReturnValue(new Promise(() => {}));
+      const user = userEvent.setup({ delay: null });
+      renderWizard();
+      await completarDatos(user);
+      await user.click(screen.getByRole("button", { name: "Cargar mi stock inicial a mano" }));
+      expect(screen.getByRole("button", { name: "Cargar mi stock inicial a mano" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Continuar" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Saltar por ahora" })).toBeDisabled();
+      expect(mockSubmit).toHaveBeenCalledTimes(1);
     });
 
     test("si el submit falla, la tabla no aparece", async () => {

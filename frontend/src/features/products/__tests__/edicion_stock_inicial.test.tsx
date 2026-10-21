@@ -13,6 +13,7 @@ import { productsService } from "@/services/products.service";
 import { fieldDefinitionsService } from "@/services/fieldDefinitions.service";
 import { fieldCatalogService } from "@/services/fieldCatalog.service";
 import { useAuthStore } from "@/stores/authStore";
+import { useToastStore } from "@/stores/toastStore";
 
 jest.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -85,8 +86,11 @@ beforeEach(() => {
   } as never);
 });
 
+let invalidar: jest.SpyInstance;
+
 async function abrirEditor() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  invalidar = jest.spyOn(qc, "invalidateQueries");
   render(
     <QueryClientProvider client={qc}>
       <ProductsPage />
@@ -167,6 +171,51 @@ test("OPENING_EXISTS muestra los caminos que da el servidor", async () => {
       "Si la cantidad está mal, ajustá el stock desde la edición del producto.",
     ),
   ).toBeInTheDocument();
+  // Ya tiene stock inicial: la opción se retira y la lista se refresca.
+  expect(within(dialogo).queryByLabelText(/Es mi stock inicial/)).not.toBeInTheDocument();
+  expect(invalidar).toHaveBeenCalledWith({ queryKey: ["products-list"] });
+});
+
+function abrirYGuardarApertura(dialogo: HTMLElement) {
+  fireEvent.click(within(dialogo).getByLabelText(/Es mi stock inicial/));
+  fireEvent.change(within(dialogo).getByLabelText("Fecha del stock inicial"), {
+    target: { value: "2026-08-01" },
+  });
+  fireEvent.click(within(dialogo).getByRole("button", { name: "Guardar" }));
+}
+
+test("el éxito dice cuántas ventas quedaron con costo", async () => {
+  mockRegisterOpening.mockResolvedValue({
+    movement_id: "m1",
+    product_id: "p1",
+    stock_units: 7,
+    ventas_sin_costo_desde_la_fecha: 4,
+  });
+  abrirYGuardarApertura(await abrirEditor());
+  await waitFor(() =>
+    expect(useToastStore.getState().toasts.map((t) => t.message)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/4 venta\(s\) quedaron con costo/)]),
+    ),
+  );
+});
+
+test("un 404 en la apertura se explica en castellano", async () => {
+  mockRegisterOpening.mockRejectedValue(
+    new AxiosError("nf", "404", undefined, undefined, {
+      status: 404,
+      statusText: "Not Found",
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+      data: { detail: "Product not found." },
+    }),
+  );
+  abrirYGuardarApertura(await abrirEditor());
+  await waitFor(() =>
+    expect(useToastStore.getState().toasts.map((t) => t.message)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/el producto ya no existe/)]),
+    ),
+  );
+  expect(useToastStore.getState().toasts.map((t) => t.message).join(" ")).not.toMatch(/not found/i);
 });
 
 test("sin costo, «Es mi stock inicial» no deja guardar", async () => {

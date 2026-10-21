@@ -10,8 +10,11 @@
  * revisar invalida la revisión (el token del servidor es de ESAS filas).
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
+import { parseNumeroAr } from "@/lib/numeroAr";
+import { unidadDeVentaDe } from "@/features/products/saleUnitOptions";
 import { Button } from "@/components/ui/Button";
 import {
   EnvioSelect,
@@ -22,6 +25,7 @@ import {
 } from "@/features/products/costoManual";
 import {
   productsService,
+  type CoincidenciaDeFila,
   type EleccionDeFila,
   type FilaPreview,
   type FilaStockInicial,
@@ -60,8 +64,21 @@ function filaVacia(): FilaEditable {
   return { key: siguienteKey++, nombre: "", precio: "", costo: "", stock: "", sku: "" };
 }
 
+/** «1.000» es mil (montos argentinos); lo que no se entiende es NaN. */
 function numero(texto: string): number {
-  return Number(texto.trim().replace(",", "."));
+  return parseNumeroAr(texto) ?? Number.NaN;
+}
+
+/**
+ * En qué se lee el stock de una fila que se aplica a un producto existente: su
+ * unidad de VENTA. Por kilo / litro (factor 1000) son kg / L; «gram» o
+ * «milliliter» con factor 1 se venden por gramo / ml.
+ */
+function unidadDeLaFila(c: CoincidenciaDeFila): string | null {
+  const factor = c.base_units_per_sale_unit ?? 1;
+  if (c.sale_unit === "gram") return factor === 1000 ? unidadDeVentaDe("gram", 1000).etiqueta : "gramos";
+  if (c.sale_unit === "milliliter") return factor === 1000 ? unidadDeVentaDe("milliliter", 1000).etiqueta : "ml";
+  return null;
 }
 
 function round2(n: number): number {
@@ -102,8 +119,14 @@ function tieneOpcion(p: FilaPreview): boolean {
 export function StockInicialTabla({
   onDone,
 }: {
-  onDone?: (r: LoteStockInicialResponse) => void;
+  /** `null` = esa carga ya se había hecho (409 `DUPLICATE_IDEMPOTENT`): no hay detalle. */
+  onDone?: (r: LoteStockInicialResponse | null) => void;
 }) {
+  const queryClient = useQueryClient();
+  // La MISMA clave mientras el cuerpo no cambie: si la respuesta se pierde y
+  // el servidor ya commiteó, el reintento no duplica productos ni stock.
+  const claveDelIntento = useRef<{ firma: string; clave: string } | null>(null);
+  const [yaHecha, setYaHecha] = useState(false);
   const [filas, setFilas] = useState<FilaEditable[]>(() => [filaVacia()]);
   const [fecha, setFecha] = useState("");
   const [envio, setEnvio] = useState<TratamientoEnvio | "">("");
@@ -143,6 +166,7 @@ export function StockInicialTabla({
   }
 
   async function revisar() {
+    if (enviando) return;
     setMensaje(null);
     const porFila: Record<number, string[]> = {};
     filas.forEach((f, i) => {
@@ -193,25 +217,34 @@ export function StockInicialTabla({
         ? { fila: Number(fila), accion: "crear" }
         : { fila: Number(fila), accion: "apertura_en", product_id: valor },
     );
+    const body = {
+      filas: payloadFilas,
+      elecciones: eleccionesPayload,
+      preview_token: preview.preview_token,
+      fecha: fechaDeStockInicial(fecha),
+    };
+    // Mismo cuerpo (filas + elecciones + token + fecha + envío) = mismo
+    // intento = misma clave. Cualquier cambio es otro intento.
+    const firma = JSON.stringify(body);
+    if (claveDelIntento.current?.firma !== firma) {
+      claveDelIntento.current = { firma, clave: nuevaClaveIdempotencia() };
+    }
     setEnviando(true);
     try {
-      const r = await productsService.confirmInitialStockBatch(
-        {
-          filas: payloadFilas,
-          elecciones: eleccionesPayload,
-          preview_token: preview.preview_token,
-          fecha: fechaDeStockInicial(fecha),
-        },
-        // Una clave por intento: un reintento tras un error es otro intento.
-        nuevaClaveIdempotencia(),
-      );
+      const r = await productsService.confirmInitialStockBatch(body, claveDelIntento.current.clave);
       setConfirmadas(payloadFilas);
       setResultado(r);
       onDone?.(r);
     } catch (e) {
       if (esPinCancelado(e)) return;
       const info = posErrorInfo(e);
-      if (info.code === "BATCH_CHANGED") {
+      if (info.code === "DUPLICATE_IDEMPOTENT") {
+        // El servidor ya registró ESTA carga (la respuesta anterior se perdió):
+        // no se reintenta, se muestra hecha.
+        void queryClient.invalidateQueries({ queryKey: ["products-list"] });
+        setYaHecha(true);
+        onDone?.(null);
+      } else if (info.code === "BATCH_CHANGED") {
         const nuevo = info.fields.preview as LoteStockInicialPreview | undefined;
         if (nuevo) {
           // Se conservan sólo las elecciones que siguen siendo válidas.
@@ -272,6 +305,21 @@ export function StockInicialTabla({
     setMensaje(null);
     setResultado(null);
     setConfirmadas([]);
+    setYaHecha(false);
+    claveDelIntento.current = null;
+  }
+
+  if (yaHecha) {
+    return (
+      <div className="space-y-3" aria-live="polite">
+        <p className="rounded-lg border border-vk-success/20 bg-vk-success-bg px-3 py-2 text-sm text-vk-success">
+          Esa carga ya se hizo: el stock inicial quedó registrado. Revisalo en Productos.
+        </p>
+        <Button type="button" size="sm" variant="secondary" onClick={otraCarga}>
+          Cargar otra tabla
+        </Button>
+      </div>
+    );
   }
 
   if (resultado) {
@@ -302,7 +350,9 @@ export function StockInicialTabla({
   }
 
   return (
-    <div className="space-y-4">
+    // Con un pedido en vuelo nada se edita ni se reenvía: `disabled` en el
+    // fieldset apaga todos los controles de adentro.
+    <fieldset disabled={enviando} aria-busy={enviando} className="m-0 min-w-0 space-y-4 border-0 p-0">
       <p className="rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-2 text-xs text-vk-text-secondary">
         {QUE_ES_STOCK_INICIAL}
       </p>
@@ -409,10 +459,9 @@ export function StockInicialTabla({
                           onChange={() => setElecciones((prev) => ({ ...prev, [i]: c.product_id }))}
                         />
                         Es «{c.nombre}»{c.por !== "nombre" ? ` (mismo ${NOMBRES_DE_CAMPO[c.por]})` : ""}
-                        {c.sale_unit === "gram" || c.sale_unit === "milliliter" ? (
+                        {unidadDeLaFila(c) ? (
                           <span className="text-vk-text-muted">
-                            {" "}— se vende por {c.sale_unit === "gram" ? "kg" : "litro"}: el stock de la fila va en{" "}
-                            {c.sale_unit === "gram" ? "kg" : "litros"}
+                            {" "}— el stock de la fila va en {unidadDeLaFila(c)}
                           </span>
                         ) : null}
                       </label>
@@ -471,14 +520,27 @@ export function StockInicialTabla({
       )}
 
       <div className="flex gap-2">
-        <Button type="button" size="sm" variant="secondary" loading={enviando && !preview} onClick={revisar}>
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={enviando}
+          loading={enviando && !preview}
+          onClick={revisar}
+        >
           Revisar
         </Button>
-        <Button type="button" size="sm" disabled={!puedeConfirmar} loading={enviando && !!preview} onClick={confirmar}>
+        <Button
+          type="button"
+          size="sm"
+          disabled={!puedeConfirmar}
+          loading={enviando && !!preview}
+          onClick={confirmar}
+        >
           Confirmar
         </Button>
       </div>
-    </div>
+    </fieldset>
   );
 }
 

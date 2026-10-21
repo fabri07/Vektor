@@ -4,11 +4,24 @@
  * revisión que se invalida al editar la tabla o al cambiar los productos.
  */
 import "@testing-library/jest-dom";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AxiosError, AxiosHeaders } from "axios";
 
 import { StockInicialTabla } from "../StockInicialTabla";
 import { productsService } from "@/services/products.service";
+
+function pintar(ui: ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const invalidar = jest.spyOn(qc, "invalidateQueries");
+  render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+  return { invalidar };
+}
+
+function errorDeRed() {
+  return new AxiosError("Network Error", "ERR_NETWORK");
+}
 
 jest.mock("@/services/products.service", () => ({
   productsService: {
@@ -77,7 +90,7 @@ test("flujo feliz: revisa, confirma con fecha y clave, y muestra el resumen", as
     con_apertura: 0,
   });
   const onDone = jest.fn();
-  render(<StockInicialTabla onDone={onDone} />);
+  pintar(<StockInicialTabla onDone={onDone} />);
   expect(screen.getByText(/compraron vos o tus socios/)).toBeInTheDocument();
   // Sin default a hoy.
   expect(screen.getByLabelText("¿Desde qué fecha tenés este stock?")).toHaveValue("");
@@ -119,7 +132,7 @@ test("con coincidencia, Confirmar espera la elección y la elección viaja", asy
     creados: 0,
     con_apertura: 1,
   });
-  render(<StockInicialTabla />);
+  pintar(<StockInicialTabla />);
   completarFila();
   fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
 
@@ -153,7 +166,7 @@ test("una coincidencia por SKU no deja elegir «producto nuevo»", async () => {
     ],
     preview_token: "tok",
   });
-  render(<StockInicialTabla />);
+  pintar(<StockInicialTabla />);
   completarFila();
   fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
   const grupo = await screen.findByRole("radiogroup", { name: /fila 1/ });
@@ -169,7 +182,7 @@ test("BATCH_CHANGED reemplaza la revisión y pide revisar de nuevo", async () =>
       preview: CON_COINCIDENCIA,
     }),
   );
-  render(<StockInicialTabla />);
+  pintar(<StockInicialTabla />);
   completarFila();
   fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
   await waitFor(() => expect(confirmar()).toBeEnabled());
@@ -191,7 +204,7 @@ test("BATCH_CHANGED reemplaza la revisión y pide revisar de nuevo", async () =>
 
 test("editar una fila después de revisar invalida la revisión", async () => {
   mockPreview.mockResolvedValue(SIN_COINCIDENCIAS);
-  render(<StockInicialTabla />);
+  pintar(<StockInicialTabla />);
   completarFila();
   fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
   await waitFor(() => expect(confirmar()).toBeEnabled());
@@ -205,7 +218,7 @@ test("editar una fila después de revisar invalida la revisión", async () => {
 test("PRODUCTS_BEING_CREATED avisa que se reintente", async () => {
   mockPreview.mockResolvedValue(SIN_COINCIDENCIAS);
   mockConfirm.mockRejectedValue(error409({ code: "PRODUCTS_BEING_CREATED", message: "x" }));
-  render(<StockInicialTabla />);
+  pintar(<StockInicialTabla />);
   completarFila();
   fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
   await waitFor(() => expect(confirmar()).toBeEnabled());
@@ -214,11 +227,112 @@ test("PRODUCTS_BEING_CREATED avisa que se reintente", async () => {
 });
 
 test("una fila sin costo no se revisa", () => {
-  render(<StockInicialTabla />);
+  pintar(<StockInicialTabla />);
   escribir("Nombre, fila 1", "Vela");
   escribir("Precio de venta, fila 1", "3000");
   escribir("Stock, fila 1", "10");
   fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
   expect(screen.getByText(/El costo es obligatorio/)).toBeInTheDocument();
   expect(mockPreview).not.toHaveBeenCalled();
+});
+
+test("reintentar el MISMO cuerpo reusa la clave; cambiar el cuerpo la renueva", async () => {
+  mockPreview.mockResolvedValue(SIN_COINCIDENCIAS);
+  // La primera respuesta se pierde (el servidor pudo haber commiteado).
+  mockConfirm.mockRejectedValueOnce(errorDeRed()).mockRejectedValueOnce(errorDeRed());
+  pintar(<StockInicialTabla />);
+  completarFila();
+  fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
+  await waitFor(() => expect(confirmar()).toBeEnabled());
+  fireEvent.click(confirmar());
+  await waitFor(() => expect(confirmar()).toBeEnabled());
+  fireEvent.click(confirmar());
+  await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(2));
+  expect(mockConfirm.mock.calls[1][1]).toBe(mockConfirm.mock.calls[0][1]);
+
+  // Otra fecha = otro cuerpo = otro intento.
+  await waitFor(() => expect(confirmar()).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("¿Desde qué fecha tenés este stock?"), {
+    target: { value: "2026-08-02" },
+  });
+  mockConfirm.mockResolvedValueOnce({ filas: [], creados: 1, con_apertura: 0 });
+  fireEvent.click(confirmar());
+  await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(3));
+  expect(mockConfirm.mock.calls[2][1]).not.toBe(mockConfirm.mock.calls[0][1]);
+});
+
+test("DUPLICATE_IDEMPOTENT: la carga ya se hizo, no se ofrece reintentar", async () => {
+  mockPreview.mockResolvedValue(SIN_COINCIDENCIAS);
+  mockConfirm.mockRejectedValue(error409({ code: "DUPLICATE_IDEMPOTENT" }));
+  const onDone = jest.fn();
+  const { invalidar } = pintar(<StockInicialTabla onDone={onDone} />);
+  completarFila();
+  fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
+  await waitFor(() => expect(confirmar()).toBeEnabled());
+  fireEvent.click(confirmar());
+
+  expect(await screen.findByText(/Esa carga ya se hizo/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Confirmar" })).not.toBeInTheDocument();
+  expect(onDone).toHaveBeenCalledWith(null);
+  expect(invalidar).toHaveBeenCalledWith({ queryKey: ["products-list"] });
+});
+
+test("«1.000» es mil y «1.500,50» es mil quinientos con cincuenta", async () => {
+  mockPreview.mockResolvedValue(SIN_COINCIDENCIAS);
+  pintar(<StockInicialTabla />);
+  completarFila();
+  escribir("Precio de venta, fila 1", "1.500,50");
+  escribir("Costo, fila 1", "1.000");
+  escribir("Stock, fila 1", "1.200");
+  fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
+  await waitFor(() => expect(mockPreview).toHaveBeenCalled());
+  expect(mockPreview.mock.calls[0][0][0]).toMatchObject({
+    sale_price_ars: 1500.5,
+    unit_cost_ars: 1000,
+    stock_units: 1200,
+  });
+});
+
+test.each([
+  ["gram", 1000, "kg"],
+  ["milliliter", 1000, "L"],
+  ["gram", 1, "gramos"],
+  ["milliliter", 1, "ml"],
+])("la fila sobre un producto %s ×%s se lee en %s", async (saleUnit, factor, rotulo) => {
+  mockPreview.mockResolvedValue({
+    filas: [
+      {
+        fila: 0,
+        errores: [],
+        coincidencias: [
+          {
+            product_id: "p",
+            nombre: "Queso",
+            por: "nombre",
+            necesita_stock_inicial: true,
+            sale_unit: saleUnit,
+            base_units_per_sale_unit: factor,
+          },
+        ],
+      },
+    ],
+    preview_token: "t",
+  });
+  pintar(<StockInicialTabla />);
+  completarFila();
+  fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
+  expect(await screen.findByText(`— el stock de la fila va en ${rotulo}`)).toBeInTheDocument();
+});
+
+test("con un pedido en vuelo no se edita ni se reenvía", async () => {
+  let soltar: (v: unknown) => void = () => {};
+  mockPreview.mockReturnValue(new Promise((r) => (soltar = r)));
+  pintar(<StockInicialTabla />);
+  completarFila();
+  fireEvent.click(screen.getByRole("button", { name: "Revisar" }));
+  expect(screen.getByLabelText("Nombre, fila 1")).toBeDisabled();
+  expect(screen.getByRole("button", { name: /Revisar/ })).toBeDisabled();
+  expect(confirmar()).toBeDisabled();
+  await act(async () => soltar(SIN_COINCIDENCIAS));
+  await waitFor(() => expect(screen.getByLabelText("Nombre, fila 1")).toBeEnabled());
 });

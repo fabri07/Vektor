@@ -10,6 +10,7 @@
  */
 
 import { useState } from "react";
+import axios from "axios";
 import { useQuery } from "@tanstack/react-query";
 import { ProgressBar } from "./ProgressBar";
 import { Step2Form, type MainConcern, type Step2Data } from "./Step2Form";
@@ -43,6 +44,8 @@ interface WizardState {
   /** B·5d: en el paso 2, la tabla de stock inicial en vez del archivo. Sólo
    *  después del submit: el negocio tiene que existir antes de cargarle stock. */
   stockInicialAMano: boolean;
+  /** La tabla terminó: se muestra su resumen y «Seguir» lleva al paso 3. */
+  stockInicialCargado: boolean;
 }
 
 
@@ -56,6 +59,7 @@ export function OnboardingWizard() {
     pendingFile: null,
     uploadedFileId: null,
     stockInicialAMano: false,
+    stockInicialCargado: false,
   });
 
   /*
@@ -129,7 +133,13 @@ export function OnboardingWizard() {
       });
       setState((prev) => ({ ...prev, formSubmitted: true }));
       return true;
-    } catch {
+    } catch (e) {
+      // 409 «Onboarding already completed»: un submit anterior ya entró (p. ej.
+      // la respuesta se perdió). Los datos están: se sigue como si hubiera salido.
+      if (axios.isAxiosError(e) && e.response?.status === 409) {
+        setState((prev) => ({ ...prev, formSubmitted: true }));
+        return true;
+      }
       setState((prev) => ({
         ...prev,
         isSubmitting: false,
@@ -140,7 +150,7 @@ export function OnboardingWizard() {
   }
 
   async function handleUploadNext(file: File | null) {
-    if (!state.formData) return;
+    if (!state.formData || state.isSubmitting) return;
 
     setState((prev) => ({ ...prev, isSubmitting: true, submitError: null }));
 
@@ -166,7 +176,7 @@ export function OnboardingWizard() {
   }
 
   async function handleStockInicial() {
-    if (!state.formData) return;
+    if (!state.formData || state.isSubmitting) return;
     setState((prev) => ({ ...prev, isSubmitting: true, submitError: null }));
     if (!(await asegurarSubmit())) return;
     setState((prev) => ({ ...prev, isSubmitting: false, stockInicialAMano: true }));
@@ -203,6 +213,7 @@ export function OnboardingWizard() {
     formSubmitted,
     uploadedFileId,
     stockInicialAMano,
+    stockInicialCargado,
   } = state;
 
   return (
@@ -237,23 +248,43 @@ export function OnboardingWizard() {
                 <p className="mb-4 text-sm text-gray-500">
                   Cargá los productos que ya tenés, con su costo y su precio de venta.
                 </p>
-                {/* Al terminar sigue como cuando no se sube archivo. */}
-                <StockInicialTabla onDone={() => goToStep(3)} />
-                <div className="mt-4 flex justify-start">
-                  <button
-                    type="button"
-                    onClick={() => setState((prev) => ({ ...prev, stockInicialAMano: false }))}
-                    className="text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
-                  >
-                    Volver a subir un archivo
-                  </button>
+                {/* Al terminar queda el resumen de la tabla; «Seguir» va al paso
+                    3 como cuando no se sube archivo. */}
+                <StockInicialTabla
+                  onDone={() => setState((prev) => ({ ...prev, stockInicialCargado: true }))}
+                />
+                <div className="mt-4 flex items-center justify-between">
+                  {stockInicialCargado ? (
+                    <span />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setState((prev) => ({ ...prev, stockInicialAMano: false }))}
+                      className="text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
+                    >
+                      Volver a subir un archivo
+                    </button>
+                  )}
+                  {stockInicialCargado ? (
+                    <button
+                      type="button"
+                      onClick={() => goToStep(3)}
+                      className="h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
+                    >
+                      Seguir
+                    </button>
+                  ) : null}
                 </div>
               </>
             )}
 
             {step === 2 && !stockInicialAMano && (
               <>
-                <Step3Upload onNext={handleUploadNext} onStockInicial={handleStockInicial} />
+                <Step3Upload
+                  onNext={handleUploadNext}
+                  onStockInicial={handleStockInicial}
+                  disabled={isSubmitting}
+                />
 
                 {submitError && (
                   <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">

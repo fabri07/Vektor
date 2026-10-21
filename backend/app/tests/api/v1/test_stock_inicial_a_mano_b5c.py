@@ -687,6 +687,7 @@ async def test_apertura_en_un_producto_por_peso_lee_el_stock_en_kg(
     filas = [_fila("Queso cremoso", stock_units=3)]
     pv = await _preview(client, auth_headers, filas)
     assert pv["filas"][0]["coincidencias"][0]["sale_unit"] == "gram"
+    assert pv["filas"][0]["coincidencias"][0]["base_units_per_sale_unit"] == 1000
     r = await _confirmar(
         client, auth_headers, filas, pv["preview_token"],
         [{"fila": 0, "accion": "apertura_en", "product_id": str(p.id)}],
@@ -695,3 +696,41 @@ async def test_apertura_en_un_producto_por_peso_lee_el_stock_en_kg(
     (mov,) = await _aperturas(db_session, p.id)
     assert mov.qty == 3000
     assert (await _leer(db_session, Product, p.id)).stock_units == 3000
+
+    # La auditoría dice lo que entró al ledger (gramos) y lo tipeado (kg).
+    await db_session.commit()
+    (audit,) = (
+        await db_session.execute(
+            select(DecisionAuditLog).where(
+                DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                DecisionAuditLog.decision_type == "OPENING_STOCK_BATCH",
+            )
+        )
+    ).scalars().all()
+    fila = audit.decision_data["filas"][0]
+    assert (fila["stock_units"], fila["stock_units_fila"]) == (3000, 3)
+
+
+async def test_cambiar_la_unidad_entre_preview_y_confirmar_da_batch_changed(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """B·5d: la fila se lee en la unidad de venta de la coincidencia; si esa
+    unidad cambia después del preview, «3» ya no significa lo mismo → 409."""
+    p = await _producto(db_session, sample_tenant.tenant_id, name="Queso cremoso")
+    filas = [_fila("Queso cremoso", stock_units=3)]
+    pv = await _preview(client, auth_headers, filas)
+    assert pv["filas"][0]["coincidencias"][0]["base_units_per_sale_unit"] == 1
+    prod = await _leer(db_session, Product, p.id)
+    prod.sale_unit = "gram"
+    prod.base_units_per_sale_unit = 1000
+    await db_session.commit()
+    r = await _confirmar(
+        client, auth_headers, filas, pv["preview_token"],
+        [{"fila": 0, "accion": "apertura_en", "product_id": str(p.id)}],
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "BATCH_CHANGED"
+    assert await _aperturas(db_session, p.id) == []

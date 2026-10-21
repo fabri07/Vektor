@@ -1011,6 +1011,7 @@ def _preview_de(analisis: list[stock_inicial_lote_service.FilaAnalizada]) -> lis
                     por=c.por,
                     necesita_stock_inicial=c.necesita_stock_inicial,
                     sale_unit=c.sale_unit,
+                    base_units_per_sale_unit=c.base_units_per_sale_unit,
                 )
                 for c in a.coincidencias
             ],
@@ -1226,6 +1227,9 @@ async def confirm_initial_stock_batch(
             )
         elecciones[dada.fila] = dada
     plan: list[tuple[int, str, UUID | None]] = []
+    # Factor a unidades base por fila (auditoría): el de la coincidencia elegida
+    # en ``apertura_en``; un producto nuevo del lote se vende por unidad.
+    factor_de: dict[int, int] = {}
     for a in analisis:
         e = elecciones.get(a.fila)
         if e is None:
@@ -1257,6 +1261,7 @@ async def confirm_initial_stock_batch(
                 fila=a.fila,
             )
         plan.append((a.fila, "apertura_en", destino.product_id))
+        factor_de[a.fila] = destino.base_units_per_sale_unit
     destinos = [d for _, accion, d in plan if accion == "apertura_en" and d is not None]
     if len(set(destinos)) != len(destinos):
         raise _error_de_lote(
@@ -1284,7 +1289,10 @@ async def confirm_initial_stock_batch(
                         "accion": r.accion,
                         "product_id": str(r.product_id),
                         "movement_id": str(r.movement_id),
-                        "stock_units": body.filas[r.fila].stock_units,
+                        # Lo que entró al ledger (unidades base) y lo tipeado.
+                        "stock_units": body.filas[r.fila].stock_units
+                        * factor_de.get(r.fila, 1),
+                        "stock_units_fila": body.filas[r.fila].stock_units,
                         "unit_cost_ars": str(body.filas[r.fila].unit_cost_ars),
                     }
                     for r in resultados

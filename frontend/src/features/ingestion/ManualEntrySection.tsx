@@ -1532,7 +1532,10 @@ function OpeningTab({ onToast }: { onToast: (t: ToastState) => void }) {
       onDone={(r) => {
         onToast({
           type: "success",
-          message: `Stock inicial cargado en ${r.filas.length} producto(s).`,
+          // null = esa carga ya se había hecho (respuesta perdida, misma clave).
+          message: r
+            ? `Stock inicial cargado en ${r.filas.length} producto(s).`
+            : "Esa carga de stock inicial ya se había hecho.",
         });
         void queryClient.invalidateQueries({ queryKey: ["products-list"] });
       }}
