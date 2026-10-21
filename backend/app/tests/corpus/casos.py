@@ -75,6 +75,10 @@ class CasoDeCorpus:
     #: Filas que NO se importan y quedan para revisar. Es parte de la expectativa:
     #: un caso que espera 0 y captura 3 está perdiendo datos en silencio.
     otros: int = 0
+    #: B·5e: productos que el negocio ya compró antes del archivo. Una venta
+    #: importada de un producto sin compra previa va a «Otros»; los casos de
+    #: ventas fijan la LECTURA del archivo, así que su mercadería ya está comprada.
+    con_compra: tuple[str, ...] = ()
 
 
 def _xlsx(hojas: dict[str, list[list[Any]]]) -> bytes:
@@ -143,6 +147,7 @@ CASOS: list[CasoDeCorpus] = [
         ),
         mime=_CSV_MIME,
         archivo="ventas_ar.csv",
+        con_compra=("Vela aromatica", "Difusor"),
         mapeo=_mapeo(_MAPEO_VENTAS),
         confirmado={"ventas": True},
         ventas=[
@@ -167,6 +172,7 @@ CASOS: list[CasoDeCorpus] = [
         ),
         mime=_CSV_MIME,
         archivo="ventas_latin1.csv",
+        con_compra=("Café molido",),
         mapeo=_mapeo(_MAPEO_VENTAS),
         confirmado={"ventas": True},
         ventas=[VentaEsperada(date(2024, 3, 5), Decimal("3400"), 1)],
@@ -191,6 +197,7 @@ CASOS: list[CasoDeCorpus] = [
         ),
         mime=_XLSX_MIME,
         archivo="ventas_us.xlsx",
+        con_compra=("Vela aromatica", "Difusor"),
         mapeo=_mapeo(_MAPEO_VENTAS),
         confirmado={"ventas": True},
         ventas=[
@@ -220,6 +227,7 @@ CASOS: list[CasoDeCorpus] = [
         ),
         mime=_XLSX_MIME,
         archivo="ventas_sucias.xlsx",
+        con_compra=("Vela aromatica", "Difusor", "Portarretrato", "Sahumerio"),
         mapeo=_mapeo(_MAPEO_VENTAS),
         confirmado={"ventas": True},
         ventas=[VentaEsperada(date(2024, 3, 5), Decimal("12500.50"), 1)],
@@ -238,6 +246,7 @@ CASOS: list[CasoDeCorpus] = [
         ),
         mime=_XLSX_MIME,
         archivo="ventas_serial.xlsx",
+        con_compra=("Vela aromatica",),
         mapeo=_mapeo(_MAPEO_VENTAS),
         confirmado={"ventas": True},
         ventas=[VentaEsperada(date(2023, 7, 16), Decimal("8400"), 1)],

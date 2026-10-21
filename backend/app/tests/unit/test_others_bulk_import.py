@@ -17,6 +17,7 @@ from app.application.services.ingestion_import_service import bulk_import_unclas
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import producto_con_compra
 
 
 def _record(
@@ -35,11 +36,13 @@ async def test_bulk_import_sales_and_expenses(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     tid = sample_tenant.tenant_id
+    # B·5e: la venta sugerida entra sólo con producto y compra previa.
+    await producto_con_compra(db_session, tid, nombre="Vela")
     db_session.add_all(
         [
             _record(
                 tid,
-                {"fecha": "2026-05-01", "detalle": "Venta del día", "monto": "120000"},
+                {"fecha": "2026-05-01", "detalle": "Vela", "monto": "120000"},
                 "sale",
             ),
             _record(
@@ -86,7 +89,7 @@ async def test_bulk_import_sales_and_expenses(
     sale = (await db_session.execute(select(SaleEntry))).scalar_one()
     assert sale.amount == Decimal("120000")
     assert sale.payment_method == "cash"
-    assert sale.notes == "Venta del día"
+    assert sale.notes == "Vela"
 
     expense = (await db_session.execute(select(ExpenseEntry))).scalar_one()
     assert expense.category == "UTILITIES"
@@ -105,9 +108,11 @@ async def test_bulk_import_entity_filter(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     tid = sample_tenant.tenant_id
+    # B·5e: la venta sugerida entra sólo con producto y compra previa.
+    await producto_con_compra(db_session, tid, nombre="Vela")
     db_session.add_all(
         [
-            _record(tid, {"fecha": "2026-05-01", "monto": "1000"}, "sale"),
+            _record(tid, {"fecha": "2026-05-01", "monto": "1000", "detalle": "Vela"}, "sale"),
             _record(tid, {"fecha": "2026-05-01", "monto": "2000"}, "expense"),
         ]
     )

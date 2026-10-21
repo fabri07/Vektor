@@ -27,6 +27,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import productos_con_compra
 from app.tests.corpus.casos import CASOS, CasoDeCorpus, ProductoEsperado, VentaEsperada
 
 
@@ -38,6 +39,7 @@ def _sin_broker(mock_score_trigger: Any) -> None:
 async def _subir(
     db_session: AsyncSession, tenant: Tenant, caso: CasoDeCorpus
 ) -> UploadedFile:
+    await productos_con_compra(db_session, tenant.tenant_id, caso.con_compra)
     record = UploadedFile(
         tenant_id=tenant.tenant_id,
         uploaded_by=None,

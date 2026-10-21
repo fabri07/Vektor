@@ -39,7 +39,7 @@ import pytest_asyncio
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.application.services import reread_service
+from app.application.services import ingestion_import_service, reread_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
@@ -54,6 +54,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairRun
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.tests._respaldo import productos_con_compra
 from app.tests.conftest import add_business_profile
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -214,6 +215,16 @@ async def _editar(
         setattr(rec, k, v)
     await session.commit()
     return rec.id
+
+
+def _antes_de_b5e(m: pytest.MonkeyPatch) -> None:
+    """Importa como antes de B·5e: sin la pasada que manda a «Otros» las ventas sin
+    producto o sin compra previa."""
+
+    async def _sin_pasada(*_a: Any, **_k: Any) -> None:
+        return None
+
+    m.setattr(ingestion_import_service, "_ventas_sin_compra_a_otros", _sin_pasada)
 
 
 # ── La foto ─────────────────────────────────────────────────────────────────────
@@ -464,17 +475,25 @@ async def test_5_gemelas_con_una_editada_y_una_fila_nueva_antes(
 
 
 async def test_6_fila_con_venta_y_gasto_y_la_venta_editada(
-    db_session: AsyncSession, tid: uuid.UUID
+    db_session: AsyncSession, tid: uuid.UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Hallazgo 2 del #86: la fila con venta y gasto. Las dos operaciones nacen de
-    la misma fila y comparten ``source_row_ref``."""
+    la misma fila y comparten ``source_row_ref``.
+
+    B·5e: la planilla no tiene producto, así que HOY sus ventas van a «Otros» en
+    el import y no hay venta que editar. El caso sigue existiendo para un archivo
+    importado ANTES de B·5e (datos que ya están en producción): el import original
+    se hace sin la pasada de B·5e; la relectura, con la regla vigente (que no
+    vuelve a juzgar una fila que ya era venta de este archivo)."""
     contenido = (
         "fecha,detalle,venta,gasto\n"
         f"{_dia(1)},A,1500,900\n{_dia(2)},B,800,500\n{_dia(3)},C,2200,1000\n"
     ).encode()
-    fid = await _importar(
-        db_session, tid, contenido, "vg.csv", confirmed={"ventas": True, "gastos": True}
-    )
+    with monkeypatch.context() as m:
+        _antes_de_b5e(m)
+        fid = await _importar(
+            db_session, tid, contenido, "vg.csv", confirmed={"ventas": True, "gastos": True}
+        )
     editada = await _editar(db_session, fid, "800", SaleEntry)
 
     salida = await _releer(db_session, tid, fid, contenido, "vg.csv")
@@ -725,6 +744,8 @@ async def test_corrimiento_en_el_mismo_dia_con_importe_no_confiable(
     preview compara por día, y acá todo es del mismo día — el preview no ve el
     corrimiento. La autoridad es el apply."""
     filas = [("Vela", "150", "3"), ("Difusor", "900", "2"), ("Mantel", "4200", "1")]
+    # B·5e: con compra previa; si no, las ventas irían a «Otros» desde el import.
+    await productos_con_compra(db_session, tid, ["Vela", "Difusor", "Mantel", "Florero"])
     fid = await _importar(
         db_session,
         tid,

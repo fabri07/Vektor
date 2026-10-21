@@ -46,8 +46,18 @@ from app.persistence.models.pipeline_event import (
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.tests._respaldo import producto_con_compra, productos_con_compra
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
+#: B·5e: una venta importada de un producto sin compra (o sin producto) va a
+#: «Otros». Los tests de confirm que sólo necesitan que la venta ENTRE venden
+#: este producto, que `_con_compra` deja con su stock inicial antes del import.
+_PRODUCTO = "Vela"
+
+
+async def _con_compra(db_session: AsyncSession, tenant: Tenant) -> None:
+    await productos_con_compra(db_session, tenant.tenant_id, [_PRODUCTO])
 
 
 @pytest.fixture
@@ -129,6 +139,7 @@ async def confirmed_file(
     db_session: AsyncSession, sample_tenant: Tenant, sample_user: "object"
 ) -> UploadedFile:
     """A file already in NEEDS_CONFIRMATION state."""
+    await _con_compra(db_session, sample_tenant)
     record = UploadedFile(
         tenant_id=sample_tenant.tenant_id,
         uploaded_by=None,
@@ -149,7 +160,7 @@ async def confirmed_file(
             "has_fecha": True,
             "row_count": 1,
             "ventas_detectadas": [
-                {"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}
+                {"fecha": "2024-01-15", "monto": "50000", "producto": _PRODUCTO}
             ],
         },
     )
@@ -1259,6 +1270,7 @@ class TestConfirmEndpoint:
         El guard bloquea la ausencia de decisión, no la hoja. Sin este test, el
         fix podría estar rompiendo el caso legítimo de reasignar una hoja.
         """
+        await _con_compra(db_session, sample_tenant)
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -1279,7 +1291,7 @@ class TestConfirmEndpoint:
                         "context_id": "sheet:Hoja1",
                         "label": "Hoja1",
                         "entity_type": None,
-                        "headers": ["fecha", "monto"],
+                        "headers": ["fecha", "monto", "producto"],
                         "row_count": 1,
                         "preview_rows": [],
                     }
@@ -1288,7 +1300,12 @@ class TestConfirmEndpoint:
                 # al reasignarla, el importador las levanta de ahí
                 # (`bucket_key = entity_bucket.get(base_entity or "", "otros_detectados")`).
                 "otros_detectados": [
-                    {"__context__": "sheet:Hoja1", "fecha": "2024-01-15", "monto": "50000"},
+                    {
+                        "__context__": "sheet:Hoja1",
+                        "fecha": "2024-01-15",
+                        "monto": "50000",
+                        "producto": _PRODUCTO,
+                    },
                 ],
             },
         )
@@ -1400,6 +1417,7 @@ class TestConfirmEndpoint:
 
         F8b (Task 4): además, el drop AHORA se aplica de verdad, así que la fila
         debe importar por la columna de reemplazo (fecha_alt)."""
+        await _con_compra(db_session, sample_tenant)
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -1418,7 +1436,12 @@ class TestConfirmEndpoint:
                 "has_fecha": True,
                 "row_count": 1,
                 "ventas_detectadas": [
-                    {"fecha": "2024-01-15", "fecha_alt": "2024-01-20", "monto": "50000"}
+                    {
+                        "fecha": "2024-01-15",
+                        "fecha_alt": "2024-01-20",
+                        "monto": "50000",
+                        "producto": _PRODUCTO,
+                    }
                 ],
             },
         )
@@ -1526,6 +1549,7 @@ class TestConfirmEndpoint:
     ) -> None:
         """F8b (Task 2): rutear filas afectadas por un campo REQUERIDO (amount)
         es una decisión válida — no bloquea el confirm."""
+        await _con_compra(db_session, sample_tenant)
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -1543,7 +1567,9 @@ class TestConfirmEndpoint:
                 "has_venta": True,
                 "has_fecha": True,
                 "row_count": 1,
-                "ventas_detectadas": [{"fecha": "2024-01-15", "monto": "50000"}],
+                "ventas_detectadas": [
+                    {"fecha": "2024-01-15", "monto": "50000", "producto": _PRODUCTO}
+                ],
             },
         )
         db_session.add(record)
@@ -2011,7 +2037,7 @@ def _importing_file_kwargs(tenant_id: uuid.UUID, *, started_at: datetime) -> dic
             "has_fecha": True,
             "row_count": 1,
             "ventas_detectadas": [
-                {"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}
+                {"fecha": "2024-01-15", "monto": "50000", "producto": _PRODUCTO}
             ],
         },
     }
@@ -2078,6 +2104,7 @@ class TestConfirmLeaseF4:
     ) -> None:
         """Un IMPORTING con import_started_at viejo (proceso muerto) es retomable."""
         stale = datetime.now(UTC) - timedelta(hours=1)  # TTL default = 15 min
+        await _con_compra(db_session, sample_tenant)
         record = UploadedFile(**_importing_file_kwargs(sample_tenant.tenant_id, started_at=stale))
         db_session.add(record)
         await db_session.commit()
@@ -2496,7 +2523,8 @@ class TestConfirmColumnRiskF8b:
                 "has_venta": True,
                 "has_fecha": True,
                 "row_count": len(rows),
-                "ventas_detectadas": rows,
+                # B·5e: cada venta vende `_PRODUCTO` (con compra si el test la crea).
+                "ventas_detectadas": [{**r, "producto": _PRODUCTO} for r in rows],
             },
         )
 
@@ -2512,6 +2540,8 @@ class TestConfirmColumnRiskF8b:
         inválidas van a Otros. El recálculo es EXACTO (no rutea la válida — el
         backend NUNCA confía en un `affected_rows` del cliente)."""
         from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        await _con_compra(db_session, sample_tenant)
 
         record = self._ventas_record(
             sample_tenant.tenant_id,
@@ -2576,6 +2606,8 @@ class TestConfirmColumnRiskF8b:
         solo la afectada va a Otros. Si el backend ruteara el contexto entero
         (mutación: confiar en el cliente), este test fallaría."""
         from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        await _con_compra(db_session, sample_tenant)
 
         record = self._ventas_record(
             sample_tenant.tenant_id,
@@ -2788,6 +2820,8 @@ class TestConfirmColumnRiskF8b:
         Ambas hojas importan; la auditoría agregada registra solo s1."""
         from app.persistence.models.audit import DecisionAuditLog
 
+        await _con_compra(db_session, sample_tenant)
+
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -2809,7 +2843,7 @@ class TestConfirmColumnRiskF8b:
                         "context_id": "s1",
                         "label": "Ventas",
                         "entity_type": "sale",
-                        "headers": ["fecha", "monto", "notas"],
+                        "headers": ["fecha", "monto", "notas", "producto"],
                         "preview_rows": [],
                     },
                     {
@@ -2825,6 +2859,7 @@ class TestConfirmColumnRiskF8b:
                         "fecha": "2024-01-15",
                         "monto": "50000",
                         "notas": "hola",
+                        "producto": _PRODUCTO,
                         "__context__": "s1",
                     }
                 ],
@@ -2913,6 +2948,8 @@ class TestConfirmColumnRiskF8b:
         from app.persistence.models.audit import DecisionAuditLog
         from app.persistence.models.unclassified_record import UnclassifiedRecord
 
+        await _con_compra(db_session, sample_tenant)
+
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -2931,12 +2968,13 @@ class TestConfirmColumnRiskF8b:
                 "row_count": 2,
                 "mapping_contexts": [
                     {"context_id": "s1", "label": "Ventas", "entity_type": "sale",
-                     "headers": ["fecha", "monto"], "preview_rows": []},
+                     "headers": ["fecha", "monto", "producto"], "preview_rows": []},
                     {"context_id": "s2", "label": "Gastos", "entity_type": "expense",
                      "headers": ["fecha", "monto"], "preview_rows": []},
                 ],
                 "ventas_detectadas": [
-                    {"fecha": "2024-01-15", "monto": "50000", "__context__": "s1"}
+                    {"fecha": "2024-01-15", "monto": "50000", "producto": _PRODUCTO,
+                     "__context__": "s1"}
                 ],
                 "gastos_detectados": [
                     {"fecha": "2024-01-16", "monto": "", "__context__": "s2"}
@@ -3077,7 +3115,8 @@ class TestConfirmColumnRiskAllRoutedF8c:
                 "has_venta": True,
                 "has_fecha": True,
                 "row_count": len(rows),
-                "ventas_detectadas": rows,
+                # B·5e: cada venta vende `_PRODUCTO` (con compra si el test la crea).
+                "ventas_detectadas": [{**r, "producto": _PRODUCTO} for r in rows],
             },
         )
 
@@ -3169,6 +3208,8 @@ class TestConfirmColumnRiskAllRoutedF8c:
         red de regresión del reorden: `total_inserted > 0` no debe romper la
         captura ni los counters)."""
         from app.persistence.models.unclassified_record import UnclassifiedRecord
+
+        await _con_compra(db_session, sample_tenant)
 
         record = self._ventas_record(
             sample_tenant.tenant_id,
@@ -4439,7 +4480,15 @@ class TestEfectoDeInventarioPorHoja:
     """
 
     @staticmethod
-    async def _archivo(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    async def _archivo(
+        db_session: AsyncSession, sample_tenant: Tenant, *, con_compra: bool = True
+    ) -> UploadedFile:
+        # B·5e: la venta de un producto sin compra va a «Otros»; salvo el test que
+        # mide justamente eso, acá se mide el efecto de una venta que entra.
+        if con_compra:
+            await productos_con_compra(
+                db_session, sample_tenant.tenant_id, ["Vela aromática 200g"]
+            )
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -4552,7 +4601,7 @@ class TestEfectoDeInventarioPorHoja:
         detalle = eventos[-1].detail or {}
         assert detalle["inventory_effect"] == {"sheet:Ventas": "historical_replay"}
 
-    async def test_una_hoja_de_ventas_no_toca_stock_por_default(
+    async def test_una_venta_sin_compra_no_toca_stock_y_va_a_otros(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
@@ -4560,12 +4609,24 @@ class TestEfectoDeInventarioPorHoja:
         sample_tenant: Tenant,
         mock_score_trigger: unittest.mock.MagicMock,
     ) -> None:
-        """El invariante de la fase, visto desde afuera.
+        """Importar ventas no mueve el inventario de lo que nunca se compró.
 
-        Importar ventas históricas no puede mover el inventario sin que alguien
-        lo haya pedido para esa hoja.
+        Antes era «una hoja de ventas no toca stock por default» (F-H3.a), que
+        desde F-F.4 sólo seguía pasando porque el producto no existía: el efecto
+        deducido es ``historical_replay`` y descuenta (ver
+        ``TestImpactoDeInventarioEnLaRespuesta``). Desde B·5e esa venta —de un
+        producto sin compra ni stock inicial— no entra: va a «Otros» con su
+        motivo, y no deja ningún movimiento de venta.
         """
-        record = await self._archivo(db_session, sample_tenant)
+        from app.application.services.respaldo_service import (  # noqa: PLC0415
+            MOTIVO_VENTA_SIN_COMPRA,
+            MOTIVO_VENTA_SIN_PRODUCTO,
+        )
+        from app.persistence.models.unclassified_record import (  # noqa: PLC0415
+            UnclassifiedRecord,
+        )
+
+        record = await self._archivo(db_session, sample_tenant, con_compra=False)
 
         response = await client.post(
             f"/api/v1/ingestion/files/{record.id}/confirm",
@@ -4587,6 +4648,22 @@ class TestEfectoDeInventarioPorHoja:
             .all()
         )
         assert movimientos == []
+        assert (
+            await db_session.execute(
+                select(SaleEntry).where(SaleEntry.tenant_id == sample_tenant.tenant_id)
+            )
+        ).scalars().all() == []
+        otros = (
+            await db_session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                )
+            )
+        ).scalars().all()
+        assert len(otros) == 1
+        assert (otros[0].context_label or "").startswith(
+            (MOTIVO_VENTA_SIN_COMPRA, MOTIVO_VENTA_SIN_PRODUCTO)
+        )
 
     async def test_un_efecto_para_una_hoja_inexistente_corta_antes_del_lease(
         self,
@@ -4642,14 +4719,16 @@ class TestImpactoDeInventarioEnLaRespuesta:
         sample_tenant: Tenant,
         mock_score_trigger: unittest.mock.MagicMock,
     ) -> None:
-        producto = Product(
-            tenant_id=sample_tenant.tenant_id,
-            name="Vela aromática 200g",
-            sale_price_ars=Decimal("2100"),
-            unit_cost_ars=Decimal("1200"),
-            stock_units=10,
+        # B·5e: con compra previa (stock inicial de 10 al costo), para que la venta
+        # entre y no vaya a «Otros».
+        producto = await producto_con_compra(
+            db_session,
+            sample_tenant.tenant_id,
+            nombre="Vela aromática 200g",
+            stock=10,
+            costo=Decimal("1200"),
+            precio=Decimal("2100"),
         )
-        db_session.add(producto)
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -4730,16 +4809,14 @@ class TestImpactoDeInventarioEnLaRespuesta:
         "mostrando N de M" en vez de dar a entender que N es todo.
         """
         cantidad = ingestion_module._MAX_IMPACTO_LISTADO + 5
-        for i in range(cantidad):
-            db_session.add(
-                Product(
-                    tenant_id=sample_tenant.tenant_id,
-                    name=f"Producto {i:03d}",
-                    sale_price_ars=Decimal("1000"),
-                    unit_cost_ars=Decimal("500"),
-                    stock_units=50,
-                )
-            )
+        # B·5e: cada producto con compra previa (stock inicial de 50 al costo).
+        await productos_con_compra(
+            db_session,
+            sample_tenant.tenant_id,
+            [f"Producto {i:03d}" for i in range(cantidad)],
+            stock=50,
+            costo=Decimal("500"),
+        )
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,

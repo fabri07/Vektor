@@ -13,6 +13,7 @@ fecha bien en el pasado para respaldar cualquier venta de los tests.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -67,6 +68,14 @@ async def producto_con_compra(
     return product
 
 
+async def productos_con_compra(
+    db: AsyncSession, tenant_id: uuid.UUID, nombres: Iterable[str], **kw: Any
+) -> dict[str, Product]:
+    """Un ``producto_con_compra`` por nombre (los que vende el archivo de un import:
+    el import resuelve el producto por nombre/SKU y lo encuentra ya respaldado)."""
+    return {n: await producto_con_compra(db, tenant_id, nombre=n, **kw) for n in nombres}
+
+
 async def producto_con_compra_http(
     client: AsyncClient,
     headers: dict[str, Any],
@@ -95,4 +104,25 @@ async def producto_con_compra_http(
     return str(resp.json()["id"])
 
 
-__all__ = ["DIA_DE_COMPRA", "producto_con_compra", "producto_con_compra_http"]
+async def archivo_de_prueba(db: AsyncSession, tenant_id: uuid.UUID) -> uuid.UUID:
+    """Un ``UploadedFile`` para importar «como un archivo»: la regla de B·5e juzga
+    las ventas de un import con archivo (o del chat), como en producción."""
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+
+    f = UploadedFile(
+        id=uuid.uuid4(), tenant_id=tenant_id, uploaded_by=None,
+        original_filename="prueba.xlsx", s3_key="prueba.xlsx",
+        content_type="application/vnd.ms-excel", size_bytes=100, purpose="ingestion",
+    )
+    db.add(f)
+    await db.flush()
+    return f.id
+
+
+__all__ = [
+    "DIA_DE_COMPRA",
+    "archivo_de_prueba",
+    "producto_con_compra",
+    "producto_con_compra_http",
+    "productos_con_compra",
+]

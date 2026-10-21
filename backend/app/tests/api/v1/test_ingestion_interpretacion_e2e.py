@@ -45,6 +45,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import productos_con_compra
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _PRODUCTO = "Vela aromatica 200g"
@@ -74,7 +75,12 @@ async def _subir(
     nombre: str,
     *,
     legacy: bool = False,
+    respaldar: bool = True,
 ) -> UploadedFile:
+    if respaldar:
+        # B·5e: una venta importada de un producto sin compra va a «Otros». Acá se
+        # mide la interpretación de la fila, así que el producto ya tiene compra.
+        await productos_con_compra(db_session, tenant.tenant_id, [_PRODUCTO])
     summary = parse_uploaded_content(contenido, _XLSX_MIME, nombre)
     if legacy:
         # Un archivo cargado antes de que existieran los `mapping_contexts`. No se
@@ -382,6 +388,8 @@ async def _legacy_de_productos_importado(
         _libro_multihoja_de_productos_con_montos_con_punto(),
         "legacy_productos.xlsx",
         legacy=True,
+        # Un catálogo, no ventas: sin producto previo (se mide el stock que crea).
+        respaldar=False,
     )
     assert "mapping_contexts" not in record.parsed_summary_json
     assert record.parsed_summary_json.get("multi_sheet") or (

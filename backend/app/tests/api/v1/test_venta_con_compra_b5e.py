@@ -334,3 +334,120 @@ async def test_el_stock_inicial_del_mismo_archivo_respalda_su_historial(
     ventas = await _ventas(db_session, tid)
     assert [str(v.amount) for v in ventas] == ["2000.00"]
     assert ventas[0].product_id is not None
+
+
+# ── Revisión de B·5e-1 ────────────────────────────────────────────────────────
+
+
+async def test_un_archivo_con_todas_las_ventas_sin_compra_no_es_un_import_vacio(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Revisión: el primer archivo de un local que no cargó compras daba 422
+    «no se importó ninguna fila» y el rollback se llevaba lo de «Otros»."""
+    from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION
+
+    tid = sample_tenant.tenant_id
+    await _producto_sin_compra(db_session, tid, "Vela")
+    filas = [
+        {"fecha": hace(3).isoformat(), "venta": "1000", "producto": "Vela", "__context__": "table"},
+        {"fecha": hace(2).isoformat(), "venta": "1500", "producto": "Vela", "__context__": "table"},
+    ]
+    f = UploadedFile(
+        id=uuid.uuid4(), tenant_id=tid, uploaded_by=None, original_filename="v.xlsx",
+        s3_key="v.xlsx", content_type="application/vnd.ms-excel", size_bytes=100,
+        purpose="ventas", status="uploaded", processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
+        parsed_summary_json={
+            "confidence": "HIGH", "file_type": "spreadsheet", "inferred_type": "ventas",
+            "has_venta": True, "row_count": 2, "ventas_detectadas": filas,
+            "headers": ["fecha", "venta", "producto"], "preview_rows": filas,
+        },
+    )
+    db_session.add(f)
+    await db_session.commit()
+    r = await client.post(
+        f"/api/v1/ingestion/files/{f.id}/confirm",
+        json={"confirmed_fields": {"ventas": True}},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert any("2 venta(s) fueron a «Otros»" in w for w in r.json()["warnings"])
+    await db_session.commit()
+    assert await _ventas(db_session, tid) == []
+    otros = (
+        await db_session.execute(
+            select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tid)
+        )
+    ).scalars().all()
+    assert len(otros) == 2
+
+
+@pytest.mark.parametrize("tratamiento", ["opening_balance", "purchase"])
+async def test_el_catalogo_del_archivo_respalda_como_apertura_y_como_compra(
+    db_session: AsyncSession, sample_tenant: Tenant, tratamiento: str
+) -> None:
+    """Revisión: tratado como COMPRA, el stock del catálogo toma la fecha de
+    carga y no respaldaba el historial del mismo archivo."""
+    tid = sample_tenant.tenant_id
+    f = await _archivo(db_session, tid)
+    cat, ven = "sheet:Catalogo", "sheet:Ventas"
+    await insert_confirmed_data(
+        db_session,
+        tid,
+        {
+            "file_type": "spreadsheet", "inferred_type": "mixed", "multi_sheet": True,
+            "has_producto": True, "has_venta": True,
+            "mapping_contexts": [
+                {"context_id": cat, "entity_type": "product", "source_kind": "sheet",
+                 "headers": ["Producto", "Precio", "Costo", "Stock"], "fields": None,
+                 "preview_rows": [], "row_count": 1},
+                {"context_id": ven, "entity_type": "sale", "source_kind": "sheet",
+                 "headers": ["Fecha", "Producto", "Cantidad", "Monto"], "fields": None,
+                 "preview_rows": [], "row_count": 1},
+            ],
+            "stock_detectado": [
+                {"Producto": "Vela", "Precio": "1000", "Costo": "400", "Stock": "20",
+                 "__context__": cat},
+            ],
+            "ventas_detectadas": [
+                {"Fecha": hace(90).isoformat(), "Producto": "Vela", "Cantidad": "2",
+                 "Monto": "2000", "__context__": ven},
+            ],
+        },
+        {"productos": True, "ventas": True},
+        uploaded_file_id=f.id,
+        context_mappings={
+            cat: {"Producto": "name", "Precio": "sale_price_ars", "Costo": "unit_cost_ars",
+                  "Stock": "stock_units"},
+            ven: {"Fecha": "transaction_date", "Producto": "product_name",
+                  "Cantidad": "quantity", "Monto": "amount"},
+        },
+        stock_treatment={cat: tratamiento},
+    )
+    await db_session.commit()
+    assert [str(v.amount) for v in await _ventas(db_session, tid)] == ["2000.00"]
+
+
+async def test_importar_sugeridos_no_saltea_la_regla(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión: «Importar todos los sugeridos» volvía a dejar como venta lo que
+    B·5e mandó a «Otros»."""
+    from app.application.services.ingestion_import_service import bulk_import_unclassified
+
+    tid = sample_tenant.tenant_id
+    await _producto_sin_compra(db_session, tid, "Vela")
+    for detalle in ("Vela", "Algo sin producto"):
+        db_session.add(
+            UnclassifiedRecord(
+                tenant_id=tid, source="ingestion", context_label=MOTIVO_VENTA_SIN_COMPRA,
+                row_data={"fecha": hace(2).isoformat(), "monto": "1000", "producto": detalle},
+                suggested_entity="sale", status="PENDING",
+            )
+        )
+    await db_session.commit()
+    counts = await bulk_import_unclassified(db_session, tid)
+    await db_session.commit()
+    assert counts["imported_sales"] == 0
+    assert counts["needs_manual"] == 2
+    assert await _ventas(db_session, tid) == []

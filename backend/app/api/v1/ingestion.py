@@ -3922,6 +3922,18 @@ async def confirm_file(
     warnings: list[str] = []
     # B·5f: columnas con ≥ 40 % de vacíos (excluidas, o cargadas y por qué).
     warnings.extend(_avisos_columnas_vacias)
+    # B·5e: lo que no entró como venta por no tener compra previa o producto.
+    if counts.get("ventas_sin_compra"):
+        warnings.append(
+            f"{counts['ventas_sin_compra']} venta(s) fueron a «Otros» porque su producto "
+            "no tiene compra ni stock inicial a esa fecha: cargá la compra o el stock "
+            "inicial y clasificalas desde «Otros»."
+        )
+    if counts.get("ventas_sin_producto"):
+        warnings.append(
+            f"{counts['ventas_sin_producto']} venta(s) fueron a «Otros» porque no dicen "
+            "qué producto se vendió: elegilo desde «Otros»."
+        )
     # Una columna que el usuario mapeó a otra sección y el importador NO escribió.
     # Pasa cuando el destino todavía no está implementado (F-D) o cuando el
     # rollout que lo habilita está apagado para el tenant. El contador existía

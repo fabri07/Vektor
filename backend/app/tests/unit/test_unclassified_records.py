@@ -17,6 +17,7 @@ from app.application.services.ingestion_import_service import insert_confirmed_d
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import producto_con_compra
 
 
 def _general_summary() -> dict[str, Any]:
@@ -75,6 +76,7 @@ async def test_general_confirmado_como_ventas_importa_normal(
 async def test_multisheet_hoja_no_clasificada_va_a_otros(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
+    await producto_con_compra(db_session, sample_tenant.tenant_id, nombre="Vela")
     summary: dict[str, Any] = {
         "file_type": "spreadsheet",
         "inferred_type": "mixed",
@@ -84,7 +86,7 @@ async def test_multisheet_hoja_no_clasificada_va_a_otros(
                 "context_id": "sheet:Ventas",
                 "label": "Ventas",
                 "entity_type": "sale",
-                "headers": ["fecha", "monto"],
+                "headers": ["fecha", "monto", "producto"],
             },
             {
                 "context_id": "sheet:Rara",
@@ -95,7 +97,9 @@ async def test_multisheet_hoja_no_clasificada_va_a_otros(
             },
         ],
         "ventas_detectadas": [
-            {"fecha": "2026-05-01", "monto": "500", "__context__": "sheet:Ventas"}
+            # B·5e: la venta del chat entra con producto y compra previa.
+            {"fecha": "2026-05-01", "monto": "500", "producto": "Vela",
+             "__context__": "sheet:Ventas"}
         ],
         "gastos_detectados": [],
         "stock_detectado": [],

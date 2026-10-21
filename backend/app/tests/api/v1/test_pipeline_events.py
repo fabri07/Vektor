@@ -35,6 +35,7 @@ from app.persistence.models.pipeline_event import (
 )
 from app.persistence.models.repair import DataRepairRun
 from app.persistence.models.tenant import Tenant
+from app.tests._respaldo import productos_con_compra
 
 
 async def _events_for(session: AsyncSession, tenant_id: uuid.UUID) -> list[PipelineEvent]:
@@ -151,6 +152,8 @@ class TestConfirmEmitsEvent:
         mock_score_trigger: unittest.mock.MagicMock,
     ) -> None:
         trace_id = uuid.uuid4()
+        # B·5e: la venta vende un producto con compra previa; si no, iría a «Otros».
+        await productos_con_compra(db_session, sample_tenant.tenant_id, ["Vela"])
         record = UploadedFile(
             tenant_id=sample_tenant.tenant_id,
             uploaded_by=None,
@@ -169,7 +172,7 @@ class TestConfirmEmitsEvent:
                 "file_type": "spreadsheet",
                 "inferred_type": "ventas",
                 "ventas_detectadas": [
-                    {"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}
+                    {"fecha": "2024-01-15", "monto": "50000", "producto": "Vela"}
                 ],
             },
         )

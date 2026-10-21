@@ -22,6 +22,7 @@ from app.application.services.file_parsing import (
     parse_libro_diario,
 )
 from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.application.services.respaldo_service import MOTIVO_VENTA_SIN_PRODUCTO
 from app.domain.fila_de_total import (
     MOTIVO_FILA_DE_TOTAL,
     es_etiqueta_de_total,
@@ -32,6 +33,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import archivo_de_prueba, productos_con_compra
 
 # ── Dominio ───────────────────────────────────────────────────────────────────
 
@@ -176,6 +178,9 @@ async def test_la_fila_total_de_ventas_va_a_otros_y_no_suma(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     tid = sample_tenant.tenant_id
+    # B·5e: las ventas reales tienen compra previa; la fila TOTAL va a «Otros» por
+    # ser total, no por falta de compra.
+    await productos_con_compra(db_session, tid, ["Yerba", "Azúcar"])
     upload_id = await _upload(db_session, tid)
     counts = await insert_confirmed_data(
         db_session, tid, _ventas_summary(), {"ventas": True}, uploaded_file_id=upload_id
@@ -264,18 +269,18 @@ def _multihoja_summary() -> dict[str, Any]:
                 "context_id": "sheet:Ventas",
                 "entity_type": "sale",
                 "source_kind": "sheet",
-                "headers": ["fecha", "detalle", "monto"],
+                "headers": ["fecha", "producto", "detalle", "monto"],
                 "fields": None,
                 "preview_rows": [],
                 "row_count": 3,
             },
         ],
         "ventas_detectadas": [
-            {"fecha": f, "detalle": d, "monto": m, "__context__": "sheet:Ventas"}
-            for f, d, m in (
-                ("2026-03-30", "Mostrador", "700"),
-                ("2026-03-31", "Mostrador", "300"),
-                ("", "Subtotal marzo", "1000"),
+            {"fecha": f, "producto": p, "detalle": d, "monto": m, "__context__": "sheet:Ventas"}
+            for f, p, d, m in (
+                ("2026-03-30", "Yerba", "Mostrador", "700"),
+                ("2026-03-31", "Yerba", "Mostrador", "300"),
+                ("", "", "Subtotal marzo", "1000"),
             )
         ],
         "gastos_detectados": [],
@@ -287,6 +292,9 @@ async def test_multihoja_subtotal_va_a_otros_con_su_hoja(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     tid = sample_tenant.tenant_id
+    # B·5e: las ventas de la hoja llevan producto con compra previa; el subtotal va
+    # a «Otros» por ser total.
+    await productos_con_compra(db_session, tid, ["Yerba"])
     upload_id = await _upload(db_session, tid)
     for _ in range(2):
         counts = await insert_confirmed_data(
@@ -338,7 +346,13 @@ async def test_planilla_de_cierre_diario_no_se_pierde(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """Revisión de B·4a: un renglón por día «fecha | Total del día | monto» son
-    las ventas del kiosco, no un pie de planilla."""
+    las ventas del kiosco, no un pie de planilla.
+
+    B·5e: un cierre diario no dice qué productos se vendieron, así que esas ventas
+    ya no entran como venta: van a «Otros» con ``MOTIVO_VENTA_SIN_PRODUCTO``. Lo que
+    este test protege sigue igual: NO se toman por fila de total (no se pierden),
+    cada día queda con su monto para resolverlo después.
+    """
     tid = sample_tenant.tenant_id
     rows = [
         {"fecha": f"2026-03-{d:02d}", "concepto": "Total del día", "monto": "150000"}
@@ -352,7 +366,15 @@ async def test_planilla_de_cierre_diario_no_se_pierde(
         "gastos_detectados": [],
         "stock_detectado": [],
     }
-    counts = await insert_confirmed_data(db_session, tid, summary, {"ventas": True})
-    assert counts["ventas"] == 3
+    counts = await insert_confirmed_data(
+        db_session, tid, summary, {"ventas": True},
+        uploaded_file_id=await archivo_de_prueba(db_session, tid),
+    )
     assert counts.get("filas_de_total", 0) == 0
-    assert await _otros(db_session, tid) == []
+    assert counts["ventas"] == 0
+    assert counts["ventas_sin_producto"] == 3
+    otros = await _otros(db_session, tid)
+    assert len(otros) == 3
+    # Ninguna por fila de total: las tres por no tener producto, con su monto.
+    assert all((o.context_label or "").startswith(MOTIVO_VENTA_SIN_PRODUCTO) for o in otros)
+    assert sorted(Decimal(o.row_data["monto"]) for o in otros) == [Decimal("150000")] * 3

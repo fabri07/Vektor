@@ -27,17 +27,23 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services import file_parsing, reread_service
+from app.application.services import file_parsing, ingestion_import_service, reread_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import (
     default_confirmed_fields,
     insert_confirmed_data,
 )
+from app.application.services.respaldo_service import MOTIVO_VENTA_SIN_PRODUCTO
 from app.integrations.s3 import S3Client
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.repair import DataRepairRun
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.unclassified_record import (
+    UNCLASSIFIED_STATUS_PENDING,
+    UnclassifiedRecord,
+)
+from app.tests._respaldo import productos_con_compra
 from app.tests.conftest import add_business_profile
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -154,6 +160,18 @@ _LD_CON_APORTES: list[list[Any]] = [
 ]
 
 
+def _antes_de_b5e(m: pytest.MonkeyPatch) -> None:
+    """Importa como antes de B·5e: sin la pasada que manda a «Otros» las ventas sin
+    producto o sin compra previa. El Libro Diario no tiene columna de producto, así
+    que con la regla vigente ninguna de sus ventas llega a ser venta; un libro
+    importado antes de B·5e (como el de ASTERIA, importado antes de D0) sí las tiene."""
+
+    async def _sin_pasada(*_a: Any, **_k: Any) -> None:
+        return None
+
+    m.setattr(ingestion_import_service, "_ventas_sin_compra_a_otros", _sin_pasada)
+
+
 def _xlsx(filas: list[list[Any]]) -> bytes:
     openpyxl = pytest.importorskip("openpyxl")
     wb = openpyxl.Workbook()
@@ -175,9 +193,11 @@ async def test_releer_el_libro_diario_con_d0_muestra_las_devoluciones_en_se_pier
     with monkeypatch.context() as m:
         m.setattr(file_parsing, "es_tipo_reconocido", lambda _d: False)
         viejo = parse_uploaded_content(content, _XLSX_MIME, "ld.xlsx")
-    file = await _subir_e_importar(
-        db_session, tenant.tenant_id, content, _XLSX_MIME, "ld.xlsx", summary=viejo
-    )
+    with monkeypatch.context() as m:
+        _antes_de_b5e(m)
+        file = await _subir_e_importar(
+            db_session, tenant.tenant_id, content, _XLSX_MIME, "ld.xlsx", summary=viejo
+        )
     ventas = (
         await db_session.execute(select(SaleEntry).where(SaleEntry.source_upload_id == file.id))
     ).scalars().all()
@@ -306,12 +326,19 @@ _MAPEO_PxC = {
 }
 
 
+async def _productos_con_compra_pxc(session: AsyncSession, tenant: Tenant) -> None:
+    """B·5e: los productos de la hoja con compra previa ANTES del import original;
+    si no, sus ventas irían a «Otros» y no habría nada que releer."""
+    await productos_con_compra(session, tenant.tenant_id, [p for _, p, _, _ in _PxC])
+
+
 async def test_precio_por_cantidad_releido_igual_no_pierde_nada(
     db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from copy import deepcopy
 
     summary = _summary_precio_por_cantidad(_PxC)
+    await _productos_con_compra_pxc(db_session, tenant)
     file = await _subir_e_importar(
         db_session,
         tenant.tenant_id,
@@ -441,9 +468,11 @@ async def test_apply_del_libro_diario_con_d0_frena_con_las_devoluciones_y_no_gua
     with monkeypatch.context() as m:
         m.setattr(file_parsing, "es_tipo_reconocido", lambda _d: False)
         viejo = parse_uploaded_content(content, _XLSX_MIME, "ld.xlsx")
-    file = await _subir_e_importar(
-        db_session, tenant.tenant_id, content, _XLSX_MIME, "ld.xlsx", summary=viejo
-    )
+    with monkeypatch.context() as m:
+        _antes_de_b5e(m)
+        file = await _subir_e_importar(
+            db_session, tenant.tenant_id, content, _XLSX_MIME, "ld.xlsx", summary=viejo
+        )
     tid, fid = tenant.tenant_id, file.id
     _patch_s3(monkeypatch, content)
 
@@ -461,6 +490,51 @@ async def test_apply_del_libro_diario_con_d0_frena_con_las_devoluciones_y_no_gua
     assert await _vivos(db_session, fid) == (3, 0)
     run = await db_session.get(DataRepairRun, resultado.run_id)
     assert run is not None and (run.details_json or {})["data_loss"]["to_lose"] == 3
+
+
+async def test_releer_con_b5e_un_libro_diario_importado_antes_no_rejuzga_sus_ventas(
+    db_session: AsyncSession, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B·5e: el mismo libro, importado antes de D0 y de B·5e, releído HOY. Sus tres
+    ventas reales —«Venta del día», «Mostrador», «Cobro cliente»— no tienen
+    producto, pero ya eran ventas de este archivo: la relectura NO las vuelve a
+    juzgar (eso es una reparación histórica, B·5g, con el ``--apply`` del dueño).
+    Lo único que se pierde sigue siendo lo que aparta D0, y ninguna fila va a
+    «Otros» con ``MOTIVO_VENTA_SIN_PRODUCTO``."""
+    content = _xlsx(_LD_CON_APORTES)
+    with monkeypatch.context() as m:
+        m.setattr(file_parsing, "es_tipo_reconocido", lambda _d: False)
+        viejo = parse_uploaded_content(content, _XLSX_MIME, "ld.xlsx")
+    with monkeypatch.context() as m:
+        _antes_de_b5e(m)
+        file = await _subir_e_importar(
+            db_session, tenant.tenant_id, content, _XLSX_MIME, "ld.xlsx", summary=viejo
+        )
+    tid, fid = tenant.tenant_id, file.id
+    _patch_s3(monkeypatch, content)
+
+    perdida = await _aplicar_frena(db_session, tid, fid)
+    assert (perdida.to_lose, perdida.edited_at_risk) == (3, 0)
+    assert await _vivos(db_session, fid) == (6, 0), "frenado = nada aplicado"
+
+    await reread_service.apply_reread(db_session, fid, tid, accept_data_loss=True)
+    await db_session.commit()
+    ventas = (
+        await db_session.execute(
+            select(SaleEntry.amount).where(
+                SaleEntry.source_upload_id == fid, SaleEntry.voided_at.is_(None)
+            )
+        )
+    ).scalars().all()
+    assert sorted(ventas) == [Decimal("15000.00"), Decimal("30000.00"), Decimal("120000.00")]
+    motivos = (
+        await db_session.execute(
+            select(UnclassifiedRecord.context_label).where(
+                UnclassifiedRecord.uploaded_file_id == fid
+            )
+        )
+    ).scalars().all()
+    assert not any((m or "").startswith(MOTIVO_VENTA_SIN_PRODUCTO) for m in motivos)
 
 
 @pytest.mark.parametrize("fecha", ["xx/yy", "2099-01-06"])
@@ -557,7 +631,14 @@ async def test_una_planilla_con_venta_y_gasto_por_fila_releida_igual_no_frena(
     encabezado: str,
 ) -> None:
     """Falso positivo del estimado (revisión): el preview decía «se pierden 3 o
-    6» sobre el MISMO archivo."""
+    6» sobre el MISMO archivo.
+
+    B·5e: la planilla no tiene producto (el detalle de la fila es también el del
+    gasto: si «A» fuera un producto, el gasto pasaría a ser una compra de
+    mercadería sin artículos), así que sus tres ventas van a «Otros» con
+    ``MOTIVO_VENTA_SIN_PRODUCTO`` desde el import. Releer el MISMO archivo sigue
+    sin frenar ni mover nada: los tres gastos quedan, las ventas siguen en «Otros»
+    y no se duplican."""
     content = (
         encabezado + "\n2026-01-05,A,1500,900\n2026-01-06,B,800,500\n2026-01-07,C,2200,1000\n"
     ).encode()
@@ -571,12 +652,26 @@ async def test_una_planilla_con_venta_y_gasto_por_fila_releida_igual_no_frena(
     )
     tid, fid = tenant.tenant_id, file.id
     antes = await _vivos(db_session, fid)
-    assert antes == (3, 3), "precondición: venta y gasto por fila"
+    assert antes == (0, 3), "precondición: gasto por fila; la venta sin producto, a Otros"
+    assert await _ventas_sin_producto_en_otros(db_session, fid) == 3
     _patch_s3(monkeypatch, content)
 
     await reread_service.apply_reread(db_session, fid, tid)
     await db_session.commit()
     assert await _vivos(db_session, fid) == antes
+    assert await _ventas_sin_producto_en_otros(db_session, fid) == 3
+
+
+async def _ventas_sin_producto_en_otros(session: AsyncSession, file_id: uuid.UUID) -> int:
+    motivos = (
+        await session.execute(
+            select(UnclassifiedRecord.context_label).where(
+                UnclassifiedRecord.uploaded_file_id == file_id,
+                UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+            )
+        )
+    ).scalars().all()
+    return sum(1 for m in motivos if (m or "").startswith(MOTIVO_VENTA_SIN_PRODUCTO))
 
 
 @pytest.mark.parametrize(
@@ -623,6 +718,7 @@ async def test_precio_por_cantidad_en_el_apply_frena_solo_por_lo_que_falta(
     from copy import deepcopy
 
     summary = _summary_precio_por_cantidad(_PxC)
+    await _productos_con_compra_pxc(db_session, tenant)
     file = await _subir_e_importar(
         db_session,
         tenant.tenant_id,

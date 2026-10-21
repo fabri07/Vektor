@@ -24,7 +24,7 @@ from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.user import User
-from app.tests._respaldo import producto_con_compra
+from app.tests._respaldo import producto_con_compra, productos_con_compra
 
 
 @pytest.fixture
@@ -263,6 +263,9 @@ async def test_import_tabular_file_google_sheets_parsed_records_inserta_sale(
     sample_user: User,
     redis_mock: AsyncMock,
 ) -> None:
+    # B·5e: también sin archivo (Sheets), una venta de un producto sin compra va a
+    # «Otros». Acá se mide que los registros de Sheets entren: ya están comprados.
+    await productos_con_compra(db_session, sample_tenant.tenant_id, ["Yerba", "Azucar"])
     action = PendingAction(
         tenant_id=sample_tenant.tenant_id,
         user_id=sample_user.user_id,

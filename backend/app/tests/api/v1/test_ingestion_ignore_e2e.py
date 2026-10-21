@@ -41,6 +41,7 @@ from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import productos_con_compra
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _PRODUCTO = "Vela aromatica 200g"
@@ -97,8 +98,17 @@ def _map(source: str, target: str, context_id: str | None, entity: str | None) -
 
 
 async def _subir(
-    db_session: AsyncSession, tenant: Tenant, contenido: bytes, nombre: str
+    db_session: AsyncSession,
+    tenant: Tenant,
+    contenido: bytes,
+    nombre: str,
+    *,
+    respaldar: bool = True,
 ) -> UploadedFile:
+    if respaldar:
+        # B·5e: una venta importada de un producto sin compra va a «Otros»; acá se
+        # mide que el `ignore` se respete, así que el producto ya tiene su compra.
+        await productos_con_compra(db_session, tenant.tenant_id, [_PRODUCTO])
     summary = parse_uploaded_content(contenido, _XLSX_MIME, nombre)
     record = UploadedFile(
         tenant_id=tenant.tenant_id,

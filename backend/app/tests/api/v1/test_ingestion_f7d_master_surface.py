@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.pipeline_event import STAGE_CONFIRM, PipelineEvent
 from app.persistence.models.tenant import Tenant
+from app.tests._respaldo import productos_con_compra
 
 _VALID_DNI = "30111222"
 _OTHER_DNI = "40987654"
@@ -33,7 +34,10 @@ _OTHER_DNI = "40987654"
 
 def _mixed_summary() -> dict[str, Any]:
     """Libro mixto: hoja de Clientes (1 válida, 1 needs_review, 1 inválida) +
-    hoja de Ventas (1 matched, 1 unresolved, 1 anónima)."""
+    hoja de Ventas (1 matched, 1 unresolved, 1 anónima).
+
+    B·5e: las ventas llevan producto («Vela», con compra creada
+    antes del confirm); sin él irían a «Otros» y no se mediría lo de clientes."""
     return {
         "confidence": "HIGH",
         "file_type": "spreadsheet",
@@ -49,7 +53,7 @@ def _mixed_summary() -> dict[str, Any]:
             {
                 "context_id": "sheet:Ventas",
                 "entity_type": "sale",
-                "headers": ["fecha", "valor", "doc_cliente"],
+                "headers": ["fecha", "valor", "doc_cliente", "producto"],
                 "row_count": 3,
             },
         ],
@@ -67,15 +71,22 @@ def _mixed_summary() -> dict[str, Any]:
                 "fecha": "2024-01-15",
                 "valor": "5000",
                 "doc_cliente": _VALID_DNI,
+                "producto": "Vela",
                 "__context__": "sheet:Ventas",
             },
             {
                 "fecha": "2024-01-16",
                 "valor": "3000",
                 "doc_cliente": _OTHER_DNI,
+                "producto": "Vela",
                 "__context__": "sheet:Ventas",
             },
-            {"fecha": "2024-01-17", "valor": "1200", "__context__": "sheet:Ventas"},
+            {
+                "fecha": "2024-01-17",
+                "valor": "1200",
+                "producto": "Vela",
+                "__context__": "sheet:Ventas",
+            },
         ],
         "gastos_detectados": [],
         "stock_detectado": [],
@@ -114,6 +125,12 @@ def _mixed_column_mappings() -> list[dict[str, Any]]:
             "context_id": "sheet:Ventas",
             "entity_type": "sale",
         },
+        {
+            "source_column": "producto",
+            "target_field": "product_name",
+            "context_id": "sheet:Ventas",
+            "entity_type": "sale",
+        },
     ]
 
 
@@ -140,6 +157,7 @@ class TestConfirmMasterWarningsAndCounts:
             processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
             parsed_summary_json=_mixed_summary(),
         )
+        await productos_con_compra(db_session, sample_tenant.tenant_id, ["Vela"])
         db_session.add(record)
         await db_session.commit()
 
@@ -206,6 +224,7 @@ class TestConfirmMasterWarningsAndCounts:
             processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
             parsed_summary_json=_mixed_summary(),
         )
+        await productos_con_compra(db_session, sample_tenant.tenant_id, ["Vela"])
         db_session.add(record)
         await db_session.commit()
 
@@ -265,10 +284,16 @@ class TestConfirmMasterWarningsAndCounts:
                 "has_venta": True,
                 "row_count": 1,
                 "ventas_detectadas": [
-                    {"fecha": "2024-01-15", "monto": "50000", "descripcion": "Venta"}
+                    {
+                        "fecha": "2024-01-15",
+                        "monto": "50000",
+                        # B·5e: con producto (con compra); sin él va a «Otros».
+                        "producto": "Vela",
+                    }
                 ],
             },
         )
+        await productos_con_compra(db_session, sample_tenant.tenant_id, ["Vela"])
         db_session.add(record)
         await db_session.commit()
 
@@ -300,6 +325,7 @@ class TestConfirmMasterWarningsAndCounts:
             processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION,
             parsed_summary_json=_mixed_summary(),
         )
+        await productos_con_compra(db_session, sample_tenant.tenant_id, ["Vela"])
         db_session.add(record)
         await db_session.commit()
 
