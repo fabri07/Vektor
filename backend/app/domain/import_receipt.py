@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.domain.cross_field_buffer import CROSS_FIELDS_TRANSFORMADOS
+
 Resultado = Literal["guardado", "transformado", "pendiente", "excluido", "mixto"]
 TipoMotivo = Literal["user_decision", "system_rule"]
 
@@ -42,6 +44,16 @@ _TARGETS_TRANSFORMADOS = frozenset(
         "birthday",
     }
 )
+
+
+#: B·6: prefijos de los destinos que completan la ficha de otra sección.
+#: ``supplier:name`` no entra: es el del catálogo de productos (vincula el
+#: producto a un proveedor) y se guarda como cualquier otro campo.
+_PREFIJOS_DE_FICHA = ("customer:", "supplier:")
+
+
+def _es_campo_de_ficha(target: str) -> bool:
+    return target.startswith(_PREFIJOS_DE_FICHA) and target != "supplier:name"
 
 
 @dataclass(frozen=True)
@@ -77,6 +89,7 @@ def build_import_receipt(
     routed_rows: dict[str, dict[int, dict[str, Any]]] | None = None,
     external_code_conflicts: int = 0,
     columnas_vacias: dict[str, dict[str, float]] | None = None,
+    campos_cruzados_aplicados: bool = False,
 ) -> list[ColumnReceipt]:
     """Arma el comprobante columna por columna.
 
@@ -92,6 +105,10 @@ def build_import_receipt(
     puede atribuir el conteo a ninguno en particular con certeza — se marca
     "mixto" con ``rows_affected=None`` en todos ellos en vez de inventar un
     reparto.
+
+    ``campos_cruzados_aplicados``: si este import completó las fichas de otra
+    sección (B·6). Sólo el confirm lo hace; la relectura no, y su comprobante
+    no puede decir "guardado" de una columna que no escribió.
     """
     dropped_columns = dropped_columns or {}
     routed_rows = routed_rows or {}
@@ -187,6 +204,30 @@ def build_import_receipt(
                         "el código ya pertenece a otro producto del catálogo.",
                         "system_rule",
                         external_code_conflicts if external_code_atribuible else None,
+                    )
+                )
+                continue
+
+            if _es_campo_de_ficha(target):
+                _campo = target.split(":", 1)[1]
+                _ficha = "del cliente" if target.startswith("customer:") else "del proveedor"
+                if not campos_cruzados_aplicados:
+                    entries.append(
+                        ColumnReceipt(
+                            cid, label, col, target, "excluido",
+                            f"La relectura no completa la ficha {_ficha}: se completó "
+                            "al confirmar el archivo.",
+                            "system_rule", None,
+                        )
+                    )
+                    continue
+                entries.append(
+                    ColumnReceipt(
+                        cid, label, col, target,
+                        "transformado" if _campo in CROSS_FIELDS_TRANSFORMADOS else "guardado",
+                        f"Completa la ficha {_ficha} identificado, sólo si ese campo "
+                        "estaba vacío; no pisa lo que ya tenía.",
+                        "system_rule", None,
                     )
                 )
                 continue

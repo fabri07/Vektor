@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services._ledger_restore import (
     entity_changed_since_ledger,
+    fields_changed_since_ledger,
     restore_from_before,
     snapshot_master,
 )
@@ -107,6 +108,15 @@ _MASTER_ACTIONS: dict[tuple[str, bool], str] = {
 }
 _CREATE_MASTER_ACTIONS = (ACTION_CREATE_CUSTOMER, ACTION_CREATE_SUPPLIER)
 _UPDATE_MASTER_ACTIONS = (ACTION_UPDATE_CUSTOMER, ACTION_UPDATE_SUPPLIER)
+
+# B·6 (mig 20261021_0003): UN campo de la ficha que el archivo completó desde
+# otra sección (venta → cliente, compra → proveedor). Nunca mezclado con
+# `UPDATE_CUSTOMER`/`UPDATE_SUPPLIER`, que guardan la ficha ENTERA y se
+# conservan enteras si la ficha tiene ventas de otra fuente: con ellas el campo
+# que trajo el archivo no volvería nunca.
+ACTION_UPDATE_CUSTOMER_CROSS_FIELD = "UPDATE_CUSTOMER_CROSS_FIELD"
+ACTION_UPDATE_SUPPLIER_CROSS_FIELD = "UPDATE_SUPPLIER_CROSS_FIELD"
+_CROSS_FIELD_ACTIONS = (ACTION_UPDATE_CUSTOMER_CROSS_FIELD, ACTION_UPDATE_SUPPLIER_CROSS_FIELD)
 
 
 async def snapshot_masters_before_import(
@@ -216,6 +226,7 @@ async def record_import_ledger(
     file_id: uuid.UUID,
     product_details: list[dict[str, Any]],
     master_details: list[dict[str, Any]] | None = None,
+    cross_field_details: list[dict[str, Any]] | None = None,
 ) -> uuid.UUID | None:
     """Registra qué creó/actualizó un import, para poder revertirlo.
 
@@ -226,10 +237,13 @@ async def record_import_ledger(
     un run vacío). ``product_details`` es lo que ya devuelve
     ``insert_confirmed_data(..., return_details=True)``; ``master_details`` lo
     arma ``build_master_details`` desde los ids de clientes/proveedores que ese
-    mismo import devuelve.
+    mismo import devuelve. ``cross_field_details`` (B·6) sale de
+    ``counts["cross_field_details"]``: un ítem por campo completado, con el
+    antes y el después ya armados en el momento de escribir.
     """
     master_details = master_details or []
-    if not product_details and not master_details:
+    cross_field_details = cross_field_details or []
+    if not product_details and not master_details and not cross_field_details:
         return None
 
     run = DataRepairRun(
@@ -269,7 +283,9 @@ async def record_import_ledger(
     # Maestros: mismo run, misma transacción. `product_id` queda NULL — la
     # identidad de la entidad viaja en el `after_json` (`id` + `kind`), que es de
     # donde la lee la reversa.
-    for detalle in master_details:
+    # B·6: los campos de ficha completados desde otra sección, con el mismo
+    # convenio (`after_json["id"]`/`["kind"]`) que los maestros.
+    for detalle in (*master_details, *cross_field_details):
         session.add(
             DataRepairItem(
                 run_id=run.id,
@@ -503,6 +519,88 @@ async def _revert_master_items(
             restaurados += 1
 
     return desactivados, restaurados, conservados
+
+
+async def _revert_cross_field_items(
+    session: AsyncSession,
+    file_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    *,
+    dry_run: bool = False,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Devuelve a su valor anterior los campos de ficha que el archivo completó
+    desde otra sección (B·6). ``(campos restaurados, conservados)``.
+
+    Hermana de ``_revert_master_items``, no la misma función: ahí un ítem es la
+    ficha ENTERA (creada → se desactiva; modificada → vuelve completa, o se
+    conserva completa si tiene ventas o una edición posterior). Acá cada ítem es
+    UN campo de una ficha que ya existía antes del archivo, y la reversa es por
+    campo: no la frena que el cliente tenga ventas de otra fuente (el campo no
+    es de esas ventas), y si alguien cambió ESE campo después, ese campo se
+    conserva (``CAMPO_MODIFICADO_POSTERIORMENTE``, con ``fields``) mientras los
+    demás que trajo el archivo vuelven.
+
+    ``dry_run=True`` recorre el mismo camino sin escribir: es el preview.
+    """
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    _modelo: dict[str, type[Any]] = {"customer": Customer, "supplier": Supplier}
+    res = await session.execute(
+        select(DataRepairItem)
+        .join(DataRepairRun, DataRepairRun.id == DataRepairItem.run_id)
+        .where(
+            DataRepairRun.repair_type.in_(_LEDGER_REPAIR_TYPES),
+            DataRepairItem.tenant_id == tenant_id,
+            DataRepairItem.source_file_id == file_id,
+            DataRepairItem.action.in_(_CROSS_FIELD_ACTIONS),
+        )
+        .order_by(DataRepairItem.created_at)
+    )
+
+    # Por (ficha, campo): para restaurar vale el `before` del PRIMER ítem; para
+    # "¿cambió después?", el `after` del ÚLTIMO — mismo criterio que los maestros.
+    antes: dict[tuple[str, uuid.UUID], dict[str, Any]] = defaultdict(dict)
+    despues: dict[tuple[str, uuid.UUID], dict[str, Any]] = defaultdict(dict)
+    for it in res.scalars().all():
+        after = it.after_json or {}
+        kind = str(after.get("kind") or "")
+        raw_id = after.get("id")
+        if kind not in _modelo or not raw_id:
+            continue
+        clave = (kind, uuid.UUID(str(raw_id)))
+        for campo, valor in (it.before_json or {}).items():
+            antes[clave].setdefault(campo, valor)
+            despues[clave][campo] = after.get(campo)
+
+    restaurados = 0
+    conservados: list[dict[str, Any]] = []
+    for (kind, entity_id), before in antes.items():
+        entity = await session.get(_modelo[kind], entity_id)
+        if entity is None or entity.tenant_id != tenant_id:
+            continue
+        if getattr(entity, "is_sentinel", False):
+            # La captura nunca escribe el centinela; un ledger viejo o corrupto
+            # tampoco puede tocarlo.
+            continue
+        await session.refresh(entity)
+        cambiados = fields_changed_since_ledger(entity, despues[(kind, entity_id)])
+        restaurable = {c: v for c, v in before.items() if c not in cambiados}
+        if restaurable:
+            if not dry_run:
+                restore_from_before(entity, kind, restaurable)
+            restaurados += len(restaurable)
+        if cambiados:
+            conservados.append(
+                {
+                    "entity_type": kind,
+                    "id": str(entity_id),
+                    "name": getattr(entity, "name", "") or "",
+                    "reasons": [PreservationReason.CAMPO_MODIFICADO_POSTERIORMENTE.value],
+                    "fields": sorted(cambiados),
+                }
+            )
+    return restaurados, conservados
 
 
 async def _productos_con_otra_fuente(
@@ -822,6 +920,13 @@ async def preview_file_deletion(
     a_restaurar += _m_rest
     conservados.extend(_m_conservados)
 
+    # B·6: los campos de ficha que el archivo completó — misma función que la
+    # reversa, en modo lectura.
+    _campos_cruzados, _cruzados_conservados = await _revert_cross_field_items(
+        session, file_id, tenant_id, dry_run=True
+    )
+    conservados.extend(_cruzados_conservados)
+
     con_ledger = await _has_import_ledger(session, file_id, tenant_id)
     if not con_ledger:
         conservados.append(
@@ -858,6 +963,7 @@ async def preview_file_deletion(
         # en vez de adivinar (los productos quedan y hay que revisarlos a mano).
         "productos_no_rastreables": not con_ledger,
         "productos_a_restaurar": a_restaurar,
+        "campos_cruzados_a_restaurar": _campos_cruzados,
         "conservados": conservados,
     }
 
@@ -1097,6 +1203,14 @@ async def revert_file_data(
     contadores["maestros_desactivados"] = _mc
     contadores["maestros_restaurados"] = _mr
     conservados.extend(_conservados_maestros)
+
+    # 3-quater. B·6: campos de ficha que el archivo completó desde otra sección.
+    #    Por campo: vuelven a vacío salvo que alguien los haya cambiado después.
+    _cfr, _conservados_cruzados = await _revert_cross_field_items(
+        session, file_id, tenant_id
+    )
+    contadores["campos_cruzados_restaurados"] = _cfr
+    conservados.extend(_conservados_cruzados)
 
     # 4. Filas de "Otros" del archivo.
     #

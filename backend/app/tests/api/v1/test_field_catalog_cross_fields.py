@@ -60,18 +60,37 @@ async def test_un_cruzado_no_cuenta_como_campo_de_la_hoja(
 async def test_no_se_publica_lo_que_el_importador_descarta(
     client: AsyncClient, auth_headers: dict[str, Any]
 ) -> None:
-    """`CROSS_ENTITY_TARGETS` permite mandar `sale → customer:*` y
-    `expense → product:*`, pero `insert_confirmed_data` los filtra y los cuenta
-    en `targets_cruzados_descartados` (F-D no entregada). Mientras eso sea así,
-    la pantalla no puede ofrecerlos.
+    """`CROSS_ENTITY_TARGETS` también permite `expense → product:*`, pero el
+    importador no lo escribe (toca el motor de costo): la pantalla no puede
+    ofrecerlo, y el confirm lo rechaza con 422.
 
-    El día que se implementen, se agregan a `CROSS_ENTITY_TARGETS_IMPLEMENTED` y
-    este test es el que hay que actualizar — que es exactamente la revisión que
-    ese cambio merece.
+    B·6 implementó `sale → customer:*` y `expense → supplier:*` (completan la
+    ficha identificada sólo donde está vacía): esos sí se publican. El día que se
+    implemente otro, se agrega a `CROSS_ENTITY_TARGETS_IMPLEMENTED` y este test es
+    el que hay que actualizar — que es exactamente la revisión que ese cambio
+    merece.
     """
     catalogo = await _catalogo(client, auth_headers)
 
-    for entidad in ("sale", "expense", "customer", "supplier"):
+    assert [c["value"] for c in catalogo["sale"]["cross_fields"]] == [
+        "customer:address",
+        "customer:customer_type",
+        "customer:iva_condition",
+        "customer:last_name",
+        "customer:locality",
+        "customer:postal_code",
+        "customer:province",
+    ]
+    assert [c["value"] for c in catalogo["expense"]["cross_fields"]] == [
+        "supplier:last_name",
+        "supplier:payment_method",
+    ]
+    assert all(c["entity"] == "customer" for c in catalogo["sale"]["cross_fields"])
+    assert {c["label"] for c in catalogo["expense"]["cross_fields"]} == {
+        "Proveedor — Apellido",
+        "Proveedor — Método de pago",
+    }
+    for entidad in ("customer", "supplier"):
         assert catalogo[entidad]["cross_fields"] == [], entidad
 
 

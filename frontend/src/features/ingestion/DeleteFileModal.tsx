@@ -73,12 +73,18 @@ export function DeleteFileModal({
 
   // Productos que el archivo MODIFICÓ: no se borran, vuelven a su valor anterior.
   const aRestaurar = preview?.productos_a_restaurar ?? 0;
+  // B·6: datos que el archivo completó en fichas de clientes o proveedores.
+  const camposARestaurar = preview?.campos_cruzados_a_restaurar ?? 0;
   // Lo que NO se va a poder revertir. El backend siempre lo supo y lo descartaba
   // en silencio; mostrarlo es lo que evita prometer una limpieza que no ocurre.
   const conservados = preview?.conservados ?? [];
 
   const sinDatos =
-    Boolean(preview) && filas.length === 0 && aRestaurar === 0 && !conservados.length;
+    Boolean(preview) &&
+    filas.length === 0 &&
+    aRestaurar === 0 &&
+    camposARestaurar === 0 &&
+    !conservados.length;
 
   return (
     <Modal
@@ -128,6 +134,18 @@ export function DeleteFileModal({
               {aRestaurar} producto{aRestaurar !== 1 ? "s" : ""} que este archivo
               modificó vuelve{aRestaurar !== 1 ? "n" : ""} a su valor anterior. No se
               borra{aRestaurar !== 1 ? "n" : ""}: ya existían antes.
+            </span>
+          </p>
+        )}
+
+        {camposARestaurar > 0 && (
+          <p className="flex gap-2 rounded-lg border border-vk-border-w bg-vk-bg-light px-3 py-2 text-xs text-vk-text-secondary">
+            <RotateCcw className="mt-px h-4 w-4 shrink-0" />
+            <span>
+              {camposARestaurar} dato{camposARestaurar !== 1 ? "s" : ""} que este
+              archivo completó en fichas de clientes o proveedores vuelve
+              {camposARestaurar !== 1 ? "n" : ""} a quedar vacío
+              {camposARestaurar !== 1 ? "s" : ""}. Las fichas no se borran.
             </span>
           </p>
         )}
