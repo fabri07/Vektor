@@ -27,7 +27,15 @@ import { useBusinessFieldColumns } from "@/features/customFields/useBusinessFiel
 import { AllDataModal } from "@/features/customFields/AllDataModal";
 import { formatDateTime, toDatetimeLocal } from "@/lib/datetime";
 import { UNIDADES_DE_VENTA, unidadDeVentaDe } from "@/features/products/saleUnitOptions";
-import { COSTO_REQUERIDO_CON_STOCK, EnvioSelect } from "@/features/products/costoManual";
+import {
+  COSTO_REQUERIDO_CON_STOCK,
+  EnvioSelect,
+  QUE_ES_STOCK_INICIAL,
+  fechaDeStockInicial,
+  hoyLocal,
+  nuevaClaveIdempotencia,
+} from "@/features/products/costoManual";
+import { esPinCancelado } from "@/stores/pinGateStore";
 import { aUnidadesBase, enUnidadDeVenta, valorDeStock } from "@/lib/pos/saleUnit";
 import { posErrorInfo } from "@/lib/pos/errors";
 import { useToastStore } from "@/stores/toastStore";
@@ -340,6 +348,8 @@ export default function ProductsPage() {
   // muestra solo productos auto-creados por import sin costo/precio cargado.
   const requiresCompletionOnly = searchParams.get("filter") === "requires_completion";
   const [editing, setEditing] = useState<ProductResponse | null>(null);
+  // B·5d: el 409 OPENING_EXISTS del stock inicial, con sus caminos, en el editor.
+  const [errorApertura, setErrorApertura] = useState<ErrorDeApertura | null>(null);
   // Cambio 2: fila para la que se abrió "Todos los datos" (null = cerrado).
   const [viewingAllData, setViewingAllData] = useState<ProductResponse | null>(null);
   const queryClient = useQueryClient();
@@ -446,8 +456,16 @@ export default function ProductsPage() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ product: payload, stock }: { product: ProductResponse; stock: CambioDeStock | null }) =>
-      productsService.updateProduct(payload.id, {
+    mutationFn: async ({
+      product: payload,
+      stock,
+      apertura,
+    }: {
+      product: ProductResponse;
+      stock: CambioDeStock | null;
+      apertura: AperturaPedida | null;
+    }) => {
+      const actualizado = await productsService.updateProduct(payload.id, {
         name: payload.name,
         sku: payload.sku,
         description: payload.description,
@@ -472,13 +490,69 @@ export default function ProductsPage() {
         // null = no configurado (usa default 5 del servidor); 0 = umbral explícito
         low_stock_threshold_units: payload.low_stock_threshold_units == null ? null : Number(payload.low_stock_threshold_units),
         acquired_at: payload.acquired_at ?? null,
-      }),
-    onSuccess: async () => {
+      });
+      // B·5d: el stock inicial va DESPUÉS del PATCH (que no lleva stock) y por
+      // su endpoint: es una apertura al costo, no un ajuste.
+      let abierta: Awaited<ReturnType<typeof productsService.registerOpening>> | null = null;
+      if (apertura) {
+        try {
+          abierta = await productsService.registerOpening(
+            payload.id,
+            {
+              stock_units: apertura.stock_units,
+              unit_cost_ars: apertura.unit_cost_ars,
+              fecha: fechaDeStockInicial(apertura.fecha),
+              ...(apertura.envio ? { costo_envio: apertura.envio } : {}),
+            },
+            nuevaClaveIdempotencia(),
+          );
+        } catch (causa) {
+          throw new AperturaFallida(causa);
+        }
+      }
+      return { actualizado, abierta };
+    },
+    onSuccess: async ({ abierta }) => {
       setEditing(null);
-      toast("Producto actualizado.", "success");
+      setErrorApertura(null);
+      const costeadas = abierta?.ventas_sin_costo_desde_la_fecha ?? 0;
+      toast(
+        abierta
+          ? `Producto actualizado y stock inicial cargado.${
+              costeadas > 0 ? ` ${costeadas} venta(s) quedaron con costo.` : ""
+            }`
+          : "Producto actualizado.",
+        "success",
+      );
       await queryClient.invalidateQueries({ queryKey: ["products-list"] });
     },
     onError: (e) => {
+      if (e instanceof AperturaFallida) {
+        // El resto ya se guardó: la lista se refresca igual.
+        void queryClient.invalidateQueries({ queryKey: ["products-list"] });
+        if (esPinCancelado(e.causa)) {
+          toast("Se guardaron los demás cambios; el stock inicial no se cargó.", "error");
+          return;
+        }
+        const info = posErrorInfo(e.causa);
+        if (info.code === "OPENING_EXISTS") {
+          const caminos = Array.isArray(info.fields.caminos)
+            ? info.fields.caminos.filter((c): c is string => typeof c === "string")
+            : [];
+          setErrorApertura({
+            mensaje: info.message ?? "Este producto ya tiene stock inicial cargado.",
+            caminos,
+          });
+          return;
+        }
+        // El 404 del servidor viene en inglés («Product not found.»).
+        const motivo =
+          info.status === 404
+            ? "el producto ya no existe o es de otro negocio."
+            : (info.message ?? "probá de nuevo.");
+        toast(`Se guardaron los demás cambios, pero no el stock inicial: ${motivo}`, "error");
+        return;
+      }
       const code = errorCode(e);
       if (code === "STOCK_CAMBIO") {
         // El stock que se veía quedó viejo: sin refrescar, reabrir el producto
@@ -728,8 +802,15 @@ export default function ProductsPage() {
         categories={categories}
         canCreateCategory={user?.role === "OWNER" || user?.role === "ADMIN"}
         saving={updateMutation.isPending}
-        onClose={() => setEditing(null)}
-        onSave={(product, stock) => updateMutation.mutate({ product, stock })}
+        errorApertura={errorApertura}
+        onClose={() => {
+          setEditing(null);
+          setErrorApertura(null);
+        }}
+        onSave={(product, stock, apertura) => {
+          setErrorApertura(null);
+          updateMutation.mutate({ product, stock, apertura });
+        }}
       />
       {viewingAllData && (
         <AllDataModal
@@ -751,6 +832,24 @@ function errorCode(e: unknown): string | null {
 /** M·P2c: un cambio de stock editado a mano. `esperado` = lo que se veía. */
 type CambioDeStock = { esperado: number; envio?: TratamientoEnvio };
 
+/** B·5d: la suba es el stock inicial (lo compraron el dueño o los socios).
+ *  `stock_units` = la diferencia, en unidades base; `fecha` = "YYYY-MM-DD". */
+type AperturaPedida = {
+  stock_units: number;
+  unit_cost_ars: number;
+  fecha: string;
+  envio?: TratamientoEnvio;
+};
+
+type ErrorDeApertura = { mensaje: string; caminos: string[] };
+
+/** El PATCH salió bien y el stock inicial no: el error lleva la causa. */
+class AperturaFallida extends Error {
+  constructor(readonly causa: unknown) {
+    super("apertura");
+  }
+}
+
 // Valor centinela del <select> de categoría: abre el alta inline (B·3b).
 const NUEVA_CATEGORIA = "__nueva_categoria__";
 
@@ -759,6 +858,7 @@ function ProductEditModal({
   categories,
   canCreateCategory,
   saving,
+  errorApertura,
   onClose,
   onSave,
 }: {
@@ -767,9 +867,15 @@ function ProductEditModal({
   /** POST /products/custom-categories es OWNER/ADMIN: el resto no ve la opción. */
   canCreateCategory: boolean;
   saving: boolean;
+  errorApertura: ErrorDeApertura | null;
   onClose: () => void;
-  /** stock=null: el stock no se tocó y NO va en el PATCH. */
-  onSave: (product: ProductResponse, stock: CambioDeStock | null) => void;
+  /** stock=null: el stock no se tocó y NO va en el PATCH. apertura: la suba es
+   *  el stock inicial (va después, por `POST /opening`, con stock=null). */
+  onSave: (
+    product: ProductResponse,
+    stock: CambioDeStock | null,
+    apertura: AperturaPedida | null,
+  ) => void;
 }) {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<ProductResponse | null>(product);
@@ -816,11 +922,14 @@ function ProductEditModal({
   const [umbralText, setUmbralText] = useState("");
   // M·P2c: por qué sube el stock. Una compra no se carga acá: va por
   // «Registrar compra», que deja el gasto y el proveedor.
-  const [motivoSuba, setMotivoSuba] = useState<"" | "correccion" | "compra">("");
+  // B·5d: «apertura» = es el stock inicial; sólo si el producto no tiene uno.
+  const [motivoSuba, setMotivoSuba] = useState<"" | "correccion" | "compra" | "apertura">("");
   const [envio, setEnvio] = useState<TratamientoEnvio | "">("");
+  const [fechaApertura, setFechaApertura] = useState("");
   useEffect(() => {
     altaEsperada.current = null;
     setMotivoSuba("");
+    setFechaApertura("");
     setEnvio("");
     setForm(product);
     setCreandoCategoria(false);
@@ -836,6 +945,11 @@ function ProductEditModal({
       );
     }
   }, [product]);
+  // Tras un OPENING_EXISTS el producto ya tiene stock inicial: la opción se
+  // retira (la lista se refresca aparte) y queda el aviso con los caminos.
+  useEffect(() => {
+    if (errorApertura) setMotivoSuba((m) => (m === "apertura" ? "" : m));
+  }, [errorApertura]);
   if (!form) return null;
   const set = (key: keyof ProductResponse, value: string | number | null) => {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
@@ -849,8 +963,22 @@ function ProductEditModal({
   const invalido = stockBase === null || (umbralText.trim() !== "" && umbralBase === null);
   const subeStock = !!product && stockBase !== null && stockBase > product.stock_units;
   const sinCosto = form.unit_cost_ars == null || Number(form.unit_cost_ars) <= 0;
-  // La suba se guarda sólo como corrección y con precio de compra (M·P2c).
-  const subaBloqueada = subeStock && (motivoSuba !== "correccion" || sinCosto);
+  const ofreceApertura = product?.needs_initial_stock === true && !errorApertura;
+  const fechaAperturaError =
+    fechaApertura === ""
+      ? "Indicá desde qué fecha tenés este stock."
+      : fechaApertura > hoyLocal()
+        ? "La fecha no puede ser futura."
+        : null;
+  // La suba se guarda como corrección o como stock inicial, siempre con precio
+  // de compra (M·P2c); el stock inicial, además, con su fecha (B·5d).
+  const subaBloqueada =
+    subeStock &&
+    (sinCosto ||
+      !(
+        motivoSuba === "correccion" ||
+        (motivoSuba === "apertura" && ofreceApertura && fechaAperturaError === null)
+      ));
   // Con el alta de categoría abierta (escribiendo o en vuelo), Guardar mandaría
   // la categoría anterior y descartaría lo pedido: primero se crea o se
   // cancela. Cancelada, la respuesta ya no se aplica, así que no hay que esperarla.
@@ -875,11 +1003,25 @@ function ProductEditModal({
         onSubmit={(event) => {
           event.preventDefault();
           if (invalido || categoriaAMedias || subaBloqueada || !product) return;
+          if (subeStock && motivoSuba === "apertura" && stockBase !== null) {
+            onSave(
+              { ...form, stock_units: product.stock_units, low_stock_threshold_units: umbralBase },
+              null,
+              {
+                stock_units: stockBase - product.stock_units,
+                unit_cost_ars: Number(form.unit_cost_ars),
+                fecha: fechaApertura,
+                envio: envio || undefined,
+              },
+            );
+            return;
+          }
           onSave(
             { ...form, stock_units: stockBase ?? 0, low_stock_threshold_units: umbralBase },
             stockBase !== product.stock_units
               ? { esperado: product.stock_units, envio: subeStock && envio ? envio : undefined }
               : null,
+            null,
           );
         }}
       >
@@ -1012,16 +1154,57 @@ function ProductEditModal({
               <input type="radio" name="motivo-suba" checked={motivoSuba === "compra"} onChange={() => setMotivoSuba("compra")} />
               La compré ahora
             </label>
+            {ofreceApertura ? (
+              <label className="flex items-center gap-2">
+                <input type="radio" name="motivo-suba" checked={motivoSuba === "apertura"} onChange={() => setMotivoSuba("apertura")} />
+                Es mi stock inicial (lo compraron el dueño o los socios)
+              </label>
+            ) : null}
             {motivoSuba === "compra" ? (
               <p role="alert" className="text-xs text-vk-danger">
                 Una compra se registra en «Cargar» → Registrar compra: así quedan el gasto, la caja y el
                 proveedor. Volvé el stock a {enUnidadDeVenta(product?.stock_units ?? 0, factor)} para guardar el resto.
               </p>
             ) : null}
-            {motivoSuba === "correccion" && sinCosto ? (
+            {(motivoSuba === "correccion" || motivoSuba === "apertura") && sinCosto ? (
               <p role="alert" className="text-xs text-vk-danger">{COSTO_REQUERIDO_CON_STOCK}</p>
             ) : null}
-            {motivoSuba === "correccion" ? <EnvioSelect value={envio} onChange={setEnvio} /> : null}
+            {motivoSuba === "apertura" ? (
+              <>
+                <p className="text-xs text-vk-text-secondary">
+                  {QUE_ES_STOCK_INICIAL} Se usa el Costo de arriba.
+                </p>
+                <label className="grid gap-1 text-xs font-medium">
+                  ¿Desde qué fecha tenés este stock?
+                  <input
+                    type="date"
+                    aria-label="Fecha del stock inicial"
+                    max={hoyLocal()}
+                    className="rounded border border-vk-border-w px-3 py-2 text-sm font-normal"
+                    value={fechaApertura}
+                    onChange={(e) => setFechaApertura(e.target.value)}
+                  />
+                </label>
+                {fechaApertura !== "" && fechaAperturaError ? (
+                  <p className="text-xs text-vk-danger">{fechaAperturaError}</p>
+                ) : null}
+              </>
+            ) : null}
+            {motivoSuba === "correccion" || motivoSuba === "apertura" ? (
+              <EnvioSelect value={envio} onChange={setEnvio} />
+            ) : null}
+            {errorApertura ? (
+              <div role="alert" className="grid gap-1 rounded border border-vk-danger/30 bg-vk-danger-bg p-2 text-xs text-vk-danger">
+                <p className="font-medium">{errorApertura.mensaje} Los demás cambios se guardaron.</p>
+                {errorApertura.caminos.length > 0 ? (
+                  <ul className="list-disc pl-4">
+                    {errorApertura.caminos.map((c) => (
+                      <li key={c}>{c}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
           </fieldset>
         ) : null}
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>

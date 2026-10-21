@@ -196,6 +196,12 @@ class ColumnMappingSuggestion(BaseModel):
     status: Literal["mapped", "unmapped", "ambiguo", "required_missing"]
     # Contexto al que pertenece la sugerencia (hoja/tabla). None = archivo de un solo contexto.
     context_id: str | None = None
+    #: B·5f: % de celdas vacías de la columna (sobre TODAS las filas de su
+    #: contexto) cuando es ≥ 40; ``None`` debajo del umbral.
+    vacia_pct: int | None = None
+    #: B·5f: la columna no se mapeó sola por estar mayormente vacía (destino
+    #: informativo). El usuario puede mapearla a mano: se respeta y se avisa.
+    excluida_por_vacia: bool = False
     # F-M. `ambiguo` = el reconocedor entendió el encabezado y, con eso entendido,
     # sigue habiendo más de una lectura razonable. No es lo mismo que `unmapped`:
     # ahí no se reconoció nada. Los candidatos van en `options` y el porqué en

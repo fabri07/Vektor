@@ -405,7 +405,12 @@ class RegistrarAperturaResponse(BaseModel):
 
 
 class FilaStockInicial(BaseModel):
-    """Una fila de la tabla de stock inicial (B·5c)."""
+    """Una fila de la tabla de stock inicial (B·5c).
+
+    ``stock_units`` va en la unidad de VENTA: un producto nuevo del lote se vende
+    por unidad; en ``apertura_en`` sobre uno que se vende por peso o volumen, son
+    kg o L y el servidor los pasa a unidades base (gramos, ml).
+    """
 
     nombre: str = Field(min_length=1, max_length=300)
     sku: str | None = Field(default=None, max_length=100)
@@ -434,6 +439,11 @@ class CoincidenciaDeFila(BaseModel):
     nombre: str
     por: Literal["sku", "barcode", "nombre"]
     necesita_stock_inicial: bool
+    #: Unidad de venta del producto existente (``unit`` | ``gram`` | ``milliliter``):
+    #: en ``apertura_en`` el stock de la fila se lee en esa unidad de venta.
+    sale_unit: str = "unit"
+    #: 1000 = se vende por kg / L (la fila va en kg / L); 1 = por gramo / ml.
+    base_units_per_sale_unit: int = 1
 
 
 class FilaPreview(BaseModel):

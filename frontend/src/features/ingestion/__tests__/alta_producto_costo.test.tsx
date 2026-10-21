@@ -118,3 +118,16 @@ test("sin stock el precio de compra sigue siendo opcional y no se pregunta el en
   expect(payload).not.toHaveProperty("acquired_at");
   expect(screen.queryByLabelText(/Fecha del stock inicial/)).not.toBeInTheDocument();
 });
+
+test("B·5d: la pestaña «Stock inicial» muestra la tabla con su explicación", () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <ManualEntrySection />
+    </QueryClientProvider>,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Stock inicial" }));
+  expect(screen.getByText(/compraron vos o tus socios/)).toBeInTheDocument();
+  expect(screen.getByLabelText("¿Desde qué fecha tenés este stock?")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Confirmar" })).toBeDisabled();
+});

@@ -15,7 +15,33 @@ export const COSTO_REQUERIDO_CON_STOCK =
 export const FECHA_STOCK_INICIAL_REQUERIDA =
   "Indicá desde qué fecha tenés este stock inicial.";
 
-export const OPCIONES_ENVIO: { value: TratamientoEnvio | ""; label: string }[] = [
+/**
+ * B·5c: qué es el stock inicial, con las palabras del dueño (2026-10-20). Lo
+ * comparten la tabla, el onboarding y la edición del producto.
+ */
+export const QUE_ES_STOCK_INICIAL =
+  "Es la mercadería que compraron vos o tus socios: se carga al costo; el precio de venta va aparte.";
+
+/** "YYYY-MM-DD" de hoy en hora local: el `max` de la fecha del stock inicial. */
+export function hoyLocal(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Un día "YYYY-MM-DD" del input → lo que espera el servidor (hora local, sin zona). */
+export function fechaDeStockInicial(dia: string): string {
+  return `${dia}T00:00:00`;
+}
+
+/** Clave de idempotencia nueva por intento. */
+export function nuevaClaveIdempotencia(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+export const OPCIONES_ENVIO:{ value: TratamientoEnvio | ""; label: string }[] = [
   { value: "", label: "No sé" },
   { value: "incluido", label: "Sí, el precio incluye el envío" },
   { value: "no_aplica", label: "No hubo envío" },
