@@ -92,5 +92,6 @@
 | `20261017_0002` | `sales_entries.cost_source_date` (DATE nullable) — fecha de la fuente del costo de cada venta; «costo desactualizado» > 45 días (M·3-4), ver `docs/claude/plataforma.md` |
 | `20261019_0001` | `inventory_movements.opening_confirmed_at` / `opening_confirmed_by_user_id` (FK `users`, SET NULL) / `opening_date_source` (`usuario`/`archivo`, CHECK `NOT VALID`→`VALIDATE`), todo nullable — confirmación del stock inicial por el usuario (M·2d-1); NULL = sin confirmar, ver `docs/claude/plataforma.md` |
 | `20261021_0001` | CHECK `ck_unclassified_records_source` suma `pos` (`NOT VALID`→`VALIDATE`, superconjunto) — la tarea en «Otros» de una venta del POS sin red ya cobrada sin compra previa (B·5e-2), ver `docs/claude/plataforma.md` |
+| `20261021_0002` | CHECK `ck_sales_entries_void_reason` suma `REPAIR_SALE_WITHOUT_PURCHASE` (`NOT VALID`→`VALIDATE`, superconjunto) — la reparación explícita de ventas históricas sin compra previa (B·5g, `scripts/ventas_sin_compra_a_otros.py --apply`), ver `docs/claude/plataforma.md` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.
