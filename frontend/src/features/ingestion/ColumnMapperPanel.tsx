@@ -52,11 +52,14 @@ import { PosibleRepeticionAviso } from "./PosibleRepeticionAviso";
 import { repeticionDelConfirm, repeticionDelIntento } from "./posibleRepeticion";
 import { useImportacionAsincronica } from "./useImportacionAsincronica";
 import {
+  camposPropiosParaSinAsignar,
   customFieldCollisions,
   disabledCrossFieldReasons,
   explainMissing,
+  ignorarLasVacias,
   missingRequiredFields,
   scalarCollisions,
+  type BulkMappingPatch,
   type SheetIssues,
 } from "./mappingRules";
 
@@ -237,6 +240,46 @@ function etiquetaDe(
 ): { target_label?: string } {
   const label = labels[ctxId]?.[col];
   return label ? { target_label: label } : {};
+}
+
+/**
+ * B·9 — las dos acciones masivas inocuas del mapeo. Ninguna marca columnas como
+ * tocadas (no viajan como `user_selected`) ni toca las decisiones de riesgo de
+ * F8: sólo completan lo que la persona no decidió. Un botón sin columnas a las
+ * que aplicarse no se muestra.
+ */
+function AccionesMasivas({
+  camposPropios,
+  vacias,
+  onCamposPropios,
+  onIgnorarVacias,
+}: {
+  camposPropios: BulkMappingPatch;
+  vacias: BulkMappingPatch;
+  onCamposPropios: () => void;
+  onIgnorarVacias: () => void;
+}) {
+  const nPropios = Object.keys(camposPropios.mappings).length;
+  const nVacias = Object.keys(vacias.mappings).length;
+  if (nPropios === 0 && nVacias === 0) return null;
+  const clase =
+    "rounded border border-vk-border-w px-2 py-1 text-[11px] text-vk-text-secondary transition-colors hover:bg-vk-bg-light";
+  return (
+    <div className="mb-2 flex flex-wrap gap-2">
+      {nPropios > 0 && (
+        <button type="button" className={clase} onClick={onCamposPropios}>
+          {nPropios === 1
+            ? "Guardar la columna sin asignar como campo propio"
+            : `Guardar las ${nPropios} columnas sin asignar como campos propios`}
+        </button>
+      )}
+      {nVacias > 0 && (
+        <button type="button" className={clase} onClick={onIgnorarVacias}>
+          {nVacias === 1 ? "Ignorar la columna vacía" : `Ignorar las ${nVacias} columnas vacías`}
+        </button>
+      )}
+    </div>
+  );
 }
 
 // Propósitos posibles cuando el tipo del archivo quedó ambiguo ("general").
@@ -802,6 +845,11 @@ function SheetMapperSection({
   const unassigned = suggestions
     .filter((s) => !(mappings[s.source_column] ?? ""))
     .map((s) => s.source_column);
+  // B·9: lo que aplicaría cada acción masiva. Sin `onColumnTouched`: no es una
+  // elección columna por columna.
+  const tocada = (col: string) => isColumnTouched?.(context.context_id, col) ?? false;
+  const masivoPropios = camposPropiosParaSinAsignar(suggestions, mappings, tocada);
+  const masivoVacias = ignorarLasVacias(suggestions, mappings, tocada);
   const previewLines = context.preview_rows
     .map((r) => String(r.linea ?? Object.values(r)[0] ?? ""))
     .filter(Boolean)
@@ -910,6 +958,15 @@ function SheetMapperSection({
                 Campos obligatorios sin mapear (en rojo).
               </div>
             )}
+            <AccionesMasivas
+              camposPropios={masivoPropios}
+              vacias={masivoVacias}
+              onCamposPropios={() => {
+                setMappings((p) => ({ ...p, ...masivoPropios.mappings }));
+                setCustomLabels((p) => ({ ...p, ...masivoPropios.labels }));
+              }}
+              onIgnorarVacias={() => setMappings((p) => ({ ...p, ...masivoVacias.mappings }))}
+            />
             {/* Las columnas sin mapear se descartaban en silencio al confirmar
                 (el confirm saltea los targets vacíos), así que el usuario no se
                 enteraba de qué datos de su archivo NO entraban. Ahora se
@@ -2363,6 +2420,11 @@ export function ColumnMapperPanel({
     confirmMutation.mutate({ columnMappings });
   }
 
+  // B·9: lo que aplicaría cada acción masiva, sin tocar el touched-set.
+  const tocadaPlana = (col: string) => touchedRef.current.has(riskKey("table", col));
+  const masivoPropiosPlano = camposPropiosParaSinAsignar(suggestions, mappings, tocadaPlana);
+  const masivoVaciasPlano = ignorarLasVacias(suggestions, mappings, tocadaPlana);
+
   const rowCount =
     typeof summary?.rows_processed === "number" ? summary.rows_processed : null;
   const colCount = suggestions.length;
@@ -2567,6 +2629,15 @@ export function ColumnMapperPanel({
         </div>
       ) : (
         <>
+          <AccionesMasivas
+            camposPropios={masivoPropiosPlano}
+            vacias={masivoVaciasPlano}
+            onCamposPropios={() => {
+              setMappings((p) => ({ ...p, ...masivoPropiosPlano.mappings }));
+              setCustomLabelsPlanas((p) => ({ ...p, ...masivoPropiosPlano.labels }));
+            }}
+            onIgnorarVacias={() => setMappings((p) => ({ ...p, ...masivoVaciasPlano.mappings }))}
+          />
           {/* Tabla de mapeo — dos paneles */}
           <div className="mb-4 overflow-hidden rounded-lg border border-vk-border-w">
             {/* Headers */}

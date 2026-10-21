@@ -273,3 +273,78 @@ export function customFieldCollisions(
       columns,
     }));
 }
+
+/** Lo que aplica una acción masiva: destino y, si corresponde, etiqueta. */
+export type BulkMappingPatch = {
+  mappings: Record<string, string>;
+  labels: Record<string, string>;
+};
+
+/**
+ * B·9 — «Guardar las sin asignar como campos propios».
+ *
+ * Candidatas: las columnas a las que el backend les calculó `custom_slug`
+ * (`unmapped` con muestra, ni ambiguas ni candidatas a un requerido ni excluidas
+ * por B·5f; a diferencia de `auto_custom`, también las que traen `duda`, porque
+ * esto lo pide la persona), que NADIE tocó a mano y que hoy no tienen destino.
+ * El slug lo calcula el backend para no espejar `custom_field_slug` acá; lo
+ * único que se repite es el sufijo `_2`, `_3`, contra los campos propios que
+ * la persona creó en esta pantalla después de cargar las sugerencias (el
+ * backend no los conoce). La etiqueta es el encabezado original, como en
+ * `auto_custom`.
+ *
+ * No marca nada como tocado: la decisión no es columna por columna, así que no
+ * viaja como `user_selected` y no saltea la compuerta de riesgo de F8.
+ */
+export function camposPropiosParaSinAsignar(
+  suggestions: Pick<ColumnMappingSuggestion, "source_column" | "custom_slug">[],
+  mappings: Record<string, string>,
+  isTouched: (col: string) => boolean,
+): BulkMappingPatch {
+  const usadas = new Set(
+    Object.values(mappings)
+      .map((t) => normalizarTarget(t ?? ""))
+      .filter((t) => t.startsWith(CUSTOM_FIELD_PREFIX)),
+  );
+  const patch: BulkMappingPatch = { mappings: {}, labels: {} };
+  for (const s of suggestions) {
+    const col = s.source_column;
+    if (!s.custom_slug || isTouched(col) || (mappings[col] ?? "").trim()) continue;
+    let target = `${CUSTOM_FIELD_PREFIX}${s.custom_slug}`;
+    for (let n = 2; usadas.has(target); n += 1) {
+      target = `${CUSTOM_FIELD_PREFIX}${s.custom_slug}_${n}`;
+    }
+    usadas.add(target);
+    patch.mappings[col] = target;
+    patch.labels[col] = col;
+  }
+  return patch;
+}
+
+/**
+ * B·9 — «Ignorar las vacías».
+ *
+ * Sólo las columnas que el backend midió vacías en TODAS las filas de su hoja
+ * (`empty_in_file`): la muestra son 10 filas, y una columna vacía ahí puede
+ * traer datos más abajo. Las que la persona tocó a mano no se pisan. Tampoco
+ * marca nada como tocado (ver `camposPropiosParaSinAsignar`).
+ */
+export function ignorarLasVacias(
+  suggestions: Pick<ColumnMappingSuggestion, "source_column" | "empty_in_file">[],
+  mappings: Record<string, string>,
+  isTouched: (col: string) => boolean,
+): BulkMappingPatch {
+  const patch: BulkMappingPatch = { mappings: {}, labels: {} };
+  for (const s of suggestions) {
+    const col = s.source_column;
+    if (!s.empty_in_file || isTouched(col) || mappings[col] === "ignore") continue;
+    // Revisión de B·9: nunca pisa un destino canónico. Puede cubrir un requerido
+    // (dejaría el confirm trabado) o tener una decisión de riesgo de F8 (la
+    // podaría). Las informativas vacías ya llegan en `ignore` por B·5f: acá
+    // quedan las sin destino y los campos propios.
+    const actual = mappings[col];
+    if (actual && !actual.startsWith("custom_field:")) continue;
+    patch.mappings[col] = "ignore";
+  }
+  return patch;
+}

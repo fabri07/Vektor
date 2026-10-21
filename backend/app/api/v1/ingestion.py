@@ -55,11 +55,13 @@ from app.application.services.column_mapping_service import (
     REQUIRED_FIELDS,
     SINGLE_VALUE_FIELDS,
     ColumnMappingService,
+    candidata_a_campo_propio,
     conditional_requirement,
     cross_targets_for,
     missing_required_fields,
     parse_target,
     required_reason,
+    reservar_slug_propio,
     validate_required_date_mapping,
 )
 from app.application.services.column_risk import (
@@ -1973,7 +1975,10 @@ async def get_column_mappings(
     out: list[ColumnMappingSuggestion] = []
     for sug in raw_suggestions:
         prop = vacias.get(str(sug.get("source_column")))
-        extra: dict[str, Any] = {"context_id": context_id}
+        # B·9: vacía en TODAS las filas de su contexto (la muestra son 10 filas y
+        # no alcanza para afirmarlo). `vacias/total` da 1.0 exacto sólo si son
+        # iguales; sin filas o en el Libro Diario no hay medición → False.
+        extra: dict[str, Any] = {"context_id": context_id, "empty_in_file": prop == 1.0}
         if prop is not None:
             pct = round(prop * 100)
             extra["vacia_pct"] = pct
@@ -1998,6 +2003,19 @@ async def get_column_mappings(
             # La pantalla ya muestra `duda` en todos sus caminos (AmbiguityHint).
             extra["duda"] = f"{previa} {aviso}" if previa else aviso
         out.append(ColumnMappingSuggestion(**{**sug, **extra}))
+    # B·9: el slug de campo propio de cada columna candidata a la acción masiva
+    # «Guardar las sin asignar como campos propios» (las de `auto_custom` más
+    # las `unmapped` con `duda`), para que el frontend no tenga que espejar
+    # `custom_field_slug`. Se calcula sobre la respuesta FINAL (después de B·5f) y se
+    # desambigua contra los campos propios ya presentes y entre sí, en orden.
+    slugs_usados: set[str] = {
+        parse_target(s.target_field).field
+        for s in out
+        if parse_target(s.target_field).kind == "custom"
+    }
+    for s in out:
+        if candidata_a_campo_propio(s.model_dump(), aunque_tenga_duda=True):
+            s.custom_slug = reservar_slug_propio(s.source_column, slugs_usados)
     return out
 
 

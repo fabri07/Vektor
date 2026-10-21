@@ -202,6 +202,16 @@ class ColumnMappingSuggestion(BaseModel):
     #: B·5f: la columna no se mapeó sola por estar mayormente vacía (destino
     #: informativo). El usuario puede mapearla a mano: se respeta y se avisa.
     excluida_por_vacia: bool = False
+    #: B·9: la columna está vacía en TODAS las filas de su contexto (no en la
+    #: muestra). Sólo con esto se ofrece «Ignorar las vacías». Sin filas que
+    #: medir o en el Libro Diario → ``False``.
+    empty_in_file: bool = False
+    #: B·9: el slug desambiguado (mismo cálculo que `auto_custom`) con el que
+    #: la acción masiva archivaría esta columna como campo propio. Sólo en las
+    #: candidatas: unmapped, con muestra, no excluida por B·5f — con o sin
+    #: `duda`, a diferencia de `auto_custom`. ``None`` en el resto o si el
+    #: encabezado no deja un slug usable.
+    custom_slug: str | None = None
     # F-M. `ambiguo` = el reconocedor entendió el encabezado y, con eso entendido,
     # sigue habiendo más de una lectura razonable. No es lo mismo que `unmapped`:
     # ahí no se reconoció nada. Los candidatos van en `options` y el porqué en
