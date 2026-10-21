@@ -189,7 +189,7 @@ function PosRegister() {
     if (product.tiene_compra === false) {
       setScanMsg(
         `Falta la compra de ${product.name}: no se puede vender lo que no se compró. ` +
-          "Que el encargado cargue la compra o el stock inicial.",
+          "Que el encargado cargue la compra o el stock inicial y actualizá el catálogo.",
       );
       return;
     }

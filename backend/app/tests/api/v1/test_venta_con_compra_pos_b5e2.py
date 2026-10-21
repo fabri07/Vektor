@@ -184,3 +184,117 @@ async def test_borrar_el_archivo_cuya_compra_respalda_ventas_da_409(
     await db_session.commit()
     f = await db_session.get(UploadedFile, fid, populate_existing=True)
     assert f is not None and f.deleted_at is None
+
+
+# ── Revisión de B·5e-2 ────────────────────────────────────────────────────────
+
+
+async def test_el_reintento_sin_red_no_duplica_la_tarea(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    caja = await _caja(client, auth_headers)
+    p = await _sin_compra(db_session, sample_tenant.tenant_id)
+    venta = _venta(p.id)
+    h = {**caja, "X-POS-Offline": "1"}
+    assert (await client.post("/api/v1/pos/operations", json=venta, headers=h)).status_code == 201
+    r = await client.post("/api/v1/pos/operations", json=venta, headers=h)
+    assert r.status_code in (200, 201), r.text
+    await db_session.commit()
+    assert len((await db_session.execute(select(UnclassifiedRecord))).scalars().all()) == 1
+    assert len((await db_session.execute(select(SaleEntry))).scalars().all()) == 1
+
+
+async def test_el_lookup_del_escaner_dice_si_hay_compra(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Revisión: con red, el escáner agregaba al carrito y frenaba recién al
+    cobrar (con la plata en la mano)."""
+    p = Product(
+        tenant_id=sample_tenant.tenant_id, name="Vela", sale_price_ars=Decimal("100"),
+        stock_units=10, sku="VELA-1",
+    )
+    db_session.add(p)
+    await db_session.commit()
+    caja = await _caja(client, auth_headers)
+    r = await client.get("/api/v1/products/lookup", params={"code": "VELA-1"}, headers=caja)
+    assert r.status_code == 200, r.text
+    assert r.json()["product"]["tiene_compra"] is False
+
+
+async def test_con_otra_compra_que_respalda_el_borrado_no_frena(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """La venta sigue respaldada por un stock inicial cargado a mano antes: el
+    archivo no es lo único que la respalda."""
+    tid = sample_tenant.tenant_id
+    vela = await producto_con_compra(db_session, tid, nombre="Vela", precio=Decimal("100"))
+    fid = await archivo_de_prueba(db_session, tid)
+    from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
+    from app.persistence.models.inventory import InventoryMovement
+
+    db_session.add(
+        InventoryMovement(
+            tenant_id=tid, product_id=vela.id, movement_type="purchase", qty=5,
+            unit_cost=Decimal("40"), source_type="purchase_import", source_event_id="x",
+            source_upload_id=fid,
+        )
+    )
+    f = await db_session.get(UploadedFile, fid)
+    assert f is not None
+    f.processing_status = "DONE"
+    await db_session.commit()
+    r = await client.post(
+        "/api/v1/sales",
+        json={"amount": "100", "quantity": 1, "product_id": str(vela.id),
+              "transaction_date": _FECHA, "payment_method": "cash"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 201, r.text
+    assert SOURCE_CATALOG_INITIAL_STOCK  # el respaldo previo es una apertura
+    r = await client.delete(
+        f"/api/v1/ingestion/files/{fid}", params={"confirm": "true"}, headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_la_relectura_no_cuenta_las_ventas_del_propio_archivo(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Revisión: las ventas del archivo que se relee no son «de otro lado»."""
+    from datetime import timedelta
+
+    from app.application.services.respaldo_service import (
+        primeros_dias_de_fuente,
+        ventas_que_pierden_respaldo,
+    )
+    from app.persistence.models.inventory import InventoryMovement
+
+    tid = sample_tenant.tenant_id
+    fid = await archivo_de_prueba(db_session, tid)
+    vela = await _sin_compra(db_session, tid)
+    hace_10 = datetime.combine(today_ar() - timedelta(days=10), datetime.min.time())
+    compra = InventoryMovement(
+        tenant_id=tid, product_id=vela.id, movement_type="purchase", qty=5,
+        unit_cost=Decimal("40"), source_type="purchase_import", source_event_id="x",
+        source_upload_id=fid, occurred_at=hace_10,
+    )
+    db_session.add(compra)
+    db_session.add(
+        SaleEntry(
+            tenant_id=tid, product_id=vela.id, amount=Decimal("100"), quantity=1,
+            transaction_date=hace_10.replace(hour=12), payment_method="cash",
+            source_upload_id=fid,
+        )
+    )
+    await db_session.commit()
+    antes = await primeros_dias_de_fuente(db_session, tid, [vela.id])
+    compra.voided_at = datetime.now()
+    await db_session.flush()
+    propias = await ventas_que_pierden_respaldo(
+        db_session, tid, antes, [vela.id], excluir_upload_id=fid
+    )
+    todas = await ventas_que_pierden_respaldo(db_session, tid, antes, [vela.id])
+    assert (propias.total, todas.total) == (0, 1)

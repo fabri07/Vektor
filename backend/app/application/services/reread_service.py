@@ -4213,7 +4213,7 @@ async def apply_reread(
     # Compuerta de relectura: medición EXACTA, con lo que este apply escribió.
     await session.flush()
     _perdidas_b5e = await ventas_que_pierden_respaldo(
-        session, tenant_id, _antes_b5e, _con_fuente_b5e
+        session, tenant_id, _antes_b5e, _con_fuente_b5e, excluir_upload_id=file_id
     )
     if _perdidas_b5e.total:
         raise RereadWouldLeaveSalesWithoutPurchaseError(_perdidas_b5e.total)

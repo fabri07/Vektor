@@ -239,6 +239,21 @@ describe("la venta migrada de B13 se reclama antes de adaptarse", () => {
     expect(op.estado).toBe("PENDIENTE");
   });
 
+  it("B·5e-2: SALE_WITHOUT_PURCHASE también prueba que no existe y la adapta", async () => {
+    // Sin esto, la venta cobrada quedaba en «Requiere revisión» para siempre:
+    // reintentar sin el header devolvía el mismo 422.
+    await sembrarB13("op-b13");
+    svc.syncOperation.mockRejectedValue(httpError(422, "SALE_WITHOUT_PURCHASE"));
+    const { result } = montar();
+    await act(async () => {
+      await result.current.flush();
+    });
+    const op = await estado("op-b13");
+    expect(op.payload.charged_at).toBe("2026-09-27T10:00:00");
+    expect(op.origen).toBeUndefined();
+    expect(op.estado).toBe("PENDIENTE");
+  });
+
   it("y el intento siguiente ya va por el camino offline", async () => {
     await sembrarB13("op-b13");
     svc.syncOperation.mockRejectedValueOnce(httpError(400, "INSUFFICIENT_STOCK"));

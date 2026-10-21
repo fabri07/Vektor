@@ -140,9 +140,15 @@ async def aplicar_relectura(run_id: str, file_id: str, tenant_id: str) -> dict[s
                 return {"status": "NEEDS_CONFIRMATION", "to_lose": exc.perdida.to_lose}
             except Exception as exc:  # noqa: BLE001
                 await session.rollback()
-                logger.error(
-                    "reread.apply.failed", run_id=run_id, error=str(exc)
-                )
+                # B·5e-2: frenar porque dejaría ventas sin compra previa es una
+                # regla de negocio, no una falla: info, no error (sin ruido en
+                # Sentry). El run queda FAILED con el motivo para la pantalla.
+                if isinstance(exc, reread_service.RereadWouldLeaveSalesWithoutPurchaseError):
+                    logger.info("reread.apply.blocked_sales_without_purchase", run_id=run_id)
+                else:
+                    logger.error(
+                        "reread.apply.failed", run_id=run_id, error=str(exc)
+                    )
                 # Marcar FAILED en una transacción nueva (la anterior se revirtió).
                 async with factory() as s2:
                     r = await s2.get(DataRepairRun, _uuid.UUID(run_id))

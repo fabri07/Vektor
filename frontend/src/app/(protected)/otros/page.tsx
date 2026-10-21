@@ -28,6 +28,9 @@ const SOURCE_LABELS: Record<string, string> = {
   ingestion: "Carga de datos",
   chat: "Chat",
   reanalysis: "Reanálisis",
+  // B·5e-2: una venta de la caja sin compra previa. La venta ya existe: la fila
+  // se descarta al cargar la compra, no se clasifica.
+  pos: "Caja (venta sin compra)",
 };
 
 const ENTITY_LABELS: Record<ReclassifyEntityType, string> = {
@@ -318,13 +321,16 @@ export default function OtrosPage() {
       header: "Acciones",
       render: (_: unknown, row: UnclassifiedRecordResponse) => (
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setReclassifying(row)}
-            className="inline-flex items-center gap-1.5 rounded border border-vk-border-w px-2.5 py-1.5 text-sm text-vk-text-primary transition-colors hover:bg-vk-bg-light"
-          >
-            <Pencil className="h-3.5 w-3.5" /> Editar
-          </button>
+          {/* B·5e-2: la tarea de la caja no se clasifica (la venta ya existe). */}
+          {row.source !== "pos" ? (
+            <button
+              type="button"
+              onClick={() => setReclassifying(row)}
+              className="inline-flex items-center gap-1.5 rounded border border-vk-border-w px-2.5 py-1.5 text-sm text-vk-text-primary transition-colors hover:bg-vk-bg-light"
+            >
+              <Pencil className="h-3.5 w-3.5" /> Editar
+            </button>
+          ) : null}
           <button
             type="button"
             title="Descartar"

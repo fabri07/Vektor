@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.stock_service import SaleProductNotFoundError
@@ -144,14 +144,12 @@ async def productos_con_fuente_en_archivo(
 ) -> set[uuid.UUID]:
     """Productos con una fuente con costo viva que trae ESTE archivo."""
     m = InventoryMovement
+    # El mismo filtro de fuentes que el costeo (sin su `product_id IN`, que es el
+    # término [1]), acotado a este archivo.
+    fuentes = filtro_de_fuentes(tenant_id, [], _SIN_CORTE)
     filas = await session.execute(
         select(m.product_id)
-        .where(
-            m.tenant_id == tenant_id,
-            m.source_upload_id == uploaded_file_id,
-            m.voided_at.is_(None),
-            m.qty > 0,
-        )
+        .where(*fuentes[:1], *fuentes[2:], m.source_upload_id == uploaded_file_id, m.qty > 0)
         .distinct()
     )
     return {pid for pid in filas.scalars() if pid is not None}
@@ -171,6 +169,7 @@ async def ventas_que_pierden_respaldo(
     antes: dict[uuid.UUID, date],
     product_ids: Iterable[uuid.UUID],
     *,
+    excluir_upload_id: uuid.UUID | None = None,
     muestras: int = 5,
 ) -> VentasSinRespaldo:
     """Con las anulaciones ya escritas (flush), las ventas vivas de esos
@@ -192,6 +191,21 @@ async def ventas_que_pierden_respaldo(
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
                 SaleEntry.product_id.in_(afectados),
+                # Sólo las que podían estar respaldadas: desde el primer día viejo.
+                SaleEntry.transaction_date
+                >= datetime.combine(min(antes[p] for p in afectados), datetime.min.time()),
+                # Las del propio archivo no son «de otro lado» (la relectura las
+                # juzga con su propia regla).
+                *(
+                    [
+                        or_(
+                            SaleEntry.source_upload_id.is_(None),
+                            SaleEntry.source_upload_id != excluir_upload_id,
+                        )
+                    ]
+                    if excluir_upload_id is not None
+                    else []
+                ),
             )
             .order_by(SaleEntry.transaction_date)
         )
