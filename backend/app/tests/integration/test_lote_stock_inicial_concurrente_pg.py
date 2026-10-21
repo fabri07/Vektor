@@ -38,7 +38,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.product_cost import ProductCostHistory, ProductCostState
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
-from app.schemas.product import FilaStockInicial, LoteStockInicialRequest
+from app.schemas.product import EleccionDeFila, FilaStockInicial, LoteStockInicialRequest
 from app.tests.integration import _reread_scenario as esc
 
 TEST_PG_DSN = os.environ.get("TEST_PG_DSN")
@@ -182,3 +182,59 @@ async def test_un_lote_en_vuelo_hace_esperar_al_alta(escenario: _Escenario) -> N
     await asyncio.wait_for(tarea, timeout=10)
     # El homónimo de después es una decisión de esa alta, no del lote.
     assert await _cantidad(fabrica, tid) == 2
+
+
+async def test_un_savepoint_revertido_no_deja_el_alta_sin_lock(escenario: _Escenario) -> None:
+    """Revisión: el import inserta sus lotes dentro de un savepoint. Un ROLLBACK
+    TO SAVEPOINT suelta el lock pedido adentro; el siguiente producto de la misma
+    transacción tiene que volver a pedirlo."""
+    fabrica, tid, uid = escenario
+    token = await _token(fabrica, tid)
+    async with fabrica() as alta:
+        sp = await alta.begin_nested()
+        alta.add(Product(tenant_id=tid, name="Otro", sale_price_ars=Decimal("1")))
+        await alta.flush()
+        await sp.rollback()
+        alta.add(Product(tenant_id=tid, name="VELA", sale_price_ars=Decimal("900")))
+        await alta.flush()
+        async with fabrica() as lote:
+            with pytest.raises(HTTPException) as exc:
+                await _lote(lote, tid, uid, token)
+            await lote.rollback()
+        assert exc.value.detail["code"] == "PRODUCTS_BEING_CREATED"  # type: ignore[index]
+        await alta.rollback()
+
+
+async def test_un_destino_bloqueado_por_otra_transaccion_da_409_sin_esperar(
+    escenario: _Escenario,
+) -> None:
+    """Revisión: un import que ya tocó el producto (fila bloqueada) y todavía no
+    pidió el lock de alta. El lote no lo espera (sería un deadlock): 409."""
+    fabrica, tid, uid = escenario
+    async with fabrica() as s:
+        p = Product(tenant_id=tid, name="Vela", sale_price_ars=Decimal("1000"))
+        s.add(p)
+        await s.commit()
+        pid = p.id
+    token = await _token(fabrica, tid)
+    async with fabrica() as import_:
+        await import_.execute(select(Product).where(Product.id == pid).with_for_update())
+        async with fabrica() as lote:
+            tenant = await lote.get(Tenant, tid)
+            user = await lote.get(User, uid)
+            assert tenant is not None and user is not None
+            body = _body(token)
+            body.elecciones = [
+                EleccionDeFila(fila=0, accion="apertura_en", product_id=pid)
+            ]
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(
+                    rutas.confirm_initial_stock_batch(
+                        body, tenant=tenant, user=user, _maintenance_guard=None,
+                        session=lote, idempotency_key=None,
+                    ),
+                    timeout=4,
+                )
+            await lote.rollback()
+        assert exc.value.detail["code"] == "PRODUCTS_BEING_CREATED"  # type: ignore[index]
+        await import_.rollback()

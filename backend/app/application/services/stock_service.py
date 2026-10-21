@@ -701,6 +701,10 @@ def exigir_costo_con_stock(entra_stock: bool, costo: Decimal | None) -> None:
         raise CostoRequeridoError(COSTO_REQUERIDO_MESSAGE)
 
 
+class ProductoNoEncontradoError(ValueError):
+    """El producto no existe en el tenant (ValueError, por los llamadores viejos)."""
+
+
 class AperturaExistenteError(Exception):
     """El producto ya tiene stock inicial vivo (B·5c): no se suma otro en silencio."""
 
@@ -745,7 +749,7 @@ async def _producto_para_stock_manual(
         )
     ).scalar_one_or_none()
     if product is None:
-        raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
+        raise ProductoNoEncontradoError(f"Product {product_id} not found for tenant {tenant_id}")
     return product
 
 

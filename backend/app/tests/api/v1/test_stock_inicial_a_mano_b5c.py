@@ -606,3 +606,67 @@ async def test_otros_producto_nuevo_con_stock_exige_costo(
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "COSTO_REQUERIDO_CON_STOCK"
     assert await _cantidad_de_productos(db_session, tid) == 0
+
+
+# ── Revisión de B·5c ──────────────────────────────────────────────────────────
+
+
+async def test_dos_filas_sobre_el_mismo_producto_dan_422(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Una coincide por SKU y otra por nombre: no es «ya tiene stock inicial»
+    (un 409 con un movimiento revertido), es una elección inválida."""
+    p = await _producto(db_session, sample_tenant.tenant_id, name="Vela", sku="V-1")
+    filas = [_fila("Vela grande", sku="V-1"), _fila("Vela")]
+    pv = await _preview(client, auth_headers, filas)
+    r = await _confirmar(
+        client, auth_headers, filas, pv["preview_token"],
+        [
+            {"fila": 0, "accion": "apertura_en", "product_id": str(p.id)},
+            {"fila": 1, "accion": "apertura_en", "product_id": str(p.id)},
+        ],
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["code"] == "INVALID_CHOICE"
+    assert await _aperturas(db_session, p.id) == []
+
+
+async def test_el_token_no_cambia_por_como_se_escribe_el_precio(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    pv = await _preview(
+        client, auth_headers, [_fila("Yerba", sale_price_ars="1000", unit_cost_ars="400")]
+    )
+    r = await _confirmar(
+        client, auth_headers,
+        [_fila("Yerba", sale_price_ars="1000.00", unit_cost_ars="400.0")],
+        pv["preview_token"],
+    )
+    assert r.status_code == 201, r.text
+
+
+async def test_apertura_en_dice_lo_que_no_aplico(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """La fila trae otro SKU y otro precio: el stock inicial se carga, el
+    producto no se edita, y la respuesta lo dice."""
+    p = await _producto(db_session, sample_tenant.tenant_id, name="Vela")
+    filas = [_fila("Vela", sku="NUEVO-1", sale_price_ars="2500")]
+    pv = await _preview(client, auth_headers, filas)
+    r = await _confirmar(
+        client, auth_headers, filas, pv["preview_token"],
+        [{"fila": 0, "accion": "apertura_en", "product_id": str(p.id)}],
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["filas"][0]["campos_no_aplicados"] == ["sku", "sale_price_ars"]
+    prod = await _leer(db_session, Product, p.id)
+    assert (prod.sku, prod.sale_price_ars, prod.stock_units) == (None, Decimal("1000.00"), 10)

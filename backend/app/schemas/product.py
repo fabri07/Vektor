@@ -471,6 +471,9 @@ class ResultadoDeFila(BaseModel):
     accion: Literal["crear", "apertura_en"]
     product_id: UUID
     movement_id: UUID
+    #: ``apertura_en`` carga sólo el stock inicial: lo que la fila traía distinto
+    #: del producto (sku, barcode, precio, categoría, nombre) NO se aplicó.
+    campos_no_aplicados: list[str] = Field(default_factory=list)
 
 
 class LoteStockInicialResponse(BaseModel):

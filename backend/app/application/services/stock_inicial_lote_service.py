@@ -20,6 +20,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Literal
 
 from sqlalchemy import or_, select
@@ -31,6 +32,7 @@ from app.persistence.models.product import Product
 from app.schemas.product import FilaStockInicial
 
 Por = Literal["sku", "barcode", "nombre"]
+_CENTAVO = Decimal("0.01")
 _ORDEN: dict[str, int] = {"sku": 0, "barcode": 1, "nombre": 2}
 
 
@@ -140,8 +142,9 @@ def token(filas: list[FilaStockInicial], analisis: list[FilaAnalizada]) -> str:
     cuerpo = [
         {
             "claves": list(_claves(f)),
-            "precio": str(f.sale_price_ars),
-            "costo": str(f.unit_cost_ars),
+            # A centavos: «1000» y «1000.00» son el mismo precio, no un cambio.
+            "precio": str(f.sale_price_ars.quantize(_CENTAVO)),
+            "costo": str(f.unit_cost_ars.quantize(_CENTAVO)),
             "stock": f.stock_units,
             "envio": f.costo_envio,
             "categoria": (f.categoria or "").strip().lower(),

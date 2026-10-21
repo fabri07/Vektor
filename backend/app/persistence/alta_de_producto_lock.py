@@ -8,7 +8,7 @@ COMPARTIDO: alta, «Otros», compra a mano, chat, import, relectura, reparacione
 
 Son muchos caminos; por eso no se llama a mano en cada uno: este listener lo
 toma en el ``before_flush`` de cualquier sesión que tenga un ``Product`` nuevo,
-una vez por transacción. Compartido entre sí, dos altas o un import y un alta
+en cada flush con un producto nuevo. Compartido entre sí, dos altas o un import y un alta
 no se esperan; sólo esperan (poco) mientras un lote está confirmando.
 
 Sólo Postgres. En SQLite no hay advisory locks ni concurrencia real.
@@ -20,11 +20,9 @@ import uuid
 from typing import Any
 
 from sqlalchemy import event, text
-from sqlalchemy.orm import Session, SessionTransaction
+from sqlalchemy.orm import Session
 
 from app.persistence.models.product import Product
-
-_CLAVE_INFO = "b5c_alta_de_producto_lock"
 
 #: Espacio propio del lock: la forma de dos claves ``(int4, int4)``, que en
 #: Postgres no se superpone con la de una clave ``bigint`` del lock de
@@ -40,27 +38,23 @@ def clave_alta_de_producto(tenant_id: uuid.UUID) -> int:
 
 @event.listens_for(Session, "before_flush")
 def _tomar_lock_de_alta(session: Session, _ctx: Any, _instances: Any) -> None:
-    nuevos = {obj.tenant_id for obj in session.new if isinstance(obj, Product)}
+    nuevos = {
+        obj.tenant_id
+        for obj in session.new
+        if isinstance(obj, Product) and obj.tenant_id is not None
+    }
     if not nuevos:
         return
     conn = session.connection()
     if conn.dialect.name != "postgresql":
         return
-    tomados: set[Any] = session.info.setdefault(_CLAVE_INFO, set())
+    # En CADA flush con un producto nuevo, sin recordar los ya tomados: un
+    # ROLLBACK TO SAVEPOINT suelta el lock pedido después de ese savepoint (el
+    # import inserta sus lotes dentro de uno), y un caché lo daría por tomado.
+    # Es reentrante: pedirlo de nuevo cuesta un round-trip, no espera.
     # Orden fijo: dos sesiones con dos tenants nuevos no se cruzan.
-    for tenant_id in sorted(nuevos - tomados, key=str):
-        if tenant_id is None:
-            continue
+    for tenant_id in sorted(nuevos, key=str):
         conn.execute(
             text("SELECT pg_advisory_xact_lock_shared(:c, :k)"),
             {"c": CLASE_ALTA_DE_PRODUCTO, "k": clave_alta_de_producto(tenant_id)},
         )
-        tomados.add(tenant_id)
-
-
-@event.listens_for(Session, "after_transaction_end")
-def _olvidar_lock(session: Session, transaction: SessionTransaction) -> None:
-    # El lock es de la transacción de Postgres: termina con la raíz (no con un
-    # savepoint, que no lo suelta).
-    if transaction.parent is None:
-        session.info.pop(_CLAVE_INFO, None)

@@ -100,7 +100,7 @@ async def registrar_apertura_http(
                 "message": "El producto está dado de baja: reactivalo para cargarle stock.",
             },
         ) from exc
-    except ValueError as exc:
+    except stock_service.ProductoNoEncontradoError as exc:
         if not exigir_sin_apertura:
             raise
         raise HTTPException(

@@ -7,7 +7,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1._stock_manual import (
@@ -84,6 +85,7 @@ from app.schemas.product import (
     CreateProductRequest,
     EleccionDeFila,
     FilaPreview,
+    FilaStockInicial,
     LearnBarcodeRequest,
     LoteStockInicialPreviewRequest,
     LoteStockInicialPreviewResponse,
@@ -1043,6 +1045,119 @@ def _error_de_lote(code: str, message: str, **extra: Any) -> HTTPException:
     )
 
 
+def _productos_en_alta() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "PRODUCTS_BEING_CREATED",
+            "message": "Se están creando o cargando productos ahora mismo (otra carga o "
+            "un archivo). Probá de nuevo en un momento.",
+        },
+    )
+
+
+def _es_lock_no_disponible(exc: DBAPIError) -> bool:
+    """``55P03`` (lock_not_available): el ``NOWAIT`` o el ``lock_timeout`` del lote."""
+    for err in (exc.orig, getattr(exc.orig, "__cause__", None)):
+        if getattr(err, "sqlstate", None) == "55P03" or getattr(err, "pgcode", None) == "55P03":
+            return True
+    return False
+
+
+def _campos_no_aplicados(f: FilaStockInicial, p: Product) -> list[str]:
+    """Lo que la fila trae distinto del producto existente: ``apertura_en`` carga
+    sólo el stock inicial (cantidad, costo, envío) y no edita el producto. Se
+    devuelve para que la pantalla lo diga, nunca se descarta en silencio."""
+    out: list[str] = []
+    if f.sku and normalize_sku(f.sku) != p.sku_normalized:
+        out.append("sku")
+    if f.barcode and normalize_barcode(f.barcode) != p.barcode_normalized:
+        out.append("barcode")
+    if f.sale_price_ars.quantize(CENTAVO) != (p.sale_price_ars or 0):
+        out.append("sale_price_ars")
+    if f.categoria and f.categoria.strip().lower() != (p.category or "").strip().lower():
+        out.append("categoria")
+    if f.nombre.strip() != p.name.strip():
+        out.append("nombre")
+    return out
+
+
+async def _ejecutar_lote(
+    session: AsyncSession,
+    tid: UUID,
+    user_id: UUID,
+    body: LoteStockInicialRequest,
+    plan: list[tuple[int, str, UUID | None]],
+    destinos: list[UUID],
+) -> list[ResultadoDeFila]:
+    """Escribe el lote. Con el exclusivo de alta tomado, el lote no espera locks
+    de fila: un import en curso que ya tocó un destino (y todavía no pidió el
+    lock de alta) daría un deadlock. ``NOWAIT`` sobre los destinos y un
+    ``lock_timeout`` corto para el resto → 409, nunca un import abortado."""
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(text("SET LOCAL lock_timeout = '5s'"))
+        if destinos:
+            await session.execute(
+                select(Product.id)
+                .where(Product.tenant_id == tid, Product.id.in_(sorted(destinos)))
+                .order_by(Product.id)
+                .with_for_update(nowait=True)
+            )
+    resultados: list[ResultadoDeFila] = []
+    for i, accion, destino_id in plan:
+        f = body.filas[i]
+        if accion == "crear":
+            producto = await _crear_producto(
+                session,
+                tid,
+                user_id,
+                CreateProductRequest(
+                    name=f.nombre,
+                    sku=f.sku,
+                    barcode=f.barcode,
+                    category=f.categoria,
+                    sale_price_ars=f.sale_price_ars,
+                    unit_cost_ars=f.unit_cost_ars,
+                    stock_units=f.stock_units,
+                    costo_envio=f.costo_envio,
+                    acquired_at=body.fecha,
+                ),
+            )
+            apertura = await apertura_service.apertura_viva_de(session, tid, producto.id)
+            assert apertura is not None  # la acaba de crear el alta
+            resultados.append(
+                ResultadoDeFila(
+                    fila=i, accion="crear", product_id=producto.id, movement_id=apertura.id
+                )
+            )
+        else:
+            assert destino_id is not None
+            destino = await session.get(Product, destino_id)
+            assert destino is not None  # bloqueado arriba
+            no_aplicados = _campos_no_aplicados(f, destino)
+            mov = await registrar_apertura_http(
+                session,
+                tid,
+                destino_id,
+                f.stock_units,
+                costo=f.unit_cost_ars,
+                envio=f.costo_envio,
+                fecha=body.fecha,
+                confirmado_por=user_id,
+                exigir_sin_apertura=True,
+            )
+            resultados.append(
+                ResultadoDeFila(
+                    fila=i,
+                    accion="apertura_en",
+                    product_id=destino_id,
+                    movement_id=mov.id,
+                    campos_no_aplicados=no_aplicados,
+                )
+            )
+    return resultados
+
+
 @router.post(
     "/batch",
     dependencies=[Depends(require_active_subscription)],
@@ -1077,14 +1192,7 @@ async def confirm_initial_stock_batch(
     # abajo y los INSERT (el nombre admite homónimos: no hay índice que lo frene).
     await maintenance_lock_service.acquire_write_lock_shared(session, tid)
     if not await maintenance_lock_service.try_product_creation_exclusive(session, tid):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "PRODUCTS_BEING_CREATED",
-                "message": "Se están creando productos ahora mismo (otra carga o un "
-                "archivo). Probá de nuevo en un momento.",
-            },
-        )
+        raise _productos_en_alta()
     analisis = await stock_inicial_lote_service.analizar(session, tid, body.filas)
     if stock_inicial_lote_service.token(body.filas, analisis) != body.preview_token:
         nuevo = LoteStockInicialPreviewResponse(
@@ -1146,52 +1254,19 @@ async def confirm_initial_stock_batch(
                 fila=a.fila,
             )
         plan.append((a.fila, "apertura_en", destino.product_id))
+    destinos = [d for _, accion, d in plan if accion == "apertura_en" and d is not None]
+    if len(set(destinos)) != len(destinos):
+        raise _error_de_lote(
+            "INVALID_CHOICE",
+            "Dos filas eligen el mismo producto: unilas en una sola.",
+        )
 
-    resultados: list[ResultadoDeFila] = []
-    for i, accion, destino_id in plan:
-        f = body.filas[i]
-        if accion == "crear":
-            producto = await _crear_producto(
-                session,
-                tid,
-                user.user_id,
-                CreateProductRequest(
-                    name=f.nombre,
-                    sku=f.sku,
-                    barcode=f.barcode,
-                    category=f.categoria,
-                    sale_price_ars=f.sale_price_ars,
-                    unit_cost_ars=f.unit_cost_ars,
-                    stock_units=f.stock_units,
-                    costo_envio=f.costo_envio,
-                    acquired_at=body.fecha,
-                ),
-            )
-            apertura = await apertura_service.apertura_viva_de(session, tid, producto.id)
-            assert apertura is not None  # la acaba de crear el alta
-            resultados.append(
-                ResultadoDeFila(
-                    fila=i, accion="crear", product_id=producto.id, movement_id=apertura.id
-                )
-            )
-        else:
-            assert destino_id is not None
-            mov = await registrar_apertura_http(
-                session,
-                tid,
-                destino_id,
-                f.stock_units,
-                costo=f.unit_cost_ars,
-                envio=f.costo_envio,
-                fecha=body.fecha,
-                confirmado_por=user.user_id,
-                exigir_sin_apertura=True,
-            )
-            resultados.append(
-                ResultadoDeFila(
-                    fila=i, accion="apertura_en", product_id=destino_id, movement_id=mov.id
-                )
-            )
+    try:
+        resultados = await _ejecutar_lote(session, tid, user.user_id, body, plan, destinos)
+    except DBAPIError as exc:
+        if not _es_lock_no_disponible(exc):
+            raise
+        raise _productos_en_alta() from exc
     creados = sum(1 for r in resultados if r.accion == "crear")
     session.add(
         DecisionAuditLog(
