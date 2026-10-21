@@ -59,6 +59,7 @@ from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
 )
+from app.application.services.respaldo_service import exigir_respaldo
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
@@ -809,6 +810,14 @@ async def reclassify_record(
                     _cantidad = a_unidades_base(
                         sale_req.quantity, _vendido.base_units_per_sale_unit or 1
                     )
+            # B·5e: clasificar como venta exige el producto y su compra previa
+            # (o stock inicial con costo) a la fecha: es la salida de las ventas
+            # que el import mandó a «Otros» por falta de compra.
+            await exigir_respaldo(
+                session,
+                tenant.tenant_id,
+                [(sale_req.product_id, sale_req.transaction_date.date())],
+            )
             session.add(
                 SaleEntry(
                     tenant_id=tenant.tenant_id,

@@ -35,6 +35,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.tests._respaldo import producto_con_compra
 from app.tests.conftest import add_business_profile
 
 #: Dos ventas del mismo producto. Tres cosas de este encabezado NO son
@@ -82,18 +83,19 @@ async def tenant(db_session: AsyncSession) -> Tenant:
 async def producto(db_session: AsyncSession, tenant: Tenant) -> Product:
     """Preexistente a propósito: si lo creara el archivo, el void de la relectura
     se lo llevaría entero y la reversa del descuento no se podría distinguir de
-    la del alta."""
-    p = Product(
-        id=uuid.uuid4(),
-        tenant_id=tenant.tenant_id,
-        name=_PRODUCTO,
-        sale_price_ars=Decimal("500"),
-        unit_cost_ars=Decimal("300"),
-        stock_units=_STOCK_PREVIO,
+    la del alta.
+
+    B·5e: con su stock inicial (compra previa) a costo 300; si no, el import manda
+    sus ventas a «Otros». Las ``_STOCK_PREVIO`` unidades SON ese stock inicial, así
+    que el stock absoluto de partida no cambia."""
+    return await producto_con_compra(
+        db_session,
+        tenant.tenant_id,
+        nombre=_PRODUCTO,
+        stock=_STOCK_PREVIO,
+        costo=Decimal("300"),
+        precio=Decimal("500"),
     )
-    db_session.add(p)
-    await db_session.commit()
-    return p
 
 
 def _patch_s3(monkeypatch: pytest.MonkeyPatch, content: bytes = _CSV) -> None:

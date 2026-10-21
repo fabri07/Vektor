@@ -90,14 +90,16 @@ async def test_libro_de_varias_hojas_dice_kilos_en_stock_y_ventas(
         "multi_sheet": True,
         "mapping_contexts": [
             {"context_id": "sheet:Productos", "entity_type": "product", "source_kind": "sheet",
-             "headers": ["producto", "stock"], "fields": None, "preview_rows": [],
+             "headers": ["producto", "stock", "costo"], "fields": None, "preview_rows": [],
              "row_count": 1},
             {"context_id": "sheet:Ventas", "entity_type": "sale", "source_kind": "sheet",
              "headers": ["fecha", "producto", "cantidad", "monto"], "fields": None,
              "preview_rows": [], "row_count": 1},
         ],
         "stock_detectado": [
-            {"producto": "Queso", "stock": "5", "__context__": "sheet:Productos"}
+            # B·5e: el stock inicial del archivo trae su costo (por kilo), y así
+            # respalda la venta de la otra hoja.
+            {"producto": "Queso", "stock": "5", "costo": "800", "__context__": "sheet:Productos"}
         ],
         "ventas_detectadas": [
             {"fecha": "2024-01-15", "producto": "Queso", "cantidad": "2", "monto": "20000",
@@ -111,7 +113,9 @@ async def test_libro_de_varias_hojas_dice_kilos_en_stock_y_ventas(
         summary,
         {"productos": True, "ventas": True},
         context_mappings={
-            "sheet:Productos": {"producto": "name", "stock": "stock_units"},
+            "sheet:Productos": {
+                "producto": "name", "stock": "stock_units", "costo": "unit_cost_ars"
+            },
             "sheet:Ventas": {"fecha": "transaction_date", "producto": "product_name",
                              "cantidad": "quantity", "monto": "amount"},
         },

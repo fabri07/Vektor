@@ -23,6 +23,7 @@ from app.application.services.ingestion_import_service import (
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import productos_con_compra
 
 
 def test_parse_date_handles_datetime_and_date_formats() -> None:
@@ -40,6 +41,12 @@ def test_parse_date_handles_datetime_and_date_formats() -> None:
     assert _parse_date(None) is None
 
 
+async def _yerba_con_compra(db: AsyncSession, tenant: Tenant) -> None:
+    """B·5e: la venta importada de un producto sin compra va a «Otros». Estos tests
+    miden el mapeo por hoja, así que la «Yerba» que vende la hoja ya está comprada."""
+    await productos_con_compra(db, tenant.tenant_id, ["Yerba"])
+
+
 def _multisheet_summary() -> dict[str, Any]:
     """Summary multi-contexto: 'valor' (no keyword) en ventas, 'monto' (keyword) en gastos."""
     return {
@@ -51,7 +58,7 @@ def _multisheet_summary() -> dict[str, Any]:
                 "context_id": "sheet:Ventas",
                 "entity_type": "sale",
                 "source_kind": "sheet",
-                "headers": ["fecha", "valor", "vendedor"],
+                "headers": ["fecha", "valor", "vendedor", "producto"],
                 "fields": None,
                 "preview_rows": [],
                 "row_count": 1,
@@ -71,6 +78,7 @@ def _multisheet_summary() -> dict[str, Any]:
                 "fecha": "2024-01-15",
                 "valor": "5400",
                 "vendedor": "Juan",
+                "producto": "Yerba",
                 "__context__": "sheet:Ventas",
             }
         ],
@@ -85,13 +93,18 @@ async def test_context_mapping_applied_and_keyword_fallback(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """El mapeo explícito hace entrar 'valor'→amount; gastos entra por keyword 'monto'."""
+    await _yerba_con_compra(db_session, sample_tenant)
     counts = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
         _multisheet_summary(),
         {"ventas": True, "gastos": True},
         context_mappings={
-            "sheet:Ventas": {"valor": "amount", "fecha": "transaction_date"}
+            "sheet:Ventas": {
+                "valor": "amount",
+                "fecha": "transaction_date",
+                "producto": "product_name",
+            }
         },
         context_confirmed={"sheet:Ventas": True, "sheet:Gastos": True},
     )
@@ -108,12 +121,13 @@ async def test_context_confirmed_excludes_context(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """context_confirmed=False para una hoja → sus filas no se importan."""
+    await _yerba_con_compra(db_session, sample_tenant)
     counts = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
         _multisheet_summary(),
         {"ventas": True, "gastos": True},
-        context_mappings={"sheet:Ventas": {"valor": "amount"}},
+        context_mappings={"sheet:Ventas": {"valor": "amount", "producto": "product_name"}},
         context_confirmed={"sheet:Ventas": True, "sheet:Gastos": False},
     )
     assert counts["ventas"] == 1
@@ -139,6 +153,7 @@ async def test_context_custom_field_persisted(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
     """Un mapeo custom_field:{key} por contexto persiste el valor en custom_fields."""
+    await _yerba_con_compra(db_session, sample_tenant)
     counts = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
@@ -147,6 +162,7 @@ async def test_context_custom_field_persisted(
         context_mappings={
             "sheet:Ventas": {
                 "valor": "amount",
+                "producto": "product_name",
                 "vendedor": "custom_field:vendedor",
             }
         },
@@ -189,20 +205,29 @@ async def test_multisheet_reimport_is_idempotent(
     db_session.add(uploaded)
     await db_session.flush()
 
+    await _yerba_con_compra(db_session, sample_tenant)
+    summary = _multisheet_summary()
+
     kwargs: dict[str, Any] = {
-        "context_mappings": {"sheet:Ventas": {"valor": "amount", "fecha": "transaction_date"}},
+        "context_mappings": {
+            "sheet:Ventas": {
+                "valor": "amount",
+                "fecha": "transaction_date",
+                "producto": "product_name",
+            }
+        },
         "context_confirmed": {"sheet:Ventas": True, "sheet:Gastos": True},
         "uploaded_file_id": uploaded.id,
     }
     confirmed = {"ventas": True, "gastos": True}
     first = await insert_confirmed_data(
-        db_session, sample_tenant.tenant_id, _multisheet_summary(), confirmed, **kwargs
+        db_session, sample_tenant.tenant_id, summary, confirmed, **kwargs
     )
     assert first["ventas"] == 1
     assert first["gastos"] == 1
 
     second = await insert_confirmed_data(
-        db_session, sample_tenant.tenant_id, _multisheet_summary(), confirmed, **kwargs
+        db_session, sample_tenant.tenant_id, summary, confirmed, **kwargs
     )
     assert second["ventas"] == 0
     assert second["gastos"] == 0
@@ -437,23 +462,35 @@ async def test_multisheet_venta_con_fecha_valida_conserva_la_fecha(
                 "context_id": "sheet:Ventas",
                 "entity_type": "sale",
                 "source_kind": "sheet",
-                "headers": ["fecha", "valor"],
+                "headers": ["fecha", "valor", "producto"],
                 "row_count": 1,
             }
         ],
         "ventas_detectadas": [
-            {"fecha": "2024-03-05", "valor": "5000", "__context__": "sheet:Ventas"}
+            {
+                "fecha": "2024-03-05",
+                "valor": "5000",
+                "producto": "Yerba",
+                "__context__": "sheet:Ventas",
+            }
         ],
         "gastos_detectados": [],
         "stock_detectado": [],
     }
+    await _yerba_con_compra(db_session, sample_tenant)
     counts = await insert_confirmed_data(
         db_session,
         sample_tenant.tenant_id,
         summary,
         {"ventas": True},
         context_confirmed={"sheet:Ventas": True},
-        context_mappings={"sheet:Ventas": {"valor": "amount", "fecha": "transaction_date"}},
+        context_mappings={
+            "sheet:Ventas": {
+                "valor": "amount",
+                "fecha": "transaction_date",
+                "producto": "product_name",
+            }
+        },
     )
     assert counts["ventas"] == 1
     assert counts["otros"] == 0

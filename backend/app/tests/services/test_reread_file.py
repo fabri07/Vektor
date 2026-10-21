@@ -56,6 +56,7 @@ from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
 )
+from app.tests._respaldo import producto_con_compra
 from app.tests.conftest import add_business_profile
 
 
@@ -1099,16 +1100,16 @@ async def test_apply_reread_mapea_columna_generica_a_sku_y_vincula_producto_en_v
     que faltaba era la posibilidad de MAPEARLO desde la revisión de
     relectura. Prueba de punta a punta: preview → mapear "id" a "sku" → apply
     → `SaleEntry.product_id` correcto."""
-    existing = Product(
-        id=uuid.uuid4(),
-        tenant_id=tenant.tenant_id,
-        name="Coca 500ml",
-        sku="COC500",
-        sale_price_ars=Decimal("500"),
-        unit_cost_ars=Decimal("300"),
-        stock_units=5,
+    # B·5e: con stock inicial (compra previa); si no, la venta vinculada va a «Otros».
+    existing = await producto_con_compra(
+        db_session,
+        tenant.tenant_id,
+        nombre="Coca 500ml",
+        stock=5,
+        costo=Decimal("300"),
+        precio=Decimal("500"),
     )
-    db_session.add(existing)
+    existing.sku = "COC500"
     await db_session.commit()
 
     _patch_s3(monkeypatch, _CSV_VENTA_ID_GENERICO)

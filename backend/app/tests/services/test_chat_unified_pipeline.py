@@ -24,6 +24,7 @@ from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.user import User
+from app.tests._respaldo import producto_con_compra, productos_con_compra
 
 
 @pytest.fixture
@@ -42,7 +43,8 @@ def _sales_summary() -> dict[str, Any]:
         "confidence": "HIGH",
         "has_venta": True,
         "ventas_detectadas": [
-            {"fecha": "2026-05-03", "monto": "1200", "descripcion": "Empanadas"},
+            # B·5e: toda venta con producto y compra previa (ver `producto_con_compra`).
+            {"fecha": "2026-05-03", "monto": "1200", "producto": "Empanadas"},
         ],
         "gastos_detectados": [],
         "stock_detectado": [],
@@ -56,6 +58,7 @@ async def test_import_tabular_file_inserta_en_sale_entry(
     sample_user: User,
     redis_mock: AsyncMock,
 ) -> None:
+    await producto_con_compra(db_session, sample_tenant.tenant_id, nombre="Empanadas")
     uploaded = UploadedFile(
         tenant_id=sample_tenant.tenant_id,
         uploaded_by=sample_user.user_id,
@@ -107,6 +110,7 @@ async def test_import_tabular_file_stampea_ingestion_version(
     por chat quedaba en el default (1) para siempre y
     ``scripts/reanalyze_ingestion.py`` lo re-seleccionaría como candidato
     "pre-F8" en cada corrida, re-descargando de S3 innecesariamente."""
+    await producto_con_compra(db_session, sample_tenant.tenant_id, nombre="Empanadas")
     uploaded = UploadedFile(
         tenant_id=sample_tenant.tenant_id,
         uploaded_by=sample_user.user_id,
@@ -164,11 +168,17 @@ async def test_register_sale_registra_data_loaded(
     sample_user: User,
     redis_mock: AsyncMock,
 ) -> None:
+    producto = await producto_con_compra(db_session, sample_tenant.tenant_id)
     action = PendingAction(
         tenant_id=sample_tenant.tenant_id,
         user_id=sample_user.user_id,
         action_type=ActionType.REGISTER_SALE,
-        payload={"amount": "400", "payment_method": "cash", "conversation_id": "conv-sale"},
+        payload={
+            "amount": "400",
+            "payment_method": "cash",
+            "conversation_id": "conv-sale",
+            "product_id": str(producto.id),
+        },
         risk_level="MEDIUM",
     )
     db_session.add(action)
@@ -253,6 +263,9 @@ async def test_import_tabular_file_google_sheets_parsed_records_inserta_sale(
     sample_user: User,
     redis_mock: AsyncMock,
 ) -> None:
+    # B·5e: también sin archivo (Sheets), una venta de un producto sin compra va a
+    # «Otros». Acá se mide que los registros de Sheets entren: ya están comprados.
+    await productos_con_compra(db_session, sample_tenant.tenant_id, ["Yerba", "Azucar"])
     action = PendingAction(
         tenant_id=sample_tenant.tenant_id,
         user_id=sample_user.user_id,

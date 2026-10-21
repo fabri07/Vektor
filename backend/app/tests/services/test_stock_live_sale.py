@@ -31,6 +31,7 @@ from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.tests._respaldo import producto_con_compra
 
 
 @pytest.fixture(autouse=True)
@@ -244,7 +245,8 @@ async def test_chat_register_sale_insufficient_stock_raises_and_creates_nothing(
     from app.persistence.models.pending_action import PendingAction  # noqa: PLC0415
 
     tid = sample_tenant.tenant_id
-    product = await _make_product(db_session, tid, stock_units=2)
+    # B·5e: con compra previa, para que lo que falte sea la CANTIDAD y no la compra.
+    product = await producto_con_compra(db_session, tid, stock=2)
 
     action = PendingAction()
     action.id = uuid.uuid4()

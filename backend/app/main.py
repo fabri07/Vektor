@@ -24,6 +24,10 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.api.v1.deps import rate_limit_key, subscription_http_error
 from app.application.middleware.tenant import TenantMiddleware
 from app.application.middleware.unhandled_errors import UnhandledErrorMiddleware
+from app.application.services.respaldo_service import (
+    VentaSinCompraError,
+    VentaSinProductoError,
+)
 from app.application.services.stock_service import (
     InsufficientStockError,
     SaleProductNotFoundError,
@@ -295,6 +299,36 @@ def create_app() -> FastAPI:
                 "available": exc.available,
                 "requested": exc.requested,
             },
+        )
+
+    @app.exception_handler(VentaSinCompraError)
+    async def sale_without_purchase_handler(
+        request: Request, exc: VentaSinCompraError
+    ) -> JSONResponse:
+        # B·5e: toda venta con compra previa. 422 con el producto: la pantalla
+        # ofrece cargar la compra o el stock inicial. Rollback como cualquier error.
+        logger.info(
+            "sale.without_purchase", path=str(request.url.path), product_id=str(exc.product_id)
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "detail": {
+                    "code": "SALE_WITHOUT_PURCHASE",
+                    "message": exc.user_message,
+                    "product_id": str(exc.product_id),
+                    "product_name": exc.nombre,
+                }
+            },
+        )
+
+    @app.exception_handler(VentaSinProductoError)
+    async def sale_needs_product_handler(
+        request: Request, exc: VentaSinProductoError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"detail": {"code": "SALE_NEEDS_PRODUCT", "message": exc.user_message}},
         )
 
     @app.exception_handler(SaleProductNotFoundError)

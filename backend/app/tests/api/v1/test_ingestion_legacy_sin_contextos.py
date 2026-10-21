@@ -37,6 +37,7 @@ from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, Up
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.tests._respaldo import productos_con_compra
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -294,6 +295,8 @@ class TestLoQueNoSeToca:
         Sin esta prueba el bloqueo se podría ampliar de más y romper el caso
         histórico más común, que es justamente el que sí está protegido.
         """
+        # B·5e: «Coca» con compra previa; si no, la venta iría a «Otros».
+        await productos_con_compra(db_session, sample_tenant.tenant_id, ["Coca"])
         plana = await _guardar(
             db_session,
             _archivo(

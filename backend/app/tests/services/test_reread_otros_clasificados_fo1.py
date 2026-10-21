@@ -50,6 +50,7 @@ from app.persistence.models.unclassified_record import (
     UnclassifiedRecord,
     unclassified_row_ref,
 )
+from app.tests._respaldo import producto_con_compra
 from app.tests.conftest import add_business_profile
 
 #: La segunda fila tiene fecha ilegible: va a «Otros» (F6-A2). La primera entra
@@ -88,17 +89,18 @@ async def tenant(db_session: AsyncSession) -> Tenant:
 
 @pytest_asyncio.fixture
 async def producto(db_session: AsyncSession, tenant: Tenant) -> Product:
-    p = Product(
-        id=uuid.uuid4(),
-        tenant_id=tenant.tenant_id,
-        name=_PRODUCTO,
-        sale_price_ars=Decimal("500"),
-        unit_cost_ars=Decimal("300"),
-        stock_units=_STOCK_PREVIO,
+    # B·5e: con stock inicial (compra previa) a costo 300 y desde mucho antes del
+    # archivo; si no, la fila 1 también iría a «Otros» (por falta de compra) y la
+    # única fila de «Otros» que mide este archivo dejaría de ser la de fecha
+    # ilegible. Las ``_STOCK_PREVIO`` unidades son ese stock inicial.
+    return await producto_con_compra(
+        db_session,
+        tenant.tenant_id,
+        nombre=_PRODUCTO,
+        stock=_STOCK_PREVIO,
+        costo=Decimal("300"),
+        precio=Decimal("500"),
     )
-    db_session.add(p)
-    await db_session.commit()
-    return p
 
 
 @pytest_asyncio.fixture

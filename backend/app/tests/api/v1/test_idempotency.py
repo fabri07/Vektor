@@ -19,6 +19,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.domain.business_time import today_ar
+from app.tests._respaldo import producto_con_compra_http
 
 _TODAY = str(today_ar())
 
@@ -77,6 +78,15 @@ def _key() -> str:
     return str(uuid.uuid4())
 
 
+async def _con_respaldo(
+    client: AsyncClient, headers: dict[str, Any], endpoint: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """B·5e: una venta lleva producto con compra previa; el resto de los payloads, tal cual."""
+    if endpoint != "/api/v1/sales":
+        return payload
+    return {**payload, "product_id": await producto_con_compra_http(client, headers)}
+
+
 async def _count(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -101,6 +111,7 @@ class TestIdempotency:
         payload: dict[str, Any],
         summary_url: str | None,
     ) -> None:
+        payload = await _con_respaldo(client, auth_headers, endpoint, payload)
         resp = await client.post(endpoint, json=payload, headers=auth_headers)
         assert resp.status_code == 201
 
@@ -114,6 +125,7 @@ class TestIdempotency:
         summary_url: str | None,
     ) -> None:
         headers = {**auth_headers, "Idempotency-Key": _key()}
+        payload = await _con_respaldo(client, auth_headers, endpoint, payload)
 
         count_before = await _count(client, auth_headers, endpoint, summary_url)
 
@@ -133,8 +145,9 @@ class TestIdempotency:
     ) -> None:
         h1 = {**auth_headers, "Idempotency-Key": _key()}
         h2 = {**auth_headers, "Idempotency-Key": _key()}
-        r1 = await client.post("/api/v1/sales", json=_SALE_PAYLOAD, headers=h1)
-        r2 = await client.post("/api/v1/sales", json=_SALE_PAYLOAD, headers=h2)
+        payload = await _con_respaldo(client, auth_headers, "/api/v1/sales", _SALE_PAYLOAD)
+        r1 = await client.post("/api/v1/sales", json=payload, headers=h1)
+        r2 = await client.post("/api/v1/sales", json=payload, headers=h2)
         assert r1.status_code == 201
         assert r2.status_code == 201
 
@@ -148,12 +161,14 @@ class TestIdempotency:
         key = _key()
         r1 = await client.post(
             "/api/v1/sales",
-            json=_SALE_PAYLOAD,
+            json=await _con_respaldo(client, auth_headers, "/api/v1/sales", _SALE_PAYLOAD),
             headers={**auth_headers, "Idempotency-Key": key},
         )
         r2 = await client.post(
             "/api/v1/sales",
-            json=_SALE_PAYLOAD,
+            json=await _con_respaldo(
+                client, second_auth_headers, "/api/v1/sales", _SALE_PAYLOAD
+            ),
             headers={**second_auth_headers, "Idempotency-Key": key},
         )
         assert r1.status_code == 201

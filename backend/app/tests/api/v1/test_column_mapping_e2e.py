@@ -31,6 +31,7 @@ from app.persistence.models.file import (
 )
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.tests._respaldo import productos_con_compra
 
 # ── Fixture: archivo con headers y datos ─────────────────────────────────────
 
@@ -76,6 +77,31 @@ def _make_file(
 @pytest_asyncio.fixture
 async def sale_file(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
     record = _make_file(sample_tenant.tenant_id)
+    db_session.add(record)
+    await db_session.commit()
+    return record
+
+
+#: B·5e: una venta importada sin producto, o de uno sin compra, va a «Otros». Los
+#: tests de confirm de este archivo miden el mapeo, así que el archivo trae la
+#: columna del producto y los productos ya tienen su compra.
+_PRODUCTO = {"source_column": "Producto", "target_field": "product_name"}
+
+
+@pytest_asyncio.fixture
+async def sale_file_vendible(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    """``sale_file`` + columna ``Producto`` de productos con compra previa."""
+    await productos_con_compra(db_session, sample_tenant.tenant_id, ["Jugo", "Gaseosa"])
+    record = _make_file(
+        sample_tenant.tenant_id,
+        headers=["Fecha", "P. Unitario", "Cant.", "Descripcion", "Producto"],
+        rows=[
+            {"Fecha": "2024-01-15", "P. Unitario": "1500", "Cant.": "2",
+             "Descripcion": "Jugo", "Producto": "Jugo"},
+            {"Fecha": "2024-01-16", "P. Unitario": "800", "Cant.": "1",
+             "Descripcion": "Gaseosa", "Producto": "Gaseosa"},
+        ],
+    )
     db_session.add(record)
     await db_session.commit()
     return record
@@ -202,17 +228,18 @@ class TestConfirmWithColumnMappings:
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
-        sale_file: UploadedFile,
+        sale_file_vendible: UploadedFile,
         db_session: AsyncSession,
         mock_score_trigger_e2e: unittest.mock.MagicMock,
     ) -> None:
         """column_mappings explícitos: la fecha se importa desde la columna correcta."""
         response = await client.post(
-            f"/api/v1/ingestion/files/{sale_file.id}/confirm",
+            f"/api/v1/ingestion/files/{sale_file_vendible.id}/confirm",
             headers=auth_headers,
             json={
                 "confirmed_fields": {"ventas": True, "gastos": False, "productos": False},
                 "column_mappings": [
+                    _PRODUCTO,
                     {"source_column": "Fecha", "target_field": "transaction_date"},
                     {"source_column": "P. Unitario", "target_field": "amount"},
                     {"source_column": "Cant.", "target_field": "quantity"},
@@ -226,7 +253,7 @@ class TestConfirmWithColumnMappings:
 
         # Verificar que las ventas se importaron con la fecha correcta
         result = await db_session.execute(
-            select(SaleEntry).where(SaleEntry.tenant_id == sale_file.tenant_id)
+            select(SaleEntry).where(SaleEntry.tenant_id == sale_file_vendible.tenant_id)
         )
         sales = result.scalars().all()
         assert len(sales) == 2
@@ -241,7 +268,7 @@ class TestConfirmWithColumnMappings:
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
-        sale_file: UploadedFile,
+        sale_file_vendible: UploadedFile,
         db_session: AsyncSession,
         mock_score_trigger_e2e: unittest.mock.MagicMock,
     ) -> None:
@@ -249,11 +276,12 @@ class TestConfirmWithColumnMappings:
         from app.persistence.models.column_mapping import TenantColumnMapping  # noqa: PLC0415
 
         await client.post(
-            f"/api/v1/ingestion/files/{sale_file.id}/confirm",
+            f"/api/v1/ingestion/files/{sale_file_vendible.id}/confirm",
             headers=auth_headers,
             json={
                 "confirmed_fields": {"ventas": True},
                 "column_mappings": [
+                    _PRODUCTO,
                     {"source_column": "Fecha", "target_field": "transaction_date"},
                     {"source_column": "P. Unitario", "target_field": "amount"},
                 ],
@@ -262,7 +290,7 @@ class TestConfirmWithColumnMappings:
 
         result = await db_session.execute(
             select(TenantColumnMapping).where(
-                TenantColumnMapping.tenant_id == sale_file.tenant_id,
+                TenantColumnMapping.tenant_id == sale_file_vendible.tenant_id,
                 TenantColumnMapping.entity_type == "sale",
             )
         )
@@ -300,17 +328,18 @@ class TestConfirmWithColumnMappings:
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
-        sale_file: UploadedFile,
+        sale_file_vendible: UploadedFile,
         db_session: AsyncSession,
         mock_score_trigger_e2e: unittest.mock.MagicMock,
     ) -> None:
         """Mapear a custom_field:obs crea TenantCustomFieldDefinition."""
         response = await client.post(
-            f"/api/v1/ingestion/files/{sale_file.id}/confirm",
+            f"/api/v1/ingestion/files/{sale_file_vendible.id}/confirm",
             headers=auth_headers,
             json={
                 "confirmed_fields": {"ventas": True},
                 "column_mappings": [
+                    _PRODUCTO,
                     {"source_column": "Fecha", "target_field": "transaction_date"},
                     {"source_column": "P. Unitario", "target_field": "amount"},
                     {"source_column": "Descripcion", "target_field": "custom_field:obs_venta"},
@@ -322,7 +351,7 @@ class TestConfirmWithColumnMappings:
         # Verificar que se creó la definición del campo personalizado
         result = await db_session.execute(
             select(TenantCustomFieldDefinition).where(
-                TenantCustomFieldDefinition.tenant_id == sale_file.tenant_id,
+                TenantCustomFieldDefinition.tenant_id == sale_file_vendible.tenant_id,
                 TenantCustomFieldDefinition.field_key == "obs_venta",
                 TenantCustomFieldDefinition.entity_type == "sale",
             )
@@ -408,16 +437,17 @@ class TestLearnedMappings:
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
-        sale_file: UploadedFile,
+        sale_file_vendible: UploadedFile,
         mock_score_trigger_e2e: unittest.mock.MagicMock,
     ) -> None:
         """Después de confirmar, GET /column-mappings devuelve el mapeo aprendido."""
         await client.post(
-            f"/api/v1/ingestion/files/{sale_file.id}/confirm",
+            f"/api/v1/ingestion/files/{sale_file_vendible.id}/confirm",
             headers=auth_headers,
             json={
                 "confirmed_fields": {"ventas": True},
                 "column_mappings": [
+                    _PRODUCTO,
                     {"source_column": "Fecha", "target_field": "transaction_date"},
                     {"source_column": "P. Unitario", "target_field": "amount"},
                 ],
@@ -427,10 +457,11 @@ class TestLearnedMappings:
         response = await client.get("/api/v1/ingestion/column-mappings", headers=auth_headers)
         assert response.status_code == 200
         data = response.json()
-        assert len(data) == 2
+        assert len(data) == 3  # fecha, p._unitario y producto (B·5e)
         mapping_dict = {m["source_column"]: m["target_field"] for m in data}
         assert mapping_dict.get("fecha") == "transaction_date"
         assert mapping_dict.get("p._unitario") == "amount"
+        assert mapping_dict.get("producto") == "product_name"
         # confirmed_count debe ser 1
         assert all(m["confirmed_count"] == 1 for m in data)
 
@@ -438,17 +469,18 @@ class TestLearnedMappings:
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
-        sale_file: UploadedFile,
+        sale_file_vendible: UploadedFile,
         mock_score_trigger_e2e: unittest.mock.MagicMock,
     ) -> None:
         """DELETE /column-mappings/{id} elimina el mapeo y devuelve 204."""
         # Primero crear un mapeo vía confirm
         await client.post(
-            f"/api/v1/ingestion/files/{sale_file.id}/confirm",
+            f"/api/v1/ingestion/files/{sale_file_vendible.id}/confirm",
             headers=auth_headers,
             json={
                 "confirmed_fields": {"ventas": True},
                 "column_mappings": [
+                    _PRODUCTO,
                     {"source_column": "Fecha", "target_field": "transaction_date"},
                     {"source_column": "P. Unitario", "target_field": "amount"},
                 ],
@@ -525,7 +557,11 @@ class TestLearnedMappings:
 
 def _make_multisheet_file(tenant_id: uuid.UUID) -> UploadedFile:
     """Archivo multi-hoja con dos contextos (ventas + gastos) y marcadores __context__."""
-    ventas = [{"Fecha": "2024-01-15", "Valor": "5400", "__context__": "sheet:Ventas"}]
+    # B·5e: la venta lleva producto («Jugo», con compra en el fixture); sin él iría
+    # a «Otros» y estos tests medirían esa regla en vez del mapeo por hoja.
+    ventas = [
+        {"Fecha": "2024-01-15", "Valor": "5400", "Producto": "Jugo", "__context__": "sheet:Ventas"}
+    ]
     gastos = [{"Fecha": "2024-01-15", "Importe": "12000", "__context__": "sheet:Gastos"}]
     return UploadedFile(
         tenant_id=tenant_id,
@@ -542,16 +578,16 @@ def _make_multisheet_file(tenant_id: uuid.UUID) -> UploadedFile:
             "inferred_type": "mixed",
             "multi_sheet": True,
             "confidence": "HIGH",
-            "headers": ["Fecha", "Valor"],
+            "headers": ["Fecha", "Valor", "Producto"],
             "mapping_contexts": [
                 {
                     "context_id": "sheet:Ventas",
                     "label": "Ventas",
                     "source_kind": "sheet",
                     "entity_type": "sale",
-                    "headers": ["Fecha", "Valor"],
+                    "headers": ["Fecha", "Valor", "Producto"],
                     "fields": None,
-                    "preview_rows": [{"Fecha": "2024-01-15", "Valor": "5400"}],
+                    "preview_rows": [{"Fecha": "2024-01-15", "Valor": "5400", "Producto": "Jugo"}],
                     "row_count": 1,
                 },
                 {
@@ -575,6 +611,7 @@ def _make_multisheet_file(tenant_id: uuid.UUID) -> UploadedFile:
 
 @pytest_asyncio.fixture
 async def multisheet_file(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    await productos_con_compra(db_session, sample_tenant.tenant_id, ["Jugo"])
     record = _make_multisheet_file(sample_tenant.tenant_id)
     db_session.add(record)
     await db_session.commit()
@@ -623,6 +660,12 @@ class TestConfirmWithContextMappings:
             json={
                 "confirmed_fields": {},
                 "column_mappings": [
+                    {
+                        "source_column": "Producto",
+                        "target_field": "product_name",
+                        "context_id": "sheet:Ventas",
+                        "entity_type": "sale",
+                    },
                     {
                         "source_column": "Valor",
                         "target_field": "amount",
@@ -684,6 +727,12 @@ class TestConfirmWithContextMappings:
             json={
                 "confirmed_fields": {},
                 "column_mappings": [
+                    {
+                        "source_column": "Producto",
+                        "target_field": "product_name",
+                        "context_id": "sheet:Ventas",
+                        "entity_type": "sale",
+                    },
                     {
                         "source_column": "Valor",
                         "target_field": "amount",

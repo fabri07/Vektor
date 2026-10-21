@@ -13,6 +13,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.domain.business_time import today_ar
+from app.tests._respaldo import producto_con_compra_http
 
 _TODAY = str(today_ar())
 
@@ -170,6 +171,7 @@ class TestMarketingDashboard:
         sale = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "2000.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,

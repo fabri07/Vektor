@@ -33,12 +33,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.application.services.respaldo_service import MOTIVO_VENTA_SIN_PRODUCTO
 from app.domain.business_time import today_ar
 from app.domain.comprobante_de_compra import MOTIVO_COMPRA_SIN_ARTICULOS
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
 from app.state.business_state_service import compute_business_state
+from app.tests._respaldo import archivo_de_prueba, productos_con_compra
 from app.tests.state.test_business_state_service import FakeRedis
 
 _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -50,14 +52,14 @@ def _sin_broker(mock_score_trigger: Any) -> None:
     """Sin broker, cada import paga reintentos de kombu."""
 
 
-def _libro() -> bytes:
+def _libro(detalle_venta: str = "Venta del día") -> bytes:
     wb = Workbook()
     ld = wb.active
     ld.title = "Libro Diario"
     for fila in (
         ["Fecha", "Detalle", "Dinero", None, "Mercadería", None],
         [None, None, "Ingreso", "Egreso", "Ingreso", "Egreso"],
-        [_HOY, "Venta del día", 120000, None, None, None],
+        [_HOY, detalle_venta, 120000, None, None, None],
         [None, "Compra textiles", None, 50000, 50000, None],
         [None, "Pago luz", None, 15000, None, None],
     ):
@@ -67,14 +69,8 @@ def _libro() -> bytes:
     return buf.getvalue()
 
 
-async def test_libro_diario_la_compra_va_a_otros_y_los_numeros_cambian_asi(
-    client: AsyncClient,
-    auth_headers: dict[str, str],
-    db_session: AsyncSession,
-    sample_tenant: Tenant,
-) -> None:
-    tid = sample_tenant.tenant_id
-    # Un gasto de mercadería sin producto cargado ANTES de B·5b: queda igual.
+async def _historico(db_session: AsyncSession, tid: Any) -> Any:
+    """Un gasto de mercadería sin producto cargado ANTES de B·5b: queda igual."""
     historico = ExpenseEntry(
         tenant_id=tid,
         amount=Decimal("7000"),
@@ -87,26 +83,34 @@ async def test_libro_diario_la_compra_va_a_otros_y_los_numeros_cambian_asi(
     )
     db_session.add(historico)
     await db_session.commit()
-    historico_id = historico.id
+    return historico.id
 
-    summary = parse_uploaded_content(_libro(), _XLSX, "libro.xlsx")
-    counts = await insert_confirmed_data(
-        db_session, tid, summary, {"ventas": True, "gastos": True}
-    )
-    await db_session.commit()
-    assert counts["ventas"] == 1
-    assert counts["gastos"] == 1
-    assert counts["compras_sin_articulos"] == 1
-    otros = (
+
+async def _otros(db_session: AsyncSession, tid: Any) -> list[tuple[Any, ...]]:
+    filas = (
         await db_session.execute(
-            select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tid)
+            select(UnclassifiedRecord)
+            .where(UnclassifiedRecord.tenant_id == tid)
+            .order_by(UnclassifiedRecord.context_label)
         )
     ).scalars().all()
-    assert [(o.row_data.get("detalle"), o.context_label, o.suggested_entity) for o in otros] == [
-        ("Compra textiles", MOTIVO_COMPRA_SIN_ARTICULOS, "expense")
+    # El motivo de B·5e lleva un detalle después del rótulo; se compara por prefijo.
+    def _motivo(label: str | None) -> str | None:
+        if label and label.startswith(MOTIVO_VENTA_SIN_PRODUCTO):
+            return MOTIVO_VENTA_SIN_PRODUCTO
+        return label
+
+    return [
+        (o.row_data.get("detalle"), _motivo(o.context_label), o.suggested_entity)
+        for o in filas
     ]
 
-    # Resumen económico del mes: 120.000 − (15.000 de luz + 7.000 histórico).
+
+async def _numeros(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession, tid: Any
+) -> tuple[Decimal, Decimal, Decimal, Decimal, float]:
+    """(ingresos, gastos, resultado del Resumen económico, salida líquida del BSL,
+    efectivo esperado del arqueo)."""
     resp = await client.get(
         "/api/v1/economic-summary",
         params={"from_date": today_ar().replace(day=1).isoformat(), "to_date": _HOY},
@@ -114,29 +118,101 @@ async def test_libro_diario_la_compra_va_a_otros_y_los_numeros_cambian_asi(
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert Decimal(str(body["total_income_ars"])) == Decimal("120000")
-    assert Decimal(str(body["total_expenses_ars"])) == Decimal("22000")
-    assert Decimal(str(body["net_result_ars"])) == Decimal("98000")
-
-    # BSL: la compra ya no es salida líquida ni costo de inventario real; el
-    # gasto viejo (efectivo) sigue contando.
     estado = await compute_business_state(tid, db_session, FakeRedis())  # type: ignore[arg-type]
-    assert estado.liquid_outflow_est == Decimal("22000")
-
-    # Arqueo: el efectivo esperado sale de la venta en efectivo menos los gastos
-    # en efectivo (el histórico); la compra por transferencia nunca lo tocó.
     prev = await client.get(
         f"/api/v1/cash-closes/preview?close_date={_HOY}", headers=auth_headers
     )
     assert prev.status_code == 200, prev.text
     efectivo = {b["payment_method"]: b["expected_ars"] for b in prev.json()["breakdown"]}
-    assert efectivo["cash"] == 113000.0
+    return (
+        Decimal(str(body["total_income_ars"])),
+        Decimal(str(body["total_expenses_ars"])),
+        Decimal(str(body["net_result_ars"])),
+        estado.liquid_outflow_est,
+        efectivo.get("cash", 0.0),
+    )
 
+
+async def _el_historico_sigue_igual(db_session: AsyncSession, historico_id: Any) -> None:
     viejo = await db_session.get(ExpenseEntry, historico_id)
     assert viejo is not None and viejo.voided_at is None
     assert (viejo.amount, viejo.category, viejo.expense_type) == (
         Decimal("7000.00"), "INVENTORY", "COGS"
     )
+
+
+async def test_libro_diario_la_compra_va_a_otros_y_los_numeros_cambian_asi(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """La venta del libro es de un producto con compra previa (B·5e), así que entra.
+
+    Cuentas:
+    - Resumen económico: ingresos 120.000; gastos 15.000 de luz + 7.000 histórico
+      = 22.000 (la compra textiles está en «Otros»); resultado 98.000.
+    - Salida líquida del BSL: 15.000 + 7.000 = 22.000.
+    - Efectivo esperado del arqueo: 120.000 de la venta − 7.000 del histórico =
+      113.000 (la compra y la luz son por transferencia).
+    """
+    tid = sample_tenant.tenant_id
+    historico_id = await _historico(db_session, tid)
+    await productos_con_compra(db_session, tid, ["Vela"])
+
+    summary = parse_uploaded_content(_libro(detalle_venta="Vela"), _XLSX, "libro.xlsx")
+    counts = await insert_confirmed_data(
+        db_session, tid, summary, {"ventas": True, "gastos": True}
+    )
+    await db_session.commit()
+    assert counts["ventas"] == 1
+    assert counts["gastos"] == 1
+    assert counts["compras_sin_articulos"] == 1
+    assert await _otros(db_session, tid) == [
+        ("Compra textiles", MOTIVO_COMPRA_SIN_ARTICULOS, "expense")
+    ]
+    assert await _numeros(client, auth_headers, db_session, tid) == (
+        Decimal("120000"), Decimal("22000"), Decimal("98000"), Decimal("22000"), 113000.0
+    )
+    await _el_historico_sigue_igual(db_session, historico_id)
+
+
+async def test_libro_diario_la_venta_sin_producto_tambien_va_a_otros(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """«Venta del día» no dice qué se vendió: B·5e la manda a «Otros» junto con la
+    compra sin artículos.
+
+    Cuentas:
+    - Resumen económico: ingresos 0; gastos 15.000 de luz + 7.000 histórico =
+      22.000; resultado −22.000.
+    - Salida líquida del BSL: 15.000 + 7.000 = 22.000.
+    - Efectivo esperado del arqueo: 0 de ventas − 7.000 del histórico = −7.000.
+    """
+    tid = sample_tenant.tenant_id
+    historico_id = await _historico(db_session, tid)
+
+    summary = parse_uploaded_content(_libro(), _XLSX, "libro.xlsx")
+    counts = await insert_confirmed_data(
+        db_session, tid, summary, {"ventas": True, "gastos": True},
+        uploaded_file_id=await archivo_de_prueba(db_session, tid),
+    )
+    await db_session.commit()
+    assert counts["ventas"] == 0
+    assert counts["ventas_sin_producto"] == 1
+    assert counts["gastos"] == 1
+    assert counts["compras_sin_articulos"] == 1
+    assert sorted(await _otros(db_session, tid)) == sorted([
+        ("Compra textiles", MOTIVO_COMPRA_SIN_ARTICULOS, "expense"),
+        ("Venta del día", MOTIVO_VENTA_SIN_PRODUCTO, "sale"),
+    ])
+    assert await _numeros(client, auth_headers, db_session, tid) == (
+        Decimal("0"), Decimal("22000"), Decimal("-22000"), Decimal("22000"), -7000.0
+    )
+    await _el_historico_sigue_igual(db_session, historico_id)
 
 
 async def test_un_gasto_que_solo_se_parece_a_un_producto_no_pasa_a_mercaderia(

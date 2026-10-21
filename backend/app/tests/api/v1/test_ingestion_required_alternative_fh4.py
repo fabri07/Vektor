@@ -23,6 +23,7 @@ from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, Up
 from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.tests._respaldo import productos_con_compra
 
 _CTX = "sheet:ventas marzo"
 
@@ -63,6 +64,9 @@ def _summary() -> dict[str, Any]:
 
 @pytest_asyncio.fixture
 async def archivo(db_session: AsyncSession, sample_tenant: Tenant) -> UploadedFile:
+    # B·5e: una venta importada de un producto sin compra va a «Otros»; acá se mide
+    # que precio × cantidad alcance, así que el artículo ya tiene su compra.
+    await productos_con_compra(db_session, sample_tenant.tenant_id, ["Vela aromática 200g"])
     record = UploadedFile(
         tenant_id=sample_tenant.tenant_id,
         uploaded_by=None,

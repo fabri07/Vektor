@@ -13,6 +13,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.domain.business_time import today_ar
+from app.tests._respaldo import producto_con_compra_http
 
 _TODAY = str(today_ar())
 
@@ -33,6 +34,15 @@ def _expense_payload(fecha: str) -> dict[str, Any]:
         "expense_date": fecha,
         "description": "test gasto",
     }
+
+
+async def _con_respaldo(
+    client: AsyncClient, headers: dict[str, Any], base: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    """B·5e: una venta lleva producto con compra previa; un gasto, tal cual."""
+    if base != "/api/v1/sales":
+        return body
+    return {**body, "product_id": await producto_con_compra_http(client, headers)}
 
 
 #: (base del router, factory de payload con fecha, fecha vieja del caso date-range)
@@ -82,8 +92,13 @@ class TestSummaryYDateRange:
         payload: Any,
         fecha_vieja: str,
     ) -> None:
-        await client.post(base, json=payload(fecha_vieja), headers=auth_headers)
-        await client.post(base, json=payload(_TODAY), headers=auth_headers)
+        for fecha in (fecha_vieja, _TODAY):
+            resp = await client.post(
+                base,
+                json=await _con_respaldo(client, auth_headers, base, payload(fecha)),
+                headers=auth_headers,
+            )
+            assert resp.status_code == 201, resp.text
         resp = await client.get(f"{base}/date-range", headers=auth_headers)
         data = resp.json()
         assert data["min_date"] == fecha_vieja
@@ -98,7 +113,12 @@ class TestSummaryYDateRange:
         payload: Any,
         fecha_vieja: str,
     ) -> None:
-        await client.post(base, json=payload(_TODAY), headers=auth_headers)
+        resp = await client.post(
+            base,
+            json=await _con_respaldo(client, auth_headers, base, payload(_TODAY)),
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201, resp.text
 
         resp_b = await client.get(f"{base}/summary", headers=second_auth_headers)
         assert resp_b.json()["entry_count"] == 0

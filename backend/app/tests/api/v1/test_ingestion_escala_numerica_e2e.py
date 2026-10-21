@@ -28,6 +28,7 @@ from app.application.services.file_parsing import parse_uploaded_content
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
+from app.tests._respaldo import productos_con_compra
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -50,6 +51,9 @@ def _planilla(filas: list[list[Any]]) -> bytes:
 
 
 async def _subir(db_session: AsyncSession, tenant: Tenant, contenido: bytes) -> UploadedFile:
+    # B·5e: la venta importada de un producto sin compra va a «Otros»; acá se mide
+    # la escala del monto, así que la «Vela» del archivo ya tiene su compra.
+    await productos_con_compra(db_session, tenant.tenant_id, ["Vela"])
     record = UploadedFile(
         tenant_id=tenant.tenant_id,
         uploaded_by=None,

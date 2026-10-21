@@ -1,5 +1,6 @@
 "use client";
 
+import { mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
 import { useEffect, useState } from "react";
 import { aUnidadesBase, enUnidadDeVenta } from "@/lib/pos/saleUnit";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -279,7 +280,9 @@ export default function SalesPage() {
       await queryClient.invalidateQueries({ queryKey: ["sales-entries"] });
       await queryClient.invalidateQueries({ queryKey: ["sales-all"] });
     },
-    onError: () => toast("No se pudo actualizar la venta.", "error"),
+    // B·5e: cambiar el producto o la fecha revalida la compra previa; el
+    // servidor dice de qué producto falta.
+    onError: (e) => toast(mensajeDelServidor(e) ?? "No se pudo actualizar la venta.", "error"),
   });
 
   const deleteMutation = useMutation({

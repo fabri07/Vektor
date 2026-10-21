@@ -36,11 +36,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
+from app.application.services.respaldo_service import MOTIVO_VENTA_SIN_COMPRA
 from app.domain.inventory_effect import HISTORICAL_REPLAY
 from app.persistence.models.memory import OperationFingerprint
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import archivo_de_prueba, producto_con_compra
 
 _VENTAS = "sheet:ventas"
 _COMPRAS = "sheet:compras"
@@ -66,6 +69,11 @@ _MAPPINGS_VENTA_CON_CANTIDAD: dict[str, dict[str, str]] = {
     _VENTAS: {**_MAPPINGS[_VENTAS], "cantidad": "quantity"},
 }
 _CONFIRMED = {_VENTAS: True, _COMPRAS: True}
+#: B·5e: la compra con costo unitario respalda a la venta (sin costo no es fuente).
+_MAPPINGS_COMPRA_CON_COSTO: dict[str, dict[str, str]] = {
+    **_MAPPINGS,
+    _COMPRAS: {**_MAPPINGS[_COMPRAS], "costo_unitario": "unit_cost_ars"},
+}
 
 _PRODUCTO = "Vela aromática 200g"
 
@@ -166,6 +174,16 @@ async def _importar(
     )
 
 
+def _con_costo(resumen: dict[str, Any], costo: str = "1200") -> dict[str, Any]:
+    """La compra del libro con su costo unitario (6000 / 5 = 1200)."""
+    for fila in resumen["gastos_detectados"]:
+        fila["costo_unitario"] = costo
+    for ctx in resumen["mapping_contexts"]:
+        if ctx["context_id"] == _COMPRAS:
+            ctx["headers"] = [*ctx["headers"], "costo_unitario"]
+    return resumen
+
+
 async def _contar(db: AsyncSession, modelo: Any) -> int:
     return int((await db.execute(select(func.count()).select_from(modelo))).scalar_one())
 
@@ -183,6 +201,10 @@ class TestIdempotenciaDelImport:
     ) -> None:
         file_id = uuid.uuid4()
         resumen = _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05")
+        # B·5e: la compra del archivo no trae costo unitario (monto total sin
+        # columna de costo) y no respalda la venta; sin respaldo la venta iría a
+        # «Otros» y no habría nada que duplicar. El producto ya tiene su compra.
+        await producto_con_compra(db_session, sample_tenant.tenant_id, nombre=_PRODUCTO)
 
         await _importar(db_session, sample_tenant, resumen, file_id=file_id)
         await db_session.flush()
@@ -252,11 +274,16 @@ class TestIdentidadDesdeCompra:
     async def test_la_venta_vincula_con_el_producto_que_declara_la_compra(
         self, db_session: AsyncSession, sample_tenant: Tenant
     ) -> None:
-        """Hoja de Ventas primera, compra ANTERIOR: el caso fácil por fecha."""
+        """Hoja de Ventas primera, compra ANTERIOR: el caso fácil por fecha.
+
+        B·5e: la compra trae su costo unitario, así respalda a la venta y la venta
+        queda (sin costo iría a «Otros» y no habría venta que mirar).
+        """
         await _importar(
             db_session,
             sample_tenant,
-            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05"),
+            _con_costo(_summary(fecha_venta="2024-03-10", fecha_compra="2024-03-05")),
+            context_mappings=_MAPPINGS_COMPRA_CON_COSTO,
         )
 
         producto = (await db_session.execute(select(Product))).scalars().one()
@@ -272,16 +299,26 @@ class TestIdentidadDesdeCompra:
         por fecha manda la venta primero, y si el producto recién nace cuando
         se aplica su compra, la venta queda huérfana. La identidad tiene que
         declararse ANTES de la cola de movimientos, no durante.
+
+        B·5e: una compra posterior no respalda la venta, así que la venta va a
+        «Otros». La identidad se sigue viendo en el MOTIVO: vinculada, es «sin
+        compra previa» de ese producto; huérfana, sería «sin producto».
         """
         await _importar(
             db_session,
             sample_tenant,
-            _summary(fecha_venta="2024-03-10", fecha_compra="2024-03-20"),
+            _con_costo(_summary(fecha_venta="2024-03-10", fecha_compra="2024-03-20")),
+            context_mappings=_MAPPINGS_COMPRA_CON_COSTO,
+            file_id=await archivo_de_prueba(db_session, sample_tenant.tenant_id),
         )
 
-        producto = (await db_session.execute(select(Product))).scalars().one()
-        venta = (await db_session.execute(select(SaleEntry))).scalars().one()
-        assert venta.product_id == producto.id
+        assert await _contar(db_session, Product) == 1
+        assert await _contar(db_session, SaleEntry) == 0
+        capturas = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
+        assert len(capturas) == 1
+        motivo = capturas[0].context_label or ""
+        assert motivo.startswith(MOTIVO_VENTA_SIN_COMPRA), motivo
+        assert _PRODUCTO in motivo
 
 
 class TestInvarianteTemporal:

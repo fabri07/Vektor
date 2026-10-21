@@ -38,6 +38,7 @@ from app.application.services.idempotency import (
     legacy_idempotency_key_claimed,
     record_idempotent_response,
 )
+from app.application.services.respaldo_service import exigir_respaldo
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
@@ -356,6 +357,15 @@ async def bulk_create_sales(
     # por línea aislada. Si algún producto excede su stock → InsufficientStockError →
     # handler global 400 y toda la carga aborta (rollback: no queda ninguna venta). Filas
     # sin product_id (agregado) no tocan stock. Orden estable por id (anti-deadlock).
+    # B·5e: cada línea con producto y compra previa a la fecha del período; el
+    # total del período sin productos ya no se acepta (no tiene compra ni costo).
+    await exigir_respaldo(
+        session,
+        tenant.tenant_id,
+        [(item.product_id, body.period_date) for item in body.entries]
+        if body.entries
+        else [(None, body.period_date)],
+    )
     qty_by_product: dict[UUID, int] = {}
     for item in body.entries or []:
         if item.product_id is not None:
@@ -492,6 +502,13 @@ async def create_manual_batch_sale(
                 item.product_id, product.stock_units, item.quantity, product.name
             )
 
+    # B·5e: cada producto con compra previa (o stock inicial con costo) a la fecha.
+    await exigir_respaldo(
+        session,
+        tenant.tenant_id,
+        [(item.product_id, body.transaction_date.date()) for item in body.items],
+    )
+
     repo = SaleRepository(session)
     group_id = uuid.uuid4()
     saved: list[SaleEntry] = []
@@ -597,6 +614,12 @@ async def create_sale(
         notes=body.notes,
         custom_fields=body.custom_fields,
     )
+    # B·5e: toda venta con producto y con compra previa (o stock inicial con costo)
+    # a su fecha. Sin producto → 422 SALE_NEEDS_PRODUCT; sin compra → 422
+    # SALE_WITHOUT_PURCHASE (handlers globales). La cantidad, el chequeo de abajo.
+    await exigir_respaldo(
+        session, tenant.tenant_id, [(body.product_id, body.transaction_date.date())]
+    )
     # NO se permite stock negativo: validar ANTES de persistir. Si no alcanza, 400 (handler
     # global) y no se crea la SaleEntry ni el movimiento. Sin product_id → no toca stock.
     if body.product_id is not None:
@@ -653,6 +676,15 @@ async def update_sale(
     _new_quantity = body.quantity if body.quantity is not None else _prev_quantity
     _is_live_sale = entry.source_upload_id is None
     _stock_changed = _new_product_id != _prev_product_id or _new_quantity != _prev_quantity
+    # B·5e: cambiar el producto o la fecha revalida la compra previa (en vivo o
+    # importada). Editar otra cosa de una venta vieja no la vuelve a juzgar.
+    _new_date = (
+        body.transaction_date if body.transaction_date is not None else entry.transaction_date
+    )
+    if _new_product_id != _prev_product_id or (
+        body.transaction_date is not None and body.transaction_date != entry.transaction_date
+    ):
+        await exigir_respaldo(session, tenant.tenant_id, [(_new_product_id, _new_date.date())])
     if _is_live_sale and _stock_changed:
         await stock_service.validate_sale_update_stock(
             entry.id,

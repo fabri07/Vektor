@@ -13,6 +13,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.domain.business_time import today_ar
+from app.tests._respaldo import producto_con_compra_http
 
 _TODAY = str(today_ar())
 
@@ -70,6 +71,7 @@ class TestSaleCustomerLink:
         sale = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "2500.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -86,6 +88,7 @@ class TestSaleCustomerLink:
         other_sale = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "999.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -208,6 +211,7 @@ class TestLocalSentinel:
         sale = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": amount,
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -363,6 +367,7 @@ class TestCountCustomersEndpoint:
         sale = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "100.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -430,6 +435,7 @@ class TestFiadoRequiresRealCustomer:
         resp = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "500.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -449,6 +455,7 @@ class TestFiadoRequiresRealCustomer:
         resp = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "500.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -467,6 +474,7 @@ class TestFiadoRequiresRealCustomer:
         orphan = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "100.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -479,6 +487,7 @@ class TestFiadoRequiresRealCustomer:
         resp = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "500.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,
@@ -513,6 +522,7 @@ class TestCustomerRepositorySentinelExclusion:
         orphan = await client.post(
             "/api/v1/sales",
             json={
+                "product_id": await producto_con_compra_http(client, auth_headers),
                 "amount": "100.00",
                 "quantity": 1,
                 "transaction_date": _TODAY,

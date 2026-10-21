@@ -7,6 +7,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.domain.business_time import today_ar
+from app.tests._respaldo import producto_con_compra_http
 
 _TODAY = str(today_ar())
 
@@ -16,15 +17,19 @@ _BULK_PAYLOAD = {
     "total_amount_ars": "50000.00",
 }
 
-_BULK_PAYLOAD_WITH_ENTRIES = {
-    "period_type": "daily",
-    "period_date": _TODAY,
-    "total_amount_ars": "3000.00",
-    "entries": [
-        {"amount_ars": "1000.00", "quantity": 2},
-        {"amount_ars": "2000.00", "quantity": 1},
-    ],
-}
+async def _bulk_with_entries(client: AsyncClient, headers: dict[str, Any]) -> dict[str, Any]:
+    """Carga del día con dos líneas, cada una con un producto con compra previa (B·5e)."""
+    p1 = await producto_con_compra_http(client, headers)
+    p2 = await producto_con_compra_http(client, headers)
+    return {
+        "period_type": "daily",
+        "period_date": _TODAY,
+        "total_amount_ars": "3000.00",
+        "entries": [
+            {"amount_ars": "1000.00", "quantity": 2, "product_id": p1},
+            {"amount_ars": "2000.00", "quantity": 1, "product_id": p2},
+        ],
+    }
 
 _SINGLE_PAYLOAD = {
     "amount": "1500.00",
@@ -34,35 +39,72 @@ _SINGLE_PAYLOAD = {
 }
 
 
+async def _con_producto(
+    client: AsyncClient, headers: dict[str, Any], **over: Any
+) -> dict[str, Any]:
+    """`_SINGLE_PAYLOAD` con un producto con compra previa: desde B·5e toda venta lo
+    exige. Para los tests que prueban otra cosa y sólo necesitan «una venta»."""
+    pid = await producto_con_compra_http(client, headers)
+    return {**_SINGLE_PAYLOAD, "product_id": pid, **over}
+
+
+async def _venta_vieja_sin_producto(
+    db_session: Any, tenant_id: Any, *, quantity: int = 3, source_upload_id: Any = None
+) -> str:
+    """Una venta sin producto cargada ANTES de B·5e: ya no se puede crear por la API,
+    pero las que existen siguen en la base y se corrigen asociándoles el producto."""
+    from datetime import datetime  # noqa: PLC0415
+    from decimal import Decimal  # noqa: PLC0415
+
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    hoy = today_ar()
+    sale = SaleEntry(
+        tenant_id=tenant_id,
+        amount=Decimal("1500.00"),
+        quantity=quantity,
+        transaction_date=datetime(hoy.year, hoy.month, hoy.day, 12),
+        payment_method="cash",
+        source_upload_id=source_upload_id,
+    )
+    db_session.add(sale)
+    await db_session.flush()
+    return str(sale.id)
+
+
 class TestSalesBulk:
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
         pass
 
-    async def test_bulk_without_entries_creates_one_record(
+    async def test_bulk_sin_entries_se_rechaza_sin_producto(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
+        """B·5e: el total del período sin productos ya no se acepta (no tiene compra
+        previa ni costo). Antes creaba un único registro agregado."""
         resp = await client.post("/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=auth_headers)
-        assert resp.status_code == 201
-        data = resp.json()
-        assert len(data) == 1
-        # amount se serializa como número (no string) para que el frontend sume sin NaN.
-        assert data[0]["amount"] == 50000.0
-        # transaction_date ahora es datetime ISO ("YYYY-MM-DDThh:mm:ss"); chequear la fecha.
-        assert data[0]["transaction_date"].startswith(_TODAY)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "SALE_NEEDS_PRODUCT"
+        count = await client.get("/api/v1/sales/count", headers=auth_headers)
+        assert count.json() == {"total": 0}
 
     async def test_bulk_with_entries_creates_multiple_records(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         resp = await client.post(
-            "/api/v1/sales/bulk", json=_BULK_PAYLOAD_WITH_ENTRIES, headers=auth_headers
+            "/api/v1/sales/bulk",
+            json=await _bulk_with_entries(client, auth_headers),
+            headers=auth_headers,
         )
-        assert resp.status_code == 201
+        assert resp.status_code == 201, resp.text
         data = resp.json()
         assert len(data) == 2
+        # amount se serializa como número (no string) para que el frontend sume sin NaN.
         amounts = {d["amount"] for d in data}
         assert 1000.0 in amounts
         assert 2000.0 in amounts
+        # transaction_date es datetime ISO ("YYYY-MM-DDThh:mm:ss"); chequear la fecha.
+        assert all(d["transaction_date"].startswith(_TODAY) for d in data)
 
     async def test_bulk_invalid_period_type(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -88,10 +130,18 @@ class TestSalesSummary:
     async def test_summary_counts_entries(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        await client.post("/api/v1/sales/bulk", json=_BULK_PAYLOAD, headers=auth_headers)
-        await client.post(
-            "/api/v1/sales/bulk", json=_BULK_PAYLOAD_WITH_ENTRIES, headers=auth_headers
+        r1 = await client.post(
+            "/api/v1/sales",
+            json=await _con_producto(client, auth_headers, amount="50000.00"),
+            headers=auth_headers,
         )
+        assert r1.status_code == 201, r1.text
+        r2 = await client.post(
+            "/api/v1/sales/bulk",
+            json=await _bulk_with_entries(client, auth_headers),
+            headers=auth_headers,
+        )
+        assert r2.status_code == 201, r2.text
         resp = await client.get("/api/v1/sales/summary", headers=auth_headers)
         data = resp.json()
         assert data["entry_count"] == 3  # 1 + 2
@@ -112,8 +162,11 @@ class TestSalesDateRange:
         Con transaction_date como DATETIME, `<= to_date` (medianoche) la excluiría;
         el filtro usa func.date() para preservar la semántica por día.
         """
-        afternoon = {**_SINGLE_PAYLOAD, "transaction_date": f"{_TODAY}T23:30:00"}
-        await client.post("/api/v1/sales", json=afternoon, headers=auth_headers)
+        afternoon = await _con_producto(
+            client, auth_headers, transaction_date=f"{_TODAY}T23:30:00"
+        )
+        r = await client.post("/api/v1/sales", json=afternoon, headers=auth_headers)
+        assert r.status_code == 201, r.text
         resp = await client.get(
             f"/api/v1/sales?from_date={_TODAY}&to_date={_TODAY}", headers=auth_headers
         )
@@ -146,8 +199,9 @@ class TestSalesCount:
     async def test_count_matches_total_beyond_first_page(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
+        payload = await _con_producto(client, auth_headers)
         for _ in range(3):
-            resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+            resp = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
             assert resp.status_code == 201
 
         resp = await client.get("/api/v1/sales/count", headers=auth_headers)
@@ -157,9 +211,11 @@ class TestSalesCount:
     async def test_count_respects_date_range_filter(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
-        old = {**_SINGLE_PAYLOAD, "transaction_date": "2020-01-01"}
-        await client.post("/api/v1/sales", json=old, headers=auth_headers)
+        payload = await _con_producto(client, auth_headers)
+        r1 = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
+        old = {**payload, "transaction_date": "2020-01-01"}
+        r2 = await client.post("/api/v1/sales", json=old, headers=auth_headers)
+        assert (r1.status_code, r2.status_code) == (201, 201), (r1.text, r2.text)
 
         resp = await client.get(
             f"/api/v1/sales/count?from_date={_TODAY}&to_date={_TODAY}",
@@ -201,7 +257,9 @@ class TestSalesTenantIsolation:
         second_auth_headers: dict[str, Any],
     ) -> None:
         # Tenant A creates a sale
-        create_resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        create_resp = await client.post(
+            "/api/v1/sales", json=await _con_producto(client, auth_headers), headers=auth_headers
+        )
         assert create_resp.status_code == 201
         sale_id = create_resp.json()["id"]
 
@@ -227,7 +285,10 @@ class TestSalesTenantIsolation:
         auth_headers: dict[str, Any],
         second_auth_headers: dict[str, Any],
     ) -> None:
-        create_resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        create_resp = await client.post(
+            "/api/v1/sales", json=await _con_producto(client, auth_headers), headers=auth_headers
+        )
+        assert create_resp.status_code == 201, create_resp.text
         sale_id = create_resp.json()["id"]
 
         resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=second_auth_headers)
@@ -257,7 +318,10 @@ class TestSalesRBAC:
         auth_headers: dict[str, Any],
         viewer_headers: dict[str, Any],
     ) -> None:
-        create_resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        create_resp = await client.post(
+            "/api/v1/sales", json=await _con_producto(client, auth_headers), headers=auth_headers
+        )
+        assert create_resp.status_code == 201, create_resp.text
         sale_id = create_resp.json()["id"]
         resp = await client.delete(f"/api/v1/sales/{sale_id}", headers=viewer_headers)
         assert resp.status_code == 403
@@ -389,11 +453,16 @@ class TestLiveSaleStockDecrement:
         assert resp.status_code == 201, resp.text
         assert await self._stock(client, auth_headers, pid) == 7
 
-    async def test_create_sale_without_product_does_not_break(
+    async def test_create_sale_sin_producto_se_rechaza(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
+        """B·5e: una venta sin producto no tiene compra previa ni costo → 422 (antes 201)."""
         resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
-        assert resp.status_code == 201, resp.text
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "SALE_NEEDS_PRODUCT"
+        assert (await client.get("/api/v1/sales/count", headers=auth_headers)).json() == {
+            "total": 0
+        }
 
     async def test_bulk_with_product_decrements_stock_per_line(
         self, client: AsyncClient, auth_headers: dict[str, Any]
@@ -529,14 +598,12 @@ class TestLiveSaleStockDecrement:
         assert await self._stock(client, auth_headers, pid) == 5  # intacto
 
     async def test_patch_associate_product_decrements_when_enough(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session, sample_tenant
     ) -> None:
         """PATCH de sin-producto a con-producto con stock suficiente → descuenta."""
         pid = await _create_product(client, auth_headers, "Sal", stock=10, price="100.00")
-        # Venta sin producto: no toca stock.
-        sale_id = (
-            await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
-        ).json()["id"]
+        # Venta vieja sin producto: no toca stock.
+        sale_id = await _venta_vieja_sin_producto(db_session, sample_tenant.tenant_id)
         resp = await client.patch(
             f"/api/v1/sales/{sale_id}",
             json={"product_id": pid, "quantity": 3},
@@ -546,17 +613,13 @@ class TestLiveSaleStockDecrement:
         assert await self._stock(client, auth_headers, pid) == 7  # descontó 3
 
     async def test_patch_associate_product_rejected_when_insufficient(
-        self, client: AsyncClient, auth_headers: dict[str, Any]
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session, sample_tenant
     ) -> None:
         """PATCH de sin-producto a con-producto sin stock suficiente → 400, stock intacto."""
         pid = await _create_product(client, auth_headers, "Azúcar", stock=2, price="100.00")
-        sale_id = (
-            await client.post(
-                "/api/v1/sales",
-                json={**_SINGLE_PAYLOAD, "quantity": 5},
-                headers=auth_headers,
-            )
-        ).json()["id"]
+        sale_id = await _venta_vieja_sin_producto(
+            db_session, sample_tenant.tenant_id, quantity=5
+        )
         resp = await client.patch(
             f"/api/v1/sales/{sale_id}",
             json={"product_id": pid},  # quantity queda en 5
@@ -586,10 +649,11 @@ class TestLiveSaleStockDecrement:
         assert resp.status_code == 400, resp.text
         assert await self._stock(client, auth_headers, pid) == 2  # sin cambios
 
-    async def test_patch_disassociate_product_replenishes(
+    async def test_patch_desasociar_el_producto_se_rechaza(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        """PATCH de con-producto a sin-producto → repone el stock descontado."""
+        """B·5e: PATCH de con-producto a sin-producto → 422 SALE_NEEDS_PRODUCT y el stock
+        queda como estaba (antes se aceptaba y reponía el stock)."""
         pid = await _create_product(client, auth_headers, "Leche", stock=10, price="100.00")
         sale_id = (
             await client.post(
@@ -603,26 +667,22 @@ class TestLiveSaleStockDecrement:
         resp = await client.patch(
             f"/api/v1/sales/{sale_id}", json={"product_id": None}, headers=auth_headers
         )
-        assert resp.status_code == 200, resp.text
-        assert await self._stock(client, auth_headers, pid) == 10  # repuesto
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "SALE_NEEDS_PRODUCT"
+        assert await self._stock(client, auth_headers, pid) == 6  # sin cambios
 
     async def test_patch_imported_sale_does_not_auto_decrement(
-        self, client: AsyncClient, auth_headers: dict[str, Any], db_session
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session, sample_tenant
     ) -> None:
         """Editar una venta importada/releída (source_upload_id) NO arranca a descontar:
         su cantidad ya la cuenta la integridad desde sales_entries."""
         import uuid as _uuid  # noqa: PLC0415
 
-        from app.persistence.models.transaction import SaleEntry as _SaleEntry  # noqa: PLC0415
-
         pid = await _create_product(client, auth_headers, "Aceite", stock=10, price="100.00")
-        # Venta sin producto (sin movimiento) → marcarla como importada en la DB.
-        sale_id = (
-            await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
-        ).json()["id"]
-        sale = await db_session.get(_SaleEntry, _uuid.UUID(sale_id))
-        sale.source_upload_id = _uuid.uuid4()
-        await db_session.flush()
+        # Venta importada sin producto (sin movimiento).
+        sale_id = await _venta_vieja_sin_producto(
+            db_session, sample_tenant.tenant_id, source_upload_id=_uuid.uuid4()
+        )
 
         # Asociar producto + cantidad: por ser importada NO debe descontar stock.
         resp = await client.patch(
@@ -684,8 +744,9 @@ class TestSalesSubscriptionGate:
         from app.persistence.models.tenant import Subscription  # noqa: PLC0415
 
         create_resp = await client.post(
-            "/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers
+            "/api/v1/sales", json=await _con_producto(client, auth_headers), headers=auth_headers
         )
+        assert create_resp.status_code == 201, create_resp.text
         sale_id = create_resp.json()["id"]
 
         await db_session.execute(
@@ -724,7 +785,9 @@ class TestB0DeudaPrevia:
         (la política prohíbe esa división, porque en una fila histórica no se sabe si
         el monto es unitario o total).
         """
-        payload = {**_SINGLE_PAYLOAD, "amount": "1500.00", "quantity": 3, "unit_price": "500.00"}
+        payload = await _con_producto(
+            client, auth_headers, amount="1500.00", quantity=3, unit_price="500.00"
+        )
         resp = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
         assert resp.status_code == 201, resp.text
         assert float(resp.json()["unit_price"]) == 500.00
@@ -737,7 +800,9 @@ class TestB0DeudaPrevia:
         Comparar por presencia en el cuerpo borraba el unitario en la primera edición
         de cualquier otro campo.
         """
-        payload = {**_SINGLE_PAYLOAD, "amount": "1500.00", "quantity": 3, "unit_price": "500.00"}
+        payload = await _con_producto(
+            client, auth_headers, amount="1500.00", quantity=3, unit_price="500.00"
+        )
         creada = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
         sale_id = creada.json()["id"]
         resp = await client.patch(
@@ -751,7 +816,9 @@ class TestB0DeudaPrevia:
     async def test_cambiar_el_monto_sin_unitario_si_lo_borra(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        payload = {**_SINGLE_PAYLOAD, "amount": "1500.00", "quantity": 3, "unit_price": "500.00"}
+        payload = await _con_producto(
+            client, auth_headers, amount="1500.00", quantity=3, unit_price="500.00"
+        )
         creada = await client.post("/api/v1/sales", json=payload, headers=auth_headers)
         sale_id = creada.json()["id"]
         resp = await client.patch(
@@ -764,7 +831,9 @@ class TestB0DeudaPrevia:
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """No informado es None, nunca un valor derivado: eso sería inventar el dato."""
-        resp = await client.post("/api/v1/sales", json=_SINGLE_PAYLOAD, headers=auth_headers)
+        resp = await client.post(
+            "/api/v1/sales", json=await _con_producto(client, auth_headers), headers=auth_headers
+        )
         assert resp.status_code == 201, resp.text
         assert resp.json()["unit_price"] is None
 
@@ -820,7 +889,9 @@ class TestB0DeudaPrevia:
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """UpdateSaleRequest lo declaraba y update_sale nunca lo tocaba: 200 sin efecto."""
-        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        payload = await _con_producto(
+            client, auth_headers, amount="1000.00", quantity=2, unit_price="500.00"
+        )
         sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
         resp = await client.patch(
             f"/api/v1/sales/{sid}",
@@ -839,7 +910,9 @@ class TestB0DeudaPrevia:
         que la política prohíbe en el resto del código. None es "no informado", que es
         exactamente lo que se sabe después de la corrección.
         """
-        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        payload = await _con_producto(
+            client, auth_headers, amount="1000.00", quantity=2, unit_price="500.00"
+        )
         sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
         resp = await client.patch(
             f"/api/v1/sales/{sid}", json={"amount": "800.00"}, headers=auth_headers
@@ -851,7 +924,9 @@ class TestB0DeudaPrevia:
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """Cambiar la nota no invalida el precio al que se vendió."""
-        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        payload = await _con_producto(
+            client, auth_headers, amount="1000.00", quantity=2, unit_price="500.00"
+        )
         sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
         resp = await client.patch(
             f"/api/v1/sales/{sid}", json={"notes": "corregido"}, headers=auth_headers
@@ -867,7 +942,9 @@ class TestB0DeudaPrevia:
 
         from app.persistence.models.audit import DecisionAuditLog
 
-        payload = {**_SINGLE_PAYLOAD, "amount": "1000.00", "quantity": 2, "unit_price": "500.00"}
+        payload = await _con_producto(
+            client, auth_headers, amount="1000.00", quantity=2, unit_price="500.00"
+        )
         sid = (await client.post("/api/v1/sales", json=payload, headers=auth_headers)).json()["id"]
         await client.patch(
             f"/api/v1/sales/{sid}", json={"unit_price": "450.00"}, headers=auth_headers

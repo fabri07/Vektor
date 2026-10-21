@@ -10,6 +10,7 @@ from httpx import AsyncClient
 
 from app.domain.business_time import today_ar
 from app.heuristics.insight_templates import render_insight
+from app.tests._respaldo import producto_con_compra_http
 
 if TYPE_CHECKING:
     from app.persistence.models.score import HealthScoreSnapshot
@@ -54,7 +55,15 @@ class TestCashBreakdown:
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """Al registrar una venta, income_series refleja el método de pago."""
-        await client.post("/api/v1/sales", json=_SALE_PAYLOAD, headers=auth_headers)
+        venta = await client.post(
+            "/api/v1/sales",
+            json={
+                **_SALE_PAYLOAD,
+                "product_id": await producto_con_compra_http(client, auth_headers),
+            },
+            headers=auth_headers,
+        )
+        assert venta.status_code == 201, venta.text
 
         resp = await client.get("/api/v1/insights/cash-breakdown?days=30", headers=auth_headers)
         data = resp.json()
@@ -78,7 +87,15 @@ class TestCashBreakdown:
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
         """?granularity=weekly agrupa por semana — todas las fechas deben ser lunes."""
-        await client.post("/api/v1/sales", json=_SALE_PAYLOAD, headers=auth_headers)
+        venta = await client.post(
+            "/api/v1/sales",
+            json={
+                **_SALE_PAYLOAD,
+                "product_id": await producto_con_compra_http(client, auth_headers),
+            },
+            headers=auth_headers,
+        )
+        assert venta.status_code == 201, venta.text
 
         resp = await client.get(
             "/api/v1/insights/cash-breakdown?days=30&granularity=weekly",

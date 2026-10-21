@@ -23,11 +23,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
+from app.application.services.respaldo_service import MOTIVO_VENTA_SIN_COMPRA
 from app.domain.inventory_effect import HISTORICAL_REPLAY, IMPORT_CONTEXT_FIELD
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import producto_con_compra
 
 _VENTAS = "sheet:ventas"
 _TABLA = "table:0"
@@ -67,7 +69,23 @@ def _ctx(context_id: str, label: str) -> dict[str, Any]:
 
 
 async def _crear_producto(db: AsyncSession, tenant: Tenant, stock: int = 10) -> Product:
-    """El producto tiene que existir: una venta sólo entra a la proyección si resuelve."""
+    """El producto tiene que existir: una venta sólo entra a la proyección si resuelve.
+
+    B·5e: y con compra previa —su ``stock`` es un stock inicial con costo—, si no
+    la venta va a «Otros» por falta de compra antes de llegar al gate de stock.
+    """
+    return await producto_con_compra(
+        db,
+        tenant.tenant_id,
+        nombre=_PRODUCTO,
+        stock=stock,
+        costo=Decimal("600"),
+        precio=Decimal("1050"),
+    )
+
+
+async def _producto_sin_compra(db: AsyncSession, tenant: Tenant, stock: int = 10) -> Product:
+    """El de antes de B·5e: con ``stock_units`` pero sin compra ni stock inicial."""
     producto = Product(
         id=uuid.uuid4(),
         tenant_id=tenant.tenant_id,
@@ -437,6 +455,9 @@ class TestVentaSinRespaldoNoEntra:
 
         Sin registrar el fingerprint, re-confirmar el archivo dejaría dos veces la
         misma venta en la bandeja.
+
+        B·5e: ``_crear_producto`` da stock inicial con costo, así la única fila en
+        «Otros» es la de sin stock.
         """
         await _crear_producto(db_session, sample_tenant, stock=10)
         file_id = uuid.uuid4()
@@ -458,6 +479,40 @@ class TestVentaSinRespaldoNoEntra:
 
         assert len(await _otros(db_session)) == 1
         assert len((await db_session.execute(select(SaleEntry))).scalars().all()) == 1
+    async def test_reconfirmar_no_duplica_la_venta_sin_compra_en_otros(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        """B·5e: lo mismo para la fila que va a «Otros» por no tener compra previa.
+
+        El producto existe con stock pero sin compra ni stock inicial con costo:
+        las dos ventas (default ``informational``, sin gate de stock) van a «Otros»
+        con ``MOTIVO_VENTA_SIN_COMPRA``. Re-confirmar no las vuelve a capturar ni
+        las deja entrar como venta.
+        """
+        await _producto_sin_compra(db_session, sample_tenant, stock=10)
+        file_id = uuid.uuid4()
+        summary = _summary_dos_ventas(fecha_primera="2024-03-03", fecha_segunda="2024-03-10")
+
+        for _ in range(2):
+            contextos = [str(c["context_id"]) for c in summary["mapping_contexts"]]
+            await importer.insert_confirmed_data(
+                db_session,
+                sample_tenant.tenant_id,
+                summary,
+                {"ventas": True},
+                context_mappings=dict.fromkeys(contextos, _MAPPING_VENTAS),
+                context_confirmed=dict.fromkeys(contextos, True),
+                inventory_effect={},
+                uploaded_file_id=file_id,
+            )
+            await db_session.flush()
+
+        capturas = await _otros(db_session)
+        assert len(capturas) == 2
+        assert all(
+            (c.context_label or "").startswith(MOTIVO_VENTA_SIN_COMPRA) for c in capturas
+        )
+        assert (await db_session.execute(select(SaleEntry))).scalars().all() == []
 
 
 class TestElGateTambienCorreEnElArchivoPlano:

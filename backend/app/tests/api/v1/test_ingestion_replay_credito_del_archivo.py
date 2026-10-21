@@ -29,6 +29,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.respaldo_service import MOTIVO_VENTA_SIN_COMPRA
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.pipeline_event import PipelineEvent
@@ -36,6 +37,7 @@ from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.tests._respaldo import producto_con_compra
 
 _CTX = "table:0"
 _LABEL = "Movimientos 2024"
@@ -44,6 +46,9 @@ _PRODUCTO = "Vela aromatica 200g"
 
 def _summary() -> dict[str, Any]:
     """Una sola tabla que es a la vez catálogo y libro de ventas.
+
+    B·5e: cada fila trae su ``costo`` (1200): el stock inicial que el archivo
+    declara tiene costo y así respalda a las ventas del mismo archivo.
 
     `has_producto` y `has_venta` juntos es lo que hace que el confirm cree el
     producto Y registre la venta desde LA MISMA fila — el caso sin saldo previo.
@@ -57,6 +62,7 @@ def _summary() -> dict[str, Any]:
             "producto": _PRODUCTO,
             "cantidad": "2",
             "monto": "4200",
+            "costo": "1200",
             "__context__": _CTX,
         },
         {
@@ -64,6 +70,7 @@ def _summary() -> dict[str, Any]:
             "producto": _PRODUCTO,
             "cantidad": "6",
             "monto": "12600",
+            "costo": "1200",
             "__context__": _CTX,
         },
     ]
@@ -75,7 +82,7 @@ def _summary() -> dict[str, Any]:
         "has_venta": True,
         "has_producto": True,
         "row_count": 2,
-        "headers": ["fecha", "producto", "cantidad", "monto"],
+        "headers": ["fecha", "producto", "cantidad", "monto", "costo"],
         "ventas_detectadas": filas,
         "stock_detectado": filas,
         "preview_rows": filas,
@@ -85,7 +92,7 @@ def _summary() -> dict[str, Any]:
                 "label": _LABEL,
                 "source_kind": "table",
                 "entity_type": "sale",
-                "headers": ["fecha", "producto", "cantidad", "monto"],
+                "headers": ["fecha", "producto", "cantidad", "monto", "costo"],
                 "fields": None,
                 "preview_rows": filas,
                 "row_count": 2,
@@ -127,6 +134,7 @@ _MAPEOS = [
     _map("producto", "product_name"),
     _map("cantidad", "quantity"),
     _map("monto", "amount"),
+    _map("costo", "unit_cost_ars"),
 ]
 
 
@@ -288,17 +296,16 @@ class TestUnArchivoPlanoYaNoSeRechaza:
         caso, el bloqueo podría estar apagando el replay entero y los tests
         seguirían en verde.
         """
-        db_session.add(
-            Product(
-                id=uuid.uuid4(),
-                tenant_id=sample_tenant.tenant_id,
-                name=_PRODUCTO,
-                sale_price_ars=Decimal("2100"),
-                unit_cost_ars=Decimal("1200"),
-                stock_units=2,
-            )
+        # B·5e: las 2 unidades son un stock inicial CON costo (la compra previa de
+        # la venta); antes era un `stock_units=2` suelto, sin ledger.
+        await producto_con_compra(
+            db_session,
+            sample_tenant.tenant_id,
+            nombre=_PRODUCTO,
+            stock=2,
+            costo=Decimal("1200"),
+            precio=Decimal("2100"),
         )
-        await db_session.commit()
 
         response = await _confirmar(
             client,
@@ -314,7 +321,7 @@ class TestUnArchivoPlanoYaNoSeRechaza:
 
 _CTX_COMPRAS = "sheet:Compras"
 _CTX_VENTAS = "sheet:Ventas"
-_HEADERS_COMPRAS = ["fecha", "producto", "cantidad", "monto", "proveedor"]
+_HEADERS_COMPRAS = ["fecha", "producto", "cantidad", "monto", "costo_unitario", "proveedor"]
 _HEADERS_VENTAS = ["fecha", "producto", "cantidad", "monto"]
 
 
@@ -333,6 +340,8 @@ def _summary_dos_hojas(dia_compra: str, dia_venta: str) -> dict[str, Any]:
             "producto": _PRODUCTO,
             "cantidad": "10",
             "monto": "12000",
+            # B·5e: la compra respalda a la venta sólo con costo unitario (12000/10).
+            "costo_unitario": "1200",
             "proveedor": "Distribuidora Sur",
             "__context__": _CTX_COMPRAS,
         }
@@ -432,6 +441,7 @@ _PAYLOAD_DOS_HOJAS = {
         _map_en(_CTX_COMPRAS, "expense", "producto", "product_name"),
         _map_en(_CTX_COMPRAS, "expense", "cantidad", "quantity"),
         _map_en(_CTX_COMPRAS, "expense", "monto", "amount"),
+        _map_en(_CTX_COMPRAS, "expense", "costo_unitario", "unit_cost_ars"),
         _map_en(_CTX_VENTAS, "sale", "fecha", "transaction_date"),
         _map_en(_CTX_VENTAS, "sale", "producto", "product_name"),
         _map_en(_CTX_VENTAS, "sale", "cantidad", "quantity"),
@@ -524,17 +534,16 @@ class TestElBloqueoSeAlcanzaDesdeLaPantalla:
         unidades, de las dos ventas entra la del 03/03 y la del 10/03 queda en
         «Otros». Si el modo no llegara al backend, entrarían las dos.
         """
-        db_session.add(
-            Product(
-                id=uuid.uuid4(),
-                tenant_id=sample_tenant.tenant_id,
-                name=_PRODUCTO,
-                sale_price_ars=Decimal("2100"),
-                unit_cost_ars=Decimal("1200"),
-                stock_units=2,
-            )
+        # B·5e: las 2 unidades son un stock inicial CON costo (la compra previa de
+        # la venta); antes era un `stock_units=2` suelto, sin ledger.
+        await producto_con_compra(
+            db_session,
+            sample_tenant.tenant_id,
+            nombre=_PRODUCTO,
+            stock=2,
+            costo=Decimal("1200"),
+            precio=Decimal("2100"),
         )
-        await db_session.commit()
 
         # Lo que la pantalla ofrece para esta hoja, servido por el endpoint nuevo.
         opciones = await client.post(
@@ -591,13 +600,23 @@ class TestUnSaldoDesconocidoNoSacaLaVentaDeLosLibros:
     queda pendiente, contado y avisado.
     """
 
-    async def test_sin_procedencia_del_saldo_la_venta_entra_y_avisa(
+    async def test_sin_procedencia_ni_compra_la_venta_va_a_otros(
         self,
         client: AsyncClient,
         auth_headers: dict[str, Any],
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
+        """B·5e: antes (F-F.2) esta venta ENTRABA con el descuento pendiente y un aviso.
+
+        Decisión del dueño (2026-10-21): «no se puede vender algo que no se
+        compró». Un producto en cero sin un solo movimiento en el ledger no tiene
+        compra ni stock inicial con costo, así que la venta va a «Otros» con
+        ``MOTIVO_VENTA_SIN_COMPRA``. El caso «saldo desconocido pero venta
+        respaldada» ya no existe: toda fuente de respaldo es procedencia del saldo.
+        Lo que se sigue protegiendo es que nada se descuente: ni un movimiento, el
+        producto queda en cero (no en −6).
+        """
         # Producto en cero, sin un solo movimiento en el ledger, y un archivo que
         # sólo vende (la hoja de compras no se confirma).
         await _producto_sin_stock(db_session, sample_tenant)
@@ -613,14 +632,20 @@ class TestUnSaldoDesconocidoNoSacaLaVentaDeLosLibros:
         )
 
         assert response.status_code == 200, response.text
-        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 1
-        assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0
-        assert any(
-            "sin descontar del inventario" in w for w in response.json()["warnings"]
-        ), response.json()["warnings"]
-        # F-F.3: el confirm ahora descuenta, así que "pendiente" tiene que ser
-        # verificable en el estado y no sólo en el texto — el producto sigue en cero
-        # (no en −6) y no hay un movimiento de venta que diga lo contrario.
+        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 0
+        capturas = list(
+            (
+                await db_session.execute(
+                    select(UnclassifiedRecord).where(
+                        UnclassifiedRecord.tenant_id == sample_tenant.tenant_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(capturas) == 1
+        assert (capturas[0].context_label or "").startswith(MOTIVO_VENTA_SIN_COMPRA)
         assert await _cuantas(db_session, sample_tenant, InventoryMovement) == 0
         producto = (
             await db_session.execute(
@@ -644,17 +669,16 @@ class TestUnSaldoDesconocidoNoSacaLaVentaDeLosLibros:
         venta se va a «Otros» como siempre y NO se avisa de un descuento pendiente.
         Sin este caso, la regla de F-F.2 podría estar apagando el gate entero.
         """
-        db_session.add(
-            Product(
-                id=uuid.uuid4(),
-                tenant_id=sample_tenant.tenant_id,
-                name=_PRODUCTO,
-                sale_price_ars=Decimal("2100"),
-                unit_cost_ars=Decimal("1200"),
-                stock_units=2,
-            )
+        # B·5e: las 2 unidades son un stock inicial CON costo (la compra previa de
+        # la venta); antes era un `stock_units=2` suelto, sin ledger.
+        await producto_con_compra(
+            db_session,
+            sample_tenant.tenant_id,
+            nombre=_PRODUCTO,
+            stock=2,
+            costo=Decimal("1200"),
+            precio=Decimal("2100"),
         )
-        await db_session.commit()
         archivo = await _archivo_dos_hojas(
             db_session, sample_tenant, dia_compra="2024-03-20", dia_venta="2024-03-10"
         )

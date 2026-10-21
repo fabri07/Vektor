@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.transaction import SaleEntry
+from app.tests._respaldo import producto_con_compra
 from app.tests.integration.conftest import make_tenant, make_user
 
 
@@ -26,11 +27,14 @@ async def test_full_sale_workflow(session: AsyncSession, tenant, user) -> None:
     """save_sale → SaleEntry persiste en DB con el payment_method correcto."""
     from app.application.services.cash_service import save_sale
 
+    # B·5e: toda venta con producto y compra previa.
+    producto = await producto_con_compra(session, tenant.tenant_id, nombre="Gaseosa 2L")
     entities = {
         "amount": 3500,
         "payment_status": "paid",
         "payment_method": "efectivo",
         "product_description": "Gaseosa 2L",
+        "product_id": str(producto.id),
     }
 
     with unittest.mock.patch("app.application.services.cash_service.logger"):

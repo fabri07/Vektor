@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 if TYPE_CHECKING:
     from app.persistence.models.product import Product
 
+from sqlalchemy import event as sa_event
+
 from app.application.services import maintenance_lock_service, stock_service
 from app.application.services._import_projection import ImportProjectionRecorder
 from app.application.services._savepoint import (
@@ -74,6 +76,12 @@ from app.application.services.product_supplier_link_service import (
     link_product_to_declared_supplier,
     load_declared_link_index,
     reconcile_catalog_declared_links_for_upload,
+)
+from app.application.services.respaldo_service import (
+    MOTIVO_VENTA_SIN_COMPRA,
+    MOTIVO_VENTA_SIN_PRODUCTO,
+    primeros_dias_de_fuente,
+    respaldada,
 )
 from app.config.catalog_final_cost_rollout import catalog_final_cost_enabled_for
 from app.config.ingestion_schema_decisions_rollout import (
@@ -320,7 +328,14 @@ def check_nonempty_import(
     # mapeo estaba perfecto y lo que pasó es que ya lo tenía cargado — y además
     # el rollback se llevaría puestas las filas capturadas en «Otros». Mismo
     # criterio que `routed_to_others` (Minor 1 de F8b).
-    _decididas = counts.get("ya_aplicadas", 0) + counts.get("conflictos_de_identidad", 0)
+    _decididas = (
+        counts.get("ya_aplicadas", 0)
+        + counts.get("conflictos_de_identidad", 0)
+        # B·5e: una venta sin compra previa o sin producto fue a «Otros» por
+        # regla, con su motivo: es una decisión sobre la fila, no un mapeo roto.
+        + counts.get("ventas_sin_compra", 0)
+        + counts.get("ventas_sin_producto", 0)
+    )
     # E8: en un DOCUMENTO (foto/PDF/texto), quedar en «Otros» es el resultado
     # correcto del camino, no un fallback que tape una pérdida. Esos archivos no
     # tienen columnas que mapear y F6-A4 no les extrae fecha: cada línea con monto
@@ -1015,6 +1030,8 @@ RISK_REF_KEY = "__risk_ref__"
 # sin clasificar): esas filas degradan al comportamiento de F-O.1 —el registro
 # clasificado se preserva para siempre— que es seguro, no silencioso.
 ROW_REF_KEY = "__row_ref__"
+#: B·5e: ``{sale_id: (nombre, sku, barcode)}`` de ventas que se vinculan al final.
+_B5E_VINCULO_PENDIENTE = "b5e_vinculo_pendiente"
 
 #: E6b — la clave de identidad de una fila que quedó en "Otros" por CONFLICTO.
 #: Viaja en el payload del registro (con el prefijo ``__``, que ``/otros`` oculta
@@ -4654,31 +4671,66 @@ async def insert_confirmed_data(
     # ProductRepository.save). Shared lock ANTES de mutar. No-op en SQLite.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
 
-    counts = await _insert_confirmed_data_impl(
-        session,
-        tenant_id,
-        summary,
-        confirmed_fields=confirmed_fields,
-        return_details=return_details,
-        stamp_product_updated_at=stamp_product_updated_at,
-        column_mappings=column_mappings,
-        context_mappings=context_mappings,
-        context_confirmed=context_confirmed,
-        context_entity=context_entity,
-        source=source,
-        uploaded_file_id=uploaded_file_id,
-        stock_treatment=stock_treatment,
-        inventory_effect=inventory_effect,
-        shipping_decisions=shipping_decisions,
-        purchase_cost_decisions=purchase_cost_decisions,
+    # B·5e: se juzgan sólo las ventas que nacen en ESTA corrida (las anota un
+    # listener de `after_flush`, con o sin archivo — el chat importa sin uno). Y
+    # de un archivo, una fila que ya era venta antes (la relectura la vuelve a
+    # crear con otro id) tampoco: re-juzgarla sería una reparación histórica
+    # automática, y eso es B·5g, con el `--apply` del dueño.
+    _filas_previas = (
+        await _filas_de_ventas_del_archivo(session, tenant_id, uploaded_file_id)
+        if uploaded_file_id is not None
+        else set()
     )
-    await session.flush()
+    _ventas_nuevas: list[uuid.UUID] = []
+
+    def _anotar_ventas_nuevas(sess: Any, _ctx: Any) -> None:
+        from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+        _ventas_nuevas.extend(
+            o.id for o in sess.new if isinstance(o, SaleEntry) and o.id is not None
+        )
+
+    sa_event.listen(session.sync_session, "after_flush", _anotar_ventas_nuevas)
+    try:
+        counts = await _insert_confirmed_data_impl(
+            session,
+            tenant_id,
+            summary,
+            confirmed_fields=confirmed_fields,
+            return_details=return_details,
+            stamp_product_updated_at=stamp_product_updated_at,
+            column_mappings=column_mappings,
+            context_mappings=context_mappings,
+            context_confirmed=context_confirmed,
+            context_entity=context_entity,
+            source=source,
+            uploaded_file_id=uploaded_file_id,
+            stock_treatment=stock_treatment,
+            inventory_effect=inventory_effect,
+            shipping_decisions=shipping_decisions,
+            purchase_cost_decisions=purchase_cost_decisions,
+    )
+        await session.flush()
+    finally:
+        sa_event.remove(session.sync_session, "after_flush", _anotar_ventas_nuevas)
     # M·1c-2: red de seguridad por si algún camino del import salió antes de
     # cerrar sus costos. Vacía = no-op.
     await cerrar_costos_del_lote(
         session, tenant_id, counts.get("product_details") if return_details else None
     )
     await assign_orphan_sales_to_local(session, tenant_id)
+    # B·5e: toda venta con compra previa. Al final, con las compras y aperturas
+    # del archivo ya escritas, para que el orden de las hojas o de las filas no
+    # decida nada.
+    # Con archivo (confirm, relectura) o desde el chat (Sheets/Gmail/pegado, el
+    # único camino de producción que importa ventas sin archivo). Una llamada
+    # directa sin archivo ni chat es el importador por debajo (data repair
+    # importa sólo productos).
+    if _ventas_nuevas and (uploaded_file_id is not None or source == "chat"):
+        await _ventas_sin_compra_a_otros(
+            session, tenant_id, uploaded_file_id, set(_ventas_nuevas), _filas_previas,
+            counts, source,
+        )
     # Bloque 5: persistir las decisiones EXPLÍCITAS de esta corrida por huella
     # de esquema — nunca sugerencias. `context_mappings`/`context_entity`/
     # `context_confirmed`/`shipping_decisions` (y `stock_treatment` en su forma
@@ -4719,6 +4771,233 @@ async def insert_confirmed_data(
                 shipping_decision=(shipping_decisions or {}).get(_cid),
             )
     return counts
+
+
+async def _filas_de_ventas_del_archivo(
+    session: AsyncSession, tenant_id: uuid.UUID, uploaded_file_id: uuid.UUID
+) -> set[str]:
+    """``source_row_ref`` de toda venta que este archivo ya creó (viva o anulada)."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    return {
+        ref
+        for ref in (
+            await session.execute(
+                select(SaleEntry.source_row_ref).where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.source_upload_id == uploaded_file_id,
+                    SaleEntry.source_row_ref.is_not(None),
+                )
+            )
+        ).scalars()
+        if ref
+    }
+
+
+async def _vincular_ventas_pendientes(
+    session: AsyncSession, tenant_id: uuid.UUID, ventas: list[Any]
+) -> None:
+    """B·5e: vincula la venta que su propia fila no pudo vincular porque el
+    producto se creaba al final del mismo import (catálogo + historial en una
+    tabla). Mismo orden que el import: SKU, código de barras, nombre."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.domain.text_norm import (  # noqa: PLC0415
+        normalize_barcode,
+        normalize_product_name,
+        normalize_sku,
+    )
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    pendientes: dict[uuid.UUID, tuple[Any, Any, Any]] = session.info.pop(
+        _B5E_VINCULO_PENDIENTE, {}
+    )
+    a_vincular = [v for v in ventas if v.product_id is None and v.id in pendientes]
+    if not a_vincular:
+        return
+    productos = list(
+        (
+            await session.execute(
+                select(Product).where(
+                    Product.tenant_id == tenant_id, Product.is_active.is_(True)
+                )
+            )
+        ).scalars()
+    )
+    por_sku = {p.sku_normalized: p.id for p in productos if p.sku_normalized}
+    por_barcode = {p.barcode_normalized: p.id for p in productos if p.barcode_normalized}
+    por_nombre: dict[str, list[uuid.UUID]] = {}
+    for p in productos:
+        if p.name_normalized:
+            por_nombre.setdefault(p.name_normalized, []).append(p.id)
+    for venta in a_vincular:
+        nombre, sku, barcode = pendientes[venta.id]
+        sku_n = normalize_sku(str(sku)) if sku not in (None, "") else None
+        bar_n = normalize_barcode(str(barcode)) if barcode not in (None, "") else None
+        nom_n = normalize_product_name(str(nombre)) if nombre not in (None, "") else None
+        candidatos = por_nombre.get(nom_n or "", [])
+        venta.product_id = (
+            (por_sku.get(sku_n) if sku_n else None)
+            or (por_barcode.get(bar_n) if bar_n else None)
+            # Un nombre con homónimos no se adivina.
+            or (candidatos[0] if len(candidatos) == 1 else None)
+        )
+    await session.flush()
+
+
+async def _ventas_sin_compra_a_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    nuevas_ids: set[uuid.UUID],
+    filas_previas: set[str],
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """B·5e: «toda venta conlleva una compra previa; si no, a Otros».
+
+    Una venta que nace en este import sin producto, o con un producto sin compra
+    ni stock inicial con costo a su fecha, no queda como venta: se saca (con su
+    descuento de stock si lo hizo, y soltando su identidad de operación para que
+    el reintento pueda volver a cargarla) y su fila va a «Otros» con el motivo,
+    para resolverla con la compra cargada. Cuenta como respaldo el ledger vivo
+    —que ya incluye las compras de este archivo— y el stock del catálogo del
+    MISMO archivo, como apertura o como compra, aunque su fecha esté por
+    confirmar (M·2d-1b: la confirma el usuario después; sin esto el primer
+    import de catálogo + historial mandaría todo a «Otros»).
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from app.application.services.inventory_movement_origin import (  # noqa: PLC0415
+        SOURCE_CATALOG_INITIAL_STOCK as _CATALOGO,
+    )
+    from app.application.services.operation_identity_service import (  # noqa: PLC0415
+        liberar_identidades_de,
+    )
+    from app.persistence.models.inventory import InventoryMovement  # noqa: PLC0415
+    from app.persistence.models.product import Product  # noqa: PLC0415
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+    from app.persistence.models.unclassified_record import UnclassifiedRecord  # noqa: PLC0415
+
+    nuevas = [
+        v
+        for v in (
+            await session.execute(
+                select(SaleEntry).where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.id.in_(nuevas_ids),
+                    SaleEntry.voided_at.is_(None),
+                )
+            )
+        ).scalars()
+        if not (v.source_row_ref and v.source_row_ref in filas_previas)
+    ]
+    if not nuevas:
+        return
+    await _vincular_ventas_pendientes(session, tenant_id, nuevas)
+    pids = {v.product_id for v in nuevas if v.product_id is not None}
+    primeros = await primeros_dias_de_fuente(session, tenant_id, pids)
+    del_catalogo_del_archivo: set[uuid.UUID] = set()
+    if uploaded_file_id is not None and pids:
+        m = InventoryMovement
+        del_catalogo_del_archivo = {
+            pid
+            for pid in (
+                await session.execute(
+                    select(m.product_id).where(
+                        m.tenant_id == tenant_id,
+                        m.source_upload_id == uploaded_file_id,
+                        m.source_type == _CATALOGO,
+                        m.movement_type.in_(("adjustment", "purchase")),
+                        m.voided_at.is_(None),
+                        m.qty > 0,
+                        func.coalesce(m.unit_cost_final, m.unit_cost) > 0,
+                    )
+                )
+            ).scalars()
+            if pid is not None
+        }
+    nombres: dict[uuid.UUID, str] = {}
+    if pids:
+        nombres = {
+            fila[0]: fila[1]
+            for fila in (
+                await session.execute(
+                    select(Product.id, Product.name).where(
+                        Product.tenant_id == tenant_id, Product.id.in_(pids)
+                    )
+                )
+            ).all()
+        }
+    # Una relectura que vuelve a mandar la misma fila no la duplica en «Otros».
+    ya_pendientes: set[tuple[str | None, str]] = set()
+    if uploaded_file_id is not None:
+        ya_pendientes = {
+            ((fila[0] or {}).get(ROW_REF_KEY), fila[1] or "")
+            for fila in (
+                await session.execute(
+                    select(UnclassifiedRecord.row_data, UnclassifiedRecord.context_label).where(
+                        UnclassifiedRecord.tenant_id == tenant_id,
+                        UnclassifiedRecord.uploaded_file_id == uploaded_file_id,
+                        UnclassifiedRecord.status == "PENDING",
+                    )
+                )
+            ).all()
+        }
+    sacadas: list[SaleEntry] = []
+    sin_producto = sin_compra = 0
+    for venta in nuevas:
+        dia = venta.transaction_date.date()
+        if venta.product_id is None:
+            motivo = (
+                f"{MOTIVO_VENTA_SIN_PRODUCTO}: elegí qué producto se vendió "
+                "(sin producto no hay compra previa ni costo)"
+            )
+            sin_producto += 1
+        elif venta.product_id in del_catalogo_del_archivo or respaldada(
+            primeros.get(venta.product_id), dia
+        ):
+            continue
+        else:
+            nombre = nombres.get(venta.product_id, "el producto")
+            motivo = f"{MOTIVO_VENTA_SIN_COMPRA}: cargá la compra o el stock inicial de {nombre}"
+            sin_compra += 1
+        motivo = motivo[:200]
+        if not (venta.source_row_ref and (venta.source_row_ref, motivo) in ya_pendientes):
+            fila = {
+                "fecha": dia.isoformat(),
+                "monto": str(venta.amount),
+                "cantidad": venta.quantity,
+                "producto": nombres.get(venta.product_id) if venta.product_id else None,
+                "medio_de_pago": venta.payment_method,
+                "detalle": venta.notes,
+            }
+            _capture_unclassified(
+                session,
+                tenant_id,
+                [{k: v for k, v in fila.items() if v not in (None, "")}],
+                None,
+                source,
+                uploaded_file_id,
+                context_label=motivo,
+                suggested_entity="sale",
+                row_ref=venta.source_row_ref,
+                skip_blank_rows=False,
+            )
+        if venta.product_id is not None:
+            await stock_service.revert_sale_stock(venta.id, tenant_id, session)
+        sacadas.append(venta)
+    if not sacadas:
+        return
+    await liberar_identidades_de(session, tenant_id, [("sale", v.id) for v in sacadas])
+    for venta in sacadas:
+        await session.delete(venta)
+    await session.flush()
+    counts["ventas"] = max(0, int(counts.get("ventas", 0)) - len(sacadas))
+    counts["ventas_sin_compra"] = counts.get("ventas_sin_compra", 0) + sin_compra
+    counts["ventas_sin_producto"] = counts.get("ventas_sin_producto", 0) + sin_producto
 
 
 async def _stamp_updated_at_on_product_details(
@@ -5809,6 +6088,16 @@ async def _insert_confirmed_data_impl(
                         by_barcode=_identity_indexes.by_barcode,
                         barcode=row.get(barcode_col) if barcode_col else None,
                     )
+                    # B·5e: la fila que crea el producto Y lo vende (catálogo con su
+                    # historial en una sola tabla) todavía no tiene el producto acá
+                    # —el alta del catálogo va al final—. Se anota con qué se
+                    # vincula, y la pasada final lo resuelve antes de juzgarla.
+                    if entry.product_id is None and (nombre_col or sku_col or barcode_col):
+                        session.info.setdefault(_B5E_VINCULO_PENDIENTE, {})[entry.id] = (
+                            row.get(nombre_col) if nombre_col else None,
+                            row.get(sku_col) if sku_col else None,
+                            row.get(barcode_col) if barcode_col else None,
+                        )
                     # Producto por peso o volumen: el archivo dice la cantidad en
                     # su unidad de venta ("2" de queso = 2 kg) y la venta guarda
                     # unidades base, como la caja.
@@ -10017,6 +10306,7 @@ async def bulk_import_unclassified(
         .all()
     )
     counts = {"imported_sales": 0, "imported_expenses": 0, "skipped": 0, "needs_manual": 0}
+    _primeros_b5e: dict[uuid.UUID, date | None] = {}
     if not records:
         return counts
 
@@ -10081,6 +10371,20 @@ async def bulk_import_unclassified(
                 # cantidad ilegible la deja donde está, para completarla a mano,
                 # en vez de importarla como una unidad. `needs_manual` es el
                 # contador que la UI ya usa para "exige atención del usuario".
+                counts["needs_manual"] += 1
+                continue
+            # B·5e: toda venta con producto y compra previa. Sin una u otra la
+            # fila se queda en «Otros», para resolverla a mano.
+            if product_id is None:
+                counts["needs_manual"] += 1
+                continue
+            if product_id not in _primeros_b5e:
+                _primeros_b5e.update(
+                    await primeros_dias_de_fuente(session, tenant_id, [product_id])
+                )
+                _primeros_b5e.setdefault(product_id, None)
+            _dia_b5e = fecha.date() if isinstance(fecha, datetime) else fecha
+            if not respaldada(_primeros_b5e[product_id], _dia_b5e):
                 counts["needs_manual"] += 1
                 continue
             # Producto por peso o volumen: la fila dice la cantidad en su unidad

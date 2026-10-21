@@ -11,6 +11,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.domain.business_time import today_ar
+from app.tests._respaldo import producto_con_compra_http
 
 _HOY = str(today_ar())
 
@@ -23,7 +24,10 @@ def _celery(mock_score_trigger: Any) -> None:
 async def _dia_con_retiro(client: AsyncClient, headers: dict[str, Any]) -> None:
     venta = await client.post(
         "/api/v1/sales",
-        json={"amount": "20.00", "quantity": 1, "transaction_date": _HOY, "payment_method": "cash"},
+        json={
+            "amount": "20.00", "quantity": 1, "transaction_date": _HOY, "payment_method": "cash",
+            "product_id": await producto_con_compra_http(client, headers),
+        },
         headers=headers,
     )
     assert venta.status_code == 201, venta.text

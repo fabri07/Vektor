@@ -28,14 +28,16 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
+from app.tests._respaldo import producto_con_compra
 
 _CTX = "sheet:Ventas"
 _PRODUCTO = "Vela aromatica 200g"
@@ -125,17 +127,17 @@ def _payload(efecto: str | None = None, *, con_cantidad: bool = True) -> dict[st
 
 @pytest_asyncio.fixture
 async def producto(db_session: AsyncSession, sample_tenant: Tenant) -> Product:
-    registro = Product(
-        id=uuid.uuid4(),
-        tenant_id=sample_tenant.tenant_id,
-        name=_PRODUCTO,
-        sale_price_ars=Decimal("2100"),
-        unit_cost_ars=Decimal("1200"),
-        stock_units=_STOCK_PREVIO,
+    """B·5e: el stock previo es un stock inicial CON costo, así la venta del archivo
+    tiene compra previa y entra (sin respaldo iría a «Otros»). Mismo stock y costo
+    que antes: ``_STOCK_PREVIO`` unidades a 1200."""
+    return await producto_con_compra(
+        db_session,
+        sample_tenant.tenant_id,
+        nombre=_PRODUCTO,
+        stock=_STOCK_PREVIO,
+        costo=Decimal("1200"),
+        precio=Decimal("2100"),
     )
-    db_session.add(registro)
-    await db_session.commit()
-    return registro
 
 
 @pytest_asyncio.fixture
@@ -182,10 +184,16 @@ async def _stock(db_session: AsyncSession, producto: Product) -> int:
 async def _movimientos_vivos(
     db_session: AsyncSession, tenant: Tenant
 ) -> list[InventoryMovement]:
+    # Sin la apertura del fixture ``producto`` (anterior al archivo): lo que se
+    # mira es lo que dejó el confirm.
     result = await db_session.execute(
         select(InventoryMovement).where(
             InventoryMovement.tenant_id == tenant.tenant_id,
             InventoryMovement.voided_at.is_(None),
+            or_(
+                InventoryMovement.source_type.is_(None),
+                InventoryMovement.source_type != SOURCE_CATALOG_INITIAL_STOCK,
+            ),
         )
     )
     return list(result.scalars().all())
