@@ -7,9 +7,11 @@ const ACCEPTED = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
 
 interface Step3UploadProps {
   onNext: (file: File | null) => void;
+  /** B·5d: en vez de un archivo, cargar el stock inicial en una tabla. */
+  onStockInicial?: () => void;
 }
 
-export function Step3Upload({ onNext }: Step3UploadProps) {
+export function Step3Upload({ onNext, onStockInicial }: Step3UploadProps) {
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +110,19 @@ export function Step3Upload({ onNext }: Step3UploadProps) {
       {error && (
         <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
           {error}
+        </p>
+      )}
+
+      {onStockInicial && (
+        <p className="mt-3 text-center text-sm text-gray-500">
+          ¿No tenés un archivo?{" "}
+          <button
+            type="button"
+            onClick={onStockInicial}
+            className="font-medium text-vk-navy underline underline-offset-2 hover:opacity-80"
+          >
+            Cargar mi stock inicial a mano
+          </button>
         </p>
       )}
 

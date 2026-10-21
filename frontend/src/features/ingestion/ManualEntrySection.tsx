@@ -7,6 +7,7 @@ import {
   EnvioSelect,
   FECHA_STOCK_INICIAL_REQUERIDA,
 } from "@/features/products/costoManual";
+import { StockInicialTabla } from "@/features/products/StockInicialTabla";
 import { aUnidadesBase } from "@/lib/pos/saleUnit";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
@@ -1513,14 +1514,31 @@ function InlineSupplierCreate({
 
 // ── ManualEntrySection ────────────────────────────────────────────────────────
 
-type ActiveTab = "sale" | "expense" | "product" | "catalog";
+type ActiveTab = "sale" | "expense" | "product" | "catalog" | "opening";
 
 const TABS: { key: ActiveTab; label: string }[] = [
   { key: "sale", label: "Registrar venta" },
   { key: "expense", label: "Registrar gasto" },
   { key: "product", label: "Registrar compra" },
   { key: "catalog", label: "Alta de producto" },
+  { key: "opening", label: "Stock inicial" },
 ];
+
+/** B·5d: la tabla de stock inicial (lote de B·5c) como pestaña de la carga manual. */
+function OpeningTab({ onToast }: { onToast: (t: ToastState) => void }) {
+  const queryClient = useQueryClient();
+  return (
+    <StockInicialTabla
+      onDone={(r) => {
+        onToast({
+          type: "success",
+          message: `Stock inicial cargado en ${r.filas.length} producto(s).`,
+        });
+        void queryClient.invalidateQueries({ queryKey: ["products-list"] });
+      }}
+    />
+  );
+}
 
 /**
  * Carga manual transaccional (venta multi-línea que descuenta stock, gasto OPEX,
@@ -1621,6 +1639,7 @@ export function ManualEntrySection({
         {activeTab === "expense" && <ExpenseTab onToast={handleToast} online={online} />}
         {activeTab === "product" && <ProductTab onToast={handleToast} online={online} />}
         {activeTab === "catalog" && <CatalogProductTab onToast={handleToast} />}
+        {activeTab === "opening" && <OpeningTab onToast={handleToast} />}
       </div>
     </div>
   );

@@ -92,6 +92,85 @@ export interface ProductResponse {
   custom_fields?: Record<string, unknown>;
   acquired_at?: string | null;
   created_at?: string;
+  /** B·5c: activo y sin stock inicial vivo (manual o de archivo). `null` o
+   *  ausente en servidores viejos: no se ofrece cargarlo. */
+  needs_initial_stock?: boolean | null;
+}
+
+// ── B·5c: stock inicial a mano ──────────────────────────────────────────────
+
+/** `POST /products/{id}/opening`. `stock_units` en unidades BASE. */
+export interface RegistrarAperturaPayload {
+  stock_units: number;
+  unit_cost_ars: number;
+  /** ISO, no futura. */
+  fecha: string;
+  costo_envio?: TratamientoEnvio;
+}
+
+export interface RegistrarAperturaResponse {
+  movement_id: string;
+  product_id: string;
+  stock_units: number;
+  ventas_sin_costo_desde_la_fecha: number;
+}
+
+/** Una fila de la tabla de stock inicial. */
+export interface FilaStockInicial {
+  nombre: string;
+  sku?: string | null;
+  barcode?: string | null;
+  categoria?: string | null;
+  sale_price_ars: number;
+  unit_cost_ars: number;
+  stock_units: number;
+  costo_envio?: TratamientoEnvio;
+}
+
+export interface CoincidenciaDeFila {
+  product_id: string;
+  nombre: string;
+  por: "sku" | "barcode" | "nombre";
+  necesita_stock_inicial: boolean;
+}
+
+export interface FilaPreview {
+  fila: number;
+  errores: string[];
+  coincidencias: CoincidenciaDeFila[];
+}
+
+export interface LoteStockInicialPreview {
+  filas: FilaPreview[];
+  preview_token: string;
+}
+
+export interface EleccionDeFila {
+  fila: number;
+  accion: "crear" | "apertura_en";
+  product_id?: string;
+}
+
+export interface LoteStockInicialPayload {
+  filas: FilaStockInicial[];
+  elecciones: EleccionDeFila[];
+  preview_token: string;
+  fecha: string;
+}
+
+export interface ResultadoDeFila {
+  fila: number;
+  accion: "crear" | "apertura_en";
+  product_id: string;
+  movement_id: string;
+  /** `apertura_en` no edita el producto: lo que la fila traía distinto. */
+  campos_no_aplicados: string[];
+}
+
+export interface LoteStockInicialResponse {
+  filas: ResultadoDeFila[];
+  creados: number;
+  con_apertura: number;
 }
 
 export interface ProductsListParams {
@@ -128,6 +207,37 @@ export const productsService = {
 
   async updateProduct(id: string, payload: UpdateProductPayload): Promise<ProductResponse> {
     const res = await api.patch<ProductResponse>(`/products/${id}`, payload);
+    return res.data;
+  },
+
+  /** B·5c: stock inicial de un producto que ya existe (requiere PIN). */
+  async registerOpening(
+    productId: string,
+    body: RegistrarAperturaPayload,
+    idempotencyKey: string,
+  ): Promise<RegistrarAperturaResponse> {
+    const res = await api.post<RegistrarAperturaResponse>(
+      `/products/${productId}/opening`,
+      body,
+      { headers: { "Idempotency-Key": idempotencyKey } },
+    );
+    return res.data;
+  },
+
+  /** B·5c, paso 1 del lote: no escribe. */
+  async previewInitialStockBatch(filas: FilaStockInicial[]): Promise<LoteStockInicialPreview> {
+    const res = await api.post<LoteStockInicialPreview>("/products/batch/preview", { filas });
+    return res.data;
+  },
+
+  /** B·5c, paso 2 del lote: todo o nada. */
+  async confirmInitialStockBatch(
+    body: LoteStockInicialPayload,
+    idempotencyKey: string,
+  ): Promise<LoteStockInicialResponse> {
+    const res = await api.post<LoteStockInicialResponse>("/products/batch", body, {
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
     return res.data;
   },
 

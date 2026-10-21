@@ -19,6 +19,15 @@ jest.mock("@/services/onboarding.service", () => ({
 jest.mock("@/services/ingestion.service", () => ({
   ingestionService: { upload: jest.fn() },
 }));
+// B·5d: la tabla real tiene sus propios tests; acá sólo importa cuándo aparece
+// y qué hace el wizard cuando termina.
+jest.mock("@/features/products/StockInicialTabla", () => ({
+  StockInicialTabla: ({ onDone }: { onDone?: (r: unknown) => void }) => (
+    <button type="button" onClick={() => onDone?.({ filas: [], creados: 1, con_apertura: 0 })}>
+      tabla-de-stock-inicial
+    </button>
+  ),
+}));
 
 const mockSubmit = onboardingService.submit as jest.MockedFunction<
   typeof onboardingService.submit
@@ -321,6 +330,36 @@ describe("OnboardingWizard", () => {
       for (const { label } of MAIN_CONCERN_OPTIONS) {
         expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
       }
+    });
+  });
+
+  describe("stock inicial a mano (B·5d)", () => {
+    test("la tabla aparece recién después del submit y al terminar sigue al paso 3", async () => {
+      const user = userEvent.setup({ delay: null });
+      renderWizard();
+      await completarDatos(user);
+      expect(screen.queryByText("tabla-de-stock-inicial")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Cargar mi stock inicial a mano" }));
+      await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1));
+      await user.click(await screen.findByText("tabla-de-stock-inicial"));
+
+      // Paso 3, como cuando no se sube archivo.
+      await waitFor(() =>
+        expect(screen.queryByText("tabla-de-stock-inicial")).not.toBeInTheDocument(),
+      );
+      expect(screen.queryByText("Cargar mi stock inicial a mano")).not.toBeInTheDocument();
+      expect(mockUpload).not.toHaveBeenCalled();
+    });
+
+    test("si el submit falla, la tabla no aparece", async () => {
+      mockSubmit.mockRejectedValue(new Error("boom"));
+      const user = userEvent.setup({ delay: null });
+      renderWizard();
+      await completarDatos(user);
+      await user.click(screen.getByRole("button", { name: "Cargar mi stock inicial a mano" }));
+      expect(await screen.findByText(/Hubo un problema al enviar los datos/)).toBeInTheDocument();
+      expect(screen.queryByText("tabla-de-stock-inicial")).not.toBeInTheDocument();
     });
   });
 
