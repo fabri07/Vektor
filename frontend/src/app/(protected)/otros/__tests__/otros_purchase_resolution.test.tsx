@@ -169,11 +169,15 @@ describe("resolución de venta/gasto sin fecha (F6)", () => {
       />,
     );
     fireEvent.change(screen.getByLabelText("Fecha"), { target: { value: "2024-03-05" } });
+    // B·5e: una venta lleva producto.
+    fireEvent.change(screen.getByPlaceholderText("Buscar producto"), { target: { value: "" } });
+    await waitFor(() => expect(screen.getByRole("option", { name: "Soda" })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Producto vendido"), { target: { value: "product-2" } });
     fireEvent.submit(screen.getByRole("button", { name: /importar/i }).closest("form")!);
     await waitFor(() =>
       expect(onSave).toHaveBeenCalledWith(
         "sale",
-        expect.objectContaining({ transaction_date: "2024-03-05T00:00:00" }),
+        expect.objectContaining({ transaction_date: "2024-03-05T00:00:00", product_id: "product-2" }),
       ),
     );
   });

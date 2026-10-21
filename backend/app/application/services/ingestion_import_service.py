@@ -4713,6 +4713,7 @@ async def insert_confirmed_data(
         await session.flush()
     finally:
         sa_event.remove(session.sync_session, "after_flush", _anotar_ventas_nuevas)
+
     # M·1c-2: red de seguridad por si algún camino del import salió antes de
     # cerrar sus costos. Vacía = no-op.
     await cerrar_costos_del_lote(
@@ -4731,6 +4732,7 @@ async def insert_confirmed_data(
             session, tenant_id, uploaded_file_id, set(_ventas_nuevas), _filas_previas,
             counts, source,
         )
+    session.info.pop(_B5E_VINCULO_PENDIENTE, None)
     # Bloque 5: persistir las decisiones EXPLÍCITAS de esta corrida por huella
     # de esquema — nunca sugerencias. `context_mappings`/`context_entity`/
     # `context_confirmed`/`shipping_decisions` (y `stock_treatment` en su forma
@@ -4796,9 +4798,16 @@ async def _filas_de_ventas_del_archivo(
     }
 
 
+def _en_unidad_de_venta(qty: Any, factor: int | None) -> Any:
+    if not factor or factor <= 1 or qty is None:
+        return qty
+    valor = Decimal(qty) / Decimal(factor)
+    return int(valor) if valor == valor.to_integral_value() else str(valor.normalize())
+
+
 async def _vincular_ventas_pendientes(
     session: AsyncSession, tenant_id: uuid.UUID, ventas: list[Any]
-) -> None:
+) -> dict[uuid.UUID, tuple[Any, Any, Any]]:
     """B·5e: vincula la venta que su propia fila no pudo vincular porque el
     producto se creaba al final del mismo import (catálogo + historial en una
     tabla). Mismo orden que el import: SKU, código de barras, nombre."""
@@ -4816,35 +4825,51 @@ async def _vincular_ventas_pendientes(
     )
     a_vincular = [v for v in ventas if v.product_id is None and v.id in pendientes]
     if not a_vincular:
-        return
+        return pendientes
+    # Las MISMAS reglas que la resolución de cada fila (`_resolve_product`):
+    # barcode → SKU → nombre; un código o un nombre que comparten dos productos
+    # (el nombre contando también los inactivos) no se adivina.
     productos = list(
-        (
-            await session.execute(
-                select(Product).where(
-                    Product.tenant_id == tenant_id, Product.is_active.is_(True)
-                )
-            )
-        ).scalars()
+        (await session.execute(select(Product).where(Product.tenant_id == tenant_id))).scalars()
     )
-    por_sku = {p.sku_normalized: p.id for p in productos if p.sku_normalized}
-    por_barcode = {p.barcode_normalized: p.id for p in productos if p.barcode_normalized}
-    por_nombre: dict[str, list[uuid.UUID]] = {}
-    for p in productos:
-        if p.name_normalized:
-            por_nombre.setdefault(p.name_normalized, []).append(p.id)
+    activos = {p.id: p for p in productos if p.is_active}
+
+    def _unico(
+        clave: Callable[[Any], str | None], todos: bool = False
+    ) -> dict[str, uuid.UUID | None]:
+        out: dict[str, uuid.UUID | None] = {}
+        for p in productos if todos else activos.values():
+            k = clave(p)
+            if not k:
+                continue
+            out[k] = None if k in out and out[k] != p.id else p.id
+        return out
+
+    por_barcode = _unico(lambda p: p.barcode_normalized)
+    por_sku = _unico(lambda p: p.sku_normalized)
+    por_nombre = _unico(lambda p: p.name_normalized, todos=True)
     for venta in a_vincular:
         nombre, sku, barcode = pendientes[venta.id]
         sku_n = normalize_sku(str(sku)) if sku not in (None, "") else None
         bar_n = normalize_barcode(str(barcode)) if barcode not in (None, "") else None
         nom_n = normalize_product_name(str(nombre)) if nombre not in (None, "") else None
-        candidatos = por_nombre.get(nom_n or "", [])
-        venta.product_id = (
-            (por_sku.get(sku_n) if sku_n else None)
-            or (por_barcode.get(bar_n) if bar_n else None)
-            # Un nombre con homónimos no se adivina.
-            or (candidatos[0] if len(candidatos) == 1 else None)
+        pid = (
+            (por_barcode.get(bar_n) if bar_n else None)
+            or (por_sku.get(sku_n) if sku_n else None)
+            or (por_nombre.get(nom_n) if nom_n else None)
         )
+        if pid is None or pid not in activos:
+            continue
+        venta.product_id = pid
+        # Producto por peso o volumen: la fila decía la cantidad en su unidad de
+        # venta; la venta guarda unidades base (lo que hace cada fila al vincular).
+        factor = activos[pid].base_units_per_sale_unit or 1
+        if factor > 1:
+            venta.quantity = a_unidades_base(venta.quantity, factor)
     await session.flush()
+    # Devuelve lo que decía el archivo: la venta que igual queda sin producto va
+    # a «Otros» con ese texto, para que el usuario sepa QUÉ se vendió.
+    return pendientes
 
 
 async def _ventas_sin_compra_a_otros(
@@ -4896,7 +4921,7 @@ async def _ventas_sin_compra_a_otros(
     ]
     if not nuevas:
         return
-    await _vincular_ventas_pendientes(session, tenant_id, nuevas)
+    crudos = await _vincular_ventas_pendientes(session, tenant_id, nuevas)
     pids = {v.product_id for v in nuevas if v.product_id is not None}
     primeros = await primeros_dias_de_fuente(session, tenant_id, pids)
     del_catalogo_del_archivo: set[uuid.UUID] = set()
@@ -4920,17 +4945,17 @@ async def _ventas_sin_compra_a_otros(
             if pid is not None
         }
     nombres: dict[uuid.UUID, str] = {}
+    factores: dict[uuid.UUID, int] = {}
     if pids:
-        nombres = {
-            fila[0]: fila[1]
-            for fila in (
-                await session.execute(
-                    select(Product.id, Product.name).where(
-                        Product.tenant_id == tenant_id, Product.id.in_(pids)
-                    )
+        for prod in (
+            await session.execute(
+                select(Product.id, Product.name, Product.base_units_per_sale_unit).where(
+                    Product.tenant_id == tenant_id, Product.id.in_(pids)
                 )
-            ).all()
-        }
+            )
+        ).all():
+            nombres[prod[0]] = prod[1]
+            factores[prod[0]] = int(prod[2] or 1)
     # Una relectura que vuelve a mandar la misma fila no la duplica en «Otros».
     ya_pendientes: set[tuple[str | None, str]] = set()
     if uploaded_file_id is not None:
@@ -4968,11 +4993,26 @@ async def _ventas_sin_compra_a_otros(
             sin_compra += 1
         motivo = motivo[:200]
         if not (venta.source_row_ref and (venta.source_row_ref, motivo) in ya_pendientes):
+            nombre_crudo, sku_crudo, barcode_crudo = crudos.get(venta.id, (None, None, None))
             fila = {
                 "fecha": dia.isoformat(),
                 "monto": str(venta.amount),
-                "cantidad": venta.quantity,
-                "producto": nombres.get(venta.product_id) if venta.product_id else None,
+                # En la unidad de VENTA (kg, L), como la escribe el archivo y la
+                # espera «Otros» al clasificar (no en gramos: se convertiría dos veces).
+                "cantidad": _en_unidad_de_venta(
+                    venta.quantity, factores.get(venta.product_id) if venta.product_id else None
+                ),
+                # Sin producto: lo que decía el ARCHIVO (si no, la fila de «Otros»
+                # no dice qué se vendió y no se puede resolver).
+                "producto": (
+                    nombres.get(venta.product_id)
+                    if venta.product_id
+                    else (str(nombre_crudo).strip() if nombre_crudo not in (None, "") else None)
+                ),
+                "sku": str(sku_crudo).strip() if sku_crudo not in (None, "") else None,
+                "codigo_de_barras": (
+                    str(barcode_crudo).strip() if barcode_crudo not in (None, "") else None
+                ),
                 "medio_de_pago": venta.payment_method,
                 "detalle": venta.notes,
             }
@@ -8308,6 +8348,15 @@ async def _insert_multisheet_data(
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         _venta_producto = _venta_nombre_producto(row, cols)
         entry.product_id = _venta_producto_id(row, cols)
+        if entry.product_id is None:
+            # B·5e: con qué se vincula al final (si el producto nace en este mismo
+            # import) y qué decía el archivo si igual va a «Otros».
+            _sku_raw = _val(row, cols.get("sku"), _SKU_COLS)
+            _bar_raw = _val(row, cols.get("barcode"), _BARCODE_COLS)
+            if _venta_producto or _sku_raw or _bar_raw:
+                session.info.setdefault(_B5E_VINCULO_PENDIENTE, {})[entry.id] = (
+                    _venta_producto, _sku_raw, _bar_raw,
+                )
         # Producto por peso o volumen: el archivo dice la cantidad en su unidad
         # de venta ("2" de queso = 2 kg) y la venta guarda unidades base.
         if entry.product_id in _factores:
