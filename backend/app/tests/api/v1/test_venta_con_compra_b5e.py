@@ -453,3 +453,58 @@ async def test_importar_sugeridos_no_saltea_la_regla(
     assert counts["imported_sales"] == 0
     assert counts["needs_manual"] == 2
     assert await _ventas(db_session, tid) == []
+
+
+async def test_un_producto_por_peso_va_a_otros_en_kg_no_en_gramos(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Revisión del hotfix: «Otros» guardaba la cantidad ya pasada a gramos y al
+    clasificar se volvía a multiplicar (2 kg → 2.000.000 g)."""
+    tid = sample_tenant.tenant_id
+    queso = Product(
+        tenant_id=tid, name="Queso", sale_price_ars=Decimal("1000"), stock_units=5000,
+        sale_unit="gram", base_units_per_sale_unit=1000,
+    )
+    db_session.add(queso)
+    await db_session.commit()
+    f = await _archivo(db_session, tid)
+    await insert_confirmed_data(
+        db_session, tid,
+        _ventas_planas([
+            {"fecha": hace(3).isoformat(), "venta": "2000", "producto": "Queso", "cantidad": "2"},
+        ]),
+        {"ventas": True},
+        uploaded_file_id=f.id,
+    )
+    await db_session.commit()
+    (rec,) = (
+        await db_session.execute(
+            select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tid)
+        )
+    ).scalars().all()
+    assert str(rec.row_data["cantidad"]) == "2"
+    # Con la compra cargada, clasificarla como venta guarda 2 kg = 2.000 g.
+    await producto_con_compra(db_session, tid, nombre="Otro")  # no respalda a Queso
+    from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
+    from app.persistence.models.inventory import InventoryMovement
+
+    db_session.add(
+        InventoryMovement(
+            tenant_id=tid, product_id=queso.id, movement_type="adjustment", qty=5000,
+            unit_cost=Decimal("500"), source_type=SOURCE_CATALOG_INITIAL_STOCK,
+            source_event_id="x", occurred_at=datetime.combine(hace(30), datetime.min.time()),
+        )
+    )
+    await db_session.commit()
+    r = await client.post(
+        f"/api/v1/others/{rec.id}/reclassify",
+        json={"entity_type": "sale", "fields": {
+            "amount": "2000", "quantity": 2, "transaction_date": _iso(hace(3)),
+            "payment_method": "cash", "product_id": str(queso.id),
+        }},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    (venta,) = await _ventas(db_session, tid)
+    assert venta.quantity == 2000

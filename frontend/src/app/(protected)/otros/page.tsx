@@ -210,6 +210,7 @@ export default function OtrosPage() {
       } else if (
         code === "SALE_WITHOUT_PURCHASE" ||
         code === "SALE_NEEDS_PRODUCT" ||
+        code === "SALE_PRODUCT_NOT_FOUND" ||
         code === "POS_SALE_ALREADY_RECORDED"
       ) {
         // B·5e: el servidor dice qué falta (la compra de X, el producto).

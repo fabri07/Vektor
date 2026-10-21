@@ -79,3 +79,35 @@ it("sin producto no se manda y dice por qué", async () => {
   expect(await screen.findByText(/Elegí qué producto se vendió/)).toBeInTheDocument();
   expect(onSave).not.toHaveBeenCalled();
 });
+
+it("una venta «sin compra previa» preselecciona su producto por nombre exacto", async () => {
+  const onSave = jest.fn();
+  render(
+    <ReclassifyModal
+      record={{ ...record, row_data: { ...record.row_data, producto: "Vela aromática" } }}
+      productCategories={[]}
+      saving={false}
+      onClose={jest.fn()}
+      onSave={onSave}
+      onLink={jest.fn()}
+      onResolvePurchase={jest.fn()}
+    />,
+  );
+  await waitFor(() => expect(screen.getByLabelText("Producto vendido")).toHaveValue("p-vela"));
+});
+
+it("una cantidad con decimales no se pega como un entero", async () => {
+  const onSave = jest.fn();
+  render(
+    <ReclassifyModal
+      record={{ ...record, row_data: { ...record.row_data, cantidad: "1.5" } }}
+      productCategories={[]}
+      saving={false}
+      onClose={jest.fn()}
+      onSave={onSave}
+      onLink={jest.fn()}
+      onResolvePurchase={jest.fn()}
+    />,
+  );
+  expect(screen.getByLabelText("Cantidad vendida")).toHaveValue(null);
+});

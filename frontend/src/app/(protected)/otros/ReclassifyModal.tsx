@@ -129,10 +129,22 @@ export function ReclassifyModal({
     setEmail("");
     setPhone("");
     setVentaProducto("");
-    setVentaCantidad(pre.quantity.replace(/[^\d]/g, "") || "1");
+    // La cantidad de «Otros» viene en la unidad de venta. Una con decimales no se
+    // trunca ni se pega («1.5» no es «15»): queda para que la persona la escriba.
+    const cantidadCruda = String(record.row_data?.cantidad ?? pre.quantity ?? "").trim();
+    setVentaCantidad(/^\d+$/.test(cantidadCruda) ? cantidadCruda : "");
     // Lo que decía el archivo (B·5e lo guarda en `producto`): arranca la búsqueda.
     if (entity === "sale") setBusqueda(String(record.row_data?.producto ?? pre.text ?? ""));
   }, [record]);
+
+  // Una venta «sin compra previa» ya trae el producto (por nombre exacto del
+  // catálogo): se preselecciona; la persona sólo carga la compra.
+  const nombreDeLaFila = String(record?.row_data?.producto ?? "").trim().toLowerCase();
+  useEffect(() => {
+    if (entityType !== "sale" || ventaProducto || !nombreDeLaFila) return;
+    const exacto = productos.filter((p) => p.name.trim().toLowerCase() === nombreDeLaFila);
+    if (exacto.length === 1) setVentaProducto(exacto[0]!.id);
+  }, [entityType, ventaProducto, nombreDeLaFila, productos]);
 
   if (!record) return null;
 
@@ -182,7 +194,7 @@ export function ReclassifyModal({
       return;
     }
     if (entityType === "sale") {
-      if (!ventaProducto) {
+      if (!ventaProducto || !/^\d+$/.test(ventaCantidad) || Number(ventaCantidad) < 1) {
         setIntento(true);
         return;
       }
@@ -191,7 +203,7 @@ export function ReclassifyModal({
         transaction_date: isoDate,
         payment_method: paymentMethod,
         product_id: ventaProducto,
-        quantity: Math.max(1, Number(ventaCantidad) || 1),
+        quantity: Number(ventaCantidad),
         notes: text || null,
       });
     } else if (entityType === "expense") {
@@ -372,6 +384,10 @@ export function ReclassifyModal({
             {intento && !ventaProducto ? (
               <p role="alert" className="text-xs text-vk-danger">
                 Elegí qué producto se vendió: sin producto no hay compra previa ni costo.
+              </p>
+            ) : intento && !/^\d+$/.test(ventaCantidad) ? (
+              <p role="alert" className="text-xs text-vk-danger">
+                Escribí la cantidad vendida (un número entero en la unidad de venta).
               </p>
             ) : (
               <p className="text-xs text-vk-text-muted">
