@@ -3224,3 +3224,160 @@ describe("ColumnMapperPanel — fecha del stock inicial después de importar (M�
     await waitFor(() => expect(onDone).toHaveBeenCalled());
   });
 });
+
+describe("ColumnMapperPanel — B·9: acciones masivas inocuas", () => {
+  function sugerencia(
+    source_column: string,
+    target_field: string | null,
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      source_column,
+      normalized_column: source_column.toLowerCase(),
+      sample_values: ["x"],
+      target_field,
+      confidence: 0.9,
+      source: target_field ? "heuristic" : "none",
+      status: target_field ? "mapped" : "unmapped",
+      ...extra,
+    };
+  }
+
+  // «Sucursal» y «Tocada» son candidatas a campo propio (el backend les calculó
+  // el slug); «Vacia», «Otra vacia» y «Tocada» están vacías en todo el archivo.
+  // «Sucursal» trae `duda`: `auto_custom` no la archiva sola, pero la acción
+  // masiva es explícita y sí la ofrece (el backend le manda `custom_slug`).
+  const SUGERENCIAS = [
+    sugerencia("Fecha", "transaction_date"),
+    sugerencia("Monto", "amount"),
+    sugerencia("Sucursal", null, {
+      custom_slug: "sucursal",
+      duda: "Esta hoja no tiene un campo para la sucursal.",
+    }),
+    sugerencia("Vacia", "notes", { empty_in_file: true }),
+    sugerencia("Otra vacia", null, { empty_in_file: true, sample_values: [] }),
+    sugerencia("Tocada", null, { custom_slug: "tocada", empty_in_file: true }),
+  ];
+  const HEADERS = SUGERENCIAS.map((s) => s.source_column);
+
+  const PREVIEWS = {
+    plano: {
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: { inferred_type: "ventas", headers: HEADERS },
+      columns_at_risk: [],
+    },
+    "multi-hoja": {
+      file_id: "file-1",
+      processing_status: "NEEDS_CONFIRMATION",
+      parsed_summary_json: {
+        inferred_type: "mixed",
+        mapping_contexts: [
+          {
+            context_id: "hoja1",
+            label: "Movimientos",
+            source_kind: "sheet",
+            entity_type: "sale",
+            headers: HEADERS,
+            fields: null,
+            preview_rows: [],
+            row_count: 12,
+          },
+        ],
+      },
+      columns_at_risk: [],
+    },
+  };
+
+  /** El `<select>` de la fila de una columna en la tabla de mapeo. */
+  function selectDe(columna: string): HTMLSelectElement {
+    const textos = screen.getAllByText(columna);
+    const fila = textos[textos.length - 1]!.closest(".grid");
+    return within(fila as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    window.localStorage.clear();
+    mockGetFieldCatalog.mockResolvedValue(FIELD_CATALOG);
+    mockGetCapabilities.mockResolvedValue({});
+    mockRecomputeColumnRisk.mockResolvedValue([]);
+    mockInventoryEffects.mockResolvedValue([]);
+    mockPurchaseGroups.mockResolvedValue([]);
+    mockConfirmFile.mockResolvedValue({ file_id: "file-1", status: "ok", message: "" });
+    mockRegistrarImportacion.mockRejectedValue({ response: { status: 404 } });
+  });
+
+  test.each(["plano", "multi-hoja"] as const)(
+    "%s: aplican los destinos, respetan lo tocado y nada viaja como user_selected",
+    async (camino) => {
+      mockGetPreview.mockResolvedValue(PREVIEWS[camino]);
+      mockGetColumnMappings.mockResolvedValue(SUGERENCIAS);
+      renderPanel();
+
+      await waitFor(() => expect(selectDe("Vacia").value).toBe("notes"));
+      expect(
+        screen.getByRole("button", {
+          name: "Guardar las 2 columnas sin asignar como campos propios",
+        }),
+      ).toBeInTheDocument();
+
+      // Una elección a mano: las dos acciones la tienen que dejar como está.
+      fireEvent.change(selectDe("Tocada"), { target: { value: "quantity" } });
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Guardar la columna sin asignar como campo propio" }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Ignorar las 2 columnas vacías" }));
+
+      // Aplicadas, los botones se van: ya no tienen a qué aplicarse.
+      await waitFor(() => expect(selectDe("Vacia").value).toBe("ignore"));
+      expect(screen.queryByRole("button", { name: /como campos? propios?/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Ignorar la/ })).toBeNull();
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /Confirmar importación/ })).toBeEnabled(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Confirmar importación/ }));
+      await waitFor(() => expect(mockConfirmFile).toHaveBeenCalled());
+      const enviado = mockConfirmFile.mock.calls[0]![2] as ColumnMapping[];
+      const por = Object.fromEntries(enviado.map((m) => [m.source_column, m]));
+
+      expect(por["Sucursal"]).toEqual(
+        expect.objectContaining({
+          target_field: "custom_field:sucursal",
+          target_label: "Sucursal",
+          user_selected: false,
+        }),
+      );
+      expect(por["Vacia"]).toEqual(
+        expect.objectContaining({ target_field: "ignore", user_selected: false }),
+      );
+      expect(por["Otra vacia"]).toEqual(
+        expect.objectContaining({ target_field: "ignore", user_selected: false }),
+      );
+      expect(por["Tocada"]).toEqual(
+        expect.objectContaining({ target_field: "quantity", user_selected: true }),
+      );
+      expect(por["Fecha"]?.user_selected).toBe(false);
+      // Las acciones no tocan las decisiones de riesgo de F8.
+      if (camino === "plano") expect(mockConfirmFile.mock.calls[0]![6]).toEqual([]);
+    },
+  );
+
+  test("sin candidatas no hay botones", async () => {
+    mockGetPreview.mockResolvedValue(PREVIEWS.plano);
+    mockGetColumnMappings.mockResolvedValue([
+      sugerencia("Fecha", "transaction_date"),
+      sugerencia("Monto", "amount"),
+      // Sin asignar pero sin slug (el backend no calcula slug sin muestra) y
+      // vacía sólo en la muestra: ninguna de las dos acciones se le aplica.
+      sugerencia("Detalle", null, { sample_values: [] }),
+    ]);
+    renderPanel();
+
+    await waitFor(() => expect(selectDe("Fecha").value).toBe("transaction_date"));
+    expect(screen.queryByRole("button", { name: /como campos? propios?/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Ignorar la/ })).toBeNull();
+  });
+});

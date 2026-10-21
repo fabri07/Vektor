@@ -454,6 +454,13 @@ export interface ColumnMappingSuggestion {
   // `duda`. Espejo de `ColumnMappingSuggestion` en `schemas/ingestion.py`.
   vacia_pct?: number | null;
   excluida_por_vacia?: boolean;
+  // B·9: vacía en TODAS las filas de la hoja (no en la muestra): sólo con esto
+  // se ofrece «Ignorar las vacías». Y el slug desambiguado con el que «Guardar
+  // las sin asignar como campos propios» la archivaría (sólo en las candidatas,
+  // con o sin `duda`), para no espejar `custom_field_slug` acá. Espejo de
+  // `schemas/ingestion.py`.
+  empty_in_file?: boolean;
+  custom_slug?: string | null;
   // Candidatos entre los que elegir cuando `status === "ambiguo"`.
   options?: string[];
   // Por qué no alcanza, en castellano. Viaja también en `unmapped` cuando el

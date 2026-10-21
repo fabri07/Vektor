@@ -1459,6 +1459,51 @@ class ParsedTarget:
     field: str
 
 
+def candidata_a_campo_propio(
+    sugerencia: dict[str, Any], *, aunque_tenga_duda: bool = False
+) -> bool:
+    """F-A: una sugerencia que se puede conservar como campo propio.
+
+    La comparten `auto_custom` y la acción masiva de B·9 (`custom_slug` de
+    ``GET /column-mappings``). Ninguna archiva la candidata a un requerido
+    (`required_missing`), una ambigua, una vacía en la muestra ni una que B·5f
+    dejó afuera por vacía.
+
+    `aunque_tenga_duda` es la única diferencia, y es deliberada: `auto_custom`
+    es automático y no tapa la explicación de una `duda`; el botón de B·9 es una
+    acción explícita de la persona (aunque no marque `user_selected`), y sin las
+    `unmapped` con duda no tendría candidatas — `auto_custom` ya archiva todas
+    las demás.
+    """
+    return (
+        sugerencia.get("status") == "unmapped"
+        and bool(sugerencia.get("sample_values"))
+        and not sugerencia.get("excluida_por_vacia")
+        and (aunque_tenga_duda or not sugerencia.get("duda"))
+    )
+
+
+def reservar_slug_propio(source_column: str, slugs_usados: set[str]) -> str | None:
+    """Slug de campo propio para la columna, desambiguado contra ``slugs_usados``
+    (y agregado ahí), o ``None`` si el encabezado no deja ningún carácter usable.
+
+    Desambiguación determinística por orden de aparición: "Obs." y "Obs" dan el
+    mismo slug, y sin sufijo la segunda columna pisaría a la primera. El 422 de
+    F-0 sigue siendo el cinturón duro; esto evita llegar a él por una colisión
+    que Véktor mismo se creó.
+    """
+    slug = custom_field_slug(source_column)
+    if slug is None:
+        return None
+    if slug in slugs_usados:
+        n = 2
+        while f"{slug}_{n}" in slugs_usados:
+            n += 1
+        slug = f"{slug}_{n}"
+    slugs_usados.add(slug)
+    return slug
+
+
 def parse_target(target: str | None) -> ParsedTarget:
     """Fuente ÚNICA de verdad sobre qué representa un ``target_field``.
 
@@ -1959,21 +2004,11 @@ class ColumnMappingService:
             if parse_target(s["target_field"]).kind == "custom"
         }
         for s in suggestions:
-            if s["status"] != "unmapped" or not s["sample_values"] or s["duda"]:
+            if not candidata_a_campo_propio(s):
                 continue
-            slug = custom_field_slug(s["source_column"])
+            slug = reservar_slug_propio(s["source_column"], slugs_usados)
             if slug is None:
                 continue
-            # Desambiguación determinística por orden de aparición: "Obs." y
-            # "Obs" dan el mismo slug, y sin sufijo la segunda columna pisaría a
-            # la primera. El 422 de F-0 sigue siendo el cinturón duro; esto evita
-            # llegar a él por una colisión que Véktor mismo se creó.
-            if slug in slugs_usados:
-                n = 2
-                while f"{slug}_{n}" in slugs_usados:
-                    n += 1
-                slug = f"{slug}_{n}"
-            slugs_usados.add(slug)
             s["target_field"] = f"custom_field:{slug}"
             # La etiqueta viaja aparte y NO se reconstruye desde el slug: el
             # slug pierde acentos, mayúsculas y puntuación, así que "Año Fiscal"

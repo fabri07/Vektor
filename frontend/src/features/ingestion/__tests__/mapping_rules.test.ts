@@ -6,10 +6,12 @@
  */
 
 import {
+  camposPropiosParaSinAsignar,
   coversRequired,
   customFieldCollisions,
   disabledCrossFieldReasons,
   explainMissing,
+  ignorarLasVacias,
   mappingOrigin,
   missingRequiredFields,
   scalarCollisions,
@@ -427,5 +429,59 @@ describe("disabledCrossFieldReasons (Cambio 4)", () => {
       PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS: false,
     });
     expect(motivos).toEqual({});
+  });
+});
+
+describe("B·9 — acciones masivas", () => {
+  const nadieTocó = () => false;
+
+  test("campos propios: sólo candidatas sin destino y sin tocar, con su encabezado", () => {
+    const patch = camposPropiosParaSinAsignar(
+      [
+        { source_column: "Sucursal", custom_slug: "sucursal" },
+        { source_column: "Ya mapeada", custom_slug: "ya_mapeada" },
+        { source_column: "Tocada", custom_slug: "tocada" },
+        { source_column: "Sin slug", custom_slug: null },
+        { source_column: "Vieja" },
+      ],
+      { "Ya mapeada": "notes", Tocada: "" },
+      (col) => col === "Tocada",
+    );
+    expect(patch).toEqual({
+      mappings: { Sucursal: "custom_field:sucursal" },
+      labels: { Sucursal: "Sucursal" },
+    });
+  });
+
+  test("campos propios: desambigua contra los que la persona creó en pantalla", () => {
+    // El backend calculó el slug sin saber que «Otra» ya apunta a `obs`.
+    const patch = camposPropiosParaSinAsignar(
+      [
+        { source_column: "Obs.", custom_slug: "obs" },
+        { source_column: "Obs_2", custom_slug: "obs_2" },
+      ],
+      { Otra: "custom_field: obs" },
+      nadieTocó,
+    );
+    expect(patch.mappings).toEqual({
+      "Obs.": "custom_field:obs_2",
+      Obs_2: "custom_field:obs_2_2",
+    });
+    expect(customFieldCollisions({ Otra: "custom_field:obs", ...patch.mappings })).toEqual([]);
+  });
+
+  test("ignorar las vacías: sólo `empty_in_file`, aunque tengan destino, salvo las tocadas", () => {
+    const patch = ignorarLasVacias(
+      [
+        { source_column: "Vacia", empty_in_file: true },
+        { source_column: "Ya ignorada", empty_in_file: true },
+        { source_column: "Tocada", empty_in_file: true },
+        { source_column: "Con datos", empty_in_file: false },
+        { source_column: "Vieja" },
+      ],
+      { Vacia: "notes", "Ya ignorada": "ignore", Tocada: "quantity" },
+      (col) => col === "Tocada",
+    );
+    expect(patch).toEqual({ mappings: { Vacia: "ignore" }, labels: {} });
   });
 });
