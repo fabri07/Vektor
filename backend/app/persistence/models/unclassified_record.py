@@ -20,7 +20,11 @@ UNCLASSIFIED_STATUS_PENDING = "PENDING"
 UNCLASSIFIED_STATUS_IMPORTED = "IMPORTED"
 UNCLASSIFIED_STATUS_DISMISSED = "DISMISSED"
 
-UNCLASSIFIED_SOURCES = ("ingestion", "chat", "reanalysis")
+UNCLASSIFIED_SOURCES = ("ingestion", "chat", "reanalysis", "pos")
+#: B·5e-2: la tarea de una venta del POS sin red ya cobrada sin compra previa.
+#: La venta YA existe: la fila no se clasifica (duplicaría), se descarta al
+#: cargar la compra.
+UNCLASSIFIED_SOURCE_POS = "pos"
 
 #: Prefijo del ``source_row_ref`` que se estampa en la venta/gasto nacido de
 #: clasificar a mano una fila de "Otros" (``unclassified:{record_id}``).
@@ -121,7 +125,9 @@ class UnclassifiedRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_unclassified_records_status",
         ),
         CheckConstraint(
-            "source IN ('ingestion', 'chat', 'reanalysis')",
+            # B·5e-2 (mig `20261021_0001`): `pos` = la tarea de una venta sin red
+            # ya cobrada sin compra previa.
+            "source IN ('ingestion', 'chat', 'reanalysis', 'pos')",
             name="ck_unclassified_records_source",
         ),
         Index("ix_unclassified_records_tenant_status", "tenant_id", "status"),

@@ -106,6 +106,7 @@ from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
+    UNCLASSIFIED_SOURCE_POS,
     UNCLASSIFIED_STATUS_DISMISSED,
     UNCLASSIFIED_STATUS_IMPORTED,
     UNCLASSIFIED_STATUS_PENDING,
@@ -712,7 +713,10 @@ async def _get_pending_record(
     record_id: UUID,
     *,
     for_update: bool = False,
+    clasificar: bool = True,
 ) -> UnclassifiedRecord:
+    """``clasificar=False``: el descarte. Una tarea del POS (B·5e-2) se descarta
+    pero no se clasifica: su venta YA existe y clasificarla la duplicaría."""
     query = select(UnclassifiedRecord).where(
             UnclassifiedRecord.id == record_id,
             UnclassifiedRecord.tenant_id == tenant_id,
@@ -731,6 +735,17 @@ async def _get_pending_record(
             detail={
                 "code": "RECORD_ALREADY_RESOLVED",
                 "message": "El registro ya fue importado o descartado.",
+            },
+        )
+    if clasificar and record.source == UNCLASSIFIED_SOURCE_POS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "POS_SALE_ALREADY_RECORDED",
+                "message": (
+                    "Esta venta del POS ya está registrada. Cargá la compra o el stock "
+                    "inicial del producto y descartá este aviso."
+                ),
             },
         )
     return record
@@ -1222,7 +1237,7 @@ async def dismiss_record(
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
     record = await _get_pending_record(
-        session, tenant.tenant_id, record_id, for_update=True
+        session, tenant.tenant_id, record_id, for_update=True, clasificar=False
     )
     ahora = datetime.now(UTC)
     record.status = UNCLASSIFIED_STATUS_DISMISSED

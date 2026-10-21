@@ -12,6 +12,7 @@ import {
   type RereadNotRevertedEntity,
   type RereadDataLoss,
 } from "@/services/ingestion.service";
+import { mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
 import { useToastStore } from "@/stores/toastStore";
 import { Modal } from "@/components/ui/Modal";
 import { TableSearch } from "@/components/ui/TableSearch";
@@ -333,9 +334,11 @@ export function FileListSection() {
         );
       }
     },
-    onError: () => {
+    onError: (e) => {
       setFileToDelete(null);
-      addToast("No se pudo eliminar el archivo.", "error");
+      // B·5e-2: 409 FILE_BACKS_SALES dice cuántas ventas quedarían vendiendo
+      // algo que no se compró; se muestra el motivo del servidor.
+      addToast(mensajeDelServidor(e) ?? "No se pudo eliminar el archivo.", "error");
     },
   });
 

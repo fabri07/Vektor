@@ -133,7 +133,15 @@ export function usePosSync({
             });
           } catch (e) {
             const info = posErrorInfo(e);
-            if (op.origen === "b13" && info.code === "INSUFFICIENT_STOCK") {
+            // B·5e-2: «sin compra previa» prueba lo mismo que «sin stock»: el
+            // chequeo corre después de reclamar la clave, así que la venta no
+            // existía. Se adapta igual y el próximo intento, por el camino
+            // offline, la registra y deja la tarea en «Otros» (la plata ya se
+            // cobró: no se pierde).
+            if (
+              op.origen === "b13" &&
+              (info.code === "INSUFFICIENT_STOCK" || info.code === "SALE_WITHOUT_PURCHASE")
+            ) {
               // Llegar al chequeo de stock PRUEBA que la venta no existía: una
               // clave ya reclamada con el mismo contenido se contesta antes,
               // con el ticket original. Y el 400 revierte la transacción, así

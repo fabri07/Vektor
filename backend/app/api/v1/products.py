@@ -42,6 +42,7 @@ from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
 )
+from app.application.services.respaldo_service import primeros_dias_de_fuente, respaldada
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation,
     trigger_score_recalculation_after_commit,
@@ -102,6 +103,17 @@ from app.schemas.product import (
 router = APIRouter()
 
 DEACTIVATION_REASON_MANUAL = "MANUAL_ADMIN_VOID"
+
+
+async def _a_caja_con_compra(
+    session: AsyncSession, producto: Product, tenant_id: UUID
+) -> PosProductResponse:
+    """La vista de caja con ``tiene_compra`` (B·5e-2): el escáner con red frena
+    al agregar, no recién al cobrar."""
+    item = a_pos_product(producto, tenant_id)
+    primeros = await primeros_dias_de_fuente(session, tenant_id, [producto.id])
+    item.tiene_compra = respaldada(primeros.get(producto.id), today_ar())
+    return item
 
 
 async def _tenant_vertical(session: AsyncSession, tenant_id: UUID) -> Vertical:
@@ -667,7 +679,7 @@ async def lookup_product_by_scan(
     return ScanLookupResponse(
         code_type=codigo.tipo.value,
         matched_by=columna,
-        product=a_pos_product(producto, tenant.tenant_id),
+        product=await _a_caja_con_compra(session, producto, tenant.tenant_id),
     )
 
 
@@ -1404,7 +1416,7 @@ async def learn_product_barcode(
 
     variantes = variantes_gtin(codigo.valor)
     if producto.barcode_normalized in variantes:
-        return a_pos_product(producto, tenant.tenant_id)
+        return await _a_caja_con_compra(session, producto, tenant.tenant_id)
     # Se mira el campo CRUDO, no sólo el normalizado: un código alfanumérico
     # tiene `barcode_normalized = None` y, mirando sólo ese, esto lo pisaría.
     if producto.barcode_normalized is not None or (producto.barcode or "").strip():
@@ -1458,7 +1470,7 @@ async def learn_product_barcode(
             "terminal_id": str(terminal.id) if terminal is not None else None,
         },
     )
-    return a_pos_product(producto, tenant.tenant_id)
+    return await _a_caja_con_compra(session, producto, tenant.tenant_id)
 
 
 def _barcode_taken(ocupante: Product, columna: str) -> HTTPException:

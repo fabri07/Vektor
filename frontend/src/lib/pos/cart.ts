@@ -31,6 +31,12 @@ export interface PosProduct {
    * guardado antes de B7·1 — ahí manda el catálogo, como siempre.
    */
   price_token?: string | null;
+  /**
+   * B·5e-2: hoy hay compra o stock inicial con costo (viene en el catálogo).
+   * `false` = no se puede vender («no se vende lo que no se compró»), también
+   * sin red. `null`/ausente = no se sabe (lookup en vivo: decide el servidor).
+   */
+  tiene_compra?: boolean | null;
 }
 
 export interface CartLine {

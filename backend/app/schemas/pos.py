@@ -285,6 +285,10 @@ class PosProductResponse(BaseModel):
     #: sin que el servidor tenga que confiar en ella. Lo pone
     #: :func:`a_pos_product`, no ``model_validate``.
     price_token: str | None = None
+    #: B·5e-2: hoy hay compra o stock inicial con costo del producto (sin costos
+    #: en la respuesta: sólo sí/no). ``False`` = la caja sin red no deja
+    #: agregarlo. ``None`` donde no se calcula.
+    tiene_compra: bool | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

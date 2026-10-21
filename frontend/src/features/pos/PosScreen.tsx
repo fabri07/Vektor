@@ -182,6 +182,19 @@ function PosRegister() {
   saleRef.current = sale;
   const [picker, setPicker] = useState<PickerMode | null>(null);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
+  // B·5e-2: «no se puede vender algo que no se compró». El catálogo dice si el
+  // producto tiene compra o stock inicial; sin eso no entra al carrito (con o
+  // sin red). Sin el dato (lookup en vivo) decide el servidor al cobrar.
+  const agregar = useCallback((product: PosProduct) => {
+    if (product.tiene_compra === false) {
+      setScanMsg(
+        `Falta la compra de ${product.name}: no se puede vender lo que no se compró. ` +
+          "Que el encargado cargue la compra o el stock inicial y actualizá el catálogo.",
+      );
+      return;
+    }
+    dispatch({ type: "ADD_PRODUCT", product });
+  }, []);
   const [lastOperation, setLastOperation] = useState<PosOperationResult | null>(null);
   const scanRef = useRef<HTMLInputElement>(null);
 
@@ -548,7 +561,7 @@ function PosRegister() {
       setScanMsg(null);
       try {
         const r = await posService.lookup(code);
-        dispatch({ type: "ADD_PRODUCT", product: r.product });
+        agregar(r.product);
       } catch (e) {
         const info = posErrorInfo(e);
         if (info.code === "SCAN_AMBIGUOUS" && Array.isArray(info.fields.candidates)) {
@@ -571,7 +584,7 @@ function PosRegister() {
             const p = hallados[0]!.producto;
             // Se muestra el stock ESTIMADO: el del servidor menos lo que la
             // caja ya cobró y todavía no subió.
-            dispatch({ type: "ADD_PRODUCT", product: { ...p, stock_units: p.stock_estimado } });
+            agregar({ ...p, stock_units: p.stock_estimado });
           } else if (hallados.length > 1) {
             setPicker({
               mode: "ambiguous",
@@ -592,7 +605,7 @@ function PosRegister() {
         }
       }
     },
-    [canLearn],
+    [canLearn, agregar],
   );
 
   useScanner({
@@ -645,12 +658,12 @@ function PosRegister() {
       setPicker(null);
       focusScan();
       if (actual?.mode !== "learn") {
-        dispatch({ type: "ADD_PRODUCT", product });
+        agregar(product);
         return;
       }
       try {
         const actualizado = await posService.learnBarcode(product.id, actual.code);
-        dispatch({ type: "ADD_PRODUCT", product: actualizado });
+        agregar(actualizado);
         setScanMsg(`«${actual.code}» quedó vinculado a ${product.name}.`);
       } catch (e) {
         const info = posErrorInfo(e);
@@ -658,7 +671,7 @@ function PosRegister() {
           const motivo = await aprenderSinRed(actual.code, product);
           // El cajero eligió el producto a propósito: se vende igual aunque el
           // código no se pueda vincular, como en el camino con red.
-          dispatch({ type: "ADD_PRODUCT", product });
+          agregar(product);
           setScanMsg(
             motivo === null
               ? `«${actual.code}» quedó vinculado a ${product.name} en esta PC. ` +
@@ -669,7 +682,7 @@ function PosRegister() {
         }
         if (info.code === "BARCODE_ALREADY_SET") {
           // Lo eligió a propósito: se vende igual, pero el código no se vinculó.
-          dispatch({ type: "ADD_PRODUCT", product });
+          agregar(product);
           setScanMsg(`${product.name} ya tiene otro código cargado: no se vinculó «${actual.code}».`);
         } else if (info.code === "BARCODE_TAKEN") {
           setScanMsg(`«${actual.code}» ya es de otro producto. Avisale al encargado.`);
@@ -678,7 +691,7 @@ function PosRegister() {
         }
       }
     },
-    [picker, focusScan, aprenderSinRed],
+    [picker, focusScan, aprenderSinRed, agregar],
   );
 
   // ─── Render ───────────────────────────────────────────────────────────────

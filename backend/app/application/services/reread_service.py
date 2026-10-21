@@ -116,6 +116,11 @@ from app.application.services.operation_identity_service import (
     vinculos_de,
 )
 from app.application.services.reread_limits import REREAD_STALE_AFTER_SECONDS
+from app.application.services.respaldo_service import (
+    primeros_dias_de_fuente,
+    productos_con_fuente_en_archivo,
+    ventas_que_pierden_respaldo,
+)
 from app.application.services.stock_service import (
     sale_source_event_id,
     unvoid_movement,
@@ -3721,6 +3726,19 @@ def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
     return texto
 
 
+class RereadWouldLeaveSalesWithoutPurchaseError(ValueError):
+    """B·5e-2: la relectura sacaría compras o stock inicial que respaldan ventas
+    vivas cargadas por otro lado. No se acepta como pérdida: se frena."""
+
+    def __init__(self, ventas: int) -> None:
+        super().__init__(
+            f"La relectura sacaría compras o stock inicial que respaldan {ventas} "
+            "venta(s) cargadas por otro lado: quedarían vendiendo algo que no se "
+            "compró. Revisá el mapeo de las compras del archivo."
+        )
+        self.ventas = ventas
+
+
 class RereadWouldLoseDataError(ValueError):
     """El apply perdería registros (o repetiría ediciones a mano) y no se
     aceptó. Lanzado ANTES de estampar: el caller hace rollback."""
@@ -4112,6 +4130,11 @@ async def apply_reread(
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
 
     file = await _load_file(session, file_id, tenant_id)
+    # B·5e-2: las compras y el stock inicial que este archivo trae HOY, y desde
+    # cuándo respaldan: si la relectura los saca, no puede dejar ventas de otro
+    # lado vendiendo algo que no se compró.
+    _con_fuente_b5e = await productos_con_fuente_en_archivo(session, tenant_id, file_id)
+    _antes_b5e = await primeros_dias_de_fuente(session, tenant_id, _con_fuente_b5e)
     if file is None:
         raise FileNotFoundError(file_id)
     s3 = s3 or S3Client()
@@ -4189,6 +4212,11 @@ async def apply_reread(
 
     # Compuerta de relectura: medición EXACTA, con lo que este apply escribió.
     await session.flush()
+    _perdidas_b5e = await ventas_que_pierden_respaldo(
+        session, tenant_id, _antes_b5e, _con_fuente_b5e, excluir_upload_id=file_id
+    )
+    if _perdidas_b5e.total:
+        raise RereadWouldLeaveSalesWithoutPurchaseError(_perdidas_b5e.total)
     otros_nuevos = [
         r.row_data or {}
         for r in (

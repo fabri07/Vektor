@@ -17,7 +17,7 @@ export interface ProductMatchCandidate {
 export interface UnclassifiedRecordResponse {
   id: string;
   uploaded_file_id: string | null;
-  source: "ingestion" | "chat" | "reanalysis";
+  source: "ingestion" | "chat" | "reanalysis" | "pos";
   context_label: string | null;
   headers: string[] | null;
   row_data: Record<string, string>;

@@ -78,9 +78,16 @@ from app.application.services.pos_terminal_service import (
     listar,
     resolver_terminal,
 )
+from app.application.services.respaldo_service import (
+    MOTIVO_VENTA_POS_SIN_COMPRA,
+    VentaSinCompraError,
+    primeros_dias_de_fuente,
+    respaldada,
+)
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
+from app.domain.business_time import today_ar
 from app.domain.pos_operation import (
     LineaPedida,
     OperacionInvalidaError,
@@ -114,6 +121,7 @@ from app.persistence.models.pos_stock_discrepancy import (
     PosStockDiscrepancy,
 )
 from app.persistence.models.pos_terminal import PosTerminal
+from app.persistence.models.unclassified_record import UnclassifiedRecord
 from app.schemas.pos import (
     PosAdoptPendingRequest,
     PosAdoptPendingResponse,
@@ -408,6 +416,13 @@ async def create_pos_operation(
         .all()
     )
     por_id = {p.id: p for p in locked}
+    # B·5e: «no se puede vender algo que no se compró». Online, la venta de un
+    # producto sin compra ni stock inicial a la fecha se frena (422 con el
+    # producto). Sin red ya está cobrada: entra completa y deja una tarea en
+    # «Otros» para cargar la compra (la plata y el turno son reales).
+    _primeros_b5e = await primeros_dias_de_fuente(session, tenant.tenant_id, por_id.keys())
+    _dia_b5e = body.operation_date.date()
+    sin_respaldo: set[uuid.UUID] = set()
 
     pedidas: list[LineaPedida] = []
     #: product_id → (precio, factor, nombre, unidad) del CATÁLOGO, sólo si
@@ -526,6 +541,10 @@ async def create_pos_operation(
             )
             precio = item.manual_unit_price_ars
 
+        if not respaldada(_primeros_b5e.get(producto.id), _dia_b5e):
+            if not es_offline:
+                raise VentaSinCompraError(producto.id, producto.name, _dia_b5e)
+            sin_respaldo.add(producto.id)
         if producto.stock_units < item.quantity:
             if not es_offline:
                 raise stock_service.InsufficientStockError(
@@ -715,6 +734,29 @@ async def create_pos_operation(
                 ),
             )
 
+    # B·5e: la venta sin red sin compra previa ya entró; queda la tarea.
+    for ln in lineas:
+        if ln.product_id in sin_respaldo:
+            _nombre_b5e = por_id[ln.product_id].name
+            session.add(
+                UnclassifiedRecord(
+                    tenant_id=tenant.tenant_id,
+                    source="pos",
+                    context_label=(
+                        f"{MOTIVO_VENTA_POS_SIN_COMPRA}: cargá la compra o el stock "
+                        f"inicial de {_nombre_b5e}"
+                    )[:200],
+                    row_data={
+                        "sale_id": str(ln.sale_entry_id),
+                        "operation_id": str(operacion.id),
+                        "producto": _nombre_b5e,
+                        "cantidad": ln.quantity,
+                        "fecha": _dia_b5e.isoformat(),
+                    },
+                    suggested_entity=None,
+                    status="PENDING",
+                )
+            )
     # Las salidas pendientes se registran después del flush: la discrepancia
     # apunta a la línea, y la línea recién ahí tiene id.
     for ln in lineas:
@@ -1395,8 +1437,16 @@ async def pos_catalog(
     )
     hay_mas = len(filas) > limit
     pagina = filas[:limit]
+    # B·5e-2: «no se puede vender algo que no se compró», también sin red.
+    _primeros = await primeros_dias_de_fuente(session, tenant.tenant_id, (p.id for p in pagina))
+    _hoy = today_ar()
+    items = []
+    for p in pagina:
+        item = a_pos_product(p, tenant.tenant_id)
+        item.tiene_compra = respaldada(_primeros.get(p.id), _hoy)
+        items.append(item)
     return PosCatalogResponse(
-        items=[a_pos_product(p, tenant.tenant_id) for p in pagina],
+        items=items,
         next_cursor=pagina[-1].id if hay_mas and pagina else None,
         business_name=tenant.display_name,
     )

@@ -10299,6 +10299,8 @@ async def bulk_import_unclassified(
                     UnclassifiedRecord.tenant_id == tenant_id,
                     UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
                     UnclassifiedRecord.suggested_entity.in_(entities),
+                    # B·5e-2: la tarea del POS señala una venta que YA existe.
+                    UnclassifiedRecord.source != "pos",
                 )
             )
         )
