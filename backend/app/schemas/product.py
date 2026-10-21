@@ -90,6 +90,9 @@ class ProductResponse(BaseModel):
     avg_cost_ars: Decimal | None = None
     avg_cost_estado: Literal["medido", "incompleto", "sin_medicion"] | None = None
     avg_cost_motivo: str | None = None
+    #: B·5c: activo y sin stock inicial vivo (``productos_con_apertura_viva``).
+    #: ``None`` sólo en respuestas que no lo calculan.
+    needs_initial_stock: bool | None = None
 
     @field_validator("custom_fields", mode="before")
     @classmethod
@@ -371,3 +374,106 @@ class ConfirmarAperturaResponse(BaseModel):
     #: costo no se revalúa (M·2a); se informan para revisarlas.
     ventas_costeadas_antes: int
     venta_ids: list[UUID]
+
+
+class RegistrarAperturaRequest(BaseModel):
+    """B·5c: el stock inicial de un producto que ya existe.
+
+    Es mercadería que compraron el dueño o los socios: va al COSTO (obligatorio)
+    y se vende a otro precio. ``stock_units`` en unidades base, como el alta.
+    """
+
+    stock_units: int = Field(ge=1)
+    unit_cost_ars: Decimal = Field(gt=0, decimal_places=2)
+    fecha: datetime
+    costo_envio: TratamientoEnvio | None = None
+
+    @field_validator("fecha")
+    @classmethod
+    def _no_futura(cls, v: datetime) -> datetime:
+        resultado = _validar_acquired_at(v)
+        assert resultado is not None
+        return resultado
+
+
+class RegistrarAperturaResponse(BaseModel):
+    movement_id: UUID
+    product_id: UUID
+    stock_units: int
+    #: Ventas ``sin_costo`` del producto desde la fecha: se costean al confirmar.
+    ventas_sin_costo_desde_la_fecha: int
+
+
+class FilaStockInicial(BaseModel):
+    """Una fila de la tabla de stock inicial (B·5c)."""
+
+    nombre: str = Field(min_length=1, max_length=300)
+    sku: str | None = Field(default=None, max_length=100)
+    barcode: str | None = Field(default=None, max_length=64)
+    categoria: str | None = Field(default=None, max_length=100)
+    sale_price_ars: Decimal = Field(gt=0, decimal_places=2)
+    unit_cost_ars: Decimal = Field(gt=0, decimal_places=2)
+    stock_units: int = Field(ge=1)
+    costo_envio: TratamientoEnvio | None = None
+
+    @field_validator("nombre", mode="before")
+    @classmethod
+    def _strip(cls, v: Any) -> Any:
+        return v.strip() if isinstance(v, str) else v
+
+
+MAX_FILAS_STOCK_INICIAL = 200
+
+
+class LoteStockInicialPreviewRequest(BaseModel):
+    filas: list[FilaStockInicial] = Field(min_length=1, max_length=MAX_FILAS_STOCK_INICIAL)
+
+
+class CoincidenciaDeFila(BaseModel):
+    product_id: UUID
+    nombre: str
+    por: Literal["sku", "barcode", "nombre"]
+    necesita_stock_inicial: bool
+
+
+class FilaPreview(BaseModel):
+    fila: int
+    errores: list[str]
+    coincidencias: list[CoincidenciaDeFila]
+
+
+class LoteStockInicialPreviewResponse(BaseModel):
+    filas: list[FilaPreview]
+    preview_token: str
+
+
+class EleccionDeFila(BaseModel):
+    fila: int = Field(ge=0)
+    accion: Literal["crear", "apertura_en"]
+    product_id: UUID | None = None
+
+
+class LoteStockInicialRequest(LoteStockInicialPreviewRequest):
+    elecciones: list[EleccionDeFila] = Field(default_factory=list)
+    preview_token: str = Field(min_length=1, max_length=128)
+    fecha: datetime
+
+    @field_validator("fecha")
+    @classmethod
+    def _no_futura(cls, v: datetime) -> datetime:
+        resultado = _validar_acquired_at(v)
+        assert resultado is not None
+        return resultado
+
+
+class ResultadoDeFila(BaseModel):
+    fila: int
+    accion: Literal["crear", "apertura_en"]
+    product_id: UUID
+    movement_id: UUID
+
+
+class LoteStockInicialResponse(BaseModel):
+    filas: list[ResultadoDeFila]
+    creados: int
+    con_apertura: int

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
-from app.application.services import maintenance_lock_service
+from app.application.services import apertura_service, maintenance_lock_service
 from app.application.services._savepoint import (
     SavepointConflictError,
     guarded_savepoint,
@@ -701,6 +701,18 @@ def exigir_costo_con_stock(entra_stock: bool, costo: Decimal | None) -> None:
         raise CostoRequeridoError(COSTO_REQUERIDO_MESSAGE)
 
 
+class AperturaExistenteError(Exception):
+    """El producto ya tiene stock inicial vivo (B·5c): no se suma otro en silencio."""
+
+    def __init__(self, apertura: InventoryMovement) -> None:
+        super().__init__("El producto ya tiene stock inicial cargado.")
+        self.apertura = apertura
+
+
+class ProductoInactivoError(Exception):
+    """Stock inicial para un producto dado de baja (B·5c)."""
+
+
 class StockCambioError(Exception):
     """El stock que el usuario veía al editar ya no es el actual (M·P2c)."""
 
@@ -747,6 +759,7 @@ async def registrar_apertura_manual(
     fecha: datetime,
     confirmado_por: uuid.UUID | None,
     source_upload_id: uuid.UUID | None = None,
+    exigir_sin_apertura: bool = False,
 ) -> InventoryMovement:
     """Stock inicial cargado a mano en el alta de un producto (M·P2c).
 
@@ -763,10 +776,21 @@ async def registrar_apertura_manual(
     ``fecha`` (M·2d): desde cuándo el negocio tiene ese stock, la que tipeó el
     usuario. La apertura nace CONFIRMADA en esa fecha de negocio (no en la de la
     carga): una venta anterior a la carga y posterior a esa fecha tiene fuente.
+
+    ``exigir_sin_apertura`` (B·5c, producto que ya existía): con el producto
+    bloqueado, si ya tiene una apertura viva → ``AperturaExistenteError``, y si
+    está dado de baja → ``ProductoInactivoError``. Dos cargas simultáneas se
+    serializan en el ``FOR UPDATE``: la segunda ve la apertura de la primera.
     """
     if qty <= 0:
         raise ValueError("El stock inicial tiene que ser positivo.")
     product = await _producto_para_stock_manual(product_id, tenant_id, db)
+    if exigir_sin_apertura:
+        if not product.is_active:
+            raise ProductoInactivoError(str(product_id))
+        existente = await apertura_service.apertura_viva_de(db, tenant_id, product_id)
+        if existente is not None:
+            raise AperturaExistenteError(existente)
     balance = await _get_or_create_balance(product, tenant_id, db)
     balance.current_qty += qty
     product.stock_units += qty

@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1._stock_manual import (
@@ -28,6 +28,7 @@ from app.api.v1.deps import (
 from app.application.services import (
     apertura_service,
     maintenance_lock_service,
+    stock_inicial_lote_service,
     tenant_categories_service,
 )
 from app.application.services.costo_promedio_service import costos_a_lote
@@ -77,11 +78,21 @@ from app.schemas.common import MessageResponse
 from app.schemas.pos import PosProductResponse, a_pos_product
 from app.schemas.product import (
     CategorySuggestionResponse,
+    CoincidenciaDeFila,
     ConfirmarAperturaRequest,
     ConfirmarAperturaResponse,
     CreateProductRequest,
+    EleccionDeFila,
+    FilaPreview,
     LearnBarcodeRequest,
+    LoteStockInicialPreviewRequest,
+    LoteStockInicialPreviewResponse,
+    LoteStockInicialRequest,
+    LoteStockInicialResponse,
     ProductResponse,
+    RegistrarAperturaRequest,
+    RegistrarAperturaResponse,
+    ResultadoDeFila,
     ScanLookupResponse,
     UpdateProductRequest,
 )
@@ -134,9 +145,13 @@ async def _con_sugerencias(
         if avg_cost_display_enabled_for(tenant_id)
         else {}
     )
+    con_apertura = await apertura_service.productos_con_apertura_viva(
+        session, tenant_id, [p.id for p in products]
+    )
     out: list[ProductResponse] = []
     for product in products:
         response = ProductResponse.model_validate(product)
+        response.needs_initial_stock = bool(product.is_active) and product.id not in con_apertura
         registro = promedios.get(product.id)
         if registro is not None:
             # Sin registro, los tres quedan en null: un producto todavía sin
@@ -494,6 +509,16 @@ async def create_product(
         session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_PRODUCT"
     ):
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    saved = await _crear_producto(session, tenant.tenant_id, user.user_id, body)
+    trigger_score_recalculation.delay(str(tenant.tenant_id), "product_created")
+    return saved
+
+
+async def _crear_producto(
+    session: AsyncSession, tenant_id: UUID, user_id: UUID, body: CreateProductRequest
+) -> Product:
+    """El alta de ``POST /products``, con su stock inicial. La comparte el lote de
+    stock inicial (B·5c) para que una fila «crear» no difiera de un alta."""
     repo = ProductRepository(session)
     data = body.model_dump()
     # M·P2c: el stock inicial no se fija en la fila: entra como movimiento de
@@ -512,7 +537,7 @@ async def create_product(
             DEFAULT_LOW_STOCK_THRESHOLD_UNITS * data["base_units_per_sale_unit"]
         )
     barcode_match, sku_match = await _find_identity_matches(
-        session, tenant.tenant_id, barcode=data.get("barcode"), sku=data.get("sku")
+        session, tenant_id, barcode=data.get("barcode"), sku=data.get("sku")
     )
     conflict = _identity_conflict_response(
         barcode_match, sku_match, barcode=data.get("barcode"), sku=data.get("sku")
@@ -521,9 +546,9 @@ async def create_product(
         raise conflict
     # FASE E: normalizar categoría libre al catálogo (custom del tenant primero).
     if data.get("category"):
-        vertical = await _tenant_vertical(session, tenant.tenant_id)
+        vertical = await _tenant_vertical(session, tenant_id)
         code, label = await _resolve_category(
-            session, tenant.tenant_id, data["category"], vertical
+            session, tenant_id, data["category"], vertical
         )
         data["category"] = code
         if label:
@@ -542,14 +567,14 @@ async def create_product(
         )
         or conservar_claves_del_costo(None, data.get("custom_fields"))
     )
-    product = Product(tenant_id=tenant.tenant_id, **data)
+    product = Product(tenant_id=tenant_id, **data)
     # F5-A: el pre-check de arriba tiene ventana TOCTOU. El guard abre el savepoint,
     # emite el INSERT adentro y traduce la violación del índice único al mismo 409
     # —sin él la request perdedora daría 500 y dejaría la transacción abortada—.
     try:
         async with product_identity_guard(
             session,
-            tenant_id=tenant.tenant_id,
+            tenant_id=tenant_id,
             barcode=data.get("barcode"),
             sku=data.get("sku"),
         ):
@@ -561,15 +586,14 @@ async def create_product(
     if stock_inicial > 0:
         await registrar_apertura_http(
             session,
-            tenant.tenant_id,
+            tenant_id,
             saved.id,
             stock_inicial,
             costo=data["unit_cost_ars"],
             envio=costo_envio,
             fecha=data["acquired_at"],
-            confirmado_por=user.user_id,
+            confirmado_por=user_id,
         )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "product_created")
     return saved
 
 
@@ -871,6 +895,332 @@ async def confirm_product_opening(
         productos=r.productos,
         ventas_costeadas_antes=r.ventas_costeadas_antes,
         venta_ids=r.venta_ids,
+    )
+
+
+async def _ventas_sin_costo_desde(
+    session: AsyncSession, tenant_id: UUID, product_id: UUID, fecha: datetime
+) -> int:
+    """Ventas vivas ``sin_costo`` del producto desde la fecha: las que el listener
+    costea con esta apertura al confirmar (salvo las de unidad dudosa)."""
+    dia = fecha.date()
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(SaleEntry)
+                .where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.product_id == product_id,
+                    SaleEntry.voided_at.is_(None),
+                    SaleEntry.cost_origin == "sin_costo",
+                    func.date(SaleEntry.transaction_date) >= dia,
+                )
+            )
+        ).scalar_one()
+    )
+
+
+@router.post(
+    "/{product_id}/opening",
+    dependencies=[Depends(require_active_subscription)],
+    response_model=RegistrarAperturaResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Cargar el stock inicial de un producto que ya existe (B·5c)",
+)
+async def register_product_opening(
+    product_id: UUID,
+    body: RegistrarAperturaRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    # Escribe stock y costo: el mismo permiso que editar el producto.
+    user: User = Depends(require_modify_access),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+    session: AsyncSession = Depends(get_db_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> RegistrarAperturaResponse:
+    """Stock inicial = mercadería que compraron el dueño o los socios, al COSTO.
+
+    - 404: el producto no existe o es de otro negocio.
+    - 409 ``PRODUCT_INACTIVE``: está dado de baja.
+    - 409 ``OPENING_EXISTS``: ya tiene stock inicial vivo (manual o de un
+      archivo); nunca se suma otro en silencio. Trae lo que hay y cómo
+      corregirlo con lo que existe hoy.
+
+    Las ventas ``sin_costo`` del producto desde la fecha quedan costeadas al
+    confirmar; un costo ya congelado no se revalúa.
+    """
+    if idempotency_key is not None and not await claim_idempotency_key(
+        session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_OPENING"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    movement = await registrar_apertura_http(
+        session,
+        tenant.tenant_id,
+        product_id,
+        body.stock_units,
+        costo=body.unit_cost_ars,
+        envio=body.costo_envio,
+        fecha=body.fecha,
+        confirmado_por=user.user_id,
+        exigir_sin_apertura=True,
+    )
+    pendientes = await _ventas_sin_costo_desde(
+        session, tenant.tenant_id, product_id, body.fecha
+    )
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant.tenant_id,
+            decision_type="OPENING_STOCK_REGISTERED",
+            decision_data={
+                "alcance": "producto",
+                "product_id": str(product_id),
+                "movement_id": str(movement.id),
+                "stock_units": body.stock_units,
+                "unit_cost_ars": str(body.unit_cost_ars),
+                "fecha": body.fecha.date().isoformat(),
+                "ventas_sin_costo_desde_la_fecha": pendientes,
+            },
+            triggered_by="ui:opening_registration",
+            actor_user_id=user.user_id,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "opening_registered"
+    )
+    return RegistrarAperturaResponse(
+        movement_id=movement.id,
+        product_id=product_id,
+        stock_units=body.stock_units,
+        ventas_sin_costo_desde_la_fecha=pendientes,
+    )
+
+
+def _preview_de(analisis: list[stock_inicial_lote_service.FilaAnalizada]) -> list[FilaPreview]:
+    return [
+        FilaPreview(
+            fila=a.fila,
+            errores=a.errores,
+            coincidencias=[
+                CoincidenciaDeFila(
+                    product_id=c.product_id,
+                    nombre=c.nombre,
+                    por=c.por,
+                    necesita_stock_inicial=c.necesita_stock_inicial,
+                )
+                for c in a.coincidencias
+            ],
+        )
+        for a in analisis
+    ]
+
+
+@router.post(
+    "/batch/preview",
+    response_model=LoteStockInicialPreviewResponse,
+    summary="Paso 1 del lote de stock inicial: coincidencias y token (B·5c)",
+)
+async def preview_initial_stock_batch(
+    body: LoteStockInicialPreviewRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    _user: User = Depends(require_modify_access),
+    session: AsyncSession = Depends(get_db_session),
+) -> LoteStockInicialPreviewResponse:
+    """No escribe. Por fila: errores y productos activos que coinciden por SKU,
+    código de barras o nombre normalizado, y si necesitan stock inicial."""
+    analisis = await stock_inicial_lote_service.analizar(session, tenant.tenant_id, body.filas)
+    return LoteStockInicialPreviewResponse(
+        filas=_preview_de(analisis),
+        preview_token=stock_inicial_lote_service.token(body.filas, analisis),
+    )
+
+
+def _error_de_lote(code: str, message: str, **extra: Any) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={"code": code, "message": message, **extra},
+    )
+
+
+@router.post(
+    "/batch",
+    dependencies=[Depends(require_active_subscription)],
+    response_model=LoteStockInicialResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Paso 2 del lote de stock inicial: crear o abrir, todo o nada (B·5c)",
+)
+async def confirm_initial_stock_batch(
+    body: LoteStockInicialRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(require_modify_access),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+    session: AsyncSession = Depends(get_db_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> LoteStockInicialResponse:
+    """Cada fila crea un producto con su stock inicial, o carga el stock inicial
+    de un producto existente que coincide (``apertura_en``). Todo o nada.
+
+    - 409 ``PRODUCTS_BEING_CREATED``: otra alta o un import está creando
+      productos ahora; se reintenta en un momento.
+    - 409 ``BATCH_CHANGED``: las coincidencias cambiaron desde el preview (trae
+      el preview nuevo).
+    - 422 ``ROWS_INVALID`` / ``CHOICE_REQUIRED`` / ``INVALID_CHOICE``.
+    """
+    tid = tenant.tenant_id
+    if idempotency_key is not None and not await claim_idempotency_key(
+        session, tid, idempotency_key, "IDEMPOTENT_POST_PRODUCT_BATCH"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    # Mismo orden que cualquier alta: el lock de escritura y después el de alta.
+    # Exclusivo y sin esperar: ningún producto nace entre las coincidencias de
+    # abajo y los INSERT (el nombre admite homónimos: no hay índice que lo frene).
+    await maintenance_lock_service.acquire_write_lock_shared(session, tid)
+    if not await maintenance_lock_service.try_product_creation_exclusive(session, tid):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "PRODUCTS_BEING_CREATED",
+                "message": "Se están creando productos ahora mismo (otra carga o un "
+                "archivo). Probá de nuevo en un momento.",
+            },
+        )
+    analisis = await stock_inicial_lote_service.analizar(session, tid, body.filas)
+    if stock_inicial_lote_service.token(body.filas, analisis) != body.preview_token:
+        nuevo = LoteStockInicialPreviewResponse(
+            filas=_preview_de(analisis),
+            preview_token=stock_inicial_lote_service.token(body.filas, analisis),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "BATCH_CHANGED",
+                "message": "Los productos cambiaron desde que revisaste la tabla. "
+                "Revisá las coincidencias de nuevo.",
+                "preview": nuevo.model_dump(mode="json"),
+            },
+        )
+    con_error = [a for a in analisis if a.errores]
+    if con_error:
+        raise _error_de_lote(
+            "ROWS_INVALID",
+            "Hay filas con errores.",
+            filas=[{"fila": a.fila, "errores": a.errores} for a in con_error],
+        )
+    elecciones: dict[int, EleccionDeFila] = {}
+    for dada in body.elecciones:
+        if dada.fila >= len(body.filas) or dada.fila in elecciones:
+            raise _error_de_lote(
+                "INVALID_CHOICE", f"Elección inválida para la fila {dada.fila + 1}."
+            )
+        elecciones[dada.fila] = dada
+    plan: list[tuple[int, str, UUID | None]] = []
+    for a in analisis:
+        e = elecciones.get(a.fila)
+        if e is None:
+            if a.coincidencias:
+                raise _error_de_lote(
+                    "CHOICE_REQUIRED",
+                    f"La fila {a.fila + 1} se parece a un producto que ya existe: "
+                    "elegí si es ese o uno nuevo.",
+                    fila=a.fila,
+                )
+            plan.append((a.fila, "crear", None))
+            continue
+        if e.accion == "crear":
+            if a.por_identidad:
+                raise _error_de_lote(
+                    "INVALID_CHOICE",
+                    f"La fila {a.fila + 1} tiene el SKU o el código de barras de un "
+                    "producto que ya existe: no se puede crear otro.",
+                    fila=a.fila,
+                )
+            plan.append((a.fila, "crear", None))
+            continue
+        destino = next((c for c in a.coincidencias if c.product_id == e.product_id), None)
+        if destino is None or not destino.necesita_stock_inicial:
+            raise _error_de_lote(
+                "INVALID_CHOICE",
+                f"La fila {a.fila + 1}: el producto elegido no coincide o ya tiene "
+                "stock inicial.",
+                fila=a.fila,
+            )
+        plan.append((a.fila, "apertura_en", destino.product_id))
+
+    resultados: list[ResultadoDeFila] = []
+    for i, accion, destino_id in plan:
+        f = body.filas[i]
+        if accion == "crear":
+            producto = await _crear_producto(
+                session,
+                tid,
+                user.user_id,
+                CreateProductRequest(
+                    name=f.nombre,
+                    sku=f.sku,
+                    barcode=f.barcode,
+                    category=f.categoria,
+                    sale_price_ars=f.sale_price_ars,
+                    unit_cost_ars=f.unit_cost_ars,
+                    stock_units=f.stock_units,
+                    costo_envio=f.costo_envio,
+                    acquired_at=body.fecha,
+                ),
+            )
+            apertura = await apertura_service.apertura_viva_de(session, tid, producto.id)
+            assert apertura is not None  # la acaba de crear el alta
+            resultados.append(
+                ResultadoDeFila(
+                    fila=i, accion="crear", product_id=producto.id, movement_id=apertura.id
+                )
+            )
+        else:
+            assert destino_id is not None
+            mov = await registrar_apertura_http(
+                session,
+                tid,
+                destino_id,
+                f.stock_units,
+                costo=f.unit_cost_ars,
+                envio=f.costo_envio,
+                fecha=body.fecha,
+                confirmado_por=user.user_id,
+                exigir_sin_apertura=True,
+            )
+            resultados.append(
+                ResultadoDeFila(
+                    fila=i, accion="apertura_en", product_id=destino_id, movement_id=mov.id
+                )
+            )
+    creados = sum(1 for r in resultados if r.accion == "crear")
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tid,
+            decision_type="OPENING_STOCK_BATCH",
+            decision_data={
+                "alcance": "lote",
+                "fecha": body.fecha.date().isoformat(),
+                "filas": [
+                    {
+                        "fila": r.fila,
+                        "accion": r.accion,
+                        "product_id": str(r.product_id),
+                        "movement_id": str(r.movement_id),
+                        "stock_units": body.filas[r.fila].stock_units,
+                        "unit_cost_ars": str(body.filas[r.fila].unit_cost_ars),
+                    }
+                    for r in resultados
+                ],
+            },
+            triggered_by="ui:opening_batch",
+            actor_user_id=user.user_id,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    trigger_score_recalculation_after_commit(session, str(tid), "opening_batch")
+    return LoteStockInicialResponse(
+        filas=resultados, creados=creados, con_apertura=len(resultados) - creados
     )
 
 

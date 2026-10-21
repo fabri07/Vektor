@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1._stock_manual import (
+    exigir_costo_con_stock,
     exigir_fecha_con_stock,
     momento_del_costo_del_alta,
     registrar_apertura_http,
@@ -957,11 +958,13 @@ async def reclassify_record(
             prod_req = CreateProductRequest(**body.fields)
             data = prod_req.model_dump()
             # M·P2c: el stock inicial entra como apertura en el ledger (igual
-            # que POST /products), no fijado en la fila. Acá NO se exige el
-            # costo: la fila viene de un archivo, y una fila importada sin costo
-            # entra igual (queda `incompleto`), como en el import.
+            # que POST /products), no fijado en la fila. B·5c: con stock, el
+            # costo es obligatorio también acá — el stock inicial es mercadería
+            # comprada por el dueño o los socios, y una apertura sin costo no
+            # respalda ninguna venta. Sin stock, el producto entra sin costo.
             stock_inicial = data.pop("stock_units")
             costo_envio = data.pop("costo_envio")
+            exigir_costo_con_stock(stock_inicial > 0, data.get("unit_cost_ars"))
             data["stock_units"] = 0
             # M·2d: la fecha del stock inicial la da el usuario, como en el alta.
             exigir_fecha_con_stock(stock_inicial > 0, data.get("acquired_at"))

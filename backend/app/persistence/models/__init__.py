@@ -149,6 +149,9 @@ __all__ = [
     "AccessRequestToken",
 ]
 
+# B·5c: el lock compartido de alta de productos, en cualquier camino que cree uno.
+from app.persistence import alta_de_producto_lock as _alta_de_producto_lock  # noqa: E402,F401
+
 # M·2a: registra los listeners que costean cada venta al confirmarla. Va acá
 # porque todo lo que abre una sesión importa los modelos (API, worker, scripts,
 # tests): una venta creada por cualquier camino queda costeada.
