@@ -131,6 +131,11 @@ from app.application.services.inventory_replay_service import (
     run_inventory_replay,
 )
 from app.application.services.llm_file_type_detector import maybe_detect_file_type
+from app.application.services.respaldo_service import (
+    primeros_dias_de_fuente,
+    productos_con_fuente_en_archivo,
+    ventas_que_pierden_respaldo,
+)
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
@@ -1594,9 +1599,36 @@ async def delete_file(
         _revertido: dict[str, Any] = {}
     else:
         # La reversa va SOLO si el CAS ganó.
+        # B·5e-2: «no se puede vender algo que no se compró» vale también para
+        # atrás: si las compras o el stock inicial de este archivo son lo único
+        # que respalda ventas vivas de OTRAS fuentes, el borrado se frena.
+        _con_fuente = await productos_con_fuente_en_archivo(
+            session, tenant.tenant_id, file_id
+        )
+        _antes = await primeros_dias_de_fuente(session, tenant.tenant_id, _con_fuente)
         _revertido = await revert_file_data(
             session, file_id, tenant.tenant_id, actor_user_id=user.user_id
         )
+        await session.flush()
+        _perdidas = await ventas_que_pierden_respaldo(
+            session, tenant.tenant_id, _antes, _con_fuente
+        )
+        if _perdidas.total:
+            await session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "FILE_BACKS_SALES",
+                    "message": (
+                        f"No se puede eliminar: sus compras o su stock inicial respaldan "
+                        f"{_perdidas.total} venta(s) cargadas por otro lado, que quedarían "
+                        "vendiendo algo que no se compró. Cargá esas compras de otra "
+                        "forma o anulá esas ventas primero."
+                    ),
+                    "ventas": _perdidas.total,
+                    "muestras": _perdidas.muestras,
+                },
+            )
         # Los scores quedaban calculados sobre datos que este borrado acaba de
         # revertir. Se dispara DESPUÉS del commit: el worker abre su propia
         # sesión, así que encolarlo antes lo haría leer un estado que todavía no

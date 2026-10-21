@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Final
 
@@ -32,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.stock_service import SaleProductNotFoundError
 from app.persistence.models.inventory import InventoryMovement, movement_business_time
 from app.persistence.models.product import Product
+from app.persistence.models.transaction import SaleEntry
 from app.persistence.repositories.costo_de_referencia_repository import filtro_de_fuentes
 
 #: Sin corte práctico: el primer día se compara después contra cada venta.
@@ -39,6 +41,8 @@ _SIN_CORTE: Final = date(9999, 12, 30)
 
 MOTIVO_VENTA_SIN_COMPRA: Final = "Venta sin compra previa"
 MOTIVO_VENTA_SIN_PRODUCTO: Final = "Venta sin producto"
+#: B·5e-2: la venta del POS sin red ya cobrada entra; la tarea queda en «Otros».
+MOTIVO_VENTA_POS_SIN_COMPRA: Final = "Venta del POS sin compra previa"
 
 
 def _dia(valor: object) -> date:
@@ -135,10 +139,81 @@ async def exigir_respaldo(
             raise VentaSinCompraError(producto, nombres[producto], dia)
 
 
+async def productos_con_fuente_en_archivo(
+    session: AsyncSession, tenant_id: uuid.UUID, uploaded_file_id: uuid.UUID
+) -> set[uuid.UUID]:
+    """Productos con una fuente con costo viva que trae ESTE archivo."""
+    m = InventoryMovement
+    filas = await session.execute(
+        select(m.product_id)
+        .where(
+            m.tenant_id == tenant_id,
+            m.source_upload_id == uploaded_file_id,
+            m.voided_at.is_(None),
+            m.qty > 0,
+        )
+        .distinct()
+    )
+    return {pid for pid in filas.scalars() if pid is not None}
+
+
+@dataclass(frozen=True)
+class VentasSinRespaldo:
+    """Ventas vivas que perderían su compra previa (B·5e-2)."""
+
+    total: int
+    muestras: list[dict[str, str]]
+
+
+async def ventas_que_pierden_respaldo(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    antes: dict[uuid.UUID, date],
+    product_ids: Iterable[uuid.UUID],
+    *,
+    muestras: int = 5,
+) -> VentasSinRespaldo:
+    """Con las anulaciones ya escritas (flush), las ventas vivas de esos
+    productos que ANTES estaban respaldadas y AHORA no: su día cae entre el
+    primer día de fuente de antes y el de ahora (o ya no hay fuente). Una venta
+    que ya no tenía respaldo (anterior a B·5e) no cuenta: no la rompe esto."""
+    ids = sorted({p for p in product_ids if p is not None and p in antes}, key=str)
+    if not ids:
+        return VentasSinRespaldo(0, [])
+    despues = await primeros_dias_de_fuente(session, tenant_id, ids)
+    afectados = [p for p in ids if despues.get(p) is None or despues[p] > antes[p]]
+    if not afectados:
+        return VentasSinRespaldo(0, [])
+    filas = (
+        await session.execute(
+            select(SaleEntry.id, SaleEntry.product_id, SaleEntry.transaction_date, Product.name)
+            .join(Product, Product.id == SaleEntry.product_id)
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.product_id.in_(afectados),
+            )
+            .order_by(SaleEntry.transaction_date)
+        )
+    ).all()
+    perdidas = []
+    for venta_id, pid, cuando, nombre in filas:
+        dia = cuando.date()
+        if dia >= antes[pid] and not respaldada(despues.get(pid), dia):
+            perdidas.append(
+                {"sale_id": str(venta_id), "producto": nombre, "fecha": dia.isoformat()}
+            )
+    return VentasSinRespaldo(len(perdidas), perdidas[:muestras])
+
+
 __all__ = [
+    "MOTIVO_VENTA_POS_SIN_COMPRA",
     "MOTIVO_VENTA_SIN_COMPRA",
     "MOTIVO_VENTA_SIN_PRODUCTO",
     "VentaSinCompraError",
+    "VentasSinRespaldo",
+    "productos_con_fuente_en_archivo",
+    "ventas_que_pierden_respaldo",
     "VentaSinProductoError",
     "exigir_respaldo",
     "primeros_dias_de_fuente",
