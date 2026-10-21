@@ -1570,15 +1570,32 @@ ENTITY_LABELS: dict[str, str] = {
 #: - ``CROSS_ENTITY_TARGETS`` = qué acepta el confirm sin rechazar (validación).
 #: - esto = qué produce un efecto (implementación).
 #:
-#: Hoy el importador aplica UNO solo: `insert_confirmed_data` filtra con
-#: ``{k: v for k, v in _cruzados.items() if v != "supplier:name"}`` y cuenta el
-#: resto en ``targets_cruzados_descartados`` — F-D no está entregada.
+#: Hoy aplica `supplier:name` (catálogo → proveedor declarado, `_add_product`) y,
+#: desde B·6 (F-D), los de venta → cliente y compra → proveedor: completan la
+#: ficha identificada sólo donde está vacía (``domain/cross_field_buffer.py``).
+#: ``expense → product:*`` sigue afuera — toca el motor de costo — y el confirm
+#: lo rechaza con 422 en vez de aceptarlo y tirarlo.
 #:
 #: La UI se deriva de ESTA lista y no de la otra. Ofrecer un destino que el
 #: confirm acepta pero que no escribe nada es peor que no ofrecerlo: el usuario
 #: mapea la columna, la pantalla no se queja, y el dato desaparece en silencio.
 #: Es la misma clase de bug que el propio `/field-catalog` vino a cerrar.
-CROSS_ENTITY_TARGETS_IMPLEMENTED: frozenset[str] = frozenset({"supplier:name"})
+CROSS_ENTITY_TARGETS_IMPLEMENTED: frozenset[str] = frozenset(
+    {
+        "supplier:name",
+        # B·6: venta → cliente.
+        "customer:last_name",
+        "customer:address",
+        "customer:locality",
+        "customer:province",
+        "customer:postal_code",
+        "customer:customer_type",
+        "customer:iva_condition",
+        # B·6: compra → proveedor.
+        "supplier:last_name",
+        "supplier:payment_method",
+    }
+)
 
 
 def cross_targets_for(entity: str) -> list[tuple[str, str, str]]:

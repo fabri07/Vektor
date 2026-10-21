@@ -253,12 +253,13 @@ class TestResolucionDeColumnas:
 class TestLosCruzadosDejanRastro:
     """#10 del review — `kind="cross"` caía sin rama y la columna se evaporaba.
 
-    F-D no está entregada, así que un target `{entidad}:{campo}` no se puede
-    escribir todavía. Lo que no puede pasar es que el usuario mapee una columna a
-    mano, el importador la tire y nadie se entere: es la clase exacta del
-    incidente ASTERIA —un valor que desaparece y una heurística que lo reemplaza
-    con otra cosa—. No se rechaza (hay imports vivos que dependen del fallback
-    heurístico de `unit_cost_ars`), pero se reporta.
+    `_resolve_target_cols` separa los targets `{entidad}:{campo}` en su propia
+    rama. Desde B·6 el importador escribe los de venta → cliente y compra →
+    proveedor (completan la ficha identificada); el resto, por el importador, se
+    cuenta en `targets_cruzados_descartados` — lo que no puede pasar es que el
+    usuario mapee una columna a mano, el importador la tire y nadie se entere (la
+    clase exacta del incidente ASTERIA). El confirm, además, rechaza con 422 un
+    cruzado que la hoja no puede escribir.
     """
 
     def test_un_target_cruzado_se_descarta_pero_se_reporta(self) -> None:
