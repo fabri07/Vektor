@@ -11,12 +11,15 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import stock_service
 from app.domain.business_time import a_hora_de_negocio, now_ar_naive
 from app.domain.contrato_de_costo import contrato_declarado
 from app.domain.costo_de_referencia import Tratamiento
+from app.persistence.models.file import UploadedFile
+from app.persistence.models.inventory import InventoryMovement
 
 
 def exigir_costo_con_stock(entra_stock: bool, costo: Decimal | None) -> None:
@@ -71,16 +74,83 @@ async def registrar_apertura_http(
     fecha: datetime,
     confirmado_por: UUID | None,
     source_upload_id: UUID | None = None,
-) -> None:
-    await stock_service.registrar_apertura_manual(
-        product_id,
-        tenant_id,
-        qty,
-        contrato_declarado(costo, envio=envio or "desconocido"),
-        session,
-        fecha=fecha,
-        confirmado_por=confirmado_por,
-        source_upload_id=source_upload_id,
+    exigir_sin_apertura: bool = False,
+) -> InventoryMovement:
+    """``exigir_sin_apertura`` (B·5c): stock inicial de un producto que ya
+    existía; 404 / 409 ``PRODUCT_INACTIVE`` / 409 ``OPENING_EXISTS``."""
+    try:
+        return await stock_service.registrar_apertura_manual(
+            product_id,
+            tenant_id,
+            qty,
+            contrato_declarado(costo, envio=envio or "desconocido"),
+            session,
+            fecha=fecha,
+            confirmado_por=confirmado_por,
+            source_upload_id=source_upload_id,
+            exigir_sin_apertura=exigir_sin_apertura,
+        )
+    except stock_service.AperturaExistenteError as exc:
+        raise await apertura_existente_http(session, exc.apertura) from exc
+    except stock_service.ProductoInactivoError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "PRODUCT_INACTIVE",
+                "message": "El producto está dado de baja: reactivalo para cargarle stock.",
+            },
+        ) from exc
+    except stock_service.ProductoNoEncontradoError as exc:
+        if not exigir_sin_apertura:
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Product not found."
+        ) from exc
+
+
+async def apertura_existente_http(
+    session: AsyncSession, apertura: InventoryMovement
+) -> HTTPException:
+    """409 ``OPENING_EXISTS`` con lo que ya hay y SÓLO los caminos que existen
+    para corregirlo (B·5c): la fecha, con «Confirmar apertura»; la cantidad, con
+    un ajuste de stock; una apertura de archivo, desde ese archivo. El costo de
+    una apertura ya cargada no tiene corrección: no se promete."""
+    archivo: str | None = None
+    if apertura.source_upload_id is not None:
+        archivo = (
+            await session.execute(
+                select(UploadedFile.original_filename).where(
+                    UploadedFile.id == apertura.source_upload_id
+                )
+            )
+        ).scalar_one_or_none()
+    fecha = apertura.occurred_at or apertura.created_at
+    de_archivo = apertura.source_upload_id is not None
+    costo = (
+        apertura.unit_cost_final if apertura.unit_cost_final is not None else apertura.unit_cost
+    )
+    caminos = (
+        [f"Viene del archivo «{archivo or 'importado'}»: corregila confirmando o "
+         "releyendo ese archivo."]
+        if de_archivo
+        else [
+            "Si la fecha está mal, corregila con «Confirmar stock inicial».",
+            "Si la cantidad está mal, ajustá el stock desde la edición del producto.",
+        ]
+    )
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "OPENING_EXISTS",
+            "message": "Este producto ya tiene stock inicial cargado.",
+            "origen": "archivo" if de_archivo else "manual",
+            "archivo": archivo,
+            "movement_id": str(apertura.id),
+            "fecha": fecha.date().isoformat() if fecha is not None else None,
+            "qty": apertura.qty,
+            "unit_cost": str(costo) if costo is not None else None,
+            "caminos": caminos,
+        },
     )
 
 

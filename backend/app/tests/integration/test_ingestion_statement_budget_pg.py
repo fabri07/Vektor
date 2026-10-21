@@ -293,8 +293,11 @@ async def test_presupuesto_absoluto_de_statements(
     cota("INSERT inventory_balances", 8)
     cota("INSERT inventory_movements", 8)
     cota("INSERT sales_entries", 8)
-    # La barrera que PR #53 bajó de 812 a 2 en la relectura.
-    cota("pg_advisory_lock (lock)", 2)
+    # La barrera que PR #53 bajó de 812 a 2 en la relectura, más el lock de alta
+    # de productos de B·5c: uno por flush con productos nuevos (por lote de 200,
+    # no por producto: reentrante y sin caché, porque un savepoint revertido lo
+    # suelta). 300 productos = 2 lotes.
+    cota("pg_advisory_lock (lock)", 4)
     # El camino batch de fingerprints: un INSERT ... ON CONFLICT, no uno por fila.
     cota("INSERT operation_fingerprints", 2)
     # Y el total, que es lo que el usuario paga contra Neon.

@@ -33,6 +33,10 @@ from sqlalchemy import ColumnElement, func, select, text
 from sqlalchemy.engine import CursorResult, Dialect
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.persistence.alta_de_producto_lock import (
+    CLASE_ALTA_DE_PRODUCTO,
+    clave_alta_de_producto,
+)
 from app.persistence.models.maintenance_lock import TenantMaintenanceLock
 
 
@@ -235,3 +239,20 @@ async def acquire_maintenance_lock_exclusive(db: AsyncSession, tenant_id: uuid.U
         return
     key = _advisory_key(tenant_id)
     await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
+async def try_product_creation_exclusive(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    """El lote de stock inicial (B·5c): exclusivo y SIN esperar.
+
+    ``False`` = hay un alta o un import creando productos ahora mismo. El lote
+    no espera (un import puede tardar minutos): responde que se reintente.
+    ``True`` en SQLite.
+    """
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        return True
+    r = await db.execute(
+        text("SELECT pg_try_advisory_xact_lock(:c, :k)"),
+        {"c": CLASE_ALTA_DE_PRODUCTO, "k": clave_alta_de_producto(tenant_id)},
+    )
+    return bool(r.scalar_one())

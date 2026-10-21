@@ -133,6 +133,39 @@ def filtro_aperturas_vivas(tenant_id: uuid.UUID) -> list[ColumnElement[bool]]:
     ]
 
 
+async def apertura_viva_de(
+    session: AsyncSession, tenant_id: uuid.UUID, product_id: uuid.UUID
+) -> InventoryMovement | None:
+    """La apertura viva más vieja del producto, manual o de archivo (B·5c)."""
+    return (
+        await session.execute(
+            select(InventoryMovement)
+            .where(*filtro_aperturas_vivas(tenant_id), InventoryMovement.product_id == product_id)
+            .order_by(InventoryMovement.created_at, InventoryMovement.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def productos_con_apertura_viva(
+    session: AsyncSession, tenant_id: uuid.UUID, product_ids: list[uuid.UUID]
+) -> set[uuid.UUID]:
+    """DEFINICIÓN ÚNICA (B·5c): un producto activo «necesita stock inicial» si
+    NO está en este conjunto. La usan la apertura a mano, el lote, la respuesta
+    del producto y la pantalla. Tenga ventas o no."""
+    if not product_ids:
+        return set()
+    filas = await session.execute(
+        select(InventoryMovement.product_id)
+        .where(
+            *filtro_aperturas_vivas(tenant_id),
+            InventoryMovement.product_id.in_(product_ids),
+        )
+        .distinct()
+    )
+    return {pid for pid in filas.scalars() if pid is not None}
+
+
 async def confirmar_apertura_de_producto(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -425,6 +458,8 @@ async def resumen_de_archivo(
 
 __all__ = [
     "AperturaAmbiguaError",
+    "apertura_viva_de",
+    "productos_con_apertura_viva",
     "FechaRequeridaError",
     "ResumenAperturasDeArchivo",
     "ResultadoConfirmacion",

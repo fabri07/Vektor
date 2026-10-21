@@ -56,6 +56,10 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
         ("POST", f"{P}/expenses/profit-withdrawal"),
         ("POST", f"{P}/products"),
         ("POST", f"{P}/products/custom-categories"),
+        # B·5c: stock inicial a mano, por producto y en lote. El preview del
+        # lote no escribe: sin gate.
+        ("POST", f"{P}/products/{{product_id}}/opening"),
+        ("POST", f"{P}/products/batch"),
         ("POST", f"{P}/customers"),
         ("POST", f"{P}/customers/extract"),
         ("POST", f"{P}/customers/import/confirm"),
