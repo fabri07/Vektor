@@ -1924,10 +1924,20 @@ async def get_column_mappings(
         file_id=record.id,
     )
     # B·5f: una columna con ≥ 40 % de celdas vacías (sobre todas las filas de su
-    # contexto) no se mapea SOLA a un destino informativo: queda sin mapear con
-    # el porcentaje, para que la pantalla diga que no se carga. Con un destino
-    # que mueve números o identidad, la sugerencia queda y lleva el porcentaje.
-    vacias = columnas_vacias(summary, context_id or "table", [str(h) for h in headers])
+    # contexto) no se mapea SOLA a un destino informativo: se propone `ignore`
+    # (explícito, para que viaje en el confirm y la heurística por nombre no la
+    # cargue igual) con el porcentaje. Una ambigua conserva sus opciones; con un
+    # destino que mueve números o identidad la sugerencia queda. En todos los
+    # casos el aviso va en `duda`. El Libro Diario (columnas sintéticas) no se mide.
+    ctx_info = next(
+        (c for c in resolve_contexts(summary) if c.get("context_id") == (context_id or "table")),
+        None,
+    )
+    vacias = (
+        {}
+        if (ctx_info or {}).get("libro_diario")
+        else columnas_vacias(summary, context_id or "table", [str(h) for h in headers])
+    )
     out: list[ColumnMappingSuggestion] = []
     for sug in raw_suggestions:
         prop = vacias.get(str(sug.get("source_column")))
@@ -1936,13 +1946,16 @@ async def get_column_mappings(
             pct = round(prop * 100)
             extra["vacia_pct"] = pct
             previa = sug.get("duda")
-            if destino_excluible_por_vacio(sug.get("target_field")):
+            target = sug.get("target_field")
+            if sug.get("status") == "ambiguo":
+                aviso = f"Está {pct}% vacía."
+            elif destino_excluible_por_vacio(target, resolved_entity):
                 aviso = (
                     f"Está {pct}% vacía: no se carga. Si la querés igual, elegí el campo "
                     "a mano y se respeta."
                 )
                 extra.update(
-                    target_field=None, status="unmapped", confidence=0.0, source="none",
+                    target_field="ignore", status="mapped", confidence=0.0, source="none",
                     excluida_por_vacia=True, options=[],
                 )
             else:
@@ -2968,32 +2981,53 @@ async def confirm_file(
 
     # ── B·5f: columnas con ≥ 40 % de celdas vacías ─────────────────────────────
     # Una columna mayormente vacía mapeada SOLA (sugerencia, no elegida por el
-    # usuario) a un destino informativo no se carga: se suma a `_dropped_pairs`
-    # (mismo efecto que dropearla: no llega al importador ni crea campo propio).
-    # Elegida a mano, o con un destino que mueve números/identidad, se carga y
-    # se avisa. Sobre las filas COMPLETAS de su contexto.
+    # usuario) a un destino informativo no se carga: viaja al importador como
+    # `ignore` (`_vacias_ignoradas`), que la saca de las filas — sólo sacarla
+    # del mapeo dejaría que la heurística por nombre de columna la cargue igual.
+    # Una sugerencia que ya llegó como `ignore` por esta regla también se
+    # registra (aviso + comprobante). Elegida a mano, o con un destino que mueve
+    # números o identidad, se carga y se avisa. Sobre las filas COMPLETAS de su
+    # contexto; las hojas excluidas y el Libro Diario (columnas sintéticas del
+    # parser) no se miden.
     _vacias_por_ctx: dict[str, dict[str, float]] = {}
+    _ctx_por_id = {
+        c.get("context_id"): c for c in resolve_contexts(record.parsed_summary_json or {})
+    }
+    _vacias_ignoradas: set[tuple[str, str]] = set()
     _columnas_vacias_excluidas: dict[str, dict[str, float]] = defaultdict(dict)
     _avisos_columnas_vacias: list[str] = []
+    _vacias_vistas: set[tuple[str, str]] = set()
     for _m in body.column_mappings:
         _cid = _m.context_id or "table"
-        if parse_target(_m.target_field).kind in ("ignore", "none"):
+        _par = (_cid, _m.source_column)
+        _kind = parse_target(_m.target_field).kind
+        if _kind == "none" or _par in _dropped_pairs or _par in _vacias_vistas:
             continue
-        if (_cid, _m.source_column) in _dropped_pairs:
+        if (_ctx_por_id.get(_cid) or {}).get("libro_diario"):
+            continue
+        if not _context_included(_cid, _entity_for(_m)):
             continue
         if _cid not in _vacias_por_ctx:
             _vacias_por_ctx[_cid] = columnas_vacias(record.parsed_summary_json or {}, _cid)
         _prop = _vacias_por_ctx[_cid].get(_m.source_column)
         if _prop is None:
             continue
+        _vacias_vistas.add(_par)
         _pct = round(_prop * 100)
+        if _kind == "ignore":
+            if not _m.user_selected:
+                _columnas_vacias_excluidas[_cid][_m.source_column] = _prop
+                _avisos_columnas_vacias.append(
+                    f"La columna «{_m.source_column}» no se carga: está {_pct}% vacía."
+                )
+            continue
         if _m.user_selected:
             _avisos_columnas_vacias.append(
                 f"La columna «{_m.source_column}» está {_pct}% vacía: se carga porque la "
                 "elegiste vos."
             )
-        elif destino_excluible_por_vacio(_m.target_field):
-            _dropped_pairs.add((_cid, _m.source_column))
+        elif destino_excluible_por_vacio(_m.target_field, _entity_for(_m)):
+            _vacias_ignoradas.add(_par)
             _columnas_vacias_excluidas[_cid][_m.source_column] = _prop
             _avisos_columnas_vacias.append(
                 f"La columna «{_m.source_column}» no se carga: está {_pct}% vacía."
@@ -3189,11 +3223,10 @@ async def confirm_file(
             )
 
             for _mapping in body.column_mappings:
-                # Una columna dropeada no crea custom field (no se va a importar).
-                if (
-                    _mapping.context_id or "table",
-                    _mapping.source_column,
-                ) in _dropped_pairs:
+                # Una columna dropeada, o excluida por vacía (B·5f), no crea
+                # custom field (no se va a importar).
+                _par_cf = (_mapping.context_id or "table", _mapping.source_column)
+                if _par_cf in _dropped_pairs or _par_cf in _vacias_ignoradas:
                     continue
                 _parsed_target = parse_target(_mapping.target_field)
                 if _parsed_target.kind == "custom":
@@ -3241,6 +3274,11 @@ async def confirm_file(
             _applied.summary if _applied is not None else dict(record.parsed_summary_json or {})
         )
         updated_summary["confirmed_fields"] = body.confirmed_fields
+        # B·5f: lo que no se cargó por vacío, para que la relectura lo reaplique.
+        if _columnas_vacias_excluidas:
+            updated_summary["columnas_vacias_excluidas"] = {
+                cid: sorted(cols) for cid, cols in _columnas_vacias_excluidas.items()
+            }
         # Persistir la elección de tratamiento del stock (apertura vs compra) en el summary
         # para que una relectura posterior conserve la decisión sin volver a preguntar.
         if body.stock_treatment is not None:
@@ -3257,7 +3295,12 @@ async def confirm_file(
         if _flat_mappings:
             # F8b: una columna dropeada ("table") no se pasa al importador.
             explicit_mappings = {
-                m.source_column: m.target_field
+                # B·5f: una columna vacía excluida viaja como `ignore`.
+                m.source_column: (
+                    "ignore"
+                    if ("table", m.source_column) in _vacias_ignoradas
+                    else m.target_field
+                )
                 for m in _flat_mappings
                 if ("table", m.source_column) not in _dropped_pairs
             }
@@ -3269,7 +3312,12 @@ async def confirm_file(
                 # F8b: saltear las columnas dropeadas de su contexto.
                 if (m.context_id or "table", m.source_column) in _dropped_pairs:
                     continue
-                _cm[m.context_id or ""][m.source_column] = m.target_field
+                # B·5f: una columna vacía excluida viaja como `ignore`.
+                _cm[m.context_id or ""][m.source_column] = (
+                    "ignore"
+                    if (m.context_id or "table", m.source_column) in _vacias_ignoradas
+                    else m.target_field
+                )
             context_mappings = dict(_cm)
 
         # F7d: subconjunto de mapeos de columnas de hojas de maestro (clientes/

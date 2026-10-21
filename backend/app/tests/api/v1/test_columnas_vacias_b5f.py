@@ -139,24 +139,43 @@ def test_se_mide_sobre_todas_las_filas_y_el_umbral_es_40_inclusive() -> None:
 
 
 @pytest.mark.parametrize(
-    ("destino", "excluible"),
+    ("destino", "entidad", "excluible"),
     [
-        ("description", True),
-        ("notes", True),
-        ("customer_phone", True),
-        ("custom_field:color", True),
-        ("customer:email", True),
-        ("amount", False),
-        ("sale_price_ars", False),
-        ("unit_cost_ars", False),
-        ("name", False),
-        ("sku", False),
-        ("payment_method", False),
-        ("transaction_date", False),
+        ("description", "product", True),
+        ("notes", "sale", True),
+        ("category", "product", True),
+        ("custom_field:color", "sale", True),
+        ("address", "customer", True),
+        # Revisión: identidad o números, nunca solos.
+        ("category", "expense", False),
+        ("customer_phone", "sale", False),
+        ("customer_email", "sale", False),
+        ("customer:email", "sale", False),
+        ("is_recurring", "expense", False),
+        ("amount", "sale", False),
+        ("sale_price_ars", "product", False),
+        ("unit_cost_ars", "product", False),
+        ("name", "product", False),
+        ("sku", "product", False),
+        ("payment_method", "sale", False),
+        ("transaction_date", "sale", False),
     ],
 )
-def test_solo_se_excluyen_solos_los_destinos_informativos(destino: str, excluible: bool) -> None:
-    assert destino_excluible_por_vacio(destino) is excluible
+def test_solo_se_excluyen_solos_los_destinos_informativos(
+    destino: str, entidad: str, excluible: bool
+) -> None:
+    assert destino_excluible_por_vacio(destino, entidad) is excluible
+
+
+def test_la_relectura_vuelve_a_dejar_afuera_lo_excluido() -> None:
+    from app.application.services.reread_service import _con_vacias_excluidas
+
+    assert _con_vacias_excluidas(None, {_CTX: ["Rubro"]}) == {_CTX: {"Rubro": "ignore"}}
+    # Lo que el usuario mapeó en el borrador gana.
+    assert _con_vacias_excluidas({_CTX: {"Rubro": "category"}}, {_CTX: ["Rubro"]}) == {
+        _CTX: {"Rubro": "category"}
+    }
+    assert _con_vacias_excluidas({_CTX: {"A": "name"}}, None) == {_CTX: {"A": "name"}}
 
 
 # ── Confirm ───────────────────────────────────────────────────────────────────
@@ -265,7 +284,103 @@ async def test_la_sugerencia_no_mapea_sola_una_columna_informativa_vacia(
     desc = por_col["Descripcion"]
     assert (
         desc["target_field"], desc["status"], desc["excluida_por_vacia"], desc["vacia_pct"]
-    ) == (None, "unmapped", True, 60)
+    ) == ("ignore", "mapped", True, 60)
     assert desc["duda"].startswith("Está 60% vacía: no se carga.")
     precio = por_col["Precio"]
     assert (precio["vacia_pct"], precio["excluida_por_vacia"]) == (None, False)
+
+
+# ── Revisión de B·5f ──────────────────────────────────────────────────────────
+
+
+def _summary_con_rubro() -> dict[str, Any]:
+    """«Rubro» vacío en 3 de 5: la categoría tiene heurística por nombre de
+    columna en el importador, así que sacarla del mapeo no alcanza."""
+    summary = _summary()
+    for i, fila in enumerate(summary["stock_detectado"]):
+        fila["Rubro"] = "Velas" if i < 2 else None
+    summary["mapping_contexts"][0]["headers"] = [*_HEADERS, "Rubro"]
+    return summary
+
+
+async def _archivo_con(db: AsyncSession, tenant: Tenant, summary: dict[str, Any]) -> UploadedFile:
+    record = UploadedFile(
+        tenant_id=tenant.tenant_id, uploaded_by=None, original_filename="r.xlsx",
+        s3_key="uploads/test/uuid/r.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=2048, purpose="stock", status="uploaded",
+        processing_status=PROCESSING_STATUS_NEEDS_CONFIRMATION, parsed_summary_json=summary,
+    )
+    db.add(record)
+    await db.commit()
+    return record
+
+
+@pytest.mark.parametrize("como_llega", ["category", "ignore"])
+async def test_la_categoria_vacia_no_se_carga_por_la_heuristica(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    como_llega: str,
+) -> None:
+    """Revisión: con el destino sólo quitado del mapeo, la heurística del
+    importador leía «Rubro» y la cargaba, mientras el comprobante decía
+    «excluido». Llegue como `category` sugerido o como `ignore` (lo que propone
+    la sugerencia), ningún producto queda con categoría."""
+    record = await _archivo_con(db_session, sample_tenant, _summary_con_rubro())
+    mapeos = [_m("Producto", "name"), _m("Precio", "sale_price_ars"), _m("Rubro", como_llega)]
+    r = await client.post(
+        f"/api/v1/ingestion/files/{record.id}/confirm",
+        json={
+            "column_mappings": mapeos,
+            "confirmed_fields": {"productos": True},
+            "context_confirmed": {_CTX: True},
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    productos = (await db_session.execute(select(Product))).scalars().all()
+    assert len(productos) == 5
+    assert {p.category for p in productos} == {None}
+    assert not any((p.custom_fields or {}).get("category_label") for p in productos)
+    assert "La columna «Rubro» no se carga: está 60% vacía." in r.json()["warnings"]
+
+
+async def test_la_sugerencia_propone_ignorar_y_conserva_las_ambiguas(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    record = await _archivo_con(db_session, sample_tenant, _summary_con_rubro())
+    r = await client.get(
+        f"/api/v1/ingestion/files/{record.id}/column-mappings",
+        params={"context_id": _CTX},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    rubro = next(s for s in r.json() if s["source_column"] == "Rubro")
+    assert (rubro["target_field"], rubro["excluida_por_vacia"], rubro["vacia_pct"]) == (
+        "ignore", True, 60
+    )
+
+
+async def test_el_libro_diario_no_se_mide(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Sus columnas son sintéticas del parser (la forma de pago sólo en los
+    fiados): no hay columna del usuario que avisar."""
+    summary = _summary()
+    summary["mapping_contexts"][0]["libro_diario"] = True
+    record = await _archivo_con(db_session, sample_tenant, summary)
+    r = await client.get(
+        f"/api/v1/ingestion/files/{record.id}/column-mappings",
+        params={"context_id": _CTX},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert {s["source_column"]: s["vacia_pct"] for s in r.json()}["Descripcion"] is None

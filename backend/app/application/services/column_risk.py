@@ -279,21 +279,32 @@ UMBRAL_COLUMNA_VACIA = NULL_COLUMN_WARN_THRESHOLD  # 0.40
 #: Destinos que una columna mayormente vacía pierde sin cambiar ningún número.
 DESTINOS_INFORMATIVOS: frozenset[str] = frozenset(
     {
-        "address", "birthday", "category", "customer_email", "customer_phone",
-        "customer_type", "description", "email", "expiry_date", "is_recurring",
-        "list_price_ars", "locality", "notes", "phone", "postal_code", "province",
-        "supplier_email", "supplier_phone",
+        "address", "birthday", "customer_type", "description", "expiry_date",
+        "list_price_ars", "locality", "notes", "postal_code", "province",
     }
 )
+#: Informativos sólo en estas entidades: la categoría de un gasto decide si es
+#: mercadería (COGS) y mueve el margen; la de un producto, no.
+_INFORMATIVOS_POR_ENTIDAD: dict[str, frozenset[str]] = {
+    "product": frozenset({"category"}),
+}
+# Fuera a propósito: email y teléfono (de cliente o proveedor) son claves de
+# identidad (`identity_resolution`, índices de clientes y proveedores);
+# `is_recurring` alimenta los gastos fijos del BSL.
 
 
-def destino_excluible_por_vacio(target_field: str | None) -> bool:
+def destino_excluible_por_vacio(target_field: str | None, entity: str | None = None) -> bool:
     """Un destino que se puede dejar de cargar sin tocar montos ni identidad:
-    informativo, campo propio, o ninguno."""
+    informativo (según la entidad), campo propio, o ninguno."""
     target = parse_target(target_field)
     if target.kind in ("none", "ignore", "custom"):
         return True
-    return target.kind in ("canonical", "cross") and target.field in DESTINOS_INFORMATIVOS
+    if target.kind not in ("canonical", "cross"):
+        return False
+    informativos = DESTINOS_INFORMATIVOS | _INFORMATIVOS_POR_ENTIDAD.get(
+        target.entity or entity or "", frozenset()
+    )
+    return target.field in informativos
 
 
 def columnas_vacias(

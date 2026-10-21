@@ -1515,6 +1515,9 @@ async def _reconcile(
     # de F-F.4 —cuyas ventas nunca descontaron— queda al día en cuanto se relee.
     _stored_effect = await _deduce_inventory_effect(session, tenant_id, fresh)
     _draft_context_mappings, _draft_context_entity = _draft_effective_mappings(draft)
+    _draft_context_mappings = _con_vacias_excluidas(
+        _draft_context_mappings, (file.parsed_summary_json or {}).get("columnas_vacias_excluidas")
+    )
     # Bloque 6 (validación, hallazgo real del dry-run Bloque 7): `context_confirmed`
     # del borrador NUNCA llegaba hasta acá — solo lo usaba `build_reread_sheets`
     # para el status que se MUESTRA en el preview. Una hoja que el usuario
@@ -3089,6 +3092,24 @@ class ResolvedRisk:
     applied: AppliedColumnRisk | None = None
     ambiguous_rows: list[dict[str, Any]] = field(default_factory=list)
     forced_rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _con_vacias_excluidas(
+    context_mappings: dict[str, dict[str, str]] | None,
+    excluidas: dict[str, list[str]] | None,
+) -> dict[str, dict[str, str]] | None:
+    """B·5f: las columnas que el confirm no cargó por estar ≥ 40 % vacías vuelven
+    a quedar afuera al releer, como ``ignore`` (si no, la heurística por nombre
+    las cargaría). Una que el usuario mapeó en este borrador gana: es su decisión.
+    Mapeo parcial, igual que el del borrador: el resto sigue con la heurística."""
+    if not excluidas:
+        return context_mappings
+    out = {cid: dict(cols) for cid, cols in (context_mappings or {}).items()}
+    for cid, columnas in excluidas.items():
+        destino = out.setdefault(cid, {})
+        for col in columnas:
+            destino.setdefault(col, "ignore")
+    return out or None
 
 
 def _draft_effective_mappings(
