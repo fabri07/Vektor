@@ -54,7 +54,8 @@ from app.persistence.db.engine_factory import crear_engine  # noqa: E402
 from app.persistence.models.repair import DataRepairRun  # noqa: E402
 from app.persistence.models.transaction import SaleEntry  # noqa: E402
 
-LEASE_TTL = 900
+#: Holgado: una corrida con miles de ventas sobre Neon puede pasar los 15 min.
+LEASE_TTL = 3600
 CREADO_POR = "script:ventas_sin_compra_a_otros"
 
 
@@ -63,6 +64,14 @@ def imprimir(r: Resumen, modo: str, nombre: str) -> None:
     print(f"   ventas sin compra previa o sin producto: {len(r.candidatas)} · ${r.monto:,.2f}")
     for motivo, n in r.por_motivo().most_common():
         print(f"   {motivo}: {n}")
+    if r.fiado:
+        print(f"   de ellas fiadas: ${r.fiado:,.2f} (la deuda de esos clientes baja al aplicar)")
+    if r.en_dias_con_arqueo:
+        n = len(r.en_dias_con_arqueo)
+        print(
+            f"   {n} caen en días con arqueo cerrado: se EXCLUYEN del --apply salvo "
+            "--incluir-dias-con-arqueo (descuadrarían esos arqueos)"
+        )
     for mes, monto in r.por_mes().items():
         print(f"   {mes}: los ingresos de ese mes bajan ${monto:,.2f}")
     if modo == "APPLY" and r.run_id:
@@ -112,6 +121,7 @@ def parser() -> argparse.ArgumentParser:
     quien.add_argument("--all", action="store_true")
     quien.add_argument("--revert", metavar="RUN_ID")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--incluir-dias-con-arqueo", action="store_true")
     ap.add_argument("--desde")
     ap.add_argument("--hasta")
     return ap
@@ -144,7 +154,8 @@ async def _revertir(session: AsyncSession, run_id: uuid.UUID) -> None:
         await session.commit()
     print(
         f"Restauradas: {len(res.restauradas)} · ya resueltas por el usuario (no se tocan): "
-        f"{len(res.resueltas_por_el_usuario)}"
+        f"{len(res.resueltas_por_el_usuario)} · sin stock para volver a descontar "
+        f"(quedan anuladas): {len(res.sin_stock)}"
     )
 
 
@@ -186,7 +197,9 @@ async def main() -> None:
                     continue
                 try:
                     resumen = await reparar(
-                        session, tenant_id, desde=desde, hasta=hasta, creado_por=CREADO_POR
+                        session, tenant_id, desde=desde, hasta=hasta,
+                        incluir_dias_con_arqueo=args.incluir_dias_con_arqueo,
+                        creado_por=CREADO_POR,
                     )
                     await session.commit()
                 except BaseException:

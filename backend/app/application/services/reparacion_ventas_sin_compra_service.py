@@ -24,20 +24,25 @@ from __future__ import annotations
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services import stock_service
+from app.application.services import maintenance_lock_service, stock_service
+from app.application.services.facts_service import INFLOW_METHOD
+from app.application.services.ingestion_import_service import ROW_REF_KEY
 from app.application.services.respaldo_service import (
     MOTIVO_VENTA_SIN_COMPRA,
     MOTIVO_VENTA_SIN_PRODUCTO,
     primeros_dias_de_fuente,
     respaldada,
 )
+from app.domain.transaction import PaymentMethod
+from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.cash_close import CashClose
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.pos_operation import PosOperationLine
 from app.persistence.models.product import Product
@@ -54,9 +59,17 @@ VOID_REASON: Final = "REPAIR_SALE_WITHOUT_PURCHASE"
 
 @dataclass
 class Candidata:
-    venta: SaleEntry
+    """Valores planos (no el ORM): el análisis se imprime después del rollback."""
+
+    sale_id: uuid.UUID
+    monto: Decimal
+    dia: date
     motivo: str
     producto: str | None
+    product_id: uuid.UUID | None
+    customer_id: uuid.UUID | None
+    fiada: bool
+    con_arqueo: bool
 
 
 @dataclass
@@ -67,7 +80,16 @@ class Resumen:
 
     @property
     def monto(self) -> Decimal:
-        return sum((c.venta.amount for c in self.candidatas), Decimal("0"))
+        return sum((c.monto for c in self.candidatas), Decimal("0"))
+
+    @property
+    def fiado(self) -> Decimal:
+        """Lo que baja la deuda de clientes al anularlas (ventas en cuenta corriente)."""
+        return sum((c.monto for c in self.candidatas if c.fiada), Decimal("0"))
+
+    @property
+    def en_dias_con_arqueo(self) -> list[Candidata]:
+        return [c for c in self.candidatas if c.con_arqueo]
 
     def por_motivo(self) -> Counter[str]:
         return Counter(
@@ -78,8 +100,8 @@ class Resumen:
     def por_mes(self) -> dict[str, Decimal]:
         out: dict[str, Decimal] = {}
         for c in self.candidatas:
-            mes = c.venta.transaction_date.strftime("%Y-%m")
-            out[mes] = out.get(mes, Decimal("0")) + c.venta.amount
+            mes = c.dia.strftime("%Y-%m")
+            out[mes] = out.get(mes, Decimal("0")) + c.monto
         return dict(sorted(out.items()))
 
 
@@ -89,10 +111,15 @@ async def analizar(
     desde: date | None = None,
     hasta: date | None = None,
 ) -> Resumen:
-    """Las ventas vivas del negocio sin producto o sin compra previa. SELECT-only."""
+    """Las ventas vivas del negocio sin producto o sin compra previa. SELECT-only.
+
+    Quedan afuera los cobros de fiado (``inflow``: no son ventas) y las ventas
+    del POS (la plata y el turno son reales).
+    """
     q = select(SaleEntry).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.voided_at.is_(None),
+        SaleEntry.payment_method != INFLOW_METHOD,
         ~SaleEntry.id.in_(
             select(PosOperationLine.sale_entry_id).where(
                 PosOperationLine.tenant_id == tenant_id,
@@ -100,13 +127,12 @@ async def analizar(
             )
         ),
     )
+    if desde is not None:
+        q = q.where(SaleEntry.transaction_date >= datetime.combine(desde, time.min))
+    if hasta is not None:
+        fin = datetime.combine(hasta + timedelta(days=1), time.min)
+        q = q.where(SaleEntry.transaction_date < fin)
     ventas = list((await session.execute(q.order_by(SaleEntry.transaction_date))).scalars())
-    ventas = [
-        v
-        for v in ventas
-        if (desde is None or v.transaction_date.date() >= desde)
-        and (hasta is None or v.transaction_date.date() <= hasta)
-    ]
     pids = {v.product_id for v in ventas if v.product_id is not None}
     primeros = await primeros_dias_de_fuente(session, tenant_id, pids)
     nombres: dict[uuid.UUID, str] = {}
@@ -121,26 +147,40 @@ async def analizar(
                 )
             ).all()
         }
+    dias_con_arqueo = set(
+        (
+            await session.execute(
+                select(CashClose.close_date).where(CashClose.tenant_id == tenant_id)
+            )
+        ).scalars()
+    )
     resumen = Resumen(tenant_id=tenant_id)
     for v in ventas:
+        dia = v.transaction_date.date()
         if v.product_id is None:
-            resumen.candidatas.append(
-                Candidata(
-                    v,
-                    f"{MOTIVO_VENTA_SIN_PRODUCTO}: elegí qué producto se vendió "
-                    "(sin producto no hay compra previa ni costo)",
-                    None,
-                )
+            motivo = (
+                f"{MOTIVO_VENTA_SIN_PRODUCTO}: elegí qué producto se vendió "
+                "(sin producto no hay compra previa ni costo)"
             )
-        elif not respaldada(primeros.get(v.product_id), v.transaction_date.date()):
+            nombre = None
+        elif not respaldada(primeros.get(v.product_id), dia):
             nombre = nombres.get(v.product_id, "el producto")
-            resumen.candidatas.append(
-                Candidata(
-                    v,
-                    f"{MOTIVO_VENTA_SIN_COMPRA}: cargá la compra o el stock inicial de {nombre}",
-                    nombre,
-                )
+            motivo = f"{MOTIVO_VENTA_SIN_COMPRA}: cargá la compra o el stock inicial de {nombre}"
+        else:
+            continue
+        resumen.candidatas.append(
+            Candidata(
+                sale_id=v.id,
+                monto=Decimal(v.amount),
+                dia=dia,
+                motivo=motivo,
+                producto=nombre,
+                product_id=v.product_id,
+                customer_id=v.customer_id,
+                fiada=(v.payment_method or "").lower() == PaymentMethod.ACCOUNT.value,
+                con_arqueo=dia in dias_con_arqueo,
             )
+        )
     return resumen
 
 
@@ -150,10 +190,22 @@ async def reparar(
     *,
     desde: date | None = None,
     hasta: date | None = None,
+    incluir_dias_con_arqueo: bool = False,
     creado_por: str = "script:ventas_sin_compra_a_otros",
 ) -> Resumen:
-    """Aplica: anula, devuelve el stock y deja la fila en «Otros». Sin commit."""
+    """Aplica: anula, devuelve el stock y deja la fila en «Otros». Sin commit.
+
+    Una venta de un día con arqueo cerrado descuadraría ese arqueo (su esperado
+    quedó congelado): se excluye salvo ``incluir_dias_con_arqueo``.
+    """
+    from app.application.services.operation_identity_service import (  # noqa: PLC0415
+        liberar_identidades_de,
+    )
+
+    await maintenance_lock_service.acquire_maintenance_lock_exclusive(session, tenant_id)
     resumen = await analizar(session, tenant_id, desde, hasta)
+    if not incluir_dias_con_arqueo:
+        resumen.candidatas = [c for c in resumen.candidatas if not c.con_arqueo]
     run = DataRepairRun(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -166,24 +218,31 @@ async def reparar(
         details_json={},
     )
     session.add(run)
+    await session.flush()
     ahora = datetime.now(UTC)
     pares: list[dict[str, Any]] = []
     for c in resumen.candidatas:
-        v = c.venta
+        v = await session.get(SaleEntry, c.sale_id)
+        assert v is not None
         movimiento = await stock_service._live_sale_movement(v.id, tenant_id, session)
         if movimiento is not None:
-            await stock_service.void_movement(movimiento, session)
+            await stock_service.void_movement(movimiento, session, lock_held=True)
         v.voided_at = ahora
         v.void_reason = VOID_REASON
-        fila = {
-            "fecha": v.transaction_date.date().isoformat(),
-            "monto": str(v.amount),
+        v.voided_by_repair_run_id = run.id
+        fila: dict[str, Any] = {
+            "fecha": c.dia.isoformat(),
+            "monto": str(c.monto),
             "cantidad": v.quantity,
             "producto": c.producto,
             "medio_de_pago": v.payment_method,
             "detalle": v.notes,
-            "sale_id": str(v.id),
+            # Internas (``__``): no se muestran como columnas de la fila.
+            "__sale_id__": str(v.id),
+            "__customer_id__": str(v.customer_id) if v.customer_id else None,
         }
+        if v.source_row_ref:
+            fila[ROW_REF_KEY] = v.source_row_ref
         registro = UnclassifiedRecord(
             id=uuid.uuid4(),
             tenant_id=tenant_id,
@@ -202,14 +261,31 @@ async def reparar(
                 "movement_id": str(movimiento.id) if movimiento is not None else None,
             }
         )
+    # La fila vuelve a poder entrar si el usuario la descarta y re-sube el
+    # archivo con la compra (si no, quedaría «ya aplicada» para siempre).
+    await liberar_identidades_de(
+        session, tenant_id, [("sale", c.sale_id) for c in resumen.candidatas]
+    )
     run.details_json = {
         "repair_type": REPAIR_TYPE,
         "pares": pares,
         "desde": desde.isoformat() if desde else None,
         "hasta": hasta.isoformat() if hasta else None,
         "monto": str(resumen.monto),
+        "fiado": str(resumen.fiado),
         "creado_por": creado_por,
     }
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant_id,
+            decision_type="REPAIR_SALES_WITHOUT_PURCHASE",
+            decision_data={
+                "run_id": str(run.id), "ventas": len(pares), "monto": str(resumen.monto)
+            },
+            triggered_by=creado_por,
+            created_at=ahora,
+        )
+    )
     await session.flush()
     resumen.run_id = run.id
     return resumen
@@ -219,6 +295,8 @@ async def reparar(
 class Reversion:
     restauradas: list[str] = field(default_factory=list)
     resueltas_por_el_usuario: list[str] = field(default_factory=list)
+    #: Su stock ya se vendió: volver a descontarlo dejaría el stock negativo.
+    sin_stock: list[str] = field(default_factory=list)
 
 
 async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
@@ -226,6 +304,9 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
     run = await session.get(DataRepairRun, run_id)
     if run is None or run.repair_type != REPAIR_TYPE or run.tenant_id is None:
         raise ValueError(f"No es una corrida de {REPAIR_TYPE}: {run_id}")
+    if run.status != "APPLIED":
+        raise ValueError(f"La corrida {run_id} ya está {run.status}.")
+    await maintenance_lock_service.acquire_maintenance_lock_exclusive(session, run.tenant_id)
     res = Reversion()
     for par in (run.details_json or {}).get("pares") or []:
         registro = await session.get(UnclassifiedRecord, uuid.UUID(par["record_id"]))
@@ -234,16 +315,26 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
             registro is None
             or venta is None
             or registro.status != UNCLASSIFIED_STATUS_PENDING
-            or venta.void_reason != VOID_REASON
+            or venta.voided_by_repair_run_id != run.id
         ):
             res.resueltas_por_el_usuario.append(par["sale_id"])
             continue
+        mov = (
+            await session.get(InventoryMovement, uuid.UUID(par["movement_id"]))
+            if par.get("movement_id")
+            else None
+        )
+        if mov is not None and mov.voided_at is not None:
+            # Volver a descontar no puede dejar stock negativo (regla del ledger):
+            # si se vendió lo que se había devuelto, la venta queda anulada.
+            producto = await session.get(Product, mov.product_id)
+            if producto is not None and producto.stock_units + mov.qty < 0:
+                res.sin_stock.append(par["sale_id"])
+                continue
+            await stock_service.unvoid_movement(mov, session)
         venta.voided_at = None
         venta.void_reason = None
-        if par.get("movement_id"):
-            mov = await session.get(InventoryMovement, uuid.UUID(par["movement_id"]))
-            if mov is not None and mov.voided_at is not None:
-                await stock_service.unvoid_movement(mov, session)
+        venta.voided_by_repair_run_id = None
         await session.delete(registro)
         res.restauradas.append(par["sale_id"])
     run.status = "REVERTED"

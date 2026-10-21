@@ -4950,6 +4950,8 @@ async def _ventas_sin_compra_a_otros(
     sin_producto = sin_compra = 0
     for venta in nuevas:
         dia = venta.transaction_date.date()
+        if (venta.payment_method or "").lower() == "inflow":
+            continue  # un cobro de fiado no es una venta
         if venta.product_id is None:
             motivo = (
                 f"{MOTIVO_VENTA_SIN_PRODUCTO}: elegí qué producto se vendió "

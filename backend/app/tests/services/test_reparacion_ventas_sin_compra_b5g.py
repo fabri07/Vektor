@@ -77,10 +77,11 @@ async def test_analizar_no_toca_nada(db_session: AsyncSession, sample_tenant: Te
     _ok, sin_compra, sin_producto, _vela = await _escenario(db_session, tid)
     esperadas = {sin_compra.id, sin_producto.id}
     r = await analizar(db_session, tid)
-    ids, monto = {c.venta.id for c in r.candidatas}, r.monto
     await db_session.rollback()
-    assert ids == esperadas
-    assert monto == Decimal("5000")
+    # Revisión: el script imprime DESPUÉS del rollback; con valores planos no
+    # hay carga perezosa (antes: MissingGreenlet en el primer negocio).
+    assert {c.sale_id for c in r.candidatas} == esperadas
+    assert r.monto == Decimal("5000")
     assert (await db_session.execute(select(UnclassifiedRecord))).first() is None
 
 
@@ -121,3 +122,66 @@ async def test_apply_y_revert(db_session: AsyncSession, sample_tenant: Tenant) -
     assert vela.stock_units == 8
     quedan = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
     assert [o.id for o in quedan] == [resuelta.id]
+
+
+# ── Revisión de B·5g ──────────────────────────────────────────────────────────
+
+
+async def test_un_cobro_de_fiado_no_es_una_venta_sin_producto(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    db_session.add(
+        SaleEntry(
+            tenant_id=tid, amount=Decimal("500"), quantity=1, payment_method="inflow",
+            transaction_date=datetime.combine(_DIA, time(12)), provenance="REAL",
+        )
+    )
+    await db_session.commit()
+    r = await analizar(db_session, tid)
+    assert r.candidatas == []
+
+
+async def test_los_dias_con_arqueo_cerrado_se_excluyen_del_apply(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    from app.persistence.models.cash_close import CashClose
+
+    tid = sample_tenant.tenant_id
+    _ok, _sin_compra, sin_producto, _vela = await _escenario(db_session, tid)
+    db_session.add(
+        CashClose(
+            tenant_id=tid, close_date=_DIA, expected_total_ars=Decimal("6000"),
+            counted_total_ars=Decimal("6000"), difference_ars=Decimal("0"),
+            breakdown_by_method={},
+        )
+    )
+    await db_session.commit()
+    r = await analizar(db_session, tid)
+    assert len(r.en_dias_con_arqueo) == 2
+    aplicado = await reparar(db_session, tid)
+    await db_session.commit()
+    assert aplicado.candidatas == []
+    await db_session.refresh(sin_producto)
+    assert sin_producto.voided_at is None
+
+
+async def test_revertir_no_deja_stock_negativo(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Se devuelven 2 unidades, se venden, y el revert ya no puede descontarlas."""
+    tid = sample_tenant.tenant_id
+    _ok, sin_compra, _sp, vela = await _escenario(db_session, tid)
+    r = await reparar(db_session, tid)
+    await db_session.commit()
+    await db_session.refresh(vela)
+    vela.stock_units = 0  # vendidas por otro lado
+    await db_session.commit()
+    assert r.run_id is not None
+    rev = await revertir(db_session, r.run_id)
+    await db_session.commit()
+    assert str(sin_compra.id) in rev.sin_stock
+    await db_session.refresh(vela)
+    assert vela.stock_units == 0
+    await db_session.refresh(sin_compra)
+    assert sin_compra.voided_at is not None
