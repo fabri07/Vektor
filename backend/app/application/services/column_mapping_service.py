@@ -1848,6 +1848,7 @@ class ColumnMappingService:
                 history_folded[fk] = alias
 
         required = set(REQUIRED_FIELDS.get(entity_type, []))
+        _cruzados_permitidos = {value for value, _, _ in cross_targets_for(entity_type)}
         suggestions: list[dict[str, Any]] = []
         #: Índices de las columnas cuya lectura no se puede desempatar sin
         #: inventar. Se lleva aparte y no como una clave más del dict porque el
@@ -1882,6 +1883,15 @@ class ColumnMappingService:
             # primero y recién después por clave plegada: si el tenant tiene el
             # alias tal cual vino el header, ese gana sobre cualquier variante.
             aprendido = history.get(normalized) or history_folded.get(fold_header(normalized))
+            # B·6: un destino de OTRA sección aprendido antes de que el confirm lo
+            # rechazara (o desde otra hoja) no se vuelve a sugerir: el confirm
+            # daría 422. Se cae a las capas de abajo como si no hubiera historial.
+            if (
+                aprendido is not None
+                and parse_target(aprendido.target_field).kind == "cross"
+                and aprendido.target_field not in _cruzados_permitidos
+            ):
+                aprendido = None
             if aprendido is not None:
                 target_field = aprendido.target_field
                 confidence = min(0.99, 0.5 + aprendido.confirmed_count / 20.0)

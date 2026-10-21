@@ -2559,7 +2559,12 @@ async def confirm_file(
         )
 
     def _collision_detail(entity_type: str, colisiones: dict[str, list[str]]) -> str:
-        etiquetas = CANONICAL_FIELDS.get(entity_type, {})
+        # B·6: los destinos de otra sección con su etiqueta del catálogo
+        # («Cliente — Dirección»), no con el valor técnico.
+        etiquetas = {
+            **CANONICAL_FIELDS.get(entity_type, {}),
+            **{value: label for value, label, _ in cross_targets_for(entity_type)},
+        }
         partes = [
             f"«{etiquetas.get(target, target)}» ← {', '.join(cols)}"
             for target, cols in sorted(colisiones.items())

@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     from app.persistence.models.product import Product
 
 from sqlalchemy import event as sa_event
+from sqlalchemy import func, or_
+from sqlalchemy import update as sa_update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.application.services import maintenance_lock_service, stock_service
 from app.application.services._import_projection import ImportProjectionRecorder
@@ -650,6 +654,10 @@ class RowReferenceResolution:
     outcome: str  # "matched" | "anonymous" | "unresolved"
     entity: Any | None = None
     raw_value: str | None = None
+    #: Con qué clave matcheó (``code``/``doc``/``email``/``phone``). B·6 la mira:
+    #: un email o un teléfono pueden compartirlos dos fichas (el índice se queda
+    #: con la primera), así que alcanzan para vincular pero no para escribir.
+    matched_key_type: str | None = None
 
 
 def _classify_row_reference(
@@ -683,7 +691,13 @@ def _classify_row_reference(
     resolution = resolve_identity(keys, existing_index)
     if resolution.outcome == "matched":
         assert resolution.entity is not None  # invariante de "matched"
-        return RowReferenceResolution(outcome="matched", entity=resolution.entity)
+        return RowReferenceResolution(
+            outcome="matched",
+            entity=resolution.entity,
+            matched_key_type=(
+                resolution.matched_key.type if resolution.matched_key is not None else None
+            ),
+        )
 
     # unresolved: needs_review (solo nombre débil), none (clave sin match) o
     # conflict (clave ambigua) — todas se tratan igual acá: no identifican sin
@@ -754,6 +768,28 @@ def _cruzados_de_ficha(cruzados: dict[str, str], kind: str) -> dict[str, str]:
     return salida
 
 
+#: Claves que identifican una ficha lo bastante como para ESCRIBIRLA (B·6). Un
+#: email o un teléfono pueden ser de dos fichas a la vez —un local y su dueño, dos
+#: hermanos— y `build_existing_index` se queda con la primera: para vincular una
+#: venta alcanza, para completarle el domicilio a otra persona no.
+_CLAVES_QUE_ESCRIBEN_FICHA: frozenset[str] = frozenset({"code", "doc"})
+
+
+def _ficha_para_completar(
+    ref: RowReferenceResolution | None,
+) -> tuple[uuid.UUID | None, bool]:
+    """``(ficha a completar, identificada sólo por email/teléfono)``."""
+    if ref is None or ref.outcome != "matched" or ref.entity is None:
+        return None, False
+    if ref.matched_key_type in _CLAVES_QUE_ESCRIBEN_FICHA:
+        return ref.entity.id, False
+    return None, True
+
+
+def _sumar(counts: dict[str, Any], clave: str, n: int = 1) -> None:
+    counts[clave] = counts.get(clave, 0) + n
+
+
 def _capturar_cruzados_de_la_fila(
     buffer: CrossFieldBuffer | None,
     campos: dict[str, str],
@@ -763,23 +799,43 @@ def _capturar_cruzados_de_la_fila(
     kind: CrossKind,
     entity_id: uuid.UUID | None,
     source_row_ref: str | None,
+    por_contacto: bool = False,
+    nombre_fila: Any = None,
+    nombre_ficha: str | None = None,
 ) -> None:
     """Propone al buffer los campos de la ficha que trae esta fila.
 
-    ``entity_id`` es la ficha que la fila identificó por clave fuerte, o
-    ``None`` si no la identificó (anónima, sin match o ambigua): ahí no se
-    propone nada, pero si la fila traía datos se cuenta, porque el usuario mapeó
-    esa columna a mano y tiene que saber por qué no llegó a ninguna ficha.
+    ``entity_id`` es la ficha que la fila identificó por documento o código, o
+    ``None`` si no la identificó así: ahí no se propone nada, pero si la fila
+    traía datos se cuenta —sin ficha (`cross_fields_filas_sin_ficha`) o con una
+    ficha encontrada sólo por email/teléfono (`cross_fields_ficha_por_contacto`)—,
+    porque el usuario mapeó esa columna a mano y tiene que saber por qué no llegó.
+
+    El apellido del cliente, además, sólo si el nombre de la fila (si lo trae)
+    es el de la ficha: un apellido es de una persona, y una fila que nombra a
+    otra no puede ponérselo a ésta.
     """
     if buffer is None or not campos:
         return
     if entity_id is None:
         if any(not is_ficha_value_blank(row.get(col)) for col in campos):
-            counts["cross_fields_filas_sin_ficha"] = (
-                counts.get("cross_fields_filas_sin_ficha", 0) + 1
+            _sumar(
+                counts,
+                "cross_fields_ficha_por_contacto"
+                if por_contacto
+                else "cross_fields_filas_sin_ficha",
             )
         return
     for col, campo in campos.items():
+        if (
+            kind == "customer"
+            and campo == "last_name"
+            and not is_ficha_value_blank(nombre_fila)
+            and normalize_text(str(nombre_fila)) != normalize_text(nombre_ficha or "")
+        ):
+            if not is_ficha_value_blank(row.get(col)):
+                _sumar(counts, "cross_fields_apellido_omitido")
+            continue
         buffer.add(kind, str(entity_id), campo, row.get(col), source_row_ref=source_row_ref)
 
 
@@ -787,18 +843,19 @@ def _ficha_de_proveedor_legacy(
     record: dict[str, Any],
     identity_index: dict[IdentityKey, Any],
     supplier_id: uuid.UUID | None,
-) -> uuid.UUID | None:
+) -> tuple[uuid.UUID | None, bool]:
     """En modo `legacy` el proveedor de la compra sale del NOMBRE, que es una
-    señal débil. Su ficha se completa sólo si además una clave fuerte de la fila
-    identifica a ESE mismo proveedor; si apunta a otro, no se completa ninguno."""
+    señal débil. Su ficha se completa sólo si además el documento o el código de
+    la fila identifica a ESE mismo proveedor; si apunta a otro, no se completa
+    ninguno. Devuelve lo mismo que ``_ficha_para_completar``."""
     if supplier_id is None:
-        return None
+        return None, False
     ref = _classify_row_reference(
         record, doc_fields=_SUPPLIER_DOC_FIELDS, existing_index=identity_index
     )
     if ref.outcome != "matched" or ref.entity is None or ref.entity.id != supplier_id:
-        return None
-    return supplier_id
+        return None, False
+    return _ficha_para_completar(ref)
 
 
 def _contar_cruzados_descartados(
@@ -811,6 +868,10 @@ def _contar_cruzados_descartados(
             counts.get("targets_cruzados_descartados", 0) + descartados
         )
 
+
+#: Lo que la ficha guarda y cuenta como vacío (`is_ficha_value_blank`), dicho en
+#: SQL para la escritura condicional.
+_VACIOS_EN_SQL: tuple[str, ...] = ("", "nan", "none", "null")
 
 #: Acción de ledger de cada campo completado. Propias, y no `UPDATE_CUSTOMER` /
 #: `UPDATE_SUPPLIER`: esas guardan la ficha ENTERA y su reversa conserva la
@@ -869,7 +930,7 @@ async def _aplicar_campos_cruzados(
     }
 
     detalles: list[dict[str, Any]] = []
-    aplicados = ya_tenian = de_ficha_del_archivo = 0
+    aplicados = ya_tenian = de_ficha_del_archivo = apellido_omitido = 0
     fichas: set[tuple[str, str]] = set()
     for kind, entity_id, campos in buffer.resolved():
         if entity_id in del_archivo[kind]:
@@ -888,7 +949,41 @@ async def _aplicar_campos_cruzados(
             if not is_ficha_value_blank(actual):
                 ya_tenian += 1
                 continue
-            setattr(entity, campo, pendiente.value)
+            if kind == "customer" and campo == "last_name" and (
+                entity.customer_type == "company"
+                or normalize_text(entity.name or "").endswith(normalize_text(pendiente.value))
+            ):
+                # Una empresa no tiene apellido, y un apellido que ya está al
+                # final del nombre («Juan Pérez») lo duplicaría.
+                apellido_omitido += 1
+                continue
+            # La escritura es condicional EN LA BASE, no sobre lo leído: dos
+            # confirms que leyeron el campo vacío a la vez no pueden escribir los
+            # dos (el segundo espera el lock de la fila y reevalúa el WHERE en
+            # READ COMMITTED). Sólo el que escribió deja su ítem de ledger.
+            columna = getattr(modelos[kind], campo)
+            res = cast(
+                "CursorResult[Any]",
+                await session.execute(
+                    sa_update(modelos[kind])
+                    .where(
+                        modelos[kind].id == entity.id,
+                        modelos[kind].tenant_id == tenant_id,
+                        or_(
+                            columna.is_(None),
+                            func.lower(func.trim(columna)).in_(_VACIOS_EN_SQL),
+                        ),
+                    )
+                    .values({campo: pendiente.value})
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            if res.rowcount != 1:
+                ya_tenian += 1
+                continue
+            # La sesión tiene que ver lo que quedó en la base, sin marcar la
+            # entidad sucia (un flush posterior no debe re-escribir el campo).
+            set_committed_value(entity, campo, pendiente.value)
             aplicados += 1
             fichas.add((kind, entity_id))
             detalles.append(
@@ -915,6 +1010,8 @@ async def _aplicar_campos_cruzados(
     ):
         if valor:
             counts[clave] = valor
+    if apellido_omitido:
+        _sumar(counts, "cross_fields_apellido_omitido", apellido_omitido)
 
 
 # Bucket del summary donde el PARSER dejó las filas de cada tipo de hoja.
@@ -6408,11 +6505,14 @@ async def _insert_confirmed_data_impl(
                         row,
                         counts,
                         kind="customer",
-                        entity_id=(
-                            _cust_ref.entity.id
-                            if _cust_ref.outcome == "matched" and _cust_ref.entity is not None
+                        entity_id=_ficha_para_completar(_cust_ref)[0],
+                        por_contacto=_ficha_para_completar(_cust_ref)[1],
+                        nombre_fila=(
+                            row.get(target_to_col["customer_name"])
+                            if target_to_col.get("customer_name")
                             else None
                         ),
+                        nombre_ficha=_cust_ref.entity.name if _cust_ref.entity else None,
                         source_row_ref=_source_row_ref(_row_anchor),
                     )
                     # F-H3.d.2: de qué hoja vino, para que el replay se pueda aplicar
@@ -6539,6 +6639,7 @@ async def _insert_confirmed_data_impl(
                     # B·6: la ficha de proveedor que esta fila identificó por clave
                     # fuerte (la única que puede completarse con sus columnas).
                     _sup_ficha_id: uuid.UUID | None = None
+                    _sup_por_contacto = False
                     if _supplier_ref_mode == "link_only":
                         _has_supplier_ref_col = bool(
                             supplier_col
@@ -6559,7 +6660,9 @@ async def _insert_confirmed_data_impl(
                                 expense.supplier_name = _sup_ref.entity.name
                                 cf["_supplier_resolution"] = "matched"
                                 _supplier_matched = True
-                                _sup_ficha_id = _sup_ref.entity.id
+                                _sup_ficha_id, _sup_por_contacto = _ficha_para_completar(
+                                    _sup_ref
+                                )
                             else:
                                 _pending_supplier_ref = _sup_ref
                     elif supplier_col:
@@ -6576,7 +6679,7 @@ async def _insert_confirmed_data_impl(
                         if expense.supplier_name:
                             _real_suppliers.add(expense.supplier_name)
                         if _campos_proveedor:
-                            _sup_ficha_id = _ficha_de_proveedor_legacy(
+                            _sup_ficha_id, _sup_por_contacto = _ficha_de_proveedor_legacy(
                                 _supplier_reference_record(
                                     row, target_to_col, row.get(supplier_col)
                                 ),
@@ -6841,6 +6944,7 @@ async def _insert_confirmed_data_impl(
                             counts,
                             kind="supplier",
                             entity_id=_sup_ficha_id,
+                            por_contacto=_sup_por_contacto,
                             source_row_ref=_source_row_ref(_row_anchor),
                         )
                         session.add(expense)
@@ -8675,11 +8779,10 @@ async def _insert_multisheet_data(
             row,
             counts,
             kind="customer",
-            entity_id=(
-                _cust_ref.entity.id
-                if _cust_ref.outcome == "matched" and _cust_ref.entity is not None
-                else None
-            ),
+            entity_id=_ficha_para_completar(_cust_ref)[0],
+            por_contacto=_ficha_para_completar(_cust_ref)[1],
+            nombre_fila=row.get(cols["customer_name"]) if cols.get("customer_name") else None,
+            nombre_ficha=_cust_ref.entity.name if _cust_ref.entity else None,
             source_row_ref=row_ref,
         )
         # F-H3.d.2: de qué hoja vino (ver IMPORT_CONTEXT_FIELD).
@@ -8852,6 +8955,7 @@ async def _insert_multisheet_data(
         _supplier_matched = False
         # B·6: la ficha que esta fila identificó por clave fuerte.
         _sup_ficha_id: uuid.UUID | None = None
+        _sup_por_contacto = False
         _supplier_name_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
         if _supplier_ref_mode == "link_only":
             _has_supplier_ref_col = bool(
@@ -8872,7 +8976,7 @@ async def _insert_multisheet_data(
                     expense.supplier_name = _sup_ref.entity.name
                     cf["_supplier_resolution"] = "matched"
                     _supplier_matched = True
-                    _sup_ficha_id = _sup_ref.entity.id
+                    _sup_ficha_id, _sup_por_contacto = _ficha_para_completar(_sup_ref)
                 else:
                     _pending_supplier_ref = _sup_ref
         elif _supplier_name_raw is not None:
@@ -8889,7 +8993,7 @@ async def _insert_multisheet_data(
             if expense.supplier_name:
                 _real_suppliers.add(expense.supplier_name)
             if campos_ficha:
-                _sup_ficha_id = _ficha_de_proveedor_legacy(
+                _sup_ficha_id, _sup_por_contacto = _ficha_de_proveedor_legacy(
                     _supplier_reference_record(row, cols, _supplier_name_raw),
                     _supplier_identity_index,
                     expense.supplier_id,
@@ -9121,6 +9225,7 @@ async def _insert_multisheet_data(
             counts,
             kind="supplier",
             entity_id=_sup_ficha_id,
+            por_contacto=_sup_por_contacto,
             source_row_ref=row_ref,
         )
         session.add(expense)

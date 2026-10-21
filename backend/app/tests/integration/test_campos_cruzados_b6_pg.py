@@ -10,15 +10,17 @@ de una transacción que se revierte. Correr con ``-n 0`` contra una base con
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.application.services.file_deletion_service import (
@@ -187,3 +189,61 @@ async def test_el_check_acepta_las_acciones_nuevas_y_sigue_rechazando_otras() ->
                     action="UPDATE_PRODUCT_CROSS_FIELD", confidence="HIGH",
                 ))
                 await s.flush()
+
+
+async def test_dos_confirms_a_la_vez_escriben_el_campo_una_sola_vez() -> None:
+    """Las dos sesiones leen el campo vacío; la escritura es condicional en la
+    base, así que la segunda espera el lock de la fila, reevalúa el WHERE y no
+    escribe: un solo valor, un solo ítem de ledger."""
+    from app.application.services.ingestion_import_service import (
+        _aplicar_campos_cruzados,
+    )
+    from app.domain.cross_field_buffer import CrossFieldBuffer
+
+    assert TEST_PG_DSN is not None
+    engine = create_async_engine(TEST_PG_DSN, poolclass=NullPool)
+    fabrica = async_sessionmaker(engine, expire_on_commit=False)
+    tid = uuid.uuid4()
+    try:
+        async with fabrica() as s:
+            s.add(Tenant(tenant_id=tid, legal_name="B6", display_name="B6"))
+            await s.flush()
+            cliente = Customer(tenant_id=tid, name="Cliente Uno", dni=_DNI)
+            s.add(cliente)
+            await s.commit()
+            cid = str(cliente.id)
+
+        def _buffer(valor: str) -> CrossFieldBuffer:
+            b = CrossFieldBuffer()
+            b.add("customer", cid, "address", valor, source_row_ref=None)
+            return b
+
+        counts_1: dict[str, Any] = {}
+        counts_2: dict[str, Any] = {}
+        async with fabrica() as s1, fabrica() as s2:
+            # Las dos leen la ficha ANTES de que nadie escriba.
+            assert (await s1.get(Customer, uuid.UUID(cid))) is not None
+            assert (await s2.get(Customer, uuid.UUID(cid))) is not None
+            await _aplicar_campos_cruzados(s1, tid, _buffer("Mitre 10"), counts_1)
+            segunda = asyncio.create_task(
+                _aplicar_campos_cruzados(s2, tid, _buffer("Belgrano 20"), counts_2)
+            )
+            await asyncio.sleep(0.5)
+            assert not segunda.done(), "la segunda tenía que esperar el lock de la fila"
+            await s1.commit()
+            await segunda
+            await s2.commit()
+
+        assert counts_1.get("cross_fields_aplicados") == 1
+        assert len(counts_1["cross_field_details"]) == 1
+        assert not counts_2.get("cross_fields_aplicados")
+        assert "cross_field_details" not in counts_2
+        async with fabrica() as s:
+            final = await s.get(Customer, uuid.UUID(cid))
+            assert final is not None and final.address == "Mitre 10"
+    finally:
+        async with fabrica() as s:
+            await s.execute(delete(Customer).where(Customer.tenant_id == tid))
+            await s.execute(delete(Tenant).where(Tenant.tenant_id == tid))
+            await s.commit()
+        await engine.dispose()

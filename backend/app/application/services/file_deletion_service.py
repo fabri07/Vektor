@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -425,6 +426,47 @@ async def _master_tiene_dependencias(
     return None
 
 
+@dataclass(frozen=True)
+class _CampoCruzado:
+    campo: str
+    valor: Any
+    #: El archivo que lo completó sigue vivo (no se borró).
+    vivo: bool
+    creado: datetime
+
+
+async def _cruzados_por_ficha(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> dict[tuple[str, uuid.UUID], list[_CampoCruzado]]:
+    """Los campos que B·6 completó en cada ficha del tenant, de cualquier archivo.
+
+    Una consulta por reversa de maestros, no una por ficha. El id viaja en el
+    JSON (`after_json["id"]`), así que se filtra en Python: un `->>` sería
+    específico de Postgres y la suite corre en SQLite.
+    """
+    res = await session.execute(
+        select(DataRepairItem.after_json, DataRepairItem.created_at, UploadedFile.deleted_at)
+        .outerjoin(UploadedFile, UploadedFile.id == DataRepairItem.source_file_id)
+        .where(
+            DataRepairItem.tenant_id == tenant_id,
+            DataRepairItem.action.in_(_CROSS_FIELD_ACTIONS),
+        )
+    )
+    salida: dict[tuple[str, uuid.UUID], list[_CampoCruzado]] = defaultdict(list)
+    for after, creado, borrado in res.all():
+        after = after or {}
+        kind, raw_id = str(after.get("kind") or ""), after.get("id")
+        if not raw_id:
+            continue
+        for campo, valor in after.items():
+            if campo in ("id", "kind", "source_row_ref"):
+                continue
+            salida[(kind, uuid.UUID(str(raw_id)))].append(
+                _CampoCruzado(campo, valor, borrado is None, creado)
+            )
+    return salida
+
+
 async def _revert_master_items(
     session: AsyncSession,
     file_id: uuid.UUID,
@@ -450,6 +492,7 @@ async def _revert_master_items(
 
     _modelo: dict[str, type[Any]] = {"customer": Customer, "supplier": Supplier}
     items = await _master_items_by_file(session, file_id, tenant_id)
+    cruzados = await _cruzados_por_ficha(session, tenant_id) if items else {}
 
     # Un mismo maestro puede tener varios items del archivo: para restaurar vale
     # el `before` del PRIMERO; para el guard, el `after` del ÚLTIMO.
@@ -500,7 +543,22 @@ async def _revert_master_items(
             desactivados += 1
             continue
 
-        if entity_changed_since_ledger(entity, ultimo[(kind, entity_id)].after_json):
+        # B·6: un campo que OTRO archivo vivo completó desde una venta/compra, y
+        # que sigue valiendo lo que ese archivo dejó, no es una edición posterior:
+        # se conserva (es de ese archivo, que lo revierte al borrarse) y el resto
+        # de la ficha vuelve. Y si hubo escrituras de B·6 sobre la ficha después
+        # de este ítem —o sus reversas—, el `updated_at` ya no distingue nada.
+        _ultimo = ultimo[(kind, entity_id)]
+        _de_la_ficha = cruzados.get((kind, entity_id), [])
+        _con_duenio = frozenset(
+            c.campo
+            for c in _de_la_ficha
+            if c.vivo and getattr(entity, c.campo, None) == c.valor
+        )
+        _reloj_movido = any(c.creado > _ultimo.created_at for c in _de_la_ficha)
+        if entity_changed_since_ledger(
+            entity, _ultimo.after_json, ignorar=_con_duenio, sin_updated_at=_reloj_movido
+        ):
             conservados.append(
                 {
                     "entity_type": kind,
@@ -511,11 +569,12 @@ async def _revert_master_items(
                 }
             )
             continue
+        _antes = {k: v for k, v in (item.before_json or {}).items() if k not in _con_duenio}
         if dry_run:
             # Se cuenta lo que se restauraría, sin tocar la entidad.
-            if item.before_json:
+            if _antes:
                 restaurados += 1
-        elif restore_from_before(entity, kind, item.before_json or {}):
+        elif restore_from_before(entity, kind, _antes):
             restaurados += 1
 
     return desactivados, restaurados, conservados

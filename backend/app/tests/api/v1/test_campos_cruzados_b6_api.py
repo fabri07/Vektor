@@ -180,6 +180,9 @@ class TestRechazoAntesDelLease:
         detalle = r.json()["detail"]
         assert "«Ventas»" in detalle
         assert "Apellido" in detalle and "Domicilio" in detalle
+        # La etiqueta del campo cruzado, no el valor técnico.
+        assert "«Cliente — Dirección»" in detalle
+        assert "customer:address" not in detalle
 
     async def test_el_rechazo_no_toma_el_lease(
         self,
