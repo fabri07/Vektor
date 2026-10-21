@@ -4175,6 +4175,26 @@ async def confirm_file(
             "proveedor que no se pudo identificar quedaron agrupadas en «No "
             "identificado». Revisá el dato (CUIL/email/teléfono) cuando puedas."
         )
+    # B·7: el código del cliente/proveedor va primero. Uno que ninguna ficha tiene,
+    # o que apunta a otra ficha que el DNI/CUIL/email de la misma fila, no vincula
+    # ni crea — y se dice cuál de los dos pasó, porque se arreglan distinto.
+    for _clave, _que, _quien in (
+        ("ventas_cliente", "venta(s)", "cliente"),
+        ("compras_proveedor", "compra(s)", "proveedor"),
+    ):
+        if counts.get(f"{_clave}_codigo_desconocido"):
+            warnings.append(
+                f"{counts[f'{_clave}_codigo_desconocido']} {_que} traen un código de "
+                f"{_quien} que no tiene ninguna ficha: no se vincularon ni se creó un "
+                f"{_quien} nuevo. Cargá el código en la ficha del {_quien} o corregí el "
+                "archivo."
+            )
+        if counts.get(f"{_clave}_codigo_en_conflicto"):
+            warnings.append(
+                f"{counts[f'{_clave}_codigo_en_conflicto']} {_que} traen un código de "
+                f"{_quien} que apunta a una ficha distinta de la que indican sus otros "
+                "datos (documento, email o teléfono): no se vincularon a ninguna."
+            )
     # F7d: maestros con filas que necesitan revisión o son inválidas — NUNCA se
     # persisten (needs_review/invalid/conflicto se saltean siempre en el import
     # service), así que el aviso es la única señal de que quedaron afuera.

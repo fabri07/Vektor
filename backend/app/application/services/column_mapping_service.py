@@ -58,6 +58,11 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "customer_email": "Cliente — Email",
         "customer_phone": "Cliente — Teléfono",
         "customer_name": "Cliente — Nombre",
+        # B·7: el código con que el negocio identifica al cliente en su sistema.
+        # Va primero en la resolución y un código desconocido no vincula. Sin
+        # keywords de heurística a propósito: «código» se lee como SKU (E6b), así
+        # que este destino es sólo de mapeo manual.
+        "customer_external_code": "Cliente — Código",
         # E6b — IDENTIDAD de la operación. No son datos de negocio que Véktor
         # muestre: son lo que permite afirmar que una venta ya importada desde
         # otro archivo es la MISMA venta y no aplicarla dos veces. Ver
@@ -125,6 +130,8 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "supplier_cuit": "Proveedor — CUIT",
         "supplier_email": "Proveedor — Email",
         "supplier_phone": "Proveedor — Teléfono",
+        # B·7: ver `customer_external_code` en `sale` — mismo contrato.
+        "supplier_external_code": "Proveedor — Código",
         # E6b — el resto de la identidad del comprobante. `invoice_number` ya
         # estaba (F-H6.b lo usa para agrupar el flete); sin tipo y punto de venta
         # un número suelto no identifica: se repite entre tipos y entre bocas de
@@ -1316,6 +1323,10 @@ MASTER_REFERENCE_TARGETS: frozenset[str] = frozenset(
         "supplier_cuil",
         "supplier_email",
         "supplier_phone",
+        # B·7: en modo `legacy` un código de proveedor decide si se crea por
+        # nombre o no; el borrado tiene que saber que el archivo trae maestros.
+        "customer_external_code",
+        "supplier_external_code",
     }
 )
 
@@ -1338,6 +1349,9 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
             "external_operation_id",
             "external_source",
             "external_line_id",
+            # B·7: una fila tiene UN código de cliente; dos columnas eligen a
+            # quién se le atribuye la venta.
+            "customer_external_code",
         }
     ),
     # F-H6.a: los nuevos son escalares por la misma razón que en `sale` — dos
@@ -1365,6 +1379,8 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
             "external_line_id",
             "supplier_cuit",
             "supplier_cuil",
+            # B·7: idem, el código del proveedor.
+            "supplier_external_code",
         }
     ),
     "product": frozenset(

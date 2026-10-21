@@ -126,6 +126,7 @@ from app.domain.expense_categories import (
     infer_expense_type,
     resolve_tax_kind,
 )
+from app.domain.external_code import clave_de_codigo_externo
 from app.domain.fila_de_total import MOTIVO_FILA_DE_TOTAL, es_fila_de_total_dict
 from app.domain.ingestion_limits import (
     TEXTO_FORMULA_SIN_RESULTADO,
@@ -658,6 +659,11 @@ class RowReferenceResolution:
     #: un email o un teléfono pueden compartirlos dos fichas (el índice se queda
     #: con la primera), así que alcanzan para vincular pero no para escribir.
     matched_key_type: str | None = None
+    #: B·7: por qué un CÓDIGO de la fila no vinculó — ``"desconocido"`` (no hay
+    #: ficha con ese código) o ``"conflicto"`` (el código y otra clave de la
+    #: fila apuntan a fichas distintas). ``None`` si la fila no trae código o si
+    #: el código resolvió. Con código fallido el outcome es SIEMPRE `unresolved`.
+    codigo: str | None = None
 
 
 def _classify_row_reference(
@@ -678,6 +684,14 @@ def _classify_row_reference(
     - ``unresolved``: hay una referencia (documento/email/teléfono, o un nombre
       real sin clave fuerte) pero no matchea, o matchea a más de una entidad —
       se marca para revisión. NUNCA crea.
+
+    B·7 — el CÓDIGO del cliente/proveedor va primero y no se saltea: si la fila
+    trae un código que ninguna ficha tiene, la fila NO se vincula aunque su DNI
+    o su email sí matcheen (``codigo="desconocido"``). ``resolve_identity`` ignora
+    una clave que no está en el índice, así que sin este corte un código mal
+    tipeado se tapaba con el DNI y nadie se enteraba de que el código no existe.
+    Un código que apunta a una ficha y otra clave a otra es ``conflict`` del
+    motor (``codigo="conflicto"``). Ninguno de los dos crea ni elige.
     """
     name_raw = record.get("name")
     name_norm = normalize_text(str(name_raw)) if name_raw else ""
@@ -689,7 +703,14 @@ def _classify_row_reference(
         return RowReferenceResolution(outcome="anonymous")
 
     resolution = resolve_identity(keys, existing_index)
-    if resolution.outcome == "matched":
+    _clave_codigo = next((k for k in keys if k.type == "code"), None)
+    codigo: str | None = None
+    if _clave_codigo is not None:
+        if _clave_codigo not in existing_index:
+            codigo = "desconocido"
+        elif resolution.outcome == "conflict":
+            codigo = "conflicto"
+    if resolution.outcome == "matched" and codigo is None:
         assert resolution.entity is not None  # invariante de "matched"
         return RowReferenceResolution(
             outcome="matched",
@@ -710,8 +731,10 @@ def _classify_row_reference(
                 break
         else:
             raw = record.get("email") or record.get("phone")
+    if raw is None and codigo is not None:
+        raw = record.get("external_code")
     return RowReferenceResolution(
-        outcome="unresolved", raw_value=str(raw) if raw is not None else None
+        outcome="unresolved", raw_value=str(raw) if raw is not None else None, codigo=codigo
     )
 
 
@@ -724,6 +747,20 @@ _REFERENCE_OUTCOME_SUFFIX = {
     "anonymous": "anonimo",
     "unresolved": "no_resuelto",
 }
+
+
+def _bump_codigo_fallido(
+    counts: dict[str, Any], prefix: str, ref: RowReferenceResolution
+) -> None:
+    """B·7: ``{prefix}_codigo_desconocido`` / ``{prefix}_codigo_en_conflicto``."""
+    if ref.codigo == "desconocido":
+        counts[f"{prefix}_codigo_desconocido"] = (
+            counts.get(f"{prefix}_codigo_desconocido", 0) + 1
+        )
+    elif ref.codigo == "conflicto":
+        counts[f"{prefix}_codigo_en_conflicto"] = (
+            counts.get(f"{prefix}_codigo_en_conflicto", 0) + 1
+        )
 
 
 def _bump_reference_counts(counts: dict[str, Any], prefix: str, outcome: str) -> None:
@@ -856,6 +893,27 @@ def _ficha_de_proveedor_legacy(
     if ref.outcome != "matched" or ref.entity is None or ref.entity.id != supplier_id:
         return None, False
     return _ficha_para_completar(ref)
+
+
+def _proveedor_por_codigo_legacy(
+    row: dict[str, Any],
+    cols: dict[str, str],
+    name_raw: Any,
+    identity_index: dict[IdentityKey, Any],
+) -> RowReferenceResolution | None:
+    """B·7 en modo `legacy`: si la fila trae código de proveedor, el código va
+    ANTES de crear por nombre. Devuelve la clasificación (``matched``, o
+    ``unresolved`` con ``codigo`` desconocido/en conflicto: en ese caso NO se
+    crea un proveedor por nombre) o ``None`` si la fila no trae código y sigue
+    el find-or-create por nombre de siempre."""
+    col = cols.get("supplier_external_code")
+    if not col or clave_de_codigo_externo(row.get(col)) is None:
+        return None
+    return _classify_row_reference(
+        _supplier_reference_record(row, cols, name_raw),
+        doc_fields=_SUPPLIER_DOC_FIELDS,
+        existing_index=identity_index,
+    )
 
 
 def _contar_cruzados_descartados(
@@ -1072,6 +1130,15 @@ def _customer_reference_record(row: dict[str, Any], cols: dict[str, str]) -> dic
         "email": row.get(cols["customer_email"]) if cols.get("customer_email") else None,
         "phone": row.get(cols["customer_phone"]) if cols.get("customer_phone") else None,
         "name": row.get(cols["customer_name"]) if cols.get("customer_name") else None,
+        # B·7: el código con que el negocio identifica al cliente. Su sistema es
+        # SIEMPRE «propio» (`None`): el `external_source` de una venta es el
+        # sistema de la OPERACIÓN (E6b), no el del código del cliente.
+        "external_code": (
+            row.get(cols["customer_external_code"])
+            if cols.get("customer_external_code")
+            else None
+        ),
+        "external_source": None,
     }
 
 
@@ -1088,6 +1155,13 @@ def _supplier_reference_record(
         "email": row.get(cols["supplier_email"]) if cols.get("supplier_email") else None,
         "phone": row.get(cols["supplier_phone"]) if cols.get("supplier_phone") else None,
         "name": name_raw,
+        # B·7: ver la nota del cliente — sistema «propio», nunca el de la compra.
+        "external_code": (
+            row.get(cols["supplier_external_code"])
+            if cols.get("supplier_external_code")
+            else None
+        ),
+        "external_source": None,
     }
 
 
@@ -5721,9 +5795,11 @@ async def _insert_confirmed_data_impl(
             _cruzados_de_ficha(_cruzados, "supplier") if cross_buffer is not None else {}
         )
         # En modo `legacy` el proveedor se resuelve por nombre y el índice de
-        # identidad ni se carga; para completar su ficha hace falta igual una
-        # clave fuerte (CUIL, email, teléfono, código), así que se carga.
-        if _campos_proveedor and not _supplier_identity_index:
+        # identidad ni se carga; para completar su ficha (B·6) o resolverlo por
+        # su código (B·7) hace falta igual una clave fuerte, así que se carga.
+        if (
+            _campos_proveedor or _canon.get("supplier_external_code")
+        ) and not _supplier_identity_index:
             _supplier_identity_index = await _load_supplier_identity_index(
                 session, tenant_id
             )
@@ -6498,6 +6574,7 @@ async def _insert_confirmed_data_impl(
                         if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                             cf["_customer_reference_raw"] = _cust_ref.raw_value
                     _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+                    _bump_codigo_fallido(counts, "ventas_cliente", _cust_ref)
                     # B·6: sólo sobre la ficha identificada; el centinela nunca.
                     _capturar_cruzados_de_la_fila(
                         cross_buffer,
@@ -6646,6 +6723,7 @@ async def _insert_confirmed_data_impl(
                             or target_to_col.get("supplier_cuil")
                             or target_to_col.get("supplier_email")
                             or target_to_col.get("supplier_phone")
+                            or target_to_col.get("supplier_external_code")
                         )
                         if _has_supplier_ref_col:
                             _sup_name_raw = row.get(supplier_col) if supplier_col else None
@@ -6654,6 +6732,7 @@ async def _insert_confirmed_data_impl(
                                 doc_fields=_SUPPLIER_DOC_FIELDS,
                                 existing_index=_supplier_identity_index,
                             )
+                            _bump_codigo_fallido(counts, "compras_proveedor", _sup_ref)
                             if _sup_ref.outcome == "matched":
                                 assert _sup_ref.entity is not None
                                 expense.supplier_id = _sup_ref.entity.id
@@ -6665,6 +6744,27 @@ async def _insert_confirmed_data_impl(
                                 )
                             else:
                                 _pending_supplier_ref = _sup_ref
+                    elif (
+                        _por_codigo := _proveedor_por_codigo_legacy(
+                            row,
+                            target_to_col,
+                            row.get(supplier_col) if supplier_col else None,
+                            _supplier_identity_index,
+                        )
+                    ) is not None:
+                        # B·7: con código, el código manda y NO se crea por nombre.
+                        _bump_codigo_fallido(counts, "compras_proveedor", _por_codigo)
+                        if _por_codigo.outcome == "matched":
+                            assert _por_codigo.entity is not None
+                            expense.supplier_id = _por_codigo.entity.id
+                            expense.supplier_name = _por_codigo.entity.name
+                            cf["_supplier_resolution"] = "matched"
+                            _supplier_matched = True
+                            _sup_ficha_id, _sup_por_contacto = _ficha_para_completar(_por_codigo)
+                        else:
+                            cf["_supplier_resolution"] = "unresolved"
+                            if _por_codigo.raw_value:
+                                cf["_supplier_reference_raw"] = _por_codigo.raw_value
                     elif supplier_col:
                         (
                             expense.supplier_id,
@@ -8312,13 +8412,12 @@ async def _insert_multisheet_data(
     _supplier_identity_index: dict[IdentityKey, Any] = (
         await _load_supplier_identity_index(session, tenant_id)
         if _supplier_ref_mode == "link_only"
-        or (
-            cross_buffer is not None
-            and any(
-                # El mapeo entero sirve: sólo los destinos cruzados pasan el filtro.
-                _cruzados_de_ficha(_m, "supplier")
-                for _m in (context_mappings or {}).values()
-            )
+        or any(
+            # B·7: el código del proveedor se resuelve contra el índice.
+            "supplier_external_code" in _m.values()
+            # El mapeo entero sirve: sólo los destinos cruzados pasan el filtro.
+            or (cross_buffer is not None and _cruzados_de_ficha(_m, "supplier"))
+            for _m in (context_mappings or {}).values()
         )
         else {}
     )
@@ -8772,6 +8871,7 @@ async def _insert_multisheet_data(
             if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                 cf["_customer_reference_raw"] = _cust_ref.raw_value
         _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+        _bump_codigo_fallido(counts, "ventas_cliente", _cust_ref)
         # B·6: sólo sobre la ficha identificada; el centinela nunca.
         _capturar_cruzados_de_la_fila(
             cross_buffer,
@@ -8963,6 +9063,7 @@ async def _insert_multisheet_data(
                 or cols.get("supplier_cuil")
                 or cols.get("supplier_email")
                 or cols.get("supplier_phone")
+                or cols.get("supplier_external_code")
             )
             if _has_supplier_ref_col:
                 _sup_ref = _classify_row_reference(
@@ -8970,6 +9071,7 @@ async def _insert_multisheet_data(
                     doc_fields=_SUPPLIER_DOC_FIELDS,
                     existing_index=_supplier_identity_index,
                 )
+                _bump_codigo_fallido(counts, "compras_proveedor", _sup_ref)
                 if _sup_ref.outcome == "matched":
                     assert _sup_ref.entity is not None
                     expense.supplier_id = _sup_ref.entity.id
@@ -8979,6 +9081,24 @@ async def _insert_multisheet_data(
                     _sup_ficha_id, _sup_por_contacto = _ficha_para_completar(_sup_ref)
                 else:
                     _pending_supplier_ref = _sup_ref
+        elif (
+            _por_codigo := _proveedor_por_codigo_legacy(
+                row, cols, _supplier_name_raw, _supplier_identity_index
+            )
+        ) is not None:
+            # B·7: con código, el código manda y NO se crea por nombre.
+            _bump_codigo_fallido(counts, "compras_proveedor", _por_codigo)
+            if _por_codigo.outcome == "matched":
+                assert _por_codigo.entity is not None
+                expense.supplier_id = _por_codigo.entity.id
+                expense.supplier_name = _por_codigo.entity.name
+                cf["_supplier_resolution"] = "matched"
+                _supplier_matched = True
+                _sup_ficha_id, _sup_por_contacto = _ficha_para_completar(_por_codigo)
+            else:
+                cf["_supplier_resolution"] = "unresolved"
+                if _por_codigo.raw_value:
+                    cf["_supplier_reference_raw"] = _por_codigo.raw_value
         elif _supplier_name_raw is not None:
             (
                 expense.supplier_id,
