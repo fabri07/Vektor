@@ -87,3 +87,30 @@ export function rowPreview(record: UnclassifiedRecordResponse): string {
     .map(([k, v]) => `${k}: ${v}`)
     .join(" · ");
 }
+
+/** B·8b: una referencia de la cola «Vincular a producto» y las ventas que la usan. */
+export interface GrupoDeReferencia {
+  /** `row_data.producto` con trim + minúsculas: agrupa «Coca 500» y «coca 500 ». */
+  clave: string;
+  /** Lo que decía el archivo, tal cual (el de la primera venta). */
+  referencia: string;
+  records: UnclassifiedRecordResponse[];
+}
+
+/**
+ * Agrupa las ventas pendientes por lo que decía el archivo del producto. Las
+ * filas sin `producto` quedan afuera (el backend las rechaza con
+ * `SIN_REFERENCIA`). Primero las referencias que más ventas resuelven.
+ */
+export function agruparPorReferencia(records: UnclassifiedRecordResponse[]): GrupoDeReferencia[] {
+  const grupos = new Map<string, GrupoDeReferencia>();
+  for (const r of records) {
+    const cruda = String(r.row_data?.producto ?? "").trim();
+    if (!cruda) continue;
+    const clave = cruda.toLowerCase();
+    const grupo = grupos.get(clave);
+    if (grupo) grupo.records.push(r);
+    else grupos.set(clave, { clave, referencia: cruda, records: [r] });
+  }
+  return [...grupos.values()].sort((a, b) => b.records.length - a.records.length);
+}

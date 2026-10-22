@@ -163,6 +163,40 @@ export const othersService = {
     await api.post(`/others/${id}/resolve-purchase`, payload);
   },
 
+  /**
+   * B·8a: la venta es de este producto y lo que decía el archivo
+   * (`row_data.producto`) queda como alias suyo. `quantity` sólo si la de la
+   * fila no es entera (el backend responde 422 `CANTIDAD_REQUERIDA`).
+   */
+  async linkProduct(id: string, payload: { product_id: string; quantity?: number }): Promise<string> {
+    const res = await api.post<{ message: string }>(`/others/${id}/link-product`, payload);
+    return res.data.message;
+  },
+
+  /**
+   * B·8b: las ventas pendientes que dicen qué producto se vendió, para la cola
+   * «Vincular a producto». El backend no filtra por destino: se pagina de a 500
+   * y se filtra acá, hasta juntar `tope` ventas. `truncado` dice si quedaron
+   * ventas sin traer.
+   */
+  async getPendingSalesWithReference(
+    tope = 5000,
+  ): Promise<{ records: UnclassifiedRecordResponse[]; truncado: boolean }> {
+    const PAGINA = 500;
+    const records: UnclassifiedRecordResponse[] = [];
+    for (let offset = 0; ; offset += PAGINA) {
+      const res = await api.get<UnclassifiedRecordResponse[]>("/others", {
+        params: { status: "PENDING", limit: PAGINA, offset },
+      });
+      for (const r of res.data) {
+        if (r.suggested_entity !== "sale" || !String(r.row_data?.producto ?? "").trim()) continue;
+        if (records.length >= tope) return { records, truncado: true };
+        records.push(r);
+      }
+      if (res.data.length < PAGINA) return { records, truncado: false };
+    }
+  },
+
   async dismiss(id: string): Promise<void> {
     await api.post(`/others/${id}/dismiss`);
   },

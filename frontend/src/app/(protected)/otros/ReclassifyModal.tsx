@@ -25,6 +25,7 @@ import {
   type PurchaseTerms,
 } from "@/features/purchases/purchaseTerms";
 import { prefill, rowPreview } from "./helpers";
+import { ProductoVendidoSelector } from "./ProductoVendidoSelector";
 
 /** B·5b: «Compra de mercadería» es un destino propio: se resuelve con artículos. */
 type Destino = ReclassifyEntityType | "purchase";
@@ -138,13 +139,8 @@ export function ReclassifyModal({
   }, [record]);
 
   // Una venta «sin compra previa» ya trae el producto (por nombre exacto del
-  // catálogo): se preselecciona; la persona sólo carga la compra.
-  const nombreDeLaFila = String(record?.row_data?.producto ?? "").trim().toLowerCase();
-  useEffect(() => {
-    if (entityType !== "sale" || ventaProducto || !nombreDeLaFila) return;
-    const exacto = productos.filter((p) => p.name.trim().toLowerCase() === nombreDeLaFila);
-    if (exacto.length === 1) setVentaProducto(exacto[0]!.id);
-  }, [entityType, ventaProducto, nombreDeLaFila, productos]);
+  // catálogo): el selector lo preselecciona; la persona sólo carga la compra.
+  const nombreDeLaFila = String(record?.row_data?.producto ?? "");
 
   if (!record) return null;
 
@@ -341,36 +337,15 @@ export function ReclassifyModal({
         ) : null}
         {entityType === "sale" ? (
           <div className="grid gap-2">
-            <label className="grid gap-1 text-sm text-vektor-body">
-              ¿Qué producto se vendió?
-              <input
-                className={inputCls}
-                placeholder="Buscar producto"
-                value={busqueda}
-                onChange={(e) => setBusqueda(e.target.value)}
-              />
-            </label>
-            <div className="grid grid-cols-[1fr_6rem] gap-2">
-              <select
-                aria-label="Producto vendido"
-                className={inputCls}
-                value={ventaProducto}
-                onChange={(e) => setVentaProducto(e.target.value)}
-              >
-                <option value="">Elegí el producto</option>
-                {productos
-                  .filter(
-                    (p) =>
-                      p.id === ventaProducto ||
-                      !busqueda.trim() ||
-                      p.name.toLowerCase().includes(busqueda.trim().toLowerCase()),
-                  )
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-              </select>
+            <ProductoVendidoSelector
+              productos={productos}
+              busqueda={busqueda}
+              onBusqueda={setBusqueda}
+              value={ventaProducto}
+              onChange={setVentaProducto}
+              referencia={nombreDeLaFila}
+              inputClassName={inputCls}
+            >
               <input
                 aria-label="Cantidad vendida"
                 className={inputCls}
@@ -380,7 +355,7 @@ export function ReclassifyModal({
                 value={ventaCantidad}
                 onChange={(e) => setVentaCantidad(e.target.value)}
               />
-            </div>
+            </ProductoVendidoSelector>
             {intento && !ventaProducto ? (
               <p role="alert" className="text-xs text-vk-danger">
                 Elegí qué producto se vendió: sin producto no hay compra previa ni costo.

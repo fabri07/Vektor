@@ -1,5 +1,5 @@
 import type { UnclassifiedRecordResponse } from "@/services/others.service";
-import { prefill, toIsoDate } from "../helpers";
+import { agruparPorReferencia, prefill, toIsoDate } from "../helpers";
 
 describe("toIsoDate", () => {
   it("normaliza dd/mm/yyyy a ISO (convención AR)", () => {
@@ -58,5 +58,28 @@ describe("prefill", () => {
     const pre = prefill(record);
     expect(pre.date).toBe("2024-03-12");
     expect(pre.amount).toBe("5000");
+  });
+});
+
+describe("agruparPorReferencia (B·8b)", () => {
+  const venta = (id: string, producto: string | undefined) =>
+    ({
+      id,
+      row_data: producto === undefined ? { monto: "10" } : { producto, monto: "10" },
+      suggested_entity: "sale",
+    }) as unknown as UnclassifiedRecordResponse;
+
+  it("agrupa por texto sin mayúsculas ni espacios, muestra el crudo y ordena por cantidad", () => {
+    const grupos = agruparPorReferencia([
+      venta("a", "Yerba"),
+      venta("b", "Coca 500"),
+      venta("c", " coca 500 "),
+      venta("d", ""),
+      venta("e", undefined),
+    ]);
+    expect(grupos.map((g) => [g.referencia, g.records.map((r) => r.id)])).toEqual([
+      ["Coca 500", ["b", "c"]],
+      ["Yerba", ["a"]],
+    ]);
   });
 });

@@ -4,13 +4,14 @@ import { mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AxiosError } from "axios";
-import { Trash2, Pencil, Zap } from "lucide-react";
+import { Trash2, Pencil, Zap, Link2 } from "lucide-react";
 import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
 import { ReclassifyModal } from "./ReclassifyModal";
 import { OthersGroups } from "./OthersGroups";
+import { VincularColaModal } from "./VincularColaModal";
 import { prefill, rowPreview } from "./helpers";
 import { Table } from "@/components/ui/Table";
 import {
@@ -57,6 +58,8 @@ export default function OtrosPage() {
   // B·5a: grupo elegido en «Por archivo y motivo» (filtra la tabla).
   const [group, setGroup] = useState<OthersGroup | null>(null);
   const [toDismiss, setToDismiss] = useState<UnclassifiedRecordResponse | null>(null);
+  // B·8b: la cola «Vincular a producto» (sólo trae las ventas al abrirse).
+  const [colaAbierta, setColaAbierta] = useState(false);
   const queryClient = useQueryClient();
   const toast = useToastStore((s) => s.add);
 
@@ -95,6 +98,19 @@ export default function OtrosPage() {
     ? (summary?.find((g) => g.group_key === group.group_key)?.count ?? 0)
     : pendingTotal;
   const totalPages = Math.max(1, Math.ceil(groupCount / PAGE_SIZE));
+  // B·8b: el botón de la cola sale del resumen, sin traer las filas: hay ventas
+  // pendientes. Las que no dicen qué producto se vendió las filtra la cola.
+  const hayVentasPendientes = (summary ?? []).some(
+    (g) => g.status === "PENDING" && g.suggested_entity === "sale" && g.count > 0,
+  );
+
+  const cerrarCola = async () => {
+    setColaAbierta(false);
+    // Lo vinculado mueve «Otros», el catálogo (alias, stock) y las ventas.
+    await queryClient.invalidateQueries({
+      predicate: (q) => /^(others|products|sales)/.test(String(q.queryKey[0])),
+    });
+  };
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["others-pending"] });
@@ -395,29 +411,41 @@ export default function OtrosPage() {
                 </span>
               ) : null}
             </p>
-            <button
-              type="button"
-              disabled={bulkImportMutation.isPending || sinSugerencias}
-              title={
-                sinSugerencias
-                  ? "Ninguno de los registros pendientes tiene un destino sugerido: no hay nada que importar automáticamente. Revisalos y asignales destino de a uno."
-                  : undefined
-              }
-              onClick={() => {
-                if (
-                  confirm(
-                    "¿Importar TODOS los registros pendientes sugeridos como venta o gasto? " +
-                      "Cada uno se registra en su sección con la fecha, monto y categoría detectados. " +
-                      "Los que no tengan fecha o monto legibles quedan pendientes para revisión manual.",
+            <div className="flex flex-wrap items-center gap-2">
+              {hayVentasPendientes ? (
+                <button
+                  type="button"
+                  onClick={() => setColaAbierta(true)}
+                  className="inline-flex items-center gap-1.5 rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary transition-colors hover:bg-vk-bg-light"
+                >
+                  <Link2 className="h-4 w-4" />
+                  Vincular ventas a productos
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={bulkImportMutation.isPending || sinSugerencias}
+                title={
+                  sinSugerencias
+                    ? "Ninguno de los registros pendientes tiene un destino sugerido: no hay nada que importar automáticamente. Revisalos y asignales destino de a uno."
+                    : undefined
+                }
+                onClick={() => {
+                  if (
+                    confirm(
+                      "¿Importar TODOS los registros pendientes sugeridos como venta o gasto? " +
+                        "Cada uno se registra en su sección con la fecha, monto y categoría detectados. " +
+                        "Los que no tengan fecha o monto legibles quedan pendientes para revisión manual.",
+                    )
                   )
-                )
-                  bulkImportMutation.mutate();
-              }}
-              className="inline-flex items-center gap-1.5 rounded border border-vektor-teal/40 px-3 py-1.5 text-sm text-vektor-teal transition-colors hover:bg-vektor-teal/10 disabled:opacity-50"
-            >
-              <Zap className="h-4 w-4" />
-              {bulkImportMutation.isPending ? "Importando…" : "Importar todo lo sugerido"}
-            </button>
+                    bulkImportMutation.mutate();
+                }}
+                className="inline-flex items-center gap-1.5 rounded border border-vektor-teal/40 px-3 py-1.5 text-sm text-vektor-teal transition-colors hover:bg-vektor-teal/10 disabled:opacity-50"
+              >
+                <Zap className="h-4 w-4" />
+                {bulkImportMutation.isPending ? "Importando…" : "Importar todo lo sugerido"}
+              </button>
+            </div>
           </div>
           <Table columns={columns} data={records} />
           {totalPages > 1 ? (
@@ -470,6 +498,8 @@ export default function OtrosPage() {
           </button>
         </div>
       </Modal>
+
+      {colaAbierta ? <VincularColaModal onClose={() => void cerrarCola()} /> : null}
 
       <ReclassifyModal
         record={reclassifying}
