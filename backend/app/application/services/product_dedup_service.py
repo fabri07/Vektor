@@ -1421,6 +1421,25 @@ async def _apply_one_group(
         "external_source": canonical_obj.external_source,
     }
 
+    # B·8a — los alias de los duplicados pasan al canónico (paso 7). Se deciden
+    # acá para que queden en el MERGE_PRODUCT y el revert sepa a quién devolverlos.
+    # No pueden chocar con los del canónico: el alias es único por negocio.
+    from app.persistence.models.product_alias import ProductAlias  # noqa: PLC0415
+
+    aliases_moved = [
+        {"id": str(aid), "from_product_id": str(pid)}
+        for aid, pid in (
+            await session.execute(
+                select(ProductAlias.id, ProductAlias.product_id)
+                .where(
+                    ProductAlias.tenant_id == tenant_id,
+                    ProductAlias.product_id.in_(duplicate_ids),
+                )
+                .order_by(ProductAlias.id)
+            )
+        ).all()
+    ]
+
     # Delta de stock group-level: UNA vez a stock_units (y más abajo a current_qty).
     canonical_obj.stock_units = stock_before + delta
     recompute_requires_completion(canonical_obj)
@@ -1453,6 +1472,7 @@ async def _apply_one_group(
                 "requires_completion_after": canonical_obj.requires_completion,
                 "external_code_transferred": ext_transfer,
                 "external_code_conflicts": ext_conflicts,
+                "aliases_moved": aliases_moved,
             },
             confidence="HIGH",
         )
@@ -1654,6 +1674,18 @@ async def _apply_one_group(
             canonical_obj,
             ext_transfer["external_code"],
             ext_transfer["external_source"],
+        )
+
+    # 7) B·8a — los alias de los duplicados, al canónico (registrados en el MERGE).
+    if aliases_moved:
+        await session.execute(
+            update(ProductAlias)
+            .where(
+                ProductAlias.tenant_id == tenant_id,
+                ProductAlias.id.in_([uuid.UUID(a["id"]) for a in aliases_moved]),
+            )
+            .values(product_id=canonical_id)
+            .execution_options(synchronize_session=False)
         )
 
     return ("applied", str(stock_dec.get("kind") or ""))
@@ -2401,6 +2433,22 @@ async def _revert_one_group(
             dup_objs[ext_source_id],
             ext_transfer["external_code"],
             ext_transfer["external_source"],
+        )
+
+    # 7⁻¹) B·8a — cada alias vuelve a su duplicado, si sigue en el canónico (uno que
+    # alguien re-vinculó o borró después no se toca).
+    from app.persistence.models.product_alias import ProductAlias  # noqa: PLC0415
+
+    for moved in m_after.get("aliases_moved") or []:
+        await session.execute(
+            update(ProductAlias)
+            .where(
+                ProductAlias.tenant_id == tenant_id,
+                ProductAlias.id == uuid.UUID(moved["id"]),
+                ProductAlias.product_id == canonical_id,
+            )
+            .values(product_id=uuid.UUID(moved["from_product_id"]))
+            .execution_options(synchronize_session=False)
         )
 
     return ("reverted", "")
