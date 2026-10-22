@@ -212,6 +212,17 @@ export default function OtrosPage() {
         toast("Esta fila ya se había resuelto. Actualizamos la lista.", "info");
         setReclassifying(null);
         await invalidate();
+      } else if (
+        (error as AxiosError<{ code?: string }>)?.response?.data?.code === "INSUFFICIENT_STOCK"
+      ) {
+        // El 400 de stock trae `code` al lado de `detail`, que es el texto.
+        const texto = (error as AxiosError<{ detail?: unknown }>)?.response?.data?.detail;
+        toast(
+          typeof texto === "string" && texto.trim()
+            ? texto
+            : "No hay stock suficiente para registrar esta venta.",
+          "error",
+        );
       } else if (code === "PURCHASE_NEEDS_ITEMS") {
         // B·5b: una compra de mercadería se registra con sus artículos.
         toast(

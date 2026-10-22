@@ -26,23 +26,50 @@ interface DetalleDeError {
   product_name?: string | null;
 }
 
-function detalle(error: unknown): { status?: number; detail?: DetalleDeError } {
-  const res = (error as { response?: { status?: number; data?: { detail?: unknown } } })?.response;
+interface CuerpoDeError {
+  detail?: unknown;
+  // El 400 de stock insuficiente trae `code` y las cantidades al lado de `detail`
+  // (que ahí es el texto), no adentro.
+  code?: string;
+  available?: number | string;
+  requested?: number | string;
+}
+
+function detalle(error: unknown): {
+  status?: number;
+  detail?: DetalleDeError;
+  cuerpo?: CuerpoDeError;
+} {
+  const res = (error as { response?: { status?: number; data?: CuerpoDeError } })?.response;
   const d = res?.data?.detail;
   return {
     status: res?.status,
     detail: d && typeof d === "object" && !Array.isArray(d) ? (d as DetalleDeError) : undefined,
+    cuerpo: res?.data,
   };
 }
 
 export function codigoDeError(error: unknown): string | null {
-  return detalle(error).detail?.code ?? null;
+  const { detail, cuerpo } = detalle(error);
+  return detail?.code ?? cuerpo?.code ?? null;
 }
 
 /** Cada respuesta de `link-product` en español, sin jerga. */
 export function mensajeVincular(error: unknown): string {
-  const { status, detail } = detalle(error);
+  const { status, detail, cuerpo } = detalle(error);
+  if (cuerpo?.code === "INSUFFICIENT_STOCK") {
+    if (typeof cuerpo.detail === "string" && cuerpo.detail.trim()) return cuerpo.detail;
+    return (
+      `No hay stock suficiente para esta venta: hay ${cuerpo.available ?? "—"} y la venta ` +
+      `pide ${cuerpo.requested ?? "—"}.`
+    );
+  }
   switch (detail?.code) {
+    case "IMPORT_IDENTITY_TAKEN":
+      return (
+        "Esta venta ya está cargada (otra fila del mismo comprobante/operación ya se " +
+        "registró). Descartala o revisala desde la lista."
+      );
     case "SALE_WITHOUT_PURCHASE":
       return (
         `Ese producto${detail.product_name ? ` («${detail.product_name}»)` : ""} no tiene ` +

@@ -192,6 +192,63 @@ it("409 ALIAS_OTRO_PRODUCTO: dice de qué producto es ese nombre", async () => {
   expect(svc.linkProduct).toHaveBeenCalledTimes(1);
 });
 
+it("IMPORT_IDENTITY_TAKEN en la primera: dice que ya está cargada y no sigue", async () => {
+  svc.linkProduct!.mockRejectedValue(
+    axiosError(409, { code: "IMPORT_IDENTITY_TAKEN", message: "otro texto" }),
+  );
+  await abrirCola([venta("r1", "Yerba"), venta("r2", "Yerba")]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+
+  expect(
+    await screen.findByText(
+      "Esta venta ya está cargada (otra fila del mismo comprobante/operación ya se registró). Descartala o revisala desde la lista.",
+    ),
+  ).toBeInTheDocument();
+  expect(svc.linkProduct).toHaveBeenCalledTimes(1);
+});
+
+it("stock insuficiente en una del resto: se lista con lo disponible y no corta las demás", async () => {
+  const sinStock = Object.assign(new Error("x"), {
+    response: {
+      status: 400,
+      data: {
+        detail: "Stock insuficiente para Yerba: hay 1, la venta pide 2.",
+        code: "INSUFFICIENT_STOCK",
+        product_id: "p-yerba",
+        available: 1,
+        requested: 2,
+      },
+    },
+  });
+  svc.linkProduct!
+    .mockResolvedValueOnce("ok")
+    .mockRejectedValueOnce(sinStock)
+    .mockResolvedValueOnce("ok");
+  await abrirCola([venta("r1", "Yerba"), venta("r2", "Yerba"), venta("r3", "Yerba")]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+
+  expect(
+    await screen.findByText("Stock insuficiente para Yerba: hay 1, la venta pide 2."),
+  ).toBeInTheDocument();
+  expect(svc.linkProduct).toHaveBeenCalledTimes(3);
+});
+
+it("stock insuficiente sin texto: arma el mensaje con lo disponible y lo pedido", async () => {
+  svc.linkProduct!.mockRejectedValue(
+    Object.assign(new Error("x"), {
+      response: { status: 400, data: { code: "INSUFFICIENT_STOCK", available: 0, requested: 3 } },
+    }),
+  );
+  await abrirCola([venta("r1", "Yerba")]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  expect(
+    await screen.findByText("No hay stock suficiente para esta venta: hay 0 y la venta pide 3."),
+  ).toBeInTheDocument();
+});
+
 it("sin referencias (ninguna venta dice el producto) muestra el mensaje vacío", async () => {
   svc.getPendingSalesWithReference!.mockResolvedValue({ records: [], truncado: false });
   render(<VincularColaModal onClose={jest.fn()} />);
