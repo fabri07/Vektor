@@ -72,6 +72,7 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
         ("POST", f"{P}/marketing/metrics/bulk"),
         ("POST", f"{P}/others/{{record_id}}/reclassify"),
         ("POST", f"{P}/others/{{record_id}}/resolve-purchase"),
+        ("POST", f"{P}/others/{{record_id}}/link-product"),
         ("POST", f"{P}/others/bulk-import"),
         # Ingesta (bloque C): subir dispara parseo con IA; confirmar e importar
         # en segundo plano además consumen cupo. La relectura es corrección.

@@ -58,6 +58,7 @@ from app.persistence.models.pos_stock_discrepancy import (
 )
 from app.persistence.models.pos_terminal import PosTerminal
 from app.persistence.models.product import Product
+from app.persistence.models.product_alias import ProductAlias
 from app.persistence.models.product_cost import ProductCostHistory, ProductCostState
 from app.persistence.models.product_supplier_link import ProductSupplierLink
 from app.persistence.models.purchase_order import PurchaseOrder
@@ -121,6 +122,7 @@ __all__ = [
     "PosStockDiscrepancy",
     "PosTender",
     "PosTerminal",
+    "ProductAlias",
     "ImportAttempt",
     "ImportOutbox",
     "OperationFingerprint",
