@@ -7,7 +7,7 @@ import json
 import re
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -126,7 +126,7 @@ from app.domain.expense_categories import (
     infer_expense_type,
     resolve_tax_kind,
 )
-from app.domain.external_code import clave_de_codigo_externo
+from app.domain.external_code import clave_de_codigo_externo, normalizar_sistema
 from app.domain.fila_de_total import MOTIVO_FILA_DE_TOTAL, es_fila_de_total_dict
 from app.domain.ingestion_limits import (
     TEXTO_FORMULA_SIN_RESULTADO,
@@ -660,10 +660,49 @@ class RowReferenceResolution:
     #: con la primera), así que alcanzan para vincular pero no para escribir.
     matched_key_type: str | None = None
     #: B·7: por qué un CÓDIGO de la fila no vinculó — ``"desconocido"`` (no hay
-    #: ficha con ese código) o ``"conflicto"`` (el código y otra clave de la
-    #: fila apuntan a fichas distintas). ``None`` si la fila no trae código o si
-    #: el código resolvió. Con código fallido el outcome es SIEMPRE `unresolved`.
+    #: ficha con ese código), ``"en_varias_fichas"`` (ignorando el sistema de
+    #: origen, el código está en más de una ficha) o ``"conflicto"`` (el código y
+    #: el DOCUMENTO de la fila apuntan a fichas distintas). ``None`` si la fila no
+    #: trae código o si el código resolvió. Con código fallido el outcome es
+    #: SIEMPRE `unresolved`.
     codigo: str | None = None
+
+
+class _CodigoEnVariasFichas:
+    """B·7: valor del índice de identidad para un código que ninguna ficha tiene
+    como propio y que, ignorando el sistema de origen, está en MÁS de una ficha
+    (p. ej. «C-1» de Tango y «C-1» de otro sistema). No es una entidad: marca que
+    el código existe pero no identifica a nadie. Sólo lo lee
+    ``_classify_row_reference``; ``resolve_identity`` nunca lo ve, porque se le
+    pasan únicamente claves que no son de código."""
+
+    def __init__(self, entidades: list[Any]) -> None:
+        self.entidades = entidades
+
+
+def _indexar_codigo_sin_sistema(
+    index: dict[IdentityKey, Any], entidades: Iterable[Any]
+) -> None:
+    """B·7: una venta o compra compara el código como PROPIO (sistema vacío), y
+    una ficha cuyo código se cargó con sistema (``external_source``, p. ej. Tango)
+    queda indexada bajo otra clave y no se encontraba nunca. Si ninguna ficha
+    tiene el código como propio —esa gana siempre—, se lo busca ignorando el
+    sistema: una sola ficha con ese código es match; varias (de sistemas
+    distintos: el índice único impide dos del mismo) es ``_CodigoEnVariasFichas``.
+    """
+    por_clave: dict[str, dict[int, Any]] = {}
+    for entidad in entidades:
+        if not normalizar_sistema(entidad.external_source):
+            continue  # código propio: ya está en el índice con su clave
+        clave = clave_de_codigo_externo(entidad.external_code)
+        if clave is not None:
+            por_clave.setdefault(clave, {})[id(entidad)] = entidad
+    for clave, fichas in por_clave.items():
+        key = IdentityKey("code", clave)
+        if key in index:
+            continue
+        unicas = list(fichas.values())
+        index[key] = unicas[0] if len(unicas) == 1 else _CodigoEnVariasFichas(unicas)
 
 
 def _classify_row_reference(
@@ -690,40 +729,61 @@ def _classify_row_reference(
     o su email sí matcheen (``codigo="desconocido"``). ``resolve_identity`` ignora
     una clave que no está en el índice, así que sin este corte un código mal
     tipeado se tapaba con el DNI y nadie se enteraba de que el código no existe.
-    Un código que apunta a una ficha y otra clave a otra es ``conflict`` del
-    motor (``codigo="conflicto"``). Ninguno de los dos crea ni elige.
+    Un código que resuelve vincula aunque el nombre sea «Consumidor final» (el
+    corte por ``anonymous_name_tokens`` es sólo para filas sin código). Sólo el
+    DOCUMENTO puede contradecirlo (``codigo="conflicto"``): email y teléfono los
+    pueden compartir dos fichas y el índice se queda con la primera (B·6), así
+    que no alcanzan para desmentir al código. Ninguno de los fallos crea ni elige.
     """
     name_raw = record.get("name")
     name_norm = normalize_text(str(name_raw)) if name_raw else ""
-    if anonymous_name_tokens is not None and name_norm and name_norm in anonymous_name_tokens:
-        return RowReferenceResolution(outcome="anonymous")
-
     keys = record_keys(record, doc_fields=doc_fields)
+    _clave_codigo = next((k for k in keys if k.type == "code"), None)
+    if (
+        _clave_codigo is None
+        and anonymous_name_tokens is not None
+        and name_norm
+        and name_norm in anonymous_name_tokens
+    ):
+        return RowReferenceResolution(outcome="anonymous")
     if not keys and not name_norm:
         return RowReferenceResolution(outcome="anonymous")
 
-    resolution = resolve_identity(keys, existing_index)
-    _clave_codigo = next((k for k in keys if k.type == "code"), None)
     codigo: str | None = None
     if _clave_codigo is not None:
-        if _clave_codigo not in existing_index:
+        por_codigo = existing_index.get(_clave_codigo)
+        if por_codigo is None:
             codigo = "desconocido"
-        elif resolution.outcome == "conflict":
+        elif isinstance(por_codigo, _CodigoEnVariasFichas):
+            codigo = "en_varias_fichas"
+        elif any(
+            existing_index[k] is not por_codigo
+            for k in keys
+            if k.type == "doc" and k in existing_index
+        ):
             codigo = "conflicto"
-    if resolution.outcome == "matched" and codigo is None:
-        assert resolution.entity is not None  # invariante de "matched"
-        return RowReferenceResolution(
-            outcome="matched",
-            entity=resolution.entity,
-            matched_key_type=(
-                resolution.matched_key.type if resolution.matched_key is not None else None
-            ),
-        )
+        else:
+            return RowReferenceResolution(
+                outcome="matched", entity=por_codigo, matched_key_type="code"
+            )
+    else:
+        resolution = resolve_identity(keys, existing_index)
+        if resolution.outcome == "matched":
+            assert resolution.entity is not None  # invariante de "matched"
+            return RowReferenceResolution(
+                outcome="matched",
+                entity=resolution.entity,
+                matched_key_type=(
+                    resolution.matched_key.type if resolution.matched_key is not None else None
+                ),
+            )
 
     # unresolved: needs_review (solo nombre débil), none (clave sin match) o
     # conflict (clave ambigua) — todas se tratan igual acá: no identifican sin
     # ambigüedad, van al sentinela con traza para revisión humana.
-    raw: Any = name_raw
+    # B·7: si lo que falló es el código, la traza muestra el código y no el
+    # nombre o el documento, que no son lo que hay que corregir.
+    raw: Any = record.get("external_code") if codigo is not None else name_raw
     if raw is None:
         for f in doc_fields:
             if record.get(f):
@@ -731,8 +791,6 @@ def _classify_row_reference(
                 break
         else:
             raw = record.get("email") or record.get("phone")
-    if raw is None and codigo is not None:
-        raw = record.get("external_code")
     return RowReferenceResolution(
         outcome="unresolved", raw_value=str(raw) if raw is not None else None, codigo=codigo
     )
@@ -752,10 +810,15 @@ _REFERENCE_OUTCOME_SUFFIX = {
 def _bump_codigo_fallido(
     counts: dict[str, Any], prefix: str, ref: RowReferenceResolution
 ) -> None:
-    """B·7: ``{prefix}_codigo_desconocido`` / ``{prefix}_codigo_en_conflicto``."""
+    """B·7: ``{prefix}_codigo_desconocido`` / ``_codigo_en_varias_fichas`` /
+    ``_codigo_en_conflicto``."""
     if ref.codigo == "desconocido":
         counts[f"{prefix}_codigo_desconocido"] = (
             counts.get(f"{prefix}_codigo_desconocido", 0) + 1
+        )
+    elif ref.codigo == "en_varias_fichas":
+        counts[f"{prefix}_codigo_en_varias_fichas"] = (
+            counts.get(f"{prefix}_codigo_en_varias_fichas", 0) + 1
         )
     elif ref.codigo == "conflicto":
         counts[f"{prefix}_codigo_en_conflicto"] = (
@@ -1176,7 +1239,7 @@ async def _load_customer_identity_index(
     )
 
     existing = await CustomerRepository(session).list_for_dedup(tenant_id)
-    return build_existing_index(
+    index = build_existing_index(
         existing,
         to_record=lambda c: {
             "cuit": c.cuit,
@@ -1191,6 +1254,8 @@ async def _load_customer_identity_index(
         },
         doc_fields=_CUSTOMER_DOC_FIELDS,
     )
+    _indexar_codigo_sin_sistema(index, existing)
+    return index
 
 
 async def _load_supplier_identity_index(
@@ -1204,7 +1269,7 @@ async def _load_supplier_identity_index(
     )
 
     existing = await SupplierRepository(session).list_for_dedup(tenant_id)
-    return build_existing_index(
+    index = build_existing_index(
         existing,
         to_record=lambda s: {
             "cuil": s.cuil,
@@ -1216,6 +1281,8 @@ async def _load_supplier_identity_index(
         },
         doc_fields=_SUPPLIER_DOC_FIELDS,
     )
+    _indexar_codigo_sin_sistema(index, existing)
+    return index
 
 
 async def _import_master_entities(
@@ -6765,6 +6832,9 @@ async def _insert_confirmed_data_impl(
                             cf["_supplier_resolution"] = "unresolved"
                             if _por_codigo.raw_value:
                                 cf["_supplier_reference_raw"] = _por_codigo.raw_value
+                            # Cuenta en `compras_proveedor_no_resuelto` como en
+                            # `link_only`, recién si la compra es de mercadería.
+                            _pending_supplier_ref = _por_codigo
                     elif supplier_col:
                         (
                             expense.supplier_id,
@@ -6969,7 +7039,11 @@ async def _insert_confirmed_data_impl(
                             # OPEX (product_id None) el sentinela nunca se toca, así
                             # que una referencia sin matchear en un gasto operativo
                             # queda sin proveedor y sin traza — igual que hoy.
-                            if _supplier_ref_mode == "link_only":
+                            # B·7: en `legacy`, la fila cuyo código no resolvió.
+                            if (
+                                _supplier_ref_mode == "link_only"
+                                or _pending_supplier_ref is not None
+                            ):
                                 _outcome = (
                                     _pending_supplier_ref.outcome
                                     if _pending_supplier_ref is not None
@@ -7139,6 +7213,7 @@ async def _insert_confirmed_data_impl(
                     supplier_ref_mode=_supplier_ref_mode,
                     shipping_decisions=shipping_decisions,
                     purchase_cost_decisions=purchase_cost_decisions,
+                    supplier_identity_index=_supplier_identity_index,
                 ),
                 _ctx_plano,
                 rows,
@@ -8070,6 +8145,9 @@ class EntornoDeEnvios:
     supplier_ref_mode: str
     shipping_decisions: dict[str, str] | None
     purchase_cost_decisions: dict[str, PurchaseCostDecision] | None
+    #: B·7: el índice de identidad de proveedores con que las filas resolvieron
+    #: su código. ``None`` = no se cargó (la hoja no trae código).
+    supplier_identity_index: dict[IdentityKey, Any] | None = None
 
 
 async def cobrar_envios_de_la_hoja(
@@ -8109,6 +8187,14 @@ async def cobrar_envios_de_la_hoja(
     _comp_col = cols.get("invoice_number")
     _prov_col = cols.get("supplier_name")
 
+    # Se normalizan porque la clave de agrupación tiene que ser insensible a
+    # mayúsculas y espacios: "A-0001" y "a-0001 " son el mismo comprobante.
+    def _prov_de(_row: dict[str, Any]) -> str:
+        return (_clean_str(_row.get(_prov_col), 199) or "").strip().lower() if _prov_col else ""
+
+    def _comp_de(_row: dict[str, Any]) -> str:
+        return (_clean_str(_row.get(_comp_col), 99) or "").strip().lower() if _comp_col else ""
+
     def _leer_envios(col: str) -> list[ShippingLine]:
         leidas: list[ShippingLine] = []
         for _idx, _row in enumerate(rows):
@@ -8120,21 +8206,53 @@ async def cobrar_envios_de_la_hoja(
             leidas.append(
                 ShippingLine(
                     row_index=_idx,
-                    # Se normalizan acá porque la clave de agrupación tiene que ser
-                    # insensible a mayúsculas y espacios: "A-0001" y "a-0001 " son
-                    # el mismo comprobante.
-                    supplier=(_clean_str(_row.get(_prov_col), 199) or "")
-                    .strip()
-                    .lower()
-                    if _prov_col
-                    else "",
-                    invoice=(_clean_str(_row.get(_comp_col), 99) or "").strip().lower()
-                    if _comp_col
-                    else "",
+                    supplier=_prov_de(_row),
+                    invoice=_comp_de(_row),
                     amount=_monto,
                 )
             )
         return leidas
+
+    def _proveedor_por_codigo_del_comprobante(
+        _cargo: ShippingCharge,
+    ) -> tuple[bool, uuid.UUID | None, str | None]:
+        """B·7: el envío cuelga del proveedor que las filas del comprobante ya
+        resolvieron por su código — nunca de uno creado por nombre. Devuelve
+        ``(decidido, id, nombre)``: ``decidido=False`` si ninguna fila trae código
+        (sigue el camino por nombre de siempre). Si alguna fila con código no
+        resolvió, o resolvieron a fichas distintas, el envío queda sin proveedor,
+        igual que la compra (un gasto de logística no va a «No identificado»)."""
+        if not cols.get("supplier_external_code"):
+            return False, None, None
+        _idxs = (
+            [
+                i
+                for i, r in enumerate(rows)
+                if _comp_de(r) == _cargo.invoice and _prov_de(r) == _cargo.supplier
+            ]
+            if _cargo.invoice
+            else list(_cargo.row_indexes)
+        )
+        _refs = [
+            ref
+            for i in _idxs
+            if (
+                ref := _proveedor_por_codigo_legacy(
+                    rows[i],
+                    cols,
+                    rows[i].get(_prov_col) if _prov_col else None,
+                    entorno.supplier_identity_index or {},
+                )
+            )
+            is not None
+        ]
+        if not _refs:
+            return False, None, None
+        _fichas = {id(r.entity): r.entity for r in _refs if r.entity is not None}
+        if len(_fichas) != 1 or any(r.outcome != "matched" for r in _refs):
+            return True, None, None
+        _ficha = next(iter(_fichas.values()))
+        return True, _ficha.id, _ficha.name
 
     async def _emitir_cargo(
         _cargo: ShippingCharge,
@@ -8179,7 +8297,12 @@ async def cobrar_envios_de_la_hoja(
 
         _sup_id: uuid.UUID | None = None
         _sup_nombre = _clean_str(_fila.get(_prov_col), 199) if _prov_col else None
-        if _sup_nombre and entorno.supplier_ref_mode != "link_only":
+        _por_codigo, _id_por_codigo, _nombre_por_codigo = (
+            _proveedor_por_codigo_del_comprobante(_cargo)
+        )
+        if _por_codigo:
+            _sup_id, _sup_nombre = _id_por_codigo, _nombre_por_codigo
+        elif _sup_nombre and entorno.supplier_ref_mode != "link_only":
             _sup_id, _sup_nombre = await _resolve_or_create_supplier(
                 session,
                 tenant_id,
@@ -8441,6 +8564,7 @@ async def _insert_multisheet_data(
             supplier_ref_mode=_supplier_ref_mode,
             shipping_decisions=shipping_decisions,
             purchase_cost_decisions=purchase_cost_decisions,
+            supplier_identity_index=_supplier_identity_index,
         )
 
     # E7a-lite: los motivos numéricos de TODAS las hojas, acumulados. El camino
@@ -9099,6 +9223,9 @@ async def _insert_multisheet_data(
                 cf["_supplier_resolution"] = "unresolved"
                 if _por_codigo.raw_value:
                     cf["_supplier_reference_raw"] = _por_codigo.raw_value
+                # Cuenta en `compras_proveedor_no_resuelto` como en `link_only`,
+                # recién si la compra es de mercadería.
+                _pending_supplier_ref = _por_codigo
         elif _supplier_name_raw is not None:
             (
                 expense.supplier_id,
@@ -9298,8 +9425,9 @@ async def _insert_multisheet_data(
             # aplicar la clasificación diferida (anonymous/unresolved). En OPEX
             # (product_id None) el sentinela nunca se toca, así que una
             # referencia sin matchear en un gasto operativo queda sin proveedor
-            # y sin traza, igual que hoy.
-            if _supplier_ref_mode == "link_only":
+            # y sin traza, igual que hoy. B·7: en `legacy`, la fila cuyo código
+            # no resolvió.
+            if _supplier_ref_mode == "link_only" or _pending_supplier_ref is not None:
                 _outcome = (
                     _pending_supplier_ref.outcome
                     if _pending_supplier_ref is not None

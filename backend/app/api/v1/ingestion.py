@@ -4176,8 +4176,9 @@ async def confirm_file(
             "identificado». Revisá el dato (CUIL/email/teléfono) cuando puedas."
         )
     # B·7: el código del cliente/proveedor va primero. Uno que ninguna ficha tiene,
-    # o que apunta a otra ficha que el DNI/CUIL/email de la misma fila, no vincula
-    # ni crea — y se dice cuál de los dos pasó, porque se arreglan distinto.
+    # uno que está en más de una ficha (de sistemas distintos), o uno que apunta a
+    # otra ficha que el DNI/CUIT/CUIL de la misma fila, no vincula ni crea — y se
+    # dice cuál de los tres pasó, porque se arreglan distinto.
     for _clave, _que, _quien in (
         ("ventas_cliente", "venta(s)", "cliente"),
         ("compras_proveedor", "compra(s)", "proveedor"),
@@ -4189,11 +4190,18 @@ async def confirm_file(
                 f"{_quien} nuevo. Cargá el código en la ficha del {_quien} o corregí el "
                 "archivo."
             )
+        if counts.get(f"{_clave}_codigo_en_varias_fichas"):
+            warnings.append(
+                f"{counts[f'{_clave}_codigo_en_varias_fichas']} {_que} traen un código "
+                f"de {_quien} que está en más de una ficha (cargado desde sistemas "
+                "distintos): no se vincularon a ninguna. Dejá el código en una sola "
+                f"ficha del {_quien}."
+            )
         if counts.get(f"{_clave}_codigo_en_conflicto"):
             warnings.append(
                 f"{counts[f'{_clave}_codigo_en_conflicto']} {_que} traen un código de "
-                f"{_quien} que apunta a una ficha distinta de la que indican sus otros "
-                "datos (documento, email o teléfono): no se vincularon a ninguna."
+                f"{_quien} que apunta a una ficha distinta de la que indica su "
+                "documento: no se vincularon a ninguna."
             )
     # F7d: maestros con filas que necesitan revisión o son inválidas — NUNCA se
     # persisten (needs_review/invalid/conflicto se saltean siempre en el import
