@@ -97,9 +97,31 @@ export function mensajeVincular(error: unknown): string {
   }
   if (detail?.message) return detail.message;
   if (status === 422) {
-    return "A la fila le falta la fecha o el monto para registrar la venta: resolvela desde «Editar».";
+    // Un 422 de validación (pydantic) trae `detail` como lista: algún dato de la
+    // fila no es válido, sin saber cuál sin leerla.
+    return "Algún dato de la fila no es válido para registrar la venta: resolvela desde «Editar».";
   }
   return "No se pudo vincular la venta. Probá de nuevo.";
+}
+
+/**
+ * Los errores de la ELECCIÓN (el producto elegido o el alias) cortan la
+ * referencia: vale para todas sus ventas. Los demás son de esa fila (su
+ * comprobante, su compra previa, su stock) y no traban al resto del grupo.
+ */
+const ERRORES_DE_LA_ELECCION = new Set([
+  "ALIAS_OTRO_PRODUCTO",
+  "ALIAS_NOMBRE_DE_OTRO_PRODUCTO",
+  "INVALID_TARGET_PRODUCT",
+]);
+
+/** `null` si la cantidad sirve (entero ≥ 1); si no, por qué. */
+export function errorDeCantidad(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return "Ingresá la cantidad.";
+  if (!/^\d+$/.test(v)) return "La cantidad tiene que ser un número entero.";
+  if (Number(v) < 1) return "La cantidad tiene que ser 1 o más.";
+  return null;
 }
 
 interface FilaConFalla {
@@ -123,7 +145,17 @@ function formatoMonto(raw: string | undefined): string {
     : "—";
 }
 
-export function VincularColaModal({ onClose }: { onClose: () => void }) {
+export function VincularColaModal({
+  onClose,
+  onCambiosTrasCerrar,
+}: {
+  onClose: () => void;
+  /**
+   * Si se cerró con una llamada en vuelo, la invalidación del cierre ya pasó:
+   * esto se llama cuando la llamada termina, para que lo que vinculó se vea.
+   */
+  onCambiosTrasCerrar?: () => void;
+}) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["others-link-queue"],
     queryFn: () => othersService.getPendingSalesWithReference(TOPE_COLA),
@@ -146,39 +178,52 @@ export function VincularColaModal({ onClose }: { onClose: () => void }) {
   const [corriendo, setCorriendo] = useState(false);
   const [progreso, setProgreso] = useState<{ hecho: number; total: number } | null>(null);
   const [errorPrincipal, setErrorPrincipal] = useState<string | null>(null);
-  // El primer intento pidió cantidad (la fila no trae un entero).
-  const [cantidadPrimero, setCantidadPrimero] = useState<string | null>(null);
+  // La venta que iba a crear el alias pidió cantidad (la fila no trae un entero).
+  const [cantidadPedida, setCantidadPedida] = useState<{ id: string; valor: string } | null>(
+    null,
+  );
   const [fallas, setFallas] = useState<FilaConFalla[]>([]);
   const [hechas, setHechas] = useState<Set<string>>(new Set());
   const [vinculadas, setVinculadas] = useState(0);
+  // Vinculadas de la referencia actual: con 0, el alias todavía no existe.
+  const [okDelGrupo, setOkDelGrupo] = useState(0);
   const [aviso, setAviso] = useState<string | null>(null);
 
   // Cerrar a mitad de camino corta lo que falta: cada llamada es atómica, así que
   // lo ya vinculado queda bien y lo demás sigue en «Otros».
+  // En StrictMode el efecto se monta, desmonta y vuelve a montar: el montaje
+  // tiene que volver a poner la bandera en falso o «Vincular» no hace nada.
   const cancelado = useRef(false);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    cancelado.current = false;
+    return () => {
       cancelado.current = true;
-    },
-    [],
-  );
+    };
+  }, []);
 
   useEffect(() => {
     setProductoId("");
-    setBusqueda(grupo?.referencia ?? "");
+    // Vacía: filtrar por lo que decía el archivo puede esconder justo el producto
+    // destino («Coca 500» no encuentra «Coca-Cola 500 ml»). Si el texto es el
+    // nombre exacto de un producto, el selector lo preselecciona igual.
+    setBusqueda("");
     setErrorPrincipal(null);
-    setCantidadPrimero(null);
+    setCantidadPedida(null);
     setFallas([]);
     setProgreso(null);
+    setOkDelGrupo(0);
   }, [grupo]);
 
   const siguiente = useCallback(() => setIdx((i) => i + 1), []);
 
   const vincular = async () => {
     if (!grupo || !productoId || corriendo) return;
-    if (cantidadPrimero !== null && !/^\d+$/.test(cantidadPrimero.trim())) {
-      setErrorPrincipal("Escribí la cantidad vendida (un número entero en la unidad de venta).");
-      return;
+    if (cantidadPedida) {
+      const problema = errorDeCantidad(cantidadPedida.valor);
+      if (problema) {
+        setErrorPrincipal(problema);
+        return;
+      }
     }
     const pendientes = grupo.records.filter((r) => !hechas.has(r.id));
     setCorriendo(true);
@@ -186,18 +231,18 @@ export function VincularColaModal({ onClose }: { onClose: () => void }) {
     setAviso(null);
     const nuevasFallas: FilaConFalla[] = [];
     const nuevasHechas = new Set(hechas);
-    let primeraOk = false;
     let ok = 0;
+    let corte: string | null = null;
+    let pedirCantidad: string | null = null;
     for (const [i, record] of pendientes.entries()) {
-      if (cancelado.current) return;
+      if (cancelado.current) break;
       setProgreso({ hecho: i + 1, total: pendientes.length });
-      const usarCantidad = !primeraOk && cantidadPrimero !== null;
+      const usarCantidad = cantidadPedida?.id === record.id;
       try {
         await othersService.linkProduct(record.id, {
           product_id: productoId,
-          ...(usarCantidad ? { quantity: Number(cantidadPrimero) } : {}),
+          ...(usarCantidad ? { quantity: Number(cantidadPedida.valor.trim()) } : {}),
         });
-        primeraOk = true;
         ok += 1;
         nuevasHechas.add(record.id);
       } catch (error) {
@@ -207,49 +252,81 @@ export function VincularColaModal({ onClose }: { onClose: () => void }) {
           nuevasHechas.add(record.id);
           continue;
         }
-        if (!primeraOk) {
-          // Hasta que una salga bien, el error es de la elección (el producto, su
-          // compra, el alias): se corta y se muestra, sin tocar las demás.
-          if (code === "CANTIDAD_REQUERIDA") setCantidadPrimero("");
-          setErrorPrincipal(mensajeVincular(error));
+        if (code && ERRORES_DE_LA_ELECCION.has(code)) {
+          // Es del producto elegido o del alias: vale para todo el grupo.
+          corte = mensajeVincular(error);
           break;
         }
+        if (code === "CANTIDAD_REQUERIDA" && ok === 0) {
+          // Todavía no hay alias: se pide la cantidad de ésta y se sigue desde acá.
+          pedirCantidad = record.id;
+          corte = mensajeVincular(error);
+          break;
+        }
+        // Un error de la fila (su comprobante, su compra, su stock): se lista y se
+        // sigue con la próxima, que pasa a ser la que crea el alias.
         nuevasFallas.push({ record, code, mensaje: mensajeVincular(error), cantidad: "" });
       }
     }
-    if (cancelado.current) return;
+    if (cancelado.current) {
+      onCambiosTrasCerrar?.();
+      return;
+    }
     setHechas(nuevasHechas);
     setVinculadas((n) => n + ok);
+    setOkDelGrupo((n) => n + ok);
     setCorriendo(false);
     setProgreso(null);
-    if (!primeraOk) return;
-    const nombre = productos.find((p) => p.id === productoId)?.name ?? "el producto";
-    setAviso(`Se vincularon ${ok} venta(s) de «${grupo.referencia}» a «${nombre}».`);
-    if (nuevasFallas.length === 0) siguiente();
-    else {
-      setCantidadPrimero(null);
-      setFallas(nuevasFallas);
+    setCantidadPedida(pedirCantidad ? { id: pedirCantidad, valor: "" } : null);
+    if (ok > 0) {
+      const nombre = productos.find((p) => p.id === productoId)?.name ?? "el producto";
+      setAviso(`Se vincularon ${ok} venta(s) de «${grupo.referencia}» a «${nombre}».`);
     }
+    if (corte) {
+      // Las fallas de fila juntadas antes del corte se reintentan con el próximo
+      // «Vincular» (no están en `hechas`).
+      setErrorPrincipal(corte);
+      return;
+    }
+    if (nuevasFallas.length > 0) setFallas(nuevasFallas);
+    else siguiente();
   };
 
   const reintentar = async (falla: FilaConFalla) => {
     if (corriendo) return;
-    const cantidad = falla.cantidad.trim();
-    if (falla.code === "CANTIDAD_REQUERIDA" && !/^\d+$/.test(cantidad)) return;
+    const conCantidad = falla.code === "CANTIDAD_REQUERIDA";
+    const problema = conCantidad ? errorDeCantidad(falla.cantidad) : null;
+    if (problema) {
+      setFallas((prev) =>
+        prev.map((f) => (f.record.id === falla.record.id ? { ...f, mensaje: problema } : f)),
+      );
+      return;
+    }
     setCorriendo(true);
     try {
       await othersService.linkProduct(falla.record.id, {
         product_id: productoId,
-        ...(falla.code === "CANTIDAD_REQUERIDA" ? { quantity: Number(cantidad) } : {}),
+        ...(conCantidad ? { quantity: Number(falla.cantidad.trim()) } : {}),
       });
-      if (cancelado.current) return;
+      if (cancelado.current) {
+        onCambiosTrasCerrar?.();
+        return;
+      }
       setHechas((prev) => new Set(prev).add(falla.record.id));
       setVinculadas((n) => n + 1);
+      setOkDelGrupo((n) => n + 1);
       const resto = fallas.filter((f) => f.record.id !== falla.record.id);
       setFallas(resto);
       if (resto.length === 0) siguiente();
     } catch (error) {
       if (cancelado.current) return;
+      if (codigoDeError(error) === "RECORD_ALREADY_RESOLVED") {
+        setHechas((prev) => new Set(prev).add(falla.record.id));
+        const resto = fallas.filter((f) => f.record.id !== falla.record.id);
+        setFallas(resto);
+        if (resto.length === 0) siguiente();
+        return;
+      }
       setFallas((prev) =>
         prev.map((f) =>
           f.record.id === falla.record.id
@@ -297,6 +374,8 @@ export function VincularColaModal({ onClose }: { onClose: () => void }) {
     cuerpo = (
       <form
         className="grid gap-4"
+        // La cantidad se valida acá, con un mensaje, y no con el globo del navegador.
+        noValidate
         onSubmit={(e) => {
           e.preventDefault();
           void vincular();
@@ -367,17 +446,17 @@ export function VincularColaModal({ onClose }: { onClose: () => void }) {
                 No se pudo cargar el catálogo de productos.
               </p>
             ) : null}
-            {cantidadPrimero !== null ? (
+            {cantidadPedida ? (
               <label className="grid gap-1 text-sm text-vektor-body">
-                Cantidad vendida en la primera venta
+                Cantidad vendida
                 <input
                   aria-label="Cantidad vendida"
                   className={inputCls}
                   type="number"
                   min={1}
                   step={1}
-                  value={cantidadPrimero}
-                  onChange={(e) => setCantidadPrimero(e.target.value)}
+                  value={cantidadPedida.valor}
+                  onChange={(e) => setCantidadPedida({ ...cantidadPedida, valor: e.target.value })}
                 />
               </label>
             ) : null}
@@ -393,9 +472,11 @@ export function VincularColaModal({ onClose }: { onClose: () => void }) {
             )}
           </div>
         ) : (
-          <div className="grid gap-2">
+          <div className="grid gap-2" role="status" aria-live="polite">
             <p className="text-sm text-vk-text-primary">
-              Estas ventas no se pudieron vincular. Las demás ya quedaron.
+              {okDelGrupo === 0
+                ? "Ninguna venta se pudo vincular, así que el nombre no quedó aprendido:"
+                : "Estas ventas no se pudieron vincular. Las demás ya quedaron."}
             </p>
             <ul className="grid gap-2">
               {fallas.map((f) => (
@@ -407,9 +488,7 @@ export function VincularColaModal({ onClose }: { onClose: () => void }) {
                     {f.record.row_data?.fecha || "—"} · {formatoMonto(f.record.row_data?.monto)} ·
                     cantidad {f.record.row_data?.cantidad || "1"}
                   </span>
-                  <span role="alert" className="text-vk-danger">
-                    {f.mensaje}
-                  </span>
+                  <span className="text-vk-danger">{f.mensaje}</span>
                   <span className="flex items-center gap-2">
                     {f.code === "CANTIDAD_REQUERIDA" ? (
                       <input
@@ -426,6 +505,7 @@ export function VincularColaModal({ onClose }: { onClose: () => void }) {
                       type="button"
                       disabled={corriendo}
                       onClick={() => void reintentar(f)}
+                      aria-label={`Reintentar la venta del ${f.record.row_data?.fecha || "—"} por ${formatoMonto(f.record.row_data?.monto)}`}
                       className="rounded border border-vk-border-w px-2 py-1 text-vk-text-primary hover:bg-vk-surface-w disabled:opacity-50"
                     >
                       Reintentar

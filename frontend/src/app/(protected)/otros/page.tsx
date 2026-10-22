@@ -12,7 +12,7 @@ import { Modal } from "@/components/ui/Modal";
 import { ReclassifyModal } from "./ReclassifyModal";
 import { OthersGroups } from "./OthersGroups";
 import { VincularColaModal } from "./VincularColaModal";
-import { prefill, rowPreview } from "./helpers";
+import { esQueryAfectadaPorVincular, prefill, rowPreview } from "./helpers";
 import { Table } from "@/components/ui/Table";
 import {
   othersService,
@@ -104,12 +104,11 @@ export default function OtrosPage() {
     (g) => g.status === "PENDING" && g.suggested_entity === "sale" && g.count > 0,
   );
 
+  const invalidarTrasVincular = () =>
+    queryClient.invalidateQueries({ predicate: (q) => esQueryAfectadaPorVincular(q.queryKey) });
   const cerrarCola = async () => {
     setColaAbierta(false);
-    // Lo vinculado mueve «Otros», el catálogo (alias, stock) y las ventas.
-    await queryClient.invalidateQueries({
-      predicate: (q) => /^(others|products|sales)/.test(String(q.queryKey[0])),
-    });
+    await invalidarTrasVincular();
   };
 
   const invalidate = async () => {
@@ -510,7 +509,10 @@ export default function OtrosPage() {
         </div>
       </Modal>
 
-      {colaAbierta ? <VincularColaModal onClose={() => void cerrarCola()} /> : null}
+      {colaAbierta ? <VincularColaModal
+          onClose={() => void cerrarCola()}
+          onCambiosTrasCerrar={() => void invalidarTrasVincular()}
+        /> : null}
 
       <ReclassifyModal
         record={reclassifying}

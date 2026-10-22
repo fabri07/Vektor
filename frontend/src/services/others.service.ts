@@ -184,12 +184,17 @@ export const othersService = {
   ): Promise<{ records: UnclassifiedRecordResponse[]; truncado: boolean }> {
     const PAGINA = 500;
     const records: UnclassifiedRecordResponse[] = [];
+    // Entre una página y la siguiente se puede resolver una fila y correrse el
+    // offset: la misma venta llegaría dos veces.
+    const vistos = new Set<string>();
     for (let offset = 0; ; offset += PAGINA) {
       const res = await api.get<UnclassifiedRecordResponse[]>("/others", {
         params: { status: "PENDING", limit: PAGINA, offset },
       });
       for (const r of res.data) {
         if (r.suggested_entity !== "sale" || !String(r.row_data?.producto ?? "").trim()) continue;
+        if (vistos.has(r.id)) continue;
+        vistos.add(r.id);
         if (records.length >= tope) return { records, truncado: true };
         records.push(r);
       }

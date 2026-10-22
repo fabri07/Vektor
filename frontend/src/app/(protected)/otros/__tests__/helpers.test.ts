@@ -1,5 +1,5 @@
 import type { UnclassifiedRecordResponse } from "@/services/others.service";
-import { agruparPorReferencia, prefill, toIsoDate } from "../helpers";
+import { agruparPorReferencia, esQueryAfectadaPorVincular, prefill, toIsoDate } from "../helpers";
 
 describe("toIsoDate", () => {
   it("normaliza dd/mm/yyyy a ISO (convención AR)", () => {
@@ -73,7 +73,7 @@ describe("agruparPorReferencia (B·8b)", () => {
     const grupos = agruparPorReferencia([
       venta("a", "Yerba"),
       venta("b", "Coca 500"),
-      venta("c", " coca 500 "),
+      venta("c", " coca  500 "),
       venta("d", ""),
       venta("e", undefined),
     ]);
@@ -81,5 +81,16 @@ describe("agruparPorReferencia (B·8b)", () => {
       ["Coca 500", ["b", "c"]],
       ["Yerba", ["a"]],
     ]);
+  });
+});
+
+describe("esQueryAfectadaPorVincular (B·8b)", () => {
+  it("invalida «Otros», productos y ventas, no las categorías ni el resto", () => {
+    for (const k of ["others-pending", "others-link-queue", "products", "products-list", "sales-entries", "sales-all"]) {
+      expect(esQueryAfectadaPorVincular([k])).toBe(true);
+    }
+    for (const k of ["product-categories", "health-score", "expenses", "salesman"]) {
+      expect(esQueryAfectadaPorVincular([k])).toBe(false);
+    }
   });
 });

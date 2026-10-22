@@ -97,8 +97,8 @@ it("vincula el grupo entero con el mismo producto y pasa a la siguiente referenc
   expect(screen.getByText("1 de 2 referencias")).toBeInTheDocument();
   expect(screen.getByText("«Coca 500»")).toBeInTheDocument();
   expect(screen.getByText("La usan 3 ventas")).toBeInTheDocument();
-  // La búsqueda arranca con lo que decía el archivo.
-  expect(screen.getByPlaceholderText("Buscar producto")).toHaveValue("Coca 500");
+  // La búsqueda arranca vacía: «Coca 500» escondería «Coca-Cola 500 ml».
+  expect(screen.getByPlaceholderText("Buscar producto")).toHaveValue("");
 
   await elegir("p-coca");
   fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
@@ -139,10 +139,12 @@ it("Saltear pasa a la referencia siguiente sin llamar al backend", async () => {
   expect(svc.linkProduct).not.toHaveBeenCalled();
 });
 
-it("SALE_WITHOUT_PURCHASE en la primera: dice qué cargar y no sigue con el resto", async () => {
-  svc.linkProduct!.mockRejectedValue(
-    axiosError(422, { code: "SALE_WITHOUT_PURCHASE", product_name: "Yerba", message: "x" }),
-  );
+it("SALE_WITHOUT_PURCHASE en la primera: queda listada y la siguiente crea el alias", async () => {
+  svc.linkProduct!
+    .mockRejectedValueOnce(
+      axiosError(422, { code: "SALE_WITHOUT_PURCHASE", product_name: "Yerba", message: "x" }),
+    )
+    .mockResolvedValueOnce("ok");
   await abrirCola([venta("r1", "Yerba"), venta("r2", "Yerba")]);
   await elegir("p-yerba");
   fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
@@ -152,8 +154,8 @@ it("SALE_WITHOUT_PURCHASE en la primera: dice qué cargar y no sigue con el rest
       "Ese producto («Yerba») no tiene compra ni stock inicial antes de la fecha de la venta: cargá la compra o el stock inicial primero.",
     ),
   ).toBeInTheDocument();
-  expect(svc.linkProduct).toHaveBeenCalledTimes(1);
-  expect(screen.getByText("1 de 1 referencias")).toBeInTheDocument();
+  expect(svc.linkProduct!.mock.calls.map((c) => c[0])).toEqual(["r1", "r2"]);
+  expect(screen.getByText(/Las demás ya quedaron/)).toBeInTheDocument();
 });
 
 it("CANTIDAD_REQUERIDA: pide la cantidad y reintenta con ella", async () => {
@@ -192,7 +194,7 @@ it("409 ALIAS_OTRO_PRODUCTO: dice de qué producto es ese nombre", async () => {
   expect(svc.linkProduct).toHaveBeenCalledTimes(1);
 });
 
-it("IMPORT_IDENTITY_TAKEN en la primera: dice que ya está cargada y no sigue", async () => {
+it("IMPORT_IDENTITY_TAKEN en todas: se listan y el alias no queda creado", async () => {
   svc.linkProduct!.mockRejectedValue(
     axiosError(409, { code: "IMPORT_IDENTITY_TAKEN", message: "otro texto" }),
   );
@@ -200,12 +202,13 @@ it("IMPORT_IDENTITY_TAKEN en la primera: dice que ya está cargada y no sigue", 
   await elegir("p-yerba");
   fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
 
+  expect(await screen.findByText(/Ninguna venta se pudo vincular/)).toBeInTheDocument();
   expect(
-    await screen.findByText(
+    screen.getAllByText(
       "Esta venta ya está cargada (otra fila del mismo comprobante/operación ya se registró). Descartala o revisala desde la lista.",
     ),
-  ).toBeInTheDocument();
-  expect(svc.linkProduct).toHaveBeenCalledTimes(1);
+  ).toHaveLength(2);
+  expect(svc.linkProduct).toHaveBeenCalledTimes(2);
 });
 
 it("stock insuficiente en una del resto: se lista con lo disponible y no corta las demás", async () => {
@@ -247,6 +250,130 @@ it("stock insuficiente sin texto: arma el mensaje con lo disponible y lo pedido"
   expect(
     await screen.findByText("No hay stock suficiente para esta venta: hay 0 y la venta pide 3."),
   ).toBeInTheDocument();
+});
+
+it("en StrictMode, «Vincular» vincula", async () => {
+  svc.linkProduct!.mockResolvedValue("ok");
+  svc.getPendingSalesWithReference!.mockResolvedValue({
+    records: [venta("r1", "Yerba")],
+    truncado: false,
+  });
+  render(
+    <React.StrictMode>
+      <VincularColaModal onClose={jest.fn()} />
+    </React.StrictMode>,
+  );
+  await screen.findByText(/referencias$/);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  expect(await screen.findByText(/Terminaste la cola/)).toBeInTheDocument();
+  expect(svc.linkProduct).toHaveBeenCalledTimes(1);
+});
+
+it("RECORD_ALREADY_RESOLVED cuenta como resuelta, no como falla", async () => {
+  svc.linkProduct!
+    .mockRejectedValueOnce(axiosError(409, { code: "RECORD_ALREADY_RESOLVED" }))
+    .mockResolvedValueOnce("ok");
+  await abrirCola([venta("r1", "Yerba"), venta("r2", "Yerba")]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  expect(await screen.findByText(/Terminaste la cola/)).toBeInTheDocument();
+  expect(screen.queryByText(/no se pudieron vincular/)).toBeNull();
+});
+
+it("al volver a vincular no repite las ventas ya resueltas", async () => {
+  svc.linkProduct!
+    .mockRejectedValueOnce(axiosError(409, { code: "RECORD_ALREADY_RESOLVED" }))
+    .mockRejectedValueOnce(axiosError(422, { code: "CANTIDAD_REQUERIDA" }))
+    .mockResolvedValue("ok");
+  await abrirCola([venta("r1", "Queso"), venta("r2", "Queso", { cantidad: "0,5" })]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  fireEvent.change(await screen.findByLabelText("Cantidad vendida"), { target: { value: "1" } });
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  await screen.findByText(/Terminaste la cola/);
+  expect(svc.linkProduct!.mock.calls).toEqual([
+    ["r1", { product_id: "p-yerba" }],
+    ["r2", { product_id: "p-yerba" }],
+    ["r2", { product_id: "p-yerba", quantity: 1 }],
+  ]);
+});
+
+it("la cantidad pedida tiene que ser 1 o más", async () => {
+  svc.linkProduct!.mockRejectedValueOnce(axiosError(422, { code: "CANTIDAD_REQUERIDA" }));
+  await abrirCola([venta("r1", "Queso", { cantidad: "0,5" })]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  fireEvent.change(await screen.findByLabelText("Cantidad vendida"), { target: { value: "0" } });
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  expect(await screen.findByText("La cantidad tiene que ser 1 o más.")).toBeInTheDocument();
+  expect(svc.linkProduct).toHaveBeenCalledTimes(1);
+});
+
+it("cerrar a mitad de camino corta lo que falta y avisa al terminar la llamada en vuelo", async () => {
+  let soltar: (v: string) => void = () => {};
+  svc.linkProduct!.mockImplementationOnce(
+    () => new Promise<string>((resolve) => (soltar = resolve)),
+  );
+  svc.linkProduct!.mockResolvedValue("ok");
+  svc.getPendingSalesWithReference!.mockResolvedValue({
+    records: [venta("r1", "Yerba"), venta("r2", "Yerba"), venta("r3", "Yerba")],
+    truncado: false,
+  });
+  const trasCerrar = jest.fn();
+  const { unmount } = render(
+    <VincularColaModal onClose={jest.fn()} onCambiosTrasCerrar={trasCerrar} />,
+  );
+  await screen.findByText(/referencias$/);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  expect(await screen.findByText("Vinculando 1 de 3…")).toBeInTheDocument();
+  unmount();
+  soltar("ok");
+  await waitFor(() => expect(trasCerrar).toHaveBeenCalledTimes(1));
+  expect(svc.linkProduct).toHaveBeenCalledTimes(1);
+});
+
+it("«Reintentar» pide la cantidad y la manda", async () => {
+  svc.linkProduct!
+    .mockResolvedValueOnce("ok")
+    .mockRejectedValueOnce(axiosError(422, { code: "CANTIDAD_REQUERIDA" }))
+    .mockResolvedValueOnce("ok");
+  await abrirCola([venta("r1", "Queso"), venta("r2", "Queso", { cantidad: "1,5" })]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+
+  const boton = await screen.findByRole("button", {
+    name: /Reintentar la venta del 2026-10-02 por/,
+  });
+  fireEvent.click(boton);
+  expect(await screen.findByText("Ingresá la cantidad.")).toBeInTheDocument();
+  expect(svc.linkProduct).toHaveBeenCalledTimes(2);
+
+  fireEvent.change(screen.getByLabelText("Cantidad de la venta del 2026-10-02"), {
+    target: { value: "3" },
+  });
+  fireEvent.click(boton);
+  await screen.findByText(/Terminaste la cola/);
+  expect(svc.linkProduct).toHaveBeenLastCalledWith("r2", { product_id: "p-yerba", quantity: 3 });
+});
+
+it("al pasar a la referencia siguiente el producto elegido no se arrastra", async () => {
+  svc.linkProduct!.mockResolvedValue("ok");
+  await abrirCola([venta("r1", "Coca 500"), venta("r2", "Fernet")]);
+  await elegir("p-coca");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  expect(await screen.findByText("«Fernet»")).toBeInTheDocument();
+  expect(screen.getByLabelText("Producto vendido")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Vincular" })).toBeDisabled();
+});
+
+it("un 422 de validación (lista) no culpa a la fecha o el monto", async () => {
+  svc.linkProduct!.mockRejectedValue(axiosError(422, [{ loc: ["body", "amount"], msg: "x" }]));
+  await abrirCola([venta("r1", "Yerba")]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+  expect(await screen.findByText(/Algún dato de la fila no es válido/)).toBeInTheDocument();
 });
 
 it("sin referencias (ninguna venta dice el producto) muestra el mensaje vacío", async () => {
