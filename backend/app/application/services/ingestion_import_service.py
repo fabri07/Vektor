@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     from app.persistence.models.product import Product
 
 from sqlalchemy import event as sa_event
+from sqlalchemy import func, or_
+from sqlalchemy import update as sa_update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.application.services import maintenance_lock_service, stock_service
 from app.application.services._import_projection import ImportProjectionRecorder
@@ -108,6 +112,7 @@ from app.domain.costo_vigente import (
     registrar_edicion,
     snapshot_claves_del_costo,
 )
+from app.domain.cross_field_buffer import CrossFieldBuffer, CrossKind, is_ficha_value_blank
 from app.domain.date_parsing import (
     CAMPOS_DE_FECHA,
     MOTIVO_FECHA_FUTURA,
@@ -649,6 +654,10 @@ class RowReferenceResolution:
     outcome: str  # "matched" | "anonymous" | "unresolved"
     entity: Any | None = None
     raw_value: str | None = None
+    #: Con qué clave matcheó (``code``/``doc``/``email``/``phone``). B·6 la mira:
+    #: un email o un teléfono pueden compartirlos dos fichas (el índice se queda
+    #: con la primera), así que alcanzan para vincular pero no para escribir.
+    matched_key_type: str | None = None
 
 
 def _classify_row_reference(
@@ -682,7 +691,13 @@ def _classify_row_reference(
     resolution = resolve_identity(keys, existing_index)
     if resolution.outcome == "matched":
         assert resolution.entity is not None  # invariante de "matched"
-        return RowReferenceResolution(outcome="matched", entity=resolution.entity)
+        return RowReferenceResolution(
+            outcome="matched",
+            entity=resolution.entity,
+            matched_key_type=(
+                resolution.matched_key.type if resolution.matched_key is not None else None
+            ),
+        )
 
     # unresolved: needs_review (solo nombre débil), none (clave sin match) o
     # conflict (clave ambigua) — todas se tratan igual acá: no identifican sin
@@ -720,6 +735,283 @@ def _bump_reference_counts(counts: dict[str, Any], prefix: str, outcome: str) ->
     """
     key = f"{prefix}_{_REFERENCE_OUTCOME_SUFFIX[outcome]}"
     counts[key] = counts.get(key, 0) + 1
+
+
+# ── B·6 (F-D): campos de otra sección (venta → cliente, compra → proveedor) ──
+# La fila no escribe la ficha: propone al buffer (`domain/cross_field_buffer.py`)
+# y la ficha se completa UNA vez al final del import, sólo donde está vacía y
+# sólo si la fila la identificó por clave fuerte (`matched`). Nunca el centinela
+# —el índice de identidad no lo incluye— ni una ficha que este mismo archivo
+# creó o actualizó desde una hoja de clientes/proveedores (ver
+# `_aplicar_campos_cruzados`).
+
+
+def _cruzados_de_ficha(cruzados: dict[str, str], kind: str) -> dict[str, str]:
+    """``source_col → campo`` de la ficha ``kind`` que esta hoja completa.
+
+    Sólo los destinos que ``CROSS_ENTITY_TARGETS_IMPLEMENTED`` habilita y que no
+    son ``supplier:name`` (ese es del catálogo de productos y tiene su propio
+    camino, `_add_product`).
+    """
+    from app.application.services.column_mapping_service import (  # noqa: PLC0415
+        CROSS_ENTITY_TARGETS_IMPLEMENTED,
+        parse_target,
+    )
+
+    salida: dict[str, str] = {}
+    for col, target in cruzados.items():
+        if target == "supplier:name" or target not in CROSS_ENTITY_TARGETS_IMPLEMENTED:
+            continue
+        parsed = parse_target(target)
+        if parsed.entity == kind and parsed.field:
+            salida[col] = parsed.field
+    return salida
+
+
+#: Claves que identifican una ficha lo bastante como para ESCRIBIRLA (B·6). Un
+#: email o un teléfono pueden ser de dos fichas a la vez —un local y su dueño, dos
+#: hermanos— y `build_existing_index` se queda con la primera: para vincular una
+#: venta alcanza, para completarle el domicilio a otra persona no.
+_CLAVES_QUE_ESCRIBEN_FICHA: frozenset[str] = frozenset({"code", "doc"})
+
+
+def _ficha_para_completar(
+    ref: RowReferenceResolution | None,
+) -> tuple[uuid.UUID | None, bool]:
+    """``(ficha a completar, identificada sólo por email/teléfono)``."""
+    if ref is None or ref.outcome != "matched" or ref.entity is None:
+        return None, False
+    if ref.matched_key_type in _CLAVES_QUE_ESCRIBEN_FICHA:
+        return ref.entity.id, False
+    return None, True
+
+
+def _sumar(counts: dict[str, Any], clave: str, n: int = 1) -> None:
+    counts[clave] = counts.get(clave, 0) + n
+
+
+def _capturar_cruzados_de_la_fila(
+    buffer: CrossFieldBuffer | None,
+    campos: dict[str, str],
+    row: dict[str, Any],
+    counts: dict[str, Any],
+    *,
+    kind: CrossKind,
+    entity_id: uuid.UUID | None,
+    source_row_ref: str | None,
+    por_contacto: bool = False,
+    nombre_fila: Any = None,
+    nombre_ficha: str | None = None,
+) -> None:
+    """Propone al buffer los campos de la ficha que trae esta fila.
+
+    ``entity_id`` es la ficha que la fila identificó por documento o código, o
+    ``None`` si no la identificó así: ahí no se propone nada, pero si la fila
+    traía datos se cuenta —sin ficha (`cross_fields_filas_sin_ficha`) o con una
+    ficha encontrada sólo por email/teléfono (`cross_fields_ficha_por_contacto`)—,
+    porque el usuario mapeó esa columna a mano y tiene que saber por qué no llegó.
+
+    El apellido del cliente, además, sólo si el nombre de la fila (si lo trae)
+    es el de la ficha: un apellido es de una persona, y una fila que nombra a
+    otra no puede ponérselo a ésta.
+    """
+    if buffer is None or not campos:
+        return
+    if entity_id is None:
+        if any(not is_ficha_value_blank(row.get(col)) for col in campos):
+            _sumar(
+                counts,
+                "cross_fields_ficha_por_contacto"
+                if por_contacto
+                else "cross_fields_filas_sin_ficha",
+            )
+        return
+    for col, campo in campos.items():
+        if (
+            kind == "customer"
+            and campo == "last_name"
+            and not is_ficha_value_blank(nombre_fila)
+            and normalize_text(str(nombre_fila)) != normalize_text(nombre_ficha or "")
+        ):
+            if not is_ficha_value_blank(row.get(col)):
+                _sumar(counts, "cross_fields_apellido_omitido")
+            continue
+        buffer.add(kind, str(entity_id), campo, row.get(col), source_row_ref=source_row_ref)
+
+
+def _ficha_de_proveedor_legacy(
+    record: dict[str, Any],
+    identity_index: dict[IdentityKey, Any],
+    supplier_id: uuid.UUID | None,
+) -> tuple[uuid.UUID | None, bool]:
+    """En modo `legacy` el proveedor de la compra sale del NOMBRE, que es una
+    señal débil. Su ficha se completa sólo si además el documento o el código de
+    la fila identifica a ESE mismo proveedor; si apunta a otro, no se completa
+    ninguno. Devuelve lo mismo que ``_ficha_para_completar``."""
+    if supplier_id is None:
+        return None, False
+    ref = _classify_row_reference(
+        record, doc_fields=_SUPPLIER_DOC_FIELDS, existing_index=identity_index
+    )
+    if ref.outcome != "matched" or ref.entity is None or ref.entity.id != supplier_id:
+        return None, False
+    return _ficha_para_completar(ref)
+
+
+def _contar_cruzados_descartados(
+    counts: dict[str, Any], cruzados: dict[str, str], aplicados: set[str]
+) -> None:
+    """Columnas mapeadas a otra sección que este import NO escribe."""
+    descartados = sum(1 for col in cruzados if col not in aplicados)
+    if descartados:
+        counts["targets_cruzados_descartados"] = (
+            counts.get("targets_cruzados_descartados", 0) + descartados
+        )
+
+
+#: Lo que la ficha guarda y cuenta como vacío (`is_ficha_value_blank`), dicho en
+#: SQL para la escritura condicional.
+_VACIOS_EN_SQL: tuple[str, ...] = ("", "nan", "none", "null")
+
+#: Acción de ledger de cada campo completado. Propias, y no `UPDATE_CUSTOMER` /
+#: `UPDATE_SUPPLIER`: esas guardan la ficha ENTERA y su reversa conserva la
+#: ficha completa si tiene ventas de otra fuente — o sea, el campo que trajo el
+#: archivo no volvería nunca (decisión del dueño, 2026-10-20).
+_CROSS_FIELD_ACTION: dict[str, str] = {
+    "customer": "UPDATE_CUSTOMER_CROSS_FIELD",
+    "supplier": "UPDATE_SUPPLIER_CROSS_FIELD",
+}
+
+
+async def _aplicar_campos_cruzados(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    buffer: CrossFieldBuffer,
+    counts: dict[str, Any],
+) -> None:
+    """Completa las fichas con lo que juntó el buffer. Una vez por ficha.
+
+    - Sólo un campo VACÍO se completa; uno con dato no se pisa nunca, haya
+      editado la ficha el usuario o no. Es la política de ``has_user_edits``
+      (`_solo_completar` del import de clientes) aplicada siempre: un dato que
+      llega de costado, desde una venta, nunca tiene más autoridad que el que
+      ya está en la ficha.
+    - Una ficha que este mismo archivo creó o actualizó desde su hoja de
+      clientes/proveedores no se toca: ya tiene su ítem de ledger de ficha
+      entera, y dos ítems que describen el mismo campo con semánticas distintas
+      se revertirían mal (la reversa de uno vería el cambio del otro como una
+      edición posterior).
+    - El centinela y una ficha dada de baja no se tocan (defensa: el índice de
+      identidad ya no los incluye).
+
+    Deja en ``counts["cross_field_details"]`` un ítem POR CAMPO con su antes y
+    su después, que el confirm pasa a ``record_import_ledger`` dentro del mismo
+    run que productos y maestros.
+    """
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+    from app.persistence.models.supplier import Supplier  # noqa: PLC0415
+
+    modelos: dict[str, type[Any]] = {"customer": Customer, "supplier": Supplier}
+    del_archivo: dict[str, set[str]] = {
+        "customer": {
+            str(i)
+            for i in (
+                *counts.get("clientes_creados_ids", []),
+                *counts.get("clientes_actualizados_ids", []),
+            )
+        },
+        "supplier": {
+            str(i)
+            for i in (
+                *counts.get("proveedores_creados_ids", []),
+                *counts.get("proveedores_actualizados_ids", []),
+            )
+        },
+    }
+
+    detalles: list[dict[str, Any]] = []
+    aplicados = ya_tenian = de_ficha_del_archivo = apellido_omitido = 0
+    fichas: set[tuple[str, str]] = set()
+    for kind, entity_id, campos in buffer.resolved():
+        if entity_id in del_archivo[kind]:
+            de_ficha_del_archivo += len(campos)
+            continue
+        entity = await session.get(modelos[kind], uuid.UUID(entity_id))
+        if (
+            entity is None
+            or entity.tenant_id != tenant_id
+            or entity.deactivated_at is not None
+            or getattr(entity, "is_sentinel", False)
+        ):
+            continue
+        for campo, pendiente in campos.items():
+            actual = getattr(entity, campo)
+            if not is_ficha_value_blank(actual):
+                ya_tenian += 1
+                continue
+            if kind == "customer" and campo == "last_name" and (
+                entity.customer_type == "company"
+                or normalize_text(entity.name or "").endswith(normalize_text(pendiente.value))
+            ):
+                # Una empresa no tiene apellido, y un apellido que ya está al
+                # final del nombre («Juan Pérez») lo duplicaría.
+                apellido_omitido += 1
+                continue
+            # La escritura es condicional EN LA BASE, no sobre lo leído: dos
+            # confirms que leyeron el campo vacío a la vez no pueden escribir los
+            # dos (el segundo espera el lock de la fila y reevalúa el WHERE en
+            # READ COMMITTED). Sólo el que escribió deja su ítem de ledger.
+            columna = getattr(modelos[kind], campo)
+            res = cast(
+                "CursorResult[Any]",
+                await session.execute(
+                    sa_update(modelos[kind])
+                    .where(
+                        modelos[kind].id == entity.id,
+                        modelos[kind].tenant_id == tenant_id,
+                        or_(
+                            columna.is_(None),
+                            func.lower(func.trim(columna)).in_(_VACIOS_EN_SQL),
+                        ),
+                    )
+                    .values({campo: pendiente.value})
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            if res.rowcount != 1:
+                ya_tenian += 1
+                continue
+            # La sesión tiene que ver lo que quedó en la base, sin marcar la
+            # entidad sucia (un flush posterior no debe re-escribir el campo).
+            set_committed_value(entity, campo, pendiente.value)
+            aplicados += 1
+            fichas.add((kind, entity_id))
+            detalles.append(
+                {
+                    "action": _CROSS_FIELD_ACTION[kind],
+                    "before": {campo: actual},
+                    "after": {
+                        campo: pendiente.value,
+                        "id": entity_id,
+                        "kind": kind,
+                        "source_row_ref": pendiente.source_row_ref,
+                    },
+                }
+            )
+
+    if detalles:
+        counts["cross_field_details"] = detalles
+    for clave, valor in (
+        ("cross_fields_aplicados", aplicados),
+        ("cross_fields_fichas", len(fichas)),
+        ("cross_fields_ya_tenian_dato", ya_tenian),
+        ("cross_fields_ficha_del_archivo", de_ficha_del_archivo),
+        ("cross_fields_invalidos", buffer.invalid),
+    ):
+        if valor:
+            counts[clave] = valor
+    if apellido_omitido:
+        _sumar(counts, "cross_fields_apellido_omitido", apellido_omitido)
 
 
 # Bucket del summary donde el PARSER dejó las filas de cada tipo de hoja.
@@ -4311,12 +4603,13 @@ def _resolve_target_cols(
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], set[str]]:
     """Desde un mapeo explícito source_col→target, resuelve columnas por target canónico.
 
-    Devuelve ``(target_to_col, custom_field_cols, cruzados_descartados,
-    ignoradas)``: el primero mapea campo canónico (amount, transaction_date,
-    name, ...) → source_col; el segundo mapea cf_key → source_col para los
-    targets `custom_field:{key}`; el tercero, source_col → target, son los
-    targets CRUZADOS (`{entidad}:{campo}`) que este importador todavía no sabe
-    escribir; el cuarto son las columnas que el usuario mandó **ignorar**.
+    Devuelve ``(target_to_col, custom_field_cols, cruzados, ignoradas)``: el
+    primero mapea campo canónico (amount, transaction_date, name, ...) →
+    source_col; el segundo mapea cf_key → source_col para los targets
+    `custom_field:{key}`; el tercero, source_col → target, son los targets
+    CRUZADOS (`{entidad}:{campo}`) — cada camino decide cuáles escribe
+    (`supplier:name` del catálogo, B·6 `_cruzados_de_ficha`) y cuenta el resto
+    como descartado; el cuarto son las columnas que el usuario mandó **ignorar**.
 
     **Las ignoradas se devuelven, no se descartan.** Antes esta función las
     salteaba con un ``continue`` y ahí moría la decisión: la columna no quedaba
@@ -4331,7 +4624,7 @@ def _resolve_target_cols(
     de interpretarlas — lo hace ``_sin_columnas_ignoradas``, en los dos puntos
     donde el importador toma las filas de un bucket.
 
-    Los cruzados se descartan porque F-D no está entregada, pero hasta acá se
+    Los cruzados que ningún camino escribe se descartan, pero hasta acá se
     evaporaban: `parse_target` puede devolver ``kind="cross"`` y no había rama
     para ese caso, así que la columna que el usuario mapeó a mano simplemente no
     se importaba y nadie se enteraba — ni él ni el operador. Es la clase exacta
@@ -4654,6 +4947,11 @@ async def insert_confirmed_data(
     # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
     shipping_decisions: dict[str, str] | None = None,
     purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
+    # B·6: completar las fichas de cliente/proveedor con las columnas de otra
+    # sección. Sólo el confirm lo pide, porque es el único caller que registra el
+    # ledger que permite revertirlo al borrar el archivo; en el resto (relectura,
+    # chat, reparación) esas columnas se informan como no importadas.
+    apply_cross_fields: bool = False,
 ) -> dict[str, Any]:
     """Importa datos confirmados y, al cerrar, rutea las ventas sin cliente a "Local".
 
@@ -4690,6 +4988,7 @@ async def insert_confirmed_data(
             o.id for o in sess.new if isinstance(o, SaleEntry) and o.id is not None
         )
 
+    _cross_buffer = CrossFieldBuffer() if apply_cross_fields else None
     sa_event.listen(session.sync_session, "after_flush", _anotar_ventas_nuevas)
     try:
         counts = await _insert_confirmed_data_impl(
@@ -4709,7 +5008,13 @@ async def insert_confirmed_data(
             inventory_effect=inventory_effect,
             shipping_decisions=shipping_decisions,
             purchase_cost_decisions=purchase_cost_decisions,
-    )
+            cross_buffer=_cross_buffer,
+        )
+        # B·6: al final y no por fila — con todas las hojas recorridas, la
+        # primera fila del ARCHIVO ya ganó, y los ids de lo que el archivo creó
+        # o actualizó ya están en `counts`.
+        if _cross_buffer is not None:
+            await _aplicar_campos_cruzados(session, tenant_id, _cross_buffer, counts)
         await session.flush()
     finally:
         sa_event.remove(session.sync_session, "after_flush", _anotar_ventas_nuevas)
@@ -5104,6 +5409,8 @@ async def _insert_confirmed_data_impl(
     # F-H6.b: qué hacer con los envíos sin comprobante, por hoja.
     shipping_decisions: dict[str, str] | None = None,
     purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
+    # B·6: buffer de campos de otra sección; `None` = no se completan fichas.
+    cross_buffer: CrossFieldBuffer | None = None,
 ) -> dict[str, Any]:
     """Parse parsed_summary_json and insert rows into sales/expense/product tables.
 
@@ -5323,6 +5630,7 @@ async def _insert_confirmed_data_impl(
                 shipping_decisions=shipping_decisions,
                 purchase_cost_decisions=purchase_cost_decisions,
                 proyeccion=_proyeccion_recorder,
+                cross_buffer=cross_buffer,
             )
             if seen_fp is not None:
                 await _persist_import_fingerprints(session, tenant_id, seen_fp.nuevas)
@@ -5403,6 +5711,22 @@ async def _insert_confirmed_data_impl(
         rows = _sin_columnas_ignoradas(rows, _ignoradas)
         if not rows:
             return counts
+        # B·6: qué columnas completan la ficha del cliente (desde la venta) o del
+        # proveedor (desde la compra). Sin buffer, ninguna: se informan abajo
+        # como no importadas.
+        _campos_cliente = (
+            _cruzados_de_ficha(_cruzados, "customer") if cross_buffer is not None else {}
+        )
+        _campos_proveedor = (
+            _cruzados_de_ficha(_cruzados, "supplier") if cross_buffer is not None else {}
+        )
+        # En modo `legacy` el proveedor se resuelve por nombre y el índice de
+        # identidad ni se carga; para completar su ficha hace falta igual una
+        # clave fuerte (CUIL, email, teléfono, código), así que se carga.
+        if _campos_proveedor and not _supplier_identity_index:
+            _supplier_identity_index = await _load_supplier_identity_index(
+                session, tenant_id
+            )
 
         headers = list(rows[0].keys())
         fecha_col = _find_col(headers, _FECHA_COLS)
@@ -5462,12 +5786,11 @@ async def _insert_confirmed_data_impl(
             # dos resoluciones diverjan.
             target_to_col.update(_canon)
             custom_field_cols.update(_custom)
-            if _cruzados:
-                # Se descartan (F-D no está entregada) pero el usuario tiene
-                # que enterarse: mapeó una columna a mano y no se importó.
-                counts["targets_cruzados_descartados"] = counts.get(
-                    "targets_cruzados_descartados", 0
-                ) + len(_cruzados)
+            # Lo que no completa una ficha (B·6) se descarta, pero el usuario
+            # tiene que enterarse: mapeó una columna a mano y no se importó.
+            _contar_cruzados_descartados(
+                counts, _cruzados, set(_campos_cliente) | set(_campos_proveedor)
+            )
 
             # Remapear columnas de fecha y monto usando el mapeo explícito
             fecha_col = (
@@ -6175,6 +6498,23 @@ async def _insert_confirmed_data_impl(
                         if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                             cf["_customer_reference_raw"] = _cust_ref.raw_value
                     _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+                    # B·6: sólo sobre la ficha identificada; el centinela nunca.
+                    _capturar_cruzados_de_la_fila(
+                        cross_buffer,
+                        _campos_cliente,
+                        row,
+                        counts,
+                        kind="customer",
+                        entity_id=_ficha_para_completar(_cust_ref)[0],
+                        por_contacto=_ficha_para_completar(_cust_ref)[1],
+                        nombre_fila=(
+                            row.get(target_to_col["customer_name"])
+                            if target_to_col.get("customer_name")
+                            else None
+                        ),
+                        nombre_ficha=_cust_ref.entity.name if _cust_ref.entity else None,
+                        source_row_ref=_source_row_ref(_row_anchor),
+                    )
                     # F-H3.d.2: de qué hoja vino, para que el replay se pueda aplicar
                     # por hoja y no al archivo entero (ver IMPORT_CONTEXT_FIELD).
                     if _ctx_inline:
@@ -6296,6 +6636,10 @@ async def _insert_confirmed_data_impl(
                     # contaba una fila que después podía ir a "Otros" por producto
                     # ambiguo (el gasto nunca se persiste en ese caso).
                     _supplier_matched = False
+                    # B·6: la ficha de proveedor que esta fila identificó por clave
+                    # fuerte (la única que puede completarse con sus columnas).
+                    _sup_ficha_id: uuid.UUID | None = None
+                    _sup_por_contacto = False
                     if _supplier_ref_mode == "link_only":
                         _has_supplier_ref_col = bool(
                             supplier_col
@@ -6316,6 +6660,9 @@ async def _insert_confirmed_data_impl(
                                 expense.supplier_name = _sup_ref.entity.name
                                 cf["_supplier_resolution"] = "matched"
                                 _supplier_matched = True
+                                _sup_ficha_id, _sup_por_contacto = _ficha_para_completar(
+                                    _sup_ref
+                                )
                             else:
                                 _pending_supplier_ref = _sup_ref
                     elif supplier_col:
@@ -6331,6 +6678,14 @@ async def _insert_confirmed_data_impl(
                         )
                         if expense.supplier_name:
                             _real_suppliers.add(expense.supplier_name)
+                        if _campos_proveedor:
+                            _sup_ficha_id, _sup_por_contacto = _ficha_de_proveedor_legacy(
+                                _supplier_reference_record(
+                                    row, target_to_col, row.get(supplier_col)
+                                ),
+                                _supplier_identity_index,
+                                expense.supplier_id,
+                            )
                     # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
                     _exp_name = str(row.get(nombre_col)) if nombre_col else None
                     _exp_sku = str(row.get(sku_col)) if sku_col else None
@@ -6581,6 +6936,17 @@ async def _insert_confirmed_data_impl(
                         # Mejora D: trazabilidad import → fila origen.
                         if _row_anchor is not None:
                             expense.source_row_ref = _source_row_ref(_row_anchor)
+                        # B·6: recién acá se sabe que la compra se persiste.
+                        _capturar_cruzados_de_la_fila(
+                            cross_buffer,
+                            _campos_proveedor,
+                            row,
+                            counts,
+                            kind="supplier",
+                            entity_id=_sup_ficha_id,
+                            por_contacto=_sup_por_contacto,
+                            source_row_ref=_source_row_ref(_row_anchor),
+                        )
                         session.add(expense)
                         counts["gastos"] += 1
                         _efectos_de_la_fila_plano.append(("expense", expense.id))
@@ -7862,6 +8228,8 @@ async def _insert_multisheet_data(
     # envíos sin comprobante de cada hoja. Sin entrada, no se cobran.
     shipping_decisions: dict[str, str] | None = None,
     purchase_cost_decisions: dict[str, PurchaseCostDecision] | None = None,
+    # B·6: compartido con el camino de una sola tabla (ver `insert_confirmed_data`).
+    cross_buffer: CrossFieldBuffer | None = None,
 ) -> dict[str, Any]:
     """Importa datos de un archivo multi-contexto (multi-hoja) por contexto.
 
@@ -7939,9 +8307,19 @@ async def _insert_multisheet_data(
     # F7c: modo de resolución de proveedor por fila en compras (ver docstring del
     # mismo bloque en _insert_confirmed_data_impl). "legacy" no carga el índice.
     _supplier_ref_mode = get_settings().SUPPLIER_REFERENCE_CREATION_MODE
+    # B·6: en `legacy` también se carga si alguna hoja completa fichas de
+    # proveedor — completar una ficha exige una clave fuerte, no sólo el nombre.
     _supplier_identity_index: dict[IdentityKey, Any] = (
         await _load_supplier_identity_index(session, tenant_id)
         if _supplier_ref_mode == "link_only"
+        or (
+            cross_buffer is not None
+            and any(
+                # El mapeo entero sirve: sólo los destinos cruzados pasan el filtro.
+                _cruzados_de_ficha(_m, "supplier")
+                for _m in (context_mappings or {}).values()
+            )
+        )
         else {}
     )
     # Traza agregada de decisiones de proveedor (Fase 1): reales desde compras,
@@ -8233,6 +8611,8 @@ async def _insert_multisheet_data(
         cf_cols: dict[str, str],
         row_ref: str | None = None,
         context_id: str | None = None,
+        *,
+        campos_ficha: dict[str, str] | None = None,
     ) -> bool:
         """Inserta una venta. Devuelve ``True`` si produjo output persistido."""
         amount_col = cols.get("amount")
@@ -8392,6 +8772,19 @@ async def _insert_multisheet_data(
             if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                 cf["_customer_reference_raw"] = _cust_ref.raw_value
         _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+        # B·6: sólo sobre la ficha identificada; el centinela nunca.
+        _capturar_cruzados_de_la_fila(
+            cross_buffer,
+            campos_ficha or {},
+            row,
+            counts,
+            kind="customer",
+            entity_id=_ficha_para_completar(_cust_ref)[0],
+            por_contacto=_ficha_para_completar(_cust_ref)[1],
+            nombre_fila=row.get(cols["customer_name"]) if cols.get("customer_name") else None,
+            nombre_ficha=_cust_ref.entity.name if _cust_ref.entity else None,
+            source_row_ref=row_ref,
+        )
         # F-H3.d.2: de qué hoja vino (ver IMPORT_CONTEXT_FIELD).
         if context_id:
             cf[IMPORT_CONTEXT_FIELD] = context_id
@@ -8414,6 +8807,8 @@ async def _insert_multisheet_data(
         row_ref: str | None = None,
         context_id: str | None = None,
         costo_calculado: LineCost | None = None,
+        *,
+        campos_ficha: dict[str, str] | None = None,
     ) -> bool:
         """Inserta un gasto. Devuelve ``True`` si insertó (monto parseable), ``False`` si no."""
         amount_col = cols.get("amount")
@@ -8558,6 +8953,9 @@ async def _insert_multisheet_data(
         # Review 7d (Important): diferido igual que en el path single-context —
         # ver el comentario en _insert_confirmed_data_impl.
         _supplier_matched = False
+        # B·6: la ficha que esta fila identificó por clave fuerte.
+        _sup_ficha_id: uuid.UUID | None = None
+        _sup_por_contacto = False
         _supplier_name_raw = _val(row, cols.get("supplier_name"), _PROVEEDOR_COLS)
         if _supplier_ref_mode == "link_only":
             _has_supplier_ref_col = bool(
@@ -8578,6 +8976,7 @@ async def _insert_multisheet_data(
                     expense.supplier_name = _sup_ref.entity.name
                     cf["_supplier_resolution"] = "matched"
                     _supplier_matched = True
+                    _sup_ficha_id, _sup_por_contacto = _ficha_para_completar(_sup_ref)
                 else:
                     _pending_supplier_ref = _sup_ref
         elif _supplier_name_raw is not None:
@@ -8593,6 +8992,12 @@ async def _insert_multisheet_data(
             )
             if expense.supplier_name:
                 _real_suppliers.add(expense.supplier_name)
+            if campos_ficha:
+                _sup_ficha_id, _sup_por_contacto = _ficha_de_proveedor_legacy(
+                    _supplier_reference_record(row, cols, _supplier_name_raw),
+                    _supplier_identity_index,
+                    expense.supplier_id,
+                )
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         _exp_name = _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
         _exp_sku = _val(row, cols.get("sku"), _SKU_COLS)
@@ -8812,6 +9217,17 @@ async def _insert_multisheet_data(
         )
         if row_ref is not None:
             expense.source_row_ref = row_ref  # Mejora D
+        # B·6: recién acá se sabe que la compra se persiste.
+        _capturar_cruzados_de_la_fila(
+            cross_buffer,
+            campos_ficha or {},
+            row,
+            counts,
+            kind="supplier",
+            entity_id=_sup_ficha_id,
+            por_contacto=_sup_por_contacto,
+            source_row_ref=row_ref,
+        )
         session.add(expense)
         counts["gastos"] += 1
         _efectos_de_la_fila.append(("expense", expense.id))
@@ -9592,8 +10008,20 @@ async def _insert_multisheet_data(
         def _orden_de_pasada(ctx: dict[str, Any]) -> int:
             return _prioridad_de_pasada.get(_entidad_de(ctx) or "", 3)
 
+        def _campos_de_ficha_de(
+            ctx: dict[str, Any], cruzados: dict[str, str]
+        ) -> dict[str, str]:
+            """B·6: columnas de esta hoja que completan una ficha. Una hoja de
+            ventas completa la del cliente; una de compras, la del proveedor."""
+            if cross_buffer is None:
+                return {}
+            _kind = {"sale": "customer", "expense": "supplier"}.get(_entidad_de(ctx) or "")
+            return _cruzados_de_ficha(cruzados, _kind) if _kind else {}
+
         def _filas_y_mapeo(
             ctx: dict[str, Any],
+            *,
+            contar: bool = True,
         ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str], dict[str, str]]:
             """Filas de esta hoja + su mapeo resuelto.
 
@@ -9631,13 +10059,17 @@ async def _insert_multisheet_data(
                 for motivo in por_columna.values()
             )
             # Bloque 2: "supplier:name" en un contexto de producto no se descarta
-            # — `_add_product` lo aplica (gateado por rollout). El resto de los
-            # cruzados sigue contando como descartado, F-D no está entregada.
-            _no_aplicados = {k: v for k, v in _cruzados.items() if v != "supplier:name"}
-            if _no_aplicados:
-                counts["targets_cruzados_descartados"] = counts.get(
-                    "targets_cruzados_descartados", 0
-                ) + len(_no_aplicados)
+            # — `_add_product` lo aplica (gateado por rollout). B·6: tampoco los
+            # que completan la ficha del cliente o del proveedor de esta hoja. El
+            # resto cuenta como descartado. Sólo cuenta quien importa (`contar`):
+            # el gate de replay lee la misma hoja y la contaría dos veces.
+            if contar:
+                _contar_cruzados_descartados(
+                    counts,
+                    _cruzados,
+                    {c for c, t in _cruzados.items() if t == "supplier:name"}
+                    | set(_campos_de_ficha_de(ctx, _cruzados)),
+                )
             return _rows, _cols, _cf_cols, _cruzados
 
         def _hoja_incluida(ctx: dict[str, Any]) -> bool:
@@ -9673,7 +10105,7 @@ async def _insert_multisheet_data(
                 _cid = str(_ctx.get("context_id") or "")
                 if (proyeccion.effect_for(_cid) if proyeccion else None) != HISTORICAL_REPLAY:
                     continue
-                _rows, _cols, _, _ = _filas_y_mapeo(_ctx)
+                _rows, _cols, _, _ = _filas_y_mapeo(_ctx, contar=False)
                 for _idx, _row in enumerate(_rows):
                     _pid = _venta_producto_id(_row, _cols)
                     _fecha = _venta_fecha(_row, _cols)
@@ -9826,6 +10258,7 @@ async def _insert_multisheet_data(
             rows, cols, cf_cols, cruzados = _filas_y_mapeo(ctx)
             if not rows:
                 continue
+            _campos_ficha = _campos_de_ficha_de(ctx, cruzados)
             # F-H3.d.3: recién acá, no antes del loop — los productos que el archivo
             # declara los crean las hojas de catálogo y compras, que por el orden de
             # pasada ya corrieron cuando aparece la primera hoja de ventas.
@@ -10009,10 +10442,18 @@ async def _insert_multisheet_data(
                     counts["ventas_sin_stock"] = counts.get("ventas_sin_stock", 0) + 1
                     _did_insert = True
                 elif entity == "sale":
-                    _did_insert = await _add_sale(row, cols, cf_cols, _row_ref, ctx_id)
+                    _did_insert = await _add_sale(
+                        row, cols, cf_cols, _row_ref, ctx_id, campos_ficha=_campos_ficha
+                    )
                 elif entity == "expense":
                     _did_insert = await _add_expense(
-                        row, cols, cf_cols, _row_ref, ctx_id, _costos_por_fila.get(_i)
+                        row,
+                        cols,
+                        cf_cols,
+                        _row_ref,
+                        ctx_id,
+                        _costos_por_fila.get(_i),
+                        campos_ficha=_campos_ficha,
                     )
                 else:
                     # F6-B2: la CREACIÓN de producto no fingerprintea (dedup por

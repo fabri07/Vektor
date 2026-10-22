@@ -112,7 +112,11 @@ class DataRepairItem(UUIDPrimaryKeyMixin, Base):
             "'DELETE_BALANCE','REREAD_MASTER_CREATE','REREAD_MASTER_UPDATE',"
             # Maestros creados/modificados por un IMPORT (mig 20260810_0001). Los
             # `REREAD_MASTER_*` de arriba son el camino de la relectura y quedan.
-            "'CREATE_CUSTOMER','UPDATE_CUSTOMER','CREATE_SUPPLIER','UPDATE_SUPPLIER')",
+            "'CREATE_CUSTOMER','UPDATE_CUSTOMER','CREATE_SUPPLIER','UPDATE_SUPPLIER',"
+            # B·6: UN campo de ficha completado desde otra sección (mig
+            # 20261021_0003). Nunca mezclado con UPDATE_CUSTOMER/UPDATE_SUPPLIER,
+            # que guardan la ficha ENTERA.
+            "'UPDATE_CUSTOMER_CROSS_FIELD','UPDATE_SUPPLIER_CROSS_FIELD')",
             name="ck_repair_items_action",
         ),
     )

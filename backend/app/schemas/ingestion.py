@@ -135,6 +135,9 @@ class FileDeletionPreviewResponse(BaseModel):
     # Productos que el archivo MODIFICÓ y a los que se les va a devolver su valor
     # anterior (no se borran: ya existían).
     productos_a_restaurar: int = 0
+    # B·6: datos de fichas de cliente/proveedor que el archivo completó desde
+    # otra sección y que vuelven a quedar vacíos.
+    campos_cruzados_a_restaurar: int = 0
     # Lo que NO se va a poder revertir, con nombre y motivo. El backend ya sabía
     # calcularlo y lo descartaba en silencio; sin esto el borrado prometía una
     # limpieza que no cumplía.

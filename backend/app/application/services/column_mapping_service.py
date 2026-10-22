@@ -1615,15 +1615,32 @@ ENTITY_LABELS: dict[str, str] = {
 #: - ``CROSS_ENTITY_TARGETS`` = qué acepta el confirm sin rechazar (validación).
 #: - esto = qué produce un efecto (implementación).
 #:
-#: Hoy el importador aplica UNO solo: `insert_confirmed_data` filtra con
-#: ``{k: v for k, v in _cruzados.items() if v != "supplier:name"}`` y cuenta el
-#: resto en ``targets_cruzados_descartados`` — F-D no está entregada.
+#: Hoy aplica `supplier:name` (catálogo → proveedor declarado, `_add_product`) y,
+#: desde B·6 (F-D), los de venta → cliente y compra → proveedor: completan la
+#: ficha identificada sólo donde está vacía (``domain/cross_field_buffer.py``).
+#: ``expense → product:*`` sigue afuera — toca el motor de costo — y el confirm
+#: lo rechaza con 422 en vez de aceptarlo y tirarlo.
 #:
 #: La UI se deriva de ESTA lista y no de la otra. Ofrecer un destino que el
 #: confirm acepta pero que no escribe nada es peor que no ofrecerlo: el usuario
 #: mapea la columna, la pantalla no se queja, y el dato desaparece en silencio.
 #: Es la misma clase de bug que el propio `/field-catalog` vino a cerrar.
-CROSS_ENTITY_TARGETS_IMPLEMENTED: frozenset[str] = frozenset({"supplier:name"})
+CROSS_ENTITY_TARGETS_IMPLEMENTED: frozenset[str] = frozenset(
+    {
+        "supplier:name",
+        # B·6: venta → cliente.
+        "customer:last_name",
+        "customer:address",
+        "customer:locality",
+        "customer:province",
+        "customer:postal_code",
+        "customer:customer_type",
+        "customer:iva_condition",
+        # B·6: compra → proveedor.
+        "supplier:last_name",
+        "supplier:payment_method",
+    }
+)
 
 
 def cross_targets_for(entity: str) -> list[tuple[str, str, str]]:
@@ -1831,6 +1848,7 @@ class ColumnMappingService:
                 history_folded[fk] = alias
 
         required = set(REQUIRED_FIELDS.get(entity_type, []))
+        _cruzados_permitidos = {value for value, _, _ in cross_targets_for(entity_type)}
         suggestions: list[dict[str, Any]] = []
         #: Índices de las columnas cuya lectura no se puede desempatar sin
         #: inventar. Se lleva aparte y no como una clave más del dict porque el
@@ -1865,6 +1883,15 @@ class ColumnMappingService:
             # primero y recién después por clave plegada: si el tenant tiene el
             # alias tal cual vino el header, ese gana sobre cualquier variante.
             aprendido = history.get(normalized) or history_folded.get(fold_header(normalized))
+            # B·6: un destino de OTRA sección aprendido antes de que el confirm lo
+            # rechazara (o desde otra hoja) no se vuelve a sugerir: el confirm
+            # daría 422. Se cae a las capas de abajo como si no hubiera historial.
+            if (
+                aprendido is not None
+                and parse_target(aprendido.target_field).kind == "cross"
+                and aprendido.target_field not in _cruzados_permitidos
+            ):
+                aprendido = None
             if aprendido is not None:
                 target_field = aprendido.target_field
                 confidence = min(0.99, 0.5 + aprendido.confirmed_count / 20.0)

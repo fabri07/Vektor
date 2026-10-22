@@ -1662,6 +1662,8 @@ async def delete_file(
         restored={
             "products": int(_revertido.get("productos_restaurados", 0)),
             "masters": int(_revertido.get("maestros_restaurados", 0)),
+            # B·6: campos de ficha que el archivo completó y volvieron a vacío.
+            "cross_fields": int(_revertido.get("campos_cruzados_restaurados", 0)),
         },
         conservados=_conservados,
     )
@@ -2501,6 +2503,51 @@ async def confirm_file(
             by_key[parsed.field].append(m.source_column)
         return {k: cols for k, cols in by_key.items() if len(cols) > 1}
 
+    def _cruzados_no_permitidos(
+        entity_type: str, mappings: list[ColumnMapping]
+    ) -> list[tuple[str, str]]:
+        """B·6: columnas mapeadas a un campo de OTRA sección que esta hoja no
+        puede escribir. ``(columna, destino)``.
+
+        La lista permitida es la misma que publica el catálogo
+        (``cross_targets_for``): lo que el mapeador ofrece es exactamente lo que
+        el confirm acepta, y lo que el confirm acepta es lo que el importador
+        escribe. Antes un destino fuera de la lista se aceptaba y se tiraba en
+        silencio (``targets_cruzados_descartados``); ahora se rechaza acá, antes
+        del lease, para que el usuario lo saque del mapeo sabiendo por qué.
+        """
+        permitidos = {value for value, _, _ in cross_targets_for(entity_type)}
+        invalidos: list[tuple[str, str]] = []
+        for m in mappings:
+            if parse_target(m.target_field).kind != "cross":
+                continue
+            if (m.context_id or "table", m.source_column) in _dropped_by_risk:
+                continue  # el usuario ya decidió sacarla
+            if m.target_field not in permitidos:
+                invalidos.append((m.source_column, m.target_field))
+        return invalidos
+
+    def _cruzados_repetidos(mappings: list[ColumnMapping]) -> dict[str, list[str]]:
+        """B·6: un campo de la ficha con más de una columna apuntándole. La ficha
+        guarda un valor, así que elegir entre las dos por el orden de las
+        columnas sería elegir un dato por un detalle del Excel — se pregunta."""
+        by_target: dict[str, list[str]] = defaultdict(list)
+        for m in mappings:
+            if parse_target(m.target_field).kind != "cross":
+                continue
+            if (m.context_id or "table", m.source_column) in _dropped_by_risk:
+                continue
+            by_target[m.target_field].append(m.source_column)
+        return {t: cols for t, cols in by_target.items() if len(cols) > 1}
+
+    def _cruzados_detail(invalidos: list[tuple[str, str]]) -> str:
+        partes = [f"«{col}» → {target}" for col, target in sorted(invalidos)]
+        return (
+            "Estas columnas apuntan a un campo de otra sección que no se puede "
+            f"completar desde esta hoja: {'; '.join(partes)}. Elegí otro campo o "
+            "mandalas a «Ignorar»."
+        )
+
     def _custom_collision_detail(colisiones: dict[str, list[str]]) -> str:
         partes = [
             f"«{key}» ← {', '.join(cols)}" for key, cols in sorted(colisiones.items())
@@ -2512,7 +2559,12 @@ async def confirm_file(
         )
 
     def _collision_detail(entity_type: str, colisiones: dict[str, list[str]]) -> str:
-        etiquetas = CANONICAL_FIELDS.get(entity_type, {})
+        # B·6: los destinos de otra sección con su etiqueta del catálogo
+        # («Cliente — Dirección»), no con el valor técnico.
+        etiquetas = {
+            **CANONICAL_FIELDS.get(entity_type, {}),
+            **{value: label for value, label, _ in cross_targets_for(entity_type)},
+        }
         partes = [
             f"«{etiquetas.get(target, target)}» ← {', '.join(cols)}"
             for target, cols in sorted(colisiones.items())
@@ -2622,6 +2674,27 @@ async def confirm_file(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=_custom_collision_detail(_cf_colisiones),
                 )
+            if _cruzados_mal := _cruzados_no_permitidos(_entity_type, _flat_mappings):
+                await _emit_validation_reject(
+                    "cruzado_no_permitido",
+                    {
+                        "entity_type": _entity_type,
+                        "columnas": [{"columna": c, "destino": t} for c, t in _cruzados_mal],
+                    },
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=_cruzados_detail(_cruzados_mal),
+                )
+            if _cruzados_rep := _cruzados_repetidos(_flat_mappings):
+                await _emit_validation_reject(
+                    "colision_campo_cruzado",
+                    {"entity_type": _entity_type, "colisiones": _cruzados_rep},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=_collision_detail(_entity_type, _cruzados_rep),
+                )
 
     # Validación de requeridos — por contexto (multi-hoja), solo contextos incluidos
     if _ctx_mappings:
@@ -2685,6 +2758,35 @@ async def confirm_file(
                         detail=(
                             f"En la hoja «{_hoja(_cid)}»: "
                             f"{_custom_collision_detail(_cf_colisiones)}"
+                        ),
+                    )
+                if _cruzados_mal := _cruzados_no_permitidos(_ent, _ms):
+                    await _emit_validation_reject(
+                        "cruzado_no_permitido",
+                        {
+                            "context_id": _cid,
+                            "entity_type": _ent,
+                            "columnas": [
+                                {"columna": c, "destino": t} for c, t in _cruzados_mal
+                            ],
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"En la hoja «{_hoja(_cid)}»: {_cruzados_detail(_cruzados_mal)}"
+                        ),
+                    )
+                if _cruzados_rep := _cruzados_repetidos(_ms):
+                    await _emit_validation_reject(
+                        "colision_campo_cruzado",
+                        {"context_id": _cid, "entity_type": _ent, "colisiones": _cruzados_rep},
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"En la hoja «{_hoja(_cid)}»: "
+                            f"{_collision_detail(_ent, _cruzados_rep)}"
                         ),
                     )
 
@@ -3475,6 +3577,9 @@ async def confirm_file(
                     # sin este detalle no hay forma de saber qué productos creó este
                     # archivo — y borrarlo no podría deshacerlos.
                     return_details=True,
+                    # B·6: este es el camino que registra el ledger por campo (abajo),
+                    # así que es el único que completa fichas de otra sección.
+                    apply_cross_fields=True,
                 )
             except SupplierLinkNotEnabledError as exc:
                 # Cambio 4: chokepoint ÚNICO — cubre confirm, la ejecución
@@ -3564,6 +3669,8 @@ async def confirm_file(
         # detalle por producto engordaría el JSONB (justo lo que ese bloque
         # existe para evitar) y lo devolvería en la respuesta del endpoint.
         _product_details = counts.pop("product_details", []) or []
+        # B·6: mismo motivo — un ítem por campo completado, con su antes y después.
+        _cross_field_details = counts.pop("cross_field_details", []) or []
 
         # Maestros creados/modificados por este import. Sin esto, borrar el
         # archivo dejaba vivos sus clientes y proveedores, sin manera de saber de
@@ -3585,6 +3692,7 @@ async def confirm_file(
             file_id=file_id,
             product_details=_product_details,
             master_details=_master_details,
+            cross_field_details=_cross_field_details,
         )
         _timings.mark("ledger_reversa")
 
@@ -3778,6 +3886,7 @@ async def confirm_file(
             routed_rows=_applied.routed_rows if _applied is not None else None,
             external_code_conflicts=counts.get("external_code_conflict", 0),
             columnas_vacias=dict(_columnas_vacias_excluidas),
+            campos_cruzados_aplicados=True,
         )
 
         await pipeline_event_service.emit_event(
@@ -3994,6 +4103,40 @@ async def confirm_file(
             f"{counts['targets_cruzados_descartados']} columna(s) que mapeaste a otra "
             "sección no se importaron todavía. El resto del archivo sí se importó; "
             "revisá esas columnas antes de darlas por cargadas."
+        )
+    # B·6: columnas de otra sección que completan la ficha del cliente o del
+    # proveedor. Lo que se completó y, sobre todo, lo que NO y por qué: una
+    # columna mapeada a mano que no llegó a ninguna ficha no puede ser silencio.
+    if counts.get("cross_fields_aplicados"):
+        warnings.append(
+            f"Se completaron {counts['cross_fields_aplicados']} dato(s) en "
+            f"{counts.get('cross_fields_fichas', 0)} ficha(s) de cliente o proveedor "
+            "con columnas de esta carga, sólo donde estaban vacíos. Si borrás el "
+            "archivo, vuelven a quedar como estaban."
+        )
+    if counts.get("cross_fields_ya_tenian_dato"):
+        warnings.append(
+            f"{counts['cross_fields_ya_tenian_dato']} dato(s) de cliente o proveedor no "
+            "se cargaron porque la ficha ya tenía ese campo completo: el archivo no "
+            "pisa lo que ya está cargado."
+        )
+    if counts.get("cross_fields_filas_sin_ficha"):
+        warnings.append(
+            f"{counts['cross_fields_filas_sin_ficha']} fila(s) traían datos del cliente o "
+            "del proveedor pero no se pudo identificar su ficha por documento, email, "
+            "teléfono o código: esos datos no se cargaron."
+        )
+    if counts.get("cross_fields_ficha_del_archivo"):
+        warnings.append(
+            f"{counts['cross_fields_ficha_del_archivo']} dato(s) de cliente o proveedor "
+            "no se cargaron porque la ficha se creó o actualizó con la hoja de "
+            "clientes o proveedores de este mismo archivo, que es la que manda."
+        )
+    if counts.get("cross_fields_invalidos"):
+        warnings.append(
+            f"{counts['cross_fields_invalidos']} celda(s) con datos del cliente o del "
+            "proveedor no se cargaron porque el valor no es válido para ese campo "
+            "(por ejemplo, una condición de IVA desconocida o un texto demasiado largo)."
         )
     if counts.get("sin_proveedor"):
         warnings.append(

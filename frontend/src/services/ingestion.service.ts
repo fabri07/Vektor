@@ -522,6 +522,11 @@ export interface FileDeletionPreview {
   productos_no_rastreables: boolean;
   /** Productos que el archivo MODIFICÓ y vuelven a su valor anterior. */
   productos_a_restaurar: number;
+  /**
+   * B·6: datos de fichas de cliente/proveedor que el archivo completó desde otra
+   * sección y vuelven a quedar vacíos. Opcional: un backend anterior no lo manda.
+   */
+  campos_cruzados_a_restaurar?: number;
   /** Lo que NO se va a poder revertir, con nombre y motivo. */
   conservados: PreservedEntity[];
 }

@@ -214,7 +214,13 @@ def fields_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> li
     return cambiados
 
 
-def entity_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> bool:
+def entity_changed_since_ledger(
+    entity: Any,
+    after: dict[str, Any] | None,
+    *,
+    ignorar: frozenset[str] = frozenset(),
+    sin_updated_at: bool = False,
+) -> bool:
     """¿Alguien tocó la entidad DESPUÉS de que el import/relectura la dejó así?
 
     Dos señales, y alcanza con una:
@@ -232,13 +238,19 @@ def entity_changed_since_ledger(entity: Any, after: dict[str, Any] | None) -> bo
     poder restaurar nada (ver ``capturo_updated_at``). En ese caso decide la
     señal 1 sola, que es evidencia directa y no depende del reloj.
 
+    ``ignorar``: campos cuyo cambio YA tiene dueño — otro archivo vivo los
+    completó (B·6, ``*_CROSS_FIELD``) y el valor actual es el que dejó —, así
+    que no son una edición posterior. ``sin_updated_at``: no usar la señal 2,
+    porque otro camino auditado (B·6, o su reversa) movió el reloj después de
+    este ítem y el ``updated_at`` dejó de distinguir una edición de eso.
+
     **El caller debe refrescar la entidad antes de llamar**: ``updated_at`` tiene
     ``onupdate`` server-side y puede quedar expirado tras flushes previos de la
     misma transacción (mismo patrón MissingGreenlet del resto del servicio).
     """
-    if fields_changed_since_ledger(entity, after):
+    if [c for c in fields_changed_since_ledger(entity, after) if c not in ignorar]:
         return True
-    if not capturo_updated_at(after):
+    if sin_updated_at or not capturo_updated_at(after):
         return False
     actual = entity.updated_at.isoformat() if entity.updated_at else None
     return captured_updated_at(after) != actual
