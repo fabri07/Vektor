@@ -1,0 +1,180 @@
+import * as Sentry from "@sentry/nextjs";
+import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
+import { useAuthStore } from "@/stores/authStore";
+import { usePinGateStore } from "@/stores/pinGateStore";
+import { llevaHeaderDeTerminal, usePosTerminalStore } from "@/stores/posTerminalStore";
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+export const api = axios.create({
+  baseURL: `${BASE_URL}/api/v1`,
+  headers: { "Content-Type": "application/json" },
+  timeout: 15_000,
+});
+
+// Single-flight: todos los 401 simultáneos comparten el mismo promise de refresh
+let _refreshPromise: Promise<string> | null = null;
+
+api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+  if (typeof window !== "undefined") {
+    const token = useAuthStore.getState().token;
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    // B6: si esta PC es una caja habilitada DE ESTE negocio, las llamadas de caja
+    // llevan su credencial. Con otro negocio logueado no se manda: sería de otro.
+    const caja = usePosTerminalStore.getState().terminal;
+    const tenantId = useAuthStore.getState().user?.tenant_id;
+    if (caja && tenantId && caja.tenantId === tenantId && llevaHeaderDeTerminal(config.url)) {
+      config.headers["X-POS-Terminal"] = caja.secret;
+    }
+  }
+  // Trazabilidad: una correlación por request (frontend → API → audit → response).
+  if (!config.headers["X-Trace-Id"]) {
+    config.headers["X-Trace-Id"] = crypto.randomUUID();
+  }
+  Sentry.addBreadcrumb({
+    category: "http",
+    message: `${config.method?.toUpperCase()} ${config.url}`,
+    data: { trace_id: config.headers["X-Trace-Id"] },
+    level: "info",
+  });
+  return config;
+});
+
+export async function handleApiResponseError(error: AxiosError) {
+  const originalRequest = error.config as
+    | (InternalAxiosRequestConfig & { _retry?: boolean; _pinRetry?: boolean })
+    | undefined;
+
+  if (!error.response) {
+    // Una request CANCELADA a propósito (AbortController de React Query
+    // descartando una consulta que quedó obsoleta — ej. ColumnMapperPanel
+    // recalculando `riskRecomputeKey` mientras cargan varias hojas) también
+    // llega sin `error.response`, mismo shape que un error de red real. No es
+    // un fallo: es el comportamiento esperado de descartar lo obsoleto, así
+    // que NO se reporta como excepción — solo una breadcrumb para trazabilidad.
+    if (axios.isCancel(error)) {
+      Sentry.addBreadcrumb({
+        category: "http",
+        message: `canceled: ${originalRequest?.method?.toUpperCase()} ${originalRequest?.url}`,
+        level: "info",
+      });
+      return Promise.reject(error);
+    }
+    // Error de red, timeout, DNS o CORS bloqueado: el backend nunca llegó a
+    // procesar la request, así que nunca la reportó a su propio Sentry —
+    // sin este evento, quedaría invisible en los dos proyectos. `beforeSend`
+    // (scrubSentryEvent) se encarga de sanear `error.config` (headers/body).
+    Sentry.captureException(error, {
+      tags: { vektor_trace_id: originalRequest?.headers?.["X-Trace-Id"] as string | undefined },
+    });
+    return Promise.reject(error);
+  }
+
+  if (error.response.status >= 500) {
+    // El backend ya generó su propio evento en `unhandled_exception_handler`
+    // y la traza distribuida (CORS + sentry-trace/baggage) ya vincula esta
+    // transacción con la del backend — no fabricar un segundo error acá,
+    // solo dejar la referencia para poder cruzarlos.
+    Sentry.addBreadcrumb({
+      category: "http",
+      message: `5xx: ${originalRequest?.method?.toUpperCase()} ${originalRequest?.url}`,
+      data: { vektor_trace_id: error.response.headers?.["x-trace-id"] },
+      level: "error",
+    });
+  }
+
+  // Step-up PIN: el backend devuelve 428 con detail "PIN_REQUIRED" cuando la
+  // ventana de PIN venció. Abrimos el modal (single-flight) y reintentamos UNA vez.
+  if (
+    error.response?.status === 428 &&
+    (error.response.data as { detail?: string } | undefined)?.detail === "PIN_REQUIRED" &&
+    typeof window !== "undefined" &&
+    originalRequest &&
+    !originalRequest._pinRetry &&
+    !originalRequest.url?.includes("/auth/pin/")
+  ) {
+    originalRequest._pinRetry = true;
+    try {
+      await usePinGateStore.getState().requirePin("verify");
+    } catch (cancelado) {
+      // El usuario canceló el modal: la acción no se hace y NO se reintenta.
+      // Se rechaza con la cancelación (`esPinCancelado`), no con el 428: si no,
+      // cada pantalla lo mostraba como un fallo con una causa inventada.
+      return Promise.reject(cancelado);
+    }
+    return api.request(originalRequest);
+  }
+
+  if (
+    error.response?.status === 401 &&
+    typeof window !== "undefined" &&
+    originalRequest &&
+    !originalRequest._retry &&
+    !originalRequest.url?.includes("/auth/refresh")
+  ) {
+    const { refreshToken, setTokens, logout } = useAuthStore.getState();
+
+    if (!refreshToken) {
+      logout();
+      return Promise.reject(error);
+    }
+
+    originalRequest._retry = true;
+
+    try {
+      if (!_refreshPromise) {
+        _refreshPromise = axios
+          .post<{
+            access_token: string;
+            refresh_token: string;
+            token_type: "bearer";
+            expires_in: number;
+          }>(`${BASE_URL}/api/v1/auth/refresh`, { refresh_token: refreshToken })
+          .then((r) => {
+            setTokens(r.data.access_token, r.data.refresh_token);
+            return r.data.access_token;
+          })
+          .finally(() => {
+            _refreshPromise = null;
+          });
+      }
+
+      const newToken = await _refreshPromise;
+      originalRequest.headers.Authorization = `Bearer ${newToken}`;
+      return api.request(originalRequest);
+    } catch (refreshError) {
+      // B6: sólo una RESPUESTA del servidor que rechaza el refresh (401/403) es
+      // una sesión revocada. Un error de red —el refresh ni llegó— o un 5xx —el
+      // servidor está caído— no te echaron: se conservan los tokens y el
+      // próximo request con red vuelve a intentar. Antes, un corte con el access
+      // token vencido mandaba al login a quien estaba cobrando.
+      const status = axios.isAxiosError(refreshError)
+        ? refreshError.response?.status
+        : undefined;
+      if (status === 401 || status === 403) {
+        logout();
+      }
+      return Promise.reject(refreshError);
+    }
+  }
+
+  if (error.response?.status === 401 && typeof window !== "undefined") {
+    useAuthStore.getState().logout();
+  }
+  // B6: el servidor rechazó la credencial de esta caja (dada de baja o de otro
+  // lado). Se marca para que Ajustes lo muestre; la caja offline (B7) lee esto
+  // para dejar sus pendientes en "requiere autenticación".
+  const codigo = (error.response?.data as { detail?: { code?: string } } | undefined)?.detail
+    ?.code;
+  if (
+    error.response?.status === 403 &&
+    (codigo === "TERMINAL_DISABLED" || codigo === "TERMINAL_UNKNOWN")
+  ) {
+    usePosTerminalStore.getState().markInvalid();
+  }
+  return Promise.reject(error);
+}
+
+api.interceptors.response.use((response) => response, handleApiResponseError);

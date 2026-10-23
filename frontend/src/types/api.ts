@@ -1,0 +1,512 @@
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+  pages: number;
+}
+
+export interface PydanticError {
+  type: string;
+  loc: (string | number)[];
+  msg: string;
+  input: unknown;
+  ctx?: Record<string, unknown>;
+}
+
+export interface ApiError {
+  detail: string | PydanticError[];
+}
+
+export interface TokenResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: "bearer";
+  expires_in: number;
+}
+
+export interface AuthUserResponse {
+  user_id: string;
+  email: string;
+  full_name: string;
+  role_code: string;
+  tenant_id: string;
+  phone: string | null;
+}
+
+/** Respuesta de /users/* (UserResponse del backend). */
+export interface UserResponse extends AuthUserResponse {
+  is_active: boolean;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+export interface MeResponse {
+  user_id: string;
+  email: string;
+  full_name: string;
+  role_code: string;
+  tenant_id: string;
+  phone: string | null;
+  subscription: {
+    plan_code: string;
+    status: string;
+  } | null;
+  onboarding_completed: boolean;
+  /** Permisos de caja efectivos (B5). Ausente en backends anteriores. */
+  pos_permissions?: string[];
+}
+
+export interface AuthResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: "bearer";
+  expires_in: number;
+  user: AuthUserResponse;
+}
+
+export interface ForecastPoint {
+  date: string;
+  income: number;
+  expense: number;
+  net: number;
+}
+
+export interface CashForecastResponse {
+  tier: number;
+  confidence: string;
+  data_days: number;
+  horizon_days: number;
+  points: ForecastPoint[];
+  message: string | null;
+}
+
+export interface CategoryBreakdownItem {
+  category: string;
+  total: number;
+  pct: number;
+}
+
+export interface ProductStockItem {
+  product_id: string;
+  name: string;
+  stock_units: number;
+  low_stock_threshold_units: number | null;
+  sale_price_ars: number;
+  /** Plata inmovilizada: stock_units × unit_cost_ars (0 si no hay costo). */
+  immobilized_value: number;
+  /** El stock con su unidad ("5,000 kg"); ausente en respuestas anteriores. */
+  stock_display?: string | null;
+  sale_unit?: string;
+  base_units_per_sale_unit?: number;
+}
+
+export interface SupplierBreakdownProductItem {
+  product_id: string;
+  name: string;
+  brand: string;
+  total_amount: number;
+  total_qty: number;
+  /** La cantidad con su unidad ("2,500 kg"): `total_qty` está en unidades base. */
+  quantity_display?: string | null;
+  base_units_per_sale_unit?: number;
+}
+
+export interface SupplierPurchaseBreakdownItem {
+  supplier_id: string | null;
+  supplier_name: string;
+  is_unassigned: boolean;
+  total_purchased: number;
+  /** % de compras del proveedor con costo unitario conocido. */
+  coverage_pct: number;
+  products: SupplierBreakdownProductItem[];
+}
+
+export interface BusinessBreakdownResponse {
+  period_days: number;
+  from_date: string;
+  to_date: string;
+  expenses_by_category: CategoryBreakdownItem[];
+  /** Compras de mercadería agrupadas por proveedor real (acordeón). */
+  suppliers_breakdown: SupplierPurchaseBreakdownItem[];
+  low_stock_products: ProductStockItem[];
+  no_rotation_products: ProductStockItem[];
+  low_stock_count: number;
+  no_rotation_count: number;
+  total_products: number;
+  /** Plata parada total en productos sin rotación + cuántos no se pudieron valuar. */
+  no_rotation_value_total: number;
+  no_rotation_unvalued_count: number;
+  /** FASE D: gasto operativo vs compra de mercadería del período. */
+  opex_total: number;
+  cogs_total: number;
+  /** Valor actual del stock (stock_units × unit_cost_ars de productos activos). */
+  stock_value_total: number;
+}
+
+export interface HealthScoreV2Response {
+  id: string;
+  tenant_id: string;
+  score_total: number;
+  score_cash: number;
+  // null = margen ausente (sin costo suficiente de lo vendido): no es 0.
+  score_margin: number | null;
+  score_stock: number;
+  score_supplier: number;
+  score_growth: number | null;   // null = snapshot v1 (pre-Stage-5a)
+  primary_risk_code: string;
+  confidence_level: string;
+  data_completeness_score: number;
+  level: string;
+  created_at: string;
+  is_demo_data?: boolean;
+  // Fuente de la caja: "arqueo" | "onboarding" | "flujo" | "desconocido" | null.
+  // "flujo" → mostrar recordatorio de arqueo. null = snapshot viejo.
+  cash_source?: "arqueo" | "onboarding" | "flujo" | "desconocido" | null;
+  // Estado del margen (M·2b-3). null/ausente en snapshots viejos.
+  margin_status?: "confirmado" | "estimado" | "ausente" | null;
+  margin_reason?: string | null;
+  cost_coverage_total_pct?: number | null;
+}
+
+/** M·3-2: un margen de FactsService (`GET /insights/margins`). Nunca un 0 inventado. */
+export interface MarginFact {
+  value: number | null;
+  estado: "confirmado" | "estimado" | "ausente";
+  motivo: string | null;
+  periodo: string | null;
+  desde: string | null;
+  hasta: string | null;
+  cobertura_confirmada_pct: number | null;
+  cobertura_total_pct: number | null;
+  ingreso_ars: number | null;
+  costo_vendido_ars: number | null;
+  /** Sólo en el neto. */
+  gastos_operativos_ars: number | null;
+  resultado_ars: number | null;
+  /** Sólo en el desglose por categoría. */
+  categoria: string | null;
+  /** M·3-4, sólo en el bruto: vendido con costo de hace > 45 días. */
+  costo_desactualizado_ars?: number | null;
+  costo_desactualizado_pct?: number | null;
+  costo_antiguedad_desconocida_ars?: number | null;
+  costo_antiguedad_desconocida_pct?: number | null;
+  costo_desactualizado_umbral_dias?: number | null;
+}
+
+export interface MarginsResponse {
+  /** La completitud de los datos no llega a 50: estado vacío (no-invention). */
+  sin_datos: boolean;
+  motivo: string | null;
+  neto_mes_cerrado: MarginFact | null;
+  bruto_mes_en_curso: MarginFact | null;
+  bruto_periodo: MarginFact | null;
+  granularidad: "dia" | "semana" | "mes";
+  serie_bruto: MarginFact[];
+  /** Un punto por mes CERRADO del período. */
+  serie_neto: MarginFact[];
+  por_categoria: MarginFact[];
+  /** M·2d: stock inicial por confirmar. null = nada que confirmar. */
+  aperturas_por_confirmar?: AperturasPorConfirmar | null;
+  /** M·2d-3: los retiros del mes cerrado superan su resultado (informativo). */
+  retiros_vs_resultado?: RetirosVsResultado | null;
+}
+
+/** M·2d-3: en el mes cerrado se retiró más de lo que dejó el negocio. */
+export interface RetirosVsResultado {
+  periodo: string;
+  desde: string;
+  hasta: string;
+  retiros_ars: number;
+  resultado_ars: number;
+  /** El resultado sale de un neto estimado: se muestra como aproximado. */
+  estimado: boolean;
+}
+
+/** M·2d: un archivo que cargó stock inicial sin fecha confirmada. */
+export interface AperturaPorConfirmar {
+  upload_id: string;
+  archivo: string | null;
+  aperturas: number;
+  productos: number;
+  /** La fecha que tiene hoy (la de carga si está pendiente). */
+  fecha_actual: string | null;
+  /** Traen la fecha de su fila (M·2d-1b): se pueden aceptar al confirmar. */
+  con_fecha_de_fila?: number;
+}
+
+/** M·2d-1b: el stock inicial sin confirmar que acaba de cargar un archivo. */
+export interface ResumenAperturasDeArchivo {
+  aperturas: number;
+  productos: number;
+  /** En unidades de venta (decimal serializado como texto). */
+  unidades: string;
+  /** Sin fecha propia: figuran desde la hora de carga. */
+  pendientes: number;
+  con_fecha_de_fila: number;
+  fecha_de_fila_min: string | null;
+  fecha_de_fila_max: string | null;
+  /** Primer día de ventas o gastos: una sugerencia, nunca la fecha. */
+  fecha_sugerida: string | null;
+}
+
+/** M·2d: un stock inicial cargado a mano sin fecha confirmada. */
+export interface AperturaManualPorConfirmar {
+  product_id: string;
+  producto: string;
+  fecha_actual: string | null;
+}
+
+export interface AperturasPorConfirmar {
+  sin_confirmar: number;
+  por_archivo: AperturaPorConfirmar[];
+  manuales: AperturaManualPorConfirmar[];
+  /** Ventas sin costo anteriores al stock inicial de su producto. */
+  ventas_sin_costo_antes: number;
+  /** Ventas sin costo posteriores al stock inicial: quedan así hasta recostear. */
+  ventas_sin_costo_con_fuente: number;
+  /** Ventas costeadas con el stock inicial y anteriores a él (no se revalúan). */
+  ventas_costeadas_antes: number;
+}
+
+/** Respuesta de `.../opening-confirmation`. */
+export interface ConfirmarAperturaResponse {
+  aperturas: number;
+  productos: number;
+  ventas_costeadas_antes: number;
+  venta_ids: string[];
+}
+
+export interface CalculatingResponse {
+  status: "CALCULATING";
+}
+
+/**
+ * El tenant es real y todavía no cargó ningún dato: no hay score ni lo va a
+ * haber hasta que importe algo. Es una respuesta distinta de `CALCULATING` —
+ * ahí no hay nada esperando, hay que pedirle datos.
+ *
+ * Faltaba en esta unión, así que el compilador dejaba pasar consumidores que
+ * sólo contemplaban las otras dos y leían `score_total` de un payload que no
+ * lo tiene (`NaN` en pantalla).
+ *
+ * Declarar los tres miembros no alcanza por sí solo: un `as
+ * HealthScoreV2Response` en el consumidor anula el chequeo igual. Quien lea
+ * esta unión tiene que estrecharla con el type predicate `esScoreReal`
+ * (`dashboard.service`), nunca castear.
+ */
+export interface NoDataResponse {
+  status: "NO_DATA";
+  score: null;
+  score_level: string;
+  is_demo_data: boolean;
+  mensaje: string;
+}
+
+export type LatestScoreResponse =
+  | HealthScoreV2Response
+  | CalculatingResponse
+  | NoDataResponse;
+
+export interface InsightResponse {
+  id: string;
+  title: string;
+  description: string;
+  insight_type: string;
+  severity_code: string;
+  heuristic_version: string;
+  created_at: string;
+}
+
+export interface ActionSuggestionResponse {
+  id: string;
+  title: string;
+  description: string;
+  action_type: string;
+  risk_level: string;
+  status: string;
+  created_at: string;
+}
+
+export interface CurrentInsightResponse {
+  insight: InsightResponse;
+  action_suggestion: ActionSuggestionResponse | null;
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export interface NotificationItem {
+  id: string;
+  title: string;
+  body: string;
+  notification_type: string;
+  channel: string;
+  is_read: boolean;
+  created_at: string;
+  action_url: string | null;
+}
+
+export interface NotificationListResponse {
+  notifications: NotificationItem[];
+  unread_count: number;
+}
+
+// ── Momentum ──────────────────────────────────────────────────────────────────
+
+export interface WeeklyHistoryItem {
+  week_start: string;
+  week_end: string;
+  avg_score: number;
+  delta: number | null;
+  trend_label: string | null;
+}
+
+export interface ActiveGoalResponse {
+  weak_dimension: string;
+  goal: string;
+  action: string;
+  estimated_delta: number;
+  estimated_weeks: number;
+}
+
+export interface MilestoneItem {
+  code: string;
+  label: string;
+  unlocked_at: string;
+}
+
+export interface MomentumProfileResponse {
+  best_score_ever: number | null;
+  best_score_date: string | null;
+  active_goal: ActiveGoalResponse | null;
+  milestones_unlocked: MilestoneItem[];
+  estimated_value_protected_ars: number;
+  improving_streak_weeks: number;
+  weekly_history: WeeklyHistoryItem[];
+}
+
+// ── Sales ─────────────────────────────────────────────────────────────────────
+
+export interface SaleSummaryResponse {
+  total_ars: number;
+  entry_count: number;
+  period_covered: string;
+}
+
+// ── Expenses ──────────────────────────────────────────────────────────────────
+
+export interface ExpenseSummaryResponse {
+  total_ars: number;
+  entry_count: number;
+  period_covered: string;
+}
+
+// ── Files ─────────────────────────────────────────────────────────────────────
+
+export interface UploadedFileResponse {
+  id: string;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+  purpose: string;
+  status: string;
+}
+
+// ── OAuth / Google Login ──────────────────────────────────────────────────────
+
+export interface OAuthStartResponse {
+  authorization_url: string;
+}
+
+export interface OAuthLinkRequiredResponse {
+  status: "link_required";
+  pending_oauth_session_id: string;
+  email: string;
+  provider: "google";
+}
+
+/**
+ * El email de Google no tiene cuenta. Véktor cerró el registro abierto: entrar
+ * con Google NO acuña un tenant, el visitante pasa a pedir acceso con su
+ * identidad prellenada.
+ *
+ * `full_name` puede venir `null`: Google no siempre manda el claim `name` y el
+ * backend no lo deriva del email.
+ */
+export interface OAuthAccessRequestRequiredResponse {
+  status: "access_request_required";
+  prefill_token: string;
+  email: string;
+  full_name: string | null;
+  provider: "google";
+}
+
+/** Lo que `GET /access-requests/prefill/{token}` devuelve del alta por Google. */
+export interface GooglePrefillResponse {
+  email: string;
+  full_name: string | null;
+  provider: "google";
+}
+
+
+export interface GoogleConnectStartResponse {
+  auth_url: string;
+  required_scopes: string[];
+  state: string;
+}
+
+export interface GoogleAppStatusLegacy {
+  id: string;
+  label: string;
+  description: string;
+  available: boolean;
+  connected: boolean;
+  needs_reconnect: boolean;
+  required_scopes: string[];
+}
+
+export interface GoogleStatusResponseLegacy {
+  connected: boolean;
+  scopes_granted: string[];
+  apps: GoogleAppStatusLegacy[];
+  connected_at: string | null;
+  last_error_code: string | null;
+}
+
+// ── Field Definitions ─────────────────────────────────────────────────────────
+
+export interface EnumOption {
+  value: string;
+  label: string;
+}
+
+export interface FieldDefinition {
+  field_key: string;
+  entity_type: "sale" | "expense" | "product" | "inventory" | "customer" | "supplier";
+  label: string;
+  data_type: "text" | "number" | "date" | "enum" | "boolean";
+  enum_options: EnumOption[] | null;
+  is_required: boolean;
+  display_order: number;
+  is_base_field: boolean;
+  affects_scoring: boolean;
+}
+
+export interface CreateCustomFieldPayload {
+  entity_type: string;
+  field_key: string;
+  label: string;
+  data_type?: string;
+  enum_options?: EnumOption[];
+  display_order?: number;
+}
+
+export interface FieldChangeLog {
+  id: string;
+  field_key: string;
+  entity_type: string;
+  action: "enabled" | "disabled" | "modified" | "created" | "undo";
+  previous_state: Record<string, unknown> | null;
+  new_state: Record<string, unknown>;
+  changed_at: string;
+}

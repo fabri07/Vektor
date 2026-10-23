@@ -1,0 +1,80 @@
+import * as Sentry from "@sentry/nextjs";
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+
+interface AuthUser {
+  id: string;
+  email: string;
+  full_name: string;
+  role: string;
+  tenant_id: string;
+  // Opcional: las sesiones persistidas previas al campo no lo tienen.
+  phone?: string | null;
+  // Permisos de caja efectivos (B5), refrescados desde /auth/me en cada carga.
+  pos_permissions?: string[];
+}
+
+interface AuthState {
+  token: string | null;
+  refreshToken: string | null;
+  user: AuthUser | null;
+  _hasHydrated: boolean;
+  setAuth: (token: string, refreshToken: string, user: AuthUser) => void;
+  setTokens: (token: string, refreshToken: string) => void;
+  updateUser: (patch: Partial<AuthUser>) => void;
+  setHasHydrated: (state: boolean) => void;
+  logout: () => void;
+}
+
+// Sentry: tag por negocio, sin email/nombre (privacidad de datos de PyMEs
+// argentinas) — espejo del backend (deps.py::get_current_user). Alcanza con
+// el id para medir cuántos usuarios/tenants distintos pisan un error de UI.
+function _syncSentryContext(user: AuthUser | null): void {
+  if (user) {
+    Sentry.setUser({ id: user.id });
+    Sentry.setTag("tenant_id", user.tenant_id);
+  } else {
+    Sentry.setUser(null);
+    Sentry.setTag("tenant_id", undefined);
+  }
+}
+
+export const useAuthStore = create<AuthState>()(
+  persist(
+    (set) => ({
+      token: null,
+      refreshToken: null,
+      user: null,
+      _hasHydrated: false,
+      setAuth: (token, refreshToken, user) => {
+        _syncSentryContext(user);
+        set({ token, refreshToken, user });
+      },
+      setTokens: (token, refreshToken) => set({ token, refreshToken }),
+      updateUser: (patch) =>
+        set((state) => (state.user ? { user: { ...state.user, ...patch } } : {})),
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
+      logout: () => {
+        _syncSentryContext(null);
+        set({ token: null, refreshToken: null, user: null });
+        if (typeof window !== "undefined") {
+          window.location.href = "/login";
+        }
+      },
+    }),
+    {
+      name: "vektor_auth",
+      partialize: (state) => ({
+        token: state.token,
+        refreshToken: state.refreshToken,
+        user: state.user,
+      }),
+      onRehydrateStorage: () => (state) => {
+        // Sesión ya persistida (reload de página, no un login nuevo): sin
+        // esto, el contexto de Sentry quedaría vacío hasta el próximo login.
+        _syncSentryContext(state?.user ?? null);
+        state?.setHasHydrated(true);
+      },
+    },
+  ),
+);

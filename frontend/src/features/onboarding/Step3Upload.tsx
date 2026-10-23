@@ -1,0 +1,161 @@
+"use client";
+
+import { useRef, useState } from "react";
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB, UPLOAD_SIZE_HINT } from "@/constants/upload";
+
+const ACCEPTED = ".xlsx,.csv,.txt,.docx,.jpg,.jpeg,.png";
+
+interface Step3UploadProps {
+  onNext: (file: File | null) => void;
+  /** B·5d: en vez de un archivo, cargar el stock inicial en una tabla. */
+  onStockInicial?: () => void;
+  /** Hay un envío en vuelo: no se dispara otro. */
+  disabled?: boolean;
+}
+
+export function Step3Upload({ onNext, onStockInicial, disabled = false }: Step3UploadProps) {
+  const [file, setFile] = useState<File | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function handleFile(f: File) {
+    if (f.size > MAX_UPLOAD_BYTES) {
+      setError(`El archivo debe ser menor a ${MAX_UPLOAD_MB} MB.`);
+      return;
+    }
+    setError(null);
+    setFile(f);
+  }
+
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setDragOver(false);
+    const dropped = e.dataTransfer.files[0];
+    if (dropped) handleFile(dropped);
+  }
+
+  function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const selected = e.target.files?.[0];
+    if (selected) handleFile(selected);
+  }
+
+  return (
+    <div>
+      <h2 className="mb-1 text-xl font-semibold text-gray-900">
+        ¿Tenés datos de tu negocio?
+      </h2>
+      <p className="mb-2 text-sm text-gray-500">
+        Si tenés una lista de productos o ventas, podés subirla. Esto mejora
+        la precisión del análisis.
+      </p>
+      <p className="mb-8 text-xs text-vk-text-muted">
+        Formatos aceptados: .xlsx, .csv, .txt, .docx, .jpg, .png
+      </p>
+
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => inputRef.current?.click()}
+        onKeyDown={(e) => e.key === "Enter" && inputRef.current?.click()}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        className={[
+          "flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors cursor-pointer",
+          dragOver
+            ? "border-vk-navy bg-vk-bg-light"
+            : file
+              ? "border-green-400 bg-green-50"
+              : "border-gray-300 bg-white hover:border-gray-400",
+        ].join(" ")}
+      >
+        <svg
+          width="36"
+          height="36"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={file ? "#22c55e" : "#9ca3af"}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
+        </svg>
+
+        {file ? (
+          <div>
+            <p className="text-sm font-medium text-green-700">{file.name}</p>
+            <p className="mt-1 text-xs text-vk-text-muted">
+              {(file.size / 1024).toFixed(0)} KB — hacé clic para cambiar
+            </p>
+          </div>
+        ) : (
+          <div>
+            <p className="text-sm font-medium text-gray-700">
+              Arrastrá tu archivo aquí o{" "}
+              <span className="text-vk-navy underline underline-offset-2">
+                elegí uno
+              </span>
+            </p>
+            <p className="mt-1 text-xs font-medium text-gray-700">{UPLOAD_SIZE_HINT}</p>
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
+          {error}
+        </p>
+      )}
+
+      {onStockInicial && (
+        <p className="mt-3 text-center text-sm text-gray-500">
+          ¿No tenés un archivo?{" "}
+          <button
+            type="button"
+            onClick={onStockInicial}
+            disabled={disabled}
+            className="font-medium disabled:opacity-40 text-vk-navy underline underline-offset-2 hover:opacity-80"
+          >
+            Cargar mi stock inicial a mano
+          </button>
+        </p>
+      )}
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept={ACCEPTED}
+        className="hidden"
+        onChange={handleInputChange}
+      />
+
+      <div className="mt-8 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => onNext(null)}
+          disabled={disabled}
+          className="disabled:opacity-40 text-sm text-vk-text-muted underline underline-offset-2 hover:text-vk-text-primary transition-colors"
+        >
+          Saltar por ahora
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNext(file)}
+          disabled={disabled}
+          className="disabled:opacity-40 h-11 rounded-xl bg-vk-navy px-8 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-vk-navy/30"
+        >
+          {file ? "Continuar con archivo" : "Continuar"}
+        </button>
+      </div>
+    </div>
+  );
+}

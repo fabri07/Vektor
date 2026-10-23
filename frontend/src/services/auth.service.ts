@@ -1,0 +1,81 @@
+import { api } from "@/lib/api";
+import type {
+  AuthResponse,
+  MeResponse,
+  OAuthAccessRequestRequiredResponse,
+  OAuthStartResponse,
+  OAuthLinkRequiredResponse,
+} from "@/types/api";
+import type { LoginInput } from "@/validation/auth";
+
+export async function loginRequest(data: LoginInput): Promise<AuthResponse> {
+  const res = await api.post<AuthResponse>("/auth/login", {
+    email: data.email,
+    password: data.password,
+  });
+  return res.data;
+}
+
+export async function verifyEmailRequest(token: string): Promise<AuthResponse> {
+  const res = await api.post<AuthResponse>("/auth/verify-email", { token });
+  return res.data;
+}
+
+export async function resendVerificationRequest(email: string): Promise<void> {
+  await api.post("/auth/resend-verification", { email });
+}
+
+export async function forgotPasswordRequest(email: string): Promise<void> {
+  await api.post("/auth/forgot-password", { email });
+}
+
+export async function resetPasswordRequest(
+  token: string,
+  newPassword: string,
+): Promise<void> {
+  await api.post("/auth/reset-password", {
+    token,
+    new_password: newPassword,
+  });
+}
+
+export async function getMeRequest(config?: {
+  headers?: Record<string, string>;
+}): Promise<MeResponse> {
+  const res = await api.get<MeResponse>("/auth/me", config);
+  return res.data;
+}
+
+export async function logoutRequest(): Promise<void> {
+  await api.post("/auth/logout");
+}
+
+export async function getGoogleOAuthUrl(): Promise<OAuthStartResponse> {
+  const res = await api.post<OAuthStartResponse>("/auth/oauth/google/start");
+  return res.data;
+}
+
+/**
+ * Tres desenlaces posibles: sesión iniciada, hay que vincular con la contraseña
+ * de una cuenta existente, o ese email todavía no tiene cuenta y hay que pedir
+ * acceso (el registro es cerrado: Google no acuña cuentas).
+ */
+export async function exchangeGoogleSession(
+  session_id: string,
+): Promise<
+  AuthResponse | OAuthLinkRequiredResponse | OAuthAccessRequestRequiredResponse
+> {
+  const res = await api.post<
+    AuthResponse | OAuthLinkRequiredResponse | OAuthAccessRequestRequiredResponse
+  >("/auth/oauth/google/exchange", { session_id });
+  return res.data;
+}
+
+export async function linkPendingOAuth(data: {
+  pending_oauth_session_id: string;
+  email: string;
+  password: string;
+}): Promise<AuthResponse> {
+  const res = await api.post<AuthResponse>("/auth/oauth/google/link-pending", data);
+  return res.data;
+}

@@ -1,0 +1,617 @@
+import type { CustomerResponse } from "@/services/customers.service";
+import type { ExpenseEntryResponse } from "@/services/expenses.service";
+import type { ProductResponse } from "@/services/products.service";
+import type { SaleEntryResponse } from "@/services/sales.service";
+import type { SupplierResponse } from "@/services/suppliers.service";
+import type { HealthScoreV2Response } from "@/types/api";
+import { addDays, type DateRangeStrings, endOfMonth, mondayOf, parseLocal } from "@/lib/period";
+
+// Compras sin proveedor (supplier_id NULL) y el proveedor sentinela se unifican en
+// una sola etiqueta "No identificado" — coincide con el nombre del sentinela para que
+// no aparezcan dos entradas separadas en el dashboard.
+export const UNIDENTIFIED_SUPPLIER = "No identificado";
+
+// El proveedor sentinela ("No identificado") es un Supplier real con el flag
+// `custom_fields._sentinel`. Detectarlo para fusionarlo con las compras sin proveedor.
+function isSentinelSupplier(s: SupplierResponse): boolean {
+  const flag = s.custom_fields?._sentinel;
+  return flag === "true" || flag === true;
+}
+// Las ventas sin cliente registrado se agrupan en el centinela "Local" (mostrador).
+// El centinela se excluye del catálogo de clientes, así que su id no resuelve acá.
+export const UNIDENTIFIED_CUSTOMER = "Local";
+
+export const KPI_TOOLTIP_COPY: Record<string, string> = {
+  Caja:
+    "Caja: cuánto dinero está entrando y cómo se reparte entre distintos medios de cobro.",
+  Margen:
+    "Margen neto: lo que queda de cada venta después del costo de la mercadería y de todos los gastos del mes cerrado. Debajo, el margen bruto del mes en curso (sólo el costo de la mercadería).",
+  Stock:
+    "Stock: cómo está distribuido tu inventario entre productos disponibles, bajos, agotados y en camino.",
+  Proveedores:
+    "Proveedores: quiénes concentran tus compras y qué nivel de dependencia tenés con cada uno.",
+  "Riesgo principal":
+    "Este es el factor que más amenaza la salud de tu negocio en este momento.",
+};
+
+export interface CashMethodRow {
+  method: string;
+  amount: number;
+  percentage: number;
+  colorClass: string;
+}
+
+export interface StockStatusRow {
+  id: "in_stock" | "low_stock" | "out_of_stock" | "incoming";
+  label: string;
+  count: number;
+  colorClass: string;
+  description: string;
+}
+
+export interface SupplierSummary {
+  name: string;
+  totalPurchased: number;
+  lastOrderDate: string | null;
+  averageOrderValue: number;
+  paymentTerms: string;
+  overdueInvoicesCount: number;
+}
+
+/** Volumen agregado por entidad real (proveedor, cliente o producto). */
+export interface VolumeSummary {
+  /** id de la entidad o "__unidentified__" para el bucket sin identificar. */
+  key: string;
+  name: string;
+  /** true si la fila corresponde a una entidad real del catálogo. */
+  identified: boolean;
+  total: number;
+  lastDate: string | null;
+  average: number;
+  count: number;
+}
+
+export interface LineMetricOption {
+  value: "caja" | "ventas" | "margen" | "margen_neto" | "stock";
+  label: string;
+  title: string;
+}
+
+/** Las métricas de margen salen de FactsService (M·3-2), no de `buildLineSeries`. */
+export function esMetricaDeMargen(metric: string): metric is "margen" | "margen_neto" {
+  return metric === "margen" || metric === "margen_neto";
+}
+
+export interface CompareOption {
+  value: "categoria" | "proveedor" | "metodo" | "dia";
+  label: string;
+  title: string;
+}
+
+export interface DistributionOption {
+  value: "ventasCategoria" | "stockEstado" | "comprasProveedor" | "cajaMetodo";
+  label: string;
+  title: string;
+}
+
+export const LINE_METRIC_OPTIONS: LineMetricOption[] = [
+  { value: "caja", label: "Evolución de caja", title: "¿Cómo evolucionó tu caja este mes?" },
+  { value: "ventas", label: "Ventas totales", title: "¿Cómo evolucionaron tus ventas?" },
+  { value: "margen", label: "Margen bruto", title: "¿Cómo se movió tu margen bruto?" },
+  { value: "margen_neto", label: "Margen neto (mensual)", title: "¿Cómo se movió tu margen neto mes a mes?" },
+  { value: "stock", label: "Score de stock", title: "¿Cómo evolucionó tu score de stock?" },
+];
+
+export const COMPARE_OPTIONS: CompareOption[] = [
+  { value: "categoria", label: "Categoría de producto", title: "¿Qué categoría mueve más?" },
+  { value: "proveedor", label: "Proveedor", title: "¿Qué proveedores concentran tus compras?" },
+  { value: "metodo", label: "Método de pago", title: "¿Cómo te pagan más seguido?" },
+  { value: "dia", label: "Día de semana", title: "¿Qué días concentran más movimiento?" },
+];
+
+export const DISTRIBUTION_OPTIONS: DistributionOption[] = [
+  { value: "ventasCategoria", label: "Ventas por categoría", title: "¿Cómo se distribuyen tus ventas por categoría?" },
+  { value: "stockEstado", label: "Stock por estado", title: "¿Cómo está distribuido tu inventario?" },
+  { value: "comprasProveedor", label: "Compras por proveedor", title: "¿Cómo se reparten tus compras entre proveedores?" },
+  { value: "cajaMetodo", label: "Caja por método", title: "¿Cómo se distribuye tu caja por medio de pago?" },
+];
+
+const PAYMENT_METHODS = ["Efectivo", "Débito", "Crédito", "Cheque", "Pagaré"] as const;
+
+const METHOD_COLORS: Record<(typeof PAYMENT_METHODS)[number], string> = {
+  Efectivo: "border-l-vektor-teal",
+  Débito: "border-l-vektor-blue",
+  Crédito: "border-l-vk-warning",
+  Cheque: "border-l-vk-info",
+  Pagaré: "border-l-vektor-red",
+};
+
+const WEEKDAY_LABELS = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+
+export function formatARS(value: number): string {
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+export function formatARSCompact(value: number): string {
+  if (Math.abs(value) >= 1_000_000) {
+    return `$${(value / 1_000_000).toFixed(1)}M`;
+  }
+  if (Math.abs(value) >= 1_000) {
+    return `$${(value / 1_000).toFixed(0)}k`;
+  }
+  return formatARS(value);
+}
+
+export function formatPercent(value: number, digits = 1): string {
+  return `${value.toFixed(digits)}%`;
+}
+
+export function formatSignedPercent(value: number): string {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(1)}%`;
+}
+
+export function formatShortDate(date: string | null): string {
+  if (!date) return "—";
+  return new Date(date).toLocaleDateString("es-AR", {
+    day: "numeric",
+    month: "short",
+  });
+}
+
+export function normalizePaymentMethod(raw: string | null | undefined): (typeof PAYMENT_METHODS)[number] {
+  const value = raw?.toLowerCase() ?? "";
+  if (value.includes("deb")) return "Débito";
+  if (value.includes("cred")) return "Crédito";
+  if (value.includes("cheq")) return "Cheque";
+  if (value.includes("paga")) return "Pagaré";
+  return "Efectivo";
+}
+
+export function buildCashBreakdown(entries: SaleEntryResponse[]): {
+  total: number;
+  rows: CashMethodRow[];
+} {
+  const total = entries.reduce((sum, entry) => sum + Number(entry.amount), 0);
+
+  if (entries.length === 0 || total === 0) {
+    return { total: 0, rows: [] };
+  }
+
+  const buckets = PAYMENT_METHODS.reduce<Record<(typeof PAYMENT_METHODS)[number], number>>((acc, method) => {
+    acc[method] = 0;
+    return acc;
+  }, {} as Record<(typeof PAYMENT_METHODS)[number], number>);
+
+  for (const entry of entries) {
+    const method = normalizePaymentMethod(entry.payment_method);
+    buckets[method] += Number(entry.amount);
+  }
+
+  const rows = PAYMENT_METHODS.map((method) => ({
+    method,
+    amount: buckets[method],
+    percentage: total > 0 ? (buckets[method] / total) * 100 : 0,
+    colorClass: METHOD_COLORS[method],
+  }));
+
+  return { total, rows };
+}
+
+/**
+ * El stock en unidades de VENTA: 5000 g de queso son 5 (kg), no 5000. Sin esto,
+ * un solo producto por peso aplastaba al resto del gráfico.
+ */
+function enUnidadesDeVenta(p: ProductResponse): number {
+  return p.stock_units / Math.max(1, p.base_units_per_sale_unit ?? 1);
+}
+
+export function buildStockStatuses(products: ProductResponse[]): StockStatusRow[] {
+  const inStock = products
+    .filter((p) => (p.stock_status ? p.stock_status === "in_stock" : p.stock_units > 0 && !p.is_low_stock))
+    .reduce((sum, p) => sum + enUnidadesDeVenta(p), 0);
+  const lowStock = products
+    .filter((p) => (p.stock_status ? p.stock_status === "low_stock" : p.stock_units > 0 && p.is_low_stock))
+    .reduce((sum, p) => sum + enUnidadesDeVenta(p), 0);
+  const outOfStock = products.filter(
+    (p) => (p.stock_status ? p.stock_status === "out_of_stock" : p.stock_units === 0)
+  ).length;
+
+  return [
+    {
+      id: "in_stock",
+      label: "En stock",
+      count: inStock,
+      colorClass: "bg-vektor-teal text-vektor-white",
+      description: "Productos disponibles para vender ahora mismo.",
+    },
+    {
+      id: "low_stock",
+      label: "Pocas unidades",
+      count: lowStock,
+      colorClass: "bg-vektor-amber text-vektor-night",
+      description: "Menos de tu umbral recomendado. Conviene reponer pronto.",
+    },
+    {
+      id: "out_of_stock",
+      label: "Sin stock",
+      count: outOfStock,
+      colorClass: "bg-vektor-red text-vektor-white",
+      description: "Productos agotados. Perdés ventas si no reponés.",
+    },
+    {
+      id: "incoming",
+      label: "En camino",
+      count: 0,
+      colorClass: "bg-vektor-surface text-vektor-muted border border-vektor-border",
+      description: "Pedidos confirmados con proveedores aún no recibidos. Próximamente.",
+    },
+  ];
+}
+
+export function buildSupplierSummaries(expenses: ExpenseEntryResponse[]): SupplierSummary[] {
+  const suppliers = new Map<string, { total: number; count: number; lastDate: string | null }>();
+
+  for (const expense of expenses) {
+    const supplier = expense.supplier_name?.trim();
+    if (!supplier) continue;
+    const current = suppliers.get(supplier) ?? { total: 0, count: 0, lastDate: null };
+    current.total += Number(expense.amount);
+    current.count += 1;
+    if (!current.lastDate || new Date(expense.transaction_date) > new Date(current.lastDate)) {
+      current.lastDate = expense.transaction_date;
+    }
+    suppliers.set(supplier, current);
+  }
+
+  if (suppliers.size === 0) {
+    return [];
+  }
+
+  return [...suppliers.entries()]
+    .map(([name, summary]) => ({
+      name,
+      totalPurchased: summary.total,
+      lastOrderDate: summary.lastDate,
+      averageOrderValue: summary.total / summary.count,
+      // TODO: enrich with real payment terms and overdue invoice count from supplier API.
+      paymentTerms: summary.total > 1_000_000 ? "30 días" : "15 días",
+      overdueInvoicesCount: summary.total > 1_500_000 ? 1 : 0,
+    }))
+    .sort((a, b) => b.totalPurchased - a.totalPurchased);
+}
+
+const UNIDENTIFIED_KEY = "__unidentified__";
+
+interface VolumeAccumulator {
+  name: string;
+  identified: boolean;
+  total: number;
+  count: number;
+  lastDate: string | null;
+}
+
+function finalizeVolume(acc: Map<string, VolumeAccumulator>): VolumeSummary[] {
+  return [...acc.entries()]
+    .map(([key, entry]) => ({
+      key,
+      name: entry.name,
+      identified: entry.identified,
+      total: entry.total,
+      lastDate: entry.lastDate,
+      average: entry.count > 0 ? entry.total / entry.count : 0,
+      count: entry.count,
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
+/**
+ * Compras por producto (volumen de compra): agrupa los gastos vinculados a un
+ * producto real (product_id) y los mapea contra el catálogo. Los gastos sin
+ * producto asignado se omiten — esta vista es a nivel producto/stock.
+ */
+export function buildProductPurchases(
+  expenses: ExpenseEntryResponse[],
+  products: ProductResponse[],
+): VolumeSummary[] {
+  const nameById = new Map(products.map((p) => [p.id, p.name]));
+  const acc = new Map<string, VolumeAccumulator>();
+
+  for (const expense of expenses) {
+    const productId = expense.product_id;
+    if (!productId) continue;
+    const name = nameById.get(productId) ?? "Producto sin nombre";
+    const current = acc.get(productId) ?? { name, identified: true, total: 0, count: 0, lastDate: null };
+    current.total += Number(expense.amount);
+    current.count += 1;
+    if (!current.lastDate || new Date(expense.transaction_date) > new Date(current.lastDate)) {
+      current.lastDate = expense.transaction_date;
+    }
+    acc.set(productId, current);
+  }
+
+  return finalizeVolume(acc);
+}
+
+/**
+ * Volumen de compra por proveedor REAL (supplier_id contra el catálogo). Los
+ * gastos sin proveedor y los del sentinela se unifican en "No identificado".
+ */
+export function buildSupplierBreakdown(
+  expenses: ExpenseEntryResponse[],
+  suppliers: SupplierResponse[],
+): VolumeSummary[] {
+  const nameById = new Map(suppliers.map((s) => [s.id, s.name]));
+  // Ids del/los proveedor(es) sentinela: sus compras se fusionan con las que no
+  // tienen proveedor (supplier_id NULL) en un único bucket "No identificado".
+  const sentinelIds = new Set(suppliers.filter(isSentinelSupplier).map((s) => s.id));
+  const acc = new Map<string, VolumeAccumulator>();
+
+  for (const expense of expenses) {
+    const supplierId = expense.supplier_id;
+    const identified = Boolean(
+      supplierId && nameById.has(supplierId) && !sentinelIds.has(supplierId),
+    );
+    const key = identified ? (supplierId as string) : UNIDENTIFIED_KEY;
+    const name = identified ? nameById.get(supplierId as string)! : UNIDENTIFIED_SUPPLIER;
+    const current = acc.get(key) ?? { name, identified, total: 0, count: 0, lastDate: null };
+    current.total += Number(expense.amount);
+    current.count += 1;
+    if (!current.lastDate || new Date(expense.transaction_date) > new Date(current.lastDate)) {
+      current.lastDate = expense.transaction_date;
+    }
+    acc.set(key, current);
+  }
+
+  return finalizeVolume(acc);
+}
+
+/**
+ * Volumen de venta por cliente REAL (customer_id contra el catálogo). Las
+ * ventas sin cliente registrado se agrupan en el centinela "Local".
+ */
+export function buildCustomerBreakdown(
+  sales: SaleEntryResponse[],
+  customers: CustomerResponse[],
+): VolumeSummary[] {
+  const nameById = new Map(customers.map((c) => [c.id, c.name]));
+  const acc = new Map<string, VolumeAccumulator>();
+
+  for (const sale of sales) {
+    const customerId = sale.customer_id;
+    const identified = Boolean(customerId && nameById.has(customerId));
+    const key = identified ? (customerId as string) : UNIDENTIFIED_KEY;
+    const name = identified ? nameById.get(customerId as string)! : UNIDENTIFIED_CUSTOMER;
+    const current = acc.get(key) ?? { name, identified, total: 0, count: 0, lastDate: null };
+    current.total += Number(sale.amount);
+    current.count += 1;
+    if (!current.lastDate || new Date(sale.transaction_date) > new Date(current.lastDate)) {
+      current.lastDate = sale.transaction_date;
+    }
+    acc.set(key, current);
+  }
+
+  return finalizeVolume(acc);
+}
+
+interface LineBucket {
+  start: Date;
+  end: Date; // inclusive, fin del día/semana/mes/hora
+  label: string;
+}
+
+function endOfDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+}
+
+/** Un bucket por día calendario entre `from` y `to` (inclusive). */
+function buildDailyBuckets(from: Date, to: Date): LineBucket[] {
+  const buckets: LineBucket[] = [];
+  let cursor = from;
+  while (cursor <= to) {
+    buckets.push({
+      start: cursor,
+      end: endOfDay(cursor),
+      label: cursor.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" }),
+    });
+    cursor = addDays(cursor, 1);
+  }
+  return buckets;
+}
+
+/** Buckets lunes–domingo reales que cubren el rango — agrega de verdad, no repite días. */
+function buildWeeklyBuckets(from: Date, to: Date): LineBucket[] {
+  const buckets: LineBucket[] = [];
+  let cursor = mondayOf(from);
+  const lastMonday = mondayOf(to);
+  while (cursor <= lastMonday) {
+    const end = addDays(cursor, 6);
+    buckets.push({
+      start: cursor,
+      end: endOfDay(end),
+      label: `Sem ${cursor.getDate()}/${String(cursor.getMonth() + 1).padStart(2, "0")}`,
+    });
+    cursor = addDays(cursor, 7);
+  }
+  return buckets;
+}
+
+/** Buckets por mes calendario que cubren el rango. */
+function buildMonthlyBuckets(from: Date, to: Date): LineBucket[] {
+  const buckets: LineBucket[] = [];
+  let year = from.getFullYear();
+  let month = from.getMonth();
+  const endYear = to.getFullYear();
+  const endMonth = to.getMonth();
+  while (year < endYear || (year === endYear && month <= endMonth)) {
+    const start = new Date(year, month, 1);
+    // `endOfMonth` de lib/period.ts espera mes 1-indexado; `month` acá es 0-indexado (Date nativo).
+    const end = endOfMonth(year, month + 1);
+    buckets.push({
+      start,
+      end: endOfDay(end),
+      label: start.toLocaleDateString("es-AR", { month: "short" }),
+    });
+    month += 1;
+    if (month > 11) {
+      month = 0;
+      year += 1;
+    }
+  }
+  return buckets;
+}
+
+/** 24 buckets horarios de un día puntual (histórico o no, nunca "hoy" a secas). */
+function buildHourlyBuckets(day: Date): LineBucket[] {
+  return Array.from({ length: 24 }, (_, hour) => {
+    const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, 0, 0, 0);
+    const end = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, 59, 59, 999);
+    return { start, end, label: `${String(hour).padStart(2, "0")}:00` };
+  });
+}
+
+function inBucket(dateStr: string, bucket: LineBucket): boolean {
+  const parsed = new Date(dateStr);
+  return parsed >= bucket.start && parsed <= bucket.end;
+}
+
+export function buildLineSeries(
+  metric: "caja" | "ventas" | "stock",
+  sales: SaleEntryResponse[],
+  expenses: ExpenseEntryResponse[],
+  granularity: "hourly" | "daily" | "weekly" | "monthly",
+  range: DateRangeStrings,
+  scoreHistory?: HealthScoreV2Response[],
+): Array<{ label: string; value: number | null; change: number }> {
+  const fromDate = parseLocal(range.from);
+  const toDate = parseLocal(range.to);
+
+  const buckets =
+    granularity === "hourly"
+      ? buildHourlyBuckets(fromDate)
+      : granularity === "weekly"
+        ? buildWeeklyBuckets(fromDate, toDate)
+        : granularity === "monthly"
+          ? buildMonthlyBuckets(fromDate, toDate)
+          : buildDailyBuckets(fromDate, toDate);
+
+  let previous = 0;
+
+  return buckets.map((bucket) => {
+    let value: number | null = null;
+
+    if (metric === "ventas") {
+      value = sales
+        .filter((entry) => inBucket(entry.transaction_date, bucket))
+        .reduce((sum, entry) => sum + Number(entry.amount), 0);
+    } else if (metric === "caja") {
+      const salesTotal = sales
+        .filter((entry) => inBucket(entry.transaction_date, bucket))
+        .reduce((sum, entry) => sum + Number(entry.amount), 0);
+      const expensesTotal = expenses
+        .filter((entry) => inBucket(entry.transaction_date, bucket))
+        .reduce((sum, entry) => sum + Number(entry.amount), 0);
+      value = previous + salesTotal - expensesTotal;
+    } else {
+      // stock: usa score_stock del historial real más cercano al bucket. Sin
+      // historial no se fabrica un valor (no-invention) — el punto queda vacío.
+      if (scoreHistory && scoreHistory.length > 0) {
+        const reference = bucket.end.getTime();
+        const nearest = scoreHistory.reduce((best, s) => {
+          const d = Math.abs(new Date(s.created_at).getTime() - reference);
+          const bd = Math.abs(new Date(best.created_at).getTime() - reference);
+          return d < bd ? s : best;
+        });
+        value = nearest.score_stock;
+      } else {
+        value = null;
+      }
+    }
+
+    const change = value !== null && previous !== 0
+      ? ((value - previous) / Math.abs(previous)) * 100
+      : 0;
+    previous = value ?? previous;
+
+    return { label: bucket.label, value, change };
+  });
+}
+
+export function buildComparisonSeries(
+  compareBy: CompareOption["value"],
+  sales: SaleEntryResponse[],
+  expenses: ExpenseEntryResponse[],
+  products: ProductResponse[],
+): Array<{ label: string; value: number }> {
+  const productMap = new Map(products.map((product) => [product.id, product]));
+  const buckets = new Map<string, number>();
+
+  if (compareBy === "categoria") {
+    for (const sale of sales) {
+      const category = productMap.get(sale.product_id ?? "")?.category || "Sin categoría";
+      buckets.set(category, (buckets.get(category) ?? 0) + Number(sale.amount));
+    }
+  } else if (compareBy === "proveedor") {
+    for (const expense of expenses) {
+      const supplier = expense.supplier_name?.trim() || "Sin proveedor";
+      buckets.set(supplier, (buckets.get(supplier) ?? 0) + Number(expense.amount));
+    }
+  } else if (compareBy === "metodo") {
+    for (const sale of sales) {
+      const method = normalizePaymentMethod(sale.payment_method);
+      buckets.set(method, (buckets.get(method) ?? 0) + Number(sale.amount));
+    }
+  } else {
+    for (const sale of sales) {
+      const weekday = WEEKDAY_LABELS[new Date(sale.transaction_date).getDay()] ?? "—";
+      buckets.set(weekday, (buckets.get(weekday) ?? 0) + Number(sale.amount));
+    }
+  }
+
+  return [...buckets.entries()]
+    .map(([label, value]) => ({ label, value }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 6);
+}
+
+export function buildDistributionSeries(
+  distribution: DistributionOption["value"],
+  sales: SaleEntryResponse[],
+  expenses: ExpenseEntryResponse[],
+  products: ProductResponse[],
+): Array<{ name: string; value: number }> {
+  if (distribution === "cajaMetodo") {
+    return buildCashBreakdown(sales).rows.map((row) => ({
+      name: row.method,
+      value: row.amount,
+    }));
+  }
+
+  if (distribution === "stockEstado") {
+    return buildStockStatuses(products).map((row) => ({
+      name: row.label,
+      value: row.count,
+    }));
+  }
+
+  if (distribution === "comprasProveedor") {
+    return buildSupplierSummaries(expenses).slice(0, 5).map((row) => ({
+      name: row.name,
+      value: row.totalPurchased,
+    }));
+  }
+
+  const productMap = new Map(products.map((product) => [product.id, product]));
+  const buckets = new Map<string, number>();
+
+  for (const sale of sales) {
+    const category = productMap.get(sale.product_id ?? "")?.category || "Sin categoría";
+    buckets.set(category, (buckets.get(category) ?? 0) + Number(sale.amount));
+  }
+
+  return [...buckets.entries()].map(([name, value]) => ({ name, value }));
+}
