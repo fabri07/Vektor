@@ -30,6 +30,8 @@ from typing import Final
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.facts_service import INFLOW_METHOD
+from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
 from app.application.services.stock_service import SaleProductNotFoundError
 from app.persistence.models.inventory import InventoryMovement, movement_business_time
 from app.persistence.models.product import Product
@@ -72,6 +74,73 @@ async def primeros_dias_de_fuente(
 
 def respaldada(primer_dia: date | None, dia_venta: date) -> bool:
     return primer_dia is not None and primer_dia <= dia_venta
+
+
+def es_cobro_de_fiado(payment_method: str | None) -> bool:
+    """Un cobro de fiado (``inflow``) no es una venta: no necesita compra previa.
+    Sin distinguir mayúsculas, como lo escribe cualquier camino de carga."""
+    return (payment_method or "").strip().lower() == INFLOW_METHOD
+
+
+async def catalogo_por_archivo(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    pares: Iterable[tuple[uuid.UUID | None, uuid.UUID | None]],
+) -> set[tuple[uuid.UUID, uuid.UUID]]:
+    """``{(archivo, producto)}`` con stock del catálogo de ESE archivo —apertura
+    o compra, viva, con cantidad y costo— aunque su fecha esté por confirmar.
+
+    Es el respaldo propio de un import de catálogo + historial (M·2d-1b): la
+    fecha de la apertura la confirma el usuario después, así que la venta del
+    mismo archivo cuenta como respaldada por ella.
+    """
+    pedidos = {(u, p) for u, p in pares if u is not None and p is not None}
+    if not pedidos:
+        return set()
+    m = InventoryMovement
+    filas = await session.execute(
+        select(m.source_upload_id, m.product_id)
+        .where(
+            m.tenant_id == tenant_id,
+            m.source_upload_id.in_(sorted({u for u, _ in pedidos}, key=str)),
+            m.product_id.in_(sorted({p for _, p in pedidos}, key=str)),
+            m.source_type == SOURCE_CATALOG_INITIAL_STOCK,
+            m.movement_type.in_(("adjustment", "purchase")),
+            m.voided_at.is_(None),
+            m.qty > 0,
+            func.coalesce(m.unit_cost_final, m.unit_cost) > 0,
+        )
+        .distinct()
+    )
+    return {(u, p) for u, p in filas.all() if (u, p) in pedidos}
+
+
+def motivo_sin_respaldo(
+    product_id: uuid.UUID | None,
+    dia: date,
+    primeros: dict[uuid.UUID, date],
+    nombre: str | None,
+    *,
+    del_catalogo_del_archivo: bool,
+) -> str | None:
+    """El motivo de «Otros» de una venta sin respaldo, o ``None`` si lo tiene.
+
+    Regla ÚNICA de la importación (B·5e) y de la reparación de las históricas
+    (B·5g): sin producto, o sin fuente con costo a su fecha y sin stock del
+    catálogo del mismo archivo. Los cobros de fiado se filtran antes
+    (``es_cobro_de_fiado``).
+    """
+    if product_id is None:
+        return (
+            f"{MOTIVO_VENTA_SIN_PRODUCTO}: elegí qué producto se vendió "
+            "(sin producto no hay compra previa ni costo)"
+        )
+    if del_catalogo_del_archivo or respaldada(primeros.get(product_id), dia):
+        return None
+    return (
+        f"{MOTIVO_VENTA_SIN_COMPRA}: cargá la compra o el stock inicial de "
+        f"{nombre or 'el producto'}"
+    )
 
 
 class VentaSinCompraError(Exception):
@@ -229,7 +298,10 @@ __all__ = [
     "productos_con_fuente_en_archivo",
     "ventas_que_pierden_respaldo",
     "VentaSinProductoError",
+    "catalogo_por_archivo",
+    "es_cobro_de_fiado",
     "exigir_respaldo",
+    "motivo_sin_respaldo",
     "primeros_dias_de_fuente",
     "respaldada",
 ]

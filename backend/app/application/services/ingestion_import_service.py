@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,8 +82,9 @@ from app.application.services.product_supplier_link_service import (
     reconcile_catalog_declared_links_for_upload,
 )
 from app.application.services.respaldo_service import (
-    MOTIVO_VENTA_SIN_COMPRA,
-    MOTIVO_VENTA_SIN_PRODUCTO,
+    catalogo_por_archivo,
+    es_cobro_de_fiado,
+    motivo_sin_respaldo,
     primeros_dias_de_fuente,
     respaldada,
 )
@@ -206,6 +207,7 @@ from app.domain.text_norm import (
     normalize_sku,
     normalize_text,
 )
+from app.domain.transaction import PaymentMethod
 from app.domain.verticals import Vertical, parse_vertical
 from app.observability.logger import get_logger
 
@@ -5370,6 +5372,22 @@ async def _vincular_ventas_pendientes(
     return pendientes
 
 
+#: Interna (``__``, no se muestra): el cliente de la venta que pasó a «Otros».
+#: Resolverla lo devuelve; sin él, una venta fiada volvería sin su deuda.
+CUSTOMER_REF_KEY: Final = "__customer_id__"
+
+
+def filas_internas_de_venta(venta: Any) -> dict[str, str]:
+    """Lo que una venta sacada a «Otros» necesita para volver igual: su cliente.
+
+    La identidad de operación NO va en la fila: es por COMPROBANTE (varios
+    renglones comparten una) y con la clave adentro el candado E6b trataría al
+    renglón hermano vivo como un duplicado (409 imposible de resolver)."""
+    if venta.customer_id is None:
+        return {}
+    return {CUSTOMER_REF_KEY: str(venta.customer_id)}
+
+
 async def _ventas_sin_compra_a_otros(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -5391,15 +5409,11 @@ async def _ventas_sin_compra_a_otros(
     confirmar (M·2d-1b: la confirma el usuario después; sin esto el primer
     import de catálogo + historial mandaría todo a «Otros»).
     """
-    from sqlalchemy import func, select  # noqa: PLC0415
+    from sqlalchemy import select  # noqa: PLC0415
 
-    from app.application.services.inventory_movement_origin import (  # noqa: PLC0415
-        SOURCE_CATALOG_INITIAL_STOCK as _CATALOGO,
-    )
     from app.application.services.operation_identity_service import (  # noqa: PLC0415
         liberar_identidades_de,
     )
-    from app.persistence.models.inventory import InventoryMovement  # noqa: PLC0415
     from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
     from app.persistence.models.unclassified_record import UnclassifiedRecord  # noqa: PLC0415
@@ -5422,26 +5436,12 @@ async def _ventas_sin_compra_a_otros(
     crudos = await _vincular_ventas_pendientes(session, tenant_id, nuevas)
     pids = {v.product_id for v in nuevas if v.product_id is not None}
     primeros = await primeros_dias_de_fuente(session, tenant_id, pids)
-    del_catalogo_del_archivo: set[uuid.UUID] = set()
-    if uploaded_file_id is not None and pids:
-        m = InventoryMovement
-        del_catalogo_del_archivo = {
-            pid
-            for pid in (
-                await session.execute(
-                    select(m.product_id).where(
-                        m.tenant_id == tenant_id,
-                        m.source_upload_id == uploaded_file_id,
-                        m.source_type == _CATALOGO,
-                        m.movement_type.in_(("adjustment", "purchase")),
-                        m.voided_at.is_(None),
-                        m.qty > 0,
-                        func.coalesce(m.unit_cost_final, m.unit_cost) > 0,
-                    )
-                )
-            ).scalars()
-            if pid is not None
-        }
+    del_catalogo_del_archivo = {
+        pid
+        for _, pid in await catalogo_por_archivo(
+            session, tenant_id, [(uploaded_file_id, pid) for pid in pids]
+        )
+    }
     nombres: dict[uuid.UUID, str] = {}
     factores: dict[uuid.UUID, int] = {}
     if pids:
@@ -5473,23 +5473,22 @@ async def _ventas_sin_compra_a_otros(
     sin_producto = sin_compra = 0
     for venta in nuevas:
         dia = venta.transaction_date.date()
-        if (venta.payment_method or "").lower() == "inflow":
+        if es_cobro_de_fiado(venta.payment_method):
             continue  # un cobro de fiado no es una venta
-        if venta.product_id is None:
-            motivo = (
-                f"{MOTIVO_VENTA_SIN_PRODUCTO}: elegí qué producto se vendió "
-                "(sin producto no hay compra previa ni costo)"
-            )
-            sin_producto += 1
-        elif venta.product_id in del_catalogo_del_archivo or respaldada(
-            primeros.get(venta.product_id), dia
-        ):
+        _motivo = motivo_sin_respaldo(
+            venta.product_id,
+            dia,
+            primeros,
+            nombres.get(venta.product_id) if venta.product_id else None,
+            del_catalogo_del_archivo=venta.product_id in del_catalogo_del_archivo,
+        )
+        if _motivo is None:
             continue
+        if venta.product_id is None:
+            sin_producto += 1
         else:
-            nombre = nombres.get(venta.product_id, "el producto")
-            motivo = f"{MOTIVO_VENTA_SIN_COMPRA}: cargá la compra o el stock inicial de {nombre}"
             sin_compra += 1
-        motivo = motivo[:200]
+        motivo = _motivo[:200]
         if not (venta.source_row_ref and (venta.source_row_ref, motivo) in ya_pendientes):
             nombre_crudo, sku_crudo, barcode_crudo = crudos.get(venta.id, (None, None, None))
             fila = {
@@ -5513,6 +5512,7 @@ async def _ventas_sin_compra_a_otros(
                 ),
                 "medio_de_pago": venta.payment_method,
                 "detalle": venta.notes,
+                **filas_internas_de_venta(venta),
             }
             _capture_unclassified(
                 session,
@@ -11186,6 +11186,14 @@ async def bulk_import_unclassified(
                 # cantidad ilegible la deja donde está, para completarla a mano,
                 # en vez de importarla como una unidad. `needs_manual` es el
                 # contador que la UI ya usa para "exige atención del usuario".
+                counts["needs_manual"] += 1
+                continue
+            # Una venta fiada (o con su cliente guardado) se resuelve de a una:
+            # en lote se crearía sin cliente —un fiado huérfano, y la deuda
+            # perdida—. El modal aplica las reglas de cliente de POST /sales.
+            if row.get(CUSTOMER_REF_KEY) or (
+                pay_raw and normalize_payment_method(pay_raw) == PaymentMethod.ACCOUNT.value
+            ):
                 counts["needs_manual"] += 1
                 continue
             # B·5e: toda venta con producto y compra previa. Sin una u otra la
