@@ -1,0 +1,165 @@
+# Re-export all models so Alembic autogenerate can discover them.
+from app.persistence.models.access_request import AccessRequest, AccessRequestToken
+from app.persistence.models.activity import UserActivityEvent
+from app.persistence.models.agent_automation_rule import AgentAutomationRule
+from app.persistence.models.analytics_event import AnalyticsEvent
+from app.persistence.models.audit import DecisionAuditLog
+from app.persistence.models.auth_token import EmailVerificationToken, PasswordResetToken
+from app.persistence.models.business import (
+    ActionSuggestion,
+    BusinessProfile,
+    BusinessSnapshot,
+    Insight,
+    MomentumProfile,
+)
+from app.persistence.models.cash_close import CashClose
+from app.persistence.models.chat_session_log import ChatSessionLog
+from app.persistence.models.column_mapping import TenantColumnMapping
+from app.persistence.models.communication_log import CommunicationLog
+from app.persistence.models.contact_lead import ContactLead
+from app.persistence.models.conversation_context import AgentConversationContext
+from app.persistence.models.coverage_gap import ChatCoverageGap
+from app.persistence.models.customer import Customer
+from app.persistence.models.external_operation_log import ExternalOperationLog
+from app.persistence.models.field_definitions import (
+    TenantCustomFieldDefinition,
+    TenantFieldChangeLog,
+    VerticalFieldDefinition,
+)
+from app.persistence.models.file import UploadedFile
+from app.persistence.models.google_mcp_connection import GoogleMcpConnection
+from app.persistence.models.heuristic_override import BusinessHeuristicOverride
+from app.persistence.models.idempotency import IdempotencyRecord
+from app.persistence.models.import_attempt import ImportAttempt, ImportOutbox
+from app.persistence.models.ingestion_schema_decision import IngestionSchemaDecision
+from app.persistence.models.inventory import InventoryBalance, InventoryMovement
+from app.persistence.models.job_run import JobRun
+from app.persistence.models.maintenance_lock import TenantMaintenanceLock
+from app.persistence.models.memory import AgentMemory, BusinessMemory, OperationFingerprint
+from app.persistence.models.notification import Notification
+from app.persistence.models.operation_identity import (
+    OperationIdentity,
+    OperationIdentityLink,
+)
+from app.persistence.models.owner_capital import OwnerCapitalMovement
+from app.persistence.models.pending_action import PendingAction
+from app.persistence.models.pipeline_event import PipelineEvent
+from app.persistence.models.pos_cash_session import (
+    PosCashSession,
+    PosLateSale,
+)
+from app.persistence.models.pos_operation import (
+    PosOperation,
+    PosOperationLine,
+    PosTender,
+)
+from app.persistence.models.pos_stock_discrepancy import (
+    PosStockDiscrepancy,
+)
+from app.persistence.models.pos_terminal import PosTerminal
+from app.persistence.models.product import Product
+from app.persistence.models.product_alias import ProductAlias
+from app.persistence.models.product_cost import ProductCostHistory, ProductCostState
+from app.persistence.models.product_supplier_link import ProductSupplierLink
+from app.persistence.models.purchase_order import PurchaseOrder
+from app.persistence.models.repair import DataRepairItem, DataRepairRun
+from app.persistence.models.score import (
+    HealthScoreSnapshot,
+    HeuristicRuleSet,
+    WeeklyScoreHistory,
+)
+from app.persistence.models.social_metric import SocialMetric
+from app.persistence.models.supplier import Supplier
+from app.persistence.models.tenant import Subscription, Tenant
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
+from app.persistence.models.user import User
+from app.persistence.models.user_auth_identity import UserAuthIdentity
+
+__all__ = [
+    "UserActivityEvent",
+    "AnalyticsEvent",
+    "AgentAutomationRule",
+    "Tenant",
+    "Subscription",
+    "User",
+    "UserAuthIdentity",
+    "BusinessProfile",
+    "BusinessSnapshot",
+    "HeuristicRuleSet",
+    "HealthScoreSnapshot",
+    "WeeklyScoreHistory",
+    "MomentumProfile",
+    "InventoryBalance",
+    "InventoryMovement",
+    "JobRun",
+    "Product",
+    "SaleEntry",
+    "ExpenseEntry",
+    "Insight",
+    "ActionSuggestion",
+    "DecisionAuditLog",
+    "Customer",
+    "Supplier",
+    "ProductSupplierLink",
+    "IngestionSchemaDecision",
+    "UnclassifiedRecord",
+    "UploadedFile",
+    "Notification",
+    "OwnerCapitalMovement",
+    "ProductCostHistory",
+    "ProductCostState",
+    "EmailVerificationToken",
+    "PasswordResetToken",
+    "BusinessHeuristicOverride",
+    "AgentConversationContext",
+    "PendingAction",
+    "IdempotencyRecord",
+    "PosCashSession",
+    "PosLateSale",
+    "PosOperation",
+    "PosOperationLine",
+    "PosStockDiscrepancy",
+    "PosTender",
+    "PosTerminal",
+    "ProductAlias",
+    "ImportAttempt",
+    "ImportOutbox",
+    "OperationFingerprint",
+    "OperationIdentity",
+    "OperationIdentityLink",
+    "BusinessMemory",
+    "AgentMemory",
+    "GoogleMcpConnection",
+    "ChatSessionLog",
+    "ChatCoverageGap",
+    "CashClose",
+    "TenantColumnMapping",
+    "VerticalFieldDefinition",
+    "TenantCustomFieldDefinition",
+    "TenantFieldChangeLog",
+    "PurchaseOrder",
+    "DataRepairRun",
+    "DataRepairItem",
+    "PipelineEvent",
+    "CommunicationLog",
+    "ContactLead",
+    "ExternalOperationLog",
+    "SocialMetric",
+    "TenantMaintenanceLock",
+    "AccessRequest",
+    "AccessRequestToken",
+]
+
+# B·5c: el lock compartido de alta de productos, en cualquier camino que cree uno.
+from app.persistence import alta_de_producto_lock as _alta_de_producto_lock  # noqa: E402,F401
+
+# M·2a: registra los listeners que costean cada venta al confirmarla. Va acá
+# porque todo lo que abre una sesión importa los modelos (API, worker, scripts,
+# tests): una venta creada por cualquier camino queda costeada.
+from app.persistence import costeo_de_ventas as _costeo_de_ventas  # noqa: E402,F401
+
+# M·P2b: registra los listeners que marcan el costo promedio pendiente de
+# recalcular (``product_cost_state``) y encolan el recálculo. Mismo motivo: un
+# movimiento de stock creado por cualquier camino tiene que dejarlo pendiente.
+from app.persistence import costo_promedio_pendiente as _costo_promedio_pendiente  # noqa: E402,F401

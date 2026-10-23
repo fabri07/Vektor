@@ -1,0 +1,174 @@
+"""Notification endpoints."""
+
+from datetime import UTC, datetime
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.v1.deps import get_current_tenant, get_current_user
+from app.persistence.db.session import get_db_session
+from app.persistence.models.notification import Notification
+from app.persistence.models.tenant import Tenant
+from app.persistence.models.user import User
+from app.schemas.common import MessageResponse
+
+router = APIRouter()
+
+
+class NotificationItem(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: UUID
+    title: str
+    body: str
+    notification_type: str
+    channel: str
+    is_read: bool
+    created_at: datetime
+    action_url: str | None = None
+
+
+class NotificationListResponse(BaseModel):
+    notifications: list[NotificationItem]
+    unread_count: int
+
+
+class CreateNotificationRequest(BaseModel):
+    user_id: UUID | None = None
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=2000)
+    notification_type: str = Field(pattern=r"^[a-zA-Z0-9_]{1,50}$")
+    channel: str = Field(default="in_app", pattern=r"^(in_app|email|sms)$")
+    action_url: str | None = Field(default=None, max_length=500)
+
+
+def _to_response(notification: Notification) -> NotificationItem:
+    metadata = notification.metadata_ or {}
+    return NotificationItem(
+        id=notification.id,
+        title=notification.title,
+        body=notification.body,
+        notification_type=notification.notification_type,
+        channel=notification.channel,
+        is_read=notification.is_read,
+        created_at=notification.created_at,
+        action_url=metadata.get("action_url"),
+    )
+
+
+@router.post(
+    "",
+    response_model=NotificationItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create notification (internal)",
+    include_in_schema=False,
+)
+async def create_notification(
+    payload: CreateNotificationRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> Notification:
+    notification = Notification(
+        tenant_id=tenant.tenant_id,
+        user_id=payload.user_id,
+        title=payload.title,
+        body=payload.body,
+        notification_type=payload.notification_type,
+        channel=payload.channel,
+        is_read=False,
+        metadata_={"action_url": payload.action_url} if payload.action_url else None,
+    )
+    session.add(notification)
+    await session.flush()
+    await session.refresh(notification)
+    return notification
+
+
+@router.get("", response_model=NotificationListResponse, summary="List my notifications")
+async def list_notifications(
+    is_read: bool | None = Query(default=None),
+    limit: int = Query(default=30, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> NotificationListResponse:
+    base_q = select(Notification).where(
+        Notification.tenant_id == tenant.tenant_id,
+        Notification.user_id == current_user.user_id,
+    )
+    if is_read is not None:
+        base_q = base_q.where(Notification.is_read == is_read)
+
+    list_q = base_q.order_by(Notification.created_at.desc()).limit(limit)
+    result = await session.execute(list_q)
+    notifications = list(result.scalars().all())
+
+    unread_result = await session.execute(
+        select(func.count()).select_from(
+            select(Notification)
+            .where(
+                Notification.tenant_id == tenant.tenant_id,
+                Notification.user_id == current_user.user_id,
+                Notification.is_read.is_(False),
+            )
+            .subquery()
+        )
+    )
+    unread_count: int = unread_result.scalar_one()
+
+    return NotificationListResponse(
+        notifications=[_to_response(n) for n in notifications],
+        unread_count=unread_count,
+    )
+
+
+@router.patch(
+    "/{notification_id}/read",
+    response_model=MessageResponse,
+    summary="Mark notification as read",
+)
+async def mark_notification_read(
+    notification_id: UUID,
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> MessageResponse:
+    result = await session.execute(
+        select(Notification).where(
+            Notification.id == notification_id,
+            Notification.tenant_id == tenant.tenant_id,
+            Notification.user_id == current_user.user_id,
+        )
+    )
+    notification = result.scalar_one_or_none()
+    if not notification:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+    notification.is_read = True
+    notification.read_at = datetime.now(UTC)
+    session.add(notification)
+    await session.flush()
+    return MessageResponse(message="Notification marked as read.")
+
+
+@router.post("/read-all", response_model=MessageResponse, summary="Mark all notifications as read")
+async def mark_all_read(
+    current_user: User = Depends(get_current_user),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> MessageResponse:
+    from sqlalchemy import update  # noqa: PLC0415
+
+    await session.execute(
+        update(Notification)
+        .where(
+            Notification.tenant_id == tenant.tenant_id,
+            Notification.user_id == current_user.user_id,
+            Notification.is_read.is_(False),
+        )
+        .values(is_read=True)
+        .values(read_at=datetime.now(UTC))
+    )
+    return MessageResponse(message="All notifications marked as read.")
