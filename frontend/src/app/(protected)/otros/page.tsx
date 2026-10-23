@@ -1,0 +1,541 @@
+"use client";
+
+import { mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { AxiosError } from "axios";
+import { Trash2, Pencil, Zap, Link2 } from "lucide-react";
+import { PageWrapper } from "@/components/layout/PageWrapper";
+import { Badge } from "@/components/ui/Badge";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { Modal } from "@/components/ui/Modal";
+import { ReclassifyModal } from "./ReclassifyModal";
+import { OthersGroups } from "./OthersGroups";
+import { VincularColaModal } from "./VincularColaModal";
+import { esQueryAfectadaPorVincular, prefill, rowPreview } from "./helpers";
+import { Table } from "@/components/ui/Table";
+import {
+  othersService,
+  type OthersGroup,
+  type ProductMatchCandidate,
+  type ReclassifyEntityType,
+  type ResolvePurchasePayload,
+  type UnclassifiedRecordResponse,
+} from "@/services/others.service";
+import { productsService, type ProductCategoryOption } from "@/services/products.service";
+import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
+import { useToastStore } from "@/stores/toastStore";
+
+const SOURCE_LABELS: Record<string, string> = {
+  ingestion: "Carga de datos",
+  chat: "Chat",
+  reanalysis: "Reanálisis",
+  // B·5e-2: una venta de la caja sin compra previa. La venta ya existe: la fila
+  // se descarta al cargar la compra, no se clasifica.
+  pos: "Caja (venta sin compra)",
+};
+
+const ENTITY_LABELS: Record<ReclassifyEntityType, string> = {
+  sale: "Venta",
+  expense: "Gasto",
+  product: "Producto",
+  customer: "Cliente",
+  supplier: "Proveedor",
+};
+
+/** Extrae el `detail.code` de un error de axios (contrato del backend: `{detail:{code}}`). */
+function errorCode(error: unknown): string | null {
+  const detail = (error as AxiosError<{ detail?: { code?: string } }>)?.response?.data?.detail;
+  return detail?.code ?? null;
+}
+
+/** Etiqueta corta de un candidato de producto (nombre + sku/barcode si existen). */
+const PAGE_SIZE = 50;
+
+export default function OtrosPage() {
+  const [reclassifying, setReclassifying] = useState<UnclassifiedRecordResponse | null>(null);
+  const [page, setPage] = useState(0);
+  // B·5a: grupo elegido en «Por archivo y motivo» (filtra la tabla).
+  const [group, setGroup] = useState<OthersGroup | null>(null);
+  const [toDismiss, setToDismiss] = useState<UnclassifiedRecordResponse | null>(null);
+  // B·8b: la cola «Vincular a producto» (sólo trae las ventas al abrirse).
+  const [colaAbierta, setColaAbierta] = useState(false);
+  const queryClient = useQueryClient();
+  const toast = useToastStore((s) => s.add);
+
+  const { data: records = [], isLoading, isError } = useQuery({
+    queryKey: ["others-pending", page, group?.group_key ?? null],
+    queryFn: () => othersService.getPending(page * PAGE_SIZE, PAGE_SIZE, group?.group_key),
+    staleTime: 60 * 1000,
+  });
+
+  const { data: counts } = useQuery({
+    queryKey: ["others-pending-count"],
+    queryFn: () => othersService.getPendingCounts(),
+    staleTime: 60 * 1000,
+  });
+  const pendingTotal = counts?.pending ?? 0;
+  // Sin una sola sugerencia, "Importar todo lo sugerido" no tiene nada que
+  // importar: dispararlo es una importación masiva a ciegas sobre miles de
+  // filas cuyo destino Véktor no supo determinar.
+  const sinSugerencias = (counts?.pendingSuggested ?? 0) === 0;
+
+  // Catálogo de categorías de producto del vertical, para el selector del modal.
+  const { data: productCategories = [] } = useQuery({
+    queryKey: ["product-categories"],
+    queryFn: () => productsService.getCategories(),
+    staleTime: 30 * 60 * 1000,
+  });
+
+  // El conteo del grupo sale del resumen ACTUAL, no de la copia guardada al
+  // elegirlo: después de descartar o importar dentro del grupo, quedaría viejo.
+  const { data: summary } = useQuery({
+    queryKey: ["others-summary"],
+    queryFn: () => othersService.getSummary(),
+    staleTime: 60 * 1000,
+  });
+  const groupCount = group
+    ? (summary?.find((g) => g.group_key === group.group_key)?.count ?? 0)
+    : pendingTotal;
+  const totalPages = Math.max(1, Math.ceil(groupCount / PAGE_SIZE));
+  // B·8b: el botón de la cola sale del resumen, sin traer las filas: hay ventas
+  // pendientes. Las que no dicen qué producto se vendió las filtra la cola.
+  const hayVentasPendientes = (summary ?? []).some(
+    (g) => g.status === "PENDING" && g.suggested_entity === "sale" && g.count > 0,
+  );
+
+  const invalidarTrasVincular = () =>
+    queryClient.invalidateQueries({ predicate: (q) => esQueryAfectadaPorVincular(q.queryKey) });
+  const cerrarCola = async () => {
+    setColaAbierta(false);
+    await invalidarTrasVincular();
+  };
+
+  const invalidate = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["others-pending"] });
+    await queryClient.invalidateQueries({ queryKey: ["others-pending-count"] });
+    await queryClient.invalidateQueries({ queryKey: ["others-summary"] });
+  };
+
+  const dismissMutation = useMutation({
+    mutationFn: (id: string) => othersService.dismiss(id),
+    onSuccess: async () => {
+      setToDismiss(null);
+      toast("Registro descartado.", "success");
+      await invalidate();
+    },
+    onError: () => toast("No se pudo descartar el registro.", "error"),
+  });
+
+  const bulkImportMutation = useMutation({
+    mutationFn: () => othersService.bulkImport(),
+    onSuccess: async (result) => {
+      const total = result.imported_sales + result.imported_expenses;
+      const msg =
+        `${total} registro(s) importados (${result.imported_sales} ventas, ` +
+        `${result.imported_expenses} gastos)` +
+        (result.needs_manual > 0
+          ? `; ${result.needs_manual} hay que resolverlos de a uno (sin fecha o monto legible, o compras de mercadería, que van con sus artículos).`
+          : ".");
+      toast(msg, "success");
+      await invalidate();
+    },
+    onError: () => toast("No se pudo importar en lote. Probá de nuevo.", "error"),
+  });
+
+  const reclassifyMutation = useMutation({
+    mutationFn: ({
+      id,
+      entityType,
+      fields,
+      targetProductId,
+      pesesAlConflicto,
+    }: {
+      id: string;
+      entityType: ReclassifyEntityType;
+      fields: Record<string, unknown>;
+      targetProductId?: string;
+      /** E6b: el usuario ya confirmó que quiere aplicarla igual (ver el 409). */
+      pesesAlConflicto?: boolean;
+    }) =>
+      othersService.reclassify(id, {
+        entity_type: entityType,
+        fields,
+        ...(targetProductId ? { target_product_id: targetProductId } : {}),
+        ...(pesesAlConflicto ? { aplicar_pese_al_conflicto: true } : {}),
+      }),
+    onSuccess: async (_, vars) => {
+      setReclassifying(null);
+      toast(
+        vars.targetProductId
+          ? "Registro vinculado al producto existente."
+          : `Registro importado como ${ENTITY_LABELS[vars.entityType].toLowerCase()}.`,
+        "success",
+      );
+      await invalidate();
+    },
+    onError: async (error, vars) => {
+      const code = errorCode(error);
+      if (code === "DUPLICATE_PRODUCT_IDENTITY") {
+        toast(
+          "Ya existe un producto activo con ese SKU o código de barras. " +
+            "Vinculalo a uno de los sugeridos en vez de crear uno nuevo.",
+          "error",
+        );
+      } else if (code === "IDENTITY_CONFLICT") {
+        // F5-A: el backend dejó de colapsar el caso ambiguo en un solo id. El
+        // código de barras y el SKU pertenecen a productos DISTINTOS: no es un
+        // problema de los campos cargados, es una decisión que tiene que tomar el
+        // usuario. Sin esta rama caía en el else genérico ("Revisá los campos"),
+        // que apunta al lugar equivocado.
+        toast(
+          "El código de barras y el SKU apuntan a productos distintos. " +
+            "Vinculá el registro al que corresponda en vez de crear uno nuevo.",
+          "error",
+        );
+      } else if (code === "IMPORT_IDENTITY_TAKEN") {
+        // E6b: la fila tiene el mismo comprobante que algo ya cargado. NO es un
+        // problema de los campos —están bien—, es una decisión: puede ser una
+        // corrección del proveedor o un error de carga, y Véktor no puede saber
+        // cuál de las dos versiones vale. Se pregunta y, si el usuario confirma,
+        // se reintenta declarándolo explícito.
+        const igual = window.confirm(
+          "Esta fila tiene el mismo comprobante que una operación ya cargada, " +
+            "con datos distintos. Si la importás vas a quedar con las dos. " +
+            "¿La importamos igual?",
+        );
+        if (igual) {
+          reclassifyMutation.mutate({ ...vars, pesesAlConflicto: true });
+        }
+      } else if (code === "RECORD_ALREADY_RESOLVED") {
+        toast("Esta fila ya se había resuelto. Actualizamos la lista.", "info");
+        setReclassifying(null);
+        await invalidate();
+      } else if (
+        (error as AxiosError<{ code?: string }>)?.response?.data?.code === "INSUFFICIENT_STOCK"
+      ) {
+        // El 400 de stock trae `code` al lado de `detail`, que es el texto.
+        const texto = (error as AxiosError<{ detail?: unknown }>)?.response?.data?.detail;
+        toast(
+          typeof texto === "string" && texto.trim()
+            ? texto
+            : "No hay stock suficiente para registrar esta venta.",
+          "error",
+        );
+      } else if (code === "PURCHASE_NEEDS_ITEMS") {
+        // B·5b: una compra de mercadería se registra con sus artículos.
+        toast(
+          "Una compra de mercadería se registra con sus artículos: elegí «Compra de mercadería».",
+          "error",
+        );
+      } else if (code === "INVALID_TARGET_PRODUCT") {
+        // El candidato ya no está disponible (borrado/inactivo): cerrar y refrescar.
+        toast("El producto sugerido ya no está disponible. Actualizamos la lista.", "error");
+        setReclassifying(null);
+        await invalidate();
+      } else if (
+        code === "SALE_WITHOUT_PURCHASE" ||
+        code === "SALE_NEEDS_PRODUCT" ||
+        code === "SALE_PRODUCT_NOT_FOUND" ||
+        code === "POS_SALE_ALREADY_RECORDED"
+      ) {
+        // B·5e: el servidor dice qué falta (la compra de X, el producto).
+        toast(mensajeDelServidor(error) ?? "Falta la compra o el producto.", "error");
+      } else {
+        toast("No se pudo importar el registro. Revisá los campos.", "error");
+      }
+    },
+  });
+
+  const resolvePurchaseMutation = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: ResolvePurchasePayload }) =>
+      othersService.resolvePurchase(id, payload),
+    onSuccess: async () => {
+      setReclassifying(null);
+      toast("Compra registrada con sus artículos.", "success");
+      await invalidate();
+    },
+    onError: async (error, vars) => {
+      const code = errorCode(error);
+      const detail = (error as AxiosError<{ detail?: { message?: string } }>)?.response?.data
+        ?.detail;
+      if (code === "RECORD_ALREADY_RESOLVED") {
+        toast("Esta fila ya se había resuelto. Actualizamos la lista.", "info");
+        setReclassifying(null);
+        await invalidate();
+      } else if (code === "IMPORT_IDENTITY_TAKEN") {
+        const igual = window.confirm(
+          "Esta fila tiene el mismo comprobante que una operación ya cargada. " +
+            "Si la registrás vas a quedar con las dos. ¿La registramos igual?",
+        );
+        if (igual) {
+          resolvePurchaseMutation.mutate({
+            ...vars,
+            payload: { ...vars.payload, aplicar_pese_al_conflicto: true },
+          });
+        }
+      } else if (detail?.message) {
+        toast(detail.message, "error");
+      } else {
+        toast("No se pudo registrar la compra. Revisá los artículos.", "error");
+      }
+    },
+  });
+
+  const columns = [
+    {
+      key: "created_at",
+      header: "Fecha",
+      render: (_: unknown, row: UnclassifiedRecordResponse) =>
+        new Date(row.created_at).toLocaleDateString("es-AR"),
+    },
+    {
+      key: "source",
+      header: "Origen",
+      render: (_: unknown, row: UnclassifiedRecordResponse) => (
+        <Badge variant="info">{SOURCE_LABELS[row.source] ?? row.source}</Badge>
+      ),
+    },
+    {
+      key: "_detail",
+      header: "Detalle",
+      render: (_: unknown, row: UnclassifiedRecordResponse) => {
+        const preview = rowPreview(row);
+        return (
+          <span className="block max-w-md truncate" title={preview}>
+            {prefill(row).text || preview}
+          </span>
+        );
+      },
+    },
+    {
+      key: "_amount",
+      header: "Monto",
+      render: (_: unknown, row: UnclassifiedRecordResponse) => {
+        const raw = prefill(row).amount;
+        const num = Number(raw.replace(/[^\d.,-]/g, "").replace(",", "."));
+        return raw && Number.isFinite(num)
+          ? new Intl.NumberFormat("es-AR", {
+              style: "currency",
+              currency: "ARS",
+              maximumFractionDigits: 0,
+            }).format(num)
+          : "—";
+      },
+    },
+    {
+      key: "context_label",
+      header: "Motivo",
+      render: (_: unknown, row: UnclassifiedRecordResponse) =>
+        row.context_label ? (
+          <span className="block max-w-xs truncate" title={row.context_label}>
+            {row.context_label}
+          </span>
+        ) : (
+          <span className="text-vk-text-muted">—</span>
+        ),
+    },
+    {
+      key: "suggested_entity",
+      header: "Destino sugerido",
+      render: (_: unknown, row: UnclassifiedRecordResponse) =>
+        row.suggested_entity ? (
+          <Badge variant="success">{ENTITY_LABELS[row.suggested_entity]}</Badge>
+        ) : (
+          <span className="text-vk-text-muted">—</span>
+        ),
+    },
+    {
+      key: "suggested_category_label",
+      header: "Categoría recomendada",
+      render: (_: unknown, row: UnclassifiedRecordResponse) =>
+        row.suggested_category_label ?? <span className="text-vk-text-muted">—</span>,
+    },
+    {
+      key: "_actions",
+      header: "Acciones",
+      render: (_: unknown, row: UnclassifiedRecordResponse) => (
+        <div className="flex items-center gap-1.5">
+          {/* B·5e-2: la tarea de la caja no se clasifica (la venta ya existe). */}
+          {row.source !== "pos" ? (
+            <button
+              type="button"
+              onClick={() => setReclassifying(row)}
+              className="inline-flex items-center gap-1.5 rounded border border-vk-border-w px-2.5 py-1.5 text-sm text-vk-text-primary transition-colors hover:bg-vk-bg-light"
+            >
+              <Pencil className="h-3.5 w-3.5" /> Editar
+            </button>
+          ) : null}
+          <button
+            type="button"
+            title="Descartar"
+            aria-label="Descartar registro"
+            disabled={dismissMutation.isPending}
+            onClick={() => setToDismiss(row)}
+            className="inline-flex h-8 w-8 items-center justify-center rounded border border-vk-danger/30 text-vk-danger transition-colors hover:bg-vk-danger-bg disabled:opacity-50"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <PageWrapper title="Otros">
+      <p className="text-sm text-vk-text-muted">
+        Datos que llegaron por chat o carga de archivos y no se pudieron clasificar como
+        venta, gasto o producto. Revisá la categoría recomendada, editala si hace falta e
+        importalos — o descartalos.
+      </p>
+
+      <OthersGroups
+        selected={group?.group_key ?? null}
+        onSelect={(g) => {
+          setGroup(g);
+          setPage(0);
+        }}
+        onDismissed={invalidate}
+      />
+
+      {isError ? (
+        <p className="rounded-lg border border-vk-danger/20 bg-vk-danger-bg px-4 py-3 text-sm text-vk-danger">
+          Error al cargar los registros. Recargá la página.
+        </p>
+      ) : isLoading ? (
+        <div className="h-40 animate-pulse rounded-lg border border-vk-border-w bg-vk-surface-w" />
+      ) : records.length === 0 ? (
+        <EmptyState
+          title="Nada pendiente de revisión"
+          description="Todo lo que Véktor no pueda clasificar automáticamente va a aparecer acá."
+        />
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-vk-text-muted">
+              {pendingTotal} registro(s) pendiente(s)
+              {totalPages > 1 ? ` — página ${page + 1} de ${totalPages}` : ""}
+              {sinSugerencias && pendingTotal > 0 ? (
+                <span className="block pt-0.5">
+                  Ninguno tiene destino sugerido: hay que revisarlos de a uno.
+                </span>
+              ) : null}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              {hayVentasPendientes ? (
+                <button
+                  type="button"
+                  onClick={() => setColaAbierta(true)}
+                  className="inline-flex items-center gap-1.5 rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary transition-colors hover:bg-vk-bg-light"
+                >
+                  <Link2 className="h-4 w-4" />
+                  Vincular ventas a productos
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={bulkImportMutation.isPending || sinSugerencias}
+                title={
+                  sinSugerencias
+                    ? "Ninguno de los registros pendientes tiene un destino sugerido: no hay nada que importar automáticamente. Revisalos y asignales destino de a uno."
+                    : undefined
+                }
+                onClick={() => {
+                  if (
+                    confirm(
+                      "¿Importar TODOS los registros pendientes sugeridos como venta o gasto? " +
+                        "Cada uno se registra en su sección con la fecha, monto y categoría detectados. " +
+                        "Los que no tengan fecha o monto legibles quedan pendientes para revisión manual.",
+                    )
+                  )
+                    bulkImportMutation.mutate();
+                }}
+                className="inline-flex items-center gap-1.5 rounded border border-vektor-teal/40 px-3 py-1.5 text-sm text-vektor-teal transition-colors hover:bg-vektor-teal/10 disabled:opacity-50"
+              >
+                <Zap className="h-4 w-4" />
+                {bulkImportMutation.isPending ? "Importando…" : "Importar todo lo sugerido"}
+              </button>
+            </div>
+          </div>
+          <Table columns={columns} data={records} />
+          {totalPages > 1 ? (
+            <div className="flex items-center justify-center gap-3 pt-2">
+              <button
+                type="button"
+                disabled={page === 0}
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+              >
+                ← Anterior
+              </button>
+              <button
+                type="button"
+                disabled={page + 1 >= totalPages}
+                onClick={() => setPage((p) => p + 1)}
+                className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary disabled:opacity-40"
+              >
+                Siguiente →
+              </button>
+            </div>
+          ) : null}
+        </>
+      )}
+
+      <Modal
+        isOpen={toDismiss !== null}
+        onClose={() => setToDismiss(null)}
+        title="Descartar el registro"
+        size="sm"
+      >
+        <p className="text-sm text-vk-text-primary">
+          El registro no se importa a ninguna sección. {toDismiss ? rowPreview(toDismiss) : ""}
+        </p>
+        <div className="mt-3 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setToDismiss(null)}
+            className="rounded border border-vk-border-w px-3 py-1.5 text-sm text-vk-text-primary"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            disabled={dismissMutation.isPending}
+            onClick={() => toDismiss && dismissMutation.mutate(toDismiss.id)}
+            className="rounded border border-vk-danger/40 bg-vk-danger-bg px-3 py-1.5 text-sm text-vk-danger disabled:opacity-50"
+          >
+            Descartar
+          </button>
+        </div>
+      </Modal>
+
+      {colaAbierta ? <VincularColaModal
+          onClose={() => void cerrarCola()}
+          onCambiosTrasCerrar={() => void invalidarTrasVincular()}
+        /> : null}
+
+      <ReclassifyModal
+        record={reclassifying}
+        productCategories={productCategories}
+        saving={reclassifyMutation.isPending || resolvePurchaseMutation.isPending}
+        onClose={() => setReclassifying(null)}
+        onSave={(entityType, fields) =>
+          reclassifying &&
+          reclassifyMutation.mutate({ id: reclassifying.id, entityType, fields })
+        }
+        onLink={(targetProductId) =>
+          reclassifying &&
+          reclassifyMutation.mutate({
+            id: reclassifying.id,
+            entityType: "product",
+            fields: {},
+            targetProductId,
+          })
+        }
+        onResolvePurchase={(payload) =>
+          reclassifying && resolvePurchaseMutation.mutate({ id: reclassifying.id, payload })
+        }
+      />
+    </PageWrapper>
+  );
+}
