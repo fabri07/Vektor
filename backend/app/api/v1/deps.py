@@ -1,0 +1,545 @@
+"""
+FastAPI dependency injection helpers.
+
+Every business endpoint must inject `get_current_tenant` and
+`get_current_user` to enforce authentication and tenant isolation.
+
+JWT payload expected keys: sub (user_id), tenant_id, role_code.
+"""
+
+from collections.abc import Callable
+from uuid import UUID
+
+import sentry_sdk
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.application.services import maintenance_lock_service
+from app.application.services import subscription_service as quota_service
+from app.application.services.pin_service import PinService
+from app.config.settings import get_settings
+from app.domain.pos_permissions import (
+    CASHIER_ROLE,
+    PosPermission,
+    cashier_can_reach,
+    has_pos_permission,
+)
+from app.domain.subscription import (
+    SUBSCRIPTION_ERRORS,
+    QuotaExceeded,
+    ReservationMismatch,
+    ReservationNotUsable,
+    SeatLimitExceeded,
+    SubscriptionAccessDenied,
+    SubscriptionMissing,
+)
+from app.observability.logger import bind_request_context, get_logger
+from app.persistence.db.redis_client import get_redis
+from app.persistence.db.session import get_db_session
+from app.persistence.models.tenant import Tenant
+from app.persistence.models.user import User
+from app.persistence.repositories.tenant_repository import TenantRepository
+from app.persistence.repositories.user_repository import UserRepository
+from app.utils.security import decode_access_token
+
+# Código que el frontend reconoce para abrir el modal de PIN y reintentar.
+PIN_REQUIRED_CODE = "PIN_REQUIRED"
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+async def get_current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    session: AsyncSession = Depends(get_db_session),
+) -> User:
+    """Decode JWT and return the authenticated user. Raises 401 if invalid."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = credentials.credentials
+    payload = decode_access_token(token)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_id: str | None = payload.get("sub")
+    tenant_id: str | None = payload.get("tenant_id")
+    if not user_id or not tenant_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Malformed token.")
+
+    repo = UserRepository(session)
+    user = await repo.get_by_id(UUID(user_id), UUID(tenant_id))
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found.")
+
+    # Bind tenant_id and user_id into structlog context for this request
+    bind_request_context(tenant_id=user.tenant_id, user_id=user.user_id)
+    # Sentry: tag por negocio, sin email (privacidad de datos de PyMEs
+    # argentinas) — alcanza con el id para medir cuántos usuarios/tenants
+    # distintos pisan un mismo error.
+    sentry_sdk.set_tag("tenant_id", str(user.tenant_id))
+    sentry_sdk.set_user({"id": str(user.user_id)})
+
+    # B5 — un cajero llega SÓLO a la lista cerrada de rutas de caja. Denegar por
+    # defecto y acá, porque ésta es la única puerta por la que pasan las rutas
+    # autenticadas: una ruta nueva nace cerrada para el cajero aunque nadie se
+    # acuerde de él. Se mira el rol de la BASE (recién leído), no el del JWT, así
+    # que pasar a alguien a cajero rige desde el request siguiente.
+    if user.role_code == CASHIER_ROLE:
+        ruta = request.scope.get("route")
+        plantilla = getattr(ruta, "path", request.url.path)
+        if not cashier_can_reach(request.method, plantilla):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "CASHIER_ROUTE_FORBIDDEN",
+                    "message": "Tu usuario es de caja: esta sección no está disponible.",
+                },
+            )
+
+    return user
+
+
+def get_current_tenant_id(current_user: User = Depends(get_current_user)) -> UUID:
+    """Return the tenant_id of the authenticated user. Propagates to all business queries."""
+    return current_user.tenant_id
+
+
+async def get_current_tenant(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Tenant:
+    """Return the tenant for the authenticated user. Raises 403 if suspended."""
+    repo = TenantRepository(session)
+    tenant = await repo.get_by_id(current_user.tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found.")
+    if tenant.status not in ("ACTIVE", "TRIAL"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Tenant is {tenant.status}.",
+        )
+    return tenant
+
+
+def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
+    """Dependency factory that enforces role-based access. Pass uppercase role codes."""
+
+    async def _check(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.role_code not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{current_user.role_code}' is not allowed to perform this action.",
+            )
+        return current_user
+
+    return _check
+
+
+# ── Endpoints públicos (sin auth) ───────────────────────────────────────────────
+
+#: Código que devuelve `POST /auth/register` cuando el registro abierto está
+#: apagado. Lo lee el frontend para mostrar el copy de "el acceso ahora se pide"
+#: en lugar de un error genérico.
+REGISTRATION_CLOSED_CODE = "registration_closed"
+
+
+#: Header que setea el edge de Railway: UN solo valor, sin la cadena ambigua de
+#: `X-Forwarded-For` (que puede traer varias IPs y cuyo primer valor no se puede
+#: creer sin una política de proxies confiables).
+_HEADER_IP_REAL = "x-real-ip"
+
+#: Key del limiter cuando no se pudo determinar la IP. Vive acá y NO en
+#: `client_ip` a propósito: `client_ip` devuelve `None` para decir "no la sé", y
+#: `hash_ip(None)` es `None`. Si `client_ip` devolviera este centinela, el
+#: `ip_hash` guardado sería el hash de un literal inventado, indistinguible de
+#: una IP real y compartido por todos los clientes sin IP.
+_SIN_IP = "unknown"
+
+#: Se avisa UNA sola vez por proceso: es una condición de configuración del
+#: despliegue, no un evento por request — loguearla en cada uno inundaría.
+_aviso_sin_x_real_ip_emitido = False
+
+
+def _avisar_sin_x_real_ip() -> None:
+    """Denuncia una sola vez que el edge no manda `X-Real-IP` en producción.
+
+    Nunca loguea la IP ni el hash: solo que la suposición del diseño no se
+    cumple, que es lo único que hace falta saber para ir a mirar.
+    """
+    global _aviso_sin_x_real_ip_emitido
+    if _aviso_sin_x_real_ip_emitido:
+        return
+    _aviso_sin_x_real_ip_emitido = True
+    get_logger(__name__).warning(
+        "client_ip.sin_x_real_ip",
+        detalle=(
+            "En producción no llegó X-Real-IP: el rate limit y el ip_hash caen "
+            "a request.client.host, que detrás de un proxy es la IP del edge e "
+            "igual para todos los visitantes."
+        ),
+    )
+
+
+def client_ip(request: Request) -> str | None:
+    """IP del cliente. **Definición única** de "el cliente" en toda la app.
+
+    La comparten el `ip_hash` anti-abuso de los dos formularios públicos
+    anónimos (contacto y solicitud de acceso) y la key del rate limiter global
+    (`rate_limit_key`). Antes eran dos nociones distintas dentro del MISMO
+    handler: el `ip_hash` leía `X-Forwarded-For` y el `@limiter.limit("5/hour")`
+    usaba `get_remote_address`, que lo ignora — detrás del edge de Railway eso
+    podía volver el 5/hour un techo GLOBAL del único embudo de alta.
+
+    La confianza en el header está atada al DESPLIEGUE, no al header: solo se
+    lee `X-Real-IP` en producción, porque cualquiera que alcance uvicorn directo
+    puede inventarlo. Fuera de producción (dev y tests) se usa siempre
+    `request.client.host`.
+
+    Sin header, degrada a `request.client.host`. Para el limiter eso es
+    exactamente lo que hacía `get_remote_address` y no empeora nada; para el
+    `ip_hash` **sí** sería una regresión, porque antes leía `X-Forwarded-For`
+    incondicionalmente: si el edge mandara solo XFF y no `X-Real-IP`, la columna
+    pasaría a guardar un único hash (el del edge) para todos los visitantes, y
+    eso no se nota mirando los datos — un hash de la IP del proxy es
+    indistinguible de uno de cliente.
+
+    Por eso la suposición se autodenuncia: en producción, la primera vez que
+    falte `X-Real-IP` se loguea una advertencia (sin IP ni hash). Si aparece en
+    los logs de prod, hay que revisar qué manda el edge — no queda pendiente de
+    que alguien se acuerde de ir a mirar.
+
+    `None` cuando no hay forma de saberla: no se inventa un valor.
+    """
+    if get_settings().is_production:
+        real = request.headers.get(_HEADER_IP_REAL)
+        if real and real.strip():
+            return real.strip()
+        _avisar_sin_x_real_ip()
+    return request.client.host if request.client else None
+
+
+def rate_limit_key(request: Request) -> str:
+    """Key del rate limiter global — la MISMA IP que hashea el `ip_hash`.
+
+    `slowapi` exige un `str`, así que acá (y solo acá) el "no la sé" se colapsa
+    a un centinela: todos los requests sin IP comparten cubeta, que es el
+    comportamiento conservador y equivale a lo que ya hacía `get_remote_address`.
+    """
+    ip = client_ip(request)
+    return ip if ip is not None else _SIN_IP
+
+
+def require_open_registration() -> None:
+    """Corta con 410 el registro abierto mientras el flag esté OFF.
+
+    El alta de cuentas pasa por `POST /access-requests` (solicitud + aprobación
+    manual). El endpoint viejo NO se borra: conserva la ruta y devuelve un 410 con
+    código estable, así un bundle desactualizado del frontend recibe una señal
+    accionable en vez de un 404. Prender `ENABLE_OPEN_REGISTRATION` restituye el
+    comportamiento histórico completo (rollback de una línea).
+
+    Va como `dependencies=[...]` del endpoint —no como primera línea del cuerpo—
+    para que se resuelva ANTES de validar el body: un payload viejo tiene que ver
+    el 410, no un 422 de esquema.
+
+    ⚠️ **Alcance: solo `POST /auth/register`.** NO gatear `POST /onboarding/submit`:
+    la encuesta se partió en dos y esa mitad —los 6 números financieros— se pide
+    DESPUÉS de aprobar, en el primer login, detrás de JWT y sin crear cuentas. No
+    es parte del registro abierto.
+    """
+    if not get_settings().ENABLE_OPEN_REGISTRATION:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail=REGISTRATION_CLOSED_CODE,
+        )
+
+
+# ── Step-up auth (PIN) ──────────────────────────────────────────────────────────
+
+
+async def _require_pin_window(current_user: User, redis: Redis) -> None:
+    """Lanza 428 PIN_REQUIRED si no hay ventana de PIN vigente. Fail-closed."""
+    pin_service = PinService(redis)
+    if not await pin_service.is_window_valid(current_user.tenant_id, current_user.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail=PIN_REQUIRED_CODE,
+        )
+
+
+def require_pos_permission(permiso: PosPermission) -> Callable:  # type: ignore[type-arg]
+    """403 ``POS_PERMISSION_DENIED`` si el usuario no tiene ese permiso de caja.
+
+    OWNER y ADMIN lo tienen siempre; un CASHIER, sólo si su dueño se lo habilitó.
+    """
+
+    async def _check(current_user: User = Depends(get_current_user)) -> User:
+        assert_pos_permission(current_user, permiso)
+        return current_user
+
+    return _check
+
+
+def assert_pos_permission(user: User, permiso: PosPermission) -> None:
+    """La misma regla que `require_pos_permission`, para usar adentro de un handler.
+
+    Existe porque hay permisos que dependen del CUERPO (un descuento, un fiado) y
+    porque crear y recuperar una operación se autorizan distinto: un reintento de
+    una venta que ya existe no se vuelve a evaluar.
+    """
+    if not has_pos_permission(user.role_code, user.pos_permissions, permiso):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "POS_PERMISSION_DENIED",
+                "permission": permiso.value,
+                "message": "Tu usuario no tiene permiso para esta acción de caja.",
+            },
+        )
+
+
+async def require_void_access(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> User:
+    """Quién puede anular un ticket de caja.
+
+    - OWNER/ADMIN: la regla de siempre, ``require_modify_access`` (PIN).
+    - CASHIER: permiso ``void_ticket`` + ventana de SU PIN. Que el ticket sea suyo
+      y que traiga motivo lo verifica el handler, que es quien lo lee.
+    """
+    if current_user.role_code == CASHIER_ROLE:
+        assert_pos_permission(current_user, PosPermission.VOID_TICKET)
+        await _require_pin_window(current_user, redis)
+        return current_user
+    return await require_modify_access(current_user, redis)
+
+
+async def require_discrepancy_view(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Quién ve las diferencias de stock: OWNER/ADMIN, o un cajero con el permiso."""
+    if current_user.role_code == CASHIER_ROLE:
+        assert_pos_permission(current_user, PosPermission.RESOLVE_DISCREPANCY)
+        return current_user
+    if current_user.role_code not in ("OWNER", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permiso para ver las diferencias de stock.",
+        )
+    return current_user
+
+
+async def require_discrepancy_access(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> User:
+    """Quién resuelve una diferencia de stock (mueve stock, puede anular).
+
+    - OWNER/ADMIN: ``require_modify_access`` (PIN), como siempre.
+    - CASHIER: permiso ``resolve_discrepancy`` + ventana de SU PIN. Si elige
+      anular el ticket, el handler exige además las reglas de anulación del
+      cajero: el permiso nuevo no saltea las de B10.
+    """
+    if current_user.role_code == CASHIER_ROLE:
+        assert_pos_permission(current_user, PosPermission.RESOLVE_DISCREPANCY)
+        await _require_pin_window(current_user, redis)
+        return current_user
+    return await require_modify_access(current_user, redis)
+
+
+async def require_modify_access(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> User:
+    """Gate para editar/borrar datos ya cargados + configuraciones.
+
+    (a) OWNER o sub-cuenta con ``can_modify_sensitive``, si no → 403.
+    (b) ventana de PIN vigente, si no → 428 PIN_REQUIRED.
+    """
+    if not (current_user.role_code == "OWNER" or current_user.can_modify_sensitive):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permiso para modificar datos. Pedíselo al dueño de la cuenta.",
+        )
+    await _require_pin_window(current_user, redis)
+    return current_user
+
+
+async def require_capital_write(user: User = Depends(require_modify_access)) -> User:
+    """Gate para escribir capital de los socios (D·2): PIN + permiso de modificar
+    y además rol OWNER/ADMIN. CASHIER y VIEWER nunca, ni con ``can_modify_sensitive``.
+    Lo usan ``/capital-movements`` y ``/expenses/profit-withdrawal``, que también
+    escribe un movimiento de capital."""
+    if user.role_code not in ("OWNER", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Sólo el dueño o un administrador pueden registrar capital.",
+        )
+    return user
+
+
+async def require_owner_stepup(
+    current_user: User = Depends(get_current_user),
+    redis: Redis = Depends(get_redis),
+) -> User:
+    """Gate para acciones exclusivas del OWNER (forzar baja con historial,
+    reactivar, permisos de equipo, gestión de usuarios).
+
+    (a) rol OWNER estricto, si no → 403.
+    (b) ventana de PIN vigente, si no → 428 PIN_REQUIRED.
+    """
+    if current_user.role_code != "OWNER":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el dueño de la cuenta puede realizar esta acción.",
+        )
+    await _require_pin_window(current_user, redis)
+    return current_user
+
+
+# ── Suscripción (Etapa 2 — política de planes) ──────────────────────────────────
+
+
+def subscription_http_error(
+    exc: Exception, *, codigo_bloqueo: str = "SUBSCRIPTION_READ_ONLY"
+) -> HTTPException:
+    """LA traducción de un rechazo de suscripción/cupo a HTTP — una sola.
+
+    402 la suscripción no habilita · 429 sin cupo · 409 plazas o clave de
+    operación ya presentada · 503 dato roto nuestro (sin suscripción). Todos
+    con `detail.code` estable, que es lo que lee el frontend.
+
+    `codigo_bloqueo` es el código del 402: el gate de escritura dice
+    `SUBSCRIPTION_READ_ONLY` y el de análisis `SUBSCRIPTION_INSIGHTS_LOCKED`,
+    porque el frontend muestra cosas distintas (no pudo guardar vs. el
+    análisis está pausado). La regla de QUIÉN está bloqueado es la misma.
+    """
+    if isinstance(exc, SubscriptionMissing):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "SUBSCRIPTION_UNAVAILABLE"},
+        )
+    if isinstance(exc, SubscriptionAccessDenied):
+        return HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": codigo_bloqueo, "reason": exc.reason},
+        )
+    if isinstance(exc, QuotaExceeded):
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "QUOTA_EXCEEDED",
+                "resource": exc.resource.value,
+                "limit": exc.limit,
+                "renews_at": exc.renews_at.isoformat(),
+            },
+        )
+    if isinstance(exc, SeatLimitExceeded):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SEAT_LIMIT_EXCEEDED",
+                "seats_included": exc.seats_included,
+                "active_users": exc.active_users,
+            },
+        )
+    if isinstance(exc, ReservationNotUsable):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "OPERATION_ALREADY_SUBMITTED", "state": exc.outcome},
+        )
+    if isinstance(exc, ReservationMismatch):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "OPERATION_ALREADY_SUBMITTED", "state": "MISMATCH"},
+        )
+    raise TypeError(f"no es un rechazo de suscripción: {type(exc).__name__}") from exc
+
+
+async def require_active_subscription(
+    tenant_id: UUID = Depends(get_current_tenant_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Gate transversal: bloquea escrituras de negocio con la suscripción vencida.
+
+    `READ_ONLY`, `CANCELLED` con período vencido, o `TRIAL`/`GRACE` vencidas
+    (por fecha, no por el string de `status`) → 402.
+
+    Sin ninguna `Subscription` → 503 `SUBSCRIPTION_UNAVAILABLE` y un error en
+    el log. Todo tenant se acuña con una, así que es un dato roto, no un plan
+    gratis: dejar pasar convertía cualquier hueco en acceso sin límite. Es
+    503 y no 402 porque el usuario no debe nada — el problema es nuestro y
+    hay que verlo. Consulta, corrección y exportación no pasan por este gate.
+
+    Qué rutas lo llevan se decide por EFECTO, no por verbo HTTP: las altas de
+    negocio y lo que gasta IA sí; corregir, dar de baja y consultar nunca. La
+    lista exacta la fija `test_las_rutas_con_gate_son_exactamente_estas`. Lo
+    que no entra por HTTP (agente, workers) llama a
+    `subscription_service.assert_tenant_can_write`, que es lo que esto traduce.
+    """
+    try:
+        await quota_service.assert_tenant_can_write(session, tenant_id, origen="write_gate")
+    except SUBSCRIPTION_ERRORS as exc:
+        raise subscription_http_error(exc) from exc
+
+
+async def require_active_subscription_for_insights(
+    tenant_id: UUID = Depends(get_current_tenant_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Gate de las lecturas ANALÍTICAS (B14 del POS).
+
+    Con la suscripción bloqueada, lo que se pausa es el análisis —score,
+    insights, proyección, balance, momentum—, no los datos ni la caja: un
+    negocio que no pagó sigue cobrando y sigue viendo y corrigiendo lo que
+    cargó, pero Véktor deja de trabajar para él. 402
+    `SUBSCRIPTION_INSIGHTS_LOCKED` con el mismo `reason` que el gate de
+    escritura, y sin suscripción 503, igual que allá: nunca acceso libre.
+
+    La regla de quién está bloqueado es `resolve_access`, la misma que el
+    gate de escritura; la lista exacta de rutas la fija
+    `test_las_rutas_de_analisis_con_gate_son_exactamente_estas`.
+    """
+    try:
+        await quota_service.assert_tenant_can_see_insights(session, tenant_id)
+    except SUBSCRIPTION_ERRORS as exc:
+        raise subscription_http_error(
+            exc, codigo_bloqueo="SUBSCRIPTION_INSIGHTS_LOCKED"
+        ) from exc
+
+
+# ── Mantenimiento (F3-T3 — dedup de productos) ──────────────────────────────────
+
+
+async def ensure_tenant_not_under_maintenance(
+    tenant_id: UUID = Depends(get_current_tenant_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Guard HTTP 423 (fast-fail de UX) mientras corre la deduplicación del tenant.
+
+    NO es la garantía de exclusión mutua real — esa la da el advisory lock
+    transaccional (``maintenance_lock_service.acquire_write_lock_shared``) que
+    cada write boundary toma antes de mutar. Este guard solo evita que el
+    cliente mande un request que sabemos de entrada que va a esperar/fallar;
+    sin el advisory lock quedaría una carrera TOCTOU (un request que ya pasó
+    este chequeo pero escribe mientras el dedup fusiona).
+    """
+    if await maintenance_lock_service.is_locked(session, tenant_id):
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=(
+                "La cuenta está en mantenimiento (deduplicación en curso). "
+                "Reintentá en unos minutos."
+            ),
+        )

@@ -1,0 +1,120 @@
+"""Helpers de conexión compartidos por los scripts operativos.
+
+Una sola implementación de la normalización de DATABASE_URL (Neon agrega
+``sslmode=require&channel_binding=require`` y asyncpg rechaza ambos como
+kwargs de DSN). NUNCA imprime la URL.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import ssl
+import sys
+from typing import Any
+from urllib.parse import parse_qs, urlparse, urlunparse
+
+# decision_types de reparaciones/reconciliaciones auditadas de inventario. Universo
+# compartido por los scripts que detectan/revierten voids de compras.
+REPAIR_DECISION_TYPES = ("INVENTORY_REPAIR", "INVENTORY_RECONCILIATION_FIX")
+
+# Fragmento SET que marca un supplier como marca colapsada (una sola definición,
+# usada por deactivate_brand_suppliers y backfill_brand_collapsed_flag — si la
+# representación del flag cambia, cambia acá). Espejo del literal
+# BRAND_COLLAPSED_FLAG_KEY de app/persistence/models/supplier.py.
+SQL_SET_BRAND_COLLAPSED = (
+    "custom_fields = jsonb_set(coalesce(custom_fields, '{}'::jsonb), "
+    "'{_brand_collapsed}', '\"true\"'::jsonb)"
+)
+
+
+def normalize_dsn(raw: str) -> tuple[str, ssl.SSLContext | bool]:
+    """Limpia sufijos de driver y extrae sslmode para asyncpg (vía urlparse)."""
+    dsn = raw.strip()
+    for suffix in ("+asyncpg", "+psycopg2", "+psycopg"):
+        dsn = dsn.replace(suffix, "")
+    parsed = urlparse(dsn)
+    params = parse_qs(parsed.query)
+    sslmode = (params.pop("sslmode", ["require"]) or ["require"])[0]
+    # rebuild query sin sslmode/channel_binding (asyncpg rechaza kwargs desconocidos)
+    params.pop("channel_binding", None)
+    new_query = "&".join(f"{k}={v[0]}" for k, v in params.items())
+    clean = urlunparse(parsed._replace(query=new_query))
+    if sslmode in ("disable", "allow"):
+        return clean, False
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return clean, ctx
+
+
+def async_engine_config() -> tuple[str, dict[str, Any]]:
+    """(url, connect_args) para create_async_engine desde DATABASE_URL del env."""
+    raw = os.environ.get("DATABASE_URL") or os.environ.get("DATABASE_URL_SYNC")
+    if not raw:
+        print("ERROR: exportá DATABASE_URL antes de correr.")
+        sys.exit(2)
+    clean, sslarg = normalize_dsn(raw)
+    url = clean.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url, {"ssl": sslarg}
+
+
+async def insert_decision_audit(
+    session: Any,
+    *,
+    tenant_id: str,
+    decision_type: str,
+    decision_data: dict[str, Any],
+    triggered_by: str,
+) -> str:
+    """INSERT canónico de un ``decision_audit_log`` (6 columnas) — devuelve el id.
+
+    Un solo lugar para el INSERT auditado de los scripts de inventario: mismo shape de
+    columnas (id/tenant_id/decision_type/decision_data/triggered_by/created_at), con
+    ``gen_random_uuid()``/``now()`` server-side y ``decision_data`` serializado a JSONB.
+    ``triggered_by`` es NOT NULL sin default, así que SIEMPRE se pasa.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    row = (
+        await session.execute(
+            text(
+                "INSERT INTO decision_audit_log "
+                "(id, tenant_id, decision_type, decision_data, triggered_by, created_at) "
+                "VALUES (gen_random_uuid(), CAST(:tid AS uuid), :dt, CAST(:dd AS jsonb), "
+                ":tb, now()) RETURNING id"
+            ),
+            {
+                "tid": tenant_id,
+                "dt": decision_type,
+                "dd": json.dumps(decision_data, default=str),
+                "tb": triggered_by,
+            },
+        )
+    ).first()
+    return str(row[0])
+
+
+# M·P2b: una escritura Core sobre ``inventory_movements`` esquiva el listener que
+# marca el costo promedio pendiente. Quien la hace marca TODO el historial del
+# producto (``date.min``): si no, queda un historial viejo que parece válido hasta
+# el próximo recálculo. ``:mid`` (SQLAlchemy) / ``$1`` (asyncpg) = id del
+# movimiento tocado. Sin fila de estado no hay nada publicado que proteger.
+_SQL_MARCAR_COSTO_PROMEDIO = (
+    "UPDATE product_cost_state AS s "
+    "SET pendiente_desde = DATE '0001-01-01', revision = s.revision + 1, "
+    "marcado_en = CASE WHEN s.pendiente_desde IS NULL THEN now() ELSE s.marcado_en END "
+    "FROM inventory_movements AS m "
+    "WHERE m.id = CAST({mid} AS uuid) "
+    "AND s.tenant_id = m.tenant_id AND s.product_id = m.product_id"
+)
+SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE = _SQL_MARCAR_COSTO_PROMEDIO.format(mid=":mid")
+SQL_MARCAR_COSTO_PROMEDIO_PENDIENTE_ASYNCPG = _SQL_MARCAR_COSTO_PROMEDIO.format(mid="$1")
+#: Lo mismo por producto (``:tid``, ``:pid``): para quien corrige ``stock_units`` sin
+#: tocar un movimiento (mueve ``stock_fuera_del_ledger``, copiado en todo el historial).
+SQL_MARCAR_COSTO_PROMEDIO_PRODUCTO = (
+    "UPDATE product_cost_state "
+    "SET pendiente_desde = DATE '0001-01-01', revision = revision + 1, "
+    "marcado_en = CASE WHEN pendiente_desde IS NULL THEN now() ELSE marcado_en END "
+    "WHERE tenant_id = CAST(:tid AS uuid) AND product_id = CAST(:pid AS uuid)"
+)
