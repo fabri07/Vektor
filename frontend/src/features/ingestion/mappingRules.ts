@@ -1,0 +1,350 @@
+/**
+ * Reglas de validación del mapeo de columnas, compartidas con el backend.
+ *
+ * Viven en su propio módulo porque son la lógica que evita que la UI muestre un
+ * estado distinto del que envía. Cada una espeja una validación concreta del
+ * confirm (`backend/app/api/v1/ingestion.py`): si divergen, el usuario vuelve a
+ * chocar contra un 422 que la pantalla decía que no iba a pasar.
+ */
+
+import type {
+  ColumnMappingSuggestion,
+  EntityFieldCatalog,
+  FieldCatalogEntry,
+} from "@/services/ingestion.service";
+
+/** Lo que impide importar una hoja, con el detalle para poder explicarlo. */
+export type SheetIssues = {
+  missingRequired: string[];
+  collisions: ScalarCollision[];
+};
+
+export type ScalarCollision = {
+  target: string;
+  label: string;
+  columns: string[];
+};
+
+/**
+ * ¿Este target cubre un campo requerido?
+ *
+ * Un `custom_field:` guarda el dato pero NO satisface el requerido — misma regla
+ * que `_missing_required` en el backend. Antes la UI contaba cualquier target no
+ * vacío como "mapeado", así que mover la columna del nombre del producto a un
+ * campo personalizado dejaba `name` descubierto: la pantalla daba el OK y el
+ * confirm respondía `Campos requeridos sin mapear: name` sin decir cómo salir
+ * (incidente ASTERIA, 2026-07-31).
+ */
+export const coversRequired = (target: string): boolean =>
+  !!target && target !== "ignore" && !target.startsWith("custom_field:");
+
+/**
+ * Cambio 4 — qué compuerta de rollout (clave de `GET /ingestion/capabilities`)
+ * decide si un target "cruzado" (`TargetSelect.crossFields`) tiene efecto real
+ * para este tenant. Un cruzado sin entrada acá siempre está disponible — hoy
+ * el único que depende de una compuerta es "Proveedor — Nombre".
+ */
+const CROSS_FIELD_CAPABILITY: Record<string, string> = {
+  "supplier:name": "PRODUCT_SUPPLIER_LINKS_ROLLOUT_TENANT_IDS",
+};
+
+/**
+ * Motivo (o `undefined` si está disponible) por el que un target cruzado no
+ * tiene efecto para este tenant ahora mismo — para pasarle a
+ * `TargetSelect.disabledCrossFields`. Con `capabilities` todavía sin cargar
+ * (`undefined`), no se deshabilita nada: es preferible dejar elegir y que el
+ * 422 del confirm explique, a bloquear sobre un estado que no se terminó de
+ * conocer.
+ */
+export function disabledCrossFieldReasons(
+  crossFieldValues: string[],
+  capabilities: Record<string, boolean> | undefined,
+): Record<string, string> {
+  if (!capabilities) return {};
+  const disabled: Record<string, string> = {};
+  for (const value of crossFieldValues) {
+    const key = CROSS_FIELD_CAPABILITY[value];
+    if (key && capabilities[key] === false) {
+      disabled[value] = "tu cuenta no tiene esta vinculación habilitada";
+    }
+  }
+  return disabled;
+}
+
+/**
+ * Requeridos de la entidad que ninguna columna cubre con un campo canónico.
+ *
+ * Sin NINGÚN mapeo no se reporta nada, y eso espeja al backend: el confirm solo
+ * valida requeridos cuando llegan `column_mappings` (`if _flat_mappings:` /
+ * `if _ctx_mappings:`). Sin mapeo explícito el importador resuelve las columnas
+ * por heurística de headers, así que bloquear acá inventaría un problema que el
+ * backend no tiene y trabaría el flujo más común: aceptar el mapeo tal como vino.
+ *
+ * `alternatives` (F-H4) llega del catálogo y es obligatorio a propósito: un
+ * default silencioso haría que un call site nuevo bloqueara archivos que el
+ * confirm acepta, sin que nada avise. Un requerido se cubre por alternativa solo
+ * si están mapeados TODOS sus campos — con el precio unitario pero sin la
+ * cantidad no hay total que calcular.
+ */
+export function missingRequiredFields(
+  required: string[],
+  mappings: Record<string, string>,
+  alternatives: Record<string, string[]>,
+): string[] {
+  if (Object.keys(mappings).length === 0) return [];
+  const cubiertos = new Set(Object.values(mappings).filter(coversRequired));
+  return required.filter(
+    (r) =>
+      !cubiertos.has(r) &&
+      !(alternatives[r]?.length && alternatives[r].every((c) => cubiertos.has(c))),
+  );
+}
+
+/** Un requerido sin cubrir, listo para mostrarse: cómo se llama y qué se pierde. */
+export type MissingExplained = {
+  /** Nombre técnico. Sirve para enrutar el salto, NO para mostrar. */
+  field: string;
+  /** Cómo se llama el campo en la pantalla ("Fecha de venta"). */
+  label: string;
+  /** Qué pasa si no se mapea. Cadena vacía si el backend no escribió motivo. */
+  reason: string;
+};
+
+/**
+ * Traduce los requeridos sin cubrir a algo que se pueda leer y decidir.
+ *
+ * Función NUEVA y aparte a propósito: `missingRequiredFields` decide QUÉ falta y
+ * es lo que bloquea el confirm — su contrato ya está fijado por sus tests y no
+ * se toca. Ésta sólo describe lo que aquélla encontró.
+ *
+ * Existe porque «falta un dato obligatorio, revisá la hoja más arriba» no dice
+ * cuál, no dice por qué, y no lleva a ningún lado: la persona queda con el botón
+ * apagado y sin una acción concreta. El motivo lo escribe el backend
+ * (`required_reason`) porque es consecuencia de una regla del importador.
+ *
+ * Sin catálogo se devuelve el nombre técnico como label: es peor que el label,
+ * pero mucho mejor que no nombrar el campo. El caller no debería llamar acá
+ * mientras el catálogo carga (tampoco bloquea sin catálogo).
+ */
+export function explainMissing(
+  missing: string[],
+  catalog: EntityFieldCatalog | undefined,
+): MissingExplained[] {
+  return missing.map((field) => {
+    const entry = catalog?.fields.find((f) => f.value === field);
+    return {
+      field,
+      label: entry?.label ?? field,
+      reason: entry?.required_reason ?? "",
+    };
+  });
+}
+
+/**
+ * Campos de valor único con más de una columna apuntándoles.
+ *
+ * El importador se quedaba con la primera columna del orden del archivo y
+ * descartaba el resto en silencio (`_resolve_target_cols`), así que el valor
+ * guardado dependía de cómo estaba ordenada la planilla. Qué campo es escalar lo
+ * decide el backend (`single_value` del catálogo), no una lista propia de acá.
+ */
+export function scalarCollisions(
+  fields: FieldCatalogEntry[],
+  mappings: Record<string, string>,
+): ScalarCollision[] {
+  const escalares = new Map(
+    fields.filter((f) => f.single_value).map((f) => [f.value, f.label]),
+  );
+  const porTarget = new Map<string, string[]>();
+  for (const [col, target] of Object.entries(mappings)) {
+    if (!escalares.has(target)) continue;
+    porTarget.set(target, [...(porTarget.get(target) ?? []), col]);
+  }
+  return [...porTarget.entries()]
+    .filter(([, cols]) => cols.length > 1)
+    .map(([target, columns]) => ({
+      target,
+      label: escalares.get(target) ?? target,
+      columns,
+    }));
+}
+
+/**
+ * De dónde salió el destino que hoy tiene una columna.
+ *
+ * `null` = no hay nada que contar (la columna no quedó mapeada, o el backend no
+ * reconoció nada y el usuario tampoco eligió).
+ */
+export type MappingOrigin =
+  | "user"
+  | "remembered"
+  | "tenant_history"
+  | "heuristic"
+  | "fuzzy"
+  | "llm"
+  | "auto_custom"
+  | null;
+
+/**
+ * F-B.1 — quién decidió el destino de esta columna.
+ *
+ * Se resuelve COMPARANDO el destino actual contra el que sugirió el backend, no
+ * con un flag de "el usuario tocó esto". La diferencia importa: si alguien abre
+ * el select, prueba otro campo y termina dejando el mismo que había sugerido
+ * Véktor, un flag `touched` diría «Lo elegiste vos» sobre un dato que no salió
+ * de esa persona. Comparar el valor no puede mentir — o coincide con la
+ * sugerencia o no.
+ *
+ * Una columna sin destino, o mandada a «Ignorar», no tiene procedencia que
+ * contar: el importador no va a guardar nada desde ahí.
+ *
+ * `rememberedTarget` (Bloque 5) se chequea ANTES que la sugerencia heurística:
+ * es una afirmación más específica ("vos ya elegiste esto para un archivo con
+ * esta misma forma") y, cuando la memoria corrigió lo que la heurística
+ * hubiera sugerido, decir "Sugerido por el nombre de la columna" sería
+ * ocultar de dónde salió en realidad.
+ */
+export function mappingOrigin(
+  suggestion: Pick<ColumnMappingSuggestion, "source" | "target_field">,
+  currentTarget: string,
+  rememberedTarget?: string | null,
+): MappingOrigin {
+  const actual = normalizarTarget(currentTarget);
+  if (!actual || actual === "ignore") return null;
+  if (rememberedTarget != null && actual === normalizarTarget(rememberedTarget)) {
+    return "remembered";
+  }
+  // `target_field` viaja como `null` cuando el backend no propuso nada; ahí
+  // cualquier destino actual es del usuario.
+  //
+  // Los dos lados se normalizan igual que en `customFieldCollisions`: sin eso
+  // `"custom_field: obs"` y `"custom_field:obs"` son strings distintos y la
+  // comparación devuelve "Lo elegiste vos" sobre una sugerencia que la persona
+  // nunca tocó. El backend ya trata a las dos como la misma clave.
+  if (actual !== normalizarTarget(suggestion.target_field ?? "")) return "user";
+  return suggestion.source === "none" ? null : suggestion.source;
+}
+
+/** El target comparable: recorta el valor y, si es un campo propio, su clave. */
+function normalizarTarget(target: string): string {
+  const valor = target?.trim() ?? "";
+  if (!valor.startsWith(CUSTOM_FIELD_PREFIX)) return valor;
+  return `${CUSTOM_FIELD_PREFIX}${valor.slice(CUSTOM_FIELD_PREFIX.length).trim()}`;
+}
+
+const CUSTOM_FIELD_PREFIX = "custom_field:";
+
+/**
+ * Campos PROPIOS con más de una columna apuntándoles.
+ *
+ * Misma forma que `scalarCollisions` porque es el mismo problema en la otra
+ * rama del mapeo: un campo propio guarda un valor por fila, así que de dos
+ * columnas al mismo destino sobrevive una sola. Espeja
+ * `_colliding_custom_fields` del confirm.
+ *
+ * Sin esto, escribir dos veces el mismo nombre de campo personalizado
+ * (`commitCustom` no chequea contra las otras columnas de la hoja) da el OK en
+ * pantalla y 422 al confirmar — exactamente la divergencia que este módulo
+ * existe para evitar.
+ *
+ * El target y la clave se recortan igual que en `parse_target` del backend
+ * (`column_mapping_service.py`), donde este mismo bug ya está arreglado. Sin el
+ * recorte de la clave, `"custom_field: obs"` y `"custom_field:obs"` eran claves
+ * DISTINTAS y las dos columnas pasaban la pantalla para chocar contra el 422 del
+ * confirm, que sí las ve como la misma. Y sin el recorte del target,
+ * `" custom_field:obs"` ni entraba a esta rama: se iba con los canónicos y
+ * `scalarCollisions` lo evaluaba como si fuera un campo del catálogo.
+ */
+export function customFieldCollisions(
+  mappings: Record<string, string>,
+): ScalarCollision[] {
+  const porClave = new Map<string, string[]>();
+  for (const [col, target] of Object.entries(mappings)) {
+    const valor = target?.trim() ?? "";
+    if (!valor.startsWith(CUSTOM_FIELD_PREFIX)) continue;
+    const clave = valor.slice(CUSTOM_FIELD_PREFIX.length).trim();
+    porClave.set(clave, [...(porClave.get(clave) ?? []), col]);
+  }
+  return [...porClave.entries()]
+    .filter(([, cols]) => cols.length > 1)
+    .map(([clave, columns]) => ({
+      target: `${CUSTOM_FIELD_PREFIX}${clave}`,
+      label: clave,
+      columns,
+    }));
+}
+
+/** Lo que aplica una acción masiva: destino y, si corresponde, etiqueta. */
+export type BulkMappingPatch = {
+  mappings: Record<string, string>;
+  labels: Record<string, string>;
+};
+
+/**
+ * B·9 — «Guardar las sin asignar como campos propios».
+ *
+ * Candidatas: las columnas a las que el backend les calculó `custom_slug`
+ * (`unmapped` con muestra, ni ambiguas ni candidatas a un requerido ni excluidas
+ * por B·5f; a diferencia de `auto_custom`, también las que traen `duda`, porque
+ * esto lo pide la persona), que NADIE tocó a mano y que hoy no tienen destino.
+ * El slug lo calcula el backend para no espejar `custom_field_slug` acá; lo
+ * único que se repite es el sufijo `_2`, `_3`, contra los campos propios que
+ * la persona creó en esta pantalla después de cargar las sugerencias (el
+ * backend no los conoce). La etiqueta es el encabezado original, como en
+ * `auto_custom`.
+ *
+ * No marca nada como tocado: la decisión no es columna por columna, así que no
+ * viaja como `user_selected` y no saltea la compuerta de riesgo de F8.
+ */
+export function camposPropiosParaSinAsignar(
+  suggestions: Pick<ColumnMappingSuggestion, "source_column" | "custom_slug">[],
+  mappings: Record<string, string>,
+  isTouched: (col: string) => boolean,
+): BulkMappingPatch {
+  const usadas = new Set(
+    Object.values(mappings)
+      .map((t) => normalizarTarget(t ?? ""))
+      .filter((t) => t.startsWith(CUSTOM_FIELD_PREFIX)),
+  );
+  const patch: BulkMappingPatch = { mappings: {}, labels: {} };
+  for (const s of suggestions) {
+    const col = s.source_column;
+    if (!s.custom_slug || isTouched(col) || (mappings[col] ?? "").trim()) continue;
+    let target = `${CUSTOM_FIELD_PREFIX}${s.custom_slug}`;
+    for (let n = 2; usadas.has(target); n += 1) {
+      target = `${CUSTOM_FIELD_PREFIX}${s.custom_slug}_${n}`;
+    }
+    usadas.add(target);
+    patch.mappings[col] = target;
+    patch.labels[col] = col;
+  }
+  return patch;
+}
+
+/**
+ * B·9 — «Ignorar las vacías».
+ *
+ * Sólo las columnas que el backend midió vacías en TODAS las filas de su hoja
+ * (`empty_in_file`): la muestra son 10 filas, y una columna vacía ahí puede
+ * traer datos más abajo. Las que la persona tocó a mano no se pisan. Tampoco
+ * marca nada como tocado (ver `camposPropiosParaSinAsignar`).
+ */
+export function ignorarLasVacias(
+  suggestions: Pick<ColumnMappingSuggestion, "source_column" | "empty_in_file">[],
+  mappings: Record<string, string>,
+  isTouched: (col: string) => boolean,
+): BulkMappingPatch {
+  const patch: BulkMappingPatch = { mappings: {}, labels: {} };
+  for (const s of suggestions) {
+    const col = s.source_column;
+    if (!s.empty_in_file || isTouched(col) || mappings[col] === "ignore") continue;
+    // Revisión de B·9: nunca pisa un destino canónico. Puede cubrir un requerido
+    // (dejaría el confirm trabado) o tener una decisión de riesgo de F8 (la
+    // podaría). Las informativas vacías ya llegan en `ignore` por B·5f: acá
+    // quedan las sin destino y los campos propios.
+    const actual = mappings[col];
+    if (actual && !actual.startsWith("custom_field:")) continue;
+    patch.mappings[col] = "ignore";
+  }
+  return patch;
+}

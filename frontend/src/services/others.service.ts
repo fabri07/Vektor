@@ -1,0 +1,216 @@
+import { api } from "@/lib/api";
+
+/**
+ * F2-T2b: candidato de producto existente para vincular una fila de "Otros"
+ * ambigua/en conflicto en vez de crear un duplicado.
+ */
+export interface ProductMatchCandidate {
+  id: string;
+  /** Qué campos matchearon (p. ej. ["sku"], ["barcode"], ["name", "sku"]). */
+  matched_by: string[];
+  name: string | null;
+  sku: string | null;
+  barcode: string | null;
+}
+
+/** Registro sin clasificar en la bandeja "Otros" (unclassified_records). */
+export interface UnclassifiedRecordResponse {
+  id: string;
+  uploaded_file_id: string | null;
+  source: "ingestion" | "chat" | "reanalysis" | "pos";
+  context_label: string | null;
+  headers: string[] | null;
+  row_data: Record<string, string>;
+  suggested_entity: "sale" | "expense" | "product" | null;
+  /** Código canónico recomendado (catálogo de gastos o de productos según destino). */
+  suggested_category: string | null;
+  suggested_category_label: string | null;
+  /**
+   * F2-T2b: candidatos de producto existente para VINCULAR (solo aplica a filas
+   * de producto ambiguas/en conflicto). null fuera de ese caso.
+   */
+  match_candidates: ProductMatchCandidate[] | null;
+  status: "PENDING" | "IMPORTED" | "DISMISSED";
+  created_at: string;
+}
+
+export type ReclassifyEntityType = "sale" | "expense" | "product" | "customer" | "supplier";
+
+export interface ReclassifyPayload {
+  entity_type: ReclassifyEntityType;
+  fields: Record<string, unknown>;
+  /**
+   * F2-T2b: solo para entity_type="product". Si viene, se VINCULA el registro a
+   * ese producto existente (uno de los `match_candidates`) en vez de crear uno
+   * nuevo. El backend re-valida que el id pertenezca al tenant y esté activo.
+   */
+  target_product_id?: string;
+  /**
+   * E6b: la fila llegó a "Otros" porque tiene el mismo comprobante que una
+   * operación ya cargada, con datos distintos. Sin este flag el backend responde
+   * 409 (`IMPORT_IDENTITY_TAKEN`); con él, el usuario declara que revisó y la
+   * quiere igual. Es a propósito que haya que pedirlo dos veces: importarla sin
+   * mirar deja las dos versiones cargadas y nadie se entera.
+   */
+  aplicar_pese_al_conflicto?: boolean;
+}
+
+/**
+ * B·5b: una compra de mercadería se resuelve diciendo qué artículos la componen.
+ * `amount` es lo que dice el comprobante para cada línea; `tax` dice si incluye
+ * IVA y `shipping` qué se hace con el envío (los dos opcionales: sin ellos,
+ * «desconocido»).
+ */
+export interface ResolvePurchasePayload {
+  lines: { product_id: string; quantity: number; amount: number }[];
+  transaction_date: string;
+  payment_method: string;
+  supplier_name?: string;
+  shipping?: { amount: number; mode: string };
+  tax?: { treatment: string; rate?: number };
+  aplicar_pese_al_conflicto?: boolean;
+}
+
+/**
+ * B·5a: un grupo de «Otros» — archivo × hoja × motivo × sugerencia. La clave es
+ * opaca: la arma el backend y se le devuelve tal cual.
+ */
+export interface OthersGroup {
+  group_key: string;
+  uploaded_file_id: string | null;
+  file_name: string | null;
+  context_id: string | null;
+  motivo: string | null;
+  suggested_entity: "sale" | "expense" | "product" | null;
+  status: "PENDING" | "IMPORTED" | "DISMISSED";
+  count: number;
+}
+
+export interface DismissGroupPreview {
+  count: number;
+  samples: Record<string, string>[];
+  /** Huella del conjunto exacto: el descarte la exige y da 409 si cambió. */
+  group_token: string;
+}
+
+export interface BulkImportResult {
+  imported_sales: number;
+  imported_expenses: number;
+  skipped: number; // ya importados (idempotencia)
+  needs_manual: number; // no parsearon (fecha/monto ilegible) → completar a mano
+}
+
+export const othersService = {
+  async getPending(
+    offset = 0,
+    limit = 50,
+    group?: string,
+  ): Promise<UnclassifiedRecordResponse[]> {
+    const res = await api.get<UnclassifiedRecordResponse[]>("/others", {
+      params: { status: "PENDING", limit, offset, ...(group ? { group } : {}) },
+    });
+    return res.data;
+  },
+
+  async getSummary(): Promise<OthersGroup[]> {
+    const res = await api.get<OthersGroup[]>("/others/summary");
+    return res.data;
+  },
+
+  async previewDismissGroup(groupKey: string): Promise<DismissGroupPreview> {
+    const res = await api.post<DismissGroupPreview>("/others/dismiss-group/preview", {
+      group_key: groupKey,
+    });
+    return res.data;
+  },
+
+  async dismissGroup(groupKey: string, groupToken: string): Promise<{ dismissed: number }> {
+    const res = await api.post<{ dismissed: number }>("/others/dismiss-group", {
+      group_key: groupKey,
+      group_token: groupToken,
+    });
+    return res.data;
+  },
+
+  async getPendingCount(): Promise<number> {
+    const res = await api.get<{ pending: number }>("/others/count");
+    return res.data.pending;
+  },
+
+  /**
+   * Pendientes totales y, de esos, cuántos traen sugerencia de destino.
+   *
+   * El conteo de sugeridos viene del backend y no se deriva de la página que se
+   * está viendo: "Importar todo lo sugerido" opera sobre TODOS los pendientes
+   * del tenant, así que decidir con 50 filas de 2.288 se equivoca en las dos
+   * direcciones (habilitar sin nada que importar, o deshabilitar habiendo).
+   */
+  async getPendingCounts(): Promise<{ pending: number; pendingSuggested: number }> {
+    const res = await api.get<{ pending: number; pending_suggested?: number }>(
+      "/others/count",
+    );
+    return {
+      pending: res.data.pending,
+      pendingSuggested: res.data.pending_suggested ?? 0,
+    };
+  },
+
+  async reclassify(id: string, payload: ReclassifyPayload): Promise<void> {
+    await api.post(`/others/${id}/reclassify`, payload);
+  },
+
+  async resolvePurchase(id: string, payload: ResolvePurchasePayload): Promise<void> {
+    await api.post(`/others/${id}/resolve-purchase`, payload);
+  },
+
+  /**
+   * B·8a: la venta es de este producto y lo que decía el archivo
+   * (`row_data.producto`) queda como alias suyo. `quantity` sólo si la de la
+   * fila no es entera (el backend responde 422 `CANTIDAD_REQUERIDA`).
+   */
+  async linkProduct(id: string, payload: { product_id: string; quantity?: number }): Promise<string> {
+    const res = await api.post<{ message: string }>(`/others/${id}/link-product`, payload);
+    return res.data.message;
+  },
+
+  /**
+   * B·8b: las ventas pendientes que dicen qué producto se vendió, para la cola
+   * «Vincular a producto». El backend no filtra por destino: se pagina de a 500
+   * y se filtra acá, hasta juntar `tope` ventas. `truncado` dice si quedaron
+   * ventas sin traer.
+   */
+  async getPendingSalesWithReference(
+    tope = 5000,
+  ): Promise<{ records: UnclassifiedRecordResponse[]; truncado: boolean }> {
+    const PAGINA = 500;
+    const records: UnclassifiedRecordResponse[] = [];
+    // Entre una página y la siguiente se puede resolver una fila y correrse el
+    // offset: la misma venta llegaría dos veces.
+    const vistos = new Set<string>();
+    for (let offset = 0; ; offset += PAGINA) {
+      const res = await api.get<UnclassifiedRecordResponse[]>("/others", {
+        params: { status: "PENDING", limit: PAGINA, offset },
+      });
+      for (const r of res.data) {
+        if (r.suggested_entity !== "sale" || !String(r.row_data?.producto ?? "").trim()) continue;
+        if (vistos.has(r.id)) continue;
+        vistos.add(r.id);
+        if (records.length >= tope) return { records, truncado: true };
+        records.push(r);
+      }
+      if (res.data.length < PAGINA) return { records, truncado: false };
+    }
+  },
+
+  async dismiss(id: string): Promise<void> {
+    await api.post(`/others/${id}/dismiss`);
+  },
+
+  /** Importa en lote todos los pendientes sugeridos como venta/gasto. */
+  async bulkImport(entityType?: "sale" | "expense"): Promise<BulkImportResult> {
+    const res = await api.post<BulkImportResult>("/others/bulk-import", {
+      entity_type: entityType ?? null,
+    });
+    return res.data;
+  },
+};
