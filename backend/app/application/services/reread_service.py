@@ -2011,6 +2011,8 @@ def _estimate_products(
     fresh: dict[str, Any],
     confirmed_fields: dict[str, bool],
     catalog: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    by_alias: dict[str, list[uuid.UUID]] | None = None,
+    by_name_activo: dict[str, list[uuid.UUID]] | None = None,
 ) -> tuple[int, int, list[dict[str, Any]]]:
     """Estima el impacto en el catálogo de productos: altas (nombre/SKU que NO
     está en el catálogo) y reposiciones (sí está). Cubre catálogos de stock y
@@ -2048,7 +2050,17 @@ def _estimate_products(
         if key in seen:
             continue
         seen.add(key)
-        pid = _resolve_product(by_sku, by_name, clean_name, sku_str or None, by_token)
+        # B·8a: con los alias, como el import real; si no, una reposición de un
+        # producto vinculado por alias se proyectaría como alta.
+        pid = _resolve_product(
+            by_sku,
+            by_name,
+            clean_name,
+            sku_str or None,
+            by_token,
+            by_alias=by_alias,
+            by_name_activo=by_name_activo,
+        )
         after = {"kind": "product", "name": clean_name[:120], "sku": sku_str[:60] or None}
         if pid is not None:
             restock += 1
@@ -2067,6 +2079,8 @@ async def estimate_unlinked_products(
     fresh: dict[str, Any],
     confirmed_fields: dict[str, bool],
     catalog: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    by_alias: dict[str, list[uuid.UUID]] | None = None,
+    by_name_activo: dict[str, list[uuid.UUID]] | None = None,
 ) -> UnlinkedProductsEstimate:
     """Proyecta, SIN escribir nada, si cada venta/compra quedaría vinculada a
     un producto — usando la MISMA decisión determinística que el apply real
@@ -2105,7 +2119,12 @@ async def estimate_unlinked_products(
             continue
         name = _row_val(row, _NOMBRE_COLS)
         sku = _row_val(row, _SKU_COLS)
-        pid = _resolve_product(by_sku, by_name, name, sku, by_token)
+        # B·8a: la venta que el import real vincularía por alias no se proyecta
+        # como «sin producto».
+        pid = _resolve_product(
+            by_sku, by_name, name, sku, by_token,
+            by_alias=by_alias, by_name_activo=by_name_activo,
+        )
         if pid is not None:
             result.ventas_con_producto += 1
         else:
@@ -2876,6 +2895,8 @@ def _estimate_reread(
     expenses: list[ExpenseEntry],
     fingerprints: set[str],
     catalog: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    by_alias: dict[str, list[uuid.UUID]] | None = None,
+    by_name_activo: dict[str, list[uuid.UUID]] | None = None,
 ) -> RereadPreview:
     """Proyecta la relectura **en memoria, sin tocar la DB** (sub-segundo)."""
     file_id = file.id
@@ -2934,7 +2955,7 @@ def _estimate_reread(
         new_count -= move
 
     products_new, products_restock, product_samples = _estimate_products(
-        fresh, confirmed_fields, catalog
+        fresh, confirmed_fields, catalog, by_alias, by_name_activo
     )
 
     editados = [r for r in all_recs if r.has_user_edits]
@@ -4046,14 +4067,18 @@ async def preview_reread(
         _anclas_candidatas(tenant_id, file_id, _contextos_del_summary(fresh)),
     )
     catalog = await _load_product_index(session, tenant_id)
+    # B·8a: los alias y los nombres de productos ACTIVOS, como el reimport real.
+    _identidad = await _load_product_identity_indexes(session, tenant_id)
     preview = _estimate_reread(
-        file, tenant_id, fresh, confirmed_fields, sales, expenses, fingerprints, catalog
+        file, tenant_id, fresh, confirmed_fields, sales, expenses, fingerprints, catalog,
+        _identidad.by_alias, _identidad.by_name,
     )
     preview.column_risk_outcome = resolved.outcome
     preview.column_risk_ambiguous = resolved.ambiguous_rows
     preview.column_risk_forced_unverified = resolved.forced_rows
     preview.unlinked_products = await estimate_unlinked_products(
-        session, tenant_id, fresh, confirmed_fields, catalog
+        session, tenant_id, fresh, confirmed_fields, catalog,
+        _identidad.by_alias, _identidad.by_name,
     )
     # F-RR Fase 8 (backend): revisión completa — hojas/mapeo/riesgo, sobre el
     # MISMO `fresh` que ya refleja drop/route (si `resolved.applied` mutó el
