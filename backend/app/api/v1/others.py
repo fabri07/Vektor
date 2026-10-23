@@ -44,7 +44,7 @@ from app.api.v1.products import (
     _identity_conflict_from_db,
     _tenant_vertical,
 )
-from app.application.services import compra_service, maintenance_lock_service
+from app.application.services import compra_service, maintenance_lock_service, stock_service
 from app.application.services._ledger_restore import snapshot_master
 from app.application.services.file_deletion_service import (
     ACTION_CREATE_CUSTOMER,
@@ -760,26 +760,72 @@ async def _get_pending_record(
     return record
 
 
+async def _exigir_identidad_libre(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    record: UnclassifiedRecord,
+    *,
+    aplicar_pese_al_conflicto: bool,
+) -> None:
+    """E6b — el candado de identidad de la operación. Una fila que quedó en «Otros»
+    por conflicto de identidad guarda su clave; si esa clave sigue tomada por una
+    operación viva, importarla duplicaría el efecto que el confirm no aplicó. Se
+    exige una decisión explícita en vez de resolverlo solo: puede ser una
+    corrección legítima (el proveedor reemitió) y Véktor no puede saber cuál de
+    las dos versiones vale.
+
+    Detalle ESTRUCTURADO: el frontend rutea por `detail.code`; sin código este 409
+    caería en el catch-all «Revisá los campos», que apunta al lugar equivocado.
+    """
+    clave = str((record.row_data or {}).get(IDENTITY_REF_KEY) or "")
+    if (
+        clave
+        and not aplicar_pese_al_conflicto
+        and await identidad_tomada(session, tenant_id, clave) is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "IMPORT_IDENTITY_TAKEN",
+                "message": (
+                    "Esta fila tiene el mismo comprobante que una operación ya "
+                    "cargada. Si la importás igual vas a tener las dos: revisá "
+                    "cuál corresponde."
+                ),
+            },
+        )
+
+
 async def _registrar_venta_desde_otros(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     record: UnclassifiedRecord,
     sale_req: CreateSaleRequest,
+    *,
+    aplicar_pese_al_conflicto: bool = False,
 ) -> SaleEntry:
     """La venta de una fila de «Otros». Fuente única de `reclassify` (como venta)
     y de `link-product` (B·8a): las dos salidas tienen que dar la misma venta.
 
+    En este orden, y sin escribir nada hasta el final:
+    - E6b: el candado de identidad de la operación (`_exigir_identidad_libre`) —
+      acá y no en cada endpoint, para que ninguno de los dos caminos lo saltee.
     - La fila es de un DOCUMENTO: su cantidad está en la unidad de venta («2» de
       queso son 2 kg) y se pasa a unidades base del producto.
-    - B·5e: exige el producto y su compra previa (o stock inicial con costo) a la
-      fecha — es la salida de las ventas que el import mandó a «Otros» por falta
-      de compra. Si no, 422 y no se escribe nada.
+    - B·5e: el producto y su compra previa (o stock inicial con costo) a la fecha.
+    - Stock: hay que tenerlo (control real del stock, regla del dueño), igual que
+      POST /sales: sin stock suficiente, `InsufficientStockError` (400) y no se crea
+      nada. Después se descuenta por el mismo camino (`decrement_for_sale`) y el
+      movimiento lleva el archivo de la fila: borrar el archivo devuelve la venta
+      Y el stock.
     - Procedencia: el archivo de la fila y una referencia derivada del id de la
-      fila (estable aunque el usuario corrija un campo), para que borrar el
-      archivo la alcance.
+      fila (estable aunque el usuario corrija un campo).
 
     No marca la fila como importada: eso lo hace quien la llama, al final.
     """
+    await _exigir_identidad_libre(
+        session, tenant_id, record, aplicar_pese_al_conflicto=aplicar_pese_al_conflicto
+    )
     _cantidad = sale_req.quantity
     if sale_req.product_id is not None:
         _vendido = await session.get(Product, sale_req.product_id)
@@ -790,6 +836,10 @@ async def _registrar_venta_desde_otros(
     await exigir_respaldo(
         session, tenant_id, [(sale_req.product_id, sale_req.transaction_date.date())]
     )
+    if sale_req.product_id is not None:
+        await stock_service.check_stock_available(
+            sale_req.product_id, tenant_id, _cantidad, session
+        )
     _upload_id = record.uploaded_file_id
     venta = SaleEntry(
         tenant_id=tenant_id,
@@ -805,6 +855,10 @@ async def _registrar_venta_desde_otros(
         source_row_ref=unclassified_row_ref(record.id) if _upload_id else None,
     )
     session.add(venta)
+    await session.flush()
+    movimiento = await stock_service.decrement_for_sale(venta, session)
+    if movimiento is not None and _upload_id is not None:
+        movimiento.source_upload_id = _upload_id
     return venta
 
 
@@ -847,33 +901,24 @@ async def reclassify_record(
     # Se exige una decisión explícita en vez de resolverlo solo: puede ser una
     # corrección legítima (el proveedor reemitió), y Véktor no puede saber cuál
     # de las dos versiones vale.
-    _clave_identidad = str(record.row_data.get(IDENTITY_REF_KEY) or "")
-    if (
-        _clave_identidad
-        and body.entity_type in ("sale", "expense")
-        and not body.aplicar_pese_al_conflicto
-        and await identidad_tomada(session, tenant.tenant_id, _clave_identidad) is not None
-    ):
-        # Detalle ESTRUCTURADO y no un string: el frontend rutea por
-        # `detail.code`, y sin código este 409 caería en el catch-all "Revisá los
-        # campos" — que apunta al lugar equivocado. Acá los campos están bien; lo
-        # que hay es una decisión pendiente.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "IMPORT_IDENTITY_TAKEN",
-                "message": (
-                    "Esta fila tiene el mismo comprobante que una operación ya "
-                    "cargada. Si la importás igual vas a tener las dos: revisá "
-                    "cuál corresponde."
-                ),
-            },
+    # (Para una venta el chequeo vive en `_registrar_venta_desde_otros`, que
+    # comparten `reclassify` y `link-product`.)
+    if body.entity_type == "expense":
+        await _exigir_identidad_libre(
+            session,
+            tenant.tenant_id,
+            record,
+            aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
         )
 
     try:
         if body.entity_type == "sale":
             await _registrar_venta_desde_otros(
-                session, tenant.tenant_id, record, CreateSaleRequest(**body.fields)
+                session,
+                tenant.tenant_id,
+                record,
+                CreateSaleRequest(**body.fields),
+                aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
             )
             label = "venta"
         elif body.entity_type == "expense":
@@ -1194,20 +1239,26 @@ async def link_product(
             detail={"code": "INVALID_TARGET_PRODUCT"},
         )
 
-    # 1) El alias se valida ANTES de crear nada.
+    # 1) El alias se valida ANTES de crear nada. FOR UPDATE: dos vínculos que
+    # reasignan el mismo alias se serializan y el segundo ve al ganador.
     existente = (
         await session.execute(
-            select(ProductAlias).where(
+            select(ProductAlias)
+            .where(
                 ProductAlias.tenant_id == tenant.tenant_id,
                 ProductAlias.alias_normalizado == alias_n,
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
+    #: El alias era de un producto que se dio de baja: no identifica a nadie hoy,
+    #: así que pasa al producto elegido (y queda auditado de quién era).
+    reasignado_de: uuid.UUID | None = None
     if existente is not None and existente.product_id != producto.id:
         otro = await session.get(Product, existente.product_id)
-        raise _conflicto_de_alias(
-            "ALIAS_OTRO_PRODUCTO", referencia, otro.name if otro else "otro producto"
-        )
+        if otro is not None and otro.is_active:
+            raise _conflicto_de_alias("ALIAS_OTRO_PRODUCTO", referencia, otro.name)
+        reasignado_de = existente.product_id
     otro_por_nombre = (
         await session.execute(
             select(Product.name)
@@ -1253,6 +1304,10 @@ async def link_product(
     # lo identifica); si ya era suyo, no se toca. Un insert concurrente del mismo
     # alias choca con el índice único: savepoint para que eso sea un 409 y no un 500.
     creado = False
+    if existente is not None and reasignado_de is not None:
+        existente.product_id = producto.id
+        existente.created_by_user_id = user.user_id
+        await session.flush()
     if existente is None and alias_n != normalize_product_name(producto.name):
         try:
             async with session.begin_nested():
@@ -1296,6 +1351,7 @@ async def link_product(
                 "referencia": referencia,
                 "alias_normalizado": alias_n,
                 "alias_creado": creado,
+                "alias_reasignado_de": str(reasignado_de) if reasignado_de else None,
             },
             triggered_by="ui:others_link_product",
             actor_user_id=user.user_id,
@@ -1310,7 +1366,7 @@ async def link_product(
         message=(
             f"Venta vinculada a «{producto.name}». «{referencia}» queda como otro nombre "
             "del producto para los próximos archivos."
-            if creado
+            if creado or reasignado_de is not None
             else f"Venta vinculada a «{producto.name}»."
         )
     )

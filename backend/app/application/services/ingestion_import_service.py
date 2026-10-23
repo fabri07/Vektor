@@ -2074,6 +2074,7 @@ def _vinculo_fuerte(
     by_barcode: dict[str, list[uuid.UUID]] | None,
     barcode: Any,
     by_alias: dict[str, list[uuid.UUID]] | None = None,
+    by_name_activo: dict[str, list[uuid.UUID]] | None = None,
 ) -> uuid.UUID | None:
     """El producto por código de barras, SKU, alias (B·8a) o nombre exacto, sin el
     nivel de palabras (B·5b-2): un vínculo que no es un parecido de texto."""
@@ -2086,6 +2087,7 @@ def _vinculo_fuerte(
         by_barcode=by_barcode,
         barcode=str(barcode) if barcode is not None else None,
         by_alias=by_alias,
+        by_name_activo=by_name_activo,
     )
 
 
@@ -2943,6 +2945,7 @@ def _resolve_product(
     by_barcode: dict[str, list[uuid.UUID]] | None = None,
     barcode: str | None = None,
     by_alias: dict[str, list[uuid.UUID]] | None = None,
+    by_name_activo: dict[str, list[uuid.UUID]] | None = None,
 ) -> uuid.UUID | None:
     """Resuelve product_id desde el índice en memoria (link de ventas/gastos/
     compras contra el catálogo).
@@ -2965,11 +2968,14 @@ def _resolve_product(
             return hit
     if name and by_alias:
         # B·8a: el alias (aprendido a mano) después de los códigos. Si el nombre
-        # exacto del catálogo da OTRO producto, no se elige: ninguno.
-        alias_ids = by_alias.get(normalize_product_name(str(name)) or "")
+        # exacto de OTRO producto ACTIVO es ése, no se elige: ninguno. Sólo activos
+        # (`by_name_activo`, el `by_name` de `ProductIdentityIndexes`), como el
+        # endpoint y `_resolve_product_identity`: un homónimo dado de baja no puede
+        # inutilizar el alias. El `by_name` de acá incluye inactivos y no sirve.
+        clave_alias = normalize_product_name(str(name)) or ""
+        alias_ids = by_alias.get(clave_alias)
         if alias_ids and len(alias_ids) == 1:
-            por_nombre = by_name.get(_normalize_name(str(name)))
-            if por_nombre is not None and por_nombre != alias_ids[0]:
+            if any(p != alias_ids[0] for p in (by_name_activo or {}).get(clave_alias, [])):
                 return None
             return alias_ids[0]
     if name:
@@ -6228,6 +6234,7 @@ async def _insert_confirmed_data_impl(
                 _by_token,
                 by_barcode=_identity_indexes.by_barcode,
                 by_alias=_identity_indexes.by_alias,
+                by_name_activo=_identity_indexes.by_name,
                 barcode=row.get(barcode_col) if barcode_col else None,
             )
 
@@ -6642,6 +6649,7 @@ async def _insert_confirmed_data_impl(
                         _by_token,
                         by_barcode=_identity_indexes.by_barcode,
                         by_alias=_identity_indexes.by_alias,
+                        by_name_activo=_identity_indexes.by_name,
                         barcode=row.get(barcode_col) if barcode_col else None,
                     )
                     # B·5e: la fila que crea el producto Y lo vende (catálogo con su
@@ -6916,6 +6924,7 @@ async def _insert_confirmed_data_impl(
                         _by_token,
                         by_barcode=_identity_indexes.by_barcode,
                         by_alias=_identity_indexes.by_alias,
+                        by_name_activo=_identity_indexes.by_name,
                         barcode=_exp_barcode,
                     )
                     # FASE D: COGS si la fila es compra de mercadería (producto
@@ -6936,6 +6945,7 @@ async def _insert_confirmed_data_impl(
                             _identity_indexes.by_barcode,
                             _exp_barcode,
                             _identity_indexes.by_alias,
+                            _identity_indexes.by_name,
                         )
                         is None
                     ):
@@ -8876,6 +8886,7 @@ async def _insert_multisheet_data(
             _by_token,
             by_barcode=_identity_indexes.by_barcode,
             by_alias=_identity_indexes.by_alias,
+            by_name_activo=_identity_indexes.by_name,
             barcode=_val(row, cols.get("barcode"), _BARCODE_COLS),
         )
 
@@ -9308,6 +9319,7 @@ async def _insert_multisheet_data(
             _by_token,
             by_barcode=_identity_indexes.by_barcode,
             by_alias=_identity_indexes.by_alias,
+            by_name_activo=_identity_indexes.by_name,
             barcode=_exp_barcode,
         )
         # Costo unitario: columna inequívoca y DISTINTA de la del monto ("costo"
@@ -9356,6 +9368,7 @@ async def _insert_multisheet_data(
                 _identity_indexes.by_barcode,
                 _exp_barcode,
                 _identity_indexes.by_alias,
+                _identity_indexes.by_name,
             )
             is None
         ):
@@ -11162,6 +11175,7 @@ async def bulk_import_unclassified(
             _by_token,
             by_barcode=_identity_indexes.by_barcode,
             by_alias=_identity_indexes.by_alias,
+            by_name_activo=_identity_indexes.by_name,
             barcode=_clean_str(_row_val(row, _BARCODE_COLS), 64),
         )
 

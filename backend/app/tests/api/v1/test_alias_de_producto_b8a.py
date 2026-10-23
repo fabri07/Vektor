@@ -42,7 +42,9 @@ from app.tests._respaldo import producto_con_compra
 
 pytestmark = pytest.mark.asyncio
 
-_REF = "Coca 500"
+#: Sin palabras en común con «Coca Cola 500ml»: si el alias no estuviera, el
+#: vínculo por palabras no lo taparía (la mutación de cada camino tiene que fallar).
+_REF = "Negrita chica"
 
 
 @pytest.fixture(autouse=True)
@@ -192,7 +194,7 @@ class TestVincular:
                 "inferred_type": "ventas",
                 "has_venta": True,
                 "ventas_detectadas": [
-                    {"fecha": "2024-03-16", "monto": "1500", "producto": "COCA 500"}
+                    {"fecha": "2024-03-16", "monto": "1500", "producto": "NEGRITA CHICA"}
                 ],
             },
             {"ventas": True},
@@ -211,7 +213,7 @@ class TestVincular:
                      "headers": ["Fecha", "Monto", "Producto"], "row_count": 1}
                 ],
                 "ventas_detectadas": [
-                    {"Fecha": "2024-03-17", "Monto": "1500", "Producto": "coca 500",
+                    {"Fecha": "2024-03-17", "Monto": "1500", "Producto": "negrita chica",
                      "__context__": ctx}
                 ],
             },
@@ -253,7 +255,7 @@ class TestVincular:
         db_session: AsyncSession,
         sample_tenant: Tenant,
     ) -> None:
-        coca = await producto_con_compra(db_session, sample_tenant.tenant_id, nombre="Coca 500")
+        coca = await producto_con_compra(db_session, sample_tenant.tenant_id, nombre=_REF)
         rec = await _fila(db_session, sample_tenant)
 
         assert (await _vincular(client, auth_headers, rec, coca.id)).status_code == 200
@@ -299,7 +301,7 @@ class TestRechazos:
     ) -> None:
         tid = sample_tenant.tenant_id
         coca = await producto_con_compra(db_session, tid, nombre="Coca Cola 500ml")
-        await producto_con_compra(db_session, tid, nombre="Coca 500")  # otro producto
+        await producto_con_compra(db_session, tid, nombre=_REF)  # otro producto
         rec = await _fila(db_session, sample_tenant)
 
         r = await _vincular(client, auth_headers, rec, coca.id)
@@ -459,8 +461,21 @@ class TestResolucion:
         # El SKU gana.
         assert importer._resolve_product({"x1": b}, {}, _REF, "X1", by_alias=alias) == b
         # El nombre exacto del catálogo es de OTRO producto: no se elige.
+        clave = normalize_product_name(_REF)
+        # El nombre exacto de OTRO producto ACTIVO: no se elige.
+        assert (
+            importer._resolve_product(
+                {}, {}, _REF, None, by_alias=alias, by_name_activo={clave: [b]}
+            )
+            is None
+        )
+        # Un homónimo que sólo está en el índice viejo (que incluye inactivos) no
+        # inutiliza el alias.
         por_nombre: dict[str, uuid.UUID | None] = {importer._normalize_name(_REF): b}
-        assert importer._resolve_product({}, por_nombre, _REF, None, by_alias=alias) is None
+        assert (
+            importer._resolve_product({}, por_nombre, _REF, None, by_alias=alias, by_name_activo={})
+            == a
+        )
 
     def test_resolve_identity_alias_y_conflicto_con_el_nombre(self) -> None:
         a, b = uuid.uuid4(), uuid.uuid4()
