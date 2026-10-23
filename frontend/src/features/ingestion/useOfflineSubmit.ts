@@ -1,0 +1,305 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import axios from "axios";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+  salesService,
+  type CreateSalePayload,
+  type ManualBatchSalePayload,
+} from "@/services/sales.service";
+import { expensesService, type CreateExpensePayload } from "@/services/expenses.service";
+import { productsService, type CreateProductPayload } from "@/services/products.service";
+import { purchasesService, type ManualPurchasePayload } from "@/services/purchases.service";
+import {
+  isFailed,
+  useOfflineQueueStore,
+  type QueuedItem,
+  type QueuedKind,
+} from "@/stores/offlineQueueStore";
+
+type PayloadFor<K extends QueuedKind> = K extends "sale"
+  ? CreateSalePayload
+  : K extends "expense"
+    ? CreateExpensePayload
+    : K extends "product"
+      ? CreateProductPayload
+      : K extends "sale_batch"
+        ? ManualBatchSalePayload
+        : ManualPurchasePayload;
+
+interface SubmitCallbacks {
+  onSuccess?: () => void; // entró al servidor (o ya estaba: idempotente)
+  onQueued?: () => void; // sin conexión → encolado, se sincroniza al volver online
+  // Error real de validación/servidor (4xx/5xx). `mensaje`: el del servidor si vino
+  // uno legible (B·5e: «no hay compra de X…»), para mostrarlo en vez del genérico.
+  onError?: (mensaje?: string) => void;
+}
+
+// Invalida las queries reales de cada dominio (match por prefijo en TanStack).
+const INVALIDATE_KEYS: Record<QueuedKind, string[][]> = {
+  sale: [["sales-entries"], ["sales-all"], ["sales-date-range"]],
+  expense: [["expenses-entries"], ["expenses-all"], ["expenses-date-range"]],
+  product: [["products-list"], ["products-all"], ["product-categories"]],
+  sale_batch: [
+    ["sales-entries"],
+    ["sales-all"],
+    ["sales-date-range"],
+    ["products-list"],
+    ["products-all"],
+  ],
+  purchase: [
+    ["expenses-entries"],
+    ["expenses-all"],
+    ["products-list"],
+    ["products-all"],
+    ["inventory"],
+  ],
+};
+
+function invalidate(qc: QueryClient, kind: QueuedKind) {
+  for (const queryKey of INVALIDATE_KEYS[kind]) {
+    void qc.invalidateQueries({ queryKey });
+  }
+  void qc.invalidateQueries({ queryKey: ["ingestion-files"] });
+}
+
+async function postByKind(
+  kind: QueuedKind,
+  payload: unknown,
+  idempotencyKey: string,
+): Promise<void> {
+  if (kind === "sale") {
+    await salesService.createSale(payload as CreateSalePayload, idempotencyKey);
+  } else if (kind === "expense") {
+    await expensesService.createExpense(payload as CreateExpensePayload, idempotencyKey);
+  } else if (kind === "product") {
+    await productsService.createProduct(payload as CreateProductPayload, idempotencyKey);
+  } else if (kind === "sale_batch") {
+    await salesService.createManualBatch(payload as ManualBatchSalePayload, idempotencyKey);
+  } else {
+    await purchasesService.createManual(payload as ManualPurchasePayload, idempotencyKey);
+  }
+}
+
+// Error de red real: axios sin `response` (timeout/abort/DNS/CORS/offline).
+function isNetworkError(e: unknown): boolean {
+  return axios.isAxiosError(e) && !e.response;
+}
+
+// Error de cliente (4xx): permanente — reintentar el mismo payload no lo va a arreglar.
+function isClientError(e: unknown): boolean {
+  const status = axios.isAxiosError(e) ? e.response?.status : undefined;
+  return status !== undefined && status >= 400 && status < 500;
+}
+
+// Tope de reintentos para errores transitorios (5xx) — evita loops infinitos en la cola.
+const MAX_FLUSH_ATTEMPTS = 5;
+
+/**
+ * Código de error estructurado del backend, venga en la forma que venga.
+ *
+ * Hay dos: `HTTPException(detail={"code": ...})` deja el código ANIDADO bajo
+ * `detail`, mientras que los handlers globales que tienen que conservar `detail`
+ * como texto legible (el de stock insuficiente) lo ponen al LADO. Leer las dos
+ * en un solo lugar evita que cada call site tenga que saber cuál le toca.
+ */
+export function errorCode(e: unknown): string | null {
+  if (!axios.isAxiosError(e) || !e.response) return null;
+  const data = e.response.data as
+    | { code?: string; detail?: { code?: string } | string }
+    | undefined;
+  if (typeof data?.code === "string") return data.code;
+  const detail = data?.detail;
+  if (detail && typeof detail !== "string" && typeof detail.code === "string") {
+    return detail.code;
+  }
+  return null;
+}
+
+// Replay idempotente: el backend ya tiene el registro → 409 con el código del contrato.
+function isDuplicate(e: unknown): boolean {
+  if (!axios.isAxiosError(e) || e.response?.status !== 409) return false;
+  return errorCode(e) === "DUPLICATE_IDEMPOTENT";
+}
+
+/** El `detail.message` legible de un 4xx (los 422 de B·5e lo traen), o undefined. */
+export function mensajeDelServidor(e: unknown): string | undefined {
+  if (!axios.isAxiosError(e)) return undefined;
+  const detail = (e.response?.data as { detail?: unknown } | undefined)?.detail;
+  if (detail && typeof detail === "object" && "message" in detail) {
+    const m = (detail as { message?: unknown }).message;
+    if (typeof m === "string" && m.trim()) return m;
+  }
+  return undefined;
+}
+
+// Mensaje legible del error para guardarlo en el item de la cola (`lastError`).
+function errorMessage(e: unknown): string {
+  const delServidor = mensajeDelServidor(e);
+  if (delServidor) return delServidor;
+  if (axios.isAxiosError(e)) {
+    const status = e.response?.status;
+    return status ? `Error ${status} del servidor` : "Sin conexión al sincronizar";
+  }
+  return "Error desconocido";
+}
+
+/** Cantidad de cargas en la cola — pendientes y fallidas (para el badge del launcher). */
+export function useOfflineQueueCount(): number {
+  return useOfflineQueueStore((s) => s.items.length);
+}
+
+/**
+ * Cargas que agotaron los reintentos y esperan una decisión humana. Se cuentan
+ * aparte porque no son "está tardando": son operaciones que el usuario dio por
+ * guardadas y el servidor rechazó.
+ */
+export function useOfflineFailedCount(): number {
+  return useOfflineQueueStore((s) => s.items.filter(isFailed).length);
+}
+
+/** Estado de conexión reactivo (SSR-safe: arranca online y se corrige al montar). */
+export function useOnlineStatus(): boolean {
+  const [online, setOnline] = useState(true);
+  useEffect(() => {
+    setOnline(navigator.onLine);
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
+  return online;
+}
+
+/**
+ * Submit resiliente a cortes de internet. `submit` intenta el POST con una
+ * Idempotency-Key (el id del item); si falla por red, encola y sincroniza solo
+ * al volver online. `autoSync: true` (en el launcher, montado una vez por página)
+ * registra el listener `online` y dispara el flush inicial.
+ */
+// Candado de flush compartido por TODAS las instancias del hook. Con un `useRef`
+// había uno por instancia: el launcher (autoSync) y el panel de rechazadas podían
+// vaciar la cola a la vez y mandar el mismo item dos veces. El servidor lo
+// absorbe por idempotencia, pero no hay razón para depender de eso.
+let flushEnCurso = false;
+
+export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
+  const queryClient = useQueryClient();
+
+  // Tope de reintentos SIN pérdida: al alcanzarlo el item pasa a FAILED y deja de
+  // reintentarse, pero sigue en la cola. Borrarlo acá era perder una operación que el
+  // usuario ya dio por guardada.
+  const markWithCap = useCallback((item: QueuedItem, e: unknown) => {
+    const store = useOfflineQueueStore.getState();
+    if (item.attempts + 1 >= MAX_FLUSH_ATTEMPTS) {
+      store.markPermanentlyFailed(item.id, errorMessage(e));
+    } else {
+      store.markFailed(item.id, errorMessage(e));
+    }
+  }, []);
+
+  const flush = useCallback(async () => {
+    if (flushEnCurso) return;
+    if (typeof navigator !== "undefined" && !navigator.onLine) return;
+    const { items } = useOfflineQueueStore.getState();
+    if (items.length === 0) return;
+    flushEnCurso = true;
+    try {
+      for (const item of [...items]) {
+        // Un item en estado terminal dejó de reintentarse, pero sigue en la cola:
+        // saltearlo es lo que evita el loop infinito sin perder la operación.
+        if (isFailed(item)) continue;
+        try {
+          await postByKind(item.kind, item.payload, item.id);
+          useOfflineQueueStore.getState().remove(item.id);
+          invalidate(queryClient, item.kind);
+        } catch (e) {
+          if (isDuplicate(e)) {
+            useOfflineQueueStore.getState().remove(item.id);
+            invalidate(queryClient, item.kind);
+          } else if (isNetworkError(e)) {
+            // Sigue offline: dejar constancia y cortar; se reintenta en el próximo flush.
+            // NO consume presupuesto de reintentos — `navigator.onLine` da true con un
+            // router sin internet, y `flush` corre una vez por navegación de página, así
+            // que unos clics durante un corte agotaban el tope y el primer 503 real
+            // mandaba la operación a FAILED sin haberla reintentado nunca.
+            useOfflineQueueStore
+              .getState()
+              .markNetworkFailure(item.id, "Sin conexión al sincronizar");
+            break;
+          } else if (isClientError(e)) {
+            // 4xx permanente (payload inválido, stock insuficiente al sincronizar,
+            // proveedor borrado, etc.): reintentar el mismo payload no lo arregla.
+            // NUNCA se borra — las operaciones transaccionales (sale_batch / purchase)
+            // pueden 400 legítimamente y el usuario creyó que estaban guardadas. Queda
+            // visible con su lastError y, al llegar al tope, en estado terminal FAILED
+            // esperando una decisión humana (reintentar o descartar).
+            markWithCap(item, e);
+          } else {
+            // 5xx u otro error transitorio del servidor: reintentar con tope. Al alcanzar
+            // MAX_FLUSH_ATTEMPTS frena en FAILED (evita el poison-item que se reintenta
+            // para siempre) pero NO se borra.
+            markWithCap(item, e);
+          }
+        }
+      }
+    } finally {
+      flushEnCurso = false;
+    }
+  }, [queryClient, markWithCap]);
+
+  const submit = useCallback(
+    async <K extends QueuedKind>(
+      kind: K,
+      payload: PayloadFor<K>,
+      cb?: SubmitCallbacks,
+    ): Promise<void> => {
+      const id = crypto.randomUUID();
+      try {
+        await postByKind(kind, payload, id);
+        invalidate(queryClient, kind);
+        cb?.onSuccess?.();
+      } catch (e) {
+        if (isDuplicate(e)) {
+          invalidate(queryClient, kind);
+          cb?.onSuccess?.();
+        } else if (isNetworkError(e)) {
+          // Persistencia best-effort: si el encolado falla (ej. localStorage lleno),
+          // NO confirmamos como guardado → onError (el form no se resetea, no se pierde la carga).
+          try {
+            useOfflineQueueStore.getState().enqueue({
+              id,
+              kind,
+              payload,
+              createdAt: new Date().toISOString(),
+              attempts: 0,
+            });
+            cb?.onQueued?.();
+          } catch {
+            cb?.onError?.();
+          }
+        } else {
+          cb?.onError?.(mensajeDelServidor(e));
+        }
+      }
+    },
+    [queryClient],
+  );
+
+  useEffect(() => {
+    if (!opts?.autoSync) return;
+    void flush();
+    function onOnline() {
+      void flush();
+    }
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [opts?.autoSync, flush]);
+
+  return { submit, flush };
+}
