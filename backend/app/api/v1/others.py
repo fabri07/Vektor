@@ -44,6 +44,7 @@ from app.api.v1.products import (
     _identity_conflict_from_db,
     _tenant_vertical,
 )
+from app.api.v1.sales import FIADO_PAYMENT_METHOD, _resolve_sale_customer
 from app.application.services import compra_service, maintenance_lock_service, stock_service
 from app.application.services._ledger_restore import snapshot_master
 from app.application.services.file_deletion_service import (
@@ -53,7 +54,10 @@ from app.application.services.file_deletion_service import (
     ACTION_UPDATE_PRODUCT,
     REPAIR_TYPE_IMPORT,
 )
-from app.application.services.ingestion_import_service import IDENTITY_REF_KEY
+from app.application.services.ingestion_import_service import (
+    CUSTOMER_REF_KEY,
+    IDENTITY_REF_KEY,
+)
 from app.application.services.operation_identity_service import identidad_tomada
 from app.application.services.product_identity import (
     ProductIdentityConflictError,
@@ -114,6 +118,7 @@ from app.persistence.models.unclassified_record import (
     unclassified_row_ref,
 )
 from app.persistence.models.user import User
+from app.persistence.repositories.customer_repository import CustomerRepository
 from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
 from app.schemas.customer import CreateCustomerRequest
@@ -820,6 +825,10 @@ async def _registrar_venta_desde_otros(
       Y el stock.
     - Procedencia: el archivo de la fila y una referencia derivada del id de la
       fila (estable aunque el usuario corrija un campo).
+    - Cliente: las mismas reglas que POST /sales (`_resolve_sale_customer`: un
+      fiado sin cliente real es 400). Si el pedido no trae cliente, vale el de la
+      venta que se sacó a «Otros» (`__customer_id__`), si sigue existiendo: si no,
+      una venta fiada volvería sin cliente y la deuda se perdería.
 
     No marca la fila como importada: eso lo hace quien la llama, al final.
     """
@@ -840,6 +849,24 @@ async def _registrar_venta_desde_otros(
         await stock_service.check_stock_available(
             sale_req.product_id, tenant_id, _cantidad, session
         )
+    _fila = record.row_data or {}
+    _cliente = sale_req.customer_id
+    if _cliente is None and _fila.get(CUSTOMER_REF_KEY):
+        try:
+            _candidato = uuid.UUID(str(_fila[CUSTOMER_REF_KEY]))
+        except ValueError:
+            _candidato = None
+        if (
+            _candidato is not None
+            and await CustomerRepository(session).get_by_id(_candidato, tenant_id) is not None
+        ):
+            _cliente = _candidato
+    _cliente = await _resolve_sale_customer(
+        session,
+        tenant_id,
+        _cliente,
+        is_fiado=sale_req.payment_method == FIADO_PAYMENT_METHOD,
+    )
     _upload_id = record.uploaded_file_id
     venta = SaleEntry(
         tenant_id=tenant_id,
@@ -848,6 +875,7 @@ async def _registrar_venta_desde_otros(
         transaction_date=sale_req.transaction_date,
         payment_method=sale_req.payment_method,
         product_id=sale_req.product_id,
+        customer_id=_cliente,
         notes=sale_req.notes,
         custom_fields=sale_req.custom_fields,
         provenance="REAL",

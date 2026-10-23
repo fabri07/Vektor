@@ -65,7 +65,10 @@ def imprimir(r: Resumen, modo: str, nombre: str) -> None:
     for motivo, n in r.por_motivo().most_common():
         print(f"   {motivo}: {n}")
     if r.fiado:
-        print(f"   de ellas fiadas: ${r.fiado:,.2f} (la deuda de esos clientes baja al aplicar)")
+        print(
+            f"   de ellas fiadas: ${r.fiado:,.2f} (la deuda de esos clientes baja al "
+            "aplicar y vuelve, con su cliente, al resolverlas desde «Otros»)"
+        )
     if r.en_dias_con_arqueo:
         n = len(r.en_dias_con_arqueo)
         print(
@@ -155,7 +158,8 @@ async def _revertir(session: AsyncSession, run_id: uuid.UUID) -> None:
     print(
         f"Restauradas: {len(res.restauradas)} · ya resueltas por el usuario (no se tocan): "
         f"{len(res.resueltas_por_el_usuario)} · sin stock para volver a descontar "
-        f"(quedan anuladas): {len(res.sin_stock)}"
+        f"(quedan anuladas): {len(res.sin_stock)} · ya re-importadas por un archivo "
+        f"posterior (quedan anuladas, si no serían dos): {len(res.reimportadas)}"
     )
 
 

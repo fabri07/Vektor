@@ -12,8 +12,20 @@ Esto es esa reparación, explícita y reversible, que autoriza el dueño:
   queda en «Otros» con el motivo, para resolverla con la compra cargada. Todo en
   una transacción, con una ``DataRepairRun`` que guarda cada par venta↔fila.
 - **revertir(run_id)**: restaura las ventas cuya fila de «Otros» sigue PENDING
-  (y vuelve a aplicar su descuento); las que el usuario ya resolvió o descartó
-  quedan como están, con el motivo.
+  (y vuelve a aplicar su descuento y a tomar su identidad de operación); las que
+  el usuario ya resolvió o descartó quedan como están, con el motivo. Si un
+  import posterior volvió a cargar la venta (el archivo se re-subió con la
+  compra), la anulada NO se restaura: serían dos. La identidad es por
+  COMPROBANTE —varios renglones comparten una—, así que «re-importada» quiere
+  decir que la identidad tiene una venta viva que no es de esta corrida ni un
+  renglón hermano que ya estaba vivo al aplicar.
+
+La clasificación es la MISMA que la de la importación (``respaldo_service``:
+``es_cobro_de_fiado``, ``motivo_sin_respaldo``, ``catalogo_por_archivo``): una
+venta respaldada por el stock del catálogo de su propio archivo, aunque su fecha
+siga sin confirmar, no se toca. La fila de «Otros» guarda el cliente de la
+venta, igual que la del import, para que resolverla dé la misma venta (con su
+deuda si era fiada).
 
 Quedan afuera las ventas del POS: la plata y el turno son reales y no se mueven
 desde un script; lo que les falta se ve en su tarea de «Otros» (B·5e-2).
@@ -32,18 +44,29 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service, stock_service
-from app.application.services.facts_service import INFLOW_METHOD
-from app.application.services.ingestion_import_service import ROW_REF_KEY
+from app.application.services.ingestion_import_service import (
+    ROW_REF_KEY,
+    _en_unidad_de_venta,
+    filas_internas_de_venta,
+)
+from app.application.services.operation_identity_service import (
+    liberar_identidades_de,
+    restaurar_vinculos,
+    vinculos_de,
+)
 from app.application.services.respaldo_service import (
     MOTIVO_VENTA_SIN_COMPRA,
     MOTIVO_VENTA_SIN_PRODUCTO,
+    catalogo_por_archivo,
+    es_cobro_de_fiado,
+    motivo_sin_respaldo,
     primeros_dias_de_fuente,
-    respaldada,
 )
 from app.domain.transaction import PaymentMethod
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.cash_close import CashClose
 from app.persistence.models.inventory import InventoryMovement
+from app.persistence.models.operation_identity import OperationIdentity, OperationIdentityLink
 from app.persistence.models.pos_operation import PosOperationLine
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairRun
@@ -70,6 +93,9 @@ class Candidata:
     customer_id: uuid.UUID | None
     fiada: bool
     con_arqueo: bool
+    #: Unidades base por unidad de venta (gramos por kg): la fila de «Otros»
+    #: lleva la cantidad en la unidad de VENTA, como la del import.
+    factor: int | None = None
 
 
 @dataclass
@@ -113,13 +139,12 @@ async def analizar(
 ) -> Resumen:
     """Las ventas vivas del negocio sin producto o sin compra previa. SELECT-only.
 
-    Quedan afuera los cobros de fiado (``inflow``: no son ventas) y las ventas
-    del POS (la plata y el turno son reales).
+    Quedan afuera los cobros de fiado (``inflow``, sin distinguir mayúsculas:
+    no son ventas) y las ventas del POS (la plata y el turno son reales).
     """
     q = select(SaleEntry).where(
         SaleEntry.tenant_id == tenant_id,
         SaleEntry.voided_at.is_(None),
-        SaleEntry.payment_method != INFLOW_METHOD,
         ~SaleEntry.id.in_(
             select(PosOperationLine.sale_entry_id).where(
                 PosOperationLine.tenant_id == tenant_id,
@@ -132,21 +157,29 @@ async def analizar(
     if hasta is not None:
         fin = datetime.combine(hasta + timedelta(days=1), time.min)
         q = q.where(SaleEntry.transaction_date < fin)
-    ventas = list((await session.execute(q.order_by(SaleEntry.transaction_date))).scalars())
+    ventas = [
+        v
+        for v in (await session.execute(q.order_by(SaleEntry.transaction_date))).scalars()
+        # La MISMA definición de «cobro de fiado» que la importación.
+        if not es_cobro_de_fiado(v.payment_method)
+    ]
     pids = {v.product_id for v in ventas if v.product_id is not None}
     primeros = await primeros_dias_de_fuente(session, tenant_id, pids)
+    del_catalogo = await catalogo_por_archivo(
+        session, tenant_id, [(v.source_upload_id, v.product_id) for v in ventas]
+    )
     nombres: dict[uuid.UUID, str] = {}
+    factores: dict[uuid.UUID, int] = {}
     if pids:
-        nombres = {
-            fila[0]: fila[1]
-            for fila in (
-                await session.execute(
-                    select(Product.id, Product.name).where(
-                        Product.tenant_id == tenant_id, Product.id.in_(pids)
-                    )
+        for fila in (
+            await session.execute(
+                select(Product.id, Product.name, Product.base_units_per_sale_unit).where(
+                    Product.tenant_id == tenant_id, Product.id.in_(pids)
                 )
-            ).all()
-        }
+            )
+        ).all():
+            nombres[fila[0]] = fila[1]
+            factores[fila[0]] = int(fila[2] or 1)
     dias_con_arqueo = set(
         (
             await session.execute(
@@ -157,16 +190,15 @@ async def analizar(
     resumen = Resumen(tenant_id=tenant_id)
     for v in ventas:
         dia = v.transaction_date.date()
-        if v.product_id is None:
-            motivo = (
-                f"{MOTIVO_VENTA_SIN_PRODUCTO}: elegí qué producto se vendió "
-                "(sin producto no hay compra previa ni costo)"
-            )
-            nombre = None
-        elif not respaldada(primeros.get(v.product_id), dia):
-            nombre = nombres.get(v.product_id, "el producto")
-            motivo = f"{MOTIVO_VENTA_SIN_COMPRA}: cargá la compra o el stock inicial de {nombre}"
-        else:
+        nombre = nombres.get(v.product_id, "el producto") if v.product_id else None
+        motivo = motivo_sin_respaldo(
+            v.product_id,
+            dia,
+            primeros,
+            nombre,
+            del_catalogo_del_archivo=(v.source_upload_id, v.product_id) in del_catalogo,
+        )
+        if motivo is None:
             continue
         resumen.candidatas.append(
             Candidata(
@@ -176,6 +208,7 @@ async def analizar(
                 motivo=motivo,
                 producto=nombre,
                 product_id=v.product_id,
+                factor=factores.get(v.product_id) if v.product_id else None,
                 customer_id=v.customer_id,
                 fiada=(v.payment_method or "").lower() == PaymentMethod.ACCOUNT.value,
                 con_arqueo=dia in dias_con_arqueo,
@@ -198,10 +231,6 @@ async def reparar(
     Una venta de un día con arqueo cerrado descuadraría ese arqueo (su esperado
     quedó congelado): se excluye salvo ``incluir_dias_con_arqueo``.
     """
-    from app.application.services.operation_identity_service import (  # noqa: PLC0415
-        liberar_identidades_de,
-    )
-
     await maintenance_lock_service.acquire_maintenance_lock_exclusive(session, tenant_id)
     resumen = await analizar(session, tenant_id, desde, hasta)
     if not incluir_dias_con_arqueo:
@@ -221,6 +250,11 @@ async def reparar(
     await session.flush()
     ahora = datetime.now(UTC)
     pares: list[dict[str, Any]] = []
+    # La foto de las identidades ANTES de soltarlas (como la relectura): el
+    # revert las vuelve a colgar.
+    identidades = await vinculos_de(
+        session, tenant_id, [("sale", c.sale_id) for c in resumen.candidatas]
+    )
     for c in resumen.candidatas:
         v = await session.get(SaleEntry, c.sale_id)
         assert v is not None
@@ -230,16 +264,17 @@ async def reparar(
         v.voided_at = ahora
         v.void_reason = VOID_REASON
         v.voided_by_repair_run_id = run.id
+        suyas = identidades.get(("sale", v.id), [])
         fila: dict[str, Any] = {
             "fecha": c.dia.isoformat(),
             "monto": str(c.monto),
-            "cantidad": v.quantity,
+            "cantidad": _en_unidad_de_venta(v.quantity, c.factor),
             "producto": c.producto,
             "medio_de_pago": v.payment_method,
             "detalle": v.notes,
             # Internas (``__``): no se muestran como columnas de la fila.
             "__sale_id__": str(v.id),
-            "__customer_id__": str(v.customer_id) if v.customer_id else None,
+            **filas_internas_de_venta(v),
         }
         if v.source_row_ref:
             fila[ROW_REF_KEY] = v.source_row_ref
@@ -259,6 +294,7 @@ async def reparar(
                 "sale_id": str(v.id),
                 "record_id": str(registro.id),
                 "movement_id": str(movimiento.id) if movimiento is not None else None,
+                "identidades": suyas,
             }
         )
     # La fila vuelve a poder entrar si el usuario la descarta y re-sube el
@@ -266,9 +302,17 @@ async def reparar(
     await liberar_identidades_de(
         session, tenant_id, [("sale", c.sale_id) for c in resumen.candidatas]
     )
+    # Los renglones hermanos que siguen colgados del mismo comprobante (otra
+    # venta del documento, respaldada): el revert no los confunde con un re-import.
+    claves = sorted({i["identity_key"] for ids in identidades.values() for i in ids})
+    hermanos = {
+        clave: sorted(str(e) for e in ids)
+        for clave, ids in (await _ventas_vinculadas(session, tenant_id, claves)).items()
+    }
     run.details_json = {
         "repair_type": REPAIR_TYPE,
         "pares": pares,
+        "hermanos": hermanos,
         "desde": desde.isoformat() if desde else None,
         "hasta": hasta.isoformat() if hasta else None,
         "monto": str(resumen.monto),
@@ -295,8 +339,35 @@ async def reparar(
 class Reversion:
     restauradas: list[str] = field(default_factory=list)
     resueltas_por_el_usuario: list[str] = field(default_factory=list)
+    #: Un import posterior volvió a cargar la venta (tomó su identidad): la
+    #: anulada queda anulada y su fila de «Otros» se borra — si no, serían dos.
+    reimportadas: list[str] = field(default_factory=list)
     #: Su stock ya se vendió: volver a descontarlo dejaría el stock negativo.
     sin_stock: list[str] = field(default_factory=list)
+
+
+async def _ventas_vinculadas(
+    session: AsyncSession, tenant_id: uuid.UUID, claves: list[str]
+) -> dict[str, set[uuid.UUID]]:
+    """``{clave: ventas VIVAS colgadas de esa identidad}``."""
+    if not claves:
+        return {}
+    filas = await session.execute(
+        select(OperationIdentity.identity_key, OperationIdentityLink.entity_id)
+        .join(OperationIdentityLink, OperationIdentityLink.identity_id == OperationIdentity.id)
+        .join(SaleEntry, SaleEntry.id == OperationIdentityLink.entity_id)
+        .where(
+            OperationIdentity.tenant_id == tenant_id,
+            OperationIdentity.identity_key.in_(claves),
+            OperationIdentityLink.entity_type == "sale",
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+        )
+    )
+    out: dict[str, set[uuid.UUID]] = {}
+    for clave, eid in filas.all():
+        out.setdefault(clave, set()).add(eid)
+    return out
 
 
 async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
@@ -308,7 +379,23 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
         raise ValueError(f"La corrida {run_id} ya está {run.status}.")
     await maintenance_lock_service.acquire_maintenance_lock_exclusive(session, run.tenant_id)
     res = Reversion()
-    for par in (run.details_json or {}).get("pares") or []:
+    detalle = run.details_json or {}
+    pares_run = detalle.get("pares") or []
+    # Los hermanos vivos al aplicar no son un re-import. Se calcula UNA vez,
+    # antes de restaurar: lo que el loop vuelve a colgar es de esta corrida (y
+    # sus ventas, anuladas, no aparecen entre las vivas).
+    conocidas: set[uuid.UUID] = set()
+    for ids in (detalle.get("hermanos") or {}).values():
+        conocidas.update(uuid.UUID(e) for e in ids)
+    claves = sorted(
+        {i["identity_key"] for p in pares_run for i in (p.get("identidades") or [])}
+    )
+    reimportadas = {
+        clave
+        for clave, ids in (await _ventas_vinculadas(session, run.tenant_id, claves)).items()
+        if ids - conocidas
+    }
+    for par in pares_run:
         registro = await session.get(UnclassifiedRecord, uuid.UUID(par["record_id"]))
         venta = await session.get(SaleEntry, uuid.UUID(par["sale_id"]))
         if (
@@ -318,6 +405,11 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
             or venta.voided_by_repair_run_id != run.id
         ):
             res.resueltas_por_el_usuario.append(par["sale_id"])
+            continue
+        suyas: list[dict[str, str]] = par.get("identidades") or []
+        if any(i["identity_key"] in reimportadas for i in suyas):
+            await session.delete(registro)
+            res.reimportadas.append(par["sale_id"])
             continue
         mov = (
             await session.get(InventoryMovement, uuid.UUID(par["movement_id"]))
@@ -335,6 +427,13 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
         venta.voided_at = None
         venta.void_reason = None
         venta.voided_by_repair_run_id = None
+        if suyas:
+            await restaurar_vinculos(
+                session,
+                run.tenant_id,
+                venta.source_upload_id,
+                [("sale", venta.id, ident) for ident in suyas],
+            )
         await session.delete(registro)
         res.restauradas.append(par["sale_id"])
     run.status = "REVERTED"
