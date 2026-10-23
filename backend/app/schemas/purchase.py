@@ -1,0 +1,106 @@
+"""Schemas de la compra manual de mercadería (comprobante multi-línea)."""
+
+from __future__ import annotations
+
+import math
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator
+
+from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
+
+_MAX_AMOUNT = Decimal("999999999")
+_PAYMENT_PATTERN = r"^(cash|debit_card|credit_card|transfer|qr|account|other)$"
+
+
+def _reject_nan_inf(v: Decimal, field_name: str) -> Decimal:
+    fv = float(v)
+    if math.isnan(fv) or math.isinf(fv):
+        raise ValueError(f"{field_name} no puede ser NaN ni Infinity.")
+    return v
+
+
+class PurchaseLine(BaseModel):
+    """Una línea del comprobante de compra.
+
+    ``product_id`` presente → restock de un producto existente; ausente → se crea
+    un producto nuevo (``name`` y ``category`` requeridos).
+    """
+
+    product_id: UUID | None = None
+    name: str | None = Field(default=None, max_length=300)
+    category: str | None = Field(default=None, max_length=100)
+    sku: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=1000)
+    unit_cost: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
+    quantity: int = Field(ge=1)
+    sale_price_ars: Decimal = Field(gt=0, le=_MAX_AMOUNT, decimal_places=2)
+    # Solo aplica a producto existente: actualizar el precio de VENTA del catálogo.
+    # M·1c: el costo ya no depende de esto — lo fija la fuente más reciente por
+    # fecha (`costo_vigente_service`), y esta compra es una de ellas.
+    update_price: bool = False
+
+    @field_validator("unit_cost", "sale_price_ars")
+    @classmethod
+    def _no_nan(cls, v: Decimal) -> Decimal:
+        return _reject_nan_inf(v, "amount")
+
+
+class PurchaseShipping(BaseModel):
+    """B·5b: el envío del comprobante (``domain/comprobante_de_compra.py``)."""
+
+    amount: Decimal = Field(default=Decimal("0"), ge=0, le=_MAX_AMOUNT, decimal_places=2)
+    mode: str = Field(
+        default="desconocido", pattern=r"^(repartir|gasto_aparte|no_hubo|desconocido)$"
+    )
+
+
+class PurchaseTax(BaseModel):
+    """B·5b: qué es el importe de las líneas respecto del IVA. Nunca 21 % por defecto."""
+
+    treatment: str = Field(
+        default="desconocido", pattern=r"^(incluido|adicional|no_aplica|desconocido)$"
+    )
+    #: Fracción: 0,21 = 21 %. Sólo con ``incluido`` / ``adicional``.
+    rate: Decimal | None = Field(default=None, gt=0, lt=1, decimal_places=4)
+
+
+class ManualPurchaseRequest(BaseModel):
+    supplier_id: UUID
+    payment_method: str = Field(pattern=_PAYMENT_PATTERN, default="cash")
+    transaction_date: datetime
+    lines: list[PurchaseLine] = Field(min_length=1)
+    # B·5b: opcionales; sin ellos, envío e IVA quedan «desconocido» como antes,
+    # así un frontend viejo sigue funcionando igual.
+    shipping: PurchaseShipping | None = None
+    tax: PurchaseTax | None = None
+    document_ref: str | None = Field(default=None, max_length=100)
+
+    @field_validator("transaction_date")
+    @classmethod
+    def _not_future(cls, v: datetime) -> datetime:
+        if fecha_de_negocio(v) > today_ar():
+            raise ValueError("transaction_date cannot be in the future.")
+        return a_hora_de_negocio(v)
+
+
+class PurchaseLineResult(BaseModel):
+    product_id: UUID
+    product_name: str
+    created: bool
+    expense_id: UUID
+    new_stock_units: int
+    margin_pct: float | None
+
+
+class ManualPurchaseResponse(BaseModel):
+    lines: int
+    products_created: list[UUID]
+    expense_ids: list[UUID]
+    total_cogs: float
+    results: list[PurchaseLineResult]
+    # Eco de metadata útil para el front (no se persiste acá).
+    meta: dict[str, Any] = {}

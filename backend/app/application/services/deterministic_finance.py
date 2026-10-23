@@ -1,0 +1,191 @@
+"""Cálculos financieros determinísticos — sin LLM.
+
+El aislamiento de datos se hace por tenant_id. ``provenance`` describe el origen
+del dato dentro del tenant, pero no decide si el dato es visible para cálculos:
+un tenant demo debe poder mostrar su funcionamiento con números de muestra y un
+tenant real no debe tener datos demo sembrados.
+
+Usar Decimal para todos los cálculos monetarios; nunca float.
+
+Los cobros de fiado (``payment_method="inflow"``) NO son ventas: la venta fiada
+original ya se contó. Quedan fuera de ventas, ticket y rotación (misma regla que
+FactsService).
+
+**El margen NO vive acá** (M·2b-2): bruto y neto salen de FactsService
+(``facts_provider.margenes_del_tenant``), la única definición. Lo que antes se
+llamaba «margen bruto» acá era ``ventas − TODOS los gastos``: un resultado
+operativo, que es lo que sigue devolviendo ``calcular_flujo_neto_30d``.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.observability.logger import get_logger
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+
+#: Cobros de fiado: no son ventas (ver docstring del módulo y FactsService).
+_INFLOW = "inflow"
+
+
+def _es_venta() -> Any:
+    """Excluye los cobros de fiado (``payment_method`` puede ser NULL)."""
+    return func.coalesce(func.lower(SaleEntry.payment_method), "") != _INFLOW
+
+logger = get_logger(__name__)
+
+_WINDOW_DAYS = 30
+_TWO_PLACES = Decimal("0.01")
+
+
+def _today() -> date:
+    return date.today()
+
+
+def _window_start() -> date:
+    return _today() - timedelta(days=_WINDOW_DAYS)
+
+
+async def calcular_flujo_neto_30d(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
+    """
+    Retorna ventas, gastos y flujo neto de los últimos 30 días.
+    """
+    desde = _window_start()
+
+    ventas_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
+        SaleEntry.tenant_id == tenant_id,
+        SaleEntry.voided_at.is_(None),
+        SaleEntry.transaction_date >= desde,
+        _es_venta(),
+    )
+    gastos_q = select(func.coalesce(func.sum(ExpenseEntry.amount), Decimal("0"))).where(
+        ExpenseEntry.tenant_id == tenant_id,
+        ExpenseEntry.voided_at.is_(None),
+        ExpenseEntry.transaction_date >= desde,
+    )
+
+    total_ventas = Decimal(str((await db.scalar(ventas_q)) or 0))
+    total_gastos = Decimal(str((await db.scalar(gastos_q)) or 0))
+    flujo_neto = total_ventas - total_gastos
+
+    return {
+        "total_ventas": total_ventas,
+        "total_gastos": total_gastos,
+        "flujo_neto": flujo_neto,
+        "periodo_dias": _WINDOW_DAYS,
+        "desde": desde.isoformat(),
+        "hasta": _today().isoformat(),
+    }
+
+
+async def calcular_ticket_promedio(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
+    """
+    Retorna ticket promedio y número de transacciones de los últimos 30 días.
+    """
+    desde = _window_start()
+
+    count_q = select(func.count(SaleEntry.id)).where(
+        SaleEntry.tenant_id == tenant_id,
+        SaleEntry.voided_at.is_(None),
+        SaleEntry.transaction_date >= desde,
+        _es_venta(),
+    )
+    sum_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
+        SaleEntry.tenant_id == tenant_id,
+        SaleEntry.voided_at.is_(None),
+        SaleEntry.transaction_date >= desde,
+        _es_venta(),
+    )
+
+    n_transacciones = (await db.scalar(count_q)) or 0
+    total = Decimal(str((await db.scalar(sum_q)) or 0))
+
+    if n_transacciones == 0:
+        return {"ticket_promedio": None, "n_transacciones": 0, "sin_datos": True}
+
+    ticket = (total / Decimal(str(n_transacciones))).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    return {
+        "ticket_promedio": ticket,
+        "n_transacciones": n_transacciones,
+        "sin_datos": False,
+    }
+
+
+async def calcular_rotacion_inventario(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
+    """
+    Retorna días de rotación estimados y ventas diarias promedio.
+    Requiere ventas > 0 para calcular la rotación.
+    """
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    desde = _window_start()
+
+    stock_q = select(func.coalesce(func.sum(Product.stock_units), 0)).where(
+        Product.tenant_id == tenant_id,
+        Product.is_active.is_(True),
+    )
+    ventas_q = select(func.coalesce(func.sum(SaleEntry.amount), Decimal("0"))).where(
+        SaleEntry.tenant_id == tenant_id,
+        SaleEntry.voided_at.is_(None),
+        SaleEntry.transaction_date >= desde,
+        _es_venta(),
+    )
+
+    stock_units = int((await db.scalar(stock_q)) or 0)
+    ventas_30d = Decimal(str((await db.scalar(ventas_q)) or 0))
+
+    if ventas_30d == Decimal("0"):
+        return {"dias_rotacion": None, "ventas_diarias_promedio": None, "sin_datos": True}
+
+    ventas_diarias = (ventas_30d / Decimal("30")).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    return {
+        "valor_stock_unidades": stock_units,
+        "ventas_diarias_promedio": ventas_diarias,
+        "sin_datos": False,
+    }
+
+
+async def get_financial_summary(tenant_id: uuid.UUID, db: AsyncSession) -> dict[str, Any]:
+    """
+    Compone todos los cálculos financieros en un dict único.
+    Si TODOS los valores tienen sin_datos=True, retorna {"estado": "SIN_DATOS"}.
+
+    Este dict se inyecta en el contexto del agente como datos ya calculados.
+    El LLM NUNCA calcula — solo narra estos valores.
+    """
+    try:
+        flujo = await calcular_flujo_neto_30d(tenant_id, db)
+        ticket = await calcular_ticket_promedio(tenant_id, db)
+        rotacion = await calcular_rotacion_inventario(tenant_id, db)
+    except Exception as exc:
+        logger.warning(
+            "deterministic_finance.error",
+            tenant_id=str(tenant_id),
+            error=str(exc),
+        )
+        return {"estado": "SIN_DATOS", "mensaje": "error calculando datos financieros"}
+
+    sin_datos_total = (
+        flujo["total_ventas"] == Decimal("0")
+        and flujo["total_gastos"] == Decimal("0")
+        and ticket.get("sin_datos", True)
+    )
+
+    if sin_datos_total:
+        return {
+            "estado": "SIN_DATOS",
+            "mensaje": "sin datos cargados para el tenant",
+        }
+
+    return {
+        "estado": "OK",
+        "flujo_neto_30d": flujo,
+        "ticket_promedio": ticket,
+        "rotacion": rotacion,
+    }
