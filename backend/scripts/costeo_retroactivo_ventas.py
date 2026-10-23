@@ -1,0 +1,213 @@
+"""M·2c: costea las ventas anteriores a M·2a, siempre como ESTIMACIÓN.
+
+La regla vive en ``app/application/services/costeo_retroactivo_service.py``.
+Este script sólo elige los tenants, imprime el resumen y confirma o revierte.
+
+- **Sin ``--apply`` (default) es un DRY-RUN:** calcula todo dentro de una transacción
+  que se REVIERTE. No escribe nada.
+- **``--apply``:** escribe el snapshot de cada venta sin costear y deja un
+  ``data_repair_runs`` ``M2C_COSTEO_RETROACTIVO`` por tenant, con un item por venta.
+  Sólo toca ventas SIN snapshot, así que reejecutarlo no duplica nada.
+- **``--revert <run_id>``:** devuelve a NULL las ventas de esa corrida cuyo snapshot
+  sigue siendo el que escribió.
+- **``--solo-fecha`` (M·3-4):** no costea: completa ``cost_source_date`` de las
+  ventas YA costeadas, sólo donde la fuente que elige hoy el costeo da el mismo
+  costo y origen que los congelados (nunca revalúa). Dry-run igual; con
+  ``--apply`` deja un ``data_repair_runs`` ``M34_FECHA_DEL_COSTO`` que
+  ``--revert`` deshace.
+- **``--sin-costo`` (M·2d-2):** costea las ventas ``sin_costo`` que hoy YA tienen
+  fuente (cargadas antes que la compra con fecha anterior), con la regla de una
+  venta en vivo: confirmadas o estimadas según la fuente. NO mueve ninguna
+  apertura: informa las aperturas sin confirmar y las ventas anteriores a ellas,
+  para confirmarlas desde la pantalla. Con ``--apply`` deja un
+  ``data_repair_runs`` ``M2D_FUENTE_TARDIA`` con el snapshot anterior real;
+  ``--revert`` lo restaura (ojo: la próxima publicación del costo promedio de
+  ese producto las vuelve a costear, porque la fuente sigue ahí).
+
+Nunca imprime la connection URL: sólo ``host`` y ``base``.
+
+Usage (desde ``backend/``):
+    DATABASE_URL='postgresql://...' .venv/bin/python scripts/costeo_retroactivo_ventas.py \
+        --email x@y.com
+    ... --tenant-id <uuid> [--apply]
+    ... --all [--apply]
+    ... --revert <run_id>
+    ... --all --solo-fecha [--apply]
+    ... --all --sin-costo [--apply]
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import sys
+import uuid
+from urllib.parse import urlparse
+
+_SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPTS)
+sys.path.insert(0, os.path.dirname(_SCRIPTS))
+
+from _db import async_engine_config  # noqa: E402
+from sqlalchemy import select, text  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker  # noqa: E402
+
+from app.application.services.costeo_retroactivo_service import (  # noqa: E402
+    Resumen,
+    ResumenFecha,
+    ResumenSinCosto,
+    costear_historico,
+    fechar_costos,
+    recostear_sin_costo_historico,
+    revertir,
+)
+from app.persistence.db.engine_factory import crear_engine  # noqa: E402
+from app.persistence.models.transaction import SaleEntry  # noqa: E402
+
+
+def _imprimir(r: Resumen, aplicar: bool, nombre: str) -> None:
+    print(f"\n── {nombre} ({str(r.tenant_id)[:8]}…)  ventas sin costear: {r.ventas}")
+    if not r.ventas:
+        return
+    for origen, n in r.por_origen.most_common():
+        print(f"   origen {origen:14} {n:6}")
+    print(
+        f"   habrían salido confirmadas en vivo: {r.habrian_sido_confirmadas}"
+        " (quedan como estimación)"
+    )
+    if r.sin_costear_por_error:
+        print(
+            f"   ⚠ quedaron sin costear: {r.sin_costear_por_error} (producto que no es del"
+            " negocio, o falla del costeo: buscar costeo_de_ventas_fallo en el log)"
+        )
+    cobertura = r.cobertura_pct
+    margen = r.margen_estimado_pct
+    print(
+        f"   ingreso ${r.ingreso_total:,.2f} · con costo ${r.ingreso_con_costo:,.2f}"
+        f" ({'—' if cobertura is None else f'{cobertura}%'}) · costo ${r.costo_total:,.2f}"
+        f" · margen estimado sobre lo cubierto: {'—' if margen is None else f'{margen}%'}"
+    )
+    if aplicar and r.run_id:
+        print(f"   APLICADO · run_id {r.run_id} (para revertir: --revert {r.run_id})")
+
+
+def _imprimir_fecha(r: ResumenFecha, aplicar: bool, nombre: str) -> None:
+    print(f"\n── {nombre} ({str(r.tenant_id)[:8]}…)  ventas costeadas sin fecha: {r.ventas}")
+    if not r.ventas:
+        return
+    print(f"   fechadas: {r.fechadas} (de ellas con costo de > 45 días: {r.desactualizadas})")
+    print(f"   la fuente de hoy no da el costo congelado (quedan sin fecha): {r.no_coinciden}")
+    print(f"   fuente sin fecha (costo cargado; antigüedad desconocida): {r.fuente_sin_fecha}")
+    if aplicar and r.run_id:
+        print(f"   APLICADO · run_id {r.run_id} (para revertir: --revert {r.run_id})")
+
+
+def _imprimir_sin_costo(r: ResumenSinCosto, aplicar: bool, nombre: str) -> None:
+    print(f"\n── {nombre} ({str(r.tenant_id)[:8]}…)  ventas sin costo con fuente: {r.candidatas}")
+    if r.candidatas:
+        print(f"   costeadas: {r.costeadas} (confirmadas: {r.confirmadas})")
+        for origen, n in r.por_origen.most_common():
+            print(f"   origen {origen:14} {n:6}")
+    if r.aperturas_sin_confirmar or r.ventas_antes_de_apertura:
+        print(
+            f"   stock inicial sin confirmar: {r.aperturas_sin_confirmar} · ventas sin costo"
+            f" anteriores al stock inicial: {r.ventas_antes_de_apertura}"
+            " (se confirman desde la tarjeta de Margen; este script no mueve fechas)"
+        )
+    if aplicar and r.run_id:
+        print(f"   APLICADO · run_id {r.run_id} (para revertir: --revert {r.run_id})")
+
+
+async def _tenants(session: AsyncSession, args: argparse.Namespace) -> list[uuid.UUID]:
+    if args.tenant_id:
+        return [uuid.UUID(args.tenant_id)]
+    if args.email:
+        tid = (
+            await session.execute(
+                text("SELECT tenant_id FROM users WHERE lower(email) = lower(:e)"),
+                {"e": args.email},
+            )
+        ).scalars().all()
+        if len(tid) != 1:
+            print(f"ERROR: el email corresponde a {len(tid)} tenants; usá --tenant-id.")
+            sys.exit(2)
+        return [tid[0]]
+    filas = await session.execute(
+        select(SaleEntry.tenant_id)
+        .where(
+            SaleEntry.product_id.is_not(None),
+            SaleEntry.voided_at.is_(None),
+            SaleEntry.cost_unit_ars.is_not(None) & SaleEntry.cost_source_date.is_(None)
+            if args.solo_fecha
+            else SaleEntry.cost_origin == "sin_costo"
+            if args.sin_costo
+            else SaleEntry.cost_snapshot_version.is_(None),
+        )
+        .distinct()
+    )
+    return list(filas.scalars())
+
+
+async def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    quien = ap.add_mutually_exclusive_group(required=True)
+    quien.add_argument("--tenant-id")
+    quien.add_argument("--email")
+    quien.add_argument("--all", action="store_true")
+    quien.add_argument("--revert", metavar="RUN_ID")
+    ap.add_argument("--apply", action="store_true")
+    modo = ap.add_mutually_exclusive_group()
+    modo.add_argument("--solo-fecha", action="store_true",
+                      help="M·3-4: sólo la fecha de la fuente de ventas ya costeadas")
+    modo.add_argument("--sin-costo", action="store_true",
+                      help="M·2d-2: costea las ventas sin_costo que ya tienen fuente")
+    args = ap.parse_args()
+
+    # La configuración de logging de la app puede dejar el eco del SQL en INFO.
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    url, connect_args = async_engine_config()
+    p = urlparse(url)
+    print(f"Base: host={p.hostname} base={(p.path or '/')[1:]}")
+    print("MODO:", "REVERT" if args.revert else ("APPLY" if args.apply else "DRY-RUN (no escribe)"))
+    engine = crear_engine(url, connect_args=connect_args, echo=False)
+    fabrica = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with fabrica() as session:
+            if args.revert:
+                revertidas, salteadas = await revertir(session, uuid.UUID(args.revert))
+                await session.commit()
+                print(f"Revertidas: {revertidas} · salteadas (cambiaron después): {salteadas}")
+                return
+            for tenant_id in await _tenants(session, args):
+                nombre = (
+                    await session.execute(
+                        text("SELECT display_name FROM tenants WHERE tenant_id = :t"),
+                        {"t": tenant_id},
+                    )
+                ).scalar_one_or_none() or "(sin nombre)"
+                if args.sin_costo:
+                    sc = await recostear_sin_costo_historico(
+                        session, tenant_id, aplicar=args.apply
+                    )
+                    await (session.commit() if args.apply else session.rollback())
+                    _imprimir_sin_costo(sc, args.apply, nombre)
+                    continue
+                if args.solo_fecha:
+                    fechas = await fechar_costos(session, tenant_id, aplicar=args.apply)
+                    await (session.commit() if args.apply else session.rollback())
+                    _imprimir_fecha(fechas, args.apply, nombre)
+                    continue
+                resumen = await costear_historico(session, tenant_id, aplicar=args.apply)
+                if args.apply:
+                    await session.commit()
+                else:
+                    await session.rollback()
+                _imprimir(resumen, args.apply, nombre)
+    finally:
+        await engine.dispose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
