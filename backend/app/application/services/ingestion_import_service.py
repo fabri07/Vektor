@@ -2364,22 +2364,76 @@ async def _load_tenant_vertical(session: AsyncSession, tenant_id: uuid.UUID) -> 
 # ── FASE 3: vínculo de entidades (ventas/gastos → producto del catálogo) ──────
 
 
-# Mejora B: tokens genéricos de unidad/medida que NO identifican un producto.
+def _plegar_plural(token: str) -> str:
+    """«alfajores»/«alfajor» y «leches»/«leche» dan la misma raíz (sólo palabras)."""
+    if any(c.isdigit() for c in token):
+        return token
+    if len(token) > 3 and token.endswith("s"):
+        token = token[:-1]
+    if len(token) > 3 and token.endswith("e"):
+        token = token[:-1]
+    return token
+
+
+# Mejora B: palabras de unidad, medida o envase que NO identifican un producto
+# (I1-2: también las de envase, que antes la abstención volvía distintivas).
 _PRODUCT_TOKEN_STOPWORDS: frozenset[str] = frozenset(
-    {"kg", "und", "x", "de", "la", "el", "ml", "gr"}
+    _plegar_plural(w)
+    for w in (
+        "kg", "und", "x", "de", "la", "el", "ml", "gr", "por", "lt", "lts", "litro",
+        "litros", "cc", "grs", "gramo", "gramos", "unid", "unidad", "unidades", "uds",
+        "pack", "lata", "botella", "caja", "paquete", "sobre", "bolsa",
+    )
 )
+
+#: Claves internas de `by_token` para el tamaño (nunca chocan con una palabra).
+_TOKEN_NUMERO = "\x00n:"
+_TOKEN_CON_NUMERO = "\x00n*"
+_NUMERO_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _numeros_del_nombre(name: str) -> set[str]:
+    """Los números del nombre, sin unidad: «500ml» y «500» dan {"500"},
+    «1,5 L» da {"1.5"}."""
+    out: set[str] = set()
+    for crudo in _NUMERO_RE.findall(_normalize_name(name)):
+        valor = Decimal(crudo.replace(",", "."))
+        out.add(format(valor.normalize(), "f"))
+    return out
+
+
+def _es_token_distintivo(token: str) -> bool:
+    """¿La palabra nombra algo (marca, variante) y no una medida o un número?"""
+    return not any(c.isdigit() for c in token)
 
 
 def _product_name_tokens(name: str) -> list[str]:
     """Tokens significativos del nombre normalizado (≥3 chars, sin stopwords).
 
     Reusa ``_normalize_name`` (guiones/underscores → espacio) para que
-    "Coca-Cola 500ml" y "coca cola 500" produzcan tokens comparables.
+    "Coca-Cola 500ml" y "coca cola 500" produzcan tokens comparables. La
+    puntuación pegada no cuenta («(negro)» = «negro») y los plurales se pliegan
+    («Alfajores» = «Alfajor»), I1-2.
     """
-    norm = _normalize_name(name)
-    return [
-        t for t in norm.split(" ") if len(t) >= 3 and t not in _PRODUCT_TOKEN_STOPWORDS
-    ]
+    norm = re.sub(r"[^\w.,]+", " ", _normalize_name(name))
+    tokens = (_plegar_plural(t.strip(".,")) for t in norm.split())
+    return [t for t in tokens if len(t) >= 3 and t not in _PRODUCT_TOKEN_STOPWORDS]
+
+
+def _indexar_tokens(
+    by_token: dict[str, set[uuid.UUID]],
+    product_id: uuid.UUID,
+    name: str,
+    marca: str | None = None,
+) -> None:
+    """Las palabras del nombre (y de la marca, si está aparte) y su tamaño."""
+    for tok in _product_name_tokens(f"{name} {marca or ''}"):
+        by_token.setdefault(tok, set()).add(product_id)
+    numeros = _numeros_del_nombre(name)
+    for n in numeros:
+        by_token.setdefault(_TOKEN_NUMERO + n, set()).add(product_id)
+    if numeros:
+        by_token.setdefault(_TOKEN_CON_NUMERO, set()).add(product_id)
 
 
 async def _load_product_index(
@@ -2395,6 +2449,12 @@ async def _load_product_index(
       ambiguo (varios productos lo comparten → no se vincula).
     - `by_token[token] = {product_id, ...}` para match conservador por tokens
       (Mejora B): token ≥3 chars del nombre, sin stopwords genéricos de unidad.
+
+    Sólo productos ACTIVOS (I1-1, revisión profunda 2026-10-24). Un producto
+    fusionado (F3), dado de baja a mano o por F11 conserva nombre y SKU: con él
+    en el índice, el nombre del canónico quedaba ambiguo y sus ventas iban a
+    «Otros», o una compra o venta caía en el producto muerto (stock y costo en
+    algo que no se ve, sin crear el producto nuevo).
     """
     from sqlalchemy import select  # noqa: PLC0415
 
@@ -2402,13 +2462,17 @@ async def _load_product_index(
 
     result = await session.execute(
         select(
-            Product.id, Product.name, Product.sku, Product.base_units_per_sale_unit
-        ).where(Product.tenant_id == tenant_id)
+            Product.id,
+            Product.name,
+            Product.sku,
+            Product.base_units_per_sale_unit,
+            Product.brand_normalized,
+        ).where(Product.tenant_id == tenant_id, Product.is_active.is_(True))
     )
     by_sku: dict[str, uuid.UUID] = {}
     by_name: dict[str, uuid.UUID | None] = {}
     by_token: dict[str, set[uuid.UUID]] = {}
-    for pid, pname, psku, pfactor in result.all():
+    for pid, pname, psku, pfactor, pmarca in result.all():
         # Los productos por peso o volumen, en la MISMA consulta: una venta
         # importada que se vincule a uno trae la cantidad en su unidad de venta.
         if factores is not None and pfactor and pfactor > 1:
@@ -2421,8 +2485,7 @@ async def _load_product_index(
         norm = _normalize_name(pname or "")
         if norm:
             by_name[norm] = pid if norm not in by_name else None  # None = ambiguo
-        for tok in _product_name_tokens(pname or ""):
-            by_token.setdefault(tok, set()).add(pid)
+        _indexar_tokens(by_token, pid, pname or "", pmarca)
     return by_sku, by_name, by_token
 
 
@@ -2928,8 +2991,7 @@ def _register_product_transaction_indexes(
                 by_name[norm] = product_id
             elif by_name[norm] != product_id:
                 by_name[norm] = None  # nombre ya ambiguo → no resolver a ciegas
-        for tok in _product_name_tokens(clean_name):
-            by_token.setdefault(tok, set()).add(product_id)
+        _indexar_tokens(by_token, product_id, clean_name)
     bc_key = normalize_barcode(barcode) if barcode else None
     if bc_key and by_barcode is not None:
         ids = by_barcode.setdefault(bc_key, [])
@@ -2973,7 +3035,8 @@ def _resolve_product(
         # exacto de OTRO producto ACTIVO es ése, no se elige: ninguno. Sólo activos
         # (`by_name_activo`, el `by_name` de `ProductIdentityIndexes`), como el
         # endpoint y `_resolve_product_identity`: un homónimo dado de baja no puede
-        # inutilizar el alias. El `by_name` de acá incluye inactivos y no sirve.
+        # inutilizar el alias. (El `by_name` de acá también es sólo de activos desde
+        # I1-1; se sigue usando el de las identidades, que es una lista.)
         clave_alias = normalize_product_name(str(name)) or ""
         alias_ids = by_alias.get(clave_alias)
         if alias_ids and len(alias_ids) == 1:
@@ -2994,12 +3057,32 @@ def _resolve_product(
             for tok in tokens:
                 ids = by_token.get(tok)
                 if not ids:
+                    # Una palabra que el catálogo no conoce: si es una medida o un
+                    # número («500», «1kg») no identifica y se ignora («Coca Cola
+                    # 500» ~ «Coca-Cola 500ml»). Si es una marca o una variante
+                    # («Taragüi», «Zero», «Quilmes») es OTRO producto: abstenerse.
+                    # Antes se salteaba siempre, y «Yerba Taragui 1kg» se pegaba a
+                    # «Yerba Rosamonte 1kg» con su stock, su costo y su margen
+                    # (I1-2, revisión profunda 2026-10-24).
+                    if _es_token_distintivo(tok):
+                        return None
                     continue
                 candidates = set(ids) if candidates is None else (candidates & ids)
                 if not candidates:
                     break
             if candidates is not None and len(candidates) == 1:
-                return next(iter(candidates))
+                (unico,) = candidates
+                # Otro tamaño es otro producto: «Coca Cola 2250» no es la de
+                # «500ml». Si los dos dicen un número y no comparten ninguno,
+                # abstenerse (I1-2). «500» y «500ml» siguen siendo el mismo.
+                numeros = _numeros_del_nombre(str(name))
+                if (
+                    numeros
+                    and unico in by_token.get(_TOKEN_CON_NUMERO, set())
+                    and not any(unico in by_token.get(_TOKEN_NUMERO + n, set()) for n in numeros)
+                ):
+                    return None
+                return unico
     return None
 
 
@@ -5310,7 +5393,7 @@ async def _vincular_ventas_pendientes(
 ) -> dict[uuid.UUID, tuple[Any, Any, Any]]:
     """B·5e: vincula la venta que su propia fila no pudo vincular porque el
     producto se creaba al final del mismo import (catálogo + historial en una
-    tabla). Mismo orden que el import: SKU, código de barras, nombre."""
+    tabla). Mismo orden que el import: código de barras, SKU, nombre."""
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.domain.text_norm import (  # noqa: PLC0415
@@ -5328,17 +5411,20 @@ async def _vincular_ventas_pendientes(
         return pendientes
     # Las MISMAS reglas que la resolución de cada fila (`_resolve_product`):
     # barcode → SKU → nombre; un código o un nombre que comparten dos productos
-    # (el nombre contando también los inactivos) no se adivina.
-    productos = list(
-        (await session.execute(select(Product).where(Product.tenant_id == tenant_id))).scalars()
-    )
-    activos = {p.id: p for p in productos if p.is_active}
+    # ACTIVOS no se adivina. Un inactivo (fusionado, dado de baja) no cuenta: si
+    # contara, el nombre del canónico quedaba ambiguo después de una fusión (I1-1).
+    activos = {
+        p.id: p
+        for p in (
+            await session.execute(
+                select(Product).where(Product.tenant_id == tenant_id, Product.is_active.is_(True))
+            )
+        ).scalars()
+    }
 
-    def _unico(
-        clave: Callable[[Any], str | None], todos: bool = False
-    ) -> dict[str, uuid.UUID | None]:
+    def _unico(clave: Callable[[Any], str | None]) -> dict[str, uuid.UUID | None]:
         out: dict[str, uuid.UUID | None] = {}
-        for p in productos if todos else activos.values():
+        for p in activos.values():
             k = clave(p)
             if not k:
                 continue
@@ -5347,7 +5433,7 @@ async def _vincular_ventas_pendientes(
 
     por_barcode = _unico(lambda p: p.barcode_normalized)
     por_sku = _unico(lambda p: p.sku_normalized)
-    por_nombre = _unico(lambda p: p.name_normalized, todos=True)
+    por_nombre = _unico(lambda p: p.name_normalized)
     for venta in a_vincular:
         nombre, sku, barcode = pendientes[venta.id]
         sku_n = normalize_sku(str(sku)) if sku not in (None, "") else None
