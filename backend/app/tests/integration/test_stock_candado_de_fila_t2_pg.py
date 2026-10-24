@@ -45,11 +45,13 @@ from sqlalchemy.pool import NullPool
 
 from app.api.v1 import pos as pos_router
 from app.application.services import compra_service, pos_discrepancy_service, stock_service
+from app.application.services.ingestion_import_service import ReceiptLine, import_receipt
 from app.domain.comprobante_de_compra import LineaDeCompra
 from app.persistence.models.inventory import InventoryBalance, InventoryMovement
 from app.persistence.models.pos_operation import PosOperation, PosOperationLine
 from app.persistence.models.pos_stock_discrepancy import PosStockDiscrepancy
 from app.persistence.models.product import Product
+from app.persistence.models.supplier import Supplier
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.user import User
@@ -293,6 +295,36 @@ async def test_la_compra_manual_no_pisa_la_venta(
         )
 
     await _carrera(sm, tenant_id, [pid], compra)
+    assert await _stock(sm, pid) == (27, 27)
+
+
+async def test_un_remito_no_pisa_la_venta(
+    sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> None:
+    """``POST /suppliers/{id}/receipts`` (revisión de T2-a): sumaba sobre un
+    índice de balances y productos cargados sin candado. Dos líneas del mismo
+    artículo (el remito admite repetidos) para que la segunda suma también
+    escriba sobre la instancia ya cargada."""
+    pid = await _producto(sm, tenant_id)
+    async with sm() as s:
+        nombre = (await s.execute(select(Product.name).where(Product.id == pid))).scalar_one()
+        proveedor = Supplier(tenant_id=tenant_id, name=f"Prov {uuid.uuid4().hex[:6]}")
+        s.add(proveedor)
+        await s.commit()
+        proveedor_id = proveedor.id
+
+    async def remito(s: AsyncSession) -> object:
+        return await import_receipt(
+            s,
+            tenant_id,
+            proveedor_id,
+            [
+                ReceiptLine(nombre, None, 12, Decimal("50")),
+                ReceiptLine(nombre, None, 8, Decimal("50")),
+            ],
+        )
+
+    await _carrera(sm, tenant_id, [pid], remito)
     assert await _stock(sm, pid) == (27, 27)
 
 

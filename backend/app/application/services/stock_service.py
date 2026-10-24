@@ -183,6 +183,34 @@ async def bloquear_productos(
     return {p.id: p for p in filas}
 
 
+async def bloquear_balances(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_ids: Iterable[uuid.UUID],
+) -> dict[uuid.UUID, InventoryBalance]:
+    """Los balances existentes de esos productos, bloqueados y refrescados.
+
+    Para los caminos que precargan un índice de balances (el remito): se pide
+    DESPUÉS de ``bloquear_productos`` —producto y después balance, el orden de
+    ``_get_or_create_balance`` en todos los caminos—. Un producto sin balance no
+    vuelve: lo crea el camino de siempre.
+    """
+    ids = set(product_ids)
+    if not ids:
+        return {}
+    await db.flush()
+    filas = (
+        await db.execute(
+            select(InventoryBalance)
+            .where(InventoryBalance.tenant_id == tenant_id, InventoryBalance.product_id.in_(ids))
+            .order_by(InventoryBalance.product_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalars()
+    return {b.product_id: b for b in filas}
+
+
 async def bloquear_producto(
     db: AsyncSession,
     tenant_id: uuid.UUID,

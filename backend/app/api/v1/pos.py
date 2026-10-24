@@ -410,6 +410,8 @@ async def create_pos_operation(
                 )
                 .order_by(Product.id)
                 .with_for_update()
+                # T2: refrescado aunque la sesión ya tenga el producto cargado.
+                .execution_options(populate_existing=True)
             )
         )
         .scalars()
