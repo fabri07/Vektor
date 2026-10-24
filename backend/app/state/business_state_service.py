@@ -55,6 +55,7 @@ from app.persistence.models.cash_close import CashClose
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._pos_tender_scope import tenders_mixtos
+from app.persistence.repositories._ventas_scope import es_cobro_de_fiado, es_venta
 from app.persistence.repositories.business_profile_repository import BusinessProfileRepository
 from app.persistence.repositories.owner_capital_repository import flujo_de_dinero
 
@@ -139,6 +140,10 @@ class BusinessState:
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
 
+# v6: las ventas del BSL dejan de contar los cobros de fiado y los cobros pasan
+# a sumar al flujo líquido (T1). Un blob v5 serviría 24 h ventas y crecimiento
+# inflados por los cobros.
+#
 # v5: el margen (M·2b-3) sale de FactsService sobre el costo congelado por
 # venta. Un blob v4 deserializaría con `margin_status="ausente"` por default y
 # borraría el margen de todos los tenants hasta el siguiente cambio de datos.
@@ -156,11 +161,11 @@ class BusinessState:
 # `_deserialize_state`. v2: los rulesets pasaron del código corto "kiosco" al
 # canónico "kiosco_almacen".)
 def _cache_key(tenant_id: UUID) -> str:
-    return f"business_state:v5:{tenant_id}"
+    return f"business_state:v6:{tenant_id}"
 
 
 def _hash_key(tenant_id: UUID) -> str:
-    return f"last_inputs_hash:v5:{tenant_id}"
+    return f"last_inputs_hash:v6:{tenant_id}"
 
 
 def _make_fingerprint(
@@ -175,11 +180,12 @@ def _make_fingerprint(
     dia_ar: str = "",
     neto_marca: str = "",
     arqueo: str = "",
+    liquid_in: str = "0",
 ) -> str:
     raw = (
         f"{sale_count}:{expense_count}:{product_count}:"
         f"{profile_updated_at.isoformat()}:{prev_sales_amount}:{capital_liquid_out}:"
-        f"{sold_cost}:{confirmed_cost_count}:{dia_ar}:{neto_marca}:{arqueo}"
+        f"{sold_cost}:{confirmed_cost_count}:{dia_ar}:{neto_marca}:{arqueo}:{liquid_in}"
     )
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -533,6 +539,9 @@ async def compute_business_state(
             SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= window_start,
             func.date(SaleEntry.transaction_date) <= window_end,
+            # Un cobro de fiado no es venta: sumaba la venta fiada dos veces,
+            # inflaba el crecimiento y contaba como venta observada (T1).
+            es_venta(),
         )
     )
     sale_sum_row = sale_sum_result.one()
@@ -552,6 +561,7 @@ async def compute_business_state(
             SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= prev_window_start,
             func.date(SaleEntry.transaction_date) <= prev_window_end,
+            es_venta(),
         )
     )
     prev_real_sales: Decimal = Decimal(str(prev_sale_result.scalar_one() or 0))
@@ -611,7 +621,9 @@ async def compute_business_state(
             SaleEntry.voided_at.is_(None),
             SaleEntry.transaction_date >= window_start,
             func.date(SaleEntry.transaction_date) <= window_end,
-            SaleEntry.payment_method.in_(_LIQUID_METHODS),
+            # El cobro de un fiado es plata que entra a caja ese día (la venta
+            # fiada no lo fue), como en FactsService.caja_liquida.
+            or_(SaleEntry.payment_method.in_(_LIQUID_METHODS), es_cobro_de_fiado()),
         )
     )
     liquid_inflow_est: Decimal = Decimal(str(liquid_in_result.scalar_one() or 0))
@@ -725,6 +737,9 @@ async def compute_business_state(
         neto_marca=await _marca_del_neto(session, tenant_id),
         # El último arqueo define la caja (M·2d-3): uno nuevo invalida el caché.
         arqueo=str(latest_counted_cash),
+        # Un cobro de fiado ya no mueve `sale_count` (no es venta, T1) pero sí la
+        # caja: sin esto el recálculo servía el flujo líquido viejo 24 h.
+        liquid_in=str(liquid_inflow_est),
     )
     cached_hash: str | None = await redis.get(_hash_key(tenant_id))
     if cached_hash == fingerprint:

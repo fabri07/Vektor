@@ -31,6 +31,13 @@ class PaymentMethod(StrEnum):
 #: ventas vive en ``pos_tenders`` (ver ``repositories/_pos_tender_scope.py``).
 MIXED_PAYMENT_METHOD = "mixed"
 
+#: Cobro de una venta fiada: una fila de ``sales_entries`` con este método (fuera
+#: de ``PaymentMethod``, lo escribe ``cash_service.save_cash_inflow``). NO es una
+#: venta —la venta fiada ya se contó como ingreso cuando se hizo—: es plata que
+#: entra a caja y baja la deuda del cliente. Todo lector de plata la separa con
+#: ``repositories/_ventas_scope.py``.
+INFLOW_PAYMENT_METHOD = "inflow"
+
 
 class ExpenseCategory(StrEnum):
     RENT = "rent"

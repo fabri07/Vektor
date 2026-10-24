@@ -131,8 +131,8 @@ async def test_los_lectores_reparten_el_mixto_en_postgres(negocio: _Negocio) -> 
             "credit_card": 700.0, "inflow": 400.0,
         }
 
-        (deudor,) = await repo.get_receivables_by_customer(tid)
-        assert (deudor["total_owed"], deudor["n_sales"]) == (400.0, 1)
+        # La parte fiada del mixto (400) ya se cobró (inflow 400): no debe nada (T1).
+        assert await repo.get_receivables_by_customer(tid) == []
         saldo = await repo.get_balance_by_customer(tid, cliente_id)
         assert saldo == {"total_account": 400.0, "total_paid": 400.0, "balance": 0.0}
         (fila,) = await repo.get_balances_by_customer(tid)
@@ -145,6 +145,7 @@ async def test_los_lectores_reparten_el_mixto_en_postgres(negocio: _Negocio) -> 
         ) == [("account", 400.0), ("cash", 600.0), ("credit_card", 700.0), ("debit_card", 300.0)]
 
         state = await compute_business_state(tid, s, _FakeRedis())  # type: ignore[arg-type]
-        # Líquido: 1000 del mixto-no-mixto en efectivo + 600 + 300 de débito.
-        # Ni el fiado (400), ni el crédito (700), ni el cobro (inflow) entran.
-        assert state.liquid_inflow_est == Decimal("1900")
+        # Líquido: 1000 del mixto-no-mixto en efectivo + 600 + 300 de débito + el
+        # cobro de fiado (400, T1: es plata que entra). Ni el fiado (400) ni el
+        # crédito (700) entran.
+        assert state.liquid_inflow_est == Decimal("2300")

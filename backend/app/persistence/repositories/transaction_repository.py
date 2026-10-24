@@ -4,13 +4,14 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, case, func, select
+from sqlalchemy import Select, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._expense_scope import gasto_de_resultado
 from app.persistence.repositories._pos_tender_scope import tenders_mixtos, venta_no_mixta
+from app.persistence.repositories._ventas_scope import es_cobro_de_fiado, es_venta
 
 
 def _as_date(value: datetime | date | None) -> date | None:
@@ -33,6 +34,7 @@ async def _daily_amount_series(
     los días sin movimiento. `str(row.day)` normaliza la clave entre Postgres
     (devuelve `date`) y SQLite (devuelve `'YYYY-MM-DD'`). Compartido por las series
     de ventas, gastos y caja neta para que el zero-fill y el rango sean idénticos.
+    La serie de ventas no suma los cobros de fiado (`_ventas_scope`).
     """
     day = func.date(model.transaction_date).label("day")
     q = (
@@ -46,6 +48,8 @@ async def _daily_amount_series(
         .group_by(day)
         .order_by(day)
     )
+    if model is SaleEntry:
+        q = q.where(es_venta())
     result = await session.execute(q)
     by_day: dict[str, float] = {str(row.day): float(row.total or 0) for row in result.all()}
     n_days = (to_date - from_date).days + 1
@@ -136,9 +140,13 @@ class SaleRepository:
         from_date: date | None = None,
         to_date: date | None = None,
     ) -> float:
+        """Ingreso por ventas del período: sin los cobros de fiado, que no son
+        ingreso (la venta fiada ya se contó). Lo leen el Resumen económico,
+        `/sales/summary` y marketing."""
         q = select(func.sum(SaleEntry.amount)).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.voided_at.is_(None),
+            es_venta(),
         )
         if from_date:
             q = q.where(func.date(SaleEntry.transaction_date) >= from_date)
@@ -153,9 +161,11 @@ class SaleRepository:
         from_date: date,
         to_date: date,
     ) -> int:
+        """Cantidad de ventas del período (`/sales/summary`), sin los cobros."""
         q = select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.voided_at.is_(None),
+            es_venta(),
             func.date(SaleEntry.transaction_date) >= from_date,
             func.date(SaleEntry.transaction_date) <= to_date,
         )
@@ -304,7 +314,8 @@ class SaleRepository:
         JOIN sales_entries × customers, GROUP BY cliente. Solo ventas con
         `customer_id` no nulo y no anuladas. Por cada cliente: total facturado,
         cantidad de ventas y fecha de la última venta. Ordenado por total desc.
-        El cálculo (top N, ticket promedio) lo hace `shared/analytics.py`.
+        El cálculo (top N, ticket promedio) lo hace `shared/analytics.py`. Un
+        cobro de fiado no es facturación: no suma ni cuenta como venta.
 
         Returns list[dict]: customer_id, customer_name, total, n_sales, last_sale_date.
         """
@@ -322,6 +333,7 @@ class SaleRepository:
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
                 SaleEntry.customer_id.isnot(None),
+                es_venta(),
             )
             .group_by(SaleEntry.customer_id, Customer.name)
             .order_by(func.sum(SaleEntry.amount).desc())
@@ -346,15 +358,20 @@ class SaleRepository:
         self,
         tenant_id: UUID,
     ) -> list[dict[str, Any]]:
-        """Cuentas por cobrar (fiado): ventas con payment_method == 'account'.
+        """Cuentas por cobrar (fiado): lo que cada cliente DEBE HOY.
 
-        Agrupa por cliente sumando el monto adeudado. Solo ventas no anuladas con
-        cliente identificado y método de pago `account` (cuenta corriente / fiado),
-        más la parte fiada de los pagos mixtos de caja (B9). El total general lo
-        computa `shared/analytics.py`.
+        Por cliente: lo fiado (ventas no anuladas con método `account` más la
+        parte fiada de los pagos mixtos de caja, B9) MENOS sus cobros (`inflow`).
+        Sólo quedan los clientes con saldo pendiente (> 0): uno que ya pagó todo
+        —o pagó de más— no debe nada. Antes se sumaba lo fiado sin restar los
+        cobros y el chat le reclamaba la deuda a quien ya la había saldado
+        (revisión profunda 2026-10-24, T1). Es el mismo saldo que
+        `get_balances_by_customer`. El total general lo computa
+        `shared/analytics.py`.
 
-        ``n_sales`` cuenta MOVIMIENTOS, no tickets: una fila por venta (una por
-        producto en un ticket de caja) más una por pago fiado de un mixto.
+        ``n_sales`` cuenta los MOVIMIENTOS DE DEUDA, no tickets ni cobros: una
+        fila por venta fiada (una por producto en un ticket de caja) más una por
+        pago fiado de un mixto.
 
         Returns list[dict]: customer_id, customer_name, total_owed, n_sales.
         """
@@ -390,7 +407,24 @@ class SaleRepository:
                 )
                 fila["total_owed"] += float(row.total_owed or 0)
                 fila["n_sales"] += int(row.n_sales or 0)
-        return sorted(por_cliente.values(), key=lambda r: r["total_owed"], reverse=True)
+        cobros_q = (
+            select(SaleEntry.customer_id, func.sum(SaleEntry.amount).label("cobrado"))
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.customer_id.isnot(None),
+                es_cobro_de_fiado(),
+            )
+            .group_by(SaleEntry.customer_id)
+        )
+        for row in (await self._session.execute(cobros_q)).all():
+            deudor = por_cliente.get(str(row.customer_id))
+            if deudor is not None:
+                deudor["total_owed"] -= float(row.cobrado or 0)
+        for fila in por_cliente.values():
+            fila["total_owed"] = round(fila["total_owed"], 2)
+        pendientes = [fila for fila in por_cliente.values() if fila["total_owed"] > 0]
+        return sorted(pendientes, key=lambda r: r["total_owed"], reverse=True)
 
     def _fiado_mixto_por_cliente(self, tenant_id: UUID, etiqueta: str) -> Select[Any]:
         """Parte fiada de las operaciones de caja mixtas, por cliente (población B).
@@ -443,7 +477,7 @@ class SaleRepository:
         paid_q = select(func.sum(SaleEntry.amount)).where(
             SaleEntry.tenant_id == tenant_id,
             SaleEntry.customer_id == customer_id,
-            SaleEntry.payment_method == "inflow",
+            es_cobro_de_fiado(),
             SaleEntry.voided_at.is_(None),
         )
         b = tenders_mixtos(tenant_id)
@@ -492,7 +526,7 @@ class SaleRepository:
         ).label("total_account")
         total_paid_expr = func.sum(
             case(
-                (SaleEntry.payment_method == "inflow", SaleEntry.amount),
+                (es_cobro_de_fiado(), SaleEntry.amount),
                 else_=0,
             )
         ).label("total_paid")
@@ -514,7 +548,10 @@ class SaleRepository:
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
                 SaleEntry.customer_id.isnot(None),
-                SaleEntry.payment_method.in_([PaymentMethod.ACCOUNT.value, "inflow"]),
+                or_(
+                    SaleEntry.payment_method == PaymentMethod.ACCOUNT.value,
+                    es_cobro_de_fiado(),
+                ),
             )
             .group_by(SaleEntry.customer_id, Customer.name)
         )

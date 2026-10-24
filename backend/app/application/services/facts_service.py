@@ -58,7 +58,7 @@ from app.domain.margen import (
     medir_margen,
     medir_margen_neto,
 )
-from app.domain.transaction import PaymentMethod
+from app.domain.transaction import INFLOW_PAYMENT_METHOD, PaymentMethod
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. CONFIG CANÓNICA — las reglas de negocio como constantes, no como magia dispersa
@@ -80,7 +80,7 @@ DELAYED_METHODS = frozenset({PaymentMethod.CREDIT_CARD.value, "tarjeta_credito"}
 # Cobros de fiado: filas en sales_entries con payment_method="inflow" (fuera del
 # enum canónico). NO son ventas (la venta fiada original ya se contó) — son plata
 # que ENTRA a caja. Se excluyen de ventas/ticket/margen y se suman a caja_liquida.
-INFLOW_METHOD = "inflow"
+INFLOW_METHOD = INFLOW_PAYMENT_METHOD
 
 def es_categoria_de_mercaderia(categoria: object) -> bool:
     """¿La categoría de un gasto es compra de mercadería (aunque diga OPEX)?
