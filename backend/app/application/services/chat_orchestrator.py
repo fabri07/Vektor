@@ -30,6 +30,11 @@ from app.application.agents.ceo.synthesis import synthesize_team_results
 from app.application.agents.ceo.team_plan_builder import INTENT_CATALOG
 from app.application.agents.chat.agent import AgentChat
 from app.application.agents.shared.heuristic_engine import HeuristicEngine
+from app.application.agents.shared.permisos_chat import (
+    ROLES_QUE_EJECUTAN,
+    quiere_escribir,
+    rechazar_por_rol,
+)
 from app.application.agents.shared.schemas import (
     AgentRequest,
     AgentResponse,
@@ -203,6 +208,8 @@ class ChatOrchestrator:
         redis: Redis,
         user_id: uuid.UUID,
         tenant_id: uuid.UUID,
+        *,
+        role_code: str | None = None,
     ) -> AgentResponse:
         # Cache de UploadedFile por request (evita recargar el mismo archivo en
         # _build_attachment_meta / _rescue_unknown_intent / _load_file_context). La
@@ -704,6 +711,21 @@ class ChatOrchestrator:
                 ceo_target=ceo_target,
                 raw_plan=raw_plan,
             )
+            # R-1: un rol que no confirma no escribe por chat. Se decide ANTES de
+            # narrar: sin LLM y con el turno guardado diciendo lo que pasó.
+            if role_code is not None and role_code not in ROLES_QUE_EJECUTAN and (
+                quiere_escribir(agent_response) or any(quiere_escribir(r) for r in task_responses)
+            ):
+                rechazar_por_rol(agent_response)
+                agent_response.usage = (
+                    UsageSummary(calls=all_llm_calls) if all_llm_calls else None
+                )
+                if request.conversation_id:
+                    await self._save_turn(
+                        request, agent_response.message or "", redis, db, tenant_id, user_id
+                    )
+                return agent_response
+
             # Si ninguna tarea requiere aprobación y el plan pide síntesis → sintetizar
             any_approval = any(r.requires_approval for r in task_responses)
             if not any_approval and plan.requires_synthesis:
@@ -734,6 +756,15 @@ class ChatOrchestrator:
 
         # ── Single-task: flujo heredado ───────────────────────────────────────
         agent_response = task_responses[0]
+
+        # R-1: ver el camino multi-task. `rechazar_por_rol` deja `message`, así que
+        # el paso 5 no llama a AgentChat y el turno guarda el rechazo.
+        if (
+            role_code is not None
+            and role_code not in ROLES_QUE_EJECUTAN
+            and quiere_escribir(agent_response)
+        ):
+            rechazar_por_rol(agent_response)
 
         # 4b. requires_google_auth — propagar sin llamar LLM ni guardar turno
         if agent_response.status == "requires_google_auth":
