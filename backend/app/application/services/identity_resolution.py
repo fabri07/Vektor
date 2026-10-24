@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
@@ -87,6 +87,89 @@ def is_blank(value: Any) -> bool:
     return isinstance(value, str) and value.strip().lower() in _BLANK_STRINGS
 
 
+#: Lo que una planilla escribe en la celda de un contacto que no tiene: no es
+#: un dato, y como clave de identidad juntaba a todos los que lo comparten
+#: (I6-1: el «-» de Juan pisaba la ficha de Ana, que también tenía «-»).
+_RELLENO_DE_CONTACTO = frozenset(
+    {
+        "-", "--", "---", ".", "..", "x", "no", "no tiene", "sin dato", "sin datos",
+        "s/d", "sd", "sin email", "sin mail", "sin telefono", "sin teléfono",
+    }
+)
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")
+#: Menos dígitos que esto no es un teléfono que identifique a alguien (un
+#: interno, un «0», un «123»): el número local más corto del país tiene 6.
+_MIN_DIGITOS_TELEFONO = 6
+
+
+def _digitos_identifican(digits: str) -> bool:
+    """Un teléfono con todos los dígitos iguales («0», «000», «1111111») es
+    relleno, no un número."""
+    return len(set(digits)) > 1
+
+
+def _documento_identifica(digits: str) -> bool:
+    """Un documento de puros ceros («0», «00000000») es relleno. Uno con todos
+    los dígitos iguales pero distinto de cero (DNI 22222222) existe: la
+    numeración es secuencial, así que se respeta."""
+    return bool(digits) and set(digits) != {"0"}
+
+
+def email_identifica(value: Any) -> bool:
+    """True si ``value`` es un email con forma de email (algo@algo). El relleno
+    («-», «sin email», «no tiene») no identifica a nadie."""
+    email = normalize_email(value)
+    return bool(email) and email not in _RELLENO_DE_CONTACTO and bool(_EMAIL_RE.match(email))
+
+
+def telefono_identifica(value: Any) -> bool:
+    """True si ``value`` tiene dígitos suficientes y no repetidos para ser un
+    teléfono: «0», «000» o «1111111» son relleno."""
+    digits = normalize_digits(value)
+    return len(digits) >= _MIN_DIGITOS_TELEFONO and _digitos_identifican(digits)
+
+
+def contacto_sin_dato(campo: str, value: Any) -> bool:
+    """True si el ``email``/``phone`` de un import es relleno y no se escribe en
+    la ficha. Escribirlo era lo que sembraba la clave basura para el próximo
+    import. Más laxo que la clave: un teléfono corto de verdad (un interno) se
+    guarda, aunque no identifique."""
+    if is_blank(value):
+        return True
+    if str(value).strip().lower() in _RELLENO_DE_CONTACTO:
+        return True
+    if campo == "email":
+        # Sin «@» no es un email. Uno real mal escrito («a@b.com; c@d.com»,
+        # «Juan <juan@x.com>») se guarda aunque no sirva de clave.
+        return "@" not in str(value)
+    if campo == "phone":
+        return not _digitos_identifican(normalize_digits(value))
+    return False
+
+
+def _documentos(fuente: Any, doc_fields: tuple[str, ...]) -> dict[str, str]:
+    """Documentos (sólo dígitos) que identifican, por campo, de un record (dict)
+    o de una entidad (atributos con el mismo nombre)."""
+    if isinstance(fuente, FilaDelArchivo):
+        fuente = fuente.record
+    out: dict[str, str] = {}
+    for f in doc_fields:
+        raw = fuente.get(f) if isinstance(fuente, Mapping) else getattr(fuente, f, None)
+        digits = normalize_digits(raw)
+        if _documento_identifica(digits):
+            out[f] = digits
+    return out
+
+
+def documentos_se_contradicen(a: Any, b: Any, doc_fields: tuple[str, ...]) -> bool:
+    """True si ``a`` y ``b`` traen el MISMO campo de documento (DNI con DNI,
+    CUIT con CUIT) con valores distintos: son dos personas. Un campo que falta
+    en uno de los dos no contradice — un CUIT y un DNI no se comparan."""
+    docs_a = _documentos(a, doc_fields)
+    docs_b = _documentos(b, doc_fields)
+    return any(f in docs_b and docs_b[f] != v for f, v in docs_a.items())
+
+
 @dataclass(frozen=True)
 class IdentityKey:
     """Una clave candidata normalizada: tipo + valor. Hashable — sirve de dict key."""
@@ -108,7 +191,9 @@ def record_keys(
 
     ``doc_fields`` son los campos de documento del record en orden de prioridad
     (p. ej. ``("cuit", "dni")`` para cliente, ``("cuil",)`` para proveedor).
-    Vacías (sin dígitos / sin email) se descartan — no entran como clave.
+    Vacías y de relleno (``-``, ``0``, ``sin email``, un documento de puros
+    ceros, un teléfono con todos los dígitos iguales o de menos de 6 dígitos) se
+    descartan — no entran como clave.
 
     E6a: el CÓDIGO EXTERNO entra como clave fuerte y va primero. La normalización
     la hace ``domain/external_code`` —la MISMA que llena la columna indexada—, no
@@ -121,14 +206,14 @@ def record_keys(
         keys.append(IdentityKey("code", codigo))
     for f in doc_fields:
         digits = normalize_digits(record.get(f))
-        if digits:
+        if _documento_identifica(digits):
             keys.append(IdentityKey("doc", digits))
-    email = normalize_email(record.get(email_field))
-    if email:
-        keys.append(IdentityKey("email", email))
-    phone = normalize_digits(record.get(phone_field))
-    if phone:
-        keys.append(IdentityKey("phone", phone))
+    # I6-1: el relleno («-», «0», «sin email») no es clave: juntaba a todos los
+    # que lo compartían en una sola persona.
+    if email_identifica(record.get(email_field)):
+        keys.append(IdentityKey("email", normalize_email(record.get(email_field))))
+    if telefono_identifica(record.get(phone_field)):
+        keys.append(IdentityKey("phone", normalize_digits(record.get(phone_field))))
     return keys
 
 
@@ -180,16 +265,89 @@ class ResolutionResult:
     entity: Any | None = None
     matched_key: IdentityKey | None = None
     conflicting_entities: list[Any] = field(default_factory=list)
+    #: I6-1: el ``conflict`` no es por dos fichas sino porque el documento de la
+    #: fila contradice al de la única ficha que matcheó por documento.
+    documento_contradice: bool = False
+
+
+@dataclass(frozen=True, eq=False)
+class FilaDelArchivo:
+    """Una fila anterior del MISMO archivo que se va a crear: ocupa sus claves
+    en el índice del preview igual que la ficha recién creada las ocupa en el
+    índice de ``apply_import``. Sus documentos salen de ``record``."""
+
+    idx: int
+    record: Mapping[str, Any]
+
+
+class ResolutorDelArchivo:
+    """Resuelve las filas de un preview en orden, con el MISMO índice que va a
+    ver el confirm (I6-1). Antes el preview marcaba «repetida en el archivo» a
+    toda fila que compartía una clave con otra anterior, mientras el confirm
+    resolvía contra la base: con un email de familia, la fila de Ana salía como
+    repetida de la de Juan y su dato no llegaba nunca.
+
+    ``resolver`` devuelve la resolución y, si la fila repite a una anterior, el
+    índice de esa fila: coincide con una fila que se va a crear, o actualiza la
+    misma ficha existente que una fila anterior con la que comparte una clave
+    (dos filas de la misma ficha con claves distintas —una por DNI, otra por
+    teléfono— se aplican las dos, como antes).
+    """
+
+    def __init__(
+        self, existing_index: dict[IdentityKey, Any], doc_fields: tuple[str, ...]
+    ) -> None:
+        self._index: dict[IdentityKey, Any] = dict(existing_index)
+        self._doc_fields = doc_fields
+        #: Ficha existente → filas que ya la actualizan, con sus claves.
+        self._actualizadas: dict[int, list[tuple[int, set[IdentityKey]]]] = {}
+
+    def resolver(
+        self, idx: int, record: Mapping[str, Any], keys: list[IdentityKey]
+    ) -> tuple[ResolutionResult, int | None]:
+        res = resolve_identity(keys, self._index, record=record, doc_fields=self._doc_fields)
+        if res.outcome == "matched":
+            entity = res.entity
+            if isinstance(entity, FilaDelArchivo):
+                return res, entity.idx
+            previas = self._actualizadas.setdefault(id(entity), [])
+            repetida = next((i for i, ks in previas if ks & set(keys)), None)
+            if repetida is None:
+                previas.append((idx, set(keys)))
+            return res, repetida
+        if res.outcome == "conflict":
+            filas = [e for e in res.conflicting_entities if isinstance(e, FilaDelArchivo)]
+            return res, (filas[0].idx if filas else None)
+        if res.outcome == "none":
+            fila = FilaDelArchivo(idx, record)
+            for k in keys:
+                self._index.setdefault(k, fila)
+        return res, None
 
 
 def resolve_identity(
     keys: list[IdentityKey],
     existing_index: dict[IdentityKey, Any],
+    *,
+    record: Mapping[str, Any] | None = None,
+    doc_fields: tuple[str, ...] = (),
 ) -> ResolutionResult:
     """Resuelve un record (ya reducido a sus claves) contra el índice de existentes.
 
     Puro: no toca DB. El caller decide qué hacer con cada outcome (crear, actualizar,
     marcar needs_review, reportar conflicto).
+
+    I6-1 — con ``record`` y ``doc_fields``, el documento manda sobre el contacto:
+    si la ficha encontrada por EMAIL o TELÉFONO tiene en el mismo campo un
+    documento distinto del de la fila, son dos personas que comparten el
+    contacto (una familia, una sucursal) y esa coincidencia se descarta; si no
+    queda otra, el resultado es ``none`` (otra persona, se crea). Si la que
+    contradice es una coincidencia por documento (mismo CUIT, otro DNI), el dato
+    es contradictorio y el resultado es ``conflict`` con
+    ``documento_contradice``: nunca se pisa el documento de una ficha con el de
+    otra persona. El CÓDIGO externo no entra en esa regla: es la identidad que
+    le da el propio negocio y le gana al documento, como en la vinculación de
+    ventas (B·7) — un DNI corregido en el sistema de origen entra por reimport.
     """
     if not keys:
         return ResolutionResult(outcome="needs_review")
@@ -199,6 +357,29 @@ def resolve_identity(
         entity = existing_index.get(k)
         if entity is not None:
             matches[k] = entity
+
+    if record is not None and doc_fields:
+        contradice = {
+            id(e): e
+            for e in matches.values()
+            if documentos_se_contradicen(record, e, doc_fields)
+        }
+        if contradice:
+            matches = {
+                k: e
+                for k, e in matches.items()
+                if not (id(e) in contradice and k.type in ("email", "phone"))
+            }
+            por_documento = [
+                e for k, e in matches.items() if id(e) in contradice and k.type == "doc"
+            ]
+            por_codigo = any(k.type == "code" for k in matches)
+            if por_documento and not por_codigo:
+                return ResolutionResult(
+                    outcome="conflict",
+                    conflicting_entities=por_documento[:1],
+                    documento_contradice=True,
+                )
 
     if not matches:
         return ResolutionResult(outcome="none")

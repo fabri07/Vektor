@@ -19,7 +19,9 @@ from pydantic_core import PydanticCustomError
 
 from app.application.services.identity_resolution import (
     IdentityKey,
+    ResolutorDelArchivo,
     build_existing_index,
+    contacto_sin_dato,
     is_blank,
     record_keys,
     resolve_identity,
@@ -154,7 +156,7 @@ def build_import_preview(
 ) -> ImportPreview:
     """Clasifica cada fila contra los existentes. Puro, sin tocar la DB."""
     existing_index = _existing_index(existing)
-    seen_in_file: dict[IdentityKey, int] = {}
+    resolutor = ResolutorDelArchivo(existing_index, _DOC_FIELDS)
     items: list[PreviewItem] = []
 
     for idx, record in enumerate(records):
@@ -166,8 +168,12 @@ def build_import_preview(
             continue
 
         keys = _record_keys(record)
-        # Duplicado dentro del MISMO archivo (otra fila ya trajo esta clave).
-        dup_of = next((seen_in_file[k] for k in keys if k in seen_in_file), None)
+        # Duplicado dentro del MISMO archivo: la fila repite a una anterior que
+        # se va a crear, o a una que ya actualiza la misma ficha con su clave.
+        # I6-1: se decide con el mismo índice que va a ver el confirm, no por
+        # compartir una clave cualquiera — un email de familia no hace
+        # repetidas a dos personas con documentos distintos.
+        resolution, dup_of = resolutor.resolver(idx, record, keys)
         if dup_of is not None:
             items.append(
                 PreviewItem(
@@ -178,10 +184,6 @@ def build_import_preview(
                 )
             )
             continue
-        for k in keys:
-            seen_in_file[k] = idx
-
-        resolution = resolve_identity(keys, existing_index)
         if resolution.outcome == "needs_review":
             items.append(
                 PreviewItem(
@@ -195,12 +197,20 @@ def build_import_preview(
                 )
             )
         elif resolution.outcome == "conflict":
+            if resolution.documento_contradice:
+                otra = resolution.conflicting_entities[0]
+                problema = (
+                    f"El documento no coincide con el de «{otra.name}», que tiene "
+                    "otro DNI/CUIT/CUIL: revisá la fila antes de importarla."
+                )
+            else:
+                problema = "El registro matchea contra más de un proveedor existente."
             items.append(
                 PreviewItem(
                     row_index=idx,
                     status="invalid",
                     fields=record,
-                    issues=["El registro matchea contra más de un proveedor existente."],
+                    issues=[problema],
                 )
             )
         elif resolution.outcome == "matched":
@@ -245,7 +255,7 @@ async def apply_import(
             result.invalid += 1
             continue
         keys = _record_keys(record)
-        resolution = resolve_identity(keys, index)
+        resolution = resolve_identity(keys, index, record=record, doc_fields=_DOC_FIELDS)
         # F7d: mismo mapeo que build_import_preview — needs_review (sin clave
         # fuerte) es distinto de conflict (ambiguo, tratado como invalid).
         if resolution.outcome == "needs_review":
@@ -274,6 +284,8 @@ async def apply_import(
             for fname in _IMPORTABLE_FIELDS:
                 if fname not in record or is_blank(record[fname]):
                     continue
+                if fname in ("email", "phone") and contacto_sin_dato(fname, record[fname]):
+                    continue  # I6-1: el relleno no se escribe en la ficha
                 if _solo_completar and not is_blank(getattr(match, fname, None)):
                     result.preserved_fields += 1
                     continue
@@ -281,14 +293,20 @@ async def apply_import(
             await repo.save(match)
             result.updated_ids.append(match.id)
         else:
+            # I6-1: el relleno de email/teléfono no se escribe en la ficha.
             payload: dict[str, Any] = {
-                fname: record[fname] for fname in _IMPORTABLE_FIELDS if fname in record
+                fname: record[fname]
+                for fname in _IMPORTABLE_FIELDS
+                if fname in record
+                and not (fname in ("email", "phone") and contacto_sin_dato(fname, record[fname]))
             }
             supplier = Supplier(tenant_id=tenant_id, **payload)
             saved = await repo.save(supplier)
             result.created_ids.append(saved.id)
             # Registrar las nuevas claves para no duplicar dentro del mismo batch.
+            # I6-1: una clave compartida (email/teléfono) sigue siendo de la
+            # primera ficha que la tuvo, igual que en `build_existing_index`.
             for k in keys:
-                index[k] = saved
+                index.setdefault(k, saved)
 
     return result

@@ -38,7 +38,12 @@ class TestNormalizers:
 
 class TestRecordKeys:
     def test_priority_order_doc_then_email_then_phone(self) -> None:
-        record = {"cuit": "20-12345678-6", "dni": "30111222", "email": "a@a.com", "phone": "111"}
+        record = {
+            "cuit": "20-12345678-6",
+            "dni": "30111222",
+            "email": "a@a.com",
+            "phone": "1144440000",
+        }
         keys = record_keys(record, doc_fields=("cuit", "dni"))
         assert [k.type for k in keys] == ["doc", "doc", "email", "phone"]
         assert keys[0].value == "20123456786"  # cuit antes que dni

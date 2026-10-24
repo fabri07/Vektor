@@ -769,7 +769,9 @@ def _classify_row_reference(
                 outcome="matched", entity=por_codigo, matched_key_type="code"
             )
     else:
-        resolution = resolve_identity(keys, existing_index)
+        resolution = resolve_identity(
+            keys, existing_index, record=record, doc_fields=doc_fields
+        )
         if resolution.outcome == "matched":
             assert resolution.entity is not None  # invariante de "matched"
             return RowReferenceResolution(
