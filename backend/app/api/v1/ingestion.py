@@ -276,6 +276,14 @@ router = APIRouter()
 
 logger = get_logger(__name__)
 
+#: Quién puede cargar datos por archivo: los mismos roles que dan de alta una
+#: venta a mano (`POST /sales`). Subir, confirmar, registrar una importación,
+#: cancelar, reprocesar y olvidar un mapeo aprendido escriben datos del negocio o
+#: consumen su cupo; un VIEWER o un ANALYST los podía hacer porque el router no
+#: pedía rol (revisión profunda 2026-10-24, I3-3). Va PRIMERO en `dependencies`:
+#: sin permiso es 403 antes que el 423 de mantenimiento o el 402 de suscripción.
+_PUEDE_IMPORTAR = Depends(require_role("OWNER", "ADMIN"))
+
 #: F-H3.c: cuántos productos del impacto proyectado se devuelven en el confirm.
 #: Un catálogo real puede tener más de mil y la respuesta se vuelve impagable;
 #: la lista ya viene ordenada con los negativos primero, así que el corte se
@@ -437,7 +445,7 @@ async def _process_file_sync(
     "/upload",
     # Subir dispara el parseo (que puede usar IA para mapear columnas): con la
     # suscripción vencida no tiene sentido — el archivo no se podría confirmar.
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[_PUEDE_IMPORTAR, Depends(require_active_subscription)],
     response_model=UploadResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Upload a file and enqueue ingestion job",
@@ -1457,6 +1465,7 @@ async def compute_purchase_groups(
         "Cancel confirmation; mark file as NEEDS_COMPLETION so user can re-upload with complete "
         "data"
     ),
+    dependencies=[_PUEDE_IMPORTAR],
 )
 async def cancel_file_confirmation(
     file_id: uuid.UUID,
@@ -1673,6 +1682,7 @@ async def delete_file(
     "/files/{file_id}/reprocess",
     status_code=status.HTTP_202_ACCEPTED,
     summary="Re-enqueue a PENDING or FAILED file for processing",
+    dependencies=[_PUEDE_IMPORTAR],
 )
 async def reprocess_file(
     file_id: uuid.UUID,
@@ -2049,6 +2059,7 @@ async def list_column_mappings(
     "/column-mappings/{mapping_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a learned column mapping",
+    dependencies=[_PUEDE_IMPORTAR],
 )
 async def delete_column_mapping(
     mapping_id: uuid.UUID,
@@ -2175,6 +2186,7 @@ def _sin_reserva_previa() -> None:
     response_model=ConfirmIngestionResponse,
     summary="Confirm ingestion of parsed data",
     dependencies=[
+        _PUEDE_IMPORTAR,
         Depends(ensure_tenant_not_under_maintenance),
         Depends(require_active_subscription),
     ],
@@ -5304,7 +5316,7 @@ async def inventory_replay(
     response_model=ImportacionResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Registrar una importación y devolver su id consultable",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[_PUEDE_IMPORTAR, Depends(require_active_subscription)],
 )
 async def registrar_importacion(
     file_id: uuid.UUID,

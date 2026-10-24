@@ -32,6 +32,12 @@ from app.api.v1.deps import (
     require_role,
     subscription_http_error,
 )
+from app.application.agents.shared.permisos_chat import (
+    ACCIONES_AUTO_EJECUTABLES,
+    ROLES_QUE_EJECUTAN,
+    quiere_escribir,
+    rechazar_por_rol,
+)
 from app.application.agents.shared.schemas import ActionType, AgentRequest, AgentResponse
 from app.application.services import subscription_service as quota_service
 from app.application.services.automation_service import (
@@ -68,7 +74,7 @@ from app.persistence.models.user import User
 router = APIRouter()
 logger = get_logger(__name__)
 
-_AUTO_EXECUTE_ACTION_TYPES: set[str] = {str(ActionType.REGISTER_EXPENSE)}
+_AUTO_EXECUTE_ACTION_TYPES: set[str] = set(ACCIONES_AUTO_EJECUTABLES)
 _FINGERPRINT_ACTION_TYPES = {
     str(ActionType.REGISTER_SALE),
     str(ActionType.REGISTER_EXPENSE),
@@ -77,7 +83,7 @@ _FINGERPRINT_ACTION_TYPES = {
 
 # ── Confirmación por lenguaje natural (router NL antes del CEO) ────────────────
 # Roles habilitados a confirmar acciones mutantes por texto (mismo que /agent/confirm).
-_CONFIRM_ROLES: frozenset[str] = frozenset({"OWNER", "ADMIN"})
+_CONFIRM_ROLES: frozenset[str] = ROLES_QUE_EJECUTAN
 
 # Afirmaciones puras: "sí", "dale", "ok", "confirmo", "ejecutá", "hacelo".
 _AFFIRMATIONS: frozenset[str] = frozenset(
@@ -449,10 +455,18 @@ async def _process_agent_action(
     agent_response: AgentResponse,
     tenant_id: uuid.UUID,
     user_id: uuid.UUID,
+    role_code: str,
     db: AsyncSession,
     redis: Redis,
 ) -> dict[str, Any] | None:
     if agent_response.status == "error":
+        return None
+
+    # Ejecutar sin aprobación —y dejar algo pendiente— es escribir: sólo para
+    # quien confirma (R-1, `permisos_chat`). Para otro rol, rechazo claro: ni se
+    # ejecuta, ni queda una pendiente que nadie aprobaría.
+    if role_code not in _CONFIRM_ROLES and quiere_escribir(agent_response):
+        rechazar_por_rol(agent_response)
         return None
 
     # ── Multi-task: crear PendingActions agrupadas (Stage 3) ──────────────────
@@ -994,7 +1008,9 @@ async def chat(
     try:
         orchestrator = ChatOrchestrator()
         agent_response = await asyncio.wait_for(
-            orchestrator.handle(request, db, redis, user_id, tenant_id),
+            orchestrator.handle(
+                request, db, redis, user_id, tenant_id, role_code=current_user.role_code
+            ),
             timeout=45.0,
         )
     except TimeoutError:
@@ -1040,6 +1056,7 @@ async def chat(
         agent_response=agent_response,
         tenant_id=tenant_id,
         user_id=user_id,
+        role_code=current_user.role_code,
         db=db,
         redis=redis,
     )
@@ -1204,6 +1221,7 @@ async def chat_stream(
                         redis=redis,
                         user_id=user_id,
                         tenant_id=tenant_id,
+                        role_code=current_user.role_code,
                     ),
                     timeout=45.0,
                 )
@@ -1223,6 +1241,7 @@ async def chat_stream(
                 agent_response=agent_response,
                 tenant_id=tenant_id,
                 user_id=user_id,
+                role_code=current_user.role_code,
                 db=db,
                 redis=redis,
             )
