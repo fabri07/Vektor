@@ -1,6 +1,7 @@
 """Stock service — inventory operations without LLM."""
 
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -136,6 +137,64 @@ def sale_source_event_id(sale_id: uuid.UUID) -> str:
     return f"{_SALE_SOURCE_PREFIX}{sale_id}"
 
 
+async def bloquear_productos(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_ids: Iterable[uuid.UUID],
+    *,
+    lock_held: bool = False,
+) -> dict[uuid.UUID, Product]:
+    """Bloquea las filas de los productos (``FOR UPDATE``) y devuelve su versión
+    VIGENTE. Es la única forma de leer un stock que después se va a escribir.
+
+    T2 (revisión profunda 2026-10-24): ``stock_units`` y ``current_qty`` se
+    escriben como valor absoluto calculado en memoria. Leídos sin candado, o con
+    un ``FOR UPDATE`` que devuelve la instancia vieja del identity map, una venta
+    de la otra caja que commitea en el medio se pierde: stock 10, la caja vende
+    3, se anula un ticket de 2 → queda 12 en vez de 9.
+
+    - Advisory shared ANTES de la fila (orden fijo contra el exclusive del dedup).
+    - ``flush`` antes: la sesión no hace autoflush y ``populate_existing``
+      descartaría un cambio pendiente de estas mismas instancias.
+    - ``populate_existing``: si el producto ya estaba cargado, el candado espera
+      a la otra transacción y el objeto se refresca con lo que ella dejó.
+    - Ordenado por id, igual que la venta del POS: dos operaciones de varios
+      productos toman los candados en el mismo orden y no se bloquean en cruz.
+
+    Productos de otro tenant o inexistentes no vuelven (el caller decide).
+    ``lock_held``: como en ``_get_or_create_balance`` — el caller ya tomó el
+    advisory shared en esta transacción.
+    """
+    ids = set(product_ids)
+    if not ids:
+        return {}
+    if not lock_held:
+        await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
+    await db.flush()
+    filas = (
+        await db.execute(
+            select(Product)
+            .where(Product.tenant_id == tenant_id, Product.id.in_(ids))
+            .order_by(Product.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalars()
+    return {p.id: p for p in filas}
+
+
+async def bloquear_producto(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_id: uuid.UUID,
+    *,
+    lock_held: bool = False,
+) -> Product | None:
+    """``bloquear_productos`` de uno solo."""
+    bloqueados = await bloquear_productos(db, tenant_id, [product_id], lock_held=lock_held)
+    return bloqueados.get(product_id)
+
+
 async def check_stock_available(
     product_id: uuid.UUID,
     tenant_id: uuid.UUID,
@@ -152,14 +211,8 @@ async def check_stock_available(
     # F3-T3 review: el advisory shared SIEMPRE antes que cualquier FOR UPDATE — si un
     # writer tomara la fila primero y pidiera el advisory después, podría deadlockear
     # contra el dedup (que toma el exclusive y luego intentaría lockear la misma fila).
-    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
-    product = (
-        await db.execute(
-            select(Product)
-            .where(Product.id == product_id, Product.tenant_id == tenant_id)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
+    # `bloquear_producto` lo toma; T2: y refresca la instancia del identity map.
+    product = await bloquear_producto(db, tenant_id, product_id)
     if product is None:
         raise SaleProductNotFoundError(product_id)
     if product.stock_units < qty:
@@ -190,11 +243,18 @@ async def _get_or_create_balance(
     # arriba en la misma transacción, nunca "por las dudas".
     if not lock_held:
         await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
+    # T2: el balance se escribe en absoluto igual que el producto, así que se
+    # bloquea y se refresca igual (después de la fila del producto: mismo orden
+    # en todos los caminos).
+    await db.flush()
     result = await db.execute(
-        select(InventoryBalance).where(
+        select(InventoryBalance)
+        .where(
             InventoryBalance.product_id == product.id,
             InventoryBalance.tenant_id == tenant_id,
         )
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     balance = result.scalar_one_or_none()
     if balance is not None:
@@ -245,8 +305,10 @@ async def decrement_stock(
 ) -> InventoryMovement:
     # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
     await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
-    product = await db.get(Product, product_id)
-    if product is None or product.tenant_id != tenant_id:
+    # T2: con candado y refrescado (una venta ya lo bloqueó en check_stock_available
+    # y el re-pedido no espera; el ajuste «saqué N» del chat no lo bloqueaba).
+    product = await bloquear_producto(db, tenant_id, product_id, lock_held=True)
+    if product is None:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
 
     balance = await _get_or_create_balance(product, tenant_id, db)
@@ -560,14 +622,8 @@ async def increment_stock(
     # deadlock AB-BA contra el exclusive del dedup).
     await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     # Serializa compras concurrentes del mismo producto para no perder incrementos
-    # en ``stock_units``/``InventoryBalance.current_qty``.
-    product = (
-        await db.execute(
-            select(Product)
-            .where(Product.id == product_id, Product.tenant_id == tenant_id)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
+    # en ``stock_units``/``InventoryBalance.current_qty`` (T2: refrescado).
+    product = await bloquear_producto(db, tenant_id, product_id, lock_held=True)
     if product is None:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
 
@@ -650,13 +706,7 @@ async def register_reconciliation_adjustment(
     if ya is not None:
         return None
 
-    product = (
-        await db.execute(
-            select(Product)
-            .where(Product.id == product_id, Product.tenant_id == tenant_id)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
+    product = await bloquear_producto(db, tenant_id, product_id, lock_held=True)
     if product is None:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
 
@@ -739,15 +789,7 @@ async def _producto_para_stock_manual(
     # del identity map con el stock VIEJO, el 409 de ``esperado`` no salta en la
     # carrera y ``stock_units += delta`` pisa una venta commiteada en el medio
     # (la misma trampa que documenta ``pos_discrepancy_service``).
-    await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
-    product = (
-        await db.execute(
-            select(Product)
-            .where(Product.id == product_id, Product.tenant_id == tenant_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one_or_none()
+    product = await bloquear_producto(db, tenant_id, product_id)
     if product is None:
         raise ProductoNoEncontradoError(f"Product {product_id} not found for tenant {tenant_id}")
     return product
@@ -891,8 +933,9 @@ async def register_stock_loss(
     """HIGH risk: decrements stock and creates a reinforced audit entry."""
     # F3-T3 review: acquire al tope del entry point.
     await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
-    product = await db.get(Product, product_id)
-    if product is None or product.tenant_id != tenant_id:
+    # T2: la merma aprobada por chat descontaba sobre una lectura sin candado.
+    product = await bloquear_producto(db, tenant_id, product_id, lock_held=True)
+    if product is None:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
 
     balance = await _get_or_create_balance(product, tenant_id, db)
@@ -965,8 +1008,13 @@ async def void_movement(
     # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
     if not lock_held:
         await maintenance_lock_service.acquire_write_lock_shared(db, movement.tenant_id)
-    product = await db.get(Product, movement.product_id)
-    if product is not None and product.tenant_id == movement.tenant_id:
+    # T2: con candado y refrescado. Leído sin candado, una venta de la otra caja
+    # que commitea en el medio se perdía (stock 10, vende 3, se anula 2 → 12).
+    # El advisory ya está tomado: arriba, o por el caller con `lock_held`.
+    product = await bloquear_producto(
+        db, movement.tenant_id, movement.product_id, lock_held=True
+    )
+    if product is not None:
         # Sembrar el balance ANTES de mutar stock_units: _get_or_create_balance inicializa
         # current_qty desde product.stock_units, así que si mutáramos primero el balance
         # nuevo arrancaría ya descontado y la resta siguiente lo descontaría dos veces.
@@ -996,8 +1044,10 @@ async def unvoid_movement(
         return
     # F3-T3 review: acquire al tope del entry point, antes de cualquier lectura/lock.
     await maintenance_lock_service.acquire_write_lock_shared(db, movement.tenant_id)
-    product = await db.get(Product, movement.product_id)
-    if product is not None and product.tenant_id == movement.tenant_id:
+    product = await bloquear_producto(  # T2
+        db, movement.tenant_id, movement.product_id, lock_held=True
+    )
+    if product is not None:
         balance = await _get_or_create_balance(product, movement.tenant_id, db)
         product.stock_units += movement.qty
         balance.current_qty += movement.qty
@@ -1147,14 +1197,19 @@ async def validate_sale_update_stock(
     alcanza. Se llama ANTES de mutar/persistir la venta para que un rechazo no deje
     estado sucio (la validación de ``decrement_for_sale`` corre igual después, como red).
 
-    Solo hace SELECTs. No-op si la venta pasa a quedar sin producto (solo repone) o con
-    ``new_quantity`` <= 0.
+    No muta. T2: BLOQUEA el producto viejo y el nuevo, en orden de id, hasta el
+    commit: la validación y la reposición/descuento que siguen ven el mismo stock,
+    y una venta concurrente no se cuela entre ellas. No-op si la venta pasa a
+    quedar sin producto (solo repone) o con ``new_quantity`` <= 0.
     """
     if new_product_id is None or new_quantity <= 0:
         return
     had_movement = await _live_sale_movement(sale_id, tenant_id, db) is not None
-    product = await db.get(Product, new_product_id)
-    if product is None or product.tenant_id != tenant_id:
+    bloqueados = await bloquear_productos(
+        db, tenant_id, [pid for pid in (prev_product_id, new_product_id) if pid is not None]
+    )
+    product = bloqueados.get(new_product_id)
+    if product is None:
         raise SaleProductNotFoundError(new_product_id)
     available = product.stock_units
     # Si el movimiento viejo se repone sobre el MISMO producto nuevo, ese stock vuelve a

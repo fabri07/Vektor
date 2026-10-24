@@ -34,7 +34,6 @@ from app.domain.comprobante_de_compra import (
 from app.domain.product_completion import recompute_requires_completion
 from app.domain.sale_unit import a_unidades_base
 from app.persistence.models.audit import DecisionAuditLog
-from app.persistence.models.product import Product
 from app.persistence.models.supplier import Supplier
 from app.persistence.models.transaction import ExpenseEntry
 
@@ -124,20 +123,13 @@ async def registrar_compra(
     # deadlockea AB-BA contra el exclusive del dedup (F3).
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
     ids = sorted({linea.product_id for linea in lineas})
+    # T2: refrescados — `_resolve_product` ya los cargó sin candado, y el
+    # `FOR UPDATE` devolvía esa instancia con el stock viejo (la compra sumaba
+    # sobre él y pisaba una venta de caja commiteada en el medio).
     productos = {
-        p.id: p
-        for p in (
-            await session.execute(
-                select(Product)
-                .where(
-                    Product.tenant_id == tenant_id,
-                    Product.id.in_(ids),
-                    Product.is_active.is_(True),
-                )
-                .order_by(Product.id)
-                .with_for_update()
-            )
-        ).scalars()
+        pid: p
+        for pid, p in (await stock_service.bloquear_productos(session, tenant_id, ids)).items()
+        if p.is_active
     }
     faltan = [pid for pid in ids if pid not in productos]
     if faltan:
