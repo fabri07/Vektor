@@ -180,16 +180,11 @@ async def aplicar_ajuste_de_entrada(
     """
     if discrepancia.product_id is None:
         return 0
-    producto = (
-        await session.execute(
-            select(Product)
-            .where(
-                Product.id == discrepancia.product_id,
-                Product.tenant_id == discrepancia.tenant_id,
-            )
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
+    # T2: con candado y refrescado — el faltante tiene que salir del stock que
+    # dejó una venta concurrente, no del que se leyó antes de esperar el candado.
+    producto = await stock_service.bloquear_producto(
+        session, discrepancia.tenant_id, discrepancia.product_id
+    )
     if producto is None:
         raise ValueError("El producto de la discrepancia ya no existe.")
 

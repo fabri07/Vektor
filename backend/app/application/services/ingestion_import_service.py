@@ -11469,6 +11469,19 @@ async def import_receipt(
         permitir_repetidos=True,
     )
 
+    # T2: el remito es una escritura EN VIVO (la hace una persona mientras la
+    # caja vende). El índice de balances y los productos se cargaron sin
+    # candado: sumarles la compra pisaba una venta commiteada en el medio (stock
+    # y balance desincronizados). Se bloquean y refrescan antes de sumar, en el
+    # orden de siempre (productos y después balances, por id).
+    _ids_del_remito = [pid for _, pid in resueltas]
+    product_cache.update(
+        await stock_service.bloquear_productos(session, tenant_id, _ids_del_remito)
+    )
+    balance_index.update(
+        await stock_service.bloquear_balances(session, tenant_id, _ids_del_remito)
+    )
+
     for (line, product_id), costeada in zip(resueltas, costeado.lineas, strict=True):
         line_total = costeada.importe_gasto
         total_cogs += line_total

@@ -485,6 +485,8 @@ async def create_manual_batch_sale(
             )
             .order_by(Product.id)
             .with_for_update()
+            # T2: refrescado aunque la sesión ya tenga el producto cargado.
+            .execution_options(populate_existing=True)
         )
     ).scalars().all()
     by_id = {p.id: p for p in locked}

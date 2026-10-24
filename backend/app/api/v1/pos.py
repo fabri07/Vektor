@@ -410,6 +410,8 @@ async def create_pos_operation(
                 )
                 .order_by(Product.id)
                 .with_for_update()
+                # T2: refrescado aunque la sesión ya tenga el producto cargado.
+                .execution_options(populate_existing=True)
             )
         )
         .scalars()
@@ -965,6 +967,12 @@ async def _ejecutar_anulacion(
         if ids_de_venta
         else []
     )
+    # T2: todos los productos del ticket, bloqueados de una vez y en orden de id
+    # (el mismo orden que toma la venta del POS). Reponerlos de a uno en el orden
+    # del ticket los bloqueaba en cruz contra una venta de la otra caja.
+    await stock_service.bloquear_productos(
+        session, tenant_id, [v.product_id for v in ventas if v.product_id is not None]
+    )
     # En el orden del ticket, para que la auditoría liste las ventas como el
     # cajero las cargó y no en el orden de los UUID.
     posicion = {ln.sale_entry_id: ln.position for ln in lineas}
@@ -1185,12 +1193,19 @@ async def resolve_stock_discrepancy(
     if discrepancia is None:
         raise HTTPException(status_code=404, detail="Diferencia no encontrada.")
 
-    producto = (
-        await session.get(Product, discrepancia.product_id)
+    # T2: sólo el nombre, sin cargar el producto: una instancia leída acá sin
+    # candado era la que después devolvía el `FOR UPDATE` del ajuste, con el
+    # stock viejo.
+    nombre = (
+        await session.scalar(
+            select(Product.name).where(
+                Product.id == discrepancia.product_id,
+                Product.tenant_id == tenant.tenant_id,
+            )
+        )
         if discrepancia.product_id
         else None
     )
-    nombre = producto.name if producto is not None else None
 
     if discrepancia.status != ESTADO_ABIERTA:
         return _a_discrepancia(discrepancia, nombre, operacion.operation_date)
