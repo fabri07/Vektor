@@ -40,7 +40,10 @@ _REDACTED = "[Filtered]"
 _SENSITIVE_KEY_RE = re.compile(
     r"(authoriz|token|password|cookie|secret|"
     r"cuit|dni|email|phone|telefono|"
-    r"amount|monto|customer_name|supplier_name|nombre_cliente|nombre_proveedor)",
+    r"amount|monto|customer_name|supplier_name|nombre_cliente|nombre_proveedor|"
+    # El PIN como palabra (`pin`, `new_pin`, `pin_confirm`), no como pedazo de
+    # `mapping` o `shipping`.
+    r"(?:^|_)pin(?:$|_))",
     re.IGNORECASE,
 )
 # Red de seguridad adicional por VALOR, para el caso de una clave genérica
@@ -61,6 +64,18 @@ def _scrub_mapping(data: dict[str, Any]) -> dict[str, Any]:
     return {key: _redact_value(key, value) for key, value in data.items()}
 
 
+def _scrub_anidado(valor: Any) -> Any:
+    """``_scrub_mapping`` recorriendo dicts y listas anidados (el body JSON)."""
+    if isinstance(valor, dict):
+        return {
+            k: _REDACTED if _SENSITIVE_KEY_RE.search(str(k)) else _scrub_anidado(v)
+            for k, v in valor.items()
+        }
+    if isinstance(valor, list):
+        return [_scrub_anidado(v) for v in valor]
+    return _redact_value("", valor)
+
+
 def _scrub_event(event: Event, hint: Hint) -> Event | None:
     """before_send: scrubbing propio, capa aparte de `send_default_pii=False`."""
     request = event.get("request")
@@ -71,6 +86,13 @@ def _scrub_event(event: Event, hint: Hint) -> Event | None:
         query_string = request.get("query_string")
         if isinstance(query_string, str) and _SENSITIVE_KEY_RE.search(query_string):
             request["query_string"] = _REDACTED
+        # El body JSON del request: la integración de Starlette lo adjunta aunque
+        # `send_default_pii=False`, y el scrubber del SDK sólo tapa claves
+        # exactas de primer nivel (`password` sí; `new_password`, `pin`,
+        # `refresh_token` no). Un 500 en el cambio de clave o del PIN los
+        # mandaba en claro.
+        if "data" in request:
+            request["data"] = _scrub_anidado(request["data"])
 
     exception = event.get("exception")
     if isinstance(exception, dict):

@@ -13,7 +13,7 @@ from typing import Any
 import sentry_sdk
 from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
@@ -42,6 +42,20 @@ from app.observability.sentry import init_sentry
 logger = get_logger(__name__)
 settings = get_settings()
 init_sentry("web")
+
+#: Lo único de un error de validación que va al log: dónde y por qué. Nunca
+#: `input` (el valor rechazado: una contraseña, un PIN) ni `ctx` (puede traer la
+#: excepción con el valor adentro).
+_CLAVES_DE_ERROR_LOGUEABLES = ("loc", "msg", "type")
+
+
+def errores_para_log(errores: Any) -> list[dict[str, Any]]:
+    """Los errores de Pydantic sin los valores que mandó el cliente."""
+    return [
+        {k: e[k] for k in _CLAVES_DE_ERROR_LOGUEABLES if k in e}
+        for e in errores
+        if isinstance(e, dict)
+    ]
 
 # ── Rate limiter (shared instance, imported by routers) ───────────────────────
 
@@ -91,11 +105,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 async def _respuesta_500(request: Request, exc: Exception) -> Response:
     """El 500 de una excepción no manejada: log, Sentry y un cuerpo sin detalles."""
+    # Una respuesta que no valida trae en su `str()` el `input` de cada error: el
+    # dict entero de la respuesta, con `access_token`/`refresh_token` si es la del
+    # login. Al log va dónde y por qué, como en los 422.
+    exc_msg: object = (
+        errores_para_log(exc.errors())
+        if isinstance(exc, ResponseValidationError)
+        else str(exc)
+    )
     logger.error(
         "request.unhandled_exception",
         path=str(request.url.path),
         exc_type=type(exc).__name__,
-        exc_msg=str(exc),
+        exc_msg=exc_msg,
     )
     # Este handler INTERCEPTA la excepción (nunca se repropaga), así que el
     # middleware automático de FastApiIntegration nunca la ve — sin esta
@@ -218,17 +240,14 @@ def create_app() -> FastAPI:
     async def request_validation_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        body: str | None = None
-        try:
-            raw_body = await request.body()
-            body = raw_body.decode("utf-8")[:500]
-        except Exception:
-            pass
+        # Al log va QUÉ campo falló y por qué, nunca el valor: un 422 del alta o
+        # del cambio de clave llevaba la contraseña y el PIN en texto plano a los
+        # logs de Railway (cuerpo crudo + `input` de Pydantic; revisión profunda
+        # 2026-10-24, E0-B-4). El cliente sigue recibiendo el detalle completo.
         logger.warning(
             "request.body_validation_error",
             path=str(request.url.path),
-            errors=exc.errors(),
-            raw_body=body,
+            errors=errores_para_log(exc.errors()),
         )
         # `jsonable_encoder` NO es decorativo (y es lo que hace el handler default
         # de FastAPI): cuando la validación viene de un `field_validator` o un
@@ -247,11 +266,14 @@ def create_app() -> FastAPI:
         logger.warning(
             "request.validation_error",
             path=str(request.url.path),
-            errors=exc.errors(),
+            errors=errores_para_log(exc.errors()),
         )
+        # Esta validación es INTERNA (filas de la base, salida de un LLM): su
+        # `input` son datos del servidor, no lo que mandó el cliente. Tampoco se
+        # devuelven.
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"detail": jsonable_encoder(exc.errors())},
+            content={"detail": jsonable_encoder(errores_para_log(exc.errors()))},
         )
 
     async def subscription_error_handler(request: Request, exc: Exception) -> JSONResponse:

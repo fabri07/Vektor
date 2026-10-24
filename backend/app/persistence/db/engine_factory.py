@@ -46,6 +46,14 @@ def serializar_json(valor: Any) -> str:
 
 
 def crear_engine(url: str, **kwargs: Any) -> AsyncEngine:
-    """``create_async_engine`` con la política común de la aplicación."""
+    """``create_async_engine`` con la política común de la aplicación.
+
+    ``hide_parameters``: el texto de un error de la base (lo que se loguea y va a
+    Sentry en un 500) no lleva los parámetros de la sentencia. Varios tokens de
+    un solo uso —verificación de email, reseteo de clave, solicitud de acceso—
+    son la PK de su fila, así que un timeout buscándolos los imprimía en claro
+    (revisión profunda 2026-10-24).
+    """
     kwargs.setdefault("json_serializer", serializar_json)
+    kwargs.setdefault("hide_parameters", True)
     return create_async_engine(url, **kwargs)
