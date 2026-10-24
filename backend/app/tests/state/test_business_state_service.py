@@ -123,13 +123,13 @@ async def test_compute_business_state_from_onboarding_only(
 
     # Redis should be populated
     store = redis.snapshot()
-    # Las keys llevan el prefijo de versión v5: el margen (M·2b-3) sale de
-    # FactsService, y un blob v4 deserializaría con el margen ausente por
-    # default durante las 24 h del TTL (v4: completeness por procedencia).
+    # Las keys llevan el prefijo de versión v6: las ventas dejaron de contar los
+    # cobros de fiado (T1) y un blob v5 serviría 24 h ventas infladas (v5: margen
+    # de FactsService; v4: completeness por procedencia).
     assert _cache_key(sample_tenant.tenant_id) in store
     assert _hash_key(sample_tenant.tenant_id) in store
-    assert "business_state:v5:" in _cache_key(sample_tenant.tenant_id)
-    assert "last_inputs_hash:v5:" in _hash_key(sample_tenant.tenant_id)
+    assert "business_state:v6:" in _cache_key(sample_tenant.tenant_id)
+    assert "last_inputs_hash:v6:" in _hash_key(sample_tenant.tenant_id)
 
 
 # ── Montos del onboarding sin contestar ──────────────────────────────────────

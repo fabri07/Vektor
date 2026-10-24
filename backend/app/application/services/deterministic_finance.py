@@ -30,13 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.observability.logger import get_logger
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
-#: Cobros de fiado: no son ventas (ver docstring del módulo y FactsService).
-_INFLOW = "inflow"
-
-
-def _es_venta() -> Any:
-    """Excluye los cobros de fiado (``payment_method`` puede ser NULL)."""
-    return func.coalesce(func.lower(SaleEntry.payment_method), "") != _INFLOW
+#: Cobros de fiado: no son ventas (ver docstring del módulo y FactsService). La
+#: regla es la de todos los lectores de plata (``_ventas_scope``).
+from app.persistence.repositories._ventas_scope import es_venta as _es_venta
 
 logger = get_logger(__name__)
 

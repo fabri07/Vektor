@@ -37,7 +37,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.application.services.facts_service import (
-    INFLOW_METHOD,
     BusinessFact,
     FactsService,
     Granularidad,
@@ -59,6 +58,7 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._expense_scope import gasto_de_resultado
 from app.persistence.repositories._pos_tender_scope import tenders_mixtos
+from app.persistence.repositories._ventas_scope import es_venta
 
 logger = get_logger(__name__)
 
@@ -313,7 +313,7 @@ async def _primer_movimiento(session: AsyncSession, tenant_id: uuid.UUID) -> dat
                 SaleEntry.tenant_id == tenant_id,
                 SaleEntry.voided_at.is_(None),
                 SaleEntry.provenance == "REAL",
-                SaleEntry.payment_method != INFLOW_METHOD,  # un cobro de fiado no es venta
+                es_venta(),  # un cobro de fiado no es venta
             )
         )
     ).scalar_one_or_none()

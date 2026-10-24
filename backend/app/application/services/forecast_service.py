@@ -17,11 +17,14 @@ from datetime import date, timedelta
 from uuid import UUID
 
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.facts_service import FIADO_METHODS
 from app.observability.logger import get_logger
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.repositories._pos_tender_scope import tenders_mixtos, venta_no_mixta
+from app.persistence.repositories._ventas_scope import es_cobro_de_fiado, es_venta
 from app.persistence.repositories.owner_capital_repository import flujo_de_dinero
 
 logger = get_logger(__name__)
@@ -48,7 +51,61 @@ class ForecastResult:
 
 
 def _cache_key(tenant_id: UUID) -> str:
-    return f"forecast:cash:{tenant_id}"
+    # v2 (T1): el ingreso de caja dejó de contar el fiado y dos veces los
+    # cobros; un blob viejo serviría 6 h la proyección inflada.
+    return f"forecast:cash:v2:{tenant_id}"
+
+
+def _dia(v: object) -> date:
+    """`func.date()` devuelve date (Postgres) o 'YYYY-MM-DD' (SQLite)."""
+    return date.fromisoformat(str(v)[:10])
+
+
+async def ingresos_de_caja_por_dia(
+    tenant_id: UUID, db: AsyncSession, desde: date
+) -> dict[date, float]:
+    """Plata que ENTRA a caja cada día desde ``desde`` (T1).
+
+    Es una proyección de caja, no de ventas: entra toda venta MENOS el fiado
+    (``FIADO_METHODS``: es deuda a cobrar), la parte no fiada de un pago mixto de
+    caja (B9) y los cobros de fiado el día que se cobran. Antes sumaba toda venta
+    más los cobros: una venta fiada de $1.000 cobrada después daba $2.000 de
+    ingreso de caja. Es la resta de ``FactsService._split_liquidez`` salvo la
+    tarjeta de crédito, que la proyección sigue contando el día de la venta
+    (FactsService la saca de la caja de hoy; correrla a su acreditación es una
+    decisión aparte).
+    """
+    dia_venta = func.date(SaleEntry.transaction_date).label("day")
+    ventas_q = (
+        select(dia_venta, func.sum(SaleEntry.amount).label("total"))
+        .where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+            SaleEntry.transaction_date >= desde,
+            or_(
+                es_cobro_de_fiado(),
+                and_(
+                    es_venta(),
+                    venta_no_mixta(),
+                    func.lower(SaleEntry.payment_method).not_in(FIADO_METHODS),
+                ),
+            ),
+        )
+        .group_by(dia_venta)
+    )
+    mixtos = tenders_mixtos(tenant_id, desde)
+    dia_mixto = func.date(mixtos.c.sale_date).label("day")
+    mixtos_q = (
+        select(dia_mixto, func.sum(mixtos.c.amount_ars).label("total"))
+        .where(func.lower(mixtos.c.payment_method).not_in(FIADO_METHODS))
+        .group_by(dia_mixto)
+    )
+    por_dia: dict[date, float] = {}
+    for q in (ventas_q, mixtos_q):
+        for r in (await db.execute(q)).all():
+            d = _dia(r.day)
+            por_dia[d] = por_dia.get(d, 0.0) + float(r.total or 0)
+    return por_dia
 
 
 async def get_forecast(
@@ -85,17 +142,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
 
     # Agregados DIARIOS: agrupar por func.date() para no fragmentar por hora/minuto
     # ahora que transaction_date es un timestamp.
-    income_day = func.date(SaleEntry.transaction_date).label("day")
-    income_q = (
-        select(income_day, func.sum(SaleEntry.amount).label("total"))
-        .where(
-            SaleEntry.tenant_id == tenant_id,
-            SaleEntry.voided_at.is_(None),
-            SaleEntry.transaction_date >= window_start,
-        )
-        .group_by(income_day)
-    )
-    income_rows = (await db.execute(income_q)).all()
+    daily_income = await ingresos_de_caja_por_dia(tenant_id, db, window_start)
 
     expense_day = func.date(ExpenseEntry.transaction_date).label("day")
     expense_q = (
@@ -109,12 +156,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
     )
     expense_rows = (await db.execute(expense_q)).all()
 
-    # func.date() devuelve date (Postgres) o str 'YYYY-MM-DD' (SQLite); normalizar a date.
-    def _day(v: object) -> date:
-        return date.fromisoformat(str(v)[:10])
-
-    daily_income: dict[date, float] = {_day(r.day): float(r.total or 0) for r in income_rows}
-    daily_expense: dict[date, float] = {_day(r.day): float(r.total or 0) for r in expense_rows}
+    daily_expense: dict[date, float] = {_dia(r.day): float(r.total or 0) for r in expense_rows}
     # Capital de socios (D·2): la proyección es de CAJA, y un retiro en dinero
     # sale de la caja igual que cuando era un gasto PAYROLL. Los aportes no se
     # proyectan: son plata del socio, no ingreso del negocio.

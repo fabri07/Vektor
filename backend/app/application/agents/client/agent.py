@@ -155,9 +155,9 @@ class AgentClient(BaseAgent):
                 return self._analysis_response(
                     request,
                     "cuentas_por_cobrar_sin_datos",
-                    "No tenés ventas a cuenta corriente (fiado) registradas con cliente "
-                    "identificado. Cuando registres una venta con medio de pago «cuenta "
-                    "corriente», la voy a sumar acá para que sepas a quién cobrarle.",
+                    "Nadie te debe: no hay saldo de fiado pendiente con clientes "
+                    "identificados. Las ventas a cuenta corriente (fiado) que registres "
+                    "con cliente aparecen acá hasta que las cobres.",
                 )
             total = summary["total_owed"]
             total_str = f"${total:,.0f}".replace(",", ".")
