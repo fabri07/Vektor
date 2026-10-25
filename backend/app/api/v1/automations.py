@@ -14,7 +14,9 @@ from app.api.v1.deps import (
     get_current_user,
     require_active_subscription,
     require_modify_access,
+    require_role,
 )
+from app.application.agents.shared.permisos_chat import ROLES_QUE_EJECUTAN
 from app.application.services.automation_service import (
     create_rule_from_action,
     serialize_rule,
@@ -59,7 +61,8 @@ async def list_automations(
 )
 async def create_automation_from_pending_action(
     pending_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    # Automatizar es ejecutar sin preguntar: lo decide quien confirma (R-3).
+    current_user: User = Depends(require_role(*sorted(ROLES_QUE_EJECUTAN))),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     if not get_settings().ENABLE_AGENT_AUTOMATIONS:
