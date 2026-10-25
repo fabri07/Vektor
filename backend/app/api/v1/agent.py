@@ -708,17 +708,19 @@ async def _try_nl_confirmation(
             result=result,
         )
 
-    # ── Negación: cancelar (sin restricción de rol — cancelar no muta datos) ──
+    # ── Negación: cancelar — el autor o un OWNER/ADMIN (R-5) ─────────────────
     if decision is False:
         try:
             if approval_group_id:
                 await _cancel_action_group_shared(
-                    group_id=str(approval_group_id), tenant_id=tenant_id, db=db
+                    group_id=str(approval_group_id), user=current_user, db=db
                 )
             else:
                 await _cancel_pending_action_shared(
-                    pending_id=uuid.UUID(str(pending_action_id)), tenant_id=tenant_id, db=db
+                    pending_id=uuid.UUID(str(pending_action_id)), user=current_user, db=db
                 )
+        except PendingActionForbiddenError:
+            return _resp("forbidden", MENSAJE_CANCELAR_AJENA, is_error=True)
         except PendingActionNotFoundError:
             await conv_svc.clear_pending_action(body.conversation_id)
             return None
@@ -1380,6 +1382,21 @@ class PendingActionExpiredError(Exception):
     """La PendingAction venció antes de confirmarse."""
 
 
+class PendingActionForbiddenError(Exception):
+    """El usuario no es el autor de la PendingAction ni tiene un rol que confirma (R-5)."""
+
+
+MENSAJE_CANCELAR_AJENA = (
+    "Esa acción la pidió otro usuario: sólo puede cancelarla quien la pidió, "
+    "el dueño o un administrador."
+)
+
+
+def _puede_cancelar(action: PendingAction, user: User) -> bool:
+    """Cancela el autor de la acción o un rol que confirma (OWNER/ADMIN)."""
+    return action.user_id == user.user_id or user.role_code in ROLES_QUE_EJECUTAN
+
+
 class PendingActionConflictError(Exception):
     """La PendingAction ya fue procesada (no está PENDING)."""
 
@@ -1487,19 +1504,26 @@ async def _confirm_pending_action(
 async def _cancel_pending_action_shared(
     *,
     pending_id: uuid.UUID,
-    tenant_id: uuid.UUID,
+    user: User,
     db: AsyncSession,
 ) -> dict[str, Any]:
-    """Rechaza UNA PendingAction. Lógica compartida (sin HTTP)."""
+    """Rechaza UNA PendingAction. Lógica compartida (sin HTTP).
+
+    El tenant sale del usuario: una acción de otro negocio es "no encontrada",
+    nunca "prohibida", para no revelar que existe.
+    """
     stmt = select(PendingAction).where(
         PendingAction.id == pending_id,
-        PendingAction.tenant_id == tenant_id,
+        PendingAction.tenant_id == user.tenant_id,
     )
     result = await db.execute(stmt)
     action = result.scalar_one_or_none()
 
     if action is None:
         raise PendingActionNotFoundError
+
+    if not _puede_cancelar(action, user):
+        raise PendingActionForbiddenError
 
     if action.status != "PENDING":
         raise PendingActionConflictError(action.status)
@@ -1624,12 +1648,17 @@ async def _confirm_action_group_shared(
 async def _cancel_action_group_shared(
     *,
     group_id: str,
-    tenant_id: uuid.UUID,
+    user: User,
     db: AsyncSession,
 ) -> dict[str, Any]:
-    """Rechaza todas las PendingActions PENDING de un grupo. Compartida (sin HTTP)."""
+    """Rechaza todas las PendingActions PENDING de un grupo. Compartida (sin HTTP).
+
+    El permiso se valida sobre TODO el grupo antes de tocar ninguna: si alguna
+    es ajena y el usuario no puede cancelarla, la solicitud se rechaza con 403
+    y no cambia ninguna.
+    """
     stmt = select(PendingAction).where(
-        PendingAction.tenant_id == tenant_id,
+        PendingAction.tenant_id == user.tenant_id,
         PendingAction.approval_group_id == group_id,
         PendingAction.status == "PENDING",
     )
@@ -1638,6 +1667,9 @@ async def _cancel_action_group_shared(
 
     if not actions:
         raise PendingActionNotFoundError
+
+    if not all(_puede_cancelar(action, user) for action in actions):
+        raise PendingActionForbiddenError
 
     for action in actions:
         action.status = "REJECTED"
@@ -1691,13 +1723,18 @@ async def cancel_action(
     try:
         return await _cancel_pending_action_shared(
             pending_id=pending_id,
-            tenant_id=current_user.tenant_id,
+            user=current_user,
             db=db,
         )
     except PendingActionNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Acción no encontrada.",
+        ) from None
+    except PendingActionForbiddenError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=MENSAJE_CANCELAR_AJENA,
         ) from None
     except PendingActionConflictError as exc:
         raise HTTPException(
@@ -1755,13 +1792,18 @@ async def cancel_action_group(
     try:
         return await _cancel_action_group_shared(
             group_id=group_id,
-            tenant_id=current_user.tenant_id,
+            user=current_user,
             db=db,
         )
     except PendingActionNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Grupo no encontrado o ya procesado.",
+        ) from None
+    except PendingActionForbiddenError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=MENSAJE_CANCELAR_AJENA,
         ) from None
 
 

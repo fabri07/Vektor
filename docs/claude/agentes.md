@@ -66,6 +66,8 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **Crear una regla automática** (`POST /automations/from-pending-action/{id}`) también exige `ROLES_QUE_EJECUTAN` (R-3, revisión profunda 2026-10-24): una regla ejecuta sin preguntar, así que la decide quien confirma; antes un VIEWER automatizaba su acción aprobada por el dueño. Se conservan el flag `ENABLE_AGENT_AUTOMATIONS` y el chequeo de tenant + dueño de la acción (404). Compuerta: `test_automatizar_por_rol.py`.
 
+**Cancelar una pendiente** (`/agent/cancel/{id}`, `/agent/cancel/group/{id}` y el «no» por texto): la cancela su autor (`PendingAction.user_id`) o un rol de `ROLES_QUE_EJECUTAN`; otro usuario del negocio → 403 (`MENSAJE_CANCELAR_AJENA`; por texto, `nl_confirmation = "forbidden"`). En un grupo el permiso se valida sobre TODAS las acciones antes de tocar ninguna: si alguna es ajena, la solicitud se rechaza con 403 y no cambia ninguna. Una acción de otro tenant sigue siendo 404 (R-5, revisión profunda 2026-10-24). Compuerta: `test_cancelar_accion_ajena.py`.
+
 **Compras por chat (B·5b-1):** `REGISTER_PURCHASE` pasa por `compra_service.registrar_compra` (la regla única de compra): sin producto o sin cantidad no registra nada (`CompraSinArticulosError`, que el chat muestra tal cual), y el gasto queda con producto y proveedor. `REGISTER_EXPENSE` y `REGISTER_CASH_OUTFLOW` con categoría mercadería se rechazan igual: una compra de mercadería dice qué artículos y cuántos. El catálogo de `ActionType` no cambia.
 
 **Deduplicación por fingerprint** (`operation_fingerprints`): SHA-256 de `{tenant_id}:{action_type}:{amount}:{date}` para `REGISTER_SALE/EXPENSE/PURCHASE`. Duplicado → `execution_status: "DUPLICATE"`.
