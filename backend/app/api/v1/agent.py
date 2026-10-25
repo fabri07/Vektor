@@ -1653,9 +1653,9 @@ async def _cancel_action_group_shared(
 ) -> dict[str, Any]:
     """Rechaza todas las PendingActions PENDING de un grupo. Compartida (sin HTTP).
 
-    El permiso se valida sobre TODO el grupo antes de tocar ninguna: si una
-    acción es ajena y el usuario no puede cancelarla, el grupo entero se rechaza
-    sin cambios parciales.
+    El permiso se valida sobre TODO el grupo antes de tocar ninguna: si alguna
+    es ajena y el usuario no puede cancelarla, la solicitud se rechaza con 403
+    y no cambia ninguna.
     """
     stmt = select(PendingAction).where(
         PendingAction.tenant_id == user.tenant_id,

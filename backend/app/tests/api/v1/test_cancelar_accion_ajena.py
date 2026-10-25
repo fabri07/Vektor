@@ -16,10 +16,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.agent import ChatRequest, _try_nl_confirmation
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -97,6 +98,33 @@ async def _estado(db: AsyncSession, action_id: uuid.UUID) -> tuple[str, str | No
     return str(fila[0]), fila[1]
 
 
+async def _rechazos_auditados(db: AsyncSession, tenant_id: uuid.UUID) -> int:
+    """Filas de auditoría de rechazo (las escribe `cancel_pending_action`)."""
+    return int(
+        (
+            await db.execute(
+                select(func.count(DecisionAuditLog.id)).where(
+                    DecisionAuditLog.tenant_id == tenant_id,
+                    DecisionAuditLog.decision_type == "AGENT_ACTION_REJECTED",
+                )
+            )
+        ).scalar_one()
+    )
+
+
+async def _otro_tenant(db: AsyncSession) -> Tenant:
+    otro = Tenant(
+        tenant_id=uuid.uuid4(),
+        legal_name="Otro negocio",
+        display_name="Otro",
+        currency="ARS",
+        status="ACTIVE",
+    )
+    db.add(otro)
+    await db.commit()
+    return otro
+
+
 @pytest_asyncio.fixture
 async def duenio(db_session: AsyncSession, sample_tenant: Tenant) -> User:
     return await _usuario(db_session, sample_tenant.tenant_id, "OWNER")
@@ -124,6 +152,7 @@ async def test_no_cancela_la_accion_de_otro(
     assert resp.status_code == 403, resp.text
     assert "otro usuario" in resp.json()["detail"]
     assert await _estado(db_session, action.id) == ("PENDING", None)
+    assert await _rechazos_auditados(db_session, duenio.tenant_id) == 0
 
 
 async def test_cancela_la_propia(
@@ -157,15 +186,7 @@ async def test_owner_y_admin_cancelan_la_de_otro(
 async def test_accion_de_otro_tenant_es_404(
     client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant, duenio: User
 ) -> None:
-    otro = Tenant(
-        tenant_id=uuid.uuid4(),
-        legal_name="Otro negocio",
-        display_name="Otro",
-        currency="ARS",
-        status="ACTIVE",
-    )
-    db_session.add(otro)
-    await db_session.commit()
+    otro = await _otro_tenant(db_session)
     ajeno = await _usuario(db_session, otro.tenant_id, "OWNER")
     action = await _pendiente(db_session, ajeno)
 
@@ -195,6 +216,7 @@ async def test_grupo_mixto_se_rechaza_entero(
     assert resp.status_code == 403, resp.text
     assert await _estado(db_session, id_propia) == ("PENDING", "PENDING")
     assert await _estado(db_session, id_ajena) == ("PENDING", "PENDING")
+    assert await _rechazos_auditados(db_session, duenio.tenant_id) == 0
 
 
 async def test_grupo_propio_se_cancela(
@@ -213,6 +235,25 @@ async def test_grupo_propio_se_cancela(
     assert resp.json()["cancelled_count"] == 2
     assert await _estado(db_session, id1) == ("REJECTED", "FAILED")
     assert await _estado(db_session, id2) == ("REJECTED", "FAILED")
+
+
+async def test_grupo_de_otro_tenant_es_404(
+    client: AsyncClient, db_session: AsyncSession, duenio: User
+) -> None:
+    otro = await _otro_tenant(db_session)
+    ajeno = await _usuario(db_session, otro.tenant_id, "OWNER")
+    group_id = str(uuid.uuid4())
+    a1 = await _pendiente(db_session, ajeno, group_id=group_id, position=0)
+    a2 = await _pendiente(db_session, ajeno, group_id=group_id, position=1)
+    id1, id2 = _ids(a1, a2)
+
+    resp = await client.post(
+        f"/api/v1/agent/cancel/group/{group_id}", headers=_headers_de(duenio)
+    )
+
+    assert resp.status_code == 404, resp.text
+    assert await _estado(db_session, id1) == ("PENDING", "PENDING")
+    assert await _estado(db_session, id2) == ("PENDING", "PENDING")
 
 
 @pytest.mark.parametrize("rol", ["OWNER", "ADMIN"])
@@ -249,8 +290,41 @@ async def test_no_por_texto_no_cancela_la_de_otro(
         db=db_session,
         redis=redis,  # type: ignore[arg-type]
     )
+    await db_session.commit()
 
     assert resp is not None
     assert resp.status == "error"
     assert resp.result["nl_confirmation"] == "forbidden"
     assert await _estado(db_session, action.id) == ("PENDING", None)
+    assert await _rechazos_auditados(db_session, duenio.tenant_id) == 0
+
+
+async def test_no_por_texto_no_cancela_un_grupo_con_una_ajena(
+    db_session: AsyncSession, duenio: User, sin_permiso: User
+) -> None:
+    group_id = str(uuid.uuid4())
+    propia = await _pendiente(db_session, sin_permiso, group_id=group_id, position=0)
+    ajena = await _pendiente(db_session, duenio, group_id=group_id, position=1)
+    id_propia, id_ajena = _ids(propia, ajena)
+    redis = _nl.FakeRedis()
+    conv_id = str(uuid.uuid4())
+    await _nl._seed_pending_pointer(
+        redis, db_session, conv_id, pending_action_id=None, approval_group_id=group_id
+    )
+
+    resp = await _try_nl_confirmation(
+        body=ChatRequest(message="no", conversation_id=conv_id),
+        current_user=sin_permiso,
+        db=db_session,
+        redis=redis,  # type: ignore[arg-type]
+    )
+    # El chat commitea la sesión al cerrar el turno: lo que hubiera quedado a
+    # medio hacer llegaría a la base.
+    await db_session.commit()
+
+    assert resp is not None
+    assert resp.status == "error"
+    assert resp.result["nl_confirmation"] == "forbidden"
+    assert await _estado(db_session, id_propia) == ("PENDING", "PENDING")
+    assert await _estado(db_session, id_ajena) == ("PENDING", "PENDING")
+    assert await _rechazos_auditados(db_session, duenio.tenant_id) == 0
