@@ -263,8 +263,8 @@ async def create_receipt(
     supplier_id: UUID,
     body: CreateReceiptRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: auth ANTES que el guard 423 — si no, un VIEWER con el tenant
-    # lockeado recibiría 423 en vez de 403.
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # — si no, un VIEWER con el tenant lockeado recibiría 423 en vez de 403.
     user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),

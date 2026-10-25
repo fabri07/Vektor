@@ -509,10 +509,10 @@ async def _tiene_historia(session: AsyncSession, product: Product) -> bool:
 async def create_product(
     body: CreateProductRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: la auth (rol) va ANTES que el guard 423 — si no, un VIEWER con
-    # el tenant lockeado recibiría 423 en vez de 403 (filtra estado de mantenimiento
-    # a un usuario sin permiso). El guard 423 es solo UX fast-fail; la garantía real
-    # es el advisory lock que toma ProductRepository.save().
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # — si no, un VIEWER con el tenant lockeado recibiría 423 en vez de 403 (filtra
+    # estado de mantenimiento a un usuario sin permiso). El guard 423 es solo UX
+    # fast-fail; la garantía real es el advisory lock que toma ProductRepository.save().
     user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),

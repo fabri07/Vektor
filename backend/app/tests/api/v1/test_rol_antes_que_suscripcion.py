@@ -258,6 +258,76 @@ async def test_autorizado_activa_y_sin_pin_da_428(
     assert await _conteos(db_session) == antes
 
 
+#: Las dependencias que piden «OWNER o `can_modify_sensitive`» (más OWNER/ADMIN
+#: en las de capital): un ADMIN sin el permiso no pasa, a diferencia de
+#: `require_role("OWNER", "ADMIN")`.
+_DEPS_DE_MODIFICAR: frozenset[Callable[..., Any]] = frozenset(
+    {
+        deps.require_modify_role,
+        deps.require_modify_access,
+        deps.require_capital_role,
+        deps.require_capital_write,
+    }
+)
+_RUTAS_DE_MODIFICAR = tuple(
+    sorted(
+        (m, p)
+        for (m, p), r in _por_ruta().items()
+        if (m, p) in {(m2, p2) for m2, p2, _ in _RUTAS}
+        and _contiene(r.dependant, lambda c: c in _DEPS_DE_MODIFICAR)
+    )
+)
+
+
+def test_las_rutas_de_modificar_estan_enumeradas() -> None:
+    assert set(_RUTAS_DE_MODIFICAR) >= RUTAS_CON_PIN
+
+
+@pytest_asyncio.fixture
+async def admin_sin_permiso(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> dict[str, str]:
+    """ADMIN con `can_modify_sensitive=False` (el default)."""
+    return await _headers_de(db_session, sample_tenant, "ADMIN")
+
+
+@pytest.mark.parametrize("ruta", _RUTAS_DE_MODIFICAR, ids=lambda r: f"{r[0]} {r[1]}")
+async def test_admin_sin_permiso_de_modificar_y_vencida_da_403(
+    ruta: tuple[str, str],
+    client: AsyncClient,
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    admin_sin_permiso: dict[str, str],
+) -> None:
+    """El rol de estas rutas no es `require_role("OWNER", "ADMIN")`: un ADMIN sin
+    `can_modify_sensitive` frena en el 403, antes que la suscripción."""
+    await _vencer(db_session, sample_tenant)
+    antes = await _conteos(db_session)
+
+    resp = await client.request(ruta[0], _url(ruta[1]), json={}, headers=admin_sin_permiso)
+
+    assert resp.status_code == 403, f"{ruta}: {resp.status_code} {resp.text}"
+    assert await _conteos(db_session) == antes
+
+
+async def test_el_mismo_admin_pasa_el_rol_de_un_alta_comun_y_frena_en_402(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    admin_sin_permiso: dict[str, str],
+) -> None:
+    """Contracara: en `POST /customers` (`require_role("OWNER", "ADMIN")`) el
+    mismo ADMIN pasa el rol y lo frena la suscripción."""
+    await _vencer(db_session, sample_tenant)
+    antes = await _conteos(db_session)
+
+    resp = await client.post(f"{P}/customers", json={}, headers=admin_sin_permiso)
+
+    assert resp.status_code == 402, resp.text
+    assert resp.json()["detail"]["code"] == "SUBSCRIPTION_READ_ONLY"
+    assert await _conteos(db_session) == antes
+
+
 async def test_el_dueno_con_la_suscripcion_activa_sigue_dando_de_alta(
     client: AsyncClient,
     db_session: AsyncSession,

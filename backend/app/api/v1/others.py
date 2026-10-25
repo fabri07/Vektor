@@ -901,9 +901,9 @@ async def reclassify_record(
     record_id: UUID,
     body: ReclassifyRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: auth ANTES que el guard 423 (ver nota en resolve_purchase). Este
-    # endpoint puede crear/mutar Product (ramas "product" abajo) — CRITICAL sin
-    # tocar del cableado original de F3-T3.
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # (ver nota en resolve_purchase). Este endpoint puede crear/mutar Product (ramas
+    # "product" abajo) — CRITICAL sin tocar del cableado original de F3-T3.
     user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
@@ -1216,7 +1216,8 @@ async def link_product(
     record_id: UUID,
     body: LinkProductRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # Mismo orden que `reclassify`: auth antes que el guard 423.
+    # Mismo orden que `reclassify`: el rol está en el decorador; corre antes que el
+    # guard 423.
     user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
@@ -1411,8 +1412,8 @@ async def resolve_purchase(
     record_id: UUID,
     body: ResolvePurchaseRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: auth ANTES que el guard 423 — si no, un VIEWER con el tenant
-    # lockeado recibiría 423 en vez de 403.
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # — si no, un VIEWER con el tenant lockeado recibiría 423 en vez de 403.
     user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
@@ -1532,7 +1533,8 @@ async def resolve_purchase(
 async def bulk_import_records(
     body: BulkImportRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: auth ANTES que el guard 423 (ver nota en resolve_purchase).
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # (ver nota en resolve_purchase).
     _: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
