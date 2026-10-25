@@ -32,6 +32,7 @@ router = APIRouter()
 #: —incluido el omitido, que cae en "general"— guarda el archivo en S3 sin
 #: pasar por la ingesta, así que pide los mismos roles que cargar por archivo.
 _ROLES_SUBIDA_SIN_CHAT = ("OWNER", "ADMIN")
+_SIN_PERMISO_DETAIL = "No tenés permiso para hacer esto. Pedíselo al dueño de la cuenta."
 
 
 class UploadedFileResponse(BaseModel):
@@ -60,11 +61,12 @@ async def upload_file(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UploadedFile:
-    # Antes de leer el cuerpo: un rol sin permiso no sube nada a S3 ni deja registro.
+    # FastAPI ya recibió el multipart; el rol sin permiso se corta antes de
+    # cargarlo a memoria, subirlo a S3 o crear el registro.
     if purpose != "chat" and current_user.role_code not in _ROLES_SUBIDA_SIN_CHAT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Role '{current_user.role_code}' is not allowed to perform this action.",
+            detail=_SIN_PERMISO_DETAIL,
         )
 
     content = await file.read()

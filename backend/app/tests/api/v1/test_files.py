@@ -173,6 +173,9 @@ class TestSubidaSinChatPorRol:
         )
 
         assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "No tenés permiso para hacer esto. Pedíselo al dueño de la cuenta."
+        )
         espia_de_lectura.assert_not_called()
         mock_s3_upload.assert_not_called()
         assert await _archivos(db_session, sample_tenant) == 0
