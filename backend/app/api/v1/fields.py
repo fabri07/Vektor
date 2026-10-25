@@ -187,6 +187,8 @@ async def toggle_field(
         vertical_code=vertical_code,
         enabled=body.enabled,
     )
+    if field is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campo no encontrado.")
     data_type = await _resolve_data_type(
         field_key, entity_type, field.data_type, vertical_code, session
     )
