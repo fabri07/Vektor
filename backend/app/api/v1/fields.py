@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1._tenant_vertical import get_vertical_code as _get_vertical_code
 from app.api.v1.deps import (
     get_current_tenant,
-    get_current_user,
     require_active_subscription,
     require_modify_access,
+    require_role,
 )
 from app.application.services import business_field_catalog_service
 from app.application.services import field_definition_service as svc
@@ -100,7 +100,9 @@ async def get_available_fields(
 async def create_field(
     body: CreateCustomFieldRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(get_current_user),
+    # R-4: dar de alta un campo es configurar el negocio, no editar un dato
+    # cargado: pide el rol que da de alta (OWNER/ADMIN), no el PIN del PATCH.
+    user: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     field = await svc.create_custom_field(
@@ -185,6 +187,8 @@ async def toggle_field(
         vertical_code=vertical_code,
         enabled=body.enabled,
     )
+    if field is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campo no encontrado.")
     data_type = await _resolve_data_type(
         field_key, entity_type, field.data_type, vertical_code, session
     )
