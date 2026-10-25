@@ -1611,7 +1611,10 @@ def _a_sesion(
 async def open_cash_session(
     body: PosCashSessionOpenRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(get_current_user),
+    # R-2: los mismos roles que cobran. Un VIEWER o un ANALYST no abren turno;
+    # el 403 sale en la dependencia, antes de resolver la terminal (que marca
+    # ``last_seen_at``) y de cualquier escritura.
+    user: User = Depends(require_role("OWNER", "ADMIN", CASHIER_ROLE)),
     session: AsyncSession = Depends(get_db_session),
     terminal_secret: str | None = Header(default=None, alias=TERMINAL_HEADER),
 ) -> PosCashSessionResponse:
@@ -1732,7 +1735,10 @@ async def close_cash_session(
     session_id: uuid.UUID,
     body: PosCashSessionCloseRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(get_current_user),
+    # R-2: sin esto, un VIEWER cerraba el turno de cualquiera con un arqueo
+    # inventado (el chequeo de "es SU turno" de abajo sólo mira al cajero) y un
+    # arqueo cerrado no se reescribe.
+    user: User = Depends(require_role("OWNER", "ADMIN", CASHIER_ROLE)),
     session: AsyncSession = Depends(get_db_session),
 ) -> PosCashSessionResponse:
     """Congela el arqueo: esperado, contado y diferencia dejan de cambiar.
