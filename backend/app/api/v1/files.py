@@ -28,6 +28,12 @@ from app.persistence.models.user import User
 
 router = APIRouter()
 
+#: R-6: sólo el chat queda abierto a todos los roles. Cualquier otro `purpose`
+#: —incluido el omitido, que cae en "general"— guarda el archivo en S3 sin
+#: pasar por la ingesta, así que pide los mismos roles que cargar por archivo.
+_ROLES_SUBIDA_SIN_CHAT = ("OWNER", "ADMIN")
+_SIN_PERMISO_DETAIL = "No tenés permiso para hacer esto. Pedíselo al dueño de la cuenta."
+
 
 class UploadedFileResponse(BaseModel):
     model_config = {"from_attributes": True}
@@ -55,6 +61,14 @@ async def upload_file(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UploadedFile:
+    # FastAPI ya recibió el multipart; el rol sin permiso se corta antes de
+    # cargarlo a memoria, subirlo a S3 o crear el registro.
+    if purpose != "chat" and current_user.role_code not in _ROLES_SUBIDA_SIN_CHAT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_SIN_PERMISO_DETAIL,
+        )
+
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
