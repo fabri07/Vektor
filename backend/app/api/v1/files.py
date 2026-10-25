@@ -28,6 +28,11 @@ from app.persistence.models.user import User
 
 router = APIRouter()
 
+#: R-6: sólo el chat queda abierto a todos los roles. Cualquier otro `purpose`
+#: —incluido el omitido, que cae en "general"— guarda el archivo en S3 sin
+#: pasar por la ingesta, así que pide los mismos roles que cargar por archivo.
+_ROLES_SUBIDA_SIN_CHAT = ("OWNER", "ADMIN")
+
 
 class UploadedFileResponse(BaseModel):
     model_config = {"from_attributes": True}
@@ -55,6 +60,13 @@ async def upload_file(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> UploadedFile:
+    # Antes de leer el cuerpo: un rol sin permiso no sube nada a S3 ni deja registro.
+    if purpose != "chat" and current_user.role_code not in _ROLES_SUBIDA_SIN_CHAT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Role '{current_user.role_code}' is not allowed to perform this action.",
+        )
+
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
