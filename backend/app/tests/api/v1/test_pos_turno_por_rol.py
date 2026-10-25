@@ -226,3 +226,28 @@ class TestRolesQueCobran:
         assert resp.status_code == 403
         assert resp.json()["detail"]["code"] == "CASH_SESSION_NOT_OWN"
         assert (await _turno(db_session, str(turno["id"]))).status == "OPEN"
+
+    async def test_el_encargado_abre_y_cierra_el_turno_de_un_cajero(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        auth_headers: dict[str, str],
+    ) -> None:
+        # ADMIN = el encargado: abre el suyo y cierra el de un cajero, como antes.
+        caja = await _caja(client, auth_headers)
+        admin = await _headers_de(db_session, sample_tenant, "ADMIN")
+        propio = await _abrir(client, admin, "turno-encargado")
+        assert (await _turno(db_session, str(propio["id"]))).status == "OPEN"
+
+        cajero = {**await _headers_de(db_session, sample_tenant, "CASHIER"), **caja}
+        turno = await _abrir(client, cajero, "turno-del-cajero")
+        cierre = await client.post(
+            f"/api/v1/pos/cash-sessions/{turno['id']}/close",
+            json={"counted_cash_ars": "500.00"},
+            headers=admin,
+        )
+        assert cierre.status_code == 200, cierre.text
+        fila = await _turno(db_session, str(turno["id"]))
+        assert fila.status == "CLOSED"
+        assert str(fila.counted_cash_ars) == "500.00"
