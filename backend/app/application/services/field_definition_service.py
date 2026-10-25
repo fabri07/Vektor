@@ -242,7 +242,7 @@ async def toggle_field(
     entity_type: str,
     vertical_code: str,
     enabled: bool,
-) -> TenantCustomFieldDefinition:
+) -> TenantCustomFieldDefinition | None:
     now = datetime.now(UTC)
     result = await session.execute(
         select(TenantCustomFieldDefinition).where(
@@ -262,15 +262,19 @@ async def toggle_field(
             )
         )
         base_field = base.scalar_one_or_none()
+        if base_field is None:
+            # R-4: ni campo base ni campo propio del tenant. Activar o apagar
+            # no da de alta: eso es `create_custom_field`, que pide rol.
+            return None
         field = TenantCustomFieldDefinition(
             id=uuid.uuid4(),  # explícito para compatibilidad con SQLite en tests
             tenant_id=tenant_id,
-            vertical_field_id=base_field.id if base_field else None,
+            vertical_field_id=base_field.id,
             entity_type=entity_type,
             field_key=field_key,
             is_enabled=enabled,
-            is_base_field=base_field is not None,
-            display_order=base_field.display_order if base_field else 0,
+            is_base_field=True,
+            display_order=base_field.display_order,
             created_at=now,
             updated_at=now,
         )
