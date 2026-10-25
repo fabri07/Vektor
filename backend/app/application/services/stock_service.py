@@ -165,22 +165,30 @@ async def bloquear_productos(
     ``lock_held``: como en ``_get_or_create_balance`` — el caller ya tomó el
     advisory shared en esta transacción.
     """
-    ids = set(product_ids)
+    ids = sorted(set(product_ids), key=str)
     if not ids:
         return {}
     if not lock_held:
         await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
     await db.flush()
-    filas = (
-        await db.execute(
-            select(Product)
-            .where(Product.tenant_id == tenant_id, Product.id.in_(ids))
-            .order_by(Product.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalars()
-    return {p.id: p for p in filas}
+    bloqueados: dict[uuid.UUID, Product] = {}
+    # En trozos (el driver corta en 32.767 binds) y en orden: cada trozo es un
+    # tramo ascendente de ids, así que el orden total se mantiene.
+    for inicio in range(0, len(ids), BULK_DECREMENT_CHUNK_SIZE):
+        filas = (
+            await db.execute(
+                select(Product)
+                .where(
+                    Product.tenant_id == tenant_id,
+                    Product.id.in_(ids[inicio : inicio + BULK_DECREMENT_CHUNK_SIZE]),
+                )
+                .order_by(Product.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+        bloqueados.update({p.id: p for p in filas})
+    return bloqueados
 
 
 async def bloquear_balances(
@@ -195,20 +203,28 @@ async def bloquear_balances(
     ``_get_or_create_balance`` en todos los caminos—. Un producto sin balance no
     vuelve: lo crea el camino de siempre.
     """
-    ids = set(product_ids)
+    ids = sorted(set(product_ids), key=str)
     if not ids:
         return {}
     await db.flush()
-    filas = (
-        await db.execute(
-            select(InventoryBalance)
-            .where(InventoryBalance.tenant_id == tenant_id, InventoryBalance.product_id.in_(ids))
-            .order_by(InventoryBalance.product_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalars()
-    return {b.product_id: b for b in filas}
+    bloqueados: dict[uuid.UUID, InventoryBalance] = {}
+    for inicio in range(0, len(ids), BULK_DECREMENT_CHUNK_SIZE):  # ver bloquear_productos
+        filas = (
+            await db.execute(
+                select(InventoryBalance)
+                .where(
+                    InventoryBalance.tenant_id == tenant_id,
+                    InventoryBalance.product_id.in_(
+                        ids[inicio : inicio + BULK_DECREMENT_CHUNK_SIZE]
+                    ),
+                )
+                .order_by(InventoryBalance.product_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+        bloqueados.update({b.product_id: b for b in filas})
+    return bloqueados
 
 
 async def bloquear_producto(
@@ -221,6 +237,70 @@ async def bloquear_producto(
     """``bloquear_productos`` de uno solo."""
     bloqueados = await bloquear_productos(db, tenant_id, [product_id], lock_held=lock_held)
     return bloqueados.get(product_id)
+
+
+@dataclass
+class CatalogoBloqueado:
+    """Los productos y balances del negocio, bloqueados y refrescados.
+
+    Las referencias son FUERTES a propósito: el identity map es débil, y un
+    producto que nadie retiene se libera y vuelve a leerse más tarde. Bajo el
+    candado esa relectura igual daría el valor vigente, pero el import la pagaría
+    con una consulta por fila.
+    """
+
+    productos: dict[uuid.UUID, Product]
+    balances: dict[uuid.UUID, InventoryBalance]
+
+
+async def bloquear_catalogo(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    lock_held: bool = False,
+) -> CatalogoBloqueado:
+    """Bloquea TODOS los productos del negocio (orden de id) y sus balances.
+
+    T2-b: lo usan los caminos que escriben stock fila por fila sin saber de
+    antemano qué productos van a tocar —el import, la relectura—. Bloquear cada
+    producto la primera vez que se escribe dejaba el orden en manos del archivo:
+    un import que toca P5 y después P3 contra un ticket del POS que toma P3 y
+    P5 se bloqueaban en cruz. Tomar el catálogo entero de una, ordenado, es un
+    superconjunto de lo que el archivo toca y sigue el orden de todos los demás
+    caminos (``bloquear_productos``). Lo que cuesta: mientras el import escribe,
+    una venta del POS sobre cualquier producto del negocio espera a que termine.
+
+    Va ANTES de leer el stock o los balances: con ``populate_existing``, lo que
+    ya estuviera cargado en la sesión queda con el valor vigente.
+    """
+    if not lock_held:
+        await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
+    await db.flush()
+    productos = {
+        p.id: p
+        for p in (
+            await db.execute(
+                select(Product)
+                .where(Product.tenant_id == tenant_id)
+                .order_by(Product.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
+    balances = {
+        b.product_id: b
+        for b in (
+            await db.execute(
+                select(InventoryBalance)
+                .where(InventoryBalance.tenant_id == tenant_id)
+                .order_by(InventoryBalance.product_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
+    return CatalogoBloqueado(productos, balances)
 
 
 async def check_stock_available(
@@ -443,20 +523,14 @@ async def _balances_por_producto(
     siempre —uno por producto faltante, no uno por venta—, que es el que sabe
     resolver la carrera contra el índice único.
     """
-    ids = list({p.id for p in productos})
-    encontrados: dict[uuid.UUID, InventoryBalance] = {}
-    for inicio in range(0, len(ids), BULK_DECREMENT_CHUNK_SIZE):
-        filas = await db.execute(
-            select(InventoryBalance).where(
-                InventoryBalance.tenant_id == tenant_id,
-                InventoryBalance.product_id.in_(ids[inicio : inicio + BULK_DECREMENT_CHUNK_SIZE]),
-            )
-        )
-        for balance in filas.scalars():
-            encontrados[balance.product_id] = balance
+    # T2-b: bloqueados y refrescados, como los productos (que el caller ya
+    # bloqueó: producto y después balance, el orden de todos los caminos).
+    encontrados = await bloquear_balances(db, tenant_id, {p.id for p in productos})
     for producto in productos:
         if producto.id not in encontrados:
-            encontrados[producto.id] = await _get_or_create_balance(producto, tenant_id, db)
+            encontrados[producto.id] = await _get_or_create_balance(
+                producto, tenant_id, db, lock_held=True
+            )
     return encontrados
 
 
@@ -526,6 +600,26 @@ async def decrement_stock_bulk(
     # no agregaba exclusión, sólo sentencias.
     await maintenance_lock_service.acquire_write_lock_shared(db, tenant_id)
 
+    # T2-b: el saldo se escribe en absoluto, así que se valida y se escribe sobre
+    # los productos bloqueados y refrescados, nunca sobre la lectura del caller.
+    # Antes el lote recortaba a 0 en silencio: si otra caja vendía en el medio,
+    # el stock quedaba en 0 con más ventas descontadas que unidades.
+    bloqueados = await bloquear_productos(
+        db, tenant_id, {i.product.id for i in items}, lock_held=True
+    )
+    pedido: dict[uuid.UUID, int] = {}
+    for item in items:
+        pedido[item.product.id] = pedido.get(item.product.id, 0) + item.qty
+    for product_id, qty in pedido.items():
+        producto = bloqueados.get(product_id)
+        if producto is None:
+            raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
+        # Un faltante histórico NO llega hasta acá: el caller lo deja pendiente
+        # (``rows_without_stock_backing``) sobre este mismo saldo bloqueado. Si
+        # igual falta, el lote no escribe nada y el caller revierte todo.
+        if producto.stock_units < qty:
+            raise InsufficientStockError(product_id, producto.stock_units, qty, producto.name)
+
     balances = await _balances_por_producto(db, tenant_id, [i.product for i in items])
 
     aplicados: list[BulkDecrementItem] = []
@@ -560,15 +654,12 @@ async def decrement_stock_bulk(
     if not aplicados:
         return outcome
 
-    # El saldo se acumula en memoria y se escribe UNA vez por producto. El clamp a 0
-    # se replica **paso a paso**, no al final: ``stock_units`` no puede ir abajo de
-    # cero, así que una venta que pasa por el piso deja las siguientes restando desde
-    # 0. Colapsarlo en un solo ``max(0, ...)`` sobre el total daría otro número justo
-    # en el caso que el clamp existe para cubrir. ``current_qty`` sí es resta pura:
-    # el balance registra el saldo real, negativo incluido.
+    # El saldo se acumula en memoria y se escribe UNA vez por producto. Resta pura:
+    # lo validado arriba cubre todos los items y ``aplicados`` es un subconjunto
+    # (sin los que ya estaban descontados), así que ningún saldo baja de cero.
     for item in aplicados:
-        producto = item.product
-        producto.stock_units = max(0, producto.stock_units - item.qty)
+        producto = bloqueados[item.product.id]
+        producto.stock_units -= item.qty
         balances[producto.id].current_qty -= item.qty
 
     # Y se escribe antes de volver. NO es redundante con el commit del caller:
