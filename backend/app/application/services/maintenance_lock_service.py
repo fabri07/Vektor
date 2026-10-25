@@ -256,3 +256,36 @@ async def try_product_creation_exclusive(db: AsyncSession, tenant_id: uuid.UUID)
         {"c": CLASE_ALTA_DE_PRODUCTO, "k": clave_alta_de_producto(tenant_id)},
     )
     return bool(r.scalar_one())
+
+
+async def acquire_import_lock(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Un import a la vez por negocio (T2-b): exclusivo, ESPERA, hasta el commit.
+
+    Lo toman el confirm (sincrónico y del worker), la relectura y el remito,
+    después del shared de mantenimiento y antes de cualquier candado de fila o
+    de leer el catálogo. Dos imports del mismo negocio se esperan en vez de
+    cruzarse: no se bloquean en cruz (A toma P1 y espera P2, B al revés) y el
+    segundo lee el catálogo que dejó el primero, así que no vuelve a crear un
+    producto que el primero acaba de dar de alta con el mismo nombre (los
+    nombres no tienen índice único que lo frene).
+
+    Reentrante en la misma transacción (la relectura lo toma y su reimport lo
+    vuelve a pedir). No-op en SQLite.
+    """
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"), {"k": _clave_de_importacion(tenant_id)}
+    )
+
+
+def _clave_de_importacion(tenant_id: uuid.UUID) -> int:
+    """Los ÚLTIMOS 8 bytes del UUID, en la forma de una clave bigint.
+
+    Con 64 bits del tenant dos negocios no comparten candado (con los 32 de la
+    clave de alta, miles de negocios ya chocaban y se esperaban entre sí). Vive
+    en el espacio de una clave como el de mantenimiento, que usa los PRIMEROS 8:
+    coinciden sólo si la mitad baja de un UUID es la alta de otro (2⁻⁶⁴).
+    """
+    return int.from_bytes(tenant_id.bytes[8:16], "big", signed=True)

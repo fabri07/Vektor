@@ -43,6 +43,7 @@ from app.api.v1.deps import (
 )
 from app.application.services import (
     customer_import_service,
+    maintenance_lock_service,
     pipeline_event_service,
     subscription_service,
     supplier_import_service,
@@ -1582,6 +1583,12 @@ async def delete_file(
     # IMPORTING` garantiza que NO se borra un archivo con import en curso, y el CAS
     # del lease (que exige `deleted_at IS NULL`) garantiza lo simétrico.
     # FASE 0: el crudo en R2 se preserva (input para ML + respaldo).
+    # T2-b: el candado de importación ANTES del CAS, que bloquea la fila del
+    # archivo: una relectura de este archivo toma primero el candado y después
+    # escribe la fila, así que pedirlos al revés las trababa en cruz.
+    # `revert_file_data` lo vuelve a pedir (reentrante).
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant.tenant_id)
+    await maintenance_lock_service.acquire_import_lock(session, tenant.tenant_id)
     result = await session.execute(
         update(UploadedFile)
         .where(

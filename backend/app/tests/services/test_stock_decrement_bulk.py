@@ -145,32 +145,37 @@ class TestElLoteDejaElMismoSaldoQueElCaminoDeAUna:
         assert len(movimientos) == 3
         assert sorted(m.qty for m in movimientos) == [-3, -2, -1]
 
-    async def test_el_clamp_de_stock_units_se_aplica_paso_a_paso(
+    async def test_si_no_alcanza_el_lote_falla_sin_escribir_nada(
         self,
         db_session: AsyncSession,
         sample_tenant: Tenant,
         producto: Product,
         eventos: list[tuple[str, dict[str, Any]]],
     ) -> None:
-        """Dos ventas de 8 sobre un stock de 10.
+        """Tres ventas de 8 sobre un stock de 10.
 
-        De a una: ``max(0, 10-8)=2`` y después ``max(0, 2-8)=0``.
-        Acumulando y clampando al final: ``max(0, 10-16)`` también da 0 — así que el
-        caso se elige para que los dos caminos NO coincidan: con una tercera venta
-        el resultado sólo es el mismo si el clamp corre en cada paso.
+        Antes el lote recortaba ``stock_units`` a 0 paso a paso y dejaba el balance
+        en −14: más ventas descontadas que unidades, en silencio. T2-b: el total por
+        producto se valida ANTES de escribir el primer movimiento; si no alcanza, el
+        lote levanta ``InsufficientStockError`` y no queda nada escrito.
         """
-        await decrement_stock_bulk(
-            sample_tenant.tenant_id,
-            [_item(producto, 8), _item(producto, 8), _item(producto, 8)],
-            db_session,
-        )
-        await db_session.commit()
-
-        await db_session.refresh(producto)
-        assert producto.stock_units == 0
-        # El balance NO se clampa: 10 - 24 = -14. Un saldo negativo acá es el dato de
-        # que la historia del archivo no cierra, y taparlo lo volvería inencontrable.
-        assert (await _balance(db_session, producto)).current_qty == _STOCK_PREVIO - 24
+        with pytest.raises(stock_service.InsufficientStockError) as error:
+            await decrement_stock_bulk(
+                sample_tenant.tenant_id,
+                [_item(producto, 8), _item(producto, 8), _item(producto, 8)],
+                db_session,
+            )
+        assert (error.value.available, error.value.requested) == (_STOCK_PREVIO, 24)
+        assert not [o for o in db_session.new if isinstance(o, InventoryMovement)]
+        assert producto.stock_units == _STOCK_PREVIO
+        # Ni siquiera se sembró el balance: la validación corre antes que nada.
+        balance = (
+            await db_session.execute(
+                select(InventoryBalance).where(InventoryBalance.product_id == producto.id)
+            )
+        ).scalar_one_or_none()
+        assert balance is None
+        assert eventos == []
 
     async def test_sin_items_no_toca_nada_ni_avisa(
         self,

@@ -5248,6 +5248,10 @@ async def insert_confirmed_data(
     # F3-T3: chokepoint de bulk-import (crea productos/stock por fuera de
     # ProductRepository.save). Shared lock ANTES de mutar. No-op en SQLite.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+    # T2-b: un import a la vez por negocio (ver `acquire_import_lock`). Después
+    # del shared y antes de leer el catálogo: el segundo import espera y ve lo
+    # que dejó el primero.
+    await maintenance_lock_service.acquire_import_lock(session, tenant_id)
 
     # B·5e: se juzgan sólo las ventas que nacen en ESTA corrida (las anota un
     # listener de `after_flush`, con o sin archivo — el chat importa sin uno). Y
@@ -6250,6 +6254,23 @@ async def _insert_confirmed_data_impl(
             else ProductIdentityIndexes({}, {}, {}, {}, {})
         )
         products_by_identity_key: dict[str, Product] = {}
+        # T2-b: el catálogo entero bloqueado en orden de id ANTES de leer stock o
+        # balances. El import escribe `stock_units`/`current_qty` en absoluto fila
+        # por fila: leídos sin candado, una venta del POS que commiteaba en el
+        # medio se perdía; bloqueados al tocarlos, el orden lo ponía el archivo y
+        # se cruzaba con un ticket. Ver `stock_service.bloquear_catalogo`.
+        # - DESPUÉS de cargar los índices: un producto que otro camino dio de alta
+        #   mientras tanto ya está en ellos, y así también queda bloqueado.
+        # - Sólo si el archivo puede escribir stock (catálogo o compras). Las
+        #   ventas no lo tocan en esta pasada: las descuenta el reproceso, que
+        #   bloquea lo suyo. Bloquear el catálogo frena al POS mientras dura.
+        _catalogo: stock_service.CatalogoBloqueado | None = None
+        if wants_productos or wants_gastos:
+            _catalogo = await stock_service.bloquear_catalogo(
+                session, tenant_id, lock_held=True
+            )
+            for _pid_bloqueado, _bloqueado in _catalogo.productos.items():
+                _product_cache.setdefault(_pid_bloqueado, _bloqueado)
         # Índice de proveedores para find-or-create en COMPRAS. Una sola carga;
         # vacío salvo en el path de compras (gastos con columna de proveedor) o
         # cuando hay que asignar el sentinela a compras de mercadería sin proveedor.
@@ -6265,10 +6286,9 @@ async def _insert_confirmed_data_impl(
         _vertical = await _load_tenant_vertical(session, tenant_id)
         # Batch: balances del tenant en una query (evita un SELECT por fila
         # en los movimientos de stock del import).
+        # T2-b: los mismos balances, ya bloqueados y refrescados con el catálogo.
         _balance_index: dict[uuid.UUID, Any] | None = (
-            await _load_balance_index(session, tenant_id)
-            if (wants_productos or wants_gastos)
-            else None
+            dict(_catalogo.balances) if _catalogo is not None else None
         )
         # Traza agregada de decisiones de proveedor (Fase 1): proveedores reales
         # resueltos desde compras y si se usó el sentinela "No identificado".
@@ -8643,8 +8663,10 @@ async def _insert_multisheet_data(
     _declared_supplier_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
     # FASE E: vertical del tenant para normalizar categorías de producto.
     _vertical = await _load_tenant_vertical(session, tenant_id)
-    # Batch: balances en una query (evita un SELECT por fila en movimientos).
-    _balance_index = await _load_balance_index(session, tenant_id)
+    # Batch: balances en una query (evita un SELECT por fila en movimientos). T2-b:
+    # si el archivo escribe stock, se reemplaza abajo por los del catálogo
+    # bloqueado, ya refrescados (antes de que nadie lo use).
+    _balance_index: dict[uuid.UUID, Any] = {}
     #: Balances de productos NUEVOS esperando su INSERT en lote. Ver
     #: `flush_pending_balances`: con un savepoint por balance eran 784 de los
     #: 3.250 statements del confirm de Asteria.
@@ -8739,6 +8761,22 @@ async def _insert_multisheet_data(
     # F2-T2: índices de identidad pre-cargados UNA vez para esta corrida (no un
     # SELECT por fila) — alimentan el motor de resolución en _add_product.
     _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
+    # T2-b: el catálogo entero bloqueado en orden de id ANTES de leer stock o
+    # balances (mismo motivo que el camino de una tabla; reentrante si ya lo
+    # bloqueó), después de cargar los índices (un producto dado de alta en el
+    # medio queda bloqueado también). Un libro con sólo maestros y ventas no
+    # escribe stock en esta pasada (las ventas las descuenta el reproceso) y no
+    # frena al POS. `_catalogo` retiene las instancias hasta el final.
+    _entidades = {
+        (context_entity or {}).get(str(_c.get("context_id") or "")) or _c.get("entity_type")
+        for _c in (summary.get("mapping_contexts") or [])
+    }
+    _catalogo: stock_service.CatalogoBloqueado | None = None
+    if not _entidades or not _entidades <= {"customer", "supplier", "sale"}:
+        _catalogo = await stock_service.bloquear_catalogo(session, tenant_id, lock_held=True)
+        _balance_index = dict(_catalogo.balances)
+    else:
+        _balance_index = await _load_balance_index(session, tenant_id)
     # Altas de producto por LOTE: un savepoint por lote en vez de uno por producto.
     # Medido sobre el archivo real de Asteria: los savepoints por fila eran 1.588 de
     # los 3.250 statements del confirm (48,9%), y su `flush` incondicional drenaba el
@@ -11412,6 +11450,8 @@ async def import_receipt(
     # F3-T3: el remito crea productos/stock por fuera de ProductRepository.save.
     # Shared lock ANTES de mutar. No-op en SQLite.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+    # T2-b: tampoco se cruza con un import del mismo negocio (crea productos).
+    await maintenance_lock_service.acquire_import_lock(session, tenant_id)
 
     tx_date = transaction_date or now_ar_naive()
     # F2-T4: ``_resolve_product`` normaliza canónicamente (accent/dash-aware),

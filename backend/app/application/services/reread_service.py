@@ -122,6 +122,7 @@ from app.application.services.respaldo_service import (
     ventas_que_pierden_respaldo,
 )
 from app.application.services.stock_service import (
+    bloquear_catalogo,
     sale_source_event_id,
     unvoid_movement,
     void_movement,
@@ -4153,6 +4154,14 @@ async def apply_reread(
     # F3-T3: la relectura crea/void productos+stock. Shared lock ANTES de mutar.
     # No-op en SQLite.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+    # T2-b: un import a la vez por negocio y el catálogo bloqueado en orden de id,
+    # ANTES de tocar nada —maestros incluidos—. La relectura escribe clientes y
+    # proveedores, anula los movimientos del archivo y lo vuelve a cargar:
+    # bloqueando cada fila al tocarla, el orden lo ponía el archivo y se cruzaba
+    # con un ticket del POS o con otro import (que ya tiene el candado de
+    # importación y espera al cliente que la relectura acaba de escribir).
+    await maintenance_lock_service.acquire_import_lock(session, tenant_id)
+    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)  # noqa: F841
 
     file = await _load_file(session, file_id, tenant_id)
     # B·5e-2: las compras y el stock inicial que este archivo trae HOY, y desde
@@ -4884,6 +4893,14 @@ async def undo_reread(
     if run.status == "REVERTED":
         raise ValueError("Este run ya fue revertido.")
 
+    # T2-b: como la relectura misma — shared, un import a la vez por negocio y el
+    # catálogo bloqueado en orden de id ANTES de revertir nada. Deshacer repone
+    # movimientos, desactiva y restaura productos y maestros: de a una fila, en
+    # el orden de los items, se cruzaba con un ticket del POS o con un import.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+    await maintenance_lock_service.acquire_import_lock(session, tenant_id)
+    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)  # noqa: F841
+
     # Orden determinístico por ``created_at``: ``_undo_master_and_product_items``
     # asume que, para un mismo ``product_id`` con varios ``DataRepairItem`` (Task
     # 6 no dedupea productos), el ÚLTIMO de la lista es el más reciente. Los items
@@ -5018,6 +5035,7 @@ async def undo_reread(
     # ledger porque stock_units tiene base no-ledger (alta manual, chat, seed, y el
     # catálogo que setea stock absoluto y registra solo el delta) que un recompute
     # destruiría.
+    a_revertir: list[tuple[InventoryMovement, bool]] = []
     for it in items:
         after = it.after_json or {}
         before = it.before_json or {}
@@ -5033,10 +5051,12 @@ async def undo_reread(
         mov = await session.get(InventoryMovement, uuid.UUID(raw_mid))
         if mov is None or mov.tenant_id != tenant_id:
             continue
+        a_revertir.append((mov, do_unvoid))
+    for mov, do_unvoid in a_revertir:
         if do_unvoid:
             await unvoid_movement(mov, session)
         else:
-            await void_movement(mov, session)
+            await void_movement(mov, session, lock_held=True)
 
     # Fix round post-review (hallazgo Important #2): revertir el stamping de
     # versionado que ``apply_reread`` hizo sobre el archivo. Sin esto, deshacer

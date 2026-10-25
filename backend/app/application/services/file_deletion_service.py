@@ -45,6 +45,7 @@ from typing import Any
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import maintenance_lock_service
 from app.application.services._ledger_restore import (
     entity_changed_since_ledger,
     fields_changed_since_ledger,
@@ -55,7 +56,7 @@ from app.application.services.costo_vigente_service import recalcular_pendientes
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
 )
-from app.application.services.stock_service import void_movement
+from app.application.services.stock_service import bloquear_catalogo, void_movement
 from app.domain.file_deletion_reasons import PreservationReason
 from app.domain.ingestion_version import INGESTION_VERSION_WITH_LEDGER
 from app.observability.logger import get_logger
@@ -1117,6 +1118,14 @@ async def revert_file_data(
     Revierte también lo editado a mano: es la decisión de producto, y el usuario
     la acepta explícitamente en la advertencia previa.
     """
+    # T2-b: shared, un import a la vez por negocio y el catálogo bloqueado en
+    # orden de id ANTES de revertir nada. El borrado repone movimientos y además
+    # desactiva y restaura productos que no tienen movimiento (un precio que el
+    # archivo cambió): bloqueando cada fila al tocarla, el orden lo ponía el
+    # archivo y se cruzaba con un ticket del POS o con un import de otro archivo.
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+    await maintenance_lock_service.acquire_import_lock(session, tenant_id)
+    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)  # noqa: F841
     ahora = datetime.now(UTC)
     contadores = {
         "ventas": 0,
@@ -1179,7 +1188,7 @@ async def revert_file_data(
         )
     )
     for mov in movs_res.scalars().all():
-        await void_movement(mov, session)
+        await void_movement(mov, session, lock_held=True)
         contadores["movimientos_stock"] += 1
 
     # 3. Productos CREADOS por el archivo → desactivar. Solo los del ledger, y

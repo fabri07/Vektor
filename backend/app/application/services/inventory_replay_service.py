@@ -202,6 +202,17 @@ async def run_inventory_replay(
     if not ventas:
         return resultado
 
+    # T2-b: con ``apply``, los productos se bloquean ANTES de mirar
+    # qué ya se descontó y de leer los saldos (orden de id, como el POS). Sin el
+    # candado, una venta del POS que commiteaba en el medio quedaba fuera del
+    # saldo de partida y el lote la pisaba; leído bajo el candado, lo que ya no
+    # alcanza queda pendiente acá abajo. El preview no escribe y no bloquea.
+    bloqueados: dict[uuid.UUID, Product] | None = None
+    if apply:
+        _ids = {v.product_id for v in ventas if v.product_id is not None}
+        # Los balances los bloquea el lote, después de los productos.
+        bloqueados = await stock_service.bloquear_productos(session, tenant_id, _ids)
+
     descontadas = await _ya_descontadas(session, tenant_id, ventas)
     # Las dos exclusiones se cuentan por separado: una venta ya descontada es el
     # no-op idempotente y se informa; una de cantidad 0 simplemente no habla de
@@ -218,7 +229,9 @@ async def run_inventory_replay(
 
     productos: dict[uuid.UUID, Product] = {}
     for pid in {v.product_id for v in pendientes if v.product_id is not None}:
-        producto = await session.get(Product, pid)
+        producto = (
+            bloqueados.get(pid) if bloqueados is not None else await session.get(Product, pid)
+        )
         if producto is not None and producto.tenant_id == tenant_id:
             productos[pid] = producto
 

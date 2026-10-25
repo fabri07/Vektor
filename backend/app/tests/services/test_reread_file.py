@@ -1864,7 +1864,10 @@ async def test_reread_audita_productos_creados_y_actualizados(
     update_item = next(i for i in items if i.action == "UPDATE_PRODUCT")
     assert update_item.product_id == existing.id
     assert update_item.before_json is not None
-    assert update_item.before_json["sale_price_ars"] == "500"
+    # T2-b: el import relee el producto bloqueado (`populate_existing`), así que
+    # la foto previa trae el precio como quedó guardado ("500.00"), no el literal
+    # que el test dejó en memoria.
+    assert Decimal(update_item.before_json["sale_price_ars"]) == Decimal("500")
     assert update_item.before_json["sku"] == "COC500"  # campo ampliado, no solo precio/stock
     assert update_item.after_json is not None
     assert update_item.after_json["sale_price_ars"] == "650"
@@ -1957,7 +1960,10 @@ async def test_reread_multisheet_audita_productos_creados_y_actualizados(
     update_item = next(i for i in items if i.action == "UPDATE_PRODUCT")
     assert update_item.product_id == existing.id
     assert update_item.before_json is not None
-    assert update_item.before_json["sale_price_ars"] == "500"
+    # T2-b: el import relee el producto bloqueado (`populate_existing`), así que
+    # la foto previa trae el precio como quedó guardado ("500.00"), no el literal
+    # que el test dejó en memoria.
+    assert Decimal(update_item.before_json["sale_price_ars"]) == Decimal("500")
     assert update_item.before_json["sku"] == "COC500"
     assert update_item.after_json is not None
     assert update_item.after_json["sale_price_ars"] == "650"
