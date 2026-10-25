@@ -358,6 +358,26 @@ async def require_discrepancy_access(
     return await require_modify_access(current_user, redis)
 
 
+def _assert_modify_role(user: User) -> None:
+    if not (user.role_code == "OWNER" or user.can_modify_sensitive):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permiso para modificar datos. Pedíselo al dueño de la cuenta.",
+        )
+
+
+async def require_modify_role(current_user: User = Depends(get_current_user)) -> User:
+    """La parte de ROL de ``require_modify_access``, sin el PIN (R-7).
+
+    OWNER o sub-cuenta con ``can_modify_sensitive``, si no → 403. Existe para
+    ponerla en ``dependencies=[...]`` ANTES de ``require_active_subscription``:
+    FastAPI resuelve primero las del decorador, y con el gate adelante un VIEWER
+    con la suscripción vencida recibía 402 en vez de 403. Orden: 403 → 402 → 428.
+    """
+    _assert_modify_role(current_user)
+    return current_user
+
+
 async def require_modify_access(
     current_user: User = Depends(get_current_user),
     redis: Redis = Depends(get_redis),
@@ -367,13 +387,24 @@ async def require_modify_access(
     (a) OWNER o sub-cuenta con ``can_modify_sensitive``, si no → 403.
     (b) ventana de PIN vigente, si no → 428 PIN_REQUIRED.
     """
-    if not (current_user.role_code == "OWNER" or current_user.can_modify_sensitive):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tenés permiso para modificar datos. Pedíselo al dueño de la cuenta.",
-        )
+    _assert_modify_role(current_user)
     await _require_pin_window(current_user, redis)
     return current_user
+
+
+def _assert_capital_role(user: User) -> None:
+    if user.role_code not in ("OWNER", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Sólo el dueño o un administrador pueden registrar capital.",
+        )
+
+
+async def require_capital_role(user: User = Depends(require_modify_role)) -> User:
+    """La parte de ROL de ``require_capital_write``, sin el PIN (R-7): va antes
+    del gate de suscripción en ``dependencies=[...]``."""
+    _assert_capital_role(user)
+    return user
 
 
 async def require_capital_write(user: User = Depends(require_modify_access)) -> User:
@@ -381,11 +412,7 @@ async def require_capital_write(user: User = Depends(require_modify_access)) -> 
     y además rol OWNER/ADMIN. CASHIER y VIEWER nunca, ni con ``can_modify_sensitive``.
     Lo usan ``/capital-movements`` y ``/expenses/profit-withdrawal``, que también
     escribe un movimiento de capital."""
-    if user.role_code not in ("OWNER", "ADMIN"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Sólo el dueño o un administrador pueden registrar capital.",
-        )
+    _assert_capital_role(user)
     return user
 
 

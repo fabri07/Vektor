@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import (
     get_current_tenant,
     require_active_subscription,
+    require_capital_role,
     require_capital_write,
     require_role,
 )
@@ -57,12 +58,13 @@ _ROLES = ("OWNER", "ADMIN")
     response_model=CapitalMovementResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Registrar un aporte, retiro o préstamo de socio (en dinero)",
+    # R-7: el rol primero (403), después el gate (402) y recién ahí el PIN
+    # (428, en `require_capital_write`), igual que el resto de las altas.
+    dependencies=[Depends(require_capital_role)],
 )
 async def create_capital_movement(
     body: CreateCapitalMovementRequest,
     background_tasks: BackgroundTasks,
-    # El gate de suscripción va PRIMERO: una alta bloqueada corta con 402 antes
-    # de pedir el PIN (mismo orden que el resto de las altas).
     _gate: None = Depends(require_active_subscription),
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_capital_write),

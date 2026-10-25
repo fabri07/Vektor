@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
     get_current_tenant,
+    get_current_user,
     require_active_subscription,
     require_modify_access,
     require_role,
@@ -59,7 +60,7 @@ def _audit_metric_change(
 
 @router.post(
     "/metrics",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=SocialMetricResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Cargar una métrica de red social",
@@ -67,7 +68,7 @@ def _audit_metric_change(
 async def create_metric(
     body: CreateSocialMetricRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> SocialMetric:
     repo = SocialMetricRepository(session)
@@ -86,7 +87,7 @@ async def create_metric(
 
 @router.post(
     "/metrics/bulk",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=list[SocialMetricResponse],
     status_code=status.HTTP_201_CREATED,
     summary="Cargar varias métricas de red social",
@@ -94,7 +95,7 @@ async def create_metric(
 async def create_metrics_bulk(
     body: list[CreateSocialMetricRequest],
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[SocialMetric]:
     repo = SocialMetricRepository(session)
