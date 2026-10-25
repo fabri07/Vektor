@@ -142,7 +142,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | R-3 | normal | VIEWER crea una automatización desde una acción aprobada | mergeado | #183 `3b51b78d` |
 | R-4 | normal | VIEWER da de alta un campo propio | mergeado | #184 `4a21e4cd` (incluye el toggle que creaba campos) |
 | R-5 | menor | cualquiera cancela la acción pendiente de otro | mergeado | #185 `7527b131` |
-| R-6 | menor | subida a S3 sin gate con purpose distinto de chat (relacionado con I3-8) | pendiente |  |
+| R-6 | menor | subida a S3 sin gate con purpose distinto de chat (relacionado con I3-8) | mergeado | #186 `628d7b6c` (I3-8 sigue abierto) |
 | R-7 | menor | 402 antes que 403 cuando el rol va como parámetro | pendiente |  |
 | R-8 | menor | el 403 de require_role está en inglés | pendiente |  |
 | R-9 | menor | serie diaria «caja» del agente de salud es ventas − gastos | pendiente |  |
