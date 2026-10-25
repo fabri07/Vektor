@@ -139,7 +139,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 |---|---|---|---|---|
 | R-1 | grave | chat auto-ejecuta escrituras sin mirar el rol | mergeado | #177 |
 | R-2 | normal | VIEWER abre o cierra turnos de caja (= A-3) | mergeado | #182 `587ff05e` |
-| R-3 | normal | VIEWER crea una automatización desde una acción aprobada | pendiente |  |
+| R-3 | normal | VIEWER crea una automatización desde una acción aprobada | mergeado | #183 `3b51b78d` |
 | R-4 | normal | VIEWER da de alta un campo propio | pendiente |  |
 | R-5 | menor | cualquiera cancela la acción pendiente de otro | pendiente |  |
 | R-6 | menor | subida a S3 sin gate con purpose distinto de chat (relacionado con I3-8) | pendiente |  |
