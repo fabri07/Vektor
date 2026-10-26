@@ -25,6 +25,12 @@ from app.application.services.score_trigger_service import (
 )
 from app.domain.business_time import fecha_de_negocio
 from app.domain.expense_categories import infer_expense_type, resolve_tax_kind
+from app.domain.linea_de_compra import (
+    CLAVE_GRUPO_DE_COMPRA,
+    CODIGO_LINEA_DE_COMPRA,
+    MENSAJE_LINEA_DE_COMPRA,
+    es_linea_de_compra_el_gasto,
+)
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.owner_capital import KIND_RETIRO
@@ -215,6 +221,38 @@ def _rechazar_mercaderia_sin_articulos(
                 ),
             },
         )
+
+
+def _conflicto_linea_de_compra() -> HTTPException:
+    """T3 · B-3: 409 ``PURCHASE_LINE`` (ver ``domain/linea_de_compra.py``)."""
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"code": CODIGO_LINEA_DE_COMPRA, "message": MENSAJE_LINEA_DE_COMPRA},
+    )
+
+
+def _al_minuto(momento: datetime) -> datetime:
+    # El editor manda la fecha de un `datetime-local` (minutos, sin segundos) y la
+    # base guarda segundos y microsegundos: comparar al minuto, o reabrir el modal
+    # y guardar sólo la descripción parecería un cambio de fecha.
+    return momento.replace(second=0, microsecond=0, tzinfo=None)
+
+
+def _cambia_lo_de_la_compra(body: UpdateExpenseRequest, entry: ExpenseEntry) -> bool:
+    """T3 · B-3: ¿el PATCH toca lo que la compra comparte con su movimiento?
+
+    Compara VALORES, no presencia: la pantalla manda siempre monto, categoría y
+    fecha, aunque sólo se haya editado la descripción.
+    """
+    if body.amount is not None and Decimal(body.amount) != Decimal(entry.amount):
+        return True
+    if body.category is not None and body.category != entry.category:
+        return True
+    if body.expense_type is not None and body.expense_type != entry.expense_type:
+        return True
+    return body.expense_date is not None and _al_minuto(body.expense_date) != _al_minuto(
+        entry.transaction_date
+    )
 
 
 @router.post(
@@ -421,6 +459,11 @@ async def update_expense(
     entry = await repo.get_by_id(expense_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found.")
+    es_de_compra = es_linea_de_compra_el_gasto(entry)
+    if es_de_compra and _cambia_lo_de_la_compra(body, entry):
+        # T3 · B-3: el movimiento `purchase` no se entera; se corrige el stock
+        # desde el producto (la anulación de la compra entera todavía no existe).
+        raise _conflicto_linea_de_compra()
     before = _expense_snapshot(entry)
     if body.category is not None and body.category != entry.category:
         # B·5b: un gasto no se convierte en una compra de mercadería sin artículos.
@@ -451,8 +494,10 @@ async def update_expense(
         # Cambiar la categoría sin mandar el tipo lo limpia: un tipo que quedó de
         # antes no revive al volver a TAXES.
         entry.tax_kind = None
-    if body.expense_date is not None:
+    if body.expense_date is not None and not es_de_compra:
         entry.transaction_date = body.expense_date
+    # Una línea de compra llega acá sólo con la misma fecha al minuto: se queda la
+    # guardada (con sus segundos), igual a la del movimiento.
     if body.description is not None:
         entry.description = body.description
     if body.is_recurring is not None:
@@ -476,7 +521,15 @@ async def update_expense(
     if body.notes is not None:
         entry.notes = body.notes
     if body.custom_fields is not None:
+        previos = entry.custom_fields or {}
         entry.custom_fields = _conservar_marca_de_retiro(body.custom_fields, entry.custom_fields)
+        if es_de_compra and previos.get(CLAVE_GRUPO_DE_COMPRA):
+            # T3 · B-3: el grupo no se pierde con el editor de campos (el envío
+            # sólo se reconoce por él).
+            entry.custom_fields = {
+                **entry.custom_fields,
+                CLAVE_GRUPO_DE_COMPRA: previos[CLAVE_GRUPO_DE_COMPRA],
+            }
     # FASE 3.1: re-aplicar label de "Otro" si cambió la categoría o el label.
     if body.category_label is not None or body.category is not None:
         entry.custom_fields = _apply_category_label(
@@ -510,6 +563,10 @@ async def delete_expense(
     entry = await repo.get_by_id(expense_id, tenant.tenant_id)
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expense not found.")
+    if es_linea_de_compra_el_gasto(entry):
+        # T3 · B-3: anular el gasto suelto dejaba vivo el movimiento `purchase`
+        # (stock, costo y respaldo de ventas como si la compra existiera).
+        raise _conflicto_linea_de_compra()
     before = _expense_snapshot(entry)
     entry.voided_at = datetime.now(UTC)
     entry.void_reason = VOID_REASON_MANUAL

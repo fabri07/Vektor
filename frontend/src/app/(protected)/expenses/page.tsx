@@ -19,6 +19,7 @@ import { ExportAllFieldsButton } from "@/features/customFields/ExportAllFieldsBu
 import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime, parseDateOnly, toDatetimeLocal } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
+import { mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
 import { PeriodFilter } from "@/components/ui/PeriodFilter";
 import {
   type PeriodValue,
@@ -195,7 +196,7 @@ export default function ExpensesPage() {
       toast("Gasto actualizado.", "success");
       await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
     },
-    onError: () => toast("No se pudo actualizar el gasto.", "error"),
+    onError: (e) => toast(mensajeDelServidor(e) ?? "No se pudo actualizar el gasto.", "error"),
   });
 
   const deleteMutation = useMutation({
@@ -204,7 +205,7 @@ export default function ExpensesPage() {
       toast("Gasto anulado.", "success");
       await queryClient.invalidateQueries({ queryKey: ["expenses-entries"] });
     },
-    onError: () => toast("No se pudo anular el gasto.", "error"),
+    onError: (e) => toast(mensajeDelServidor(e) ?? "No se pudo anular el gasto.", "error"),
   });
 
   // KPI calculations
@@ -383,9 +384,10 @@ export default function ExpensesPage() {
               </button>
               <button
                 type="button"
-                title="Anular"
-                aria-label="Anular gasto"
-                disabled={deleteMutation.isPending}
+                // T3 · B-3: una línea de compra no se anula suelta (el stock quedaría).
+                title={row.is_purchase_line ? COMPRA_NO_SE_ANULA : "Anular"}
+                aria-label={row.is_purchase_line ? COMPRA_NO_SE_ANULA : "Anular gasto"}
+                disabled={deleteMutation.isPending || row.is_purchase_line === true}
                 onClick={() => {
                   if (confirm("¿Anular este gasto?")) deleteMutation.mutate(row.id);
                 }}
@@ -416,6 +418,12 @@ export default function ExpensesPage() {
   );
 }
 
+// T3 · B-3: mismo criterio que el 409 `PURCHASE_LINE` del servidor.
+const COMPRA_NO_SE_ANULA =
+  "Es parte de una compra de mercadería: no se anula sola. Si la mercadería está mal, corregí el stock desde el producto.";
+const COMPRA_CAMPOS_FIJOS =
+  "Este gasto es parte de una compra de mercadería: el monto, la categoría y la fecha no se cambian acá, porque el stock y el costo quedarían como si la compra siguiera. Si la mercadería está mal, corregí el stock con un ajuste desde el producto (la anulación de compras todavía no existe). La descripción, el proveedor y las notas sí se pueden editar.";
+
 function ExpenseEditModal({
   expense,
   saving,
@@ -435,15 +443,18 @@ function ExpenseEditModal({
   const set = (key: keyof ExpenseEntryResponse, value: string | number | boolean | null) => {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
+  const deCompra = expense?.is_purchase_line === true;
   return (
     <Modal isOpen={!!expense} onClose={onClose} title="Editar gasto" size="lg">
       <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); onSave(form); }}>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vektor-body">Fecha y hora<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} /></label>
-          <label className="grid gap-1 text-sm text-vektor-body">Categoría<select className="rounded border border-vk-border-w px-3 py-2" value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.filter((cat) => cat !== "INVENTORY" || expense?.category === "INVENTORY").map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Fecha y hora<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" disabled={deCompra} value={toDatetimeLocal(form.transaction_date)} onChange={(e) => set("transaction_date", e.target.value)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Categoría<select className="rounded border border-vk-border-w px-3 py-2" disabled={deCompra} value={form.category} onChange={(e) => set("category", e.target.value)}>{ALL_CATEGORIES.filter((cat) => cat !== "INVENTORY" || expense?.category === "INVENTORY").map((cat) => <option key={cat} value={cat}>{CATEGORY_LABELS[cat] ?? cat}</option>)}</select></label>
         </div>
         {/* B·5b: un gasto no se convierte en compra de mercadería; esa va con sus artículos. */}
-        {expense?.category !== "INVENTORY" && (
+        {deCompra ? (
+          <p className="text-xs text-vk-text-muted">{COMPRA_CAMPOS_FIJOS}</p>
+        ) : expense?.category !== "INVENTORY" && (
           <p className="text-xs text-vk-text-muted">Para cargar una compra de mercadería usá «Registrar compra», con los artículos y las cantidades.</p>
         )}
         {form.category === "TAXES" && (
@@ -452,7 +463,7 @@ function ExpenseEditModal({
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value)} /></label>
         <div className="grid grid-cols-2 gap-3">
           <label className="grid gap-1 text-sm text-vektor-body">Proveedor<input className="rounded border border-vk-border-w px-3 py-2" value={form.supplier_name ?? ""} onChange={(e) => set("supplier_name", e.target.value || null)} /></label>
-          <label className="grid gap-1 text-sm text-vektor-body">Monto<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.amount} onChange={(e) => set("amount", Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Monto<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" disabled={deCompra} value={form.amount} onChange={(e) => set("amount", Number(e.target.value))} /></label>
         </div>
         <label className="flex items-center gap-2 text-sm text-vektor-body"><input type="checkbox" checked={form.is_recurring} onChange={(e) => set("is_recurring", e.target.checked)} />Recurrente</label>
         <div className="flex justify-end gap-2 pt-2">
