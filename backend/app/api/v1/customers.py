@@ -18,8 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
     get_current_tenant,
+    get_current_user,
     require_active_subscription,
     require_modify_access,
+    require_modify_role,
     require_owner_stepup,
     require_role,
 )
@@ -150,7 +152,7 @@ async def list_customers(
 
 @router.post(
     "",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=CustomerResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a customer",
@@ -158,7 +160,7 @@ async def list_customers(
 async def create_customer(
     body: CreateCustomerRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> Customer:
@@ -261,7 +263,7 @@ async def _read_upload_or_413(file: UploadFile, default_name: str) -> tuple[byte
 
 @router.post(
     "/extract",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=CustomerExtractionResponse,
     summary="Extract a single customer card from an uploaded file (foto/PDF/planilla)",
 )
@@ -269,7 +271,7 @@ async def extract_customer_card(
     file: UploadFile = File(...),
     user_hint: str | None = Query(default=None, max_length=500),
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> CustomerExtractionResponse:
     """Lee la ficha de UN cliente y SUGIERE los campos para prellenar el formulario.
@@ -422,7 +424,7 @@ async def import_customers_preview(
 
 @router.post(
     "/import/confirm",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_modify_role), Depends(require_active_subscription)],
     response_model=CustomerImportConfirmResponse,
     summary="Confirm a bulk customer import (upsert idempotente)",
 )

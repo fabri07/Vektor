@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
+    get_current_user,
     require_active_subscription,
     require_modify_access,
     require_owner_stepup,
@@ -154,7 +155,7 @@ async def list_suppliers(
 
 @router.post(
     "",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=SupplierResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a supplier",
@@ -162,7 +163,7 @@ async def list_suppliers(
 async def create_supplier(
     body: CreateSupplierRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> Supplier:
@@ -253,7 +254,7 @@ async def list_supplier_products(
 
 @router.post(
     "/{supplier_id}/receipts",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=ReceiptResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Import a supplier receipt (remito)",
@@ -262,9 +263,9 @@ async def create_receipt(
     supplier_id: UUID,
     body: CreateReceiptRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: auth ANTES que el guard 423 — si no, un VIEWER con el tenant
-    # lockeado recibiría 423 en vez de 403.
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # — si no, un VIEWER con el tenant lockeado recibiría 423 en vez de 403.
+    user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -402,7 +403,7 @@ async def _persist_remito_upload(
 
 @router.post(
     "/{supplier_id}/receipts/extract",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=ReceiptExtractionResponse,
     summary="Extract receipt lines from an uploaded file (foto/PDF/planilla)",
 )
@@ -411,7 +412,7 @@ async def extract_receipt(
     file: UploadFile = File(...),
     user_hint: str | None = Query(default=None, max_length=500),
     tenant: Tenant = Depends(get_current_tenant),
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ReceiptExtractionResponse:
     """Lee el archivo de un remito y SUGIERE las líneas (producto/cantidad/precio).

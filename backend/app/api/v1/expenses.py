@@ -12,6 +12,7 @@ from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
     require_active_subscription,
+    require_capital_role,
     require_capital_write,
     require_modify_access,
     require_role,
@@ -291,16 +292,19 @@ async def create_expense(
     response_model=ExpenseEntryResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Register an early profit withdrawal as an owner capital movement (retiro)",
+    # R-7: el rol primero (403), después el gate (402) y recién ahí el PIN
+    # (428, en `require_capital_write`), como en ``POST /capital-movements``.
+    dependencies=[Depends(require_capital_role)],
 )
 async def create_profit_withdrawal(
     body: ProfitWithdrawalRequest,
     background_tasks: BackgroundTasks,
+    # Es el mismo alta que ``POST /capital-movements``: el mismo gate.
+    _sub_guard: None = Depends(require_active_subscription),
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_capital_write),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    # Es el mismo alta que ``POST /capital-movements``: el mismo gate.
-    _sub_guard: None = Depends(require_active_subscription),
 ) -> ExpenseEntryResponse:
     """Retiro de ganancias anticipadas (D·2): ya NO es un gasto PAYROLL.
 
