@@ -896,7 +896,15 @@ class StockCambioError(Exception):
 
 
 class StockNegativoError(Exception):
-    """Un ajuste manual dejaría el stock por debajo de 0 (prohibido)."""
+    """Un ajuste manual o una merma dejaría el stock por debajo de 0 (prohibido).
+
+    ``user_message`` (opcional): el texto que muestra el chat cuando la acción
+    aprobada falla (``_execute_local_action`` lo lee con ``getattr``).
+    """
+
+    def __init__(self, message: str, *, user_message: str | None = None) -> None:
+        super().__init__(message)
+        self.user_message = user_message
 
 
 async def _producto_para_stock_manual(
@@ -1057,10 +1065,24 @@ async def register_stock_loss(
     if product is None:
         raise ValueError(f"Product {product_id} not found for tenant {tenant_id}")
 
+    # T3 (E0-B-2, C-5): stock negativo prohibido. Antes se recortaba
+    # ``stock_units`` a 0 pero el movimiento, el balance y la auditoría iban por
+    # la cantidad entera: tres valores distintos y una merma de unidades que no
+    # existían. Se rechaza antes de mutar nada, como el ajuste manual.
+    if qty > product.stock_units:
+        raise StockNegativoError(
+            "La merma supera el stock.",
+            user_message=(
+                f"No se puede registrar una merma de {qty} unidades de «{product.name}»: "
+                f"el stock actual es {product.stock_units}. "
+                "Revisá la cantidad o corregí primero el stock."
+            ),
+        )
+
     balance = await _get_or_create_balance(product, tenant_id, db)
     balance.current_qty -= qty
     # Mantener Product.stock_units (lo que lee la UI) en sync con el balance.
-    product.stock_units = max(0, product.stock_units - qty)
+    product.stock_units -= qty
 
     movement = InventoryMovement(
         tenant_id=tenant_id,
