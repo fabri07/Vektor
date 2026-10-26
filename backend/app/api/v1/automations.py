@@ -55,14 +55,19 @@ async def list_automations(
 
 @router.post(
     "/from-pending-action/{pending_id}",
-    dependencies=[Depends(require_active_subscription)],
+    # Automatizar es ejecutar sin preguntar: lo decide quien confirma (R-3). El
+    # rol va antes que la suscripción: 403 antes que 402 (R-7).
+    dependencies=[
+        Depends(require_role(*sorted(ROLES_QUE_EJECUTAN))),
+        Depends(require_active_subscription),
+    ],
     response_model=AutomationRuleCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_automation_from_pending_action(
     pending_id: uuid.UUID,
-    # Automatizar es ejecutar sin preguntar: lo decide quien confirma (R-3).
-    current_user: User = Depends(require_role(*sorted(ROLES_QUE_EJECUTAN))),
+    # El rol está en el decorador (R-3, R-7).
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     if not get_settings().ENABLE_AGENT_AUTOMATIONS:

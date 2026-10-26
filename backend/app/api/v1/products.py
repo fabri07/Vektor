@@ -21,8 +21,10 @@ from app.api.v1._stock_manual import (
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
+    get_current_user,
     require_active_subscription,
     require_modify_access,
+    require_modify_role,
     require_pos_permission,
     require_role,
 )
@@ -446,14 +448,14 @@ class CreateProductCategoryRequest(BaseModel):
 
 @router.post(
     "/custom-categories",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     status_code=status.HTTP_201_CREATED,
     summary="Crear una categoría de producto personalizada del tenant",
 )
 async def create_product_category(
     body: CreateProductCategoryRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    _: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str]:
     # Si el label coincide con una categoría canónica del vertical, devolver ESA
@@ -499,7 +501,7 @@ async def _tiene_historia(session: AsyncSession, product: Product) -> bool:
 
 @router.post(
     "",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=ProductResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a product",
@@ -507,11 +509,11 @@ async def _tiene_historia(session: AsyncSession, product: Product) -> bool:
 async def create_product(
     body: CreateProductRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: la auth (rol) va ANTES que el guard 423 — si no, un VIEWER con
-    # el tenant lockeado recibiría 423 en vez de 403 (filtra estado de mantenimiento
-    # a un usuario sin permiso). El guard 423 es solo UX fast-fail; la garantía real
-    # es el advisory lock que toma ProductRepository.save().
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # — si no, un VIEWER con el tenant lockeado recibiría 423 en vez de 403 (filtra
+    # estado de mantenimiento a un usuario sin permiso). El guard 423 es solo UX
+    # fast-fail; la garantía real es el advisory lock que toma ProductRepository.save().
+    user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -937,7 +939,7 @@ async def _ventas_sin_costo_desde(
 
 @router.post(
     "/{product_id}/opening",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_modify_role), Depends(require_active_subscription)],
     response_model=RegistrarAperturaResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Cargar el stock inicial de un producto que ya existe (B·5c)",
@@ -1176,7 +1178,7 @@ async def _ejecutar_lote(
 
 @router.post(
     "/batch",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_modify_role), Depends(require_active_subscription)],
     response_model=LoteStockInicialResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Paso 2 del lote de stock inicial: crear o abrir, todo o nada (B·5c)",

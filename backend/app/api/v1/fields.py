@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1._tenant_vertical import get_vertical_code as _get_vertical_code
 from app.api.v1.deps import (
     get_current_tenant,
+    get_current_user,
     require_active_subscription,
     require_modify_access,
     require_role,
@@ -93,16 +94,21 @@ async def get_available_fields(
 
 @router.post(
     "",
-    dependencies=[Depends(require_active_subscription)],
+    # R-4: dar de alta un campo es configurar el negocio, no editar un dato
+    # cargado: pide el rol que da de alta (OWNER/ADMIN), no el PIN del PATCH.
+    # El rol va antes que la suscripción: 403 antes que 402 (R-7).
+    dependencies=[
+        Depends(require_role("OWNER", "ADMIN")),
+        Depends(require_active_subscription),
+    ],
     response_model=FieldDefinitionResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_field(
     body: CreateCustomFieldRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # R-4: dar de alta un campo es configurar el negocio, no editar un dato
-    # cargado: pide el rol que da de alta (OWNER/ADMIN), no el PIN del PATCH.
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    # El rol está en el decorador (R-4, R-7).
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     field = await svc.create_custom_field(

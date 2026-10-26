@@ -33,6 +33,7 @@ from app.api.v1._stock_manual import (
 from app.api.v1.deps import (
     ensure_tenant_not_under_maintenance,
     get_current_tenant,
+    get_current_user,
     require_active_subscription,
     require_modify_access,
     require_role,
@@ -892,7 +893,7 @@ async def _registrar_venta_desde_otros(
 
 @router.post(
     "/{record_id}/reclassify",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=MessageResponse,
     summary="Importar un registro de Otros como venta/gasto/producto",
 )
@@ -900,10 +901,10 @@ async def reclassify_record(
     record_id: UUID,
     body: ReclassifyRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: auth ANTES que el guard 423 (ver nota en resolve_purchase). Este
-    # endpoint puede crear/mutar Product (ramas "product" abajo) — CRITICAL sin
-    # tocar del cableado original de F3-T3.
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # (ver nota en resolve_purchase). Este endpoint puede crear/mutar Product (ramas
+    # "product" abajo) — CRITICAL sin tocar del cableado original de F3-T3.
+    user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
@@ -1207,7 +1208,7 @@ def _conflicto_de_alias(code: str, referencia: str, producto: str) -> HTTPExcept
 
 @router.post(
     "/{record_id}/link-product",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=MessageResponse,
     summary="Vincular una venta de Otros a un producto y aprender el nombre como alias",
 )
@@ -1215,8 +1216,9 @@ async def link_product(
     record_id: UUID,
     body: LinkProductRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # Mismo orden que `reclassify`: auth antes que el guard 423.
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    # Mismo orden que `reclassify`: el rol está en el decorador; corre antes que el
+    # guard 423.
+    user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
@@ -1402,7 +1404,7 @@ async def link_product(
 
 @router.post(
     "/{record_id}/resolve-purchase",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=MessageResponse,
     summary="Resolver una compra de Otros diciendo qué artículos la componen",
 )
@@ -1410,9 +1412,9 @@ async def resolve_purchase(
     record_id: UUID,
     body: ResolvePurchaseRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: auth ANTES que el guard 423 — si no, un VIEWER con el tenant
-    # lockeado recibiría 423 en vez de 403.
-    user: User = Depends(require_role("OWNER", "ADMIN")),
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # — si no, un VIEWER con el tenant lockeado recibiría 423 en vez de 403.
+    user: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> MessageResponse:
@@ -1524,15 +1526,16 @@ async def resolve_purchase(
 
 @router.post(
     "/bulk-import",
-    dependencies=[Depends(require_active_subscription)],
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
     response_model=BulkImportResponse,
     summary="Importar en lote los registros de Otros sugeridos como venta/gasto",
 )
 async def bulk_import_records(
     body: BulkImportRequest,
     tenant: Tenant = Depends(get_current_tenant),
-    # F3-T3 review: auth ANTES que el guard 423 (ver nota en resolve_purchase).
-    _: User = Depends(require_role("OWNER", "ADMIN")),
+    # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
+    # (ver nota en resolve_purchase).
+    _: User = Depends(get_current_user),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
     session: AsyncSession = Depends(get_db_session),
 ) -> BulkImportResponse:
