@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import maintenance_lock_service, stock_service
 from app.application.services.file_parsing import infer_spreadsheet_type
 from app.application.services.ingestion_import_service import (
     _NOMBRE_COLS,
@@ -31,6 +32,7 @@ from app.application.services.ingestion_import_service import (
     build_incomplete_product,
     insert_confirmed_data,
 )
+from app.application.services.operation_identity_service import liberar_identidades_de
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -40,6 +42,7 @@ from app.domain.verticals import Vertical, try_parse_vertical
 from app.observability.logger import get_logger
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.file import UploadedFile
+from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -52,6 +55,14 @@ VOID_REASON = "REPAIR_MISCLASSIFIED_IMPORT"
 
 # B2 — correctivo genérico:
 VOID_REASON_DUPLICATE = "DUPLICATE"
+
+# T3 (E-2): por qué un grupo de duplicados se saltea entero, sin cambios.
+MOTIVO_COMPRA_YA_VENDIDA = "compra_ya_vendida"
+MOTIVO_COMPRA_SIN_PAR_CLARO = "compra_sin_par_claro"
+
+# T3 (E-3): la corrección automática de ventas del chat está APAGADA (decisión
+# del dueño). El detector sigue y sus ventas quedan «para revisar».
+REVIEW_REASON_CORRECCION_APAGADA = "correccion_automatica_apagada"
 
 # Ventana temporal para asociar SaleEntry con UploadedFile:
 # se usa created_at de SaleEntry vs created_at de UploadedFile (más fiable que transaction_date)
@@ -119,6 +130,19 @@ class DuplicateGroup:
     keep_id: uuid.UUID
     duplicates: Sequence[SaleEntry | ExpenseEntry]
     confidence: str
+
+
+class GrupoNoReparableError(Exception):
+    """T3 (E-2): el grupo no se puede anular sin romper el stock; se saltea ENTERO.
+
+    Lo levanta el plan de stock antes de tocar nada; el savepoint del grupo
+    deshace igual cualquier cosa que hubiera quedado a medias.
+    """
+
+    def __init__(self, motivo: str, detalle: str) -> None:
+        super().__init__(f"{motivo}: {detalle}")
+        self.motivo = motivo
+        self.detalle = detalle
 
 
 @dataclass
@@ -839,6 +863,25 @@ async def apply_repair(
         try:
             await _process_duplicate_group(db, run, group, dry_run, result, dup_planned)
             await savepoint.commit()
+        except GrupoNoReparableError as exc:
+            # T3 (E-2): salteado entero, sin cambios, y se informa.
+            await savepoint.rollback()
+            logger.warning(
+                "data_repair.duplicate_group.skipped",
+                tenant_id=str(group.tenant_id),
+                entity=group.entity,
+                motivo=exc.motivo,
+            )
+            result.tenant_results.append(
+                {
+                    "tenant_id": str(group.tenant_id),
+                    "entity": group.entity,
+                    "status": "SKIPPED",
+                    "kept_id": str(group.keep_id),
+                    "reason": exc.motivo,
+                    "detail": exc.detalle,
+                }
+            )
         except Exception as exc:
             await savepoint.rollback()
             logger.warning(
@@ -1018,7 +1061,13 @@ async def _process_candidate(
 
     # ── Anular SaleEntry sospechosas ─────────────────────────────────────────
     for sale in candidate.suspicious_sales:
+        movimiento: InventoryMovement | None = None
         if not dry_run:
+            # T3 (E-2): anular la venta devuelve su descuento de stock, si lo
+            # tuvo (el mismo `sale:{id}` del vivo y del replay del import).
+            movimiento = await stock_service._live_sale_movement(sale.id, tenant_id, db)
+            if movimiento is not None:
+                await stock_service.void_movement(movimiento, db)
             sale.voided_at = now
             sale.void_reason = VOID_REASON
             sale.voided_by_repair_run_id = run.id
@@ -1038,9 +1087,22 @@ async def _process_candidate(
                     "notes": sale.notes,
                     "planned": dry_run,
                 },
+                after_json=(
+                    {
+                        "movement_id": str(movimiento.id),
+                        "movement_qty": movimiento.qty,
+                    }
+                    if movimiento is not None
+                    else None
+                ),
                 confidence=candidate.confidence,
                 created_at=now,
             )
+        )
+    if not dry_run and candidate.suspicious_sales:
+        # Re-subir el archivo correcto vuelve a poder cargar esas filas.
+        await liberar_identidades_de(
+            db, tenant_id, [("sale", s.id) for s in candidate.suspicious_sales]
         )
 
     result.tenant_results.append(
@@ -1063,61 +1125,49 @@ async def _process_chat_sale_candidate(
     dry_run: bool,
     result: RepairResult,
 ) -> None:
+    """Deja la venta del chat «para revisar» (``REVIEW_SALE``); NUNCA la modifica.
+
+    T3 (E-3), decisión del dueño: la corrección automática (``UPDATE_SALE``) está
+    APAGADA. Pisaba importe, cantidad y producto sin tocar el descuento de stock
+    ya hecho (el ``sale:{id}`` quedaba con la cantidad y el producto viejos), sin
+    mirar el arqueo del día, y cambiaba el importe cobrado por el de lista. Cuando
+    el detector encontró un producto único, la corrección queda como SUGERENCIA
+    en el ítem, igual en el dry-run que en el apply.
+    """
     now = datetime.now(UTC)
     sale = candidate.sale
     before = _sale_snapshot(sale)
 
-    if candidate.product is None:
-        db.add(
-            DataRepairItem(
-                id=uuid.uuid4(),
-                run_id=run.id,
-                tenant_id=candidate.tenant_id,
-                sale_entry_id=sale.id,
-                action="REVIEW_SALE",
-                before_json=before,
-                after_json={
-                    "planned": True,
-                    "reason": candidate.reason,
-                    "quantity_detected": candidate.quantity,
-                    "product_description": candidate.product_description,
-                    "alternatives": candidate.alternatives,
-                },
-                confidence=candidate.confidence,
-                created_at=now,
-            )
-        )
-        result.tenant_results.append(
-            {
-                "tenant_id": str(candidate.tenant_id),
-                "sale_id": str(sale.id),
-                "status": "REVIEW_REQUIRED",
-                "reason": candidate.reason,
-                "alternatives": candidate.alternatives,
-            }
-        )
-        await db.flush()
-        return
-
-    expected_amount = importe(
-        candidate.product.sale_price_ars,
-        candidate.quantity,
-        candidate.product.base_units_per_sale_unit,
-    )
-    after = {
-        **before,
-        "amount": str(expected_amount),
-        "quantity": candidate.quantity,
-        "product_id": str(candidate.product.id),
-        "product_name": candidate.product.name,
-        "planned": dry_run,
+    after: dict[str, Any] = {
+        "planned": True,
+        "reason": candidate.reason,
+        "quantity_detected": candidate.quantity,
+        "product_description": candidate.product_description,
+        "alternatives": candidate.alternatives,
     }
-
-    if not dry_run:
-        sale.amount = expected_amount
-        sale.quantity = candidate.quantity
-        sale.product_id = candidate.product.id
-        result.products_skipped += 0
+    entry: dict[str, Any] = {
+        "tenant_id": str(candidate.tenant_id),
+        "sale_id": str(sale.id),
+        "status": "REVIEW_REQUIRED",
+        "reason": candidate.reason,
+        "alternatives": candidate.alternatives,
+    }
+    if candidate.product is not None:
+        sugerencia = {
+            "amount": str(
+                importe(
+                    candidate.product.sale_price_ars,
+                    candidate.quantity,
+                    candidate.product.base_units_per_sale_unit,
+                )
+            ),
+            "quantity": candidate.quantity,
+            "product_id": str(candidate.product.id),
+            "product_name": candidate.product.name,
+        }
+        after["suggested_correction"] = sugerencia
+        after["auto_correction"] = REVIEW_REASON_CORRECCION_APAGADA
+        entry["suggested_correction"] = sugerencia
 
     db.add(
         DataRepairItem(
@@ -1125,39 +1175,15 @@ async def _process_chat_sale_candidate(
             run_id=run.id,
             tenant_id=candidate.tenant_id,
             sale_entry_id=sale.id,
-            product_id=candidate.product.id,
-            action="UPDATE_SALE",
+            product_id=candidate.product.id if candidate.product is not None else None,
+            action="REVIEW_SALE",
             before_json=before,
             after_json=after,
             confidence=candidate.confidence,
             created_at=now,
         )
     )
-
-    if not dry_run:
-        result.sales_voided += 0
-        result.tenant_results.append(
-            {
-                "tenant_id": str(candidate.tenant_id),
-                "sale_id": str(sale.id),
-                "status": "CORRECTED",
-                "amount": str(expected_amount),
-                "quantity": candidate.quantity,
-                "product_id": str(candidate.product.id),
-            }
-        )
-    else:
-        result.tenant_results.append(
-            {
-                "tenant_id": str(candidate.tenant_id),
-                "sale_id": str(sale.id),
-                "status": "PLANNED_CORRECTION",
-                "amount": str(expected_amount),
-                "quantity": candidate.quantity,
-                "product_id": str(candidate.product.id),
-            }
-        )
-
+    result.tenant_results.append(entry)
     await db.flush()
 
 
@@ -1296,6 +1322,126 @@ def _dup_snapshot(row: SaleEntry | ExpenseEntry, entity: str) -> dict[str, Any]:
     }
 
 
+async def _compras_del_gasto(
+    db: AsyncSession, expense: ExpenseEntry
+) -> tuple[list[InventoryMovement], int]:
+    """Los ``purchase`` vivos del gasto y cuántos gastos vivos comparten su fila.
+
+    El par es por (archivo, fila, producto), como en ``reparacion_stock_inicial``.
+    Sin alguno de los tres el gasto no tiene par (no movió stock por el import).
+    """
+    if (
+        expense.product_id is None
+        or expense.source_upload_id is None
+        or expense.source_row_ref is None
+    ):
+        return [], 0
+    movimientos = list(
+        (
+            await db.execute(
+                select(InventoryMovement)
+                .where(
+                    InventoryMovement.tenant_id == expense.tenant_id,
+                    InventoryMovement.movement_type == "purchase",
+                    InventoryMovement.voided_at.is_(None),
+                    InventoryMovement.source_upload_id == expense.source_upload_id,
+                    InventoryMovement.source_row_ref == expense.source_row_ref,
+                    InventoryMovement.product_id == expense.product_id,
+                )
+                .order_by(InventoryMovement.id)
+            )
+        ).scalars()
+    )
+    if not movimientos:
+        return [], 0
+    gastos_de_la_fila = (
+        await db.execute(
+            select(func.count(ExpenseEntry.id)).where(
+                ExpenseEntry.tenant_id == expense.tenant_id,
+                ExpenseEntry.voided_at.is_(None),
+                ExpenseEntry.source_upload_id == expense.source_upload_id,
+                ExpenseEntry.source_row_ref == expense.source_row_ref,
+                ExpenseEntry.product_id == expense.product_id,
+            )
+        )
+    ).scalar_one()
+    return movimientos, int(gastos_de_la_fila)
+
+
+async def _plan_de_stock_de_duplicados(
+    db: AsyncSession,
+    group: DuplicateGroup,
+    filas: Sequence[SaleEntry | ExpenseEntry],
+    *,
+    bloquear: bool,
+) -> dict[uuid.UUID, InventoryMovement | None]:
+    """T3 (E-2): el movimiento de stock que se anula con cada duplicado.
+
+    Venta → su ``sale:{id}`` vivo (devolverlo repone el stock). Gasto de compra →
+    su ``purchase`` vivo (anularlo baja el stock). Antes de tocar nada:
+
+    - Una fila con más de un gasto vivo y una cantidad distinta de compras no
+      dice cuál es de cuál: el grupo se saltea (``compra_sin_par_claro``).
+    - Si anular las compras deja stock negativo (esa mercadería ya se vendió),
+      el grupo se saltea (``compra_ya_vendida``): nunca stock negativo.
+
+    ``bloquear`` (apply): advisory shared + ``FOR UPDATE`` de los productos, y
+    el chequeo se hace sobre el stock vigente. En dry-run se lee sin candado.
+    """
+    plan: dict[uuid.UUID, InventoryMovement | None] = {}
+    if bloquear:
+        await maintenance_lock_service.acquire_write_lock_shared(db, group.tenant_id)
+    if group.entity == "sale":
+        for fila in filas:
+            plan[fila.id] = await stock_service._live_sale_movement(
+                fila.id, group.tenant_id, db
+            )
+        return plan
+
+    usados: set[uuid.UUID] = set()
+    for fila in filas:
+        assert isinstance(fila, ExpenseEntry)
+        movimientos, gastos_de_la_fila = await _compras_del_gasto(db, fila)
+        if not movimientos:
+            plan[fila.id] = None
+            continue
+        if len(movimientos) != gastos_de_la_fila:
+            raise GrupoNoReparableError(
+                MOTIVO_COMPRA_SIN_PAR_CLARO,
+                f"la fila {fila.source_row_ref} tiene {gastos_de_la_fila} gastos vivos "
+                f"y {len(movimientos)} compras",
+            )
+        libre = next(m for m in movimientos if m.id not in usados)
+        usados.add(libre.id)
+        plan[fila.id] = libre
+
+    salida: dict[uuid.UUID, int] = {}
+    for mov in plan.values():
+        if mov is not None:
+            salida[mov.product_id] = salida.get(mov.product_id, 0) + mov.qty
+    if not salida:
+        return plan
+    if bloquear:
+        productos = await stock_service.bloquear_productos(
+            db, group.tenant_id, salida, lock_held=True
+        )
+    else:
+        productos = {}
+        for pid in salida:
+            producto = await db.get(Product, pid)
+            if producto is not None:
+                productos[pid] = producto
+    for pid, qty in salida.items():
+        producto = productos.get(pid)
+        stock = int(producto.stock_units or 0) if producto is not None else 0
+        if stock - qty < 0:
+            raise GrupoNoReparableError(
+                MOTIVO_COMPRA_YA_VENDIDA,
+                f"anular la compra baja {qty} unidades y quedan {stock} del producto {pid}",
+            )
+    return plan
+
+
 async def _process_duplicate_group(
     db: AsyncSession,
     run: DataRepairRun,
@@ -1304,12 +1450,25 @@ async def _process_duplicate_group(
     result: RepairResult,
     planned_ids: frozenset[uuid.UUID] | None,
 ) -> None:
+    """Anula los duplicados del grupo devolviendo su stock y soltando su identidad.
+
+    T3 (E-2): antes sólo marcaba ``voided_at``; el ``sale:{id}`` o el ``purchase``
+    quedaban vivos (stock descontado por una venta que ya no existe, o inflado por
+    una compra anulada) y la identidad de operación colgada. El plan de stock
+    (``_plan_de_stock_de_duplicados``) corre también en el dry-run, así que un
+    grupo que se saltearía no deja ítems planificados.
+    """
     now = datetime.now(UTC)
-    for row in group.duplicates:
-        # En apply con plan, solo tocar lo planificado en el dry-run.
-        if planned_ids is not None and row.id not in planned_ids:
-            continue
+    # En apply con plan, solo tocar lo planificado en el dry-run.
+    filas = [
+        row for row in group.duplicates if planned_ids is None or row.id in planned_ids
+    ]
+    plan = await _plan_de_stock_de_duplicados(db, group, filas, bloquear=not dry_run)
+    for row in filas:
+        movimiento = plan.get(row.id)
         if not dry_run:
+            if movimiento is not None:
+                await stock_service.void_movement(movimiento, db, lock_held=True)
             row.voided_at = now
             row.void_reason = VOID_REASON_DUPLICATE
             row.voided_by_repair_run_id = run.id
@@ -1324,20 +1483,32 @@ async def _process_duplicate_group(
             "tenant_id": group.tenant_id,
             "action": "VOID_DUPLICATE",
             "before_json": {**_dup_snapshot(row, group.entity), "planned": dry_run},
-            "after_json": {"kept_id": str(group.keep_id), "planned": dry_run},
+            "after_json": {
+                "kept_id": str(group.keep_id),
+                "planned": dry_run,
+                # Para poder revertir: el movimiento anulado y su efecto.
+                "movement_id": str(movimiento.id) if movimiento is not None else None,
+                "movement_qty": movimiento.qty if movimiento is not None else None,
+            },
             "confidence": group.confidence,
             "created_at": now,
         }
         if group.entity == "sale":
             item_kwargs["sale_entry_id"] = row.id
+        if movimiento is not None:
+            item_kwargs["product_id"] = movimiento.product_id
         db.add(DataRepairItem(**item_kwargs))
+    if not dry_run and filas:
+        await liberar_identidades_de(
+            db, group.tenant_id, [(group.entity, row.id) for row in filas]
+        )
     result.tenant_results.append(
         {
             "tenant_id": str(group.tenant_id),
             "entity": group.entity,
             "status": "DUPLICATES_VOIDED" if not dry_run else "DUPLICATES_PLANNED",
             "kept_id": str(group.keep_id),
-            "voided": len(group.duplicates),
+            "voided": len(filas),
         }
     )
     await db.flush()
