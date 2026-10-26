@@ -144,7 +144,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | R-5 | menor | cualquiera cancela la acción pendiente de otro | mergeado | #185 `7527b131` |
 | R-6 | menor | subida a S3 sin gate con purpose distinto de chat (relacionado con I3-8) | mergeado | #186 `628d7b6c` (I3-8 sigue abierto) |
 | R-7 | menor | 402 antes que 403 cuando el rol va como parámetro | mergeado | #187 `2f9d0bfc` |
-| R-8 | menor | el 403 de require_role está en inglés | pendiente |  |
+| R-8 | menor | el 403 de require_role está en inglés | mergeado | #188 `6e2ede3b` |
 | R-9 | menor | serie diaria «caja» del agente de salud es ventas − gastos | pendiente |  |
 | R-10 | normal | forecast cuenta la tarjeta de crédito el día de la venta | pendiente | PR aparte, estimación explícita y configurable |
 | R-11 | normal | sobrante del arqueo guardado como inflow y rotulado «Cobro cta. cte.» | pendiente | PR aparte |
