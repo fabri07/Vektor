@@ -131,6 +131,11 @@ async def get_current_tenant(
     return tenant
 
 
+#: Detalle del 403 de `require_role` (R-8): la pantalla lo muestra tal cual, así
+#: que va en castellano y sin el código de rol, en el tono de `require_modify_access`.
+ROL_SIN_PERMISO_DETAIL = "No tenés permiso para hacer esto. Pedíselo al dueño de la cuenta."
+
+
 def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
     """Dependency factory that enforces role-based access. Pass uppercase role codes."""
 
@@ -138,7 +143,7 @@ def require_role(*roles: str) -> Callable:  # type: ignore[type-arg]
         if current_user.role_code not in roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Role '{current_user.role_code}' is not allowed to perform this action.",
+                detail=ROL_SIN_PERMISO_DETAIL,
             )
         return current_user
 

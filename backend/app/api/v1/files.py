@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_current_tenant, get_current_user
+from app.api.v1.deps import ROL_SIN_PERMISO_DETAIL, get_current_tenant, get_current_user
 from app.application.services.data_intent_extractor import DataIntentExtractor
 from app.application.services.file_parsing import (
     MAX_FILE_SIZE_BYTES,
@@ -32,7 +32,6 @@ router = APIRouter()
 #: —incluido el omitido, que cae en "general"— guarda el archivo en S3 sin
 #: pasar por la ingesta, así que pide los mismos roles que cargar por archivo.
 _ROLES_SUBIDA_SIN_CHAT = ("OWNER", "ADMIN")
-_SIN_PERMISO_DETAIL = "No tenés permiso para hacer esto. Pedíselo al dueño de la cuenta."
 
 
 class UploadedFileResponse(BaseModel):
@@ -66,7 +65,7 @@ async def upload_file(
     if purpose != "chat" and current_user.role_code not in _ROLES_SUBIDA_SIN_CHAT:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=_SIN_PERMISO_DETAIL,
+            detail=ROL_SIN_PERMISO_DETAIL,
         )
 
     content = await file.read()
