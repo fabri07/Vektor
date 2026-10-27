@@ -19,9 +19,12 @@ exactamente lo que hacía el código anterior) y el reimport con la de hoy.
 from __future__ import annotations
 
 import io
+import unittest.mock
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, time, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -31,10 +34,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import operation_identity_service as ois
+from app.application.services import stock_service
 from app.application.services.file_parsing import parse_uploaded_content
+from app.application.services.reparacion_ventas_sin_compra_service import reparar, revertir
 from app.domain import operation_identity as dominio
+from app.domain.business_time import today_ar
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.operation_identity import OperationIdentity, OperationIdentityLink
+from app.persistence.models.product import Product
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
@@ -50,17 +57,21 @@ def _sin_broker(mock_score_trigger: Any) -> None:
 
 @contextmanager
 def _con_regla_vieja(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """El planificador con la regla de antes de I6-3/I6-4: la clave legada es la
-    clave, y no hay búsqueda de legadas. Es el código que escribió lo que hoy
-    está guardado en producción."""
+    """El planificador con la regla de antes de I6-3/I6-4: la clave es su forma
+    k1 (sin entidad, sin letra) y no se buscan equivalentes. Es el código que
+    escribió lo que hoy está guardado en producción (y lo que escribe un worker
+    viejo durante el deploy en paralelo)."""
     original = dominio.clave_de_operacion
 
     def vieja(fila: dict[str, Any], cols: dict[str, str], entity: str) -> Any:
-        return dominio.clave_legada_k1(fila, cols, entity) or original(fila, cols, entity)
+        r = original(fila, cols, entity)
+        if isinstance(r, dominio.ClaveDeOperacion):
+            return dominio.ClaveDeOperacion(dominio.forma_k1(r.clave, entity), r.granularidad)
+        return r
 
     with monkeypatch.context() as m:
         m.setattr(ois, "clave_de_operacion", vieja)
-        m.setattr(ois, "clave_legada_k1", lambda *_a, **_k: None)
+        m.setattr(ois, "claves_equivalentes", lambda *_a, **_k: [])
         yield
 
 
@@ -381,9 +392,8 @@ async def test_factura_sin_letra_de_un_archivo_viejo_no_se_duplica(
     sample_tenant: Tenant,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """«Factura» sin letra ya no tiene clave (no se sabe si es A o B). Pero el
-    archivo viejo sí la tuvo: el reimport tiene que seguir reconociéndola por
-    la clave guardada, no caer a «sin clave» y cargarla otra vez."""
+    """«Factura» sin letra sigue con la k1 de siempre: el reimport de un archivo
+    viejo la reconoce por la clave guardada."""
     tid = sample_tenant.tenant_id
     await productos_con_compra(db_session, tid, ["Vela aromatica"])
     filas = [_factura("", tipo="Factura")]
@@ -395,21 +405,63 @@ async def test_factura_sin_letra_de_un_archivo_viejo_no_se_duplica(
     assert len(await _ventas(db_session, tid)) == 1, "la factura sin letra se duplicó"
 
 
-async def test_factura_sin_letra_nueva_no_produce_clave(
+async def test_fc_sin_letra_subido_dos_veces_es_una_sola_venta(
     client: AsyncClient,
     auth_headers: dict[str, str],
     db_session: AsyncSession,
     sample_tenant: Tenant,
 ) -> None:
-    """Sin letra y sin nada guardado: no hay clave fuerte (ante la duda, no hay
-    clave). Se importa por el camino de siempre y no se reclama identidad."""
+    """Sin letra no se sabe si es la A o la B, pero eso no puede dejarlo con
+    MENOS protección que antes: sigue reclamando la clave k1 de siempre, y dos
+    uploads distintos del mismo «FC 0001-00000123» son una venta."""
     tid = sample_tenant.tenant_id
     await productos_con_compra(db_session, tid, ["Vela aromatica"])
-    await _vender(
-        client, auth_headers, db_session, sample_tenant, [_factura("", tipo="Factura")]
-    )
+    filas = [_factura("", tipo="FC")]
+    await _vender(client, auth_headers, db_session, sample_tenant, filas)
+    await _vender(client, auth_headers, db_session, sample_tenant, filas)
+    assert len(await _ventas(db_session, tid)) == 1, "el FC sin letra se duplicó"
+    assert await _claves(db_session, tid) == ["k1:doc:propio:factura:1:123"]
+
+
+@pytest.mark.parametrize("tipo", ["Remito X", "Remito R", "Recibo X", "Factura X", "Ticket X"])
+async def test_una_letra_no_fiscal_no_le_quita_la_clave(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    tipo: str,
+) -> None:
+    """«Remito R», «Factura X»: la letra suelta se descarta como siempre y el
+    tipo se reconoce. Dos uploads distintos son UNA operación."""
+    tid = sample_tenant.tenant_id
+    await productos_con_compra(db_session, tid, ["Vela aromatica"])
+    filas = [_factura("", tipo=tipo)]
+    await _vender(client, auth_headers, db_session, sample_tenant, filas)
+    await _vender(client, auth_headers, db_session, sample_tenant, filas)
+    assert len(await _ventas(db_session, tid)) == 1, f"«{tipo}» se duplicó"
+    assert len(await _claves(db_session, tid)) == 1
+
+
+@pytest.mark.parametrize(
+    ("primero", "segundo"), [("Factura A", "FC"), ("FC", "Factura A")]
+)
+async def test_la_misma_factura_escrita_con_y_sin_letra_no_se_duplica(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    primero: str,
+    segundo: str,
+) -> None:
+    """Dos exportaciones del mismo comprobante, una con la letra y otra sin: en
+    main las dos daban la misma k1. Ahora una da k2 y la otra k1, y se
+    reconocen por ``claves_equivalentes`` + el contenido."""
+    tid = sample_tenant.tenant_id
+    await productos_con_compra(db_session, tid, ["Vela aromatica"])
+    await _vender(client, auth_headers, db_session, sample_tenant, [_factura("", tipo=primero)])
+    await _vender(client, auth_headers, db_session, sample_tenant, [_factura("", tipo=segundo)])
     assert len(await _ventas(db_session, tid)) == 1
-    assert not await _claves(db_session, tid)
+    assert not await _otros(db_session, tid)
 
 
 async def test_el_conflicto_contra_una_clave_vieja_no_se_importa_desde_otros_sin_decidir(
@@ -453,3 +505,78 @@ async def test_el_conflicto_contra_una_clave_vieja_no_se_importa_desde_otros_sin
         )
     ).scalars().all()
     assert len(vinculos) == 1
+
+
+# ── El revert de B·5g ve el re-import hecho con la otra forma de clave ───────
+_DIA_REVERT = today_ar() - timedelta(days=10)
+
+
+async def _venta_con_identidad(
+    db: AsyncSession, tid: uuid.UUID, pid: uuid.UUID, clave: str, contenido: str
+) -> SaleEntry:
+    venta = SaleEntry(
+        tenant_id=tid, amount=Decimal("2000"), quantity=2, product_id=pid,
+        transaction_date=datetime.combine(_DIA_REVERT, time(12)), payment_method="cash",
+        provenance="REAL",
+    )
+    db.add(venta)
+    await db.flush()
+    await stock_service.decrement_for_sale(venta, db)
+    ident = OperationIdentity(
+        tenant_id=tid, identity_key=clave, content_hash=contenido, entity_type="sale"
+    )
+    db.add(ident)
+    await db.flush()
+    db.add(
+        OperationIdentityLink(
+            identity_id=ident.id, tenant_id=tid, entity_type="sale", entity_id=venta.id
+        )
+    )
+    await db.commit()
+    return venta
+
+
+@pytest.mark.parametrize(
+    ("vieja", "nueva", "contenido_nuevo", "es_reimport"),
+    [
+        # El mismo comprobante, reimportado con la letra: mismo contenido.
+        ("k1:doc:propio:factura:1:42", "k2:doc:propio:factura:a:1:42", "H", True),
+        # El ID externo con la entidad: la misma operación, sin mirar contenido.
+        ("k1:ext:tango:77", "k2:ext:sale:tango:77", "OTRO", True),
+        # Otra letra con otro contenido: es OTRA factura, no un re-import.
+        ("k1:doc:propio:factura:1:42", "k2:doc:propio:factura:b:1:42", "OTRO", False),
+    ],
+)
+async def test_el_revert_de_b5g_ve_el_reimport_con_la_otra_forma_de_clave(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    vieja: str,
+    nueva: str,
+    contenido_nuevo: str,
+    es_reimport: bool,
+) -> None:
+    """La reparación anuló una venta con identidad k1 (guardada antes de
+    I6-3/I6-4) y la soltó. El dueño re-subió el archivo, ahora con clave k2. Si
+    el revert buscara sólo la k1 del snapshot no vería el re-import y dejaría
+    DOS ventas vivas."""
+    tid = sample_tenant.tenant_id
+    vela = Product(tenant_id=tid, name="Vela", sale_price_ars=Decimal("1000"), stock_units=10)
+    db_session.add(vela)
+    await db_session.commit()
+    original = await _venta_con_identidad(db_session, tid, vela.id, vieja, "H")
+    r = await reparar(db_session, tid)
+    await db_session.commit()
+    assert r.run_id is not None
+
+    reimport = await _venta_con_identidad(db_session, tid, vela.id, nueva, contenido_nuevo)
+    with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+        rev = await revertir(db_session, r.run_id)
+    await db_session.commit()
+    db_session.expunge_all()
+    vivas = {v.id for v in await _ventas(db_session, tid)}
+    if es_reimport:
+        assert rev.reimportadas == [str(original.id)]
+        assert vivas == {reimport.id}, "el revert restauró una venta ya re-importada"
+    else:
+        assert rev.restauradas == [str(original.id)]
+        assert vivas == {original.id, reimport.id}
