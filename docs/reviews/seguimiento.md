@@ -26,9 +26,9 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | C-2 | grave | confirmado | T3 | balance_reconstruido_a cuenta ventas importadas que nunca descontaron stock: el ajuste de reconciliación de B11 infla el stock | mergeado | #197 `893ec1be` (sólo en el ajuste) |
 | E0-B-2 | grave | e0 | T3 | La merma por chat (REGISTER_STOCK_LOSS) no valida stock: el piso max(0, …) oculta stock negativo y desalinea stock_units del ledger y del balance | mergeado | #189 `19326e2e` |
 | C-5 | normal | confirmado | T3 | register_stock_loss acepta una merma mayor que el stock: clampa stock_units a 0 pero registra el movimiento y la auditoría por la cantidad entera | mergeado | #189 `19326e2e` |
-| E-1 | grave | confirmado | T4 | El detector de duplicados de DATA_QUALITY_REPAIR anula ventas y gastos legítimos repetidos dentro del mismo archivo | pendiente |  |
-| E-5 | grave | confirmado | T4 | El dedup MOST_RECENT pisa el stock del canónico con la cantidad del ancla y borra las ventas y compras posteriores | pendiente |  |
-| E-6 | grave | confirmado | T4 | Fusionar productos no re-apunta pos_stock_discrepancies ni product_supplier_links: la salida pendiente del POS se resuelve sobre el duplicado inactivo | pendiente |  |
+| E-1 | grave | confirmado | T4 | El detector de duplicados de DATA_QUALITY_REPAIR anula ventas y gastos legítimos repetidos dentro del mismo archivo | mergeado | #211 `7f282ebe` |
+| E-5 | grave | confirmado | T4 | El dedup MOST_RECENT pisa el stock del canónico con la cantidad del ancla y borra las ventas y compras posteriores | mergeado | #212 `a6bf6926` |
+| E-6 | grave | confirmado | T4 | Fusionar productos no re-apunta pos_stock_discrepancies ni product_supplier_links: la salida pendiente del POS se resuelve sobre el duplicado inactivo | mergeado | #212 `a6bf6926` |
 | E-9 | normal | confirmado | T4 | El dedup crea el balance del canónico con current_qty = delta en vez de stock_units, y descuadra el balance contra el stock | pendiente |  |
 | E-4 | normal | plausible | T4 | La misclasificación de catálogos anula ventas de OTRO archivo por ventana de created_at, sin filtrar por source_upload_id | pendiente |  |
 | E-8 | normal | confirmado | T4 | B·5g: un renglón de un comprobante con hermanos vivos no puede volver a entrar al re-subir el archivo, contra lo que promete el código | pendiente |  |
@@ -85,8 +85,8 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I3-1 | grave | confirmado | I-B | La relectura (preview, apply y undo) no respeta el borrado del archivo: un archivo borrado vuelve a tener ventas, gastos y stock vivos, y ya no se pueden revertir | mergeado | #201 `9cdd4529` |
 | I4-1 | grave | confirmado | I-B | La relectura se aplica sobre un archivo YA BORRADO y resucita todos sus datos, sin forma de volver a borrarlo | mergeado | #201 `9cdd4529` |
 | I4-2 | grave | confirmado | I-B | «Deshacer relectura» funciona sobre un archivo borrado: des-anula sus ventas, gastos y stock originales | mergeado | #201 `9cdd4529` |
-| I4-3 | grave | confirmado | I-B | Deshacer relectura borra (hard delete) ventas y gastos que el usuario editó DESPUÉS de releer | pendiente |  |
-| I4-4 | grave | confirmado | I-B | El undo de relectura no revierte «Otros»: quedan pendientes que duplican ventas restauradas | pendiente |  |
+| I4-3 | grave | confirmado | I-B | Deshacer relectura borra (hard delete) ventas y gastos que el usuario editó DESPUÉS de releer | mergeado | #213 `2f7f568f` |
+| I4-4 | grave | confirmado | I-B | El undo de relectura no revierte «Otros»: quedan pendientes que duplican ventas restauradas | mergeado | #213 `2f7f568f` |
 | I4-5 | grave | confirmado | I-B | Borrar un archivo, deshacer o releer deja stock_units NEGATIVO (void_movement sin piso ni chequeo) | mergeado | #207 `0affce51` |
 | I4-6 | grave | confirmado | I-B | La relectura nunca vuelve a leer las filas que el import anterior mandó a «Otros» (sin fecha, sin monto, total, conflicto, venta sin stock o sin compra) | pendiente |  |
 | I3-6 | normal | confirmado | I-B | «La relectura respeta el lease del import» se verifica sólo en el endpoint: el worker de la relectura aplica sin volver a mirar el lease | pendiente |  |
@@ -102,15 +102,15 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I1-4 | grave | plausible | I-C | Las filas que F8 manda a «Otros» se borran del bucket y corren los índices: su __row_ref__ coincide con el source_row_ref de la fila siguiente, y la relectura anula la venta o gasto clasificado a mano sin medirlo como pérdida | pendiente |  |
 | I2-1 | grave | confirmado | I-C | El costo del envío se cobra de nuevo en otro archivo aunque todas sus compras quedaron como «ya aplicadas» (E6b) | pendiente |  |
 | I2-2 | grave | confirmado | I-C | El gate de replay cuenta como consumo ventas que después no se insertan (ya aplicadas, salteadas por huella, en conflicto) | pendiente |  |
-| I2-3 | grave | confirmado | I-C | Tabla suelta con Ventas+Productos tildados: la cantidad vendida de cada fila pasa a ser el stock absoluto del producto | pendiente |  |
+| I2-3 | grave | confirmado | I-C | Tabla suelta con Ventas+Productos tildados: la cantidad vendida de cada fila pasa a ser el stock absoluto del producto | mergeado | #210 `45a8cee4` |
 | I2-6 | grave | confirmado | I-C | Tabla suelta: el tratamiento de stock por hoja ({context_id: ...}) se ignora y la compra se registra como apertura | pendiente |  |
 | I1-5 | normal | confirmado | I-C | Gate de historical_replay con productos por peso: compara la cantidad de la venta en kg contra el saldo en gramos y nunca frena | pendiente |  |
 | I2-7 | normal | confirmado | I-C | Gate de replay: compara la cantidad en unidad de venta contra un saldo en unidades base (productos por peso/volumen) | pendiente |  |
 | I1-6 | normal | confirmado | I-C | Una venta importada con cantidad declarada 0 entra como 1 unidad | pendiente |  |
 | I1-7 | normal | confirmado | I-C | B·5b-2 exige NOMBRE: una compra de mercadería identificada sólo por SKU o código de barras y con cantidad va a «Otros», cuando la doc dice 'nombre o código' | pendiente |  |
 | I2-8 | normal | confirmado | I-C | Un catálogo que declara stock 0 no pisa el saldo existente: el producto agotado sigue con stock | pendiente |  |
-| I2-4 | grave | confirmado | I-D | «Importar sugeridos» persiste fechas futuras y relee el original celda por celda, sin el convenio de su columna | pendiente |  |
-| I2-5 | grave | confirmado | I-D | «Importar sugeridos» deja entrar lo que el import mandó a «Otros» a propósito: COGS sin artículo, venta sin stock, y ventas sin movimiento de stock ni procedencia | pendiente |  |
+| I2-4 | grave | confirmado | I-D | «Importar sugeridos» persiste fechas futuras y relee el original celda por celda, sin el convenio de su columna | mergeado | #214 `238a9d66` |
+| I2-5 | grave | confirmado | I-D | «Importar sugeridos» deja entrar lo que el import mandó a «Otros» a propósito: COGS sin artículo, venta sin stock, y ventas sin movimiento de stock ni procedencia | mergeado | #214 `238a9d66` |
 | I2-9 | normal | confirmado | I-D | «Importar sugeridos» no bloquea las filas: en concurrencia con reclassify/link-product/dismiss duplica la venta o pisa el estado | pendiente |  |
 | I6-8 | normal | confirmado | I-D | La importación en lote de «Otros» lee los PENDING sin FOR UPDATE: compite con reclassify/dismiss y duplica la venta o importa lo descartado | pendiente |  |
 | I5-1 | grave | confirmado | I-E | Los números nativos de Excel se pasan a texto en el parseo y el convenio de la columna los vuelve a interpretar: un valor con 3 decimales entra multiplicado por 1000 sin aviso, o la fila va a «Otros» | mergeado | #202 `2d404cd4` |
@@ -168,7 +168,7 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 | V-1 | grave | plausible | Eventos de stock (STOCK_DECREASED/ALERT/INCREASED sin defer, SALE_RECORDED de agentes) se emiten antes del commit y encadenan el recálculo del score | mergeado | #206 `59a12574` |
 | V-2 | normal | plausible | Gastos y ventas por chat (pending_action) no recalculan el score | pendiente | revisión de #199 |
 | V-3 | normal | plausible | «Otros» resolve/resolve-purchase/importar sugeridos contra un borrado concurrente del archivo: la venta/gasto queda viva colgando de un archivo borrado | pendiente | revisión de #201 |
-| V-4 | normal | confirmado | «Importar sugeridos» de «Otros» crea ventas sin descontar stock | pendiente | revisión de #208 |
+| V-4 | normal | confirmado | «Importar sugeridos» de «Otros» crea ventas sin descontar stock | mergeado | #214 `238a9d66` (revisión de #208) |
 | V-5 | normal | confirmado | «Importar sugeridos» no lee montos «1000.00» que escribe el propio Véktor, y las filas con cliente «Local» van al modal: las filas B·5e/B·5g nunca entran por el lote | pendiente | revisión de #208 |
 | V-6 | menor | confirmado (preexistente) | Una fila «ya aplicada» de tabla suelta deja además una fila «Fila sin monto» en «Otros» | pendiente | revisión de #208 |
 | V-7 | menor | plausible | Resolución de a una en «Otros» (bloquea producto → reclama identidad) contra un import concurrente (al revés): deadlock detectado por Postgres (500, sin corrupción) | pendiente | revisión de #208 |
@@ -176,5 +176,11 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 | V-9 | normal | confirmado | Borrado/relectura de archivos con más de ~32.000 operaciones: huellas (`_delete_import_fingerprints`, reread) e `id.in_` del deshacer sin tandas (I6-2 cubrió identidad) | pendiente | revisión de #207 |
 | V-10 | normal | confirmado | `data_repair_service` (l.1076/1612) y la reversa de fusión (`product_dedup_service.py:2416`) restan stock sin piso | pendiente | revisión de #207 |
 | V-11 | menor | confirmado | `HEALTH_SCORE_UPDATED` (agents/health/agent.py:216) no tiene handler; `on_confirmed_sale` de AgentCash/AgentIncome es código muerto | pendiente | revisión de #206 |
+| V-12 | normal | confirmado | En una tabla de compras+productos, un gasto que no es mercadería (p. ej. «Luz») puede darse de alta como producto | pendiente | revisión de #210 |
+| V-13 | normal | confirmado | `DATA_QUALITY_REPAIR` con tenant_id vacío alcanza a todos los tenants; y una compra re-subida con envío queda a medias (envío vivo) | pendiente | revisión de #211 |
+| V-14 | normal | confirmado | E-9: fusión con canónico sin balance crea current_qty = delta (no stock_before + delta); y el ledger del canónico suma las aperturas de ambos (B11 puede achicar el faltante) | pendiente | revisión de #212 |
+| V-15 | normal | confirmado | Deshacer relectura des-anula ventas sin chequear B·5e; el mensaje dice «anulaste» aunque la anulación venga de una reparación | pendiente | revisión de #213 |
+| V-16 | normal | confirmado | Filas de «Otros» que quedaron en needs_manual antes de #214 tienen la huella puesta y el lote las saltea (limpiar con script, OK del dueño); link-product pasa la fecha cruda (dd/mm → 422); backlog sin convenio: fechas ambiguas ahora van a resolver de a una | pendiente | revisión de #214 |
+| V-17 | normal | confirmado | `send_weekly_email.py:295` usa `date.today()`; la ventana de 30 días del BSL sale de la fecha UTC (corre un día después de las 21 ART) | pendiente | implementación de D-5 |
 
 Etapa 5 (persistencia, migraciones, scripts): sin críticos (una sola head, lock de migración correcto, migraciones recientes aditivas, scripts con dry-run).
