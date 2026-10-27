@@ -31,6 +31,9 @@ export interface QueuedItem {
    */
   tenantId?: string;
   userId?: string;
+  /** Quién reclamó una carga sin dueño con «Es mía, subirla», y cuándo (ISO). */
+  adoptadaPor?: string;
+  adoptadaEn?: string;
 }
 
 /** La sesión contra la que se filtra la cola: negocio y usuario del JWT. */
@@ -103,47 +106,87 @@ interface OfflineQueueState {
  * sigue existiendo —un item que falla siempre no puede reintentarse para
  * siempre— pero ahora frena en `FAILED` en vez de borrar.
  */
+const CLAVE_COLA = "vektor_offline_queue";
+
+/**
+ * Los items vigentes ANTES de escribir: lo que está en `localStorage` mergeado
+ * por id con lo que esta pestaña tiene en memoria.
+ *
+ * Existe porque persist reescribe el array ENTERO: con dos pestañas abiertas, la
+ * 2 encolaba o borraba sobre su copia en memoria y pisaba lo que la 1 había
+ * encolado —una venta guardada sin red que desaparecía sin que nadie se
+ * enterara—. Lo guardado gana para los ids que están en los dos lados (es lo
+ * último que escribió cualquier pestaña); lo que sólo está en memoria se
+ * conserva. El costo de conservar es acotado: un item que otra pestaña acababa
+ * de sincronizar puede volver una vez, y su reenvío vuelve con
+ * `DUPLICATE_IDEMPOTENT` y sale de la cola; perderlo no tiene arreglo.
+ */
+export function itemsVigentes(enMemoria: QueuedItem[]): QueuedItem[] {
+  let guardados: QueuedItem[] | null = null;
+  try {
+    const crudo = typeof localStorage !== "undefined" ? localStorage.getItem(CLAVE_COLA) : null;
+    const items = crudo ? (JSON.parse(crudo) as { state?: { items?: unknown } })?.state?.items : null;
+    if (Array.isArray(items)) guardados = items as QueuedItem[];
+  } catch {
+    guardados = null; // storage ilegible o bloqueado: queda lo de memoria
+  }
+  if (guardados === null) return enMemoria;
+  const ids = new Set(guardados.map((i) => i.id));
+  return [...guardados, ...enMemoria.filter((i) => !ids.has(i.id))];
+}
+
 export const useOfflineQueueStore = create<OfflineQueueState>()(
   persist(
-    (set) => ({
-      items: [],
-      enqueue: (item) => set((s) => ({ items: [...s.items, item] })),
-      remove: (id) => set((s) => ({ items: s.items.filter((i) => i.id !== id) })),
-      markFailed: (id, error) =>
-        set((s) => ({
-          items: s.items.map((i) =>
-            i.id === id ? { ...i, attempts: i.attempts + 1, lastError: error } : i,
+    (set) => {
+      // Toda escritura parte de `itemsVigentes`, nunca de la copia en memoria sola.
+      const actualizar = (f: (items: QueuedItem[]) => QueuedItem[]) =>
+        set((s) => ({ items: f(itemsVigentes(s.items)) }));
+      return {
+        items: [],
+        enqueue: (item) => actualizar((items) => [...items.filter((i) => i.id !== item.id), item]),
+        remove: (id) => actualizar((items) => items.filter((i) => i.id !== id)),
+        markFailed: (id, error) =>
+          actualizar((items) =>
+            items.map((i) =>
+              i.id === id ? { ...i, attempts: i.attempts + 1, lastError: error } : i,
+            ),
           ),
-        })),
-      markNetworkFailure: (id, error) =>
-        set((s) => ({
-          items: s.items.map((i) => (i.id === id ? { ...i, lastError: error } : i)),
-        })),
-      markPermanentlyFailed: (id, error) =>
-        set((s) => ({
-          items: s.items.map((i) =>
-            i.id === id
-              ? { ...i, attempts: i.attempts + 1, lastError: error, status: "FAILED" as const }
-              : i,
+        markNetworkFailure: (id, error) =>
+          actualizar((items) => items.map((i) => (i.id === id ? { ...i, lastError: error } : i))),
+        markPermanentlyFailed: (id, error) =>
+          actualizar((items) =>
+            items.map((i) =>
+              i.id === id
+                ? { ...i, attempts: i.attempts + 1, lastError: error, status: "FAILED" as const }
+                : i,
+            ),
           ),
-        })),
-      retry: (id) =>
-        set((s) => ({
-          items: s.items.map((i) =>
-            i.id === id ? { ...i, attempts: 0, lastError: undefined, status: "PENDING" as const } : i,
+        retry: (id) =>
+          actualizar((items) =>
+            items.map((i) =>
+              i.id === id
+                ? { ...i, attempts: 0, lastError: undefined, status: "PENDING" as const }
+                : i,
+            ),
           ),
-        })),
-      adoptar: (id, sesion) =>
-        set((s) => ({
-          items: s.items.map((i) =>
-            i.id === id && sinDuenio(i)
-              ? { ...i, tenantId: sesion.tenantId, userId: sesion.userId }
-              : i,
+        adoptar: (id, sesion) =>
+          actualizar((items) =>
+            items.map((i) =>
+              i.id === id && sinDuenio(i)
+                ? {
+                    ...i,
+                    tenantId: sesion.tenantId,
+                    userId: sesion.userId,
+                    adoptadaPor: sesion.userId,
+                    adoptadaEn: new Date().toISOString(),
+                  }
+                : i,
+            ),
           ),
-        })),
-    }),
+      };
+    },
     {
-      name: "vektor_offline_queue",
+      name: CLAVE_COLA,
       // v2 (X6-1): los items llevan `tenantId`/`userId`. Sin `migrate`, zustand
       // descarta el estado guardado con otra versión: eso era borrar en silencio
       // cargas que alguien dio por guardadas. La migración las conserva TAL CUAL,
@@ -157,3 +200,11 @@ export const useOfflineQueueStore = create<OfflineQueueState>()(
     },
   ),
 );
+
+// Otra pestaña escribió la cola: re-hidratar para que esta muestre (y no pise)
+// lo que encoló la otra. El evento `storage` sólo llega a las OTRAS pestañas.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key === CLAVE_COLA) void useOfflineQueueStore.persist.rehydrate();
+  });
+}

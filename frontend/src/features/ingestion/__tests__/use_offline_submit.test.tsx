@@ -342,3 +342,55 @@ describe("offlineQueueStore — migración del persist a v2 (X6-1)", () => {
     expect(items[0]?.tenantId).toBeUndefined();
   });
 });
+
+describe("offlineQueueStore — dos pestañas no se pisan la cola (X6-1)", () => {
+  const item = (id: string): QueuedItem => ({
+    id,
+    kind: "sale",
+    payload: {},
+    createdAt: "2026-10-26T12:00:00Z",
+    attempts: 0,
+    tenantId: "tenant-a",
+    userId: "user-a",
+  });
+
+  /** Lo que haría la OTRA pestaña: escribir la clave sin pasar por esta memoria. */
+  function otraPestaniaGuarda(items: QueuedItem[]) {
+    localStorage.setItem("vektor_offline_queue", JSON.stringify({ state: { items }, version: 2 }));
+  }
+
+  it("encolar no borra lo que encoló la otra pestaña", () => {
+    useOfflineQueueStore.setState({ items: [item("1")] });
+    otraPestaniaGuarda([item("1"), item("2")]); // esta pestaña sigue viendo sólo "1"
+    useOfflineQueueStore.getState().enqueue(item("3"));
+    const ids = useOfflineQueueStore.getState().items.map((i) => i.id);
+    expect(ids.sort()).toEqual(["1", "2", "3"]);
+    const guardado = JSON.parse(localStorage.getItem("vektor_offline_queue")!).state.items;
+    expect(guardado).toHaveLength(3);
+  });
+
+  it("remove de un item no borra lo que encoló la otra pestaña", () => {
+    useOfflineQueueStore.setState({ items: [item("1")] });
+    otraPestaniaGuarda([item("1"), item("2")]);
+    useOfflineQueueStore.getState().remove("1");
+    expect(useOfflineQueueStore.getState().items.map((i) => i.id)).toEqual(["2"]);
+  });
+
+  it("el evento storage de la otra pestaña re-hidrata esta", async () => {
+    useOfflineQueueStore.setState({ items: [item("1")] });
+    otraPestaniaGuarda([item("1"), item("2")]);
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "vektor_offline_queue" }));
+    });
+    expect(useOfflineQueueStore.getState().items.map((i) => i.id)).toEqual(["1", "2"]);
+  });
+
+  it("adoptar deja constancia de quién y cuándo", () => {
+    const { tenantId: _t, userId: _u, ...legado } = item("9");
+    useOfflineQueueStore.setState({ items: [legado] });
+    useOfflineQueueStore.getState().adoptar("9", { tenantId: "tenant-a", userId: "user-a" });
+    const adoptada = useOfflineQueueStore.getState().items[0];
+    expect(adoptada?.adoptadaPor).toBe("user-a");
+    expect(adoptada?.adoptadaEn).toBeTruthy();
+  });
+});

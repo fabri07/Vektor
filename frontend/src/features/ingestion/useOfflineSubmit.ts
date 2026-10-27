@@ -172,6 +172,17 @@ export function useOfflineQueueCount(): number {
   return useOfflineQueueStore((s) => s.items.filter((i) => esDeLaSesion(i, sesion)).length);
 }
 
+/**
+ * Cargas de OTRO usuario u otro negocio guardadas en esta PC. Sólo se cuentan,
+ * para avisar que existen sin mostrar nada de su contenido (X6-1).
+ */
+export function useOfflineAjenasCount(): number {
+  const sesion = useSesionDeCola();
+  return useOfflineQueueStore((s) =>
+    sesion ? s.items.filter((i) => !sinDuenio(i) && !esDeLaSesion(i, sesion)).length : 0,
+  );
+}
+
 /** Cargas encoladas antes de X6-1, sin dueño: esperan que alguien las reclame o descarte. */
 export function useOfflineSinDuenioCount(): number {
   const sesion = useSesionDeCola();
@@ -253,8 +264,9 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
         // Un item en estado terminal dejó de reintentarse, pero sigue en la cola:
         // saltearlo es lo que evita el loop infinito sin perder la operación.
         if (isFailed(item)) continue;
-        // La sesión puede cambiar a mitad del flush (otra pestaña de la misma PC
-        // entra con otro usuario): se vuelve a mirar antes de cada envío.
+        // La sesión EN MEMORIA puede cambiar a mitad del flush (logout/login en
+        // esta pestaña): se vuelve a mirar antes de cada envío. Lee el authStore
+        // de esta pestaña, no detecta un login hecho en otra.
         if (!esDeLaSesion(item, sesionActual())) break;
         try {
           await postByKind(item.kind, item.payload, item.id);
