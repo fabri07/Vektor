@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -62,10 +62,12 @@ from app.application.services.operation_identity_service import (
     DECISION_NUEVA,
     DECISION_YA_APLICADA,
     PlanDeIdentidad,
+    aplicada_desde_otro_origen,
     cerrar_plan,
     identidad_tomada,
     plan_vacio,
     planificar_identidades,
+    reclamar_para_efectos,
 )
 from app.application.services.product_identity import (
     MatchedBy,
@@ -1477,6 +1479,38 @@ _B5E_VINCULO_PENDIENTE = "b5e_vinculo_pendiente"
 #: revisión y clasificarlo desde ahí aplicaría el efecto duplicado que el
 #: importador se negó a aplicar.
 IDENTITY_REF_KEY = "__identity_key__"
+#: I6-7 — la identidad que la fila TOMA cuando se resuelve desde «Otros», sin
+#: frenarla: la de una venta que el import sacó por falta de compra previa (B·5e)
+#: y soltó. Va aparte de ``IDENTITY_REF_KEY`` porque la identidad es por
+#: COMPROBANTE: con la clave ahí, el candado trataría al renglón hermano vivo
+#: como un duplicado (409 imposible de resolver). Sin ninguna de las dos, la venta
+#: resuelta nacía sin identidad y el reimport del mismo documento la duplicaba.
+IDENTITY_CLAIM_KEY = "__identity_claim__"
+#: I6-7 — con cualquiera de las dos claves: el contenido con que se reclama y la
+#: entidad de la identidad. El contenido es la huella del documento en el
+#: archivo de la fila, para que reimportar ESE archivo lo vea «ya aplicado».
+IDENTITY_HASH_KEY = "__identity_hash__"
+IDENTITY_ENTITY_KEY = "__identity_entity__"
+
+
+def filas_internas_de_identidad(
+    clave: str | None, contenido: str | None, entidad: str, *, en_conflicto: bool
+) -> dict[str, str]:
+    """Las internas (``__``) de identidad de una fila que va a «Otros» (I6-7).
+
+    ``en_conflicto``: la clave choca con una operación viva y resolverla exige
+    decidir (``IDENTITY_REF_KEY``, el candado E6b); si no, sólo se reclama al
+    resolverla (``IDENTITY_CLAIM_KEY``)."""
+    if not clave:
+        return {}
+    salida = {
+        (IDENTITY_REF_KEY if en_conflicto else IDENTITY_CLAIM_KEY): clave,
+        IDENTITY_ENTITY_KEY: entidad,
+    }
+    if contenido:
+        salida[IDENTITY_HASH_KEY] = contenido
+    return salida
+
 
 #: B·nuevo, defecto (b): las filas que se saltearon por la huella de su POSICIÓN
 #: aunque su identidad fuerte es NUEVA. La huella dice «esta fila ya entró» y la
@@ -5505,6 +5539,7 @@ async def _ventas_sin_compra_a_otros(
 
     from app.application.services.operation_identity_service import (  # noqa: PLC0415
         liberar_identidades_de,
+        vinculos_de,
     )
     from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
@@ -5561,21 +5596,34 @@ async def _ventas_sin_compra_a_otros(
                 )
             ).all()
         }
-    sacadas: list[SaleEntry] = []
-    sin_producto = sin_compra = 0
+    a_sacar: list[tuple[SaleEntry, str]] = []
     for venta in nuevas:
-        dia = venta.transaction_date.date()
         if es_cobro_de_fiado(venta.payment_method):
             continue  # un cobro de fiado no es una venta
         _motivo = motivo_sin_respaldo(
             venta.product_id,
-            dia,
+            venta.transaction_date.date(),
             primeros,
             nombres.get(venta.product_id) if venta.product_id else None,
             del_catalogo_del_archivo=venta.product_id in del_catalogo_del_archivo,
         )
-        if _motivo is None:
-            continue
+        if _motivo is not None:
+            a_sacar.append((venta, _motivo))
+    if not a_sacar:
+        return
+    # I6-7: la identidad que se suelta abajo viaja con la fila, para que
+    # resolverla la vuelva a tomar (ver `IDENTITY_CLAIM_KEY`). Se lee ANTES de
+    # soltarla: una identidad huérfana se borra con su clave y su contenido.
+    identidades: dict[tuple[str, uuid.UUID], list[dict[str, str]]] = {}
+    _ids_a_sacar = [("sale", v.id) for v, _ in a_sacar]
+    for desde in range(0, len(_ids_a_sacar), 5000):
+        identidades.update(
+            await vinculos_de(session, tenant_id, _ids_a_sacar[desde : desde + 5000])
+        )
+    sacadas: list[SaleEntry] = []
+    sin_producto = sin_compra = 0
+    for venta, _motivo in a_sacar:
+        dia = venta.transaction_date.date()
         if venta.product_id is None:
             sin_producto += 1
         else:
@@ -5606,6 +5654,15 @@ async def _ventas_sin_compra_a_otros(
                 "detalle": venta.notes,
                 **filas_internas_de_venta(venta),
             }
+            for _ident in identidades.get(("sale", venta.id), [])[:1]:
+                fila.update(
+                    filas_internas_de_identidad(
+                        _ident["identity_key"],
+                        _ident["content_hash"],
+                        _ident["entity_type"],
+                        en_conflicto=False,
+                    )
+                )
             _capture_unclassified(
                 session,
                 tenant_id,
@@ -6585,10 +6642,22 @@ async def _insert_confirmed_data_impl(
                     if _dec_venta == DECISION_CONFLICTO
                     else _plan_gastos.clave.get(row_index)
                 ) or ""
+                _plan_conflicto = _plan_ventas if _dec_venta == DECISION_CONFLICTO else _plan_gastos
                 counts["otros"] += _capture_unclassified(
                     session,
                     tenant_id,
-                    rows=[{**row, IDENTITY_REF_KEY: _clave_conflicto}],
+                    rows=[
+                        {
+                            **row,
+                            IDENTITY_REF_KEY: _clave_conflicto,
+                            **filas_internas_de_identidad(
+                                _clave_conflicto,
+                                _plan_conflicto.contenido.get(row_index),
+                                "sale" if _dec_venta == DECISION_CONFLICTO else "expense",
+                                en_conflicto=True,
+                            ),
+                        }
+                    ],
                     headers=headers,
                     source=source,
                     uploaded_file_id=uploaded_file_id,
@@ -10836,7 +10905,18 @@ async def _insert_multisheet_data(
                     counts["otros"] += _capture_unclassified(
                         session,
                         tenant_id,
-                        rows=[{**row, IDENTITY_REF_KEY: _plan_ident.clave.get(_i, "")}],
+                        rows=[
+                            {
+                                **row,
+                                IDENTITY_REF_KEY: _plan_ident.clave.get(_i, ""),
+                                **filas_internas_de_identidad(
+                                    _plan_ident.clave.get(_i),
+                                    _plan_ident.contenido.get(_i),
+                                    str(entity),
+                                    en_conflicto=True,
+                                ),
+                            }
+                        ],
                         headers=ctx.get("headers"),
                         source=source,
                         uploaded_file_id=uploaded_file_id,
@@ -11255,6 +11335,11 @@ async def bulk_import_unclassified(
     _identity_indexes = await _load_product_identity_indexes(session, tenant_id)
     _vertical = await _load_tenant_vertical(session, tenant_id)
     _flush_every = 500
+    #: I6-7: ``{(entidad, archivo): [(clave, contenido, tipo, id del efecto)]}``,
+    #: reclamados en lote al final (``reclamar_para_efectos``).
+    _reclamos_otros: dict[
+        tuple[str, uuid.UUID | None], list[tuple[str, str, str, uuid.UUID]]
+    ] = defaultdict(list)
 
     for i, rec in enumerate(records):
         # B1: idempotencia anclada en el UnclassifiedRecord (importar el mismo
@@ -11277,6 +11362,21 @@ async def bulk_import_unclassified(
         # modal por registro, que sí pide la confirmación explícita.
         _clave = str(row.get(IDENTITY_REF_KEY) or "")
         if _clave and await identidad_tomada(session, tenant_id, _clave) is not None:
+            counts["needs_manual"] += 1
+            continue
+        # I6-7: la identidad que la fila toma al importarse. Si el comprobante ya
+        # lo cargó OTRO archivo mientras la fila esperaba (un reimport), en lote
+        # tampoco se decide: al modal por registro.
+        _reclamo = _clave or str(row.get(IDENTITY_CLAIM_KEY) or "")
+        _entidad_reclamo = str(row.get(IDENTITY_ENTITY_KEY) or rec.suggested_entity or "")
+        if (
+            _reclamo
+            and not _clave
+            and _entidad_reclamo == rec.suggested_entity
+            and await aplicada_desde_otro_origen(
+                session, tenant_id, _reclamo, _entidad_reclamo, rec.uploaded_file_id
+            )
+        ):
             counts["needs_manual"] += 1
             continue
         fecha = _parse_date(_row_val(row, _FECHA_COLS))
@@ -11340,19 +11440,20 @@ async def bulk_import_unclassified(
             # de venta y la venta guarda unidades base.
             if product_id in _factores:
                 qty = a_unidades_base(qty, _factores[product_id])
-            session.add(
-                SaleEntry(
-                    tenant_id=tenant_id,
-                    amount=amount,
-                    quantity=qty,
-                    transaction_date=fecha,
-                    payment_method=normalize_payment_method(pay_raw) if pay_raw else "cash",
-                    product_id=product_id,
-                    notes=desc or "Importado desde Otros",
-                    provenance="REAL",
-                    source_upload_id=rec.uploaded_file_id,
-                )
+            _venta_otros = SaleEntry(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                amount=amount,
+                quantity=qty,
+                transaction_date=fecha,
+                payment_method=normalize_payment_method(pay_raw) if pay_raw else "cash",
+                product_id=product_id,
+                notes=desc or "Importado desde Otros",
+                provenance="REAL",
+                source_upload_id=rec.uploaded_file_id,
             )
+            session.add(_venta_otros)
+            _efecto_otros: tuple[str, uuid.UUID] = ("sale", _venta_otros.id)
             counts["imported_sales"] += 1
         else:
             cat_raw_otros = _clean_str(_row_val_categoria(row), 99)
@@ -11363,6 +11464,7 @@ async def bulk_import_unclassified(
                 counts["needs_manual"] += 1
                 continue
             expense = ExpenseEntry(
+                id=uuid.uuid4(),
                 tenant_id=tenant_id,
                 amount=amount,
                 category=cat_code,
@@ -11379,14 +11481,27 @@ async def bulk_import_unclassified(
             if cat_label:
                 expense.custom_fields = {"category_label": cat_label}
             session.add(expense)
+            _efecto_otros = ("expense", expense.id)
             counts["imported_expenses"] += 1
 
+        if _reclamo and _entidad_reclamo == _efecto_otros[0]:
+            _reclamos_otros[(_entidad_reclamo, rec.uploaded_file_id)].append(
+                (
+                    _reclamo,
+                    str(row.get(IDENTITY_HASH_KEY) or "") or f"otros:{rec.id}",
+                    *_efecto_otros,
+                )
+            )
         rec.status = UNCLASSIFIED_STATUS_IMPORTED
         rec.resolved_at = datetime.now(UTC)
         if (i + 1) % _flush_every == 0:
             await session.flush()
 
     await session.flush()
+    for (_entidad, _archivo), _pedidos in _reclamos_otros.items():
+        await reclamar_para_efectos(
+            session, tenant_id, _archivo, entidad=_entidad, pedidos=_pedidos
+        )
     # Import masivo de "Otros": ventas reconstruidas sin cliente → sentinela "Local".
     from app.application.services.customer_sentinel import (  # noqa: PLC0415
         assign_orphan_sales_to_local,

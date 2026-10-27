@@ -57,9 +57,16 @@ from app.application.services.file_deletion_service import (
 )
 from app.application.services.ingestion_import_service import (
     CUSTOMER_REF_KEY,
+    IDENTITY_CLAIM_KEY,
+    IDENTITY_ENTITY_KEY,
+    IDENTITY_HASH_KEY,
     IDENTITY_REF_KEY,
 )
-from app.application.services.operation_identity_service import identidad_tomada
+from app.application.services.operation_identity_service import (
+    aplicada_desde_otro_origen,
+    identidad_tomada,
+    reclamar_para_efectos,
+)
 from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
@@ -766,12 +773,61 @@ async def _get_pending_record(
     return record
 
 
+def _identidad_de_la_fila(
+    record: UnclassifiedRecord, entidad: str
+) -> tuple[str, str, bool] | None:
+    """I6-7: ``(clave, contenido, en_conflicto)`` que la fila toma al resolverse
+    como ``entidad``, o ``None``.
+
+    Sólo si se resuelve como la entidad de su identidad: la clave de una venta no
+    dice nada de un gasto. Una fila de antes de I6-7 no trae la entidad (vale la
+    sugerida) ni el contenido: se reclama con uno que no coincide con ninguno, así
+    que un reimport la ve en conflicto (a «Otros»), nunca como nueva.
+    """
+    fila = record.row_data or {}
+    clave = str(fila.get(IDENTITY_REF_KEY) or "")
+    en_conflicto = bool(clave)
+    if not clave:
+        clave = str(fila.get(IDENTITY_CLAIM_KEY) or "")
+    if not clave:
+        return None
+    if str(fila.get(IDENTITY_ENTITY_KEY) or record.suggested_entity or "") != entidad:
+        return None
+    contenido = str(fila.get(IDENTITY_HASH_KEY) or "") or f"otros:{record.id}"
+    return clave, contenido, en_conflicto
+
+
+async def _reclamar_identidad_de_la_fila(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    record: UnclassifiedRecord,
+    entidad: str,
+    efectos: list[uuid.UUID],
+) -> None:
+    """I6-7: el efecto que nace de resolver la fila toma la identidad de su
+    comprobante (``reclamar_para_efectos``, el mismo candado que el import). Sin
+    esto nacía sin identidad, y el reimport del mismo documento —otra
+    exportación, un período solapado— lo volvía a cargar."""
+    identidad = _identidad_de_la_fila(record, entidad)
+    if identidad is None or not efectos:
+        return
+    clave, contenido, _ = identidad
+    await reclamar_para_efectos(
+        session,
+        tenant_id,
+        record.uploaded_file_id,
+        entidad=entidad,
+        pedidos=[(clave, contenido, entidad, eid) for eid in efectos],
+    )
+
+
 async def _exigir_identidad_libre(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     record: UnclassifiedRecord,
     *,
     aplicar_pese_al_conflicto: bool,
+    entidad: str,
 ) -> None:
     """E6b — el candado de identidad de la operación. Una fila que quedó en «Otros»
     por conflicto de identidad guarda su clave; si esa clave sigue tomada por una
@@ -780,15 +836,24 @@ async def _exigir_identidad_libre(
     corrección legítima (el proveedor reemitió) y Véktor no puede saber cuál de
     las dos versiones vale.
 
+    I6-7: la fila que lleva la identidad que su import soltó (``IDENTITY_CLAIM_KEY``,
+    una venta sin compra previa) frena sólo si el comprobante ya tiene un efecto
+    vivo de OTRO archivo (``aplicada_desde_otro_origen``): un reimport la cargó
+    mientras la fila esperaba. El renglón hermano del mismo archivo no frena.
+
     Detalle ESTRUCTURADO: el frontend rutea por `detail.code`; sin código este 409
     caería en el catch-all «Revisá los campos», que apunta al lugar equivocado.
     """
+    if aplicar_pese_al_conflicto:
+        return
     clave = str((record.row_data or {}).get(IDENTITY_REF_KEY) or "")
-    if (
-        clave
-        and not aplicar_pese_al_conflicto
-        and await identidad_tomada(session, tenant_id, clave) is not None
-    ):
+    tomada = bool(clave) and await identidad_tomada(session, tenant_id, clave) is not None
+    if not clave:
+        identidad = _identidad_de_la_fila(record, entidad)
+        tomada = identidad is not None and await aplicada_desde_otro_origen(
+            session, tenant_id, identidad[0], entidad, record.uploaded_file_id
+        )
+    if tomada:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -834,7 +899,11 @@ async def _registrar_venta_desde_otros(
     No marca la fila como importada: eso lo hace quien la llama, al final.
     """
     await _exigir_identidad_libre(
-        session, tenant_id, record, aplicar_pese_al_conflicto=aplicar_pese_al_conflicto
+        session,
+        tenant_id,
+        record,
+        aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
+        entidad="sale",
     )
     _cantidad = sale_req.quantity
     if sale_req.product_id is not None:
@@ -888,6 +957,7 @@ async def _registrar_venta_desde_otros(
     movimiento = await stock_service.decrement_for_sale(venta, session)
     if movimiento is not None and _upload_id is not None:
         movimiento.source_upload_id = _upload_id
+    await _reclamar_identidad_de_la_fila(session, tenant_id, record, "sale", [venta.id])
     return venta
 
 
@@ -938,6 +1008,7 @@ async def reclassify_record(
             tenant.tenant_id,
             record,
             aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
+            entidad="expense",
         )
 
     try:
@@ -972,31 +1043,34 @@ async def reclassify_record(
             custom_fields = _apply_category_label(
                 exp_req.custom_fields, exp_req.category, exp_req.category_label
             )
-            session.add(
-                ExpenseEntry(
-                    tenant_id=tenant.tenant_id,
-                    amount=exp_req.amount,
-                    category=exp_req.category,
-                    # Inferir COGS/OPEX (una fila de mercadería clasificada desde "Otros"
-                    # debe quedar COGS); un expense_type explícito del usuario gana.
-                    expense_type=infer_expense_type(
-                        exp_req.category, explicit=exp_req.expense_type
-                    ),
-                    tax_kind=resolve_tax_kind(
-                        exp_req.category, explicit=exp_req.tax_kind,
-                        textos=(str(raw_category) if raw_category else None,),
-                    ),
-                    transaction_date=exp_req.expense_date,
-                    description=exp_req.description,
-                    is_recurring=exp_req.is_recurring,
-                    payment_method=exp_req.payment_method,
-                    supplier_name=exp_req.supplier_name,
-                    notes=exp_req.notes,
-                    custom_fields=custom_fields,
-                    provenance="REAL",
-                    source_upload_id=_upload_id,
-                    source_row_ref=_row_ref,
-                )
+            _gasto = ExpenseEntry(
+                tenant_id=tenant.tenant_id,
+                amount=exp_req.amount,
+                category=exp_req.category,
+                # Inferir COGS/OPEX (una fila de mercadería clasificada desde "Otros"
+                # debe quedar COGS); un expense_type explícito del usuario gana.
+                expense_type=infer_expense_type(
+                    exp_req.category, explicit=exp_req.expense_type
+                ),
+                tax_kind=resolve_tax_kind(
+                    exp_req.category, explicit=exp_req.tax_kind,
+                    textos=(str(raw_category) if raw_category else None,),
+                ),
+                transaction_date=exp_req.expense_date,
+                description=exp_req.description,
+                is_recurring=exp_req.is_recurring,
+                payment_method=exp_req.payment_method,
+                supplier_name=exp_req.supplier_name,
+                notes=exp_req.notes,
+                custom_fields=custom_fields,
+                provenance="REAL",
+                source_upload_id=_upload_id,
+                source_row_ref=_row_ref,
+            )
+            session.add(_gasto)
+            await session.flush()
+            await _reclamar_identidad_de_la_fila(
+                session, tenant.tenant_id, record, "expense", [_gasto.id]
             )
             label = "gasto"
         elif body.entity_type == "customer":
@@ -1438,22 +1512,13 @@ async def resolve_purchase(
                 "message": "Esta fila no es un gasto: importala como lo que es.",
             },
         )
-    _clave_identidad = str(record.row_data.get(IDENTITY_REF_KEY) or "")
-    if (
-        _clave_identidad
-        and not body.aplicar_pese_al_conflicto
-        and await identidad_tomada(session, tenant.tenant_id, _clave_identidad) is not None
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "IMPORT_IDENTITY_TAKEN",
-                "message": (
-                    "Esta fila tiene el mismo comprobante que una operación ya "
-                    "cargada. Si la registrás igual vas a tener las dos."
-                ),
-            },
-        )
+    await _exigir_identidad_libre(
+        session,
+        tenant.tenant_id,
+        record,
+        aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
+        entidad="expense",
+    )
 
     if body.lines:
         lineas = [
@@ -1486,7 +1551,7 @@ async def resolve_purchase(
 
     _upload_id = record.uploaded_file_id
     try:
-        await compra_service.registrar_compra(
+        _compra = await compra_service.registrar_compra(
             session,
             tenant.tenant_id,
             user.user_id,
@@ -1515,6 +1580,12 @@ async def resolve_purchase(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "INVALID_PURCHASE", "message": str(exc)},
         ) from exc
+    # I6-7: los renglones de la compra toman la identidad del comprobante, como
+    # los del import (un vínculo por gasto de línea).
+    await session.flush()
+    await _reclamar_identidad_de_la_fila(
+        session, tenant.tenant_id, record, "expense", list(_compra.expense_ids)
+    )
     record.status = UNCLASSIFIED_STATUS_IMPORTED
     record.resolved_at = datetime.now(UTC)
     await session.flush()
