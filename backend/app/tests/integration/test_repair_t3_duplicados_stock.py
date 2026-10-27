@@ -486,8 +486,10 @@ async def test_fila_con_dos_gastos_y_una_compra_se_saltea_sin_cambios(
     assert g1.voided_at is None and copia.voided_at is None and g2.voided_at is None
     assert await _stock(session, yerba.id) == 20
     assert len(await _vivos(session, yerba.id, "purchase")) == 2
-    (salteado,) = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
-    assert salteado["reason"] == "compra_sin_par_claro"
+    # Las dos filas de la re-subida comparten ref: además de copia del original,
+    # son la misma fila aplicada dos veces. Los dos grupos se saltean por lo mismo.
+    salteados = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
+    assert [e["reason"] for e in salteados] == ["compra_sin_par_claro"] * 2
 
 
 
@@ -569,8 +571,10 @@ async def test_dos_compras_distintas_en_la_fila_que_el_monto_no_distingue_se_sal
     await session.refresh(g2)
     assert g0.voided_at is None and g1.voided_at is None and g2.voided_at is None
     assert await _stock(session, yerba.id) == 25
-    (salteado,) = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
-    assert salteado["reason"] == "compra_sin_par_claro"
+    # Las dos filas de la re-subida comparten ref: además de copia del original,
+    # son la misma fila aplicada dos veces. Los dos grupos se saltean por lo mismo.
+    salteados = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
+    assert [e["reason"] for e in salteados] == ["compra_sin_par_claro"] * 2
 
 
 async def test_dry_run_acumula_el_efecto_de_grupos_anteriores_sobre_el_producto(

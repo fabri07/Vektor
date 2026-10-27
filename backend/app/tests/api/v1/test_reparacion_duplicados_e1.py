@@ -15,6 +15,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,15 +83,20 @@ async def _ventas(
     cuantas: int,
     *,
     notas: str = "Coca 500",
+    refs: list[str | None] | None = None,
 ) -> list[SaleEntry]:
+    """``refs`` fija el ``source_row_ref`` de cada una; si no, uno por renglón."""
     filas = []
     for i in range(cuantas):
         v = SaleEntry(
             tenant_id=tid, amount=Decimal("1200.00"), quantity=1,
             transaction_date=_FECHA, payment_method="cash", notes=notas,
             provenance="REAL", source_upload_id=upload_id,
-            source_row_ref=f"{upload_id}:{i}" if upload_id else None,
+            source_row_ref=(
+                refs[i] if refs is not None else f"{upload_id}:{i}" if upload_id else None
+            ),
         )
+        v.created_at = datetime(2026, 6, 2, 12, i, tzinfo=UTC)
         db.add(v)
         filas.append(v)
     await db.commit()
@@ -98,7 +104,12 @@ async def _ventas(
 
 
 async def _gastos(
-    db: AsyncSession, tid: uuid.UUID, upload_id: uuid.UUID | None, cuantos: int
+    db: AsyncSession,
+    tid: uuid.UUID,
+    upload_id: uuid.UUID | None,
+    cuantos: int,
+    *,
+    refs: list[str | None] | None = None,
 ) -> list[ExpenseEntry]:
     filas = []
     for i in range(cuantos):
@@ -106,8 +117,11 @@ async def _gastos(
             tenant_id=tid, amount=Decimal("800.00"), category="OTHER",
             transaction_date=_FECHA, description="Flete", payment_method="cash",
             provenance="REAL", source_upload_id=upload_id,
-            source_row_ref=f"{upload_id}:{i}" if upload_id else None,
+            source_row_ref=(
+                refs[i] if refs is not None else f"{upload_id}:{i}" if upload_id else None
+            ),
         )
+        g.created_at = datetime(2026, 6, 2, 12, i, tzinfo=UTC)
         db.add(g)
         filas.append(g)
     await db.commit()
@@ -263,3 +277,54 @@ async def test_la_resubida_no_pierde_mas_filas_que_las_que_tiene_la_original(
     ventas, _ = await _anuladas(db_session, tid)
     assert len(ventas) == 2
     assert {v.id for v in ventas} < {v.id for v in copia}
+
+
+async def test_la_misma_fila_aplicada_dos_veces_en_una_carga_se_anula(
+    client: AsyncClient, db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Un doble confirm o un reintento zombie escribe la MISMA fila dos veces sobre
+    la misma carga (mismo ``source_row_ref``): la copia se anula. Los renglones
+    repetidos con otro ref, y los que no tienen ref, quedan (aunque el archivo no
+    tenga huella)."""
+    tid = sample_tenant.tenant_id
+    libro = await _archivo(db_session, tid, None, 0)
+    ventas = await _ventas(
+        db_session, tid, libro.id, 5, refs=["fila:1", "fila:1", "fila:2", None, None]
+    )
+    gastos = await _gastos(db_session, tid, libro.id, 3, refs=["fila:7", "fila:7", "fila:8"])
+
+    run_id = await _aplicar(client, db_session, tid)
+
+    anuladas, gastos_anulados = await _anuladas(db_session, tid)
+    assert [v.id for v in anuladas] == [ventas[1].id]
+    assert [g.id for g in gastos_anulados] == [gastos[1].id]
+    assert anuladas[0].void_reason == gastos_anulados[0].void_reason == "DUPLICATE"
+    items = await _items_de_duplicado(db_session, run_id)
+    assert {i.after_json["kept_id"] for i in items if i.after_json} == {
+        str(ventas[0].id),
+        str(gastos[0].id),
+    }
+
+
+async def test_las_huellas_se_leen_en_tandas_sin_perder_cargas(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I6-2: los ``UploadedFile`` se leen en tandas (tope de parámetros de asyncpg
+    al correr para todos los tenants). Con tandas de a uno, la re-subida se
+    sigue detectando: ninguna tanda se pierde."""
+    from app.application.services import data_repair_service  # noqa: PLC0415
+
+    monkeypatch.setattr(data_repair_service, "_IDS_POR_SENTENCIA", 1)
+    tid = sample_tenant.tenant_id
+    original = await _archivo(db_session, tid, "h-libro", 0)
+    resubido = await _archivo(db_session, tid, "h-libro", 5)
+    await _ventas(db_session, tid, original.id, 1)
+    (copia,) = await _ventas(db_session, tid, resubido.id, 1)
+
+    await _aplicar(client, db_session, tid)
+
+    anuladas, _ = await _anuladas(db_session, tid)
+    assert [v.id for v in anuladas] == [copia.id]

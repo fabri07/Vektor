@@ -32,7 +32,11 @@ from app.application.services.ingestion_import_service import (
     build_incomplete_product,
     insert_confirmed_data,
 )
-from app.application.services.operation_identity_service import liberar_identidades_de
+from app.application.services.operation_identity_service import (
+    _IDS_POR_SENTENCIA,
+    en_tandas,
+    liberar_identidades_de,
+)
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -1228,6 +1232,38 @@ def _orden_de_fila(fila: SaleEntry | ExpenseEntry) -> tuple[bool, str, str]:
     return (fila.created_at is None, str(fila.created_at), str(fila.id))
 
 
+def _copias_de_la_misma_fila(
+    bucket: Sequence[SaleEntry | ExpenseEntry],
+) -> tuple[
+    list[tuple[SaleEntry | ExpenseEntry, list[SaleEntry | ExpenseEntry]]],
+    list[SaleEntry | ExpenseEntry],
+]:
+    """La misma fila de un archivo aplicada dos veces sobre la MISMA carga.
+
+    Un doble confirm o un reintento zombie (``jobs.reread_apply`` antes del #53)
+    escribe dos veces la fila: mismo ``source_upload_id`` y mismo
+    ``source_row_ref`` NO nulo, y no hay unique que lo impida. Los renglones
+    repetidos legítimos tienen refs distintos (el ref sale del índice de la fila),
+    así que E-1 no vuelve. Sin ref no se sabe de qué fila vino: no se toca.
+
+    Devuelve ``([(conservada, copias)], sobrevivientes)``: uno por fila repetida,
+    y las filas del bucket menos esas copias, para comparar entre cargas.
+    """
+    por_fila: dict[tuple[uuid.UUID, str], list[SaleEntry | ExpenseEntry]] = {}
+    for fila in bucket:
+        if fila.source_upload_id is not None and fila.source_row_ref is not None:
+            por_fila.setdefault((fila.source_upload_id, fila.source_row_ref), []).append(fila)
+    grupos: list[tuple[SaleEntry | ExpenseEntry, list[SaleEntry | ExpenseEntry]]] = []
+    copias: set[uuid.UUID] = set()
+    for filas in por_fila.values():
+        if len(filas) < 2:
+            continue
+        conservada, *repetidas = sorted(filas, key=_orden_de_fila)
+        grupos.append((conservada, repetidas))
+        copias |= {f.id for f in repetidas}
+    return grupos, [f for f in bucket if f.id not in copias]
+
+
 def _duplicados_entre_cargas(
     bucket: Sequence[SaleEntry | ExpenseEntry],
     cargas: dict[uuid.UUID, tuple[str, _OrdenDeCarga]],
@@ -1240,7 +1276,8 @@ def _duplicados_entre_cargas(
 
     * dos filas de la MISMA carga nunca son duplicado entre sí (tampoco por
       compartir identidad de operación: es por comprobante y los renglones
-      hermanos la comparten);
+      hermanos la comparten), salvo la misma fila aplicada dos veces
+      (``_copias_de_la_misma_fila``, que corre antes);
     * entre cargas distintas, sólo si son el mismo archivo (``content_hash``
       igual, no nulo): que dos archivos distintos traigan la misma venta del mismo
       día no prueba nada, y el orden de inserción tampoco (invariante 2d);
@@ -1280,19 +1317,23 @@ async def _cargas_con_huella(
     db: AsyncSession, upload_ids: set[uuid.UUID]
 ) -> dict[uuid.UUID, tuple[str, _OrdenDeCarga]]:
     """``{upload_id: (content_hash, orden de carga)}`` de los archivos con huella."""
-    if not upload_ids:
-        return {}
-    filas = (
-        await db.execute(
-            select(UploadedFile.id, UploadedFile.content_hash, UploadedFile.created_at).where(
-                UploadedFile.id.in_(upload_ids),
-                UploadedFile.content_hash.is_not(None),
+    cargas: dict[uuid.UUID, tuple[str, _OrdenDeCarga]] = {}
+    # I6-2: en tandas, por el tope de parámetros de asyncpg (todos los tenants).
+    for tanda in en_tandas(sorted(upload_ids, key=str), _IDS_POR_SENTENCIA):
+        filas = (
+            await db.execute(
+                select(
+                    UploadedFile.id, UploadedFile.content_hash, UploadedFile.created_at
+                ).where(
+                    UploadedFile.id.in_(tanda),
+                    UploadedFile.content_hash.is_not(None),
+                )
             )
+        ).all()
+        cargas.update(
+            {uid: (str(huella), (creado, uid)) for uid, huella, creado in filas if huella}
         )
-    ).all()
-    return {
-        uid: (str(huella), (creado, uid)) for uid, huella, creado in filas if huella
-    }
+    return cargas
 
 
 def _candidatas(buckets: dict[tuple[Any, ...], list[Any]]) -> set[uuid.UUID]:
@@ -1309,12 +1350,13 @@ async def detect_duplicate_imports(
     db: AsyncSession,
     tenant_id: uuid.UUID | None = None,
 ) -> list[DuplicateGroup]:
-    """Detecta ventas/gastos activos que entraron dos veces por re-subir un archivo.
+    """Detecta ventas/gastos activos que entraron dos veces desde un archivo.
 
     Agrupa por (fecha, monto, desc-base, product_id, payment_method) y, dentro de
-    cada grupo, sólo cuenta como duplicado lo que dice ``_duplicados_entre_cargas``
-    (E-1): mismo archivo subido más de una vez. Renglones idénticos de un mismo
-    archivo y transacciones manuales idénticas NUNCA se agrupan.
+    cada grupo, sólo cuenta como duplicado (E-1) la misma fila aplicada dos veces
+    sobre una carga (``_copias_de_la_misma_fila``) o el mismo archivo subido más
+    de una vez (``_duplicados_entre_cargas``). Renglones idénticos de un mismo
+    archivo (refs distintos) y transacciones manuales idénticas NUNCA se agrupan.
     """
     groups: list[DuplicateGroup] = []
 
@@ -1349,7 +1391,11 @@ async def detect_duplicate_imports(
         for key, bucket in buckets.items():
             if len(bucket) < 2:
                 continue
-            for conservada, duplicados in _duplicados_entre_cargas(bucket, cargas):
+            de_la_fila, sobrevivientes = _copias_de_la_misma_fila(bucket)
+            for conservada, duplicados in [
+                *de_la_fila,
+                *_duplicados_entre_cargas(sobrevivientes, cargas),
+            ]:
                 groups.append(
                     DuplicateGroup(
                         tenant_id=key[0],
