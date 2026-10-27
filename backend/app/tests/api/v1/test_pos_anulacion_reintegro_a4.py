@@ -30,6 +30,7 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.user import User
 from app.tests.conftest import _pin_window_key
+from app.utils.security import create_access_token, hash_password
 
 _HOY = today_ar()
 _AYER = _HOY - timedelta(days=1)
@@ -94,18 +95,20 @@ async def _cobrar(
     cantidad: int,
     dia: Any = _HOY,
     metodo: str = "cash",
+    tenders: list[dict[str, str]] | None = None,
+    recibido: str | None = None,
 ) -> str:
-    resp = await client.post(
-        "/api/v1/pos/operations",
-        json={
-            "client_operation_id": f"op-{uuid.uuid4().hex[:16]}",
-            "operation_date": f"{dia.isoformat()}T10:00:00",
-            "client_session_id": turno,
-            "items": [{"product_id": pid, "quantity": cantidad, "discount_ars": "0.00"}],
-            "tenders": [{"payment_method": metodo, "amount_ars": f"{cantidad * 100}.00"}],
-        },
-        headers=caja,
-    )
+    cuerpo: dict[str, Any] = {
+        "client_operation_id": f"op-{uuid.uuid4().hex[:16]}",
+        "operation_date": f"{dia.isoformat()}T10:00:00",
+        "client_session_id": turno,
+        "items": [{"product_id": pid, "quantity": cantidad, "discount_ars": "0.00"}],
+        "tenders": tenders
+        or [{"payment_method": metodo, "amount_ars": f"{cantidad * 100}.00"}],
+    }
+    if recibido is not None:
+        cuerpo["cash_received_ars"] = recibido
+    resp = await client.post("/api/v1/pos/operations", json=cuerpo, headers=caja)
     assert resp.status_code == 201, resp.text
     return str(resp.json()["id"])
 
@@ -321,3 +324,137 @@ class TestMismoTurnoMismoDia:
         assert (await _anular(client, caja, op)).status_code == 200
         assert await _reintegros(db_session) == []
         assert await _esperado_ahora(client, auth_headers, t1) == "1000.00"
+
+
+async def _cajero_en_caja(
+    db_session: AsyncSession, tenant: Tenant, caja: dict[str, str]
+) -> dict[str, str]:
+    user = User(
+        tenant_id=tenant.tenant_id,
+        email=f"cajero-{uuid.uuid4().hex[:6]}@caja.test",
+        full_name="Cajero",
+        password_hash=hash_password("X1234567!"),
+        role_code="CASHIER",
+        is_active=True,
+        pos_permissions={},
+    )
+    db_session.add(user)
+    await db_session.flush()
+    token = create_access_token(
+        {"sub": str(user.user_id), "tenant_id": str(tenant.tenant_id), "role_code": "CASHIER"}
+    )
+    return {"Authorization": f"Bearer {token}", TERMINAL_HEADER: caja[TERMINAL_HEADER]}
+
+
+class TestCualCajon:
+    """Revisión de A-4: de qué cajón sale el reintegro cuando hay más de un turno."""
+
+    async def test_con_un_turno_viejo_abierto_en_la_caja_manda_el_de_la_pantalla(
+        self, client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession
+    ) -> None:
+        """Sin decir el turno, dos abiertos son ambiguos (409); diciéndolo, sale de ése."""
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        await _abrir(client, caja, "basura", "0.00")
+        t1 = await _abrir(client, caja, "t1", "0.00")
+        op = await _cobrar(client, caja, pid, "t1", cantidad=5)
+        await _cerrar(client, caja, t1, "500.00")
+        t2 = await _abrir(client, caja, "t2", "1000.00")
+
+        ambigua = await _anular(client, caja, op)
+        assert ambigua.status_code == 409, ambigua.text
+        resp = await _anular(client, caja, op, client_session_id="t2")
+        assert resp.status_code == 200, resp.text
+        [fila] = await _reintegros(db_session)
+        assert fila.session_id == uuid.UUID(t2)
+        assert await _esperado_ahora(client, auth_headers, t2) == "500.00"
+
+    async def test_el_dueno_no_descuenta_del_turno_del_cajero_sin_decirlo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """Dueño y cajero en la misma PC: el arqueo ciego del cajero no se toca solo."""
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        t1 = await _abrir(client, caja, "t1", "0.00")
+        op = await _cobrar(client, caja, pid, "t1", cantidad=5)
+        await _cerrar(client, caja, t1, "500.00")
+        cajero = await _cajero_en_caja(db_session, sample_tenant, caja)
+        tc = await _abrir(client, cajero, "turno-cajero", "1000.00")
+
+        resp = await _anular(client, caja, op)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "VOID_NEEDS_OPEN_CASH_SESSION"
+        assert await _reintegros(db_session) == []
+        assert await _esperado_ahora(client, auth_headers, tc) == "1000.00"
+
+    async def test_un_turno_indicado_viejo_no_frena_una_anulacion_sin_reintegro(
+        self, client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession
+    ) -> None:
+        """Mismo turno abierto y mismo día: un `client_session_id` cerrado no importa."""
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        t0 = await _abrir(client, caja, "t0", "0.00")
+        await _cerrar(client, caja, t0, "0.00")
+        t1 = await _abrir(client, caja, "t1", "0.00")
+        op = await _cobrar(client, caja, pid, "t1", cantidad=5)
+
+        resp = await _anular(client, caja, op, client_session_id="t0")
+        assert resp.status_code == 200, resp.text
+        assert await _reintegros(db_session) == []
+        assert await _esperado_ahora(client, auth_headers, t1) == "0.00"
+
+    async def test_ticket_de_ayer_en_su_turno_abierto_desde_otra_caja_sale_de_su_cajon(
+        self, client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession
+    ) -> None:
+        """El turno cruzó la medianoche y sigue abierto: es el cajón, no un 409."""
+        caja_a = await _caja(client, auth_headers)
+        caja_b = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        t1 = await _abrir(client, caja_a, "t1", "1000.00")
+        op = await _cobrar(client, caja_a, pid, "t1", cantidad=3, dia=_AYER)
+
+        resp = await _anular(client, caja_b, op)
+        assert resp.status_code == 200, resp.text
+        [fila] = await _reintegros(db_session)
+        assert fila.session_id == uuid.UUID(t1)
+        assert await _esperado_ahora(client, auth_headers, t1) == "1000.00"
+
+
+class TestPagoMixto:
+    async def test_reintegra_solo_la_parte_en_efectivo(
+        self, client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession
+    ) -> None:
+        """$300 en efectivo + $200 con débito, entregó $1.000: salen exactamente $300."""
+        caja = await _caja(client, auth_headers)
+        pid = await _producto(client, auth_headers)
+        t1 = await _abrir(client, caja, "t1", "0.00")
+        op = await _cobrar(
+            client,
+            caja,
+            pid,
+            "t1",
+            cantidad=5,
+            dia=_AYER,
+            tenders=[
+                {"payment_method": "cash", "amount_ars": "300.00"},
+                {"payment_method": "debit_card", "amount_ars": "200.00"},
+            ],
+            recibido="1000.00",
+        )
+        firmado = await _cerrar(client, caja, t1, "300.00")
+        assert firmado["expected_cash_ars"] == "300.00"
+        ayer_antes = await _efectivo_del_dia(client, auth_headers, _AYER)
+        hoy_antes = await _efectivo_del_dia(client, auth_headers, _HOY)
+        t2 = await _abrir(client, caja, "t2", "1000.00")
+
+        resp = await _anular(client, caja, op)
+        assert resp.status_code == 200, resp.text
+        [fila] = await _reintegros(db_session)
+        assert fila.cash_ars == Decimal("300.00")
+        assert await _esperado_ahora(client, auth_headers, t2) == "700.00"
+        assert await _efectivo_del_dia(client, auth_headers, _AYER) == ayer_antes == 300.0
+        assert await _efectivo_del_dia(client, auth_headers, _HOY) == hoy_antes - 300.0

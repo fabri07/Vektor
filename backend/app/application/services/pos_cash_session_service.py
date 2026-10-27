@@ -302,9 +302,12 @@ async def turno_abierto_para_reintegro(
     """El turno ABIERTO de cuyo cajón sale un reintegro (A-4). Sin candado.
 
     Si la caja lo dice (``client_session_id``) es ése, y tiene que estar abierto
-    y —para un cajero— ser suyo. Si no, el único abierto de esta caja (o de
-    este usuario, sin caja). Con más de uno no se adivina: elegir mal mete la
-    plata en el arqueo de otro cajón. ``None`` = no hay uno inequívoco.
+    y —para un cajero— ser suyo: el encargado puede nombrar a propósito el turno
+    de otro. Si no lo dice, el único abierto **de este usuario** en esta caja
+    (sin caja, el único suyo): nunca se descuenta en silencio del turno de otro
+    usuario —con el dueño y un cajero en la misma PC, el reintegro del dueño
+    caía en el arqueo ciego del cajero—. Con más de uno no se adivina.
+    ``None`` = no hay uno inequívoco.
     """
     if client_session_id is not None:
         sesion = await obtener_por_client_id(session, tenant_id, client_session_id)
@@ -316,13 +319,10 @@ async def turno_abierto_para_reintegro(
     stmt = select(PosCashSession).where(
         PosCashSession.tenant_id == tenant_id,
         PosCashSession.status == ESTADO_ABIERTO,
+        PosCashSession.user_id == user_id,
     )
     if terminal_id is not None:
         stmt = stmt.where(PosCashSession.terminal_id == terminal_id)
-    else:
-        stmt = stmt.where(PosCashSession.user_id == user_id)
-    if solo_propios:
-        stmt = stmt.where(PosCashSession.user_id == user_id)
     candidatos = list((await session.execute(stmt.limit(2))).scalars().all())
     return candidatos[0] if len(candidatos) == 1 else None
 
