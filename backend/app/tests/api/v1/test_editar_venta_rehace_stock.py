@@ -12,6 +12,10 @@ Lo que se prueba acá, por HTTP y mirando la base:
 - importada y descontada: cambiar el producto repone A y descuenta B; cambiar la
   cantidad deja descontado lo nuevo; y en los dos casos **borrar el archivo deja el
   stock como antes de importar** (el movimiento rehecho hereda el archivo);
+- importada a la que le sacaron el producto después del confirm (su movimiento
+  quedó anulado): asociarle otro vuelve a descontar —sin esto, editarla en dos
+  pasos perdía el descuento—;
+- el descuento rehecho conserva el ``source_type`` del que reemplaza;
 - sin movimiento y con producto (en vivo legada o importada sin historia aplicada):
   editar la cantidad no toca el stock.
 
@@ -32,6 +36,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import stock_service
 from app.application.services.inventory_movement_origin import SOURCE_HISTORICAL_REPLAY
 from app.application.services.stock_service import sale_source_event_id
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
@@ -278,6 +283,94 @@ class TestVentaImportadaYaDescontada:
         assert await _stock(db_session, producto_a) == _STOCK_A - _VENDIDAS
         vivos = await _movimientos_de_venta(db_session, venta.id)
         assert [int(m.qty) for m in vivos] == [-_VENDIDAS]
+
+
+    async def test_en_dos_pasos_sin_producto_y_despues_otro_vuelve_a_descontar(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        producto_a: Product,
+        producto_b: Product,
+        archivo: UploadedFile,
+    ) -> None:
+        """Revisión de T3: importada descontada → sin producto (repone A) → producto B.
+
+        El primer paso hoy no entra por el PATCH (B·5e: 422 SALE_NEEDS_PRODUCT), así
+        que se deja el estado que dejaría: movimiento anulado y venta sin producto.
+        Lo que se prueba es el segundo: antes, «sin producto y no en vivo» no
+        descontaba, y el descuento de la venta se perdía para siempre.
+        """
+        venta = await _importar(client, auth_headers, db_session, archivo, producto_a)
+        primero = await client.patch(
+            f"/api/v1/sales/{venta.id}", json={"product_id": None}, headers=auth_headers
+        )
+        assert primero.status_code == 422, primero.text
+        assert await stock_service.revert_sale_stock(
+            venta.id, sample_tenant.tenant_id, db_session
+        )
+        venta.product_id = None
+        await db_session.commit()
+        assert await _stock(db_session, producto_a) == _STOCK_A
+
+        resp = await client.patch(
+            f"/api/v1/sales/{venta.id}",
+            json={"product_id": str(producto_b.id)},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+        assert await _stock(db_session, producto_a) == _STOCK_A
+        assert await _stock(db_session, producto_b) == _STOCK_B - _VENDIDAS
+        vivos = await _movimientos_de_venta(db_session, venta.id)
+        assert [(m.product_id, int(m.qty)) for m in vivos] == [(producto_b.id, -_VENDIDAS)]
+        assert vivos[0].source_upload_id == archivo.id
+        assert vivos[0].source_type == SOURCE_HISTORICAL_REPLAY
+
+        await _borrar_archivo(client, auth_headers, archivo)
+        assert await _stock(db_session, producto_a) == _STOCK_A
+        assert await _stock(db_session, producto_b) == _STOCK_B
+
+    async def test_el_descuento_rehecho_conserva_el_source_type_del_viejo(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, Any],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        producto_a: Product,
+        archivo: UploadedFile,
+    ) -> None:
+        """Una venta del archivo cuyo descuento no es ``historical_replay`` (así lo
+        deja hoy resolver una fila de «Otros»: archivo sí, ``source_type`` no). Al
+        rehacerlo no se le inventa otra procedencia."""
+        venta = SaleEntry(
+            tenant_id=sample_tenant.tenant_id,
+            amount=Decimal("1500.00"),
+            quantity=3,
+            transaction_date=datetime(2024, 3, 10, 12),
+            payment_method="cash",
+            product_id=producto_a.id,
+            source_upload_id=archivo.id,
+        )
+        db_session.add(venta)
+        await db_session.flush()
+        await stock_service.decrement_for_sale(
+            venta, db_session, source_upload_id=archivo.id, source_type=None
+        )
+        await db_session.commit()
+        assert await _stock(db_session, producto_a) == _STOCK_A - 3
+
+        resp = await client.patch(
+            f"/api/v1/sales/{venta.id}", json={"quantity": 2}, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
+
+        assert await _stock(db_session, producto_a) == _STOCK_A - 2
+        vivos = await _movimientos_de_venta(db_session, venta.id)
+        assert [(int(m.qty), m.source_type, m.source_upload_id) for m in vivos] == [
+            (-2, None, archivo.id)
+        ]
 
 
 async def _venta_con_producto_sin_movimiento(

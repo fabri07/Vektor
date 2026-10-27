@@ -1230,6 +1230,34 @@ async def venta_descontada(
     return await _live_sale_movement(sale_id, tenant_id, db) is not None
 
 
+async def ultimo_movimiento_de_venta(
+    sale_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+) -> InventoryMovement | None:
+    """El movimiento 'sale' de la venta, VIVO o ANULADO: el vivo si hay; si no, el
+    último anulado. None si la venta nunca descontó.
+
+    T3: haber descontado alguna vez es lo que separa «una venta cuya historia se
+    aplicó» de «una que nunca la aplicó». Una importada descontada a la que le
+    sacaron el producto (su movimiento quedó anulado) vuelve a descontar cuando se
+    le asocia otro; sin mirar los anulados, editarla en dos pasos perdía el descuento.
+    También da de qué ``source_type`` era el descuento que se rehace.
+    """
+    result = await db.execute(
+        select(InventoryMovement)
+        .where(
+            InventoryMovement.tenant_id == tenant_id,
+            InventoryMovement.source_event_id == sale_source_event_id(sale_id),
+            InventoryMovement.movement_type == "sale",
+        )
+        # Falso antes que verdadero en SQLite y en Postgres: el vivo primero.
+        .order_by(InventoryMovement.voided_at.is_not(None), InventoryMovement.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def decrement_for_sale_id(
     sale_id: uuid.UUID,
     tenant_id: uuid.UUID,

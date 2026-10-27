@@ -687,12 +687,24 @@ async def update_sale(
     #   importada de una hoja que no aplicó su historia) y editarla no la hace
     #   empezar; antes descontaba la cantidad ENTERA por una corrección de +1.
     # - Sin producto todavía: asociarlo a una venta en vivo descuenta, como siempre;
-    #   a una importada, no (su historia no se aplicó).
-    _had_movement = _stock_changed and await stock_service.venta_descontada(
-        entry.id, tenant.tenant_id, session
+    #   a una importada, sólo si alguna vez descontó (movimiento anulado: le sacaron
+    #   el producto después del confirm). Si nunca lo hizo, su historia no se aplicó.
+    _ultimo_mov = (
+        await stock_service.ultimo_movimiento_de_venta(entry.id, tenant.tenant_id, session)
+        if _stock_changed
+        else None
     )
+    _had_movement = _ultimo_mov is not None and _ultimo_mov.voided_at is None
     _rehace_stock = _stock_changed and (
-        _had_movement or (_prev_product_id is None and _is_live_sale)
+        _had_movement
+        or (_prev_product_id is None and (_is_live_sale or _ultimo_mov is not None))
+    )
+    # El descuento rehecho conserva la procedencia del que reemplaza; sin uno previo,
+    # el de una importada es historia aplicada.
+    _source_type_rehecho = (
+        _ultimo_mov.source_type
+        if _ultimo_mov is not None
+        else (None if _is_live_sale else SOURCE_HISTORICAL_REPLAY)
     )
     # B·5e: cambiar el producto o la fecha revalida la compra previa (en vivo o
     # importada). Editar otra cosa de una venta vieja no la vuelve a juzgar.
@@ -793,7 +805,7 @@ async def update_sale(
             entry,
             session,
             source_upload_id=entry.source_upload_id,
-            source_type=None if _is_live_sale else SOURCE_HISTORICAL_REPLAY,
+            source_type=_source_type_rehecho,
         )
     _audit_data_change(
         session,
