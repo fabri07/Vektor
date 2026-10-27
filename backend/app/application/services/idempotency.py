@@ -23,10 +23,11 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services._savepoint import (
@@ -77,6 +78,51 @@ async def claim_operation_fingerprint(
                     tenant_id=tenant_id,
                     fingerprint=fingerprint,
                     action_type=action_type,
+                )
+            )
+    except SavepointConflictError:
+        return False
+    return True
+
+
+async def claim_operation_fingerprint_con_ventana(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    fingerprint: str,
+    action_type: str,
+    ventana: timedelta,
+) -> bool:
+    """Como `claim_operation_fingerprint`, pero la huella vence a los ``ventana``.
+
+    X4-1: la huella del chat es por CONTENIDO y sirve para frenar el doble envío
+    o la doble confirmación de la misma operación, que llegan a segundos. Sin
+    vencimiento, la misma venta repetida días después (otra operación, igual de
+    real) salía «ya fue registrada» para siempre. Una huella vencida se borra
+    antes del claim: el unique `(tenant_id, fingerprint)` sigue siendo el candado
+    de la carrera — de dos claims simultáneos, uno solo inserta.
+
+    Returns:
+        True  si reclamó la huella (no había una vigente).
+        False si hay una vigente (duplicado dentro de la ventana).
+    """
+    ahora = datetime.now(UTC)
+    await session.execute(
+        delete(OperationFingerprint).where(
+            OperationFingerprint.tenant_id == tenant_id,
+            OperationFingerprint.fingerprint == fingerprint,
+            OperationFingerprint.executed_at < ahora - ventana,
+        )
+    )
+    try:
+        async with guarded_savepoint(session, _FINGERPRINT_CONFLICT):
+            session.add(
+                OperationFingerprint(
+                    tenant_id=tenant_id,
+                    fingerprint=fingerprint,
+                    action_type=action_type,
+                    # Explícito y en UTC: la ventana se compara contra el mismo reloj
+                    # que la escribió, no contra el `CURRENT_TIMESTAMP` de la base.
+                    executed_at=ahora,
                 )
             )
     except SavepointConflictError:

@@ -220,6 +220,80 @@ async def test_registrar_ejecutar_y_consultar_el_resultado(
     assert "warnings" in cuerpo["result"]
 
 
+async def test_la_importacion_asincronica_recalcula_el_score_despues_del_commit(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    habilitado: None,
+    ejecutor_con_la_sesion_del_test: None,
+    mock_score_trigger: Any,
+) -> None:
+    """I3-4: el ejecutor le pasaba a `confirm_file` un `BackgroundTasks()` que
+    nadie corría. El `after_commit` agendaba el recálculo ahí y se perdía: el
+    score quedaba sin el import en el 100 % de las importaciones asíncronas.
+
+    Acá el ejecutor commitea de verdad (la sesión del test), así que el
+    `after_commit` corre: se afirma que el encolado sale, una vez, y con la
+    transacción ya cerrada.
+    """
+    transaccion_abierta: list[bool] = []
+    mock_score_trigger.side_effect = lambda *_a: transaccion_abierta.append(
+        db_session.in_transaction()
+    )
+    record = await _archivo(db_session, sample_tenant, filas=3)
+    registro = await client.post(
+        f"/api/v1/ingestion/files/{record.id}/imports",
+        json=_cuerpo("score-post-commit-1"),
+        headers=auth_headers,
+    )
+    attempt_id = registro.json()["attempt_id"]
+    mock_score_trigger.assert_not_called()
+
+    assert await _ejecutar(attempt_id) == "completado"
+
+    assert len(await _gastos(db_session, sample_tenant.tenant_id)) == 3
+    mock_score_trigger.assert_called_once_with(
+        str(sample_tenant.tenant_id), str(record.id)
+    )
+    assert transaccion_abierta == [False], (
+        "el recálculo salió con la transacción del import abierta"
+    )
+
+
+async def test_un_import_asincronico_revertido_no_recalcula_el_score(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    habilitado: None,
+    ejecutor_con_la_sesion_del_test: None,
+    mock_score_trigger: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Si el cierre del intento pierde el lease, el `rollback` se lleva los
+    efectos: no hay nada nuevo que el score tenga que ver."""
+    from app.application.services import import_attempt_service as svc
+
+    _tid = sample_tenant.tenant_id
+    record = await _archivo(db_session, sample_tenant)
+    registro = await client.post(
+        f"/api/v1/ingestion/files/{record.id}/imports",
+        json=_cuerpo("score-post-commit-2"),
+        headers=auth_headers,
+    )
+    attempt_id = registro.json()["attempt_id"]
+
+    async def _lease_perdido(*_a: Any, **_kw: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(svc, "cerrar_intento", _lease_perdido)
+    assert await _ejecutar(attempt_id) == "lease_perdido"
+
+    assert not await _gastos(db_session, _tid)
+    mock_score_trigger.assert_not_called()
+
+
 async def test_ejecutar_dos_veces_no_importa_dos_veces(
     client: AsyncClient,
     auth_headers: dict[str, str],

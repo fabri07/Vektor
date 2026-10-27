@@ -5,7 +5,7 @@ from decimal import ROUND_HALF_UP
 from typing import Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
@@ -46,7 +46,6 @@ from app.application.services.product_identity import (
 )
 from app.application.services.respaldo_service import primeros_dias_de_fuente, respaldada
 from app.application.services.score_trigger_service import (
-    trigger_score_recalculation,
     trigger_score_recalculation_after_commit,
 )
 from app.config.avg_cost_display_rollout import avg_cost_display_enabled_for
@@ -508,6 +507,7 @@ async def _tiene_historia(session: AsyncSession, product: Product) -> bool:
 )
 async def create_product(
     body: CreateProductRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     # F3-T3 review / R-7: el rol está en el decorador; corre antes que el guard 423
     # — si no, un VIEWER con el tenant lockeado recibiría 423 en vez de 403 (filtra
@@ -526,7 +526,10 @@ async def create_product(
     ):
         raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
     saved = await _crear_producto(session, tenant.tenant_id, user.user_id, body)
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "product_created")
+    # E0-B-1: después del commit de `get_db_session`, no antes (ver el helper).
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "product_created", background=background_tasks
+    )
     return saved
 
 
@@ -706,6 +709,7 @@ async def get_product(
 async def update_product(
     product_id: UUID,
     body: UpdateProductRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     # F3-T3 review: auth ANTES que el guard 423 (ver nota en create_product).
     user: User = Depends(require_modify_access),
@@ -865,7 +869,9 @@ async def update_product(
         before=before,
         after=_product_snapshot(saved),
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "product_updated")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "product_updated", background=background_tasks
+    )
     return saved
 
 
@@ -1327,6 +1333,7 @@ async def confirm_initial_stock_batch(
 @router.delete("/{product_id}", response_model=MessageResponse, summary="Soft-delete a product")
 async def delete_product(
     product_id: UUID,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
@@ -1348,7 +1355,9 @@ async def delete_product(
         before=before,
         after=_product_snapshot(product),
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "product_deleted")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "product_deleted", background=background_tasks
+    )
     return MessageResponse(message="Product deactivated.")
 
 
