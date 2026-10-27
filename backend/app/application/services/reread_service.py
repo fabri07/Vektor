@@ -123,6 +123,8 @@ from app.application.services.respaldo_service import (
 )
 from app.application.services.stock_service import (
     bloquear_catalogo,
+    exigir_reversa_sin_stock_negativo,
+    foto_de_stock,
     sale_source_event_id,
     unvoid_movement,
     void_movement,
@@ -4209,7 +4211,9 @@ async def apply_reread(
     # con un ticket del POS o con otro import (que ya tiene el candado de
     # importación y espera al cliente que la relectura acaba de escribir).
     await maintenance_lock_service.acquire_import_lock(session, tenant_id)
-    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)  # noqa: F841
+    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)
+    # I4-5: el stock antes de anular y reimportar, bajo el candado.
+    _stock_antes = foto_de_stock(_catalogo)
 
     # I4-1: con el candado de importación ya tomado —el borrado lo pide antes de
     # marcar el archivo—, la fila bloqueada dice si se borró mientras la sesión
@@ -4299,6 +4303,12 @@ async def apply_reread(
 
     # Compuerta de relectura: medición EXACTA, con lo que este apply escribió.
     await session.flush()
+    # I4-5: el estado FINAL (anulado + reimportado) no puede dejar stock
+    # negativo: una relectura que corrige 100 → 10 u. después de vender 60 deja
+    # -50. Se frena entera; el worker cierra el run FAILED con el motivo.
+    await exigir_reversa_sin_stock_negativo(
+        session, tenant_id, _stock_antes, operacion="Aplicar esta relectura"
+    )
     _perdidas_b5e = await ventas_que_pierden_respaldo(
         session, tenant_id, _antes_b5e, _con_fuente_b5e, excluir_upload_id=file_id
     )
@@ -4954,7 +4964,9 @@ async def undo_reread(
     # el orden de los items, se cruzaba con un ticket del POS o con un import.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
     await maintenance_lock_service.acquire_import_lock(session, tenant_id)
-    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)  # noqa: F841
+    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)
+    # I4-5: el stock antes de deshacer, bajo el candado.
+    _stock_antes = foto_de_stock(_catalogo)
 
     # I4-2: deshacer la relectura de un archivo borrado des-anulaba sus ventas,
     # gastos y stock originales —los que la relectura había anulado y el borrado
@@ -5123,6 +5135,12 @@ async def undo_reread(
             await unvoid_movement(mov, session)
         else:
             await void_movement(mov, session, lock_held=True)
+    # I4-5: anular lo que la relectura cargó (y volver a descontar lo que había
+    # anulado) no puede dejar stock negativo: si se vendió en el medio, se frena
+    # entero (409) y la relectura sigue aplicada.
+    await exigir_reversa_sin_stock_negativo(
+        session, tenant_id, _stock_antes, operacion="Deshacer esta relectura"
+    )
 
     # Fix round post-review (hallazgo Important #2): revertir el stamping de
     # versionado que ``apply_reread`` hizo sobre el archivo. Sin esto, deshacer

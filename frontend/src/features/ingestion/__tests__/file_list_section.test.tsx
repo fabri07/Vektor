@@ -40,6 +40,7 @@ jest.mock("@/services/ingestion.service", () => ({
     countFiles: jest.fn().mockResolvedValue(0),
     getFile: jest.fn(),
     deleteFile: jest.fn(),
+    getDeletionPreview: jest.fn(),
     reprocessFile: jest.fn(),
     rereadPreview: jest.fn(),
     rereadApply: jest.fn(),
@@ -720,6 +721,63 @@ describe("FileListSection — relectura de un archivo que se borró", () => {
       ).not.toBeInTheDocument(),
     );
     await waitFor(() => expect(mockListFiles.mock.calls.length).toBeGreaterThan(pedidasAntes));
+  });
+});
+
+// ── I4-5: revertir dejaría stock negativo ───────────────────────────────────
+
+const STOCK_NEGATIVO_MSG =
+  "Borrar este archivo dejaría 1 producto(s) con stock negativo, porque esa mercadería " +
+  "ya se vendió por otro lado («Vela»: stock actual 1, quedaría -1). No se cambió nada.";
+const STOCK_NEGATIVO = {
+  code: "REVERT_STOCK_NEGATIVO",
+  message: STOCK_NEGATIVO_MSG,
+  productos: 1,
+  muestras: [{ product_id: "p1", nombre: "Vela", stock_actual: 1, quedaria: -1 }],
+};
+
+describe("FileListSection — revertir dejaría stock negativo (I4-5)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("el borrado frenado muestra el mensaje del servidor", async () => {
+    const user = userEvent.setup();
+    mockListFiles.mockResolvedValue([fileWith("DONE")]);
+    (ingestionService.getDeletionPreview as jest.Mock).mockResolvedValue({
+      file_id: "file-1",
+      ventas: 0,
+      gastos: 1,
+      productos: 0,
+      movimientos_stock: 1,
+      otros: 0,
+      otros_ya_clasificados: 0,
+      has_user_edits: false,
+      productos_no_rastreables: false,
+      productos_a_restaurar: 0,
+      conservados: [],
+    });
+    (ingestionService.deleteFile as jest.Mock).mockRejectedValue(error409(STOCK_NEGATIVO));
+    renderList();
+
+    await user.click(await screen.findByTitle("Eliminar archivo"));
+    await user.click(await screen.findByRole("button", { name: /eliminar y borrar los datos/i }));
+
+    await waitFor(() =>
+      expect(mockAddToast).toHaveBeenCalledWith(STOCK_NEGATIVO_MSG, "error"),
+    );
+  });
+
+  test("deshacer frenado muestra el mensaje del servidor", async () => {
+    const user = userEvent.setup();
+    mockRereadUndo.mockRejectedValue(error409(STOCK_NEGATIVO));
+    await driveToResultPhase(user);
+
+    await confirmUndo(user);
+
+    await waitFor(() =>
+      expect(mockAddToast).toHaveBeenCalledWith(STOCK_NEGATIVO_MSG, "error"),
+    );
   });
 });
 

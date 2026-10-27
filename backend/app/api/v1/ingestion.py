@@ -45,6 +45,7 @@ from app.application.services import (
     customer_import_service,
     maintenance_lock_service,
     pipeline_event_service,
+    stock_service,
     subscription_service,
     supplier_import_service,
 )
@@ -1624,9 +1625,16 @@ async def delete_file(
             session, tenant.tenant_id, file_id
         )
         _antes = await primeros_dias_de_fuente(session, tenant.tenant_id, _con_fuente)
-        _revertido = await revert_file_data(
-            session, file_id, tenant.tenant_id, actor_user_id=user.user_id
-        )
+        try:
+            _revertido = await revert_file_data(
+                session, file_id, tenant.tenant_id, actor_user_id=user.user_id
+            )
+        except stock_service.RevertirDejaStockNegativoError as exc:
+            # I4-5: todo o nada — ni el archivo queda marcado como borrado.
+            await session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=exc.detalle_http()
+            ) from exc
         await session.flush()
         _perdidas = await ventas_que_pierden_respaldo(
             session, tenant.tenant_id, _antes, _con_fuente
@@ -5105,6 +5113,12 @@ async def reread_run_status(
         legacy_fallback=bool(d.get("legacy_fallback", False)),
         items=items,
         error=d.get("error"),
+        # I4-5: el apply se frenó porque dejaría stock negativo.
+        error_code=(
+            stock_service.REVERT_STOCK_NEGATIVO
+            if d.get("reason") == stock_service.REVERT_STOCK_NEGATIVO
+            else None
+        ),
         clientes=int(d.get("clientes", 0) or 0),
         proveedores=int(d.get("proveedores", 0) or 0),
         reconciliation_warning=d.get("reconciliation_warning"),
@@ -5158,6 +5172,12 @@ async def reread_undo(
         ) from exc
     except reread_service.RereadFileDeletedError as exc:
         raise _archivo_borrado_409(exc) from exc
+    except stock_service.RevertirDejaStockNegativoError as exc:
+        # I4-5: todo o nada — la relectura sigue aplicada, como estaba.
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=exc.detalle_http()
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
