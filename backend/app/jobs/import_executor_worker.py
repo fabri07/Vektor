@@ -241,9 +241,17 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
                 "El archivo ya no está disponible, o cambió desde que confirmaste. "
                 "Volvé a subirlo y confirmalo de nuevo.",
             )
-        try:
-            from fastapi import BackgroundTasks  # noqa: PLC0415
+        from fastapi import BackgroundTasks  # noqa: PLC0415
 
+        # I3-4: `confirm_file` pide el recálculo del score con
+        # `trigger_score_recalculation_after_commit(..., background=...)`, que en el
+        # commit sólo AGENDA el encolado en estas tasks. En un request las corre
+        # Starlette después de la respuesta; acá no hay Starlette, así que las
+        # corre el ejecutor después de SU commit. Antes se pasaba un
+        # `BackgroundTasks()` descartable: el 100 % de las importaciones asíncronas
+        # dejaba el score calculado sin el import, en silencio.
+        tareas_post_commit = BackgroundTasks()
+        try:
             respuesta = await confirm_file(
                 file_id=file_id,
                 # La revisión congelada viaja acá y NO en el payload: así la huella
@@ -255,7 +263,7 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
                     revision_ingestion=revision_ingestion,
                     revision_preview=revision_preview,
                 ),
-                background_tasks=BackgroundTasks(),
+                background_tasks=tareas_post_commit,
                 tenant=tenant,
                 session=session,
                 # La reserva se tomó al registrar el intento: el confirm
@@ -313,6 +321,13 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
                 error=str(exc),
             )
             return await _cerrar_con_error(factory, attempt_id, token, codigo, detalle)
+
+        # Recién con los efectos commiteados, y FUERA del `try`: los `except` de
+        # arriba revierten y cierran el intento como FALLADO, y esto corre sobre
+        # una importación que ya terminó. Sólo se llega acá por el camino del
+        # commit — si hubo rollback el listener `after_commit` no agendó nada.
+        # `_encolar` es fail-safe: un broker caído no rompe nada.
+        await tareas_post_commit()
 
     _ = FALLADO, ERROR_DESCONOCIDO  # referenciados por `_clasificar`
     return "completado"
