@@ -253,7 +253,8 @@ def _normalizar(valor: Any) -> str:
 
 
 def _solo_digitos(valor: Any) -> str:
-    return "".join(c for c in str(valor or "") if c.isdigit())
+    # `valor or ""` perdía un `0` nativo de xlsx (I5-1): es un dígito, no un vacío.
+    return "".join(c for c in ("" if valor is None else str(valor)) if c.isdigit())
 
 
 def leer_numero_de_comprobante(valor: Any) -> tuple[str, str]:

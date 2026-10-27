@@ -812,6 +812,15 @@ def _celda_de_fila(valor: Any, conservar_numeros: bool) -> Any:
     return str(valor)
 
 
+def _texto_de_celda(valor: Any) -> Any:
+    """Un campo de TEXTO (detalle, cliente, proveedor) de una celda que puede ser
+    un número nativo de xlsx (I5-1): como texto, igual que antes. Un ``0`` es
+    ``"0"``, no un vacío."""
+    if isinstance(valor, int | float) and not isinstance(valor, bool):
+        return str(valor)
+    return valor
+
+
 def rows_to_dicts(
     headers: list[str], rows: list[list[Any]], *, conservar_numeros: bool = False
 ) -> list[dict[str, Any]]:
@@ -1542,17 +1551,17 @@ def separar_libro_mixto(
             "fecha": (
                 str(fila[col_fecha]) if col_fecha and fila.get(col_fecha) is not None else None
             ),
-            "detalle": fila.get(col_detalle) if col_detalle else None,
+            "detalle": _texto_de_celda(fila.get(col_detalle)) if col_detalle else None,
             "monto": monto,
         }
         if clasificacion.destino == "venta":
-            if col_cliente and fila.get(col_cliente):
-                base["cliente"] = fila.get(col_cliente)
+            if col_cliente and _texto_de_celda(fila.get(col_cliente)):
+                base["cliente"] = _texto_de_celda(fila.get(col_cliente))
             ventas.append(base)
         else:
             base["categoria"] = clasificacion.categoria or str(fila.get(col_tipo)).strip()
-            if col_proveedor and fila.get(col_proveedor):
-                base["proveedor"] = fila.get(col_proveedor)
+            if col_proveedor and _texto_de_celda(fila.get(col_proveedor)):
+                base["proveedor"] = _texto_de_celda(fila.get(col_proveedor))
             gastos.append(base)
     return {
         "columna_de_tipo": col_tipo,
