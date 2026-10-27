@@ -70,7 +70,7 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **Compras por chat (B·5b-1):** `REGISTER_PURCHASE` pasa por `compra_service.registrar_compra` (la regla única de compra): sin producto o sin cantidad no registra nada (`CompraSinArticulosError`, que el chat muestra tal cual), y el gasto queda con producto y proveedor. `REGISTER_EXPENSE` y `REGISTER_CASH_OUTFLOW` con categoría mercadería se rechazan igual: una compra de mercadería dice qué artículos y cuántos. El catálogo de `ActionType` no cambia.
 
-**Deduplicación por fingerprint** (`operation_fingerprints`): SHA-256 de `{tenant_id}:{action_type}:{amount}:{date}` para `REGISTER_SALE/EXPENSE/PURCHASE`. Duplicado → `execution_status: "DUPLICATE"`.
+**Deduplicación por fingerprint** (`operation_fingerprints`): para `REGISTER_SALE/EXPENSE/PURCHASE`, `chat:` + SHA-256 del contenido COMPLETO de la acción (tenant, tipo, posición en el grupo y todo el payload salvo `confidence`/`result`), con vencimiento de `VENTANA_HUELLA_CHAT` = 5 min (`claim_operation_fingerprint_con_ventana` borra la huella vencida antes del claim). Duplicado → `execution_status: "DUPLICATE"`. **X4-1:** antes era `{tenant}:{tipo}:{monto}:{fecha}` sin vencimiento — «5000 de luz» y «5000 de flete» del mismo día salían «ya fue registrada» y una venta sin fecha dejaba la clave tomada para siempre. Frena el doble envío/doble confirmación de la MISMA operación, no dos distintas; la doble confirmación de la misma pendiente la frena además el `status == PENDING` + `FOR UPDATE`. Las huellas viejas sin prefijo quedan sin uso (sin migración).
 
 **Rate limit:** 50 mensajes/día por tenant. Redis key: `rate:chat:{tenant_id}:{date}`. Compartido entre `/chat` y `/chat/stream`.
 

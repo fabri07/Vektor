@@ -16,7 +16,7 @@ import hashlib
 import json as json_module
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import anthropic
@@ -368,6 +368,48 @@ def _payload_for_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+#: X4-1: cuánto dura la huella del chat. Frena el doble envío y la doble
+#: confirmación, que llegan a segundos; pasado esto, el mismo contenido es otra
+#: operación (la venta de $1000 de mañana).
+VENTANA_HUELLA_CHAT = timedelta(minutes=5)
+
+#: Lo que no describe la operación: la confianza del LLM y el resultado que se
+#: guarda después de ejecutar. Todo lo demás (monto, fecha, producto, categoría,
+#: medio de pago, cliente, el texto del mensaje…) entra a la huella.
+_CAMPOS_FUERA_DE_LA_HUELLA = frozenset({"confidence", "result"})
+
+#: Prefijo propio: no choca con las huellas viejas (`sha256(tenant:tipo:monto:fecha)`,
+#: que quedan sin uso) ni con las `idem:` de los POST de alta.
+_PREFIJO_HUELLA_CHAT = "chat:"
+
+
+def _huella_chat(action: PendingAction, tenant_id: uuid.UUID) -> str:
+    """Huella del CONTENIDO completo de la acción (X4-1).
+
+    Antes era ``tenant:tipo:monto:fecha``: «5000 de luz» y «5000 de flete» del
+    mismo día eran la misma operación, y una venta sin fecha dejaba ``…:None``
+    tomada para siempre. La posición en el grupo entra porque dos tareas del
+    mismo plan son dos operaciones aunque digan lo mismo.
+    """
+    contenido = {
+        k: v
+        for k, v in _payload_for_fingerprint(action.payload or {}).items()
+        if k not in _CAMPOS_FUERA_DE_LA_HUELLA
+    }
+    canonico = json_module.dumps(
+        {
+            "tenant": str(tenant_id),
+            "tipo": str(action.action_type),
+            "posicion": action.group_position,
+            "contenido": contenido,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return _PREFIJO_HUELLA_CHAT + hashlib.sha256(canonico.encode()).hexdigest()
+
+
 async def _register_operation_fingerprint(
     *,
     action: PendingAction,
@@ -378,19 +420,18 @@ async def _register_operation_fingerprint(
         return False
 
     from app.application.services.idempotency import (  # noqa: PLC0415
-        claim_operation_fingerprint,
+        claim_operation_fingerprint_con_ventana,
     )
 
-    payload = _payload_for_fingerprint(action.payload or {})
-    raw = (
-        f"{tenant_id}:{action.action_type}"
-        f":{payload.get('amount', '')}:{payload.get('transaction_date', payload.get('date', ''))}"
+    # El claim inserta con savepoint y devuelve True si la huella era nueva (o
+    # estaba vencida); aquí la semántica es inversa: True == duplicado.
+    claimed = await claim_operation_fingerprint_con_ventana(
+        db,
+        tenant_id,
+        _huella_chat(action, tenant_id),
+        str(action.action_type),
+        VENTANA_HUELLA_CHAT,
     )
-    fingerprint = hashlib.sha256(raw.encode()).hexdigest()
-
-    # claim_operation_fingerprint inserta con savepoint y devuelve True si el
-    # fingerprint era nuevo; aquí la semántica es inversa: True == duplicado.
-    claimed = await claim_operation_fingerprint(db, tenant_id, fingerprint, str(action.action_type))
     return not claimed
 
 
