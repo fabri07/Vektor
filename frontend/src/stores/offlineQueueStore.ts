@@ -22,11 +22,46 @@ export interface QueuedItem {
   attempts: number;
   lastError?: string;
   status?: QueuedStatus;
+  /**
+   * Dueño de la carga (X6-1): el negocio y el usuario de la sesión que la
+   * encoló. Sólo esa sesión la sincroniza. La idempotencia del servidor es por
+   * (tenant, clave), así que subirla con el JWT de OTRO negocio la hacía entrar
+   * en ese negocio. Opcionales porque las colas persistidas antes (version 1)
+   * no los tienen: esas son las «sin dueño» (`sinDuenio`).
+   */
+  tenantId?: string;
+  userId?: string;
+}
+
+/** La sesión contra la que se filtra la cola: negocio y usuario del JWT. */
+export interface SesionDeCola {
+  tenantId: string;
+  userId: string;
 }
 
 /** `undefined` (cola persistida antes de que existiera `status`) cuenta como pendiente. */
 export function isFailed(item: QueuedItem): boolean {
   return item.status === "FAILED";
+}
+
+/**
+ * Carga encolada antes de X6-1, sin negocio ni usuario. NO se sube sola: no hay
+ * forma de saber de quién es, y adivinar la mandaría a lo mejor al negocio de
+ * quien esté logueado. Espera que una persona diga «es mía» (`adoptar`) o la
+ * descarte.
+ */
+export function sinDuenio(item: QueuedItem): boolean {
+  return !item.tenantId || !item.userId;
+}
+
+/** La carga es de esta sesión: mismo negocio Y mismo usuario (como el POS). */
+export function esDeLaSesion(item: QueuedItem, sesion: SesionDeCola | null): boolean {
+  return (
+    sesion !== null &&
+    !sinDuenio(item) &&
+    item.tenantId === sesion.tenantId &&
+    item.userId === sesion.userId
+  );
 }
 
 interface OfflineQueueState {
@@ -48,6 +83,12 @@ interface OfflineQueueState {
   markPermanentlyFailed: (id: string, error: string) => void;
   /** Vuelve a habilitar un item terminal (acción explícita del usuario). */
   retry: (id: string) => void;
+  /**
+   * Una carga sin dueño (`sinDuenio`) pasa a la sesión dada. Sólo por acción
+   * explícita del usuario («son mías, subirlas»); a una carga que ya tiene dueño
+   * no la toca nunca, aunque se lo pidan.
+   */
+  adoptar: (id: string, sesion: SesionDeCola) => void;
 }
 
 /**
@@ -92,10 +133,27 @@ export const useOfflineQueueStore = create<OfflineQueueState>()(
             i.id === id ? { ...i, attempts: 0, lastError: undefined, status: "PENDING" as const } : i,
           ),
         })),
+      adoptar: (id, sesion) =>
+        set((s) => ({
+          items: s.items.map((i) =>
+            i.id === id && sinDuenio(i)
+              ? { ...i, tenantId: sesion.tenantId, userId: sesion.userId }
+              : i,
+          ),
+        })),
     }),
     {
       name: "vektor_offline_queue",
-      version: 1,
+      // v2 (X6-1): los items llevan `tenantId`/`userId`. Sin `migrate`, zustand
+      // descarta el estado guardado con otra versión: eso era borrar en silencio
+      // cargas que alguien dio por guardadas. La migración las conserva TAL CUAL,
+      // sin inventarles dueño: quedan «sin dueño» hasta que una persona decida.
+      version: 2,
+      migrate: (persistido) => {
+        const items = (persistido as { items?: unknown } | null)?.items;
+        return { items: Array.isArray(items) ? (items as QueuedItem[]) : [] };
+      },
+      partialize: (s) => ({ items: s.items }),
     },
   ),
 );

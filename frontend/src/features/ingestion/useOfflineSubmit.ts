@@ -12,11 +12,15 @@ import { expensesService, type CreateExpensePayload } from "@/services/expenses.
 import { productsService, type CreateProductPayload } from "@/services/products.service";
 import { purchasesService, type ManualPurchasePayload } from "@/services/purchases.service";
 import {
+  esDeLaSesion,
   isFailed,
+  sinDuenio,
   useOfflineQueueStore,
   type QueuedItem,
   type QueuedKind,
+  type SesionDeCola,
 } from "@/stores/offlineQueueStore";
+import { useAuthStore } from "@/stores/authStore";
 
 type PayloadFor<K extends QueuedKind> = K extends "sale"
   ? CreateSalePayload
@@ -145,9 +149,33 @@ function errorMessage(e: unknown): string {
   return "Error desconocido";
 }
 
-/** Cantidad de cargas en la cola — pendientes y fallidas (para el badge del launcher). */
+/** La sesión actual (negocio + usuario del JWT), o `null` si no hay nadie logueado. */
+export function sesionActual(): SesionDeCola | null {
+  const user = useAuthStore.getState().user;
+  return user ? { tenantId: user.tenant_id, userId: user.id } : null;
+}
+
+/** Igual que `sesionActual`, reactiva: re-renderiza si cambia quién está logueado. */
+export function useSesionDeCola(): SesionDeCola | null {
+  const tenantId = useAuthStore((s) => s.user?.tenant_id);
+  const userId = useAuthStore((s) => s.user?.id);
+  return tenantId && userId ? { tenantId, userId } : null;
+}
+
+/**
+ * Cantidad de cargas de ESTA sesión en la cola — pendientes y fallidas. Lo que
+ * encoló otro usuario u otro negocio en esta PC no se cuenta ni se muestra
+ * (X6-1); las «sin dueño» se cuentan aparte (`useOfflineSinDuenioCount`).
+ */
 export function useOfflineQueueCount(): number {
-  return useOfflineQueueStore((s) => s.items.length);
+  const sesion = useSesionDeCola();
+  return useOfflineQueueStore((s) => s.items.filter((i) => esDeLaSesion(i, sesion)).length);
+}
+
+/** Cargas encoladas antes de X6-1, sin dueño: esperan que alguien las reclame o descarte. */
+export function useOfflineSinDuenioCount(): number {
+  const sesion = useSesionDeCola();
+  return useOfflineQueueStore((s) => (sesion ? s.items.filter(sinDuenio).length : 0));
 }
 
 /**
@@ -156,7 +184,10 @@ export function useOfflineQueueCount(): number {
  * guardadas y el servidor rechazó.
  */
 export function useOfflineFailedCount(): number {
-  return useOfflineQueueStore((s) => s.items.filter(isFailed).length);
+  const sesion = useSesionDeCola();
+  return useOfflineQueueStore(
+    (s) => s.items.filter((i) => isFailed(i) && esDeLaSesion(i, sesion)).length,
+  );
 }
 
 /** Estado de conexión reactivo (SSR-safe: arranca online y se corrige al montar). */
@@ -206,14 +237,25 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
   const flush = useCallback(async () => {
     if (flushEnCurso) return;
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
-    const { items } = useOfflineQueueStore.getState();
+    // X6-1: sólo lo que encoló ESTA sesión. El POST va con el JWT de quien esté
+    // logueado y la idempotencia es por (tenant, clave): una carga del negocio A
+    // mandada con la sesión de B entraba en B. Lo ajeno y lo sin dueño se quedan
+    // en la cola, intactos, esperando a su dueño o a una decisión humana.
+    const sesion = sesionActual();
+    if (sesion === null) return;
+    const items = useOfflineQueueStore
+      .getState()
+      .items.filter((i) => esDeLaSesion(i, sesion));
     if (items.length === 0) return;
     flushEnCurso = true;
     try {
-      for (const item of [...items]) {
+      for (const item of items) {
         // Un item en estado terminal dejó de reintentarse, pero sigue en la cola:
         // saltearlo es lo que evita el loop infinito sin perder la operación.
         if (isFailed(item)) continue;
+        // La sesión puede cambiar a mitad del flush (otra pestaña de la misma PC
+        // entra con otro usuario): se vuelve a mirar antes de cada envío.
+        if (!esDeLaSesion(item, sesionActual())) break;
         try {
           await postByKind(item.kind, item.payload, item.id);
           useOfflineQueueStore.getState().remove(item.id);
@@ -272,12 +314,17 @@ export function useOfflineSubmit(opts?: { autoSync?: boolean }) {
           // Persistencia best-effort: si el encolado falla (ej. localStorage lleno),
           // NO confirmamos como guardado → onError (el form no se resetea, no se pierde la carga).
           try {
+            // El dueño se fija AL ENCOLAR (X6-1): es quien la cargó. Sin sesión
+            // (no debería pasar en una pantalla protegida) queda sin dueño, que
+            // no se sube sola pero tampoco se pierde.
+            const sesion = sesionActual();
             useOfflineQueueStore.getState().enqueue({
               id,
               kind,
               payload,
               createdAt: new Date().toISOString(),
               attempts: 0,
+              ...(sesion ?? {}),
             });
             cb?.onQueued?.();
           } catch {

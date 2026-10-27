@@ -7,6 +7,7 @@ import { ManualEntrySection } from "./ManualEntrySection";
 import {
   useOfflineFailedCount,
   useOfflineQueueCount,
+  useOfflineSinDuenioCount,
   useOfflineSubmit,
 } from "./useOfflineSubmit";
 
@@ -29,7 +30,11 @@ export function ManualEntryLauncher({
   const [open, setOpen] = useState(false);
   const dirtyRef = useRef(false);
   useOfflineSubmit({ autoSync: true });
-  const pending = useOfflineQueueCount();
+  // Sólo lo de esta sesión (X6-1) más las «sin dueño», que esperan una decisión
+  // de quien esté logueado. Lo que encoló otro usuario u otro negocio no se cuenta.
+  const propias = useOfflineQueueCount();
+  const sinDuenio = useOfflineSinDuenioCount();
+  const pending = propias + sinDuenio;
   const failed = useOfflineFailedCount();
   // El badge cuenta TODO lo que sigue en la cola, pero el título no puede decir
   // "pendientes de sincronizar" de algo que el flush ya no va a tocar: se resuelve
@@ -37,7 +42,9 @@ export function ManualEntryLauncher({
   const badgeTitle =
     failed > 0
       ? `${failed} carga(s) rechazada(s) — abrí la carga manual para resolverlas`
-      : `${pending} carga(s) pendientes de sincronizar`;
+      : sinDuenio > 0
+        ? `${sinDuenio} carga(s) guardada(s) sin usuario — abrí la carga manual para resolverlas`
+        : `${pending} carga(s) pendientes de sincronizar`;
 
   // Cierre (botón / Escape / overlay → todos pasan por onClose): si hay datos sin
   // guardar, confirmar antes de descartar.
