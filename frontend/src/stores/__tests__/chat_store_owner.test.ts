@@ -114,3 +114,30 @@ describe("chatStore — dueño de la conversación", () => {
     expect(useChatStore.getState().ownerKey).toBe("t-a:u-a");
   });
 });
+
+describe("chatStore — /auth/me trae a otra persona (updateUser)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    useChatStore.setState({ conversationId: "inicial", messages: [], ownerKey: null });
+    useAuthStore.getState().setAuth("t", "r", usuario("u-a", "t-a"));
+  });
+
+  it("si cambia el usuario, la conversación del anterior se descarta", () => {
+    const deA = conversar();
+
+    useAuthStore.getState().updateUser({ id: "u-b", tenant_id: "t-b" });
+
+    expect(useChatStore.getState().messages).toEqual([]);
+    expect(useChatStore.getState().conversationId).not.toBe(deA);
+    expect(useChatStore.getState().ownerKey).toBe("t-b:u-b");
+  });
+
+  it("si sólo cambia el rol, la conversación sigue", () => {
+    const deA = conversar();
+
+    useAuthStore.getState().updateUser({ role: "CASHIER" });
+
+    expect(useChatStore.getState().conversationId).toBe(deA);
+    expect(useChatStore.getState().messages).toHaveLength(1);
+  });
+});

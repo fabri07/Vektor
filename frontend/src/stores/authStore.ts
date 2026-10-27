@@ -62,7 +62,16 @@ export const useAuthStore = create<AuthState>()(
       },
       setTokens: (token, refreshToken) => set({ token, refreshToken }),
       updateUser: (patch) =>
-        set((state) => (state.user ? { user: { ...state.user, ...patch } } : {})),
+        set((state) => {
+          if (!state.user) return {};
+          const user = { ...state.user, ...patch };
+          // `/auth/me` puede traer a otra persona que la guardada (X6-2): su
+          // conversación no es la del usuario anterior.
+          if (user.id !== state.user.id || user.tenant_id !== state.user.tenant_id) {
+            _syncChatOwner(user);
+          }
+          return { user };
+        }),
       setHasHydrated: (state) => set({ _hasHydrated: state }),
       logout: () => {
         _syncSentryContext(null);
