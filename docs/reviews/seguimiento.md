@@ -23,7 +23,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | B-9 | normal | plausible | T3 | PATCH /sales ignora si la venta tenía movimiento y empieza a descontar el total de una venta que nunca descontó | mergeado | #190 `88342144` |
 | E-2 | grave | confirmado | T3 | VOID_DUPLICATE anula ventas y gastos sin devolver su movimiento de stock ni soltar su identidad | mergeado | #191 `ec4730fd` |
 | E-3 | grave | confirmado | T3 | La corrección de ventas del chat (UPDATE_SALE) cambia cantidad, producto e importe sin ajustar el stock ya descontado | mergeado | #191 `ec4730fd` (corrección automática apagada) |
-| C-2 | grave | confirmado | T3 | balance_reconstruido_a cuenta ventas importadas que nunca descontaron stock: el ajuste de reconciliación de B11 infla el stock | pendiente |  |
+| C-2 | grave | confirmado | T3 | balance_reconstruido_a cuenta ventas importadas que nunca descontaron stock: el ajuste de reconciliación de B11 infla el stock | mergeado | #197 `893ec1be` (sólo en el ajuste) |
 | E0-B-2 | grave | e0 | T3 | La merma por chat (REGISTER_STOCK_LOSS) no valida stock: el piso max(0, …) oculta stock negativo y desalinea stock_units del ledger y del balance | mergeado | #189 `19326e2e` |
 | C-5 | normal | confirmado | T3 | register_stock_loss acepta una merma mayor que el stock: clampa stock_units a 0 pero registra el movimiento y la auditoría por la cantidad entera | mergeado | #189 `19326e2e` |
 | E-1 | grave | confirmado | T4 | El detector de duplicados de DATA_QUALITY_REPAIR anula ventas y gastos legítimos repetidos dentro del mismo archivo | pendiente |  |
