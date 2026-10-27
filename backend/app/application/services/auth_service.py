@@ -216,6 +216,15 @@ class AuthService:
                 detail="invalid_or_expired_token",
             )
 
+        if user.deactivated_at is not None:
+            # Una baja del dueño no se deshace con el link del email (X3-1): mismo
+            # 400 genérico, sin consumir el token ni activar.
+            logger.warning("auth.verify_email.deactivated_user", user_id=str(user.user_id))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid_or_expired_token",
+            )
+
         if _is_demo_auth_blocked(tenant):
             # Rechazo antes de consumir el token/activar: un tenant demo no se
             # autentica en prod. Mismo 400 genérico del flujo (no revela el motivo).
@@ -237,9 +246,10 @@ class AuthService:
         """
         Generate a new verification token for an unverified user and resend the email.
         Silent no-op if the user doesn't exist or is already active (avoids email enumeration).
+        Tampoco actúa sobre una cuenta dada de baja (X3-1): inactiva no es pendiente.
         """
         user = await self._user_repo.get_by_email_any_tenant(email.lower())
-        if user is None or user.is_active:
+        if user is None or user.is_active or user.deactivated_at is not None:
             return
 
         # Invalidate all existing unused tokens for this user
