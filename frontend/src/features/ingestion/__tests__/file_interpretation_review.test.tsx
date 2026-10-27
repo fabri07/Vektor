@@ -3,6 +3,7 @@ import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AxiosError, AxiosHeaders } from "axios";
 
 import { FileInterpretationReview } from "../FileInterpretationReview";
 import { ingestionService } from "@/services/ingestion.service";
@@ -149,6 +150,29 @@ describe("FileInterpretationReview", () => {
     // Impacto proyectado (5 categorías): solo se muestra lo que es > 0.
     expect(screen.getByText(/Compras bloqueadas/i)).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("si el archivo se borró, pasa el mensaje y el código del servidor (I4-1)", async () => {
+    const user = userEvent.setup();
+    mockRereadPreview.mockRejectedValue(
+      new AxiosError("409", "ERR_BAD_REQUEST", undefined, undefined, {
+        status: 409,
+        statusText: "Conflict",
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+        data: {
+          detail: { code: "REREAD_FILE_DELETED", message: "Este archivo ya se eliminó." },
+        },
+      }),
+    );
+    const { onError } = renderReview();
+    const selects = await screen.findAllByRole("combobox", { name: "" });
+    await user.selectOptions(selects[1]!, "supplier_name");
+    await user.click(await screen.findByRole("button", { name: /actualizar vista previa/i }));
+
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith("Este archivo ya se eliminó.", "REREAD_FILE_DELETED"),
+    );
   });
 
   it("corregir un mapeo y actualizar la vista previa persiste la corrección", async () => {

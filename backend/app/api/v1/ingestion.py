@@ -5018,6 +5018,8 @@ async def reread_apply(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         ) from exc
+    except reread_service.RereadFileDeletedError as exc:
+        raise _archivo_borrado_409(exc) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)

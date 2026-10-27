@@ -218,3 +218,32 @@ async def test_releer_durante_un_borrado_en_curso_espera_y_no_reimporta_nada(
     with pytest.raises(reread_service.RereadFileDeletedError):
         await asyncio.wait_for(relectura, 60)
     assert await _vivos(sm, fid) == (0, 0), "la relectura reimportó el archivo borrado"
+
+
+async def test_deshacer_durante_un_borrado_en_curso_espera_y_no_desanula_nada(
+    sm: async_sessionmaker[AsyncSession], archivo: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    tid, fid = archivo
+    async with sm() as s:
+        r = await reread_service.apply_reread(s, fid, tid, fresh_override=esc.summary(_RELEIDO))
+        await s.commit()
+    assert await _vivos(sm, fid) == (2, 2)
+    borrado = sm()
+    await _empezar_borrado(borrado, tid, fid)  # sin commit: retiene el candado
+
+    async def _deshacer() -> None:
+        async with sm() as s:
+            await reread_service.undo_reread(s, r.run_id, tid)
+            await s.commit()
+
+    deshacer = asyncio.create_task(_deshacer())
+    await _espera_un_candado(sm, deshacer, "el deshacer")
+    await borrado.commit()
+    await borrado.close()
+
+    with pytest.raises(reread_service.RereadFileDeletedError):
+        await asyncio.wait_for(deshacer, 60)
+    assert await _vivos(sm, fid) == (0, 0), "el deshacer des-anuló los originales"
+    async with sm() as s:
+        run = await s.get(DataRepairRun, r.run_id)
+        assert run is not None and run.status == "APPLIED"

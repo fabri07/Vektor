@@ -335,3 +335,30 @@ async def test_con_el_archivo_vivo_releer_y_deshacer_siguen_andando(
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "REVERTED"
     assert await _vivos(db_session, fid) == (2, 2)
+
+
+async def test_no_se_encola_un_run_de_un_archivo_borrado(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """``start_background_apply`` también lo mira: el run nacería muerto. Por HTTP
+    lo ataja antes ``validate_ready_to_apply``; acá se llama directo."""
+    tid = sample_tenant.tenant_id
+    fid = await _importar(db_session, tid)
+    run, fresh = await reread_service.start_or_resume_preview_session(db_session, fid, tid)
+    await reread_service.preview_reread(db_session, fid, tid, fresh_override=fresh, run=run)
+    reread_service.mark_session_ready_to_apply(run)
+    run_id = run.id
+    await db_session.commit()
+    await db_session.execute(
+        update(UploadedFile).where(UploadedFile.id == fid).values(deleted_at=func.now())
+    )
+    await db_session.commit()
+    await db_session.refresh(run)
+
+    with pytest.raises(reread_service.RereadFileDeletedError):
+        await reread_service.start_background_apply(db_session, fid, tid, existing_run=run)
+    await db_session.rollback()
+
+    db_session.expire_all()
+    sigue = await db_session.get(DataRepairRun, run_id)
+    assert sigue is not None and sigue.status == "READY_TO_APPLY", "no se encoló"

@@ -12,7 +12,7 @@ import {
   type RereadNotRevertedEntity,
   type RereadDataLoss,
 } from "@/services/ingestion.service";
-import { mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
+import { errorCode, mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
 import { useToastStore } from "@/stores/toastStore";
 import { Modal } from "@/components/ui/Modal";
 import { TableSearch } from "@/components/ui/TableSearch";
@@ -342,6 +342,16 @@ export function FileListSection() {
     },
   });
 
+  // I3-1/I4-1/I4-2: el archivo se borró (otra pestaña) mientras la relectura
+  // estaba abierta. No hay sesión que retomar: se cierra y la lista se refresca
+  // para que deje de mostrarlo.
+  function cerrarSiElArchivoSeBorro(code: string | null | undefined): void {
+    if (code !== "REREAD_FILE_DELETED") return;
+    setReread(null);
+    void queryClient.invalidateQueries({ queryKey: ["ingestion-files"] });
+    void queryClient.invalidateQueries({ queryKey: ["ingestion-files-count"] });
+  }
+
   const reprocessMutation = useMutation({
     mutationFn: (fileId: string) => ingestionService.reprocessFile(fileId),
     onSuccess: () => {
@@ -374,9 +384,10 @@ export function FileListSection() {
           : prev,
       );
     },
-    onError: () => {
+    onError: (e) => {
       setReread(null);
-      addToast("No se pudo previsualizar la relectura.", "error");
+      cerrarSiElArchivoSeBorro(errorCode(e));
+      addToast(mensajeDelServidor(e) ?? "No se pudo previsualizar la relectura.", "error");
     },
   });
 
@@ -417,12 +428,14 @@ export function FileListSection() {
           : prev,
       );
     },
-    onError: (_err, { fileId }) => {
-      // Volver a la fase preview para que el usuario pueda reintentar.
+    onError: (e, { fileId }) => {
+      // Volver a la fase preview para que el usuario pueda reintentar (salvo
+      // que el archivo se haya borrado: ahí se cierra).
       setReread((prev) =>
         prev && prev.fileId === fileId ? { ...prev, phase: "preview" } : prev,
       );
-      addToast("No se pudo iniciar la relectura.", "error");
+      cerrarSiElArchivoSeBorro(errorCode(e));
+      addToast(mensajeDelServidor(e) ?? "No se pudo iniciar la relectura.", "error");
     },
   });
 
@@ -542,8 +555,9 @@ export function FileListSection() {
         setNotRevertedNotice(null);
       }
     },
-    onError: () => {
-      addToast("No se pudo deshacer la relectura.", "error");
+    onError: (e) => {
+      cerrarSiElArchivoSeBorro(errorCode(e));
+      addToast(mensajeDelServidor(e) ?? "No se pudo deshacer la relectura.", "error");
     },
   });
 
@@ -1097,7 +1111,10 @@ export function FileListSection() {
                           : prev,
                       )
                     }
-                    onError={(message) => addToast(message, "error")}
+                    onError={(message, code) => {
+                      cerrarSiElArchivoSeBorro(code);
+                      addToast(message, "error");
+                    }}
                   />
                 </div>
 

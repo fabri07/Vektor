@@ -460,9 +460,11 @@ async def _load_file(
     """El archivo, borrado o no: quien lo pide decide con ``_exigir_archivo_vivo``.
 
     ``bloquear``: con la fila tomada (``FOR UPDATE``) y releída de la base, no de
-    la sesión. Lo usan el apply y el deshacer, DESPUÉS del candado de importación
-    que también toma el borrado: así el ``deleted_at`` que leen es el vigente y
-    un borrado no se cuela hasta que commiteen."""
+    la sesión. Lo usan el apply y el deshacer DESPUÉS del candado de importación.
+    Lo que los serializa contra el borrado es ese candado —el DELETE lo toma
+    antes de marcar ``deleted_at``—: el ``deleted_at`` que leen es el vigente y un
+    borrado no se cuela hasta que commiteen. El ``FOR UPDATE`` es defensa
+    adicional, por si algún día otro camino marca el archivo sin el candado."""
     stmt = select(UploadedFile).where(
         UploadedFile.id == file_id,
         UploadedFile.tenant_id == tenant_id,
@@ -4674,6 +4676,8 @@ async def start_background_apply(
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
+    # I4-1: un run de un archivo borrado nacería muerto (el worker lo cierra).
+    _exigir_archivo_vivo(file)
 
     if existing_run is not None:
         # UPDATE atómico condicionado por status, no una mutación ORM directa:
