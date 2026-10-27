@@ -1635,16 +1635,25 @@ async def delete_file(
             )
         except stock_service.RevertirDejaStockNegativoError as exc:
             # I4-5: todo o nada — ni el archivo queda marcado como borrado.
+            # Si la causa es que el archivo respalda ventas de otra fuente
+            # (B·5e-2), ese motivo es el más concreto y gana sobre el del stock.
+            await session.flush()
+            _perdidas = await ventas_que_pierden_respaldo(
+                session, tenant.tenant_id, _antes, _con_fuente
+            )
             await session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail=exc.detalle_http()
-            ) from exc
-        await session.flush()
-        _perdidas = await ventas_que_pierden_respaldo(
-            session, tenant.tenant_id, _antes, _con_fuente
-        )
+            if not _perdidas.total:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT, detail=exc.detalle_http()
+                ) from exc
+        else:
+            await session.flush()
+            _perdidas = await ventas_que_pierden_respaldo(
+                session, tenant.tenant_id, _antes, _con_fuente
+            )
+            if _perdidas.total:
+                await session.rollback()
         if _perdidas.total:
-            await session.rollback()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
