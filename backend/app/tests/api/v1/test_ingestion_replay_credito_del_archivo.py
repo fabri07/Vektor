@@ -16,6 +16,11 @@ Lo que este camino todavía no gatea —y por eso hay un test que lo fija— es 
 venta de un producto que el propio archivo CREA: al pre-escanear no existe, no
 entra como candidata y la venta se importa sin validar. F-F.2 lo convierte en un
 descuento pendiente contado, en vez del silencio actual.
+
+I2-3: la tabla de ventas de estos tests ya NO se respalda a sí misma. Su
+«cantidad» se leía como el stock del producto (una apertura inventada con el
+costo de la fila) y esa apertura respaldaba las ventas en B·5e. Ahora una tabla
+de ventas no declara stock, así que sus ventas sin compra previa van a «Otros».
 """
 
 from __future__ import annotations
@@ -47,11 +52,12 @@ _PRODUCTO = "Vela aromatica 200g"
 def _summary() -> dict[str, Any]:
     """Una sola tabla que es a la vez catálogo y libro de ventas.
 
-    B·5e: cada fila trae su ``costo`` (1200): el stock inicial que el archivo
-    declara tiene costo y así respalda a las ventas del mismo archivo.
-
     `has_producto` y `has_venta` juntos es lo que hace que el confirm cree el
     producto Y registre la venta desde LA MISMA fila — el caso sin saldo previo.
+
+    I2-3: cada fila trae su ``costo`` (1200), pero la tabla no declara stock —su
+    «cantidad» es la de la venta—, así que el producto nace sin stock inicial y
+    las ventas no tienen compra previa (B·5e): van a «Otros».
     """
     # Dos filas del mismo producto: la del 03/03 entra en un stock de 2, la del
     # 10/03 no. Con una sola fila no se podría distinguir un gate que elige de uno

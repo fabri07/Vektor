@@ -6347,6 +6347,12 @@ async def _insert_confirmed_data_impl(
                 _cantidad_heuristica = _find_col(headers, _CANTIDAD_COLS)
                 if _cantidad_heuristica:
                     _usadas.add(_cantidad_heuristica)
+            if wants_gastos:
+                # El costo unitario lo consume la compra de mercadería (mismo
+                # lector que `exp_cost_col`, más abajo): no se perdió.
+                _costo_de_compra = _find_col(headers, _COSTO_UNITARIO_COLS)
+                if _costo_de_compra:
+                    _usadas.add(_costo_de_compra)
             _heuristicas = (stock_col, precio_col, costo_col)
             stock_col = target_to_col.get("stock_units")
             precio_col = target_to_col.get("sale_price_ars")

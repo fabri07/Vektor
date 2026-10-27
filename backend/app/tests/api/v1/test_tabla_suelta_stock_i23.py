@@ -280,7 +280,8 @@ async def test_el_confirm_avisa_el_stock_descartado(
     que la pantalla muestra al terminar el confirm."""
     tid = sample_tenant.tenant_id
     filas = [
-        {"Fecha": hace(5).isoformat(), "Producto": "Mate", "Total": "3000", "Stock": "18"},
+        {"Fecha": hace(5).isoformat(), "Producto": "Mate", "Total": "3000", "Stock": "18",
+         "Precio de venta": "3000"},
     ]
     record = UploadedFile(
         tenant_id=tid, uploaded_by=None, original_filename="ventas.csv",
@@ -312,5 +313,37 @@ async def test_el_confirm_avisa_el_stock_descartado(
     assert r.status_code == 200, r.text
     avisos = [w for w in r.json()["warnings"] if "«Stock»" in w]
     assert len(avisos) == 1
+    assert "las columnas «Precio de venta» y «Stock»" in avisos[0]
     assert "subí el catálogo en una hoja o archivo de productos" in avisos[0]
     assert (await _producto(db_session, tid, "Mate")).stock_units == 0
+
+
+async def test_el_costo_unitario_que_usa_la_compra_no_se_avisa_como_descartado(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """Compras + productos: el «Costo unitario» lo consume la compra de mercadería
+    (el producto queda con ese costo), así que no es un dato perdido."""
+    tid = sample_tenant.tenant_id
+    f = await _archivo(db_session, tid)
+    filas = [
+        {"Fecha": hace(5).isoformat(), "Producto": "Fideos", "Cantidad": "10",
+         "Costo unitario": "120", "Total": "1200", "Categoria": "Mercadería"},
+    ]
+    counts = await insert_confirmed_data(
+        db_session, tid,
+        {
+            "file_type": "spreadsheet", "inferred_type": "gastos", "has_gasto": True,
+            "has_producto": True, "gastos_detectados": filas,
+        },
+        {"gastos": True, "productos": True},
+        uploaded_file_id=f.id,
+        column_mappings={
+            "Fecha": "expense_date", "Producto": "product_name",
+            "Cantidad": "quantity", "Total": "amount", "Categoria": "category",
+        },
+    )
+    await db_session.commit()
+
+    fideos = await _producto(db_session, tid, "Fideos")
+    assert fideos.unit_cost_ars == Decimal("120")
+    assert "catalogo_descartado_tabla_transaccional" not in counts

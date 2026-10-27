@@ -4341,11 +4341,14 @@ async def confirm_file(
         # I2-3: el stock, el precio o el costo de una tabla de ventas o compras no
         # pisan el catálogo. Sin el aviso, el stock que el archivo traía se perdía
         # en silencio y el resumen sólo decía cuántos productos se cargaron.
-        _columnas = ", ".join(
-            f"«{c}»" for c in counts.get("columnas_catalogo_descartadas") or []
+        _nombres = [f"«{c}»" for c in counts.get("columnas_catalogo_descartadas") or []]
+        _columnas = (
+            f"las columnas {', '.join(_nombres[:-1])} y {_nombres[-1]}"
+            if len(_nombres) > 1
+            else f"la columna {''.join(_nombres)}"
         )
         warnings.append(
-            f"No se cargó en los productos la columna {_columnas}: el stock, el "
+            f"No se cargó en los productos {_columnas}: el stock, el "
             "precio y el costo de una tabla de ventas o compras no se cargan. Para "
             "cargarlos, subí el catálogo en una hoja o archivo de productos."
         )
