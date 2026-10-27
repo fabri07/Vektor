@@ -80,14 +80,14 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I6-4 | grave | confirmado | I-A | La letra fiscal se descarta de la clave: Factura A y Factura B con el mismo punto de venta y número colisionan (en AFIP numeran por separado) | mergeado | #203 `5a34b018` (aditivo, no reversible) |
 | I6-7 | grave | confirmado | I-A | Resolver una venta o gasto desde «Otros» no reclama la identidad del comprobante: un reimport posterior del mismo documento lo vuelve a aplicar (duplicado) | pendiente |  |
 | I5-4 | grave | confirmado | I-A | sku y barcode no son SINGLE_VALUE: dos columnas al mismo código de identidad se resuelven por orden de columna, sin aviso | pendiente |  |
-| I6-2 | grave | confirmado | I-A | Identidad de operación: sentencias sin tandas pasan el tope de 32.767 parámetros de asyncpg; falla el confirm de archivos grandes y el borrado/relectura de cualquier archivo con más de ~16k operaciones | pendiente |  |
+| I6-2 | grave | confirmado | I-A | Identidad de operación: sentencias sin tandas pasan el tope de 32.767 parámetros de asyncpg; falla el confirm de archivos grandes y el borrado/relectura de cualquier archivo con más de ~16k operaciones | mergeado | #207 `0affce51` |
 | I6-10 | normal | plausible | I-A | Celdas numéricas float de xlsx generados por script ('123.0', '1024.0') producen claves de identidad falsas o distintas | pendiente |  |
 | I3-1 | grave | confirmado | I-B | La relectura (preview, apply y undo) no respeta el borrado del archivo: un archivo borrado vuelve a tener ventas, gastos y stock vivos, y ya no se pueden revertir | mergeado | #201 `9cdd4529` |
 | I4-1 | grave | confirmado | I-B | La relectura se aplica sobre un archivo YA BORRADO y resucita todos sus datos, sin forma de volver a borrarlo | mergeado | #201 `9cdd4529` |
 | I4-2 | grave | confirmado | I-B | «Deshacer relectura» funciona sobre un archivo borrado: des-anula sus ventas, gastos y stock originales | mergeado | #201 `9cdd4529` |
 | I4-3 | grave | confirmado | I-B | Deshacer relectura borra (hard delete) ventas y gastos que el usuario editó DESPUÉS de releer | pendiente |  |
 | I4-4 | grave | confirmado | I-B | El undo de relectura no revierte «Otros»: quedan pendientes que duplican ventas restauradas | pendiente |  |
-| I4-5 | grave | confirmado | I-B | Borrar un archivo, deshacer o releer deja stock_units NEGATIVO (void_movement sin piso ni chequeo) | pendiente |  |
+| I4-5 | grave | confirmado | I-B | Borrar un archivo, deshacer o releer deja stock_units NEGATIVO (void_movement sin piso ni chequeo) | mergeado | #207 `0affce51` |
 | I4-6 | grave | confirmado | I-B | La relectura nunca vuelve a leer las filas que el import anterior mandó a «Otros» (sin fecha, sin monto, total, conflicto, venta sin stock o sin compra) | pendiente |  |
 | I3-6 | normal | confirmado | I-B | «La relectura respeta el lease del import» se verifica sólo en el endpoint: el worker de la relectura aplica sin volver a mirar el lease | pendiente |  |
 | I4-7 | normal | confirmado | I-B | Con autoflush=False, el borrado ve como «vivas» las ventas y gastos del propio archivo y conserva sus maestros y productos con un motivo falso | pendiente |  |
