@@ -66,6 +66,10 @@ logger = get_logger(__name__)
 # 'other' (desconocido). Definición de caja para el health score.
 _LIQUID_METHODS = ("cash", "transfer", "qr", "debit_card")
 
+# Antigüedad máxima (en días AR) de un arqueo para tomar su contado como saldo
+# de caja (D-5): hoy o ayer. Uno más viejo no mide la caja de hoy.
+ARQUEO_VIGENTE_DIAS = 1
+
 CACHE_TTL_SECONDS = 60 * 60 * 24  # 24 h
 
 
@@ -664,12 +668,23 @@ async def compute_business_state(
 
     # ── 3c. Último arqueo (CashClose) — saldo medido si existe ──────────────────
     cash_close_result = await session.execute(
-        select(CashClose.counted_total_ars)
+        select(CashClose.counted_total_ars, CashClose.close_date)
         .where(CashClose.tenant_id == tenant_id)
         .order_by(CashClose.close_date.desc())
         .limit(1)
     )
-    latest_counted_cash = cash_close_result.scalar_one_or_none()
+    latest_close = cash_close_result.one_or_none()
+    latest_counted_cash = latest_close[0] if latest_close is not None else None
+    latest_close_date = latest_close[1] if latest_close is not None else None
+    # D-5: el contado es la recaudación neta de UN día, no un saldo que se
+    # arrastra. Sólo un arqueo de hoy o ayer (AR) define la caja; uno de hace
+    # meses le ganaba al modo flujo con una caja que no medía nada actual.
+    arqueo_vigente = latest_close_date is not None and latest_close_date >= (
+        today_ar() - timedelta(days=ARQUEO_VIGENTE_DIAS)
+    )
+    # Y sólo un arqueo dentro de la ventana es caja observada para la
+    # completitud (invariante 5b): uno viejo no es dato del período.
+    arqueo_en_ventana = latest_close_date is not None and latest_close_date >= window_start
 
     # total expense count (for fingerprint)
     expense_count_result = await session.execute(
@@ -736,7 +751,8 @@ async def compute_business_state(
         dia_ar=today_ar().isoformat(),
         neto_marca=await _marca_del_neto(session, tenant_id),
         # El último arqueo define la caja (M·2d-3): uno nuevo invalida el caché.
-        arqueo=str(latest_counted_cash),
+        # Con su fecha (D-5): el mismo contado otro día es otro arqueo.
+        arqueo=f"{latest_counted_cash}:{latest_close_date}",
         # Un cobro de fiado ya no mueve `sale_count` (no es venta, T1) pero sí la
         # caja: sin esto el recálculo servía el flujo líquido viejo 24 h.
         liquid_in=str(liquid_inflow_est),
@@ -790,7 +806,8 @@ async def compute_business_state(
         real_fixed_expenses, profile.monthly_fixed_expenses_estimate_ars
     )
     # Tiering de la fuente de caja (de más a menos confiable):
-    #   1. arqueo       → saldo medido (CashClose.counted_total_ars)
+    #   1. arqueo       → saldo medido (CashClose.counted_total_ars), sólo
+    #                     de hoy o ayer AR (D-5)
     #   2. onboarding   → estimado del perfil (solo si onboarding_recent)
     #   3. flujo        → hay movimientos líquidos pero no saldo → modo cobertura
     #   4. desconocido  → sin nada → caja excluida del score (no-invention)
@@ -799,7 +816,7 @@ async def compute_business_state(
     # cierre válido (M·2d-3: se retiró más de lo que entró), pero no un saldo —
     # en el cajón quedó el fondo menos esa diferencia. La caja se mide con el
     # tier siguiente; el arqueo sigue contando como dato observado.
-    if latest_counted_cash is not None and latest_counted_cash >= 0:
+    if arqueo_vigente and latest_counted_cash is not None and latest_counted_cash >= 0:
         cash_on_hand_est = Decimal(str(latest_counted_cash))
         cash_source = "arqueo"
     elif onboarding_recent and profile.cash_on_hand_estimate_ars is not None:
@@ -824,8 +841,9 @@ async def compute_business_state(
     has_inventory_cost = monthly_inventory_cost_est > 0
     has_fixed_expenses = monthly_fixed_expenses_est > 0
     # Caja "presente" si hay cualquier fuente real (arqueo, estimado o flujo líquido).
-    # Un arqueo negativo no es saldo (M·2d-3) pero sigue siendo caja observada.
-    has_cash_on_hand = cash_source != "desconocido" or latest_counted_cash is not None
+    # Un arqueo negativo no es saldo (M·2d-3) pero sigue siendo caja observada;
+    # uno fuera de la ventana, no (D-5).
+    has_cash_on_hand = cash_source != "desconocido" or arqueo_en_ventana
 
     # Procedencia de cada input: ¿lo respalda un dato del negocio, o sólo la
     # respuesta del dueño en el alta? Es la distinción que `_compute_completeness`
@@ -854,7 +872,7 @@ async def compute_business_state(
         # valiera 8 el día 1 y 20 el día 8 sin que cambie un solo dato. Acá la
         # pregunta es otra: ¿hay evidencia real de caja, sin importar qué fuente
         # ganó el desempate?
-        cash_observado=latest_counted_cash is not None or has_liquid_movements,
+        cash_observado=arqueo_en_ventana or has_liquid_movements,
         products_observado=real_product_count > 0,
         suppliers_observado=real_supplier_count > 0,
     )
