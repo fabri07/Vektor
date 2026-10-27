@@ -496,7 +496,9 @@ def test_fingerprint_changes_when_input_changes() -> None:
     decision2 = StockDecision(STOCK_SUM, 6, "x")  # delta cambió
     assert svc.compute_group_fingerprint(recs, _id(1), decision2) != base
 
-    assert svc.compute_group_fingerprint(recs, _id(1), decision, decision_version=2) != base
+    assert svc.compute_group_fingerprint(
+        recs, _id(1), decision, decision_version=DECISION_VERSION + 1
+    ) != base
 
 
 # ── Dry-run (SQLite) ─────────────────────────────────────────────────────────────
