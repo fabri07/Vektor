@@ -65,6 +65,7 @@ from app.domain.operation_identity import (
     LineaEfectiva,
     SinClave,
     clave_de_operacion,
+    clave_legada_k1,
     hay_columnas_de_identidad,
     huella_de_contenido,
 )
@@ -226,15 +227,35 @@ async def planificar_identidades(
 
     plan = PlanDeIdentidad()
     documentos: dict[str, _Documento] = {}
+    # I6-3/I6-4: la clave que cada fila producía con el formato viejo, cuando
+    # cambió. Se agrupa EXACTAMENTE como la agrupaba la regla vieja (por clave
+    # legada, los renglones repetidos de una clave de línea afuera), porque la
+    # huella guardada se calculó sobre ese grupo.
+    legada_de: dict[int, str] = {}
+    lineas_de: dict[int, LineaEfectiva] = {}
+    grupos_legados: dict[str, list[LineaEfectiva]] = {}
+
+    def linea_de(indice: int, fila: dict[str, Any]) -> LineaEfectiva:
+        if indice not in lineas_de:
+            lineas_de[indice] = _linea_efectiva(fila, cols, entity)
+        return lineas_de[indice]
 
     for indice, fila in enumerate(rows):
+        legada = clave_legada_k1(fila, cols, entity)
+        if legada is not None:
+            legada_de[indice] = legada.clave
+            grupo = grupos_legados.get(legada.clave)
+            if grupo is None:
+                grupos_legados[legada.clave] = [linea_de(indice, fila)]
+            elif legada.granularidad != "linea":
+                grupo.append(linea_de(indice, fila))
         resultado = clave_de_operacion(fila, cols, entity)
         if isinstance(resultado, SinClave):
             plan.decision[indice] = DECISION_SIN_CLAVE
             plan.motivo[indice] = resultado.texto
             continue
         assert isinstance(resultado, ClaveDeOperacion)
-        linea = _linea_efectiva(fila, cols, entity)
+        linea = linea_de(indice, fila)
         doc = documentos.get(resultado.clave)
         if doc is None:
             documentos[resultado.clave] = _Documento(
@@ -251,6 +272,8 @@ async def planificar_identidades(
             # línea, así que ahí no se decide nada y manda el documento entero.
             repetida = huella_de_contenido([linea]) == huella_de_contenido([doc.lineas[0]])
             plan.decision[indice] = DECISION_YA_APLICADA if repetida else DECISION_CONFLICTO
+            # Decidida acá adentro: la clave legada no tiene nada que agregar.
+            legada_de.pop(indice, None)
             if not repetida:
                 plan.motivo[indice] = (
                     "Este archivo trae dos veces el mismo renglón (mismo ID de "
@@ -266,13 +289,18 @@ async def planificar_identidades(
         doc.lineas.append(linea)
         plan.clave[indice] = resultado.clave
 
-    if not documentos:
+    if not documentos and not legada_de:
         return plan
 
     contenidos = {clave: huella_de_contenido(doc.lineas) for clave, doc in documentos.items()}
 
     ganadas, existentes = await _reclamar(
-        session, tenant_id, file_id, contenidos=contenidos, entity=entity
+        session,
+        tenant_id,
+        file_id,
+        contenidos=contenidos,
+        entity=entity,
+        leer_ademas=sorted(grupos_legados),
     )
     plan.reclamadas = ganadas
 
@@ -296,6 +324,16 @@ async def planificar_identidades(
                     "revisala antes de aplicarla."
                 )
 
+    _decidir_por_legada(
+        plan,
+        entity=entity,
+        documentos=documentos,
+        legada_de=legada_de,
+        lineas_de=lineas_de,
+        grupos_legados=grupos_legados,
+        existentes=existentes,
+    )
+
     logger.info(
         "ingestion.identidad.plan",
         tenant_id=str(tenant_id),
@@ -309,6 +347,91 @@ async def planificar_identidades(
     return plan
 
 
+#: Lo que ve el usuario en «Otros» cuando lo que choca es una identidad guardada
+#: con el formato viejo (antes de I6-3/I6-4), que no distinguía la letra ni la
+#: entidad: no se puede saber si es el mismo documento corregido o el otro.
+MOTIVO_CONFLICTO_LEGADO = (
+    "Ya hay una operación cargada con el mismo comprobante o ID de origen, de "
+    "antes de que Véktor distinguiera la letra del comprobante (A/B) o si es una "
+    "venta o un gasto, y con datos distintos. Puede ser otro comprobante o una "
+    "corrección: revisala antes de aplicarla."
+)
+
+
+def _decidir_por_legada(
+    plan: PlanDeIdentidad,
+    *,
+    entity: str,
+    documentos: dict[str, _Documento],
+    legada_de: dict[int, str],
+    lineas_de: dict[int, LineaEfectiva],
+    grupos_legados: dict[str, list[LineaEfectiva]],
+    existentes: dict[str, tuple[uuid.UUID, str, str]],
+) -> None:
+    """I6-3/I6-4: lo que la clave nueva da por NUEVO (o sin clave) se vuelve a
+    mirar contra la identidad guardada con el formato viejo.
+
+    Sin esto, el cambio de formato haría que reimportar un archivo ya importado
+    aplicara todo de nuevo: la clave nueva no está guardada en ningún lado. Las
+    claves viejas no se migran (sería reescribir identidades de plata real sin
+    el OK del dueño); se las sigue buscando. La decisión es conservadora:
+
+    * La identidad vieja tiene que ser de la MISMA entidad. Es justo lo que la
+      clave vieja no distinguía: en una tabla mixta la venta reclamaba la clave
+      del gasto (I6-3). Si la guardada es de la otra entidad, no dice nada de
+      ésta, y los gastos que la regla vieja omitió por error entran ahora.
+    * Mismo contenido → ``ya_aplicada``: se compara contra el grupo que armaba
+      la regla vieja (Factura A y B del mismo número en un archivo eran UN
+      documento) y, si no, contra el documento nuevo solo (el A que llegó en
+      otro archivo que el B).
+    * Contenido distinto → ``conflicto``, nunca ``nueva``: con la letra
+      descartada, «la otra letra» y «el mismo documento corregido» son
+      indistinguibles, y aplicarla podría duplicar. Va a «Otros» con la clave
+      VIEJA, que es la que está tomada: así el candado de «Otros» (409) la ve.
+
+    Las reclamaciones nuevas de esas filas no producen efecto y se devuelven al
+    cierre, como cualquier otra.
+    """
+    previas: dict[str, tuple[uuid.UUID, str]] = {}
+    for legada in grupos_legados:
+        previa = existentes.get(legada)
+        if previa is not None and previa[2] == entity:
+            previas[legada] = (previa[0], previa[1])
+    if not previas:
+        return
+
+    unidades: list[tuple[str, list[int]]] = []
+    for doc in documentos.values():
+        primera = doc.filas[0]
+        de_la_doc = legada_de.get(primera)
+        if (
+            de_la_doc is not None
+            and de_la_doc in previas
+            and plan.decision.get(primera) == DECISION_NUEVA
+        ):
+            unidades.append((de_la_doc, list(doc.filas)))
+    sin_clave: dict[str, list[int]] = defaultdict(list)
+    for indice, legada in legada_de.items():
+        if legada in previas and plan.decision.get(indice) == DECISION_SIN_CLAVE:
+            sin_clave[legada].append(indice)
+    unidades.extend(sin_clave.items())
+
+    for legada, filas in unidades:
+        ident, guardada = previas[legada]
+        igual = huella_de_contenido(grupos_legados[legada]) == guardada or (
+            huella_de_contenido([lineas_de[i] for i in filas]) == guardada
+        )
+        decision = DECISION_YA_APLICADA if igual else DECISION_CONFLICTO
+        plan.identity_id[legada] = ident
+        for indice in filas:
+            plan.decision[indice] = decision
+            plan.clave[indice] = legada
+            if igual:
+                plan.motivo.pop(indice, None)
+            else:
+                plan.motivo[indice] = MOTIVO_CONFLICTO_LEGADO
+
+
 async def _reclamar(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -316,12 +439,18 @@ async def _reclamar(
     *,
     contenidos: dict[str, str],
     entity: str,
-) -> tuple[set[str], dict[str, tuple[uuid.UUID, str]]]:
+    leer_ademas: list[str] | None = None,
+) -> tuple[set[str], dict[str, tuple[uuid.UUID, str, str]]]:
     """Toma el candado de todas las claves del archivo en UNA sentencia.
 
-    Devuelve ``(claves ganadas, {clave: (id, content_hash)} de las que ya
-    estaban)``. La segunda query sólo se paga si algo se perdió.
+    Devuelve ``(claves ganadas, {clave: (id, content_hash, entity_type)}``) de
+    las ganadas, las perdidas y las de ``leer_ademas`` (las claves con el
+    formato viejo, I6-3/I6-4, que sólo se leen y nunca se reclaman). Todo eso se
+    lee en UNA query, después del INSERT.
     """
+    if not contenidos:
+        # Sólo filas sin clave nueva con clave vieja: no hay nada que reclamar.
+        return set(), await _leer_con_entidad(session, tenant_id, sorted(set(leer_ademas or ())))
     filas = [
         {
             "id": uuid.uuid4(),
@@ -357,21 +486,22 @@ async def _reclamar(
         )
     else:  # pragma: no cover — sin ON CONFLICT no hay candado: se declara nulo
         logger.warning("ingestion.identidad.dialecto_sin_upsert", dialecto=dialecto)
-        return set(), await _leer_existentes(session, tenant_id, list(contenidos))
+        return set(), await _leer_con_entidad(
+            session, tenant_id, sorted(set(contenidos) | set(leer_ademas or ()))
+        )
 
-    ganadas = set((await session.execute(sentencia)).scalars().all())
-    perdidas = [clave for clave in contenidos if clave not in ganadas]
-    existentes = await _leer_existentes(session, tenant_id, perdidas) if perdidas else {}
+    ganadas: set[str] = set((await session.execute(sentencia)).scalars().all())
     # Las ganadas también necesitan su id para colgar vínculos: se leen de una,
-    # junto con las perdidas, en vez de pagar una query por grupo.
-    if ganadas:
-        existentes.update(await _leer_existentes(session, tenant_id, sorted(ganadas)))
+    # junto con las perdidas y las legadas, en vez de pagar una query por grupo.
+    existentes = await _leer_con_entidad(
+        session, tenant_id, sorted(set(contenidos) | set(leer_ademas or ()))
+    )
     return ganadas, existentes
 
 
-async def _leer_existentes(
+async def _leer_con_entidad(
     session: AsyncSession, tenant_id: uuid.UUID, claves: list[str]
-) -> dict[str, tuple[uuid.UUID, str]]:
+) -> dict[str, tuple[uuid.UUID, str, str]]:
     if not claves:
         return {}
     filas = (
@@ -380,13 +510,27 @@ async def _leer_existentes(
                 OperationIdentity.identity_key,
                 OperationIdentity.id,
                 OperationIdentity.content_hash,
+                OperationIdentity.entity_type,
             ).where(
                 OperationIdentity.tenant_id == tenant_id,
                 OperationIdentity.identity_key.in_(claves),
             )
         )
     ).all()
-    return {clave: (ident, contenido) for clave, ident, contenido in filas}
+    return {
+        clave: (ident, contenido, entidad) for clave, ident, contenido, entidad in filas
+    }
+
+
+async def _leer_existentes(
+    session: AsyncSession, tenant_id: uuid.UUID, claves: list[str]
+) -> dict[str, tuple[uuid.UUID, str]]:
+    return {
+        clave: (ident, contenido)
+        for clave, (ident, contenido, _) in (
+            await _leer_con_entidad(session, tenant_id, claves)
+        ).items()
+    }
 
 
 async def cerrar_plan(
@@ -600,7 +744,7 @@ async def restaurar_vinculos(
         _, existentes = await _reclamar(
             session, tenant_id, file_id, contenidos=contenidos, entity=entidad
         )
-        ids.update({clave: ident for clave, (ident, _) in existentes.items()})
+        ids.update({clave: ident for clave, (ident, _, _) in existentes.items()})
     nuevos = [
         (ids[ident["identity_key"]], tipo, eid)
         for tipo, eid, ident in vinculos
