@@ -11338,11 +11338,17 @@ async def bulk_import_unclassified(
         UNCLASSIFIED_STATUS_IMPORTED,
         UNCLASSIFIED_STATUS_PENDING,
         UnclassifiedRecord,
+        unclassified_row_ref,
     )
 
     # F3-T3: importación en lote crea productos/stock por fuera de
     # ProductRepository.save. Shared lock ANTES de mutar. No-op en SQLite.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+    # I6-7: el lote reclama identidades de comprobante al final; con el candado
+    # de import (el mismo orden que el confirm: después del shared y antes de
+    # leer nada) un import en paralelo no puede tomar la misma clave entre el
+    # chequeo de cada fila y el reclamo.
+    await maintenance_lock_service.acquire_import_lock(session, tenant_id)
 
     entities = [entity_filter] if entity_filter else ["sale", "expense"]
     records = (
@@ -11376,6 +11382,7 @@ async def bulk_import_unclassified(
     _reclamos_otros: dict[
         tuple[str, uuid.UUID | None], list[tuple[str, str, str, uuid.UUID]]
     ] = defaultdict(list)
+    _archivo_del_reclamo: dict[tuple[str, str], uuid.UUID | None] = {}
 
     for i, rec in enumerate(records):
         # B1: idempotencia anclada en el UnclassifiedRecord (importar el mismo
@@ -11412,6 +11419,16 @@ async def bulk_import_unclassified(
             and await aplicada_desde_otro_origen(
                 session, tenant_id, _reclamo, _entidad_reclamo, rec.uploaded_file_id
             )
+        ):
+            counts["needs_manual"] += 1
+            continue
+        # Lo mismo dentro del lote: los reclamos van al final, así que la consulta
+        # de arriba no ve la fila de OTRO archivo con el mismo comprobante que
+        # este lote ya importó (dos exportaciones solapadas). La primera entra; la
+        # segunda, al modal. Un renglón hermano del mismo archivo no frena.
+        _visto = _archivo_del_reclamo.get((_entidad_reclamo, _reclamo), False)
+        if _reclamo and _visto is not False and (
+            _visto is None or _visto != rec.uploaded_file_id
         ):
             counts["needs_manual"] += 1
             continue
@@ -11487,6 +11504,11 @@ async def bulk_import_unclassified(
                 notes=desc or "Importado desde Otros",
                 provenance="REAL",
                 source_upload_id=rec.uploaded_file_id,
+                # Como `reclassify`: la venta nacida de esta fila se reconoce por
+                # su referencia (el revert de B·5g no la toma por un re-import).
+                source_row_ref=(
+                    unclassified_row_ref(rec.id) if rec.uploaded_file_id else None
+                ),
             )
             session.add(_venta_otros)
             _efecto_otros: tuple[str, uuid.UUID] = ("sale", _venta_otros.id)
@@ -11521,6 +11543,7 @@ async def bulk_import_unclassified(
             counts["imported_expenses"] += 1
 
         if _reclamo and _entidad_reclamo == _efecto_otros[0]:
+            _archivo_del_reclamo[(_entidad_reclamo, _reclamo)] = rec.uploaded_file_id
             _reclamos_otros[(_entidad_reclamo, rec.uploaded_file_id)].append(
                 (
                     _reclamo,

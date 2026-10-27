@@ -57,7 +57,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.operation_identity import (
@@ -668,6 +668,8 @@ async def liberar_identidades_de(
         .all()
     )
     huerfanas = afectadas - vivos
+    if vivos & afectadas:
+        await _resellar_sin_respaldo(session, tenant_id, sorted(vivos & afectadas))
     if not huerfanas:
         return 0
     await session.execute(
@@ -683,6 +685,62 @@ async def liberar_identidades_de(
         conservadas=len(afectadas - huerfanas),
     )
     return len(huerfanas)
+
+
+#: I6-7: el ``content_hash`` de una identidad que sobrevive sin ningún efecto del
+#: archivo que la describió. No coincide con ninguna huella (``c1:…``).
+CONTENIDO_SIN_RESPALDO = "sin_respaldo"
+
+
+async def _resellar_sin_respaldo(
+    session: AsyncSession, tenant_id: uuid.UUID, ids: list[uuid.UUID]
+) -> None:
+    """I6-7: la identidad que sigue tomada pero ya no tiene ningún efecto vivo del
+    archivo que la reclamó (``first_seen_upload_id``) deja de afirmar ese
+    contenido.
+
+    El caso: F1 carga el comprobante; F2 lo trae con otro importe y el dueño lo
+    aplica «pese al conflicto» (dos ventas para él). Borrar F1 deja viva sólo la
+    de F2, y la identidad conservaba la huella de F1: re-subir F1 la daba por
+    «ya aplicada» y la venta se perdía en silencio. Re-sellada, el reimport la ve
+    en conflicto y va a «Otros», donde el dueño decide. Si queda un efecto del
+    archivo que la reclamó (la relectura que conserva un renglón editado, el
+    hermano de una venta sacada por B·5e), la huella sigue siendo cierta y no se
+    toca.
+    """
+    con_archivo = (
+        await session.execute(
+            select(OperationIdentity.id, OperationIdentity.first_seen_upload_id).where(
+                OperationIdentity.tenant_id == tenant_id,
+                OperationIdentity.id.in_(ids),
+                OperationIdentity.first_seen_upload_id.is_not(None),
+            )
+        )
+    ).all()
+    if not con_archivo:
+        return
+    origen_de: dict[uuid.UUID, uuid.UUID | None] = {fila[0]: fila[1] for fila in con_archivo}
+    respaldadas = {
+        ident
+        for ident, origen in (
+            await session.execute(
+                select(
+                    OperationIdentityLink.identity_id, OperationIdentityLink.source_upload_id
+                ).where(OperationIdentityLink.identity_id.in_([i for i, _ in con_archivo]))
+            )
+        ).all()
+        if origen == origen_de[ident]
+    }
+    sin_respaldo = sorted(i for i, _ in con_archivo if i not in respaldadas)
+    if sin_respaldo:
+        await session.execute(
+            update(OperationIdentity)
+            .where(
+                OperationIdentity.tenant_id == tenant_id,
+                OperationIdentity.id.in_(sin_respaldo),
+            )
+            .values(content_hash=CONTENIDO_SIN_RESPALDO)
+        )
 
 
 async def vinculos_de(

@@ -803,15 +803,24 @@ async def _reclamar_identidad_de_la_fila(
     record: UnclassifiedRecord,
     entidad: str,
     efectos: list[uuid.UUID],
+    *,
+    aplicar_pese_al_conflicto: bool,
 ) -> None:
     """I6-7: el efecto que nace de resolver la fila toma la identidad de su
     comprobante (``reclamar_para_efectos``, el mismo candado que el import). Sin
     esto nacía sin identidad, y el reimport del mismo documento —otra
-    exportación, un período solapado— lo volvía a cargar."""
+    exportación, un período solapado— lo volvía a cargar.
+
+    Después de reclamar se vuelve a mirar el origen: entre el chequeo de
+    ``_exigir_identidad_libre`` y el reclamo otra resolución u otro import pudo
+    tomar el mismo comprobante. El ``INSERT … ON CONFLICT`` espera a que esa
+    transacción termine, así que acá ya se ve lo que dejó; si lo cargó otro
+    archivo, 409 y la transacción entera se revierte (la venta incluida).
+    """
     identidad = _identidad_de_la_fila(record, entidad)
     if identidad is None or not efectos:
         return
-    clave, contenido, _ = identidad
+    clave, contenido, en_conflicto = identidad
     await reclamar_para_efectos(
         session,
         tenant_id,
@@ -819,6 +828,14 @@ async def _reclamar_identidad_de_la_fila(
         entidad=entidad,
         pedidos=[(clave, contenido, entidad, eid) for eid in efectos],
     )
+    if (
+        not en_conflicto
+        and not aplicar_pese_al_conflicto
+        and await aplicada_desde_otro_origen(
+            session, tenant_id, clave, entidad, record.uploaded_file_id
+        )
+    ):
+        raise _identidad_tomada_409()
 
 
 async def _exigir_identidad_libre(
@@ -854,17 +871,21 @@ async def _exigir_identidad_libre(
             session, tenant_id, identidad[0], entidad, record.uploaded_file_id
         )
     if tomada:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "IMPORT_IDENTITY_TAKEN",
-                "message": (
-                    "Esta fila tiene el mismo comprobante que una operación ya "
-                    "cargada. Si la importás igual vas a tener las dos: revisá "
-                    "cuál corresponde."
-                ),
-            },
-        )
+        raise _identidad_tomada_409()
+
+
+def _identidad_tomada_409() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "IMPORT_IDENTITY_TAKEN",
+            "message": (
+                "Esta fila tiene el mismo comprobante que una operación ya "
+                "cargada. Si la importás igual vas a tener las dos: revisá "
+                "cuál corresponde."
+            ),
+        },
+    )
 
 
 async def _registrar_venta_desde_otros(
@@ -957,7 +978,14 @@ async def _registrar_venta_desde_otros(
     movimiento = await stock_service.decrement_for_sale(venta, session)
     if movimiento is not None and _upload_id is not None:
         movimiento.source_upload_id = _upload_id
-    await _reclamar_identidad_de_la_fila(session, tenant_id, record, "sale", [venta.id])
+    await _reclamar_identidad_de_la_fila(
+        session,
+        tenant_id,
+        record,
+        "sale",
+        [venta.id],
+        aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
+    )
     return venta
 
 
@@ -1070,7 +1098,12 @@ async def reclassify_record(
             session.add(_gasto)
             await session.flush()
             await _reclamar_identidad_de_la_fila(
-                session, tenant.tenant_id, record, "expense", [_gasto.id]
+                session,
+                tenant.tenant_id,
+                record,
+                "expense",
+                [_gasto.id],
+                aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
             )
             label = "gasto"
         elif body.entity_type == "customer":
@@ -1584,7 +1617,12 @@ async def resolve_purchase(
     # los del import (un vínculo por gasto de línea).
     await session.flush()
     await _reclamar_identidad_de_la_fila(
-        session, tenant.tenant_id, record, "expense", list(_compra.expense_ids)
+        session,
+        tenant.tenant_id,
+        record,
+        "expense",
+        list(_compra.expense_ids),
+        aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
     )
     record.status = UNCLASSIFIED_STATUS_IMPORTED
     record.resolved_at = datetime.now(UTC)

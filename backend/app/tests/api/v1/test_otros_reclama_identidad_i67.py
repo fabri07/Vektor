@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import unittest.mock
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -41,6 +42,7 @@ from app.application.services.ingestion_import_service import (
 from app.application.services.reparacion_ventas_sin_compra_service import reparar, revertir
 from app.domain.business_time import today_ar
 from app.domain.contrato_de_costo import ContratoDeCosto
+from app.persistence.db.session import get_db_session
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.operation_identity import OperationIdentity, OperationIdentityLink
 from app.persistence.models.product import Product
@@ -765,3 +767,191 @@ async def test_el_gasto_en_conflicto_reclasificado_queda_colgado(
     assert r.status_code == 200, r.text
     await _factura_de_luz(4000)
     assert [g.id for g in await _gastos(db_session, tid)] == [aplicado.id]
+
+
+# ── Revisión adversarial de #208 ─────────────────────────────────────────────
+
+
+async def test_borrar_el_otro_archivo_tras_aplicar_pese_al_conflicto_no_la_da_por_aplicada(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """F1 carga el comprobante por 1200; F2 lo trae por 1500 y el dueño lo aplica
+    igual (dos ventas). Borra F1 y lo vuelve a subir: la identidad seguía con la
+    huella de F1 y el reimport la daba por «ya aplicada» — la venta de 1200 se
+    perdía en silencio. Ahora va a «Otros» como conflicto, para decidir."""
+    tid = sample_tenant.tenant_id
+    vela = await producto_con_compra(db_session, tid, nombre=_VELA)
+    f1 = await _vender(client, auth_headers, db_session, sample_tenant, [_renglon(total=1200)])
+    await _vender(client, auth_headers, db_session, sample_tenant, [_renglon(total=1500)])
+    (registro,) = await _pendientes(db_session, tid)
+    r = await _reclasificar(
+        client, auth_headers, registro, _venta_de(vela.id, "1500"), pese_al_conflicto=True
+    )
+    assert r.status_code == 200, r.text
+    r = await client.delete(f"/api/v1/ingestion/files/{f1}?confirm=true", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert [v.amount for v in await _ventas(db_session, tid)] == [Decimal("1500")]
+
+    await _vender(client, auth_headers, db_session, sample_tenant, [_renglon(total=1200)])
+    assert [v.amount for v in await _ventas(db_session, tid)] == [Decimal("1500")]
+    (vuelta,) = await _pendientes(db_session, tid)
+    assert vuelta.row_data[IDENTITY_REF_KEY], "la venta de 1200 no quedó para decidir"
+
+
+async def test_revert_b5g_tras_resolver_un_renglon_en_lote_restaura_al_hermano(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Como el de arriba, pero el renglón se resuelve con «importar sugeridos»:
+    la venta del lote también lleva la referencia de su fila."""
+    tid = sample_tenant.tenant_id
+    archivo = UploadedFile(
+        tenant_id=tid, uploaded_by=None, original_filename="v.xlsx", s3_key="v.xlsx",
+        content_type=_XLSX_MIME, size_bytes=1, purpose="ingestion", status="uploaded",
+    )
+    vela = Product(tenant_id=tid, name=_VELA, sale_price_ars=Decimal("1000"), stock_units=10)
+    difusor = Product(
+        tenant_id=tid, name=_DIFUSOR, sale_price_ars=Decimal("1000"), stock_units=10
+    )
+    db_session.add_all([archivo, vela, difusor])
+    await db_session.flush()
+    ident = OperationIdentity(
+        tenant_id=tid, identity_key="k2:doc:propio:factura:b:1:9", content_hash="H",
+        entity_type="sale", first_seen_upload_id=archivo.id,
+    )
+    db_session.add(ident)
+    await db_session.flush()
+    await _venta_importada(db_session, tid, vela.id, archivo.id, ident.id)
+    otra = await _venta_importada(db_session, tid, difusor.id, archivo.id, ident.id)
+    await db_session.commit()
+    rep = await reparar(db_session, tid)
+    await db_session.commit()
+    assert rep.run_id is not None
+    filas = await _pendientes(db_session, tid)
+    assert len(filas) == 2
+    # El lote no lee «1000.00» sin el convenio de su columna (vecino, aparte):
+    # el monto se deja entero para que la fila de la vela entre.
+    for fila in filas:
+        db_session.add(fila)
+        fila.row_data = {**fila.row_data, "monto": "1000"}
+    await db_session.commit()
+
+    # Stock inicial sólo para la vela: el lote resuelve esa fila, la otra espera.
+    await stock_service.registrar_apertura_manual(
+        vela.id, tid, 5, ContratoDeCosto(unit_cost_final=Decimal("10")),
+        db_session, fecha=datetime.combine(_DIA - timedelta(days=5), time(9)),
+        confirmado_por=None,
+    )
+    await db_session.commit()
+    r = await client.post(
+        "/api/v1/others/bulk-import", json={"entity_type": "sale"}, headers=auth_headers
+    )
+    assert r.json()["imported_sales"] == 1, r.text
+
+    with unittest.mock.patch("app.application.services.stock_service.EventBus.emit"):
+        rev = await revertir(db_session, rep.run_id)
+    await db_session.commit()
+    assert rev.reimportadas == []
+    assert otra.id in {v.id for v in await _ventas(db_session, tid)}
+
+
+async def test_el_lote_no_importa_dos_veces_el_comprobante_de_dos_archivos(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Dos exportaciones solapadas dejaron el mismo comprobante en «Otros». Los
+    reclamos del lote van al final: sin mirar el propio lote, entraban las dos.
+    La primera entra; la de otro archivo, al modal. Un renglón hermano del MISMO
+    archivo sí entra."""
+    tid = sample_tenant.tenant_id
+    vela = await producto_con_compra(db_session, tid, nombre=_VELA)
+    archivos = [
+        UploadedFile(
+            tenant_id=tid, uploaded_by=None, original_filename=f"{n}.xlsx", s3_key=f"{n}",
+            content_type=_XLSX_MIME, size_bytes=1, purpose="ingestion", status="uploaded",
+        )
+        for n in ("a", "b")
+    ]
+    db_session.add_all(archivos)
+    await db_session.flush()
+    clave = "k2:doc:propio:factura:b:1:55"
+    for archivo, total in ((archivos[0], "1200"), (archivos[0], "800"), (archivos[1], "1200")):
+        db_session.add(
+            UnclassifiedRecord(
+                tenant_id=tid, uploaded_file_id=archivo.id, source="ingestion",
+                context_label="Venta sin compra previa", suggested_entity="sale",
+                status="PENDING",
+                row_data={
+                    "fecha": "05/03/2024", "total": total, "cantidad": "1",
+                    "producto": vela.name, IDENTITY_CLAIM_KEY: clave,
+                    IDENTITY_HASH_KEY: "H", "__identity_entity__": "sale",
+                },
+            )
+        )
+    await db_session.commit()
+
+    r = await client.post(
+        "/api/v1/others/bulk-import", json={"entity_type": "sale"}, headers=auth_headers
+    )
+    cuerpo = r.json()
+    assert (cuerpo["imported_sales"], cuerpo["needs_manual"]) == (2, 1), r.text
+    ventas = await _ventas(db_session, tid)
+    assert {v.source_upload_id for v in ventas} == {archivos[0].id}
+    (pendiente,) = await _pendientes(db_session, tid)
+    assert pendiente.uploaded_file_id == archivos[1].id
+
+
+async def test_si_otro_toma_el_comprobante_entre_el_chequeo_y_el_reclamo_da_409(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La carrera: el chequeo previo no ve a nadie y, cuando la fila reclama, otro
+    archivo ya tomó el comprobante (otra resolución, otro import). Se simula con
+    la respuesta del chequeo: «libre» antes, «tomada» después. El re-chequeo tras
+    el reclamo da 409 y no queda nada escrito."""
+    from app.api.v1 import others
+
+    tid = sample_tenant.tenant_id
+    registro = await _venta_sin_producto_en_otros(
+        client, auth_headers, db_session, sample_tenant, [_renglon()]
+    )
+    vela = await producto_con_compra(db_session, tid, nombre=_VELA)
+    registro_id = registro.id
+    respuestas = iter([False, True])
+
+    async def _carrera(*_a: Any, **_k: Any) -> bool:
+        return next(respuestas)
+
+    monkeypatch.setattr(others, "aplicada_desde_otro_origen", _carrera)
+
+    # La sesión de la request como en producción (`get_db_session`): revierte si
+    # el endpoint falla. La del fixture `client` no lo hace.
+    async def _sesion_que_revierte() -> AsyncIterator[AsyncSession]:
+        try:
+            yield db_session
+        except Exception:
+            await db_session.rollback()
+            raise
+
+    app = client._transport.app  # type: ignore[attr-defined]
+    app.dependency_overrides[get_db_session] = _sesion_que_revierte
+    r = await _reclasificar(client, auth_headers, registro, _venta_de(vela.id))
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "IMPORT_IDENTITY_TAKEN"
+    assert not await _ventas(db_session, tid)
+    assert [p.id for p in await _pendientes(db_session, tid)] == [registro_id]
+    assert not (
+        await db_session.execute(
+            select(OperationIdentityLink).where(OperationIdentityLink.tenant_id == tid)
+        )
+    ).scalars().all()
