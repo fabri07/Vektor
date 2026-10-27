@@ -2,8 +2,9 @@
 
 E-2: anular un duplicado de venta repone su descuento (``sale:{id}``); anular un
 duplicado de gasto de compra anula su ``purchase`` (baja el stock); las dos
-sueltan su identidad de operación y guardan el ``movement_id`` en el ítem. Si
-anular la compra deja stock negativo (ya se vendió), el grupo se saltea entero.
+pasan su identidad de operación a la fila conservada (la de ``VOID_SALE`` se
+suelta) y guardan el ``movement_id`` en el ítem. Si anular la compra deja stock
+negativo (ya se vendió) o la compra no tiene par claro, el grupo se saltea entero.
 
 E-3: la corrección automática de ventas del chat está apagada: la venta queda
 «para revisar» y no se modifica.
@@ -89,7 +90,7 @@ async def _producto(db: AsyncSession, tid: uuid.UUID, nombre: str, stock: int) -
 async def _identidad(db: AsyncSession, tid: uuid.UUID, tipo: str, eid: uuid.UUID) -> uuid.UUID:
     ident = OperationIdentity(
         tenant_id=tid,
-        identity_key=f"k:{eid}",
+        identity_key=f"k:{uuid.uuid4()}",
         content_hash=f"h:{eid}",
         entity_type=tipo,
     )
@@ -119,14 +120,31 @@ async def _venta_importada(
 
 
 async def _compra_importada(
-    db: AsyncSession, tid: uuid.UUID, upload_id: uuid.UUID, producto: Product, fila: str
+    db: AsyncSession,
+    tid: uuid.UUID,
+    upload_id: uuid.UUID | None,
+    producto: Product,
+    fila: str,
+    *,
+    con_fila: bool = True,
+    descripcion: str = "Compra yerba",
+    categoria: str = "INVENTORY",
+    tipo: str = "COGS",
+    qty: int = 10,
+    costo: str = "100",
+    custom_fields: dict[str, Any] | None = None,
 ) -> ExpenseEntry:
+    """Gasto de compra + su ``purchase``. ``fila`` ordena la carga aunque
+    ``con_fila=False`` (import viejo, sin ``source_row_ref``)."""
+    ref = fila if con_fila else None
     g = ExpenseEntry(
-        tenant_id=tid, amount=Decimal("1000.00"), category="INVENTORY", expense_type="COGS",
-        transaction_date=_FECHA, description="Compra yerba", payment_method="transfer",
-        provenance="REAL", source_upload_id=upload_id, source_row_ref=fila,
+        tenant_id=tid, amount=Decimal("1000.00"), category=categoria, expense_type=tipo,
+        transaction_date=_FECHA, description=descripcion, payment_method="transfer",
+        provenance="REAL", source_upload_id=upload_id, source_row_ref=ref,
         product_id=producto.id,
     )
+    if custom_fields is not None:
+        g.custom_fields = custom_fields
     # Orden de carga explícito: el detector se queda con el más viejo. El monto
     # va con la escala de la columna: la clave del detector compara `str(amount)`
     # y una instancia viva del identity map conserva el Decimal sin escala.
@@ -134,11 +152,23 @@ async def _compra_importada(
     db.add(g)
     await db.flush()
     await stock_service.increment_stock(
-        producto.id, tid, 10, Decimal("100"), None, db,
-        source_upload_id=upload_id, source_row_ref=fila,
+        producto.id, tid, qty, Decimal(costo), None, db,
+        source_upload_id=upload_id, source_row_ref=ref,
     )
     await db.commit()
     return g
+
+
+async def _vinculos(db: AsyncSession, identity_id: uuid.UUID) -> list[uuid.UUID]:
+    return list(
+        (
+            await db.execute(
+                select(OperationIdentityLink.entity_id).where(
+                    OperationIdentityLink.identity_id == identity_id
+                )
+            )
+        ).scalars()
+    )
 
 
 async def _stock(db: AsyncSession, pid: uuid.UUID) -> int:
@@ -176,7 +206,7 @@ async def _items(db: AsyncSession, run_id: uuid.UUID, accion: str) -> list[DataR
 # ── E-2: duplicado de venta ──────────────────────────────────────────────────
 
 
-async def test_duplicado_de_venta_repone_stock_y_suelta_identidad(
+async def test_duplicado_de_venta_repone_stock_y_pasa_su_identidad_a_la_conservada(
     session: AsyncSession, tenant: Any, archivo: UploadedFile
 ) -> None:
     tid = tenant.tenant_id
@@ -185,6 +215,12 @@ async def test_duplicado_de_venta_repone_stock_y_suelta_identidad(
     v2 = await _venta_importada(session, tid, archivo.id, coca, "fila:3")
     id1 = await _identidad(session, tid, "sale", v1.id)
     id2 = await _identidad(session, tid, "sale", v2.id)
+    # Una identidad compartida (el mismo comprobante): la conservada ya la tiene.
+    compartida = await _identidad(session, tid, "sale", v1.id)
+    session.add(OperationIdentityLink(
+        identity_id=compartida, tenant_id=tid, entity_type="sale", entity_id=v2.id
+    ))
+    await session.commit()
     assert await _stock(session, coca.id) == 4
     mov_dup = await stock_service._live_sale_movement(v2.id, tid, session)
     assert mov_dup is not None
@@ -201,9 +237,12 @@ async def test_duplicado_de_venta_repone_stock_y_suelta_identidad(
     assert await _stock(session, coca.id) == 7
     vivos = await _vivos(session, coca.id, "sale")
     assert [m.source_event_id for m in vivos] == [f"sale:{v1.id}"]
-    # La identidad del duplicado se suelta; la de la venta que queda, no.
-    assert await session.get(OperationIdentity, id2) is None
-    assert await session.get(OperationIdentity, id1) is not None
+    # La operación sigue viva en la conservada: la identidad del duplicado pasa a
+    # ella (no se suelta: un re-import la volvería a crear), y la compartida
+    # queda con un solo vínculo.
+    assert await _vinculos(session, id2) == [v1.id]
+    assert await _vinculos(session, id1) == [v1.id]
+    assert await _vinculos(session, compartida) == [v1.id]
     (item,) = await _items(session, r.run_id, "VOID_DUPLICATE")
     assert item.sale_entry_id == v2.id
     assert item.after_json is not None
@@ -237,7 +276,7 @@ async def test_duplicado_de_compra_baja_el_stock(
     assert g2.void_reason == "DUPLICATE"
     assert await _stock(session, yerba.id) == 10
     assert [m.source_row_ref for m in await _vivos(session, yerba.id, "purchase")] == ["fila:2"]
-    assert await session.get(OperationIdentity, id2) is None
+    assert await _vinculos(session, id2) == [g1.id]
     (item,) = await _items(session, r.run_id, "VOID_DUPLICATE")
     assert item.after_json is not None
     assert item.after_json["movement_id"] == str(mov_g2.id)
@@ -430,3 +469,119 @@ async def test_fila_con_dos_gastos_y_una_compra_se_saltea_sin_cambios(
     assert len(await _vivos(session, yerba.id, "purchase")) == 1
     (salteado,) = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
     assert salteado["reason"] == "compra_sin_par_claro"
+
+
+
+# ── Revisión adversarial de T3 ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("caso", ["import_viejo_sin_fila", "compra_a_mano_sin_archivo"])
+async def test_linea_de_compra_sin_par_no_se_anula_suelta(
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, caso: str
+) -> None:
+    """Una línea de compra sin su ``purchase`` identificable: el grupo se saltea.
+
+    Antes el plan daba «sin movimiento» y el gasto se anulaba dejando la compra
+    viva (stock inflado). Import viejo: sin ``source_row_ref`` (existe desde
+    20260727_0001), con la categoría vieja «mercaderia». Compra a mano o del
+    chat: ``purchase_group_id`` y sin archivo, en un grupo con una importada.
+    """
+    tid = tenant.tenant_id
+    yerba = await _producto(session, tid, "Yerba", 0)
+    if caso == "import_viejo_sin_fila":
+        g1 = await _compra_importada(
+            session, tid, archivo.id, yerba, "fila:2", con_fila=False,
+            categoria="mercaderia", tipo="OPEX",
+        )
+        g2 = await _compra_importada(
+            session, tid, archivo.id, yerba, "fila:3", con_fila=False,
+            categoria="mercaderia", tipo="OPEX",
+        )
+    else:
+        g1 = await _compra_importada(
+            session, tid, archivo.id, yerba, "fila:2", descripcion="Yerba — Proveedor"
+        )
+        g2 = await _compra_importada(
+            session, tid, None, yerba, "fila:3", con_fila=False,
+            descripcion="Yerba — Proveedor",
+            custom_fields={"purchase_group_id": str(uuid.uuid4())},
+        )
+    assert await _stock(session, yerba.id) == 20
+
+    dry = await apply_repair(session, tenant_id=tid, dry_run=True)
+    assert await _items(session, dry.run_id, "VOID_DUPLICATE") == []
+    r = await apply_repair(session, tenant_id=tid, dry_run=False)
+    await session.commit()
+
+    await session.refresh(g1)
+    await session.refresh(g2)
+    assert g1.voided_at is None and g2.voided_at is None
+    assert await _stock(session, yerba.id) == 20
+    assert len(await _vivos(session, yerba.id, "purchase")) == 2
+    (salteado,) = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
+    assert salteado["reason"] == "compra_sin_par_claro"
+
+
+async def test_dos_compras_distintas_en_la_fila_que_el_monto_no_distingue_se_saltea(
+    session: AsyncSession, tenant: Any, archivo: UploadedFile
+) -> None:
+    """Dos gastos de 1.000 y dos compras en la misma fila: 10 × 100 y 5 × 200.
+
+    El monto encaja con las dos y son distintas: no se elige por id.
+    """
+    tid = tenant.tenant_id
+    yerba = await _producto(session, tid, "Yerba", 0)
+    g1 = await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
+    g2 = await _compra_importada(
+        session, tid, archivo.id, yerba, "fila:2", qty=5, costo="200"
+    )
+    g2.created_at = datetime(2026, 6, 3, tzinfo=UTC)
+    await session.commit()
+    assert await _stock(session, yerba.id) == 15
+
+    r = await apply_repair(session, tenant_id=tid, dry_run=False)
+    await session.commit()
+
+    await session.refresh(g1)
+    await session.refresh(g2)
+    assert g1.voided_at is None and g2.voided_at is None
+    assert await _stock(session, yerba.id) == 15
+    (salteado,) = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
+    assert salteado["reason"] == "compra_sin_par_claro"
+
+
+async def test_dry_run_acumula_el_efecto_de_grupos_anteriores_sobre_el_producto(
+    session: AsyncSession, tenant: Any, archivo: UploadedFile
+) -> None:
+    """Dos grupos de compras duplicadas del mismo producto y stock para uno solo.
+
+    40 comprados, 25 vendidos: queda 15. El primer grupo baja 10 (queda 5); el
+    segundo dejaría −5. El preview tiene que saltear lo mismo que el apply.
+    """
+    tid = tenant.tenant_id
+    yerba = await _producto(session, tid, "Yerba", 0)
+    await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
+    await _compra_importada(session, tid, archivo.id, yerba, "fila:3")
+    await _compra_importada(session, tid, archivo.id, yerba, "fila:4", descripcion="Otra")
+    await _compra_importada(session, tid, archivo.id, yerba, "fila:5", descripcion="Otra")
+    venta = SaleEntry(
+        tenant_id=tid, amount=Decimal("12500"), quantity=25, product_id=yerba.id,
+        transaction_date=_FECHA, payment_method="cash", provenance="REAL",
+    )
+    session.add(venta)
+    await session.flush()
+    await stock_service.decrement_for_sale(venta, session)
+    await session.commit()
+    assert await _stock(session, yerba.id) == 15
+
+    dry = await apply_repair(session, tenant_id=tid, dry_run=True)
+    planificados = await _items(session, dry.run_id, "VOID_DUPLICATE")
+    r = await apply_repair(session, tenant_id=tid, dry_run=False)
+    await session.commit()
+
+    assert len(planificados) == 1
+    assert r.expenses_voided == 1
+    assert await _stock(session, yerba.id) == 5
+    assert [e["reason"] for e in dry.tenant_results if e.get("status") == "SKIPPED"] == [
+        "compra_ya_vendida"
+    ]
