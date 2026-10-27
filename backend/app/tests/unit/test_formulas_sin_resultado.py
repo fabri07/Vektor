@@ -198,7 +198,9 @@ def test_una_formula_simple_se_calcula_y_deja_procedencia() -> None:
     }
     assert any("calculó 1 celda" in w for w in summary["warnings"])
     fila = next(f for f in summary["ventas_detectadas"] if f.get("detalle") == "vela")
-    assert fila["monto"] == "3600"
+    # I5-1: el resultado viaja como número nativo, no como texto que el convenio
+    # de la columna pueda volver a interpretar.
+    assert fila["monto"] == 3600
 
 
 def test_lo_que_no_se_calcula_sigue_pendiente_con_su_motivo() -> None:
