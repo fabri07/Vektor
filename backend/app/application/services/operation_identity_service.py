@@ -313,6 +313,7 @@ async def planificar_identidades(
         contenidos=contenidos,
         equivalentes=equivalentes,
         existentes=existentes,
+        ganadas=ganadas,
     )
 
     logger.info(
@@ -348,6 +349,7 @@ def _decidir_por_equivalentes(
     contenidos: dict[str, str],
     equivalentes: dict[str, list[str]],
     existentes: dict[str, tuple[uuid.UUID, str, str]],
+    ganadas: set[str],
 ) -> None:
     """I6-3/I6-4: lo que la clave da por NUEVO se vuelve a mirar contra el mismo
     documento guardado en su otra forma (``claves_equivalentes``).
@@ -382,7 +384,12 @@ def _decidir_por_equivalentes(
         guardadas = [
             (eq, existentes[eq])
             for eq in equivalentes.get(clave, ())
-            if eq in existentes and existentes[eq][2] == entity
+            # Una equivalente que reclamó ESTE plan no es «lo guardado»: es otra
+            # fila del mismo archivo («Factura A 0001-123» y «FC 0001-123»
+            # juntos). Entre hermanos del mismo archivo nadie bloquea a nadie:
+            # entran los dos (cada uno con su clave), como en main, donde eran
+            # dos renglones del mismo documento y se aplicaban los dos.
+            if eq in existentes and existentes[eq][2] == entity and eq not in ganadas
         ]
         if not guardadas:
             continue
@@ -477,11 +484,19 @@ async def _reclamar(
 _CLAVES_POR_LECTURA = 5000
 
 
+def tandas_de_claves(claves: list[str]) -> list[list[str]]:
+    """``claves`` partidas en tandas de ``_CLAVES_POR_LECTURA``. La usa todo el
+    que arma un ``IN`` con claves y sus equivalentes (el import y el revert de
+    B·5g): un ``IN`` sin tope pasa el límite de parámetros de asyncpg."""
+    tope = _CLAVES_POR_LECTURA
+    return [claves[desde : desde + tope] for desde in range(0, len(claves), tope)]
+
+
 async def _leer_con_entidad(
     session: AsyncSession, tenant_id: uuid.UUID, claves: list[str]
 ) -> dict[str, tuple[uuid.UUID, str, str]]:
     salida: dict[str, tuple[uuid.UUID, str, str]] = {}
-    for desde in range(0, len(claves), _CLAVES_POR_LECTURA):
+    for tanda in tandas_de_claves(claves):
         filas = (
             await session.execute(
                 select(
@@ -491,9 +506,7 @@ async def _leer_con_entidad(
                     OperationIdentity.entity_type,
                 ).where(
                     OperationIdentity.tenant_id == tenant_id,
-                    OperationIdentity.identity_key.in_(
-                        claves[desde : desde + _CLAVES_POR_LECTURA]
-                    ),
+                    OperationIdentity.identity_key.in_(tanda),
                 )
             )
         ).all()

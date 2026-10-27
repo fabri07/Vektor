@@ -52,6 +52,7 @@ from app.application.services.ingestion_import_service import (
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
     restaurar_vinculos,
+    tandas_de_claves,
     vinculos_de,
 )
 from app.application.services.respaldo_service import (
@@ -368,24 +369,35 @@ async def _ventas_vinculadas(
     for clave in contenido_de:
         for eq in claves_equivalentes(clave, "sale"):
             origen.setdefault(eq, clave)
-    filas = await session.execute(
-        select(
-            OperationIdentity.identity_key,
-            OperationIdentity.content_hash,
-            OperationIdentityLink.entity_id,
+    # En tandas: con las equivalentes son hasta siete claves por comprobante, y
+    # miles de candidatas pasarían el límite de parámetros de asyncpg.
+    filas: list[Any] = []
+    for tanda in tandas_de_claves(sorted(origen)):
+        filas.extend(
+            (
+                await session.execute(
+                    select(
+                        OperationIdentity.identity_key,
+                        OperationIdentity.content_hash,
+                        OperationIdentityLink.entity_id,
+                    )
+                    .join(
+                        OperationIdentityLink,
+                        OperationIdentityLink.identity_id == OperationIdentity.id,
+                    )
+                    .join(SaleEntry, SaleEntry.id == OperationIdentityLink.entity_id)
+                    .where(
+                        OperationIdentity.tenant_id == tenant_id,
+                        OperationIdentity.identity_key.in_(tanda),
+                        OperationIdentityLink.entity_type == "sale",
+                        SaleEntry.tenant_id == tenant_id,
+                        SaleEntry.voided_at.is_(None),
+                    )
+                )
+            ).all()
         )
-        .join(OperationIdentityLink, OperationIdentityLink.identity_id == OperationIdentity.id)
-        .join(SaleEntry, SaleEntry.id == OperationIdentityLink.entity_id)
-        .where(
-            OperationIdentity.tenant_id == tenant_id,
-            OperationIdentity.identity_key.in_(sorted(origen)),
-            OperationIdentityLink.entity_type == "sale",
-            SaleEntry.tenant_id == tenant_id,
-            SaleEntry.voided_at.is_(None),
-        )
-    )
     out: dict[str, set[uuid.UUID]] = {}
-    for clave, contenido, eid in filas.all():
+    for clave, contenido, eid in filas:
         propia = origen[clave]
         if (
             clave != propia

@@ -580,3 +580,88 @@ async def test_el_revert_de_b5g_ve_el_reimport_con_la_otra_forma_de_clave(
     else:
         assert rev.restauradas == [str(original.id)]
         assert vivas == {original.id, reimport.id}
+
+
+# ── Revisión: hermanos del mismo archivo y lecturas en tandas ───────────────
+@pytest.mark.parametrize("total_fc", [1200, 900], ids=["mismo_contenido", "otro_contenido"])
+async def test_factura_a_y_fc_del_mismo_numero_en_un_archivo_entran_las_dos(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    total_fc: int,
+) -> None:
+    """«Factura A 0001-123» y «FC 0001-123» en el MISMO archivo: la k2 de una es
+    equivalente de la k1 de la otra, pero las dos las reclamó este import. Si
+    cada una tomara a la otra como «ya guardada», irían las dos a «Otros» (0
+    ventas). En main eran dos renglones del mismo documento y entraban los dos:
+    entran los dos, cada uno con su clave, también con el mismo contenido (dos
+    renglones iguales no se colapsan: colapsarlos borraría plata). Y el reimport
+    del archivo no duplica nada."""
+    tid = sample_tenant.tenant_id
+    await productos_con_compra(db_session, tid, ["Vela aromatica"])
+    filas = [_factura("A", 1200), _factura("", total_fc, tipo="FC")]
+
+    await _vender(client, auth_headers, db_session, sample_tenant, filas)
+    assert len(await _ventas(db_session, tid)) == 2
+    assert not await _otros(db_session, tid)
+    assert await _claves(db_session, tid) == [
+        "k1:doc:propio:factura:1:123", "k2:doc:propio:factura:a:1:123"
+    ]
+
+    await _vender(client, auth_headers, db_session, sample_tenant, filas)
+    assert len(await _ventas(db_session, tid)) == 2, "el reimport del archivo duplicó"
+    assert not await _otros(db_session, tid)
+
+
+async def test_las_lecturas_de_claves_van_en_tandas(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Con las equivalentes son hasta siete claves por comprobante: el revert de
+    B·5g de un tenant con miles de ventas armaba un IN de más de 32.767
+    parámetros (el tope de asyncpg) y fallaba. Con el tope bajado a 3, ningún
+    IN lleva más de 3 claves, y el resultado no cambia."""
+    from sqlalchemy import event
+
+    from app.application.services import reparacion_ventas_sin_compra_service as rep
+
+    tid = sample_tenant.tenant_id
+    vela = Product(tenant_id=tid, name="Vela", sale_price_ars=Decimal("1000"), stock_units=10)
+    db_session.add(vela)
+    await db_session.commit()
+    a = await _venta_con_identidad(db_session, tid, vela.id, "k2:doc:propio:factura:a:1:42", "H")
+    e = await _venta_con_identidad(db_session, tid, vela.id, "k2:ext:sale:tango:77", "X")
+    monkeypatch.setattr(ois, "_CLAVES_POR_LECTURA", 3)
+
+    tamanos: list[int] = []
+
+    def contar(_conn: Any, _cur: Any, sql: str, params: Any, *_a: Any) -> None:
+        if "operation_identities" in sql and "IN" in sql.upper():
+            tamanos.append(len(params) if params else 0)
+
+    motor = db_session.bind.sync_engine
+    event.listen(motor, "before_cursor_execute", contar)
+    try:
+        vinculadas = await rep._ventas_vinculadas(
+            db_session,
+            tid,
+            {"k1:doc:propio:factura:1:42": "H", "k1:ext:tango:77": "Y"},
+        )
+        leidas = await ois._leer_con_entidad(
+            db_session,
+            tid,
+            [f"k2:doc:propio:factura:{x}:1:42" for x in "abcemt"] + ["k2:ext:sale:tango:77"],
+        )
+    finally:
+        event.remove(motor, "before_cursor_execute", contar)
+
+    assert vinculadas == {
+        "k1:doc:propio:factura:1:42": {a.id},
+        "k1:ext:tango:77": {e.id},
+    }
+    assert set(leidas) == {"k2:doc:propio:factura:a:1:42", "k2:ext:sale:tango:77"}
+    assert len(tamanos) >= 4, tamanos
+    # tenant_id + entity_type + a lo sumo 3 claves por sentencia.
+    assert max(tamanos) <= 3 + 3, tamanos
