@@ -97,12 +97,14 @@ async def _seed_pending_pointer(
     db: AsyncSession,
     conversation_id: str,
     *,
+    tenant_id: uuid.UUID,
     pending_action_id: str | None,
     approval_group_id: str | None = None,
 ) -> None:
     svc = ConversationService(redis, db)  # type: ignore[arg-type]
     await svc.record_pending_action(
         conversation_id,
+        tenant_id=tenant_id,
         pending_action_id=pending_action_id,
         approval_group_id=approval_group_id,
         status="requires_approval",
@@ -137,7 +139,7 @@ async def test_si_confirms_single_action(
     redis = FakeRedis()
     conv_id = str(uuid.uuid4())
     await _seed_pending_pointer(
-        redis, db_session, conv_id, pending_action_id=str(action.id)
+        redis, db_session, conv_id, tenant_id=tenant_id, pending_action_id=str(action.id)
     )
 
     body = ChatRequest(message="sí", conversation_id=conv_id)
@@ -173,7 +175,9 @@ async def test_non_affirmation_returns_none(
     await db_session.commit()
     redis = FakeRedis()
     conv_id = str(uuid.uuid4())
-    await _seed_pending_pointer(redis, db_session, conv_id, pending_action_id=str(action.id))
+    await _seed_pending_pointer(
+        redis, db_session, conv_id, tenant_id=tenant_id, pending_action_id=str(action.id)
+    )
 
     body = ChatRequest(message="mostrame otra cosa", conversation_id=conv_id)
     resp = await _try_nl_confirmation(
@@ -207,7 +211,12 @@ async def test_si_confirms_group(
     redis = FakeRedis()
     conv_id = str(uuid.uuid4())
     await _seed_pending_pointer(
-        redis, db_session, conv_id, pending_action_id=None, approval_group_id=group_id
+        redis,
+        db_session,
+        conv_id,
+        tenant_id=tenant_id,
+        pending_action_id=None,
+        approval_group_id=group_id,
     )
 
     body = ChatRequest(message="dale", conversation_id=conv_id)
@@ -240,7 +249,9 @@ async def test_viewer_cannot_confirm_by_text(
 
     redis = FakeRedis()
     conv_id = str(uuid.uuid4())
-    await _seed_pending_pointer(redis, db_session, conv_id, pending_action_id=str(action.id))
+    await _seed_pending_pointer(
+        redis, db_session, conv_id, tenant_id=tenant_id, pending_action_id=str(action.id)
+    )
 
     body = ChatRequest(message="sí", conversation_id=conv_id)
     resp = await _try_nl_confirmation(
@@ -265,7 +276,9 @@ async def test_expired_action_not_executed_by_text(
 
     redis = FakeRedis()
     conv_id = str(uuid.uuid4())
-    await _seed_pending_pointer(redis, db_session, conv_id, pending_action_id=str(action.id))
+    await _seed_pending_pointer(
+        redis, db_session, conv_id, tenant_id=tenant_id, pending_action_id=str(action.id)
+    )
 
     body = ChatRequest(message="sí", conversation_id=conv_id)
     resp = await _try_nl_confirmation(
@@ -286,7 +299,9 @@ async def test_no_cancels_single_action(
 
     redis = FakeRedis()
     conv_id = str(uuid.uuid4())
-    await _seed_pending_pointer(redis, db_session, conv_id, pending_action_id=str(action.id))
+    await _seed_pending_pointer(
+        redis, db_session, conv_id, tenant_id=tenant_id, pending_action_id=str(action.id)
+    )
 
     body = ChatRequest(message="no", conversation_id=conv_id)
     resp = await _try_nl_confirmation(

@@ -199,6 +199,11 @@ async def aplicar_ajuste_de_entrada(
             discrepancia.tenant_id,
             discrepancia.product_id,
             hasta=occurred_at.date(),
+            # T3 · C-2: este número ESCRIBE stock, así que resta sólo las
+            # ventas que descontaron. Una importada que nunca restó (anterior a
+            # F-F.4 o pendiente del reproceso) no se "repone": esas unidades
+            # nunca salieron del stock.
+            solo_descontadas=True,
         )
         # `None` = el chequeo temporal no mira este producto (sin ancla o ledger
         # complejo). Ahí no hay nada que cerrar y no se inventa un número.

@@ -92,13 +92,20 @@ export function useChat() {
 
       addMessage({ role: "user", content: displayText ?? text });
       setIsLoading(true);
+      // Si mientras esperábamos cambió la conversación (otro usuario, logout o
+      // conversación nueva), la respuesta no es de la que está en pantalla (X6-2).
+      const enviadaEn = conversationId;
+      const responder: typeof addMessage = (msg) => {
+        if (useChatStore.getState().conversationId !== enviadaEn) return;
+        addMessage(msg);
+      };
 
       try {
         const response = await sendMessage(text, conversationId, attachments, uiContext);
         setMessagesUsedToday((prev) => prev + 1);
 
         if (response.status === "requires_google_auth") {
-          addMessage({
+          responder({
             role: "assistant",
             content:
               response.message ??
@@ -109,7 +116,7 @@ export function useChat() {
             authUrl: response.result?.auth_url as string | undefined,
           });
         } else if (response.status === "requires_approval") {
-          addMessage({
+          responder({
             role: "assistant",
             content:
               response.message ??
@@ -121,7 +128,7 @@ export function useChat() {
             approvalGroupId: response.approval_group_id,
           });
         } else if (response.status === "requires_clarification") {
-          addMessage({
+          responder({
             role: "assistant",
             content:
               response.message ??
@@ -130,7 +137,7 @@ export function useChat() {
             status: "requires_clarification",
           });
         } else {
-          addMessage({
+          responder({
             role: "assistant",
             content: response.message ?? response.result?.summary ?? "Listo.",
             status: "success",
@@ -141,14 +148,14 @@ export function useChat() {
         const error = err as AxiosError;
         if (error?.response?.status === 429) {
           setIsRateLimited(true);
-          addMessage({
+          responder({
             role: "system",
             content:
               "Límite diario de 50 mensajes alcanzado. Disponible mañana.",
             status: "error",
           });
         } else {
-          addMessage({
+          responder({
             role: "system",
             content: "Hubo un error. Intentá de nuevo.",
             status: "error",

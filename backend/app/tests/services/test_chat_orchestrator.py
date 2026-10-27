@@ -311,9 +311,10 @@ async def test_orchestrator_loads_conversation_context(mock_db, mock_redis):
         mock_conv_svc_cls.return_value = conv_svc_instance
 
         orchestrator = ChatOrchestrator()
-        await orchestrator.handle(request, mock_db, mock_redis, uuid.uuid4(), uuid.uuid4())
+        tenant_id = uuid.uuid4()
+        await orchestrator.handle(request, mock_db, mock_redis, uuid.uuid4(), tenant_id)
 
-    conv_svc_instance.get_context.assert_called_once_with(conv_id)
+    conv_svc_instance.get_context.assert_called_once_with(conv_id, tenant_id=tenant_id)
 
 
 async def test_orchestrator_saves_turn_after_success(mock_db, mock_redis):

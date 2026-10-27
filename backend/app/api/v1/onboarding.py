@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_tenant_id, get_current_user
@@ -34,6 +34,7 @@ _ROLES_CAPITAL = ("OWNER", "ADMIN")
 @router.post("/submit", response_model=OnboardingSubmitResponse)
 async def submit_onboarding(
     body: OnboardingSubmitRequest,
+    background_tasks: BackgroundTasks,
     tenant_id: UUID = Depends(get_current_tenant_id),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
@@ -46,7 +47,12 @@ async def submit_onboarding(
         )
     svc = OnboardingService(session)
     try:
-        return await svc.submit(tenant_id=tenant_id, body=body, user_id=user.user_id)
+        return await svc.submit(
+            tenant_id=tenant_id,
+            body=body,
+            user_id=user.user_id,
+            background=background_tasks,
+        )
     except AlreadyOnboardedError:
         raise HTTPException(status_code=409, detail="Onboarding already completed.") from None
 

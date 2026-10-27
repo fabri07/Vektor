@@ -10,15 +10,23 @@ Puramente de lectura — NUNCA escribe ``stock_units`` ni ninguna otra columna (
 repo: nunca recomputar stock desde el ledger). Solo reporta y clasifica causa probable;
 la corrección la decide un humano.
 
-Reglas de clasificación de movimientos: IDÉNTICAS al chequeo agregado, para que el
-invariante ``ending_balance == stock_esperado`` (del agregado) se cumpla:
+Reglas de clasificación de movimientos: las MISMAS que el chequeo agregado (salvo en qué
+ventas se restan, ver abajo):
 - ancla = movimiento vivo ``source_type=catalog_initial_stock`` que NO es ``purchase``
   (típicamente un ``adjustment``): es el stock inicial conocido → se siembra como
   *opening*. Un ``purchase`` con ese source_type ES una compra real y va como evento.
 - ``purchase`` (cualquier source_type) → evento +.
 - ``adjustment`` con source_type tagueado (reconciliation/manual_adjustment) → evento ±.
 - ``loss`` → evento + (la merma ya viene negativa en el ledger).
-- ventas desde ``sales_entries.quantity`` → evento −.
+- ventas desde ``sales_entries.quantity`` → evento −. El ESCANEO resta TODAS las vivas
+  (menos las de salida pendiente B11), incluidas las importadas que nunca descontaron:
+  una venta histórica que el stock no respalda es justo lo que tiene que encontrar. Por
+  eso su ``ending_balance`` NO es el ``stock_esperado`` del agregado cuando hay
+  importadas sin descontar — el agregado resta sólo las ventas que descontaron
+  (``ventas_que_descontaron_por_producto``). El modo ``solo_descontadas`` de
+  ``balance_reconstruido_a`` usa ese mismo criterio, y es el que dimensiona un ajuste
+  que ESCRIBE stock (T3 · C-2): contar ahí una venta que nunca restó metía unidades
+  que nunca existieron.
 - movimiento ``sale`` del ledger → se IGNORA (dedup: la venta se cuenta desde
   ``sales_entries``, la fuente de verdad).
 - ``return`` o ``adjustment`` sin source_type tagueado → ledger complejo (legacy no
@@ -59,6 +67,7 @@ from app.application.services.inventory_movement_origin import (
     SOURCE_CATALOG_INITIAL_STOCK,
     classify_stock_movement,
 )
+from app.application.services.stock_service import sale_source_event_id
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
 from app.persistence.models.transaction import SaleEntry
@@ -103,7 +112,7 @@ class TemporalDivergence:
     product_id: str
     product_name: str
     stock_units: int  # contexto; NO entra en la fórmula del replay
-    ending_balance: int  # == stock_esperado del chequeo agregado (invariante)
+    ending_balance: int  # == stock_esperado del agregado si toda venta viva descontó
     opening_anchor_qty: int
     min_balance: int
     min_balance_at: date | None
@@ -256,6 +265,7 @@ async def balance_reconstruido_a(
     product_id: uuid.UUID,
     *,
     hasta: date,
+    solo_descontadas: bool = False,
 ) -> int | None:
     """Cuánto stock había al cierre de ``hasta``, según la línea de tiempo.
 
@@ -266,12 +276,20 @@ async def balance_reconstruido_a(
     Las ventas con salida pendiente ya quedan afuera (``_ventas_por_producto``
     usa la exclusión compartida), así que la venta que se está resolviendo no se
     cuenta a sí misma.
+
+    ``solo_descontadas`` (T3 · C-2): resta sólo las ventas que descontaron
+    stock, con el criterio del chequeo agregado. Es el modo de quien va a
+    ESCRIBIR stock con este número (el ajuste de B11): con ancla 10, 50
+    importadas que nunca restaron y 8 en vivo, el balance «del escaneo» da −48
+    y el ajuste metía 53 unidades donde faltaban 3.
     """
     candidatos = await _candidate_products(session, tenant_id, [product_id])
     if not candidatos:
         return None
     movimientos = await _movimientos_por_producto(session, tenant_id, [product_id])
-    ventas = await _ventas_por_producto(session, tenant_id, [product_id])
+    ventas = await _ventas_por_producto(
+        session, tenant_id, [product_id], solo_descontadas=solo_descontadas
+    )
     linea = construir_linea_de_tiempo(
         movimientos.get(product_id, []), ventas.get(product_id, [])
     )
@@ -358,11 +376,21 @@ async def _movimientos_por_producto(
     return porproducto
 
 
-async def _ventas_por_producto(
+@dataclass(frozen=True)
+class VentaViva:
+    """Una venta viva de un producto, sin las de salida pendiente (B11)."""
+
+    sale_id: uuid.UUID
+    quantity: int
+    transaction_date: Any
+    importada: bool
+
+
+async def _ventas_vivas_por_producto(
     session: AsyncSession, tenant_id: uuid.UUID, product_ids: list[uuid.UUID]
-) -> dict[uuid.UUID, list[tuple[int, Any]]]:
+) -> dict[uuid.UUID, list[VentaViva]]:
     """Ventas vivas de los candidatos, en pocas queries. Ver `_movimientos_por_producto`."""
-    porproducto: dict[uuid.UUID, list[tuple[int, Any]]] = {pid: [] for pid in product_ids}
+    porproducto: dict[uuid.UUID, list[VentaViva]] = {pid: [] for pid in product_ids}
     # Una venta de caja cuya salida de stock quedó pendiente (B11) todavía no
     # descontó: contarla acá daría una divergencia falsa. La consulta es la
     # MISMA que usa el chequeo agregado — si cada uno tuviera la suya, el mismo
@@ -379,6 +407,7 @@ async def _ventas_por_producto(
                     SaleEntry.quantity,
                     SaleEntry.transaction_date,
                     SaleEntry.id,
+                    SaleEntry.source_upload_id,
                 ).where(
                     SaleEntry.tenant_id == tenant_id,
                     SaleEntry.product_id.in_(chunk),
@@ -386,11 +415,84 @@ async def _ventas_por_producto(
                 )
             )
         ).all()
-        for pid, quantity, transaction_date, sale_id in filas:
+        for pid, quantity, transaction_date, sale_id, source_upload_id in filas:
             if sale_id in pendientes:
                 continue
-            porproducto[pid].append((quantity, transaction_date))
+            porproducto[pid].append(
+                VentaViva(
+                    sale_id=sale_id,
+                    quantity=int(quantity or 0),
+                    transaction_date=transaction_date,
+                    importada=source_upload_id is not None,
+                )
+            )
     return porproducto
+
+
+async def ventas_que_descontaron_por_producto(
+    session: AsyncSession, tenant_id: uuid.UUID, product_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[VentaViva]]:
+    """Las ventas vivas que DEBEN estar reflejadas en ``stock_units`` (F-H3.d.1).
+
+    El criterio del chequeo agregado, en un solo lugar (T3 · C-2): la venta en
+    vivo (``source_upload_id IS NULL``) cuenta siempre —si su movimiento no
+    está, eso ES una divergencia—; la importada, sólo si tiene un movimiento
+    ``sale`` vivo ``sale:{id}`` del mismo producto. El ledger decide **si**
+    cuenta; ``sales_entries.quantity`` sigue decidiendo **cuánto**.
+
+    El cruce se hace en Python y no en SQL a propósito: la clave es el texto
+    ``"sale:{id}"``, y armarla en SQL exigiría castear el id a texto — en
+    Postgres da el UUID con guiones y en SQLite el hex plano, así que el mismo
+    ``EXISTS`` daría distinto según el motor. La query de movimientos sólo se
+    paga si hay ventas importadas.
+    """
+    vivas = await _ventas_vivas_por_producto(session, tenant_id, product_ids)
+    con_importadas = [pid for pid, ventas in vivas.items() if any(v.importada for v in ventas)]
+    aplicados: set[tuple[uuid.UUID, str]] = set()
+    for i in range(0, len(con_importadas), _PRELOAD_CHUNK):
+        chunk = con_importadas[i : i + _PRELOAD_CHUNK]
+        filas = (
+            await session.execute(
+                select(InventoryMovement.product_id, InventoryMovement.source_event_id).where(
+                    InventoryMovement.tenant_id == tenant_id,
+                    InventoryMovement.product_id.in_(chunk),
+                    InventoryMovement.movement_type == "sale",
+                    InventoryMovement.voided_at.is_(None),
+                    InventoryMovement.source_event_id.is_not(None),
+                )
+            )
+        ).all()
+        aplicados.update((pid, clave) for pid, clave in filas)
+    return {
+        pid: [
+            v
+            for v in ventas
+            if not v.importada or (pid, sale_source_event_id(v.sale_id)) in aplicados
+        ]
+        for pid, ventas in vivas.items()
+    }
+
+
+async def _ventas_por_producto(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_ids: list[uuid.UUID],
+    *,
+    solo_descontadas: bool = False,
+) -> dict[uuid.UUID, list[tuple[int, Any]]]:
+    """Las ventas que entran a la línea de tiempo, como ``(cantidad, fecha)``.
+
+    Por defecto todas las vivas (el escaneo). ``solo_descontadas``: sólo las
+    que restaron stock, con el criterio del agregado (ver
+    ``ventas_que_descontaron_por_producto``).
+    """
+    if solo_descontadas:
+        ventas = await ventas_que_descontaron_por_producto(session, tenant_id, product_ids)
+    else:
+        ventas = await _ventas_vivas_por_producto(session, tenant_id, product_ids)
+    return {
+        pid: [(v.quantity, v.transaction_date) for v in lista] for pid, lista in ventas.items()
+    }
 
 
 async def check_products_temporal_divergence(
