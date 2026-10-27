@@ -24,7 +24,7 @@ import re
 import unittest.mock
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -36,7 +36,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.agent import _extract_action_payload
 from app.application.agents.expense.agent import AgentExpense
-from app.application.agents.shared.schemas import ActionType, AgentRequest
+from app.application.agents.google.agent import AgentGoogle
+from app.application.agents.income.agent import AgentIncome
+from app.application.agents.shared.schemas import (
+    ActionType,
+    AgentRequest,
+    AgentResponse,
+    RiskLevel,
+)
 from app.application.agents.supplier.agent import AgentSupplier
 from app.domain.business_time import AR_TZ, today_ar
 from app.domain.pos_terminal import TERMINAL_HEADER
@@ -49,9 +56,11 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.user import User
 from app.tests._respaldo import producto_con_compra
 
-# El día AR real de la corrida: así el resto del sistema (vencimientos, JWT),
-# que mira el reloj de verdad, no queda en otra fecha que la de los tests.
-_DIA = today_ar()
+# Un día AR DISTINTO del real (hace tres días): cualquier reloj que `_reloj` no
+# alcance —p. ej. un `from datetime import date` dentro de una función— da otro
+# día a cualquier hora y con cualquier TZ del server, y el test lo caza. Lo que
+# mira el reloj de verdad (vencimientos, JWT) queda en hoy, que es posterior.
+_DIA = today_ar() - timedelta(days=3)
 _MANANA = _DIA + timedelta(days=1)
 _AR_2230 = datetime(_DIA.year, _DIA.month, _DIA.day, 22, 30, tzinfo=AR_TZ)
 _AR_1500 = datetime(_DIA.year, _DIA.month, _DIA.day, 15, 0, tzinfo=AR_TZ)
@@ -63,6 +72,8 @@ _MODULOS_CON_DATE = (
     "app.application.services.cash_service",
     "app.api.v1.insights",
     "app.api.v1.agent",
+    "app.application.agents.income.agent",
+    "app.application.agents.google.agent",
 )
 
 
@@ -336,3 +347,90 @@ async def test_el_uso_del_chat_a_las_2230_es_el_de_hoy(
         r = await client.get("/api/v1/agent/usage", headers=auth_headers)
     assert r.status_code == 200, r.text
     assert r.json()["messages_today"] == 7
+
+
+async def test_el_cupo_del_chat_vence_a_la_medianoche_ar(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    sample_tenant: Tenant,
+    fake_redis: Any,
+) -> None:
+    """El primer mensaje del día fija el vencimiento: fin del día AR, no del UTC."""
+    vencimientos: list[tuple[str, datetime]] = []
+
+    async def _espia(clave: str, cuando: datetime) -> bool:
+        vencimientos.append((clave, cuando))
+        return True
+
+    respuesta = AgentResponse(
+        request_id=str(uuid.uuid4()), agent_name="agent_chat", status="success",
+        risk_level=RiskLevel.LOW, requires_approval=False, result={"summary": "ok"},
+    )
+    with (
+        _reloj(_AR_2230),
+        unittest.mock.patch("app.api.v1.agent.ChatOrchestrator") as orquestador,
+        # El FakeRedis no tiene `expireat`: se agrega como espía.
+        unittest.mock.patch.object(fake_redis, "expireat", side_effect=_espia, create=True),
+    ):
+        orquestador.return_value.handle = unittest.mock.AsyncMock(return_value=respuesta)
+        r = await client.post(
+            "/api/v1/agent/chat", json={"message": "hola"}, headers=auth_headers
+        )
+    assert r.status_code == 200, r.text
+    clave = f"rate:chat:{sample_tenant.tenant_id}:{_DIA}"
+    assert vencimientos == [(clave, datetime.combine(_DIA, time.max, tzinfo=AR_TZ))]
+
+
+# ── E0-A-13: ventanas de 30 días del agente de ingresos ──────────────────────
+
+
+@pytest.mark.parametrize(
+    ("tipo", "intent"),
+    [
+        (ActionType.ANALYZE_SALES_DATA, "detectar_productos_estrella"),
+        (ActionType.ANSWER_DATA_QUERY, None),
+    ],
+)
+async def test_las_ventanas_del_agente_de_ingresos_terminan_hoy_ar(
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_user: User,
+    tipo: ActionType,
+    intent: str | None,
+) -> None:
+    repo = "app.persistence.repositories.transaction_repository.SaleRepository"
+    with (
+        _reloj(_AR_2230),
+        unittest.mock.patch(f"{repo}.get_sales_by_product", return_value=[]) as por_producto,
+        unittest.mock.patch(f"{repo}.get_sales_by_customer", return_value=[]),
+    ):
+        await AgentIncome(db=db_session).process(
+            AgentRequest(
+                user_id=str(sample_user.user_id),
+                business_id=str(sample_tenant.tenant_id),
+                message="¿qué productos se venden más?",
+            ),
+            SimpleNamespace(action_type=tipo, entities={"_intent": intent} if intent else {}),
+        )
+    (_tid, desde, hasta) = por_producto.call_args.args
+    assert (desde, hasta) == (_DIA - timedelta(days=30), _DIA)
+
+
+# ── E0-A-4: el «hoy» del asistente de Calendar ───────────────────────────────
+
+
+async def test_el_prompt_de_calendar_dice_hoy_ar() -> None:
+    sistemas: list[str] = []
+
+    async def _llm(**kw: Any) -> tuple[None, None]:
+        sistemas.append(kw["system"])
+        return None, None
+
+    agente = AgentGoogle()
+    agente._client = object()  # el LLM es `call_llm`, parcheado abajo
+    with (
+        _reloj(_AR_2230),
+        unittest.mock.patch("app.application.agents.google.agent.call_llm", side_effect=_llm),
+    ):
+        await agente._extract_calendar_event_data("agendame mañana a las 10 con el proveedor")
+    assert sistemas and sistemas[0].startswith(f"Hoy es {_DIA.isoformat()}.")
