@@ -32,7 +32,11 @@ from app.application.services.ingestion_import_service import (
     build_incomplete_product,
     insert_confirmed_data,
 )
-from app.application.services.operation_identity_service import liberar_identidades_de
+from app.application.services.operation_identity_service import (
+    _IDS_POR_SENTENCIA,
+    en_tandas,
+    liberar_identidades_de,
+)
 from app.domain.expense_categories import (
     classify_expense_with_vertical,
     infer_expense_type,
@@ -71,7 +75,7 @@ REVIEW_REASON_CORRECCION_APAGADA = "correccion_automatica_apagada"
 _WINDOW_DAYS = 2
 
 # Sufijo "— proveedor" / "— importado" que el import histórico anexaba a la
-# descripción: señal de origen-import para el detector de duplicados.
+# descripción: se quita para comparar la base (ya no es señal de duplicado, E-1).
 _DESC_IMPORT_SUFFIX_RE = re.compile(r"\s*[—\-–]\s*[^—\-–]+$")
 
 
@@ -121,10 +125,11 @@ class ChatSaleRepairCandidate:
 
 @dataclass
 class DuplicateGroup:
-    """Grupo de transacciones activas idénticas con señal de origen-import.
+    """Grupo de transacciones activas idénticas que entraron por re-subir un archivo.
 
-    ``entity`` distingue ventas de gastos. ``keep`` es la fila más antigua (no se
-    toca); ``duplicates`` son las que se anulan (soft delete ``DUPLICATE``).
+    ``entity`` distingue ventas de gastos. ``keep`` es una fila de la carga más
+    antigua (no se toca); ``duplicates`` son las copias de las re-subidas, que se
+    anulan (soft delete ``DUPLICATE``).
     """
 
     tenant_id: uuid.UUID
@@ -175,13 +180,6 @@ def _normalize_desc_base(desc: str | None) -> str:
         return ""
     base = _DESC_IMPORT_SUFFIX_RE.sub("", desc.strip())
     return re.sub(r"\s+", " ", base.lower()).strip()
-
-
-def _has_import_suffix(desc: str | None) -> bool:
-    """¿La descripción trae el patrón "— proveedor"/"— importado" del import?"""
-    if not desc:
-        return False
-    return bool(_DESC_IMPORT_SUFFIX_RE.search(desc.strip()))
 
 
 def _sale_snapshot(sale: SaleEntry) -> dict[str, Any]:
@@ -850,7 +848,7 @@ async def apply_repair(
                 }
             )
 
-    # B2 Detector 1 — duplicados (ventas/gastos con señal de import).
+    # B2 Detector 1 — duplicados (ventas/gastos de un archivo re-subido, E-1).
     dup_planned: frozenset[uuid.UUID] | None = None
     reclass_planned: frozenset[uuid.UUID] | None = None
     if not dry_run and source_run_id is not None:
@@ -1226,32 +1224,139 @@ def _expense_dup_key(expense: ExpenseEntry) -> tuple[Any, ...]:
     )
 
 
-def _group_has_import_signal(
-    rows: list[SaleEntry] | list[ExpenseEntry],
-    desc_attr: str,
-) -> bool:
-    """¿El grupo tiene señal de origen-import (no es una repetición legítima)?
+#: Una carga: (cuándo se subió, id). Sólo ordena cuál copia se conserva.
+_OrdenDeCarga = tuple[datetime | None, uuid.UUID]
 
-    Señal = al menos dos filas comparten el mismo ``source_upload_id`` (no NULL),
-    o alguna fila trae el sufijo "— proveedor"/"— importado" en su descripción.
-    Sin señal, NO se considera duplicado (un kiosco vende lo mismo muchas veces
-    el mismo día y eso es legítimo).
+
+def _orden_de_fila(fila: SaleEntry | ExpenseEntry) -> tuple[bool, str, str]:
+    return (fila.created_at is None, str(fila.created_at), str(fila.id))
+
+
+def _copias_de_la_misma_fila(
+    bucket: Sequence[SaleEntry | ExpenseEntry],
+) -> tuple[
+    list[tuple[SaleEntry | ExpenseEntry, list[SaleEntry | ExpenseEntry]]],
+    list[SaleEntry | ExpenseEntry],
+]:
+    """La misma fila de un archivo aplicada dos veces sobre la MISMA carga.
+
+    Un doble confirm o un reintento zombie (``jobs.reread_apply`` antes del #53)
+    escribe dos veces la fila: mismo ``source_upload_id`` y mismo
+    ``source_row_ref`` NO nulo, y no hay unique que lo impida. Los renglones
+    repetidos legítimos tienen refs distintos (el ref sale del índice de la fila),
+    así que E-1 no vuelve. Sin ref no se sabe de qué fila vino: no se toca.
+
+    Devuelve ``([(conservada, copias)], sobrevivientes)``: uno por fila repetida,
+    y las filas del bucket menos esas copias, para comparar entre cargas.
     """
-    upload_ids = [r.source_upload_id for r in rows if r.source_upload_id is not None]
-    if len(upload_ids) >= 2 and len(set(upload_ids)) < len(upload_ids):
-        return True
-    return any(_has_import_suffix(getattr(r, desc_attr, None)) for r in rows)
+    por_fila: dict[tuple[uuid.UUID, str], list[SaleEntry | ExpenseEntry]] = {}
+    for fila in bucket:
+        if fila.source_upload_id is not None and fila.source_row_ref is not None:
+            por_fila.setdefault((fila.source_upload_id, fila.source_row_ref), []).append(fila)
+    grupos: list[tuple[SaleEntry | ExpenseEntry, list[SaleEntry | ExpenseEntry]]] = []
+    copias: set[uuid.UUID] = set()
+    for filas in por_fila.values():
+        if len(filas) < 2:
+            continue
+        conservada, *repetidas = sorted(filas, key=_orden_de_fila)
+        grupos.append((conservada, repetidas))
+        copias |= {f.id for f in repetidas}
+    return grupos, [f for f in bucket if f.id not in copias]
+
+
+def _duplicados_entre_cargas(
+    bucket: Sequence[SaleEntry | ExpenseEntry],
+    cargas: dict[uuid.UUID, tuple[str, _OrdenDeCarga]],
+) -> list[tuple[SaleEntry | ExpenseEntry, list[SaleEntry | ExpenseEntry]]]:
+    """Las copias de una operación que entró dos veces por re-subir el MISMO archivo.
+
+    E-1: la señal era que dos filas compartieran ``source_upload_id``, que es
+    justamente el caso legítimo de un archivo con renglones repetidos (cinco
+    «Coca 500» del mismo día son cinco ventas, ingesta.md E8). Ahora:
+
+    * dos filas de la MISMA carga nunca son duplicado entre sí (tampoco por
+      compartir identidad de operación: es por comprobante y los renglones
+      hermanos la comparten), salvo la misma fila aplicada dos veces
+      (``_copias_de_la_misma_fila``, que corre antes);
+    * entre cargas distintas, sólo si son el mismo archivo (``content_hash``
+      igual, no nulo): que dos archivos distintos traigan la misma venta del mismo
+      día no prueba nada, y el orden de inserción tampoco (invariante 2d);
+    * las filas sin archivo (a mano, chat) o de un archivo sin huella no se tocan,
+      ni por el sufijo «— importado» (no dice de qué carga vienen).
+
+    Por cada archivo repetido se conserva la carga más vieja entera y de cada
+    re-subida se anulan a lo sumo tantas filas como tiene la original (una copia
+    de la operación por re-subida). El orden de carga sólo elige qué copia queda.
+    Devuelve ``[(conservada, duplicados)]``, uno por archivo repetido.
+    """
+    por_archivo: dict[str, dict[uuid.UUID, list[SaleEntry | ExpenseEntry]]] = {}
+    for fila in bucket:
+        uid = fila.source_upload_id
+        carga = cargas.get(uid) if uid is not None else None
+        if uid is None or carga is None:
+            continue
+        por_archivo.setdefault(carga[0], {}).setdefault(uid, []).append(fila)
+    grupos: list[tuple[SaleEntry | ExpenseEntry, list[SaleEntry | ExpenseEntry]]] = []
+    for filas_por_carga in por_archivo.values():
+        if len(filas_por_carga) < 2:
+            continue
+        orden = sorted(
+            filas_por_carga,
+            key=lambda uid: (cargas[uid][1][0] is None, str(cargas[uid][1][0]), str(uid)),
+        )
+        originales = sorted(filas_por_carga[orden[0]], key=_orden_de_fila)
+        duplicados: list[SaleEntry | ExpenseEntry] = []
+        for uid in orden[1:]:
+            copia = sorted(filas_por_carga[uid], key=_orden_de_fila)
+            duplicados.extend(copia[: len(originales)])
+        grupos.append((originales[0], duplicados))
+    return grupos
+
+
+async def _cargas_con_huella(
+    db: AsyncSession, upload_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, _OrdenDeCarga]]:
+    """``{upload_id: (content_hash, orden de carga)}`` de los archivos con huella."""
+    cargas: dict[uuid.UUID, tuple[str, _OrdenDeCarga]] = {}
+    # I6-2: en tandas, por el tope de parámetros de asyncpg (todos los tenants).
+    for tanda in en_tandas(sorted(upload_ids, key=str), _IDS_POR_SENTENCIA):
+        filas = (
+            await db.execute(
+                select(
+                    UploadedFile.id, UploadedFile.content_hash, UploadedFile.created_at
+                ).where(
+                    UploadedFile.id.in_(tanda),
+                    UploadedFile.content_hash.is_not(None),
+                )
+            )
+        ).all()
+        cargas.update(
+            {uid: (str(huella), (creado, uid)) for uid, huella, creado in filas if huella}
+        )
+    return cargas
+
+
+def _candidatas(buckets: dict[tuple[Any, ...], list[Any]]) -> set[uuid.UUID]:
+    """Uploads de los grupos con filas de al menos dos cargas distintas."""
+    ids: set[uuid.UUID] = set()
+    for bucket in buckets.values():
+        de_carga = {f.source_upload_id for f in bucket if f.source_upload_id is not None}
+        if len(de_carga) >= 2:
+            ids |= de_carga
+    return ids
 
 
 async def detect_duplicate_imports(
     db: AsyncSession,
     tenant_id: uuid.UUID | None = None,
 ) -> list[DuplicateGroup]:
-    """Detecta grupos de ventas/gastos activos idénticos CON señal de origen-import.
+    """Detecta ventas/gastos activos que entraron dos veces desde un archivo.
 
-    Criterio seguro (plan): agrupar por (fecha, monto, desc-base, product_id,
-    payment_method) y exigir señal de import. Transacciones manuales idénticas
-    (sin source_upload_id compartido ni sufijo) NUNCA se agrupan.
+    Agrupa por (fecha, monto, desc-base, product_id, payment_method) y, dentro de
+    cada grupo, sólo cuenta como duplicado (E-1) la misma fila aplicada dos veces
+    sobre una carga (``_copias_de_la_misma_fila``) o el mismo archivo subido más
+    de una vez (``_duplicados_entre_cargas``). Renglones idénticos de un mismo
+    archivo (refs distintos) y transacciones manuales idénticas NUNCA se agrupan.
     """
     groups: list[DuplicateGroup] = []
 
@@ -1266,19 +1371,6 @@ async def detect_duplicate_imports(
     sale_buckets: dict[tuple[Any, ...], list[SaleEntry]] = {}
     for sale in sales:
         sale_buckets.setdefault((sale.tenant_id, *_sale_dup_key(sale)), []).append(sale)
-    for key, bucket in sale_buckets.items():
-        if len(bucket) < 2 or not _group_has_import_signal(bucket, "notes"):
-            continue
-        ordered = sorted(bucket, key=lambda s: (s.created_at is None, str(s.created_at), str(s.id)))
-        groups.append(
-            DuplicateGroup(
-                tenant_id=key[0],
-                entity="sale",
-                keep_id=ordered[0].id,
-                duplicates=ordered[1:],
-                confidence="HIGH",
-            )
-        )
 
     # Gastos
     exp_q = select(ExpenseEntry).where(
@@ -1291,21 +1383,28 @@ async def detect_duplicate_imports(
     exp_buckets: dict[tuple[Any, ...], list[ExpenseEntry]] = {}
     for expense in expenses:
         exp_buckets.setdefault((expense.tenant_id, *_expense_dup_key(expense)), []).append(expense)
-    for key, ebucket in exp_buckets.items():
-        if len(ebucket) < 2 or not _group_has_import_signal(ebucket, "description"):
-            continue
-        ordered_e = sorted(
-            ebucket, key=lambda e: (e.created_at is None, str(e.created_at), str(e.id))
-        )
-        groups.append(
-            DuplicateGroup(
-                tenant_id=key[0],
-                entity="expense",
-                keep_id=ordered_e[0].id,
-                duplicates=ordered_e[1:],
-                confidence="HIGH",
-            )
-        )
+
+    cargas = await _cargas_con_huella(
+        db, _candidatas(sale_buckets) | _candidatas(exp_buckets)
+    )
+    for entity, buckets in (("sale", sale_buckets), ("expense", exp_buckets)):
+        for key, bucket in buckets.items():
+            if len(bucket) < 2:
+                continue
+            de_la_fila, sobrevivientes = _copias_de_la_misma_fila(bucket)
+            for conservada, duplicados in [
+                *de_la_fila,
+                *_duplicados_entre_cargas(sobrevivientes, cargas),
+            ]:
+                groups.append(
+                    DuplicateGroup(
+                        tenant_id=key[0],
+                        entity=entity,
+                        keep_id=conservada.id,
+                        duplicates=duplicados,
+                        confidence="HIGH",
+                    )
+                )
 
     logger.info(
         "data_repair.detect_duplicates.completed",

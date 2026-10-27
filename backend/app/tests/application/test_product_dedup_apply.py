@@ -463,17 +463,19 @@ async def test_apply_skips_group_when_new_balance_would_be_negative(
 ) -> None:
     tid = sample_tenant.tenant_id
     # Catálogo puro (MOST_RECENT): el canónico gana por barcode y arrastra stock_units=10,
-    # pero el ancla MÁS RECIENTE del grupo es qty=3 → delta = 3 - 10 = -7 (< 0). El canónico
-    # NO tiene balance (= 0 implícito) → crear uno con current_qty<0 sería inconsistente.
+    # pero el ancla MÁS RECIENTE del grupo es la del duplicado, qty=3 → delta = 3 - 10 = -7
+    # (< 0). El canónico NO tiene balance (= 0 implícito) → crear uno con current_qty<0
+    # sería inconsistente.
     canonical = await _add_product(
         db_session, tid, name="Sal", sku="SAL", barcode="7790099990009", stock_units=10
     )
     dup = await _add_product(db_session, tid, name="Sal x", sku="SAL", stock_units=3)
     await _add_movement(
-        db_session, tid, canonical.id, 3, SOURCE_CATALOG_INITIAL_STOCK, "c", occurred_offset_days=1
+        db_session, tid, canonical.id, 10, SOURCE_CATALOG_INITIAL_STOCK, "c",
+        occurred_offset_days=0,
     )
     await _add_movement(
-        db_session, tid, dup.id, 3, SOURCE_CATALOG_INITIAL_STOCK, "d", occurred_offset_days=0
+        db_session, tid, dup.id, 3, SOURCE_CATALOG_INITIAL_STOCK, "d", occurred_offset_days=1
     )
     await _add_balance(db_session, tid, dup.id, 3)  # el canónico queda SIN balance a propósito
     await db_session.flush()
