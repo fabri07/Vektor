@@ -207,8 +207,20 @@ export const posService = {
     const res = await api.post<PosCashSession>(`/pos/cash-sessions/${id}/abandon`, { reason });
     return res.data;
   },
-  async voidOperation(id: string, reason: string): Promise<PosOperationResult> {
-    const res = await api.post<PosOperationResult>(`/pos/operations/${id}/void`, { reason });
+  /**
+   * A-4: `clientSessionId` es el turno ABIERTO de esta pantalla. Si el ticket es
+   * de otro turno u otro día, el reintegro sale de ESTE cajón; sin decirlo, el
+   * servidor tiene que adivinar y con dos turnos abiertos responde 409.
+   */
+  async voidOperation(
+    id: string,
+    reason: string,
+    clientSessionId?: string | null,
+  ): Promise<PosOperationResult> {
+    const res = await api.post<PosOperationResult>(`/pos/operations/${id}/void`, {
+      reason,
+      ...(clientSessionId ? { client_session_id: clientSessionId } : {}),
+    });
     return res.data;
   },
 

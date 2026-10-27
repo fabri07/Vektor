@@ -13,13 +13,21 @@ interface RecentTicketsProps {
   canVoid: boolean;
   onReprint: (operationId: string) => void;
   onVoided: () => void;
+  /** A-4: el turno abierto de esta pantalla; viaja en la anulación. */
+  clientSessionId?: string | null;
 }
 
 /**
  * "Últimos tickets" (B12): reimprimir sin depender de que la página no se haya
  * recargado. Un cajero ve sólo los suyos (lo filtra el servidor).
  */
-export function RecentTickets({ refreshKey, canVoid, onReprint, onVoided }: RecentTicketsProps) {
+export function RecentTickets({
+  refreshKey,
+  canVoid,
+  onReprint,
+  onVoided,
+  clientSessionId,
+}: RecentTicketsProps) {
   const [abierto, setAbierto] = useState(false);
   const [items, setItems] = useState<PosOperationSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +86,7 @@ export function RecentTickets({ refreshKey, canVoid, onReprint, onVoided }: Rece
                 <VoidLastTicket
                   operation={t}
                   label="Anular"
+                  clientSessionId={clientSessionId}
                   onVoided={() => {
                     setItems((prev) =>
                       prev?.map((x) => (x.id === t.id ? { ...x, status: "VOIDED" } : x)) ?? null,

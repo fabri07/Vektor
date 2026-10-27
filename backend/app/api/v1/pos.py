@@ -19,6 +19,7 @@ total: los recalcula ``calcular_operacion``, reparto de centavos incluido, y
 """
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -1031,6 +1032,121 @@ async def _ejecutar_anulacion(
     )
 
 
+@dataclass(frozen=True)
+class _DecisionDeReintegro:
+    """Qué hace la anulación con el cajón (A-4).
+
+    ``reintegro``: ``(turno del que sale, efectivo)``, o ``None`` si no sale
+    plata de un cajón que su arqueo no vea. ``a_releer``: el turno de la venta
+    cuando se decidió "sin reintegro" porque estaba abierto; se relee con
+    candado después de anular, porque pudo cerrarse en el medio.
+    """
+
+    reintegro: tuple[PosCashSession | None, Decimal] | None = None
+    a_releer: PosCashSession | None = None
+
+
+def _sin_turno_para_el_reintegro() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "VOID_NEEDS_OPEN_CASH_SESSION",
+            "message": (
+                "El ticket es de un turno ya cerrado o de otro día: la plata se "
+                "devuelve del cajón de hoy. Abrí el turno de esta caja y anulá desde ahí."
+            ),
+        },
+    )
+
+
+async def _reintegro_de_la_anulacion(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    user: User,
+    terminal: PosTerminal | None,
+    operacion: PosOperation,
+    tenders: list[PosTender],
+    client_session_id: str | None,
+) -> _DecisionDeReintegro:
+    """A-4: si anular este ticket saca plata de un cajón que su arqueo no ve.
+
+    Anular dentro del mismo turno abierto y el mismo día no necesita nada: el
+    ticket pasa a ``VOIDED`` y deja de sumar en los dos arqueos, que es justo lo
+    que salió del cajón. Pero un ticket de AYER, o de un turno ya cerrado (o de
+    otro turno abierto), se devuelve con plata del cajón de HOY: sin registro,
+    el arqueo del turno abierto y el cierre diario de hoy dan un faltante sin
+    explicación, y el arqueo firmado de la venta no se puede reescribir.
+
+    El cajón del reintegro: el turno que nombra la caja; si no nombra ninguno,
+    el único abierto del usuario en esta caja; y si no hay, el de la venta si
+    sigue abierto y es suyo (cruzó la medianoche). Si no, 409: no se adivina.
+    Sólo cuenta el efectivo: tarjeta, transferencia y fiado no están en el cajón.
+    """
+    efectivo = sum(
+        (
+            t.amount_ars
+            for t in tenders
+            if t.payment_method == pos_cash_session_service.METODO_EFECTIVO
+        ),
+        Decimal("0"),
+    )
+    if efectivo <= 0:
+        return _DecisionDeReintegro()
+    origen = (
+        await pos_cash_session_service.obtener_por_client_id(
+            session, tenant_id, operacion.client_session_id
+        )
+        if operacion.client_session_id
+        else None
+    )
+
+    async def _turno_actual() -> PosCashSession | None:
+        return await pos_cash_session_service.turno_abierto_para_reintegro(
+            session,
+            tenant_id,
+            user_id=user.user_id,
+            solo_propios=user.role_code == CASHIER_ROLE,
+            terminal_id=terminal.id if terminal is not None else None,
+            client_session_id=client_session_id,
+        )
+
+    mismo_dia = operacion.operation_date.date() == today_ar()
+    if mismo_dia and (origen is None or origen.esta_abierto):
+        if origen is None:
+            return _DecisionDeReintegro()
+        # El caso de siempre, salvo que la plata salga de OTRO turno abierto.
+        # Un `client_session_id` viejo o cerrado acá no frena nada: esta
+        # anulación no necesita reintegro.
+        if client_session_id is None or client_session_id != origen.client_session_id:
+            actual = await _turno_actual()
+            if actual is not None and actual.id != origen.id:
+                return _DecisionDeReintegro(reintegro=(actual, efectivo))
+        return _DecisionDeReintegro(a_releer=origen)
+
+    actual = await _turno_actual()
+    if client_session_id is not None and actual is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VOID_CASH_SESSION_NOT_OPEN",
+                "message": "Ese turno no está abierto: abrí el turno de esta caja para anular.",
+            },
+        )
+    if (
+        actual is None
+        and origen is not None
+        and origen.esta_abierto
+        and origen.user_id == user.user_id
+    ):
+        # Ticket de ayer en un turno que cruzó la medianoche y sigue abierto:
+        # la plata entró y sale del mismo cajón.
+        actual = origen
+    if actual is None and origen is not None:
+        raise _sin_turno_para_el_reintegro()
+    return _DecisionDeReintegro(reintegro=(actual, efectivo))
+
+
 @router.post(
     "/operations/{operation_id}/void",
     response_model=PosOperationResponse,
@@ -1077,6 +1193,21 @@ async def void_pos_operation(
 
     _exigir_anulacion_del_cajero(user, operacion, body.reason if body is not None else None)
 
+    # A-4: se decide ANTES de tocar nada, para que el 409 no deje media anulación.
+    decision = (
+        await _reintegro_de_la_anulacion(
+            session,
+            tenant_id=tenant.tenant_id,
+            user=user,
+            terminal=terminal,
+            operacion=operacion,
+            tenders=tenders,
+            client_session_id=body.client_session_id if body is not None else None,
+        )
+        if operacion.status != "VOIDED"
+        else _DecisionDeReintegro()
+    )
+
     await _ejecutar_anulacion(
         session,
         tenant_id=tenant.tenant_id,
@@ -1087,6 +1218,77 @@ async def void_pos_operation(
         reason=body.reason if body is not None else None,
         background=background,
     )
+
+    if decision.a_releer is not None:
+        # B-3: se decidió "sin reintegro" porque el turno de la venta estaba
+        # abierto. Con FOR SHARE (después de los productos, como la venta): o un
+        # cierre en vuelo espera y ya no suma el ticket, o el turno ya cerró con
+        # el ticket adentro y la plata sale de otro cajón — se rechaza y el
+        # reintento lo decide de nuevo.
+        releido = await pos_cash_session_service.obtener_por_client_id(
+            session, tenant.tenant_id, decision.a_releer.client_session_id, compartido=True
+        )
+        if releido is None or not releido.esta_abierto:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "VOID_CASH_SESSION_NOT_OPEN",
+                    "message": (
+                        "El turno del ticket se cerró mientras anulabas. Reintentá la anulación."
+                    ),
+                },
+            )
+
+    if decision.reintegro is not None:
+        turno, efectivo = decision.reintegro
+        if turno is not None:
+            # FOR SHARE recién ahora, DESPUÉS de los productos: el mismo orden que
+            # la venta (productos → turno). Un cierre en vuelo (FOR UPDATE) o
+            # espera a que esto commitee y lo resta, o ya cerró y se rechaza:
+            # si no, el reintegro quedaba fuera de un arqueo firmado.
+            turno = await pos_cash_session_service.obtener_por_client_id(
+                session, tenant.tenant_id, turno.client_session_id, compartido=True
+            )
+            if turno is None or not turno.esta_abierto:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "VOID_CASH_SESSION_NOT_OPEN",
+                        "message": (
+                            "El turno de esta caja se cerró mientras anulabas. "
+                            "Abrí uno y reintentá."
+                        ),
+                    },
+                )
+        fila = await pos_cash_session_service.registrar_reintegro(
+            session,
+            operacion,
+            sesion=turno,
+            cash_ars=efectivo,
+            refund_date=today_ar(),
+            user_id=user.user_id,
+        )
+        session.add(
+            DecisionAuditLog(
+                tenant_id=tenant.tenant_id,
+                decision_type="POS_CASH_REFUND_RECORDED",
+                decision_data={
+                    "record_type": "pos_cash_refund",
+                    "record_id": str(fila.id),
+                    "operation_id": str(operacion.id),
+                    "session_id": str(turno.id) if turno is not None else None,
+                    "origin_client_session_id": operacion.client_session_id,
+                    "sale_date": fila.sale_date.isoformat(),
+                    "refund_date": fila.refund_date.isoformat(),
+                    "cash_ars": str(efectivo),
+                },
+                triggered_by="ui:pos",
+                actor_user_id=user.user_id,
+                context={"endpoint": "pos.void"},
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.flush()
     return _a_respuesta(operacion, lineas, tenders)
 
 
@@ -1228,6 +1430,9 @@ async def resolve_stock_discrepancy(
     else:
         # El permiso de resolver no saltea las reglas de anulación del cajero.
         _exigir_anulacion_del_cajero(user, operacion, body.reason)
+        # Sin reintegro (A-4) a propósito: acá la venta NO existió, así que no
+        # sale plata de ningún cajón hoy. Si su turno ya cerró, el faltante ya
+        # está en la diferencia que se firmó.
         discrepancia.reason = body.reason
         await _ejecutar_anulacion(
             session,

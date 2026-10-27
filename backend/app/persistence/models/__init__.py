@@ -45,6 +45,7 @@ from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.pending_action import PendingAction
 from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.pos_cash_session import (
+    PosCashRefund,
     PosCashSession,
     PosLateSale,
 )
@@ -115,6 +116,7 @@ __all__ = [
     "AgentConversationContext",
     "PendingAction",
     "IdempotencyRecord",
+    "PosCashRefund",
     "PosCashSession",
     "PosLateSale",
     "PosOperation",
