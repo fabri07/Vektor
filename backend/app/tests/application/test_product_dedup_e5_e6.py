@@ -53,13 +53,15 @@ async def db_session(isolated_db_engine: AsyncEngine) -> AsyncGenerator[AsyncSes
 # ── Helpers ──────────────────────────────────────────────────────────────────────
 
 
-def _mov(qty: int, source_type: str | None, dia: int, tipo: str = "purchase") -> MovementRow:
+def _mov(
+    qty: int, source_type: str | None, dia: int, tipo: str = "purchase", hora: int = 0
+) -> MovementRow:
     return MovementRow(
         qty=qty,
         movement_type=tipo,
         source_type=source_type,
         source_row_hash=None,
-        occurred_at=_BASE + timedelta(days=dia),
+        occurred_at=_BASE + timedelta(days=dia, hours=hora),
         created_at=_BASE,
     )
 
@@ -84,9 +86,9 @@ def _apertura(qty: int, dia: int) -> MovementRow:
     return _mov(qty, SOURCE_CATALOG_INITIAL_STOCK, dia)
 
 
-def _venta_pos(qty: int, dia: int) -> MovementRow:
+def _venta_pos(qty: int, dia: int, hora: int = 0) -> MovementRow:
     # La venta en vivo no tiene source_type.
-    return _mov(-qty, None, dia, tipo="sale")
+    return _mov(-qty, None, dia, tipo="sale", hora=hora)
 
 
 async def _producto(session: AsyncSession, tid: uuid.UUID, **campos: object) -> Product:
@@ -215,7 +217,61 @@ def test_e5_movimiento_del_canonico_en_la_fecha_del_ancla_va_a_revision() -> Non
     assert dec.kind == STOCK_REVIEW
 
 
+def test_e5_venta_del_mismo_dia_del_ancla_con_hora_va_a_revision() -> None:
+    # El ancla cae a las 00:00 y la venta del POS del mismo día es a las 15:00: no se
+    # sabe si la lectura ya la contaba. Comparar el instante la tomaba como posterior.
+    canonico = _record(1, 7, _apertura(10, 1), _venta_pos(3, 10, hora=15))
+    dup = _record(2, 12, _apertura(12, 10))
+    dec = svc.classify_group_stock_decision(canonico, [dup])
+    assert dec.kind == STOCK_REVIEW
+    assert dec.reason == svc.STOCK_REASON_MIXED
+
+
+def test_e5_ancla_del_duplicado_que_daria_stock_negativo_va_a_revision() -> None:
+    # Apertura 10 (día 1), vende 8 (día 3) → 2. El duplicado contó 5 el día 2:
+    # 5 − 8 = −3. Lectura y ventas se contradicen: no se adivina.
+    canonico = _record(1, 2, _apertura(10, 1), _venta_pos(8, 3))
+    dup = _record(2, 5, _apertura(5, 2))
+    dec = svc.classify_group_stock_decision(canonico, [dup])
+    assert dec.kind == STOCK_REVIEW
+    assert dec.reason == svc.STOCK_REASON_NEGATIVE_TARGET
+    assert dec.delta is None
+
+
 # ── E-5: apply + revert contra la base ───────────────────────────────────────────
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_e5_ancla_que_daria_stock_negativo_no_escribe_nada(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    canonico = await _producto(
+        db_session, tid, name="Harina", sku="HAR1", barcode="7790011110001", stock_units=2
+    )
+    dup = await _producto(db_session, tid, name="Harina x", sku="HAR1", stock_units=5)
+    await _movimiento(db_session, tid, canonico.id, 10, SOURCE_CATALOG_INITIAL_STOCK, 1)
+    await _movimiento(db_session, tid, canonico.id, -8, None, 3, tipo="sale")
+    await _movimiento(db_session, tid, dup.id, 5, SOURCE_CATALOG_INITIAL_STOCK, 2)
+    await _balance(db_session, tid, canonico.id, 2)
+    await _balance(db_session, tid, dup.id, 5)
+    await db_session.commit()
+    canonico_id, dup_id = canonico.id, dup.id
+
+    plan = await svc.plan_dedup(db_session, tid)
+    (grupo,) = plan.merge_groups
+    assert grupo.requires_review
+    assert f"stock:{svc.STOCK_REASON_NEGATIVE_TARGET}" in grupo.review_reasons
+    source_run_id = await svc.persist_dedup_plan(db_session, tid, plan)
+    await db_session.commit()
+    applied = await svc.apply_dedup_plan(db_session, tid, source_run_id, lease_id=None)
+    assert applied.groups_applied == 0
+
+    # Antes del arreglo: applied, con stock_units = current_qty = −3.
+    assert await _stock(db_session, canonico_id) == (2, 2)
+    assert await _stock(db_session, dup_id) == (5, 5)
+    d = await db_session.get(Product, dup_id)
+    assert d is not None and d.is_active is True
 
 
 @pytest.mark.usefixtures("legacy_pre_f5_schema")
@@ -478,3 +534,31 @@ async def test_e6_los_vinculos_con_proveedores_pasan_al_canonico_y_vuelven(
     assert await _vinculo_estado(db_session, oeste_canon) == (
         canonico_id, "purchase_evidence", False
     )
+
+
+@pytest.mark.usefixtures("legacy_pre_f5_schema")
+async def test_e6_no_revierte_si_un_vinculo_movido_se_edito_despues(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    canonico = await _producto(
+        db_session, tid, name="Vinagre", sku="VIN1", barcode="7790011110002", stock_units=0
+    )
+    dup = await _producto(db_session, tid, name="Vinagre x", sku="VIN1", stock_units=0)
+    norte = await _proveedor(db_session, tid, "Norte")
+    movido = await _vinculo(db_session, tid, dup.id, norte, "catalog_declared")
+    await db_session.commit()
+    canonico_id = canonico.id
+
+    applied = await _aplicar(db_session, tid)
+    assert applied.status == "APPLIED", applied.group_results
+    # Alguien lo anula después (sigue en el canónico): devolverlo pisaría esa edición.
+    lk = await db_session.get(ProductSupplierLink, movido)
+    assert lk is not None and lk.product_id == canonico_id
+    lk.voided_at = _BASE
+    await db_session.commit()
+
+    reverted = await _liberar_claves_y_revertir(db_session, tid, canonico_id, applied.run_id)
+    assert reverted.groups_reverted == 0
+    assert reverted.group_results[0]["reason"] == "state_diverged"
+    assert await _vinculo_estado(db_session, movido) == (canonico_id, "catalog_declared", True)

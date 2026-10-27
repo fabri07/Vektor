@@ -99,6 +99,7 @@ STOCK_REASON_KEEP_ONE = "SHARED_SOURCE_ROW_HASH"
 STOCK_REASON_MOST_RECENT = "CATALOG_INITIAL_STOCK_REPEATED"
 STOCK_REASON_SUM = "DISTINCT_PURCHASES"
 STOCK_REASON_EMPTY = "NO_LIVE_LEDGER"
+STOCK_REASON_NEGATIVE_TARGET = "NEGATIVE_FORWARD_TARGET"
 
 # Chunk determinístico de re-apuntado de FKs (before_json {table, chunk_index, rows}).
 REPOINT_CHUNK_SIZE = 500
@@ -498,8 +499,8 @@ def classify_group_stock_decision(
       un duplicado, ``target`` = su qty + Σ movimientos vivos del canónico
       posteriores a ella (ventas en vivo incluidas) y ``delta`` = ``target`` −
       ``canonical.stock_units`` (puede ser 0 o negativo); exige que el stock del
-      canónico sea su ledger vivo y que ningún movimiento suyo caiga en la fecha
-      del ancla, si no → REVIEW.
+      canónico sea su ledger vivo, que ningún movimiento suyo caiga el mismo día
+      de negocio que el ancla y que ``target`` no dé negativo, si no → REVIEW.
     - Compras distintas (SUM): ``delta`` = Σ qty vivos de los duplicados dedup-eados
       por ``source_row_hash`` a nivel de TODO el grupo (una fila compartida por varios
       miembros —canónico o duplicados hermanos— cuenta UNA sola vez).
@@ -563,20 +564,24 @@ def classify_group_stock_decision(
         # La lectura más reciente es de un duplicado: reemplaza la posición del
         # canónico a ESA fecha y se conservan sus movimientos posteriores. Para
         # saber qué tenía a esa fecha, su stock tiene que ser su ledger vivo
-        # completo (incluidas las ventas en vivo, sin source_type); con residuo, o
-        # con un movimiento en la misma fecha que el ancla (no se sabe si fue antes
-        # o después de la lectura), no se adivina: REVIEW.
+        # completo (incluidas las ventas en vivo, sin source_type). No se adivina
+        # (REVIEW) con residuo, con un movimiento el MISMO día de negocio que el
+        # ancla (las anclas caen a las 00:00 y las ventas tienen hora: no se sabe
+        # si fueron antes o después de la lectura) ni si el resultado da negativo
+        # (lectura y ventas se contradicen).
         if canonical.stock_units != sum(m.qty for m in canonical.movements):
             return StockDecision(STOCK_REVIEW, None, STOCK_REASON_RESIDUO)
         anchor_time = _movement_time(latest)
         posteriores = 0
         for m in canonical.movements:
             when = _movement_time(m)
-            if when == anchor_time:
+            if when.date() == anchor_time.date():
                 return StockDecision(STOCK_REVIEW, None, STOCK_REASON_MIXED)
             if when > anchor_time:
                 posteriores += m.qty
         target = latest.qty + posteriores
+        if target < 0:
+            return StockDecision(STOCK_REVIEW, None, STOCK_REASON_NEGATIVE_TARGET)
         return StockDecision(
             STOCK_MOST_RECENT, target - canonical.stock_units, STOCK_REASON_MOST_RECENT
         )
@@ -1854,7 +1859,14 @@ async def _plan_supplier_links(
         )
         own = canonical_by_supplier.get(supplier_id)
         if own is None:
-            moved.append({"id": str(best.id), "from_product_id": str(best.product_id)})
+            moved.append(
+                {
+                    "id": str(best.id),
+                    "from_product_id": str(best.product_id),
+                    "source": best.source,
+                    "voided_at": _json_scalar(best.voided_at),
+                }
+            )
             continue
         if best.voided_at is not None:
             continue  # un vínculo anulado no le agrega nada al del canónico
@@ -2724,7 +2736,12 @@ async def _e6_revert_diverged(
         link = await session.get(
             ProductSupplierLink, uuid.UUID(moved["id"]), populate_existing=True
         )
-        if link is None or link.product_id != canonical_id:
+        if (
+            link is None
+            or link.product_id != canonical_id
+            or link.source != moved.get("source", link.source)
+            or _json_scalar(link.voided_at) != moved.get("voided_at", _json_scalar(link.voided_at))
+        ):
             return True
         # Volver al duplicado no puede chocar con un vínculo que ganó después.
         taken = (
