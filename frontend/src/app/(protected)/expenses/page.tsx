@@ -422,7 +422,7 @@ export default function ExpensesPage() {
 const COMPRA_NO_SE_ANULA =
   "Es parte de una compra de mercadería: no se anula sola. Si la mercadería está mal, corregí el stock desde el producto.";
 const COMPRA_CAMPOS_FIJOS =
-  "Este gasto es parte de una compra de mercadería: el monto, la categoría y la fecha no se cambian acá, porque el stock y el costo quedarían como si la compra siguiera. Si la mercadería está mal, corregí el stock con un ajuste desde el producto (la anulación de compras todavía no existe). La descripción, el proveedor y las notas sí se pueden editar.";
+  "Este gasto es parte de una compra de mercadería: el monto, la categoría, la fecha y el proveedor no se cambian acá, porque el stock y el costo quedarían como si la compra siguiera. Si la mercadería está mal, corregí el stock con un ajuste desde el producto (la anulación de compras todavía no existe). La descripción y las notas sí se pueden editar.";
 
 function ExpenseEditModal({
   expense,
@@ -462,7 +462,7 @@ function ExpenseEditModal({
         )}
         <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value)} /></label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vektor-body">Proveedor<input className="rounded border border-vk-border-w px-3 py-2" value={form.supplier_name ?? ""} onChange={(e) => set("supplier_name", e.target.value || null)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Proveedor<input className="rounded border border-vk-border-w px-3 py-2" disabled={deCompra} value={form.supplier_name ?? ""} onChange={(e) => set("supplier_name", e.target.value || null)} /></label>
           <label className="grid gap-1 text-sm text-vektor-body">Monto<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" disabled={deCompra} value={form.amount} onChange={(e) => set("amount", Number(e.target.value))} /></label>
         </div>
         <label className="flex items-center gap-2 text-sm text-vektor-body"><input type="checkbox" checked={form.is_recurring} onChange={(e) => set("is_recurring", e.target.checked)} />Recurrente</label>

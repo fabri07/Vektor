@@ -94,6 +94,17 @@ def _conservar_marca_de_retiro(
     return cf
 
 
+def _sin_grupo_de_compra(custom_fields: dict[str, Any] | None) -> dict[str, Any] | None:
+    """T3 · B-3: el grupo de compra lo escribe sólo `registrar_compra`.
+
+    Si el cliente lo pudiera mandar, convertiría cualquier gasto en una línea de
+    compra inanulable. Se descarta del body en POST y PATCH.
+    """
+    if custom_fields is None:
+        return None
+    return {k: v for k, v in custom_fields.items() if k != CLAVE_GRUPO_DE_COMPRA}
+
+
 def _expense_snapshot(entry: ExpenseEntry) -> dict[str, object]:
     return {
         "id": str(entry.id),
@@ -241,9 +252,17 @@ def _al_minuto(momento: datetime) -> datetime:
 def _cambia_lo_de_la_compra(body: UpdateExpenseRequest, entry: ExpenseEntry) -> bool:
     """T3 · B-3: ¿el PATCH toca lo que la compra comparte con su movimiento?
 
-    Compara VALORES, no presencia: la pantalla manda siempre monto, categoría y
-    fecha, aunque sólo se haya editado la descripción.
+    Compara VALORES, no presencia: la pantalla manda siempre monto, categoría,
+    fecha y proveedor, aunque sólo se haya editado la descripción. El proveedor
+    también: el movimiento conserva el suyo (y `GET /suppliers/{id}/products` lee
+    de ahí).
     """
+    if "supplier_id" in body.model_fields_set and body.supplier_id != entry.supplier_id:
+        return True
+    if body.supplier_name is not None and body.supplier_name.strip() != (
+        entry.supplier_name or ""
+    ).strip():
+        return True
     if body.amount is not None and Decimal(body.amount) != Decimal(entry.amount):
         return True
     if body.category is not None and body.category != entry.category:
@@ -293,7 +312,9 @@ async def create_expense(
     repo = ExpenseRepository(session)
     # FASE 3.1: categoría "Otro" editable — el label libre va a custom_fields;
     # category sigue siendo OTHER (reportes/agregaciones intactos).
-    custom_fields = _apply_category_label(body.custom_fields, body.category, body.category_label)
+    custom_fields = _apply_category_label(
+        _sin_grupo_de_compra(body.custom_fields), body.category, body.category_label
+    )
     # Categoría "Otros" con label → persistir por tenant para que reaparezca en
     # futuros desplegables (sin tabla ni pantalla nueva; vive en custom_fields).
     if body.category == "OTHER" and body.category_label and body.category_label.strip():
@@ -522,10 +543,12 @@ async def update_expense(
         entry.notes = body.notes
     if body.custom_fields is not None:
         previos = entry.custom_fields or {}
-        entry.custom_fields = _conservar_marca_de_retiro(body.custom_fields, entry.custom_fields)
-        if es_de_compra and previos.get(CLAVE_GRUPO_DE_COMPRA):
-            # T3 · B-3: el grupo no se pierde con el editor de campos (el envío
-            # sólo se reconoce por él).
+        entry.custom_fields = _conservar_marca_de_retiro(
+            _sin_grupo_de_compra(body.custom_fields) or {}, entry.custom_fields
+        )
+        if previos.get(CLAVE_GRUPO_DE_COMPRA):
+            # T3 · B-3: el grupo no se agrega ni se pierde con el editor de
+            # campos (el envío sólo se reconoce por él).
             entry.custom_fields = {
                 **entry.custom_fields,
                 CLAVE_GRUPO_DE_COMPRA: previos[CLAVE_GRUPO_DE_COMPRA],

@@ -5,15 +5,18 @@ import { AxiosError, type AxiosResponse } from "axios";
 import ExpensesPage from "../page";
 
 // T3 · B-3: una línea de compra no se anula ni se le cambia monto, categoría o
-// fecha desde Gastos; el error del servidor se muestra tal cual.
+// fecha (ni el proveedor) desde Gastos; el error del servidor se muestra tal cual.
 
-const mutaciones: Array<{ onError?: (e: unknown) => void }> = [];
+type Mutacion = { mutationFn?: (arg: unknown) => unknown; onError?: (e: unknown) => void };
+const mutaciones: Mutacion[] = [];
 const toast = jest.fn();
+const updateExpense = jest.fn();
+const deleteExpense = jest.fn();
 
 jest.mock("@tanstack/react-query", () => ({
   useQuery: jest.fn(),
   useQueryClient: () => ({ invalidateQueries: jest.fn(), setQueriesData: jest.fn() }),
-  useMutation: (opts: { onError?: (e: unknown) => void }) => {
+  useMutation: (opts: Mutacion) => {
     mutaciones.push(opts);
     return { isPending: false, mutate: jest.fn() };
   },
@@ -24,6 +27,12 @@ jest.mock("@/stores/authStore", () => ({
 }));
 jest.mock("@/stores/toastStore", () => ({
   useToastStore: (selector: (state: unknown) => unknown) => selector({ add: toast }),
+}));
+jest.mock("@/services/expenses.service", () => ({
+  expensesService: {
+    updateExpense: (...a: unknown[]) => updateExpense(...a),
+    deleteExpense: (...a: unknown[]) => deleteExpense(...a),
+  },
 }));
 jest.mock("@/components/layout/PageWrapper", () => ({
   PageWrapper: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
@@ -63,6 +72,16 @@ beforeEach(() => {
   });
 });
 
+/** La mutación cuyo `mutationFn` llama a ese método del servicio (no depende del orden). */
+function mutacionQueLlama(metodo: jest.Mock): Mutacion {
+  for (const m of mutaciones) {
+    metodo.mockClear();
+    m.mutationFn?.(entries[0]);
+    if (metodo.mock.calls.length > 0) return m;
+  }
+  throw new Error("ninguna mutación llama a ese método");
+}
+
 function filaDe(texto: string): HTMLElement {
   const fila = within(screen.getByRole("table")).getByText(texto).closest("tr");
   if (!fila) throw new Error(`sin fila para ${texto}`);
@@ -78,7 +97,7 @@ test("una línea de compra no ofrece anular; un gasto común sí", () => {
   expect(within(filaDe("Alquiler del local")).getByRole("button", { name: "Anular gasto" })).toBeEnabled();
 });
 
-test("el editor de una línea de compra deja fijos monto, categoría y fecha, y explica por qué", () => {
+test("el editor de una línea de compra deja fijos monto, categoría, fecha y proveedor, y explica por qué", () => {
   render(<ExpensesPage />);
   fireEvent.click(within(filaDe("Compra: Yerba")).getByRole("button", { name: "Editar gasto" }));
   const dialog = screen.getByRole("dialog");
@@ -86,7 +105,7 @@ test("el editor de una línea de compra deja fijos monto, categoría y fecha, y 
   expect(within(dialog).getByLabelText("Categoría")).toBeDisabled();
   expect(within(dialog).getByLabelText("Fecha y hora")).toBeDisabled();
   expect(within(dialog).getByLabelText("Descripción")).toBeEnabled();
-  expect(within(dialog).getByLabelText("Proveedor")).toBeEnabled();
+  expect(within(dialog).getByLabelText("Proveedor")).toBeDisabled();
   expect(within(dialog).getByText(/ajuste desde el producto/)).toBeInTheDocument();
 });
 
@@ -97,6 +116,7 @@ test("el editor de un gasto común no cambia", () => {
   expect(within(dialog).getByLabelText("Monto")).toBeEnabled();
   expect(within(dialog).getByLabelText("Categoría")).toBeEnabled();
   expect(within(dialog).getByLabelText("Fecha y hora")).toBeEnabled();
+  expect(within(dialog).getByLabelText("Proveedor")).toBeEnabled();
 });
 
 test("editar y anular muestran el mensaje del servidor (409 PURCHASE_LINE)", () => {
@@ -106,10 +126,9 @@ test("editar y anular muestran el mensaje del servidor (409 PURCHASE_LINE)", () 
     status: 409,
     data: { detail: { code: "PURCHASE_LINE", message: mensaje } },
   } as AxiosResponse);
-  // Las dos primeras son la edición y la anulación (en ese orden en la página).
-  const [editar, anular] = mutaciones;
-  editar?.onError?.(error);
-  anular?.onError?.(error);
-  expect(toast).toHaveBeenNthCalledWith(1, mensaje, "error");
-  expect(toast).toHaveBeenNthCalledWith(2, mensaje, "error");
+  mutacionQueLlama(updateExpense).onError?.(error);
+  expect(toast).toHaveBeenLastCalledWith(mensaje, "error");
+  toast.mockClear();
+  mutacionQueLlama(deleteExpense).onError?.(error);
+  expect(toast).toHaveBeenLastCalledWith(mensaje, "error");
 });

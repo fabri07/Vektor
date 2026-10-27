@@ -5,7 +5,7 @@ gasto de mercadería por línea, sin FK entre los dos. Anular o editar el gasto
 suelto deja el movimiento vivo: el stock, el costo y el respaldo siguen como si la
 compra existiera. Hasta que exista la anulación de la compra entera (decisión del
 dueño 2026-10-26: antes del 30/10 sólo se bloquea), esos gastos no se anulan ni se
-les cambia monto, categoría, tipo ni fecha: ni por ``DELETE``/``PATCH /expenses``
+les cambia monto, categoría, tipo, fecha ni proveedor: ni por ``DELETE``/``PATCH /expenses``
 ni por ``RECLASSIFY_EXPENSE`` del chat. Esta es la ÚNICA definición; la usan los
 tres caminos y la respuesta de la API (``is_purchase_line``) para la pantalla.
 
@@ -33,10 +33,10 @@ CODIGO_LINEA_DE_COMPRA: Final = "PURCHASE_LINE"
 
 MENSAJE_LINEA_DE_COMPRA: Final = (
     "Este gasto es parte de una compra de mercadería: anularlo o cambiarle el "
-    "monto, la categoría o la fecha dejaría el stock y el costo como si la compra "
-    "siguiera. Si la mercadería que entró está mal, corregila con un ajuste de "
-    "stock desde el producto. La anulación de compras todavía no existe. La "
-    "descripción, el proveedor y las notas sí se pueden editar."
+    "monto, la categoría, la fecha o el proveedor dejaría el stock y el costo como "
+    "si la compra siguiera. Si la mercadería que entró está mal, corregila con un "
+    "ajuste de stock desde el producto. La anulación de compras todavía no existe. "
+    "La descripción y las notas sí se pueden editar."
 )
 
 #: La clave que agrupa las líneas (y el envío) de un comprobante.

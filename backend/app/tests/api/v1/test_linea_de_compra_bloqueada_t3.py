@@ -281,7 +281,7 @@ async def test_cambiar_el_tipo_de_una_linea_de_compra_da_409(
     assert (await _gasto(db_session, linea.id)).expense_type == "COGS"
 
 
-async def test_editar_solo_descripcion_proveedor_y_notas_de_una_linea_de_compra_anda(
+async def test_editar_solo_descripcion_y_notas_de_una_linea_de_compra_anda(
     client: AsyncClient,
     auth_headers: dict[str, str],
     db_session: AsyncSession,
@@ -299,7 +299,6 @@ async def test_editar_solo_descripcion_proveedor_y_notas_de_una_linea_de_compra_
         json=_como_la_pantalla(
             actual,
             description="Compra de galletitas (factura 12)",
-            supplier_name="Distribuidora Norte",
             notes="revisar factura",
         ),
         headers=auth_headers,
@@ -308,11 +307,100 @@ async def test_editar_solo_descripcion_proveedor_y_notas_de_una_linea_de_compra_
     assert resp.status_code == 200, resp.text
     g = await _gasto(db_session, linea.id)
     assert g.description == "Compra de galletitas (factura 12)"
-    assert g.supplier_name == "Distribuidora Norte"
+    assert g.supplier_name == actual["supplier_name"]
     assert g.notes == "revisar factura"
     assert g.amount == Decimal("5000.00")
     assert g.category == "INVENTORY"
     assert (g.custom_fields or {}).get("purchase_group_id")
+
+
+async def test_cambiar_el_proveedor_de_una_linea_de_compra_da_409(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """El movimiento conserva su proveedor: cambiarlo en el gasto los separaba."""
+    tid = sample_tenant.tenant_id
+    p = await _producto(db_session, tid, "Polenta")
+    await _compra_manual(client, auth_headers, p)
+    linea, _envio = await _gastos_de_la_compra(db_session, tid)
+    linea_id, proveedor_id = linea.id, linea.supplier_id
+    actual = (await client.get(f"/api/v1/expenses/{linea_id}", headers=auth_headers)).json()
+    otro = await client.post("/api/v1/suppliers", json={"name": "Otro"}, headers=auth_headers)
+    assert otro.status_code == 201, otro.text
+
+    resp = await client.patch(
+        f"/api/v1/expenses/{linea_id}",
+        json=_como_la_pantalla(actual, supplier_name="Distribuidora Norte"),
+        headers=auth_headers,
+    )
+    _es_409_de_compra(resp)
+    resp = await client.patch(
+        f"/api/v1/expenses/{linea_id}",
+        json={"supplier_id": otro.json()["id"]},
+        headers=auth_headers,
+    )
+    _es_409_de_compra(resp)
+
+    g = await _gasto(db_session, linea_id)
+    assert g.supplier_name == actual["supplier_name"]
+    assert g.supplier_id == proveedor_id
+
+
+async def test_el_cliente_no_puede_inventar_un_grupo_de_compra(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """`purchase_group_id` lo escribe sólo `registrar_compra`: mandado en el POST
+    o en el PATCH de un gasto común se descarta, y el gasto sigue anulable."""
+    grupo = str(uuid.uuid4())
+    resp = await client.post(
+        "/api/v1/expenses",
+        json={
+            "amount": "800.00",
+            "category": "UTILITIES",
+            "expense_date": _HOY,
+            "description": "Luz",
+            "payment_method": "transfer",
+            "custom_fields": {"purchase_group_id": grupo, "nota": "x"},
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["is_purchase_line"] is False
+    luz = uuid.UUID(resp.json()["id"])
+    g = await _gasto(db_session, luz)
+    assert "purchase_group_id" not in (g.custom_fields or {})
+    assert (g.custom_fields or {}).get("nota") == "x"
+
+    resp = await client.post(
+        "/api/v1/expenses",
+        json={
+            "amount": "900.00",
+            "category": "RENT",
+            "expense_date": _HOY,
+            "description": "Alquiler",
+            "payment_method": "transfer",
+        },
+        headers=auth_headers,
+    )
+    alquiler = uuid.UUID(resp.json()["id"])
+    resp = await client.patch(
+        f"/api/v1/expenses/{alquiler}",
+        json={"custom_fields": {"purchase_group_id": grupo}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["is_purchase_line"] is False
+    assert "purchase_group_id" not in ((await _gasto(db_session, alquiler)).custom_fields or {})
+
+    for gid in (luz, alquiler):
+        resp = await client.delete(f"/api/v1/expenses/{gid}", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+        assert (await _gasto(db_session, gid)).voided_at is not None
 
 
 async def test_linea_importada_bloqueada_y_la_fecha_del_editor_se_compara_al_minuto(

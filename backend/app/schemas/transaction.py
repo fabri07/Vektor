@@ -225,7 +225,7 @@ class ExpenseEntryResponse(BaseModel):
     custom_fields: dict[str, Any] = {}
     created_at: datetime
     # T3 · B-3: parte de una compra de mercadería → no se anula ni se le cambia
-    # monto, categoría o fecha (la pantalla lo deshabilita; el servidor da 409).
+    # monto, categoría, fecha o proveedor (la pantalla lo deshabilita; el servidor da 409).
     is_purchase_line: bool = False
 
     @field_serializer("amount")

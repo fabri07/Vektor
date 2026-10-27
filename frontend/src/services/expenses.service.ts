@@ -51,7 +51,8 @@ export interface ExpenseEntryResponse {
   created_at: string;
   /**
    * T3 · B-3: parte de una compra de mercadería (línea o envío). No se anula ni
-   * se le cambia monto, categoría o fecha: el servidor responde 409 `PURCHASE_LINE`.
+   * se le cambia monto, categoría, fecha o proveedor: el servidor responde 409
+   * `PURCHASE_LINE`.
    */
   is_purchase_line?: boolean;
 }
