@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 # ── Versionado de la lógica de decisión ──────────────────────────────────────────
 # Cambiar CUALQUIER regla de identidad/stock/fingerprint OBLIGA a subir esta versión:
 # entra al fingerprint, así T5 aborta planes calculados con una versión distinta.
-DECISION_VERSION = 1
+DECISION_VERSION = 2  # 2: E-5, MOST_RECENT lleva el ancla hacia adelante
 
 # ── Tipos de arista ──────────────────────────────────────────────────────────────
 EDGE_STRONG = "STRONG"  # comparten barcode_normalized (identidad fuerte)
@@ -492,9 +492,14 @@ def classify_group_stock_decision(
     - MEZCLAR semántica de catálogo (MOST_RECENT) con compras (SUM) en el MISMO
       grupo → REVIEW (ambiguo).
     - Toda la evidencia no-canónica es catálogo (``catalog_initial_stock``):
-      MOST_RECENT — ``target`` = qty del ancla catálogo MÁS RECIENTE de TODO el grupo
-      (canónico + duplicados, por COALESCE(occurred_at, created_at));
-      ``delta`` = ``target`` − ``canonical.stock_units`` (puede ser 0 o negativo).
+      MOST_RECENT — se busca el ancla catálogo MÁS RECIENTE de TODO el grupo
+      (canónico + duplicados, por COALESCE(occurred_at, created_at)). Si es del
+      canónico, ``delta`` = 0: ya tiene esa lectura y lo posterior (E-5). Si es de
+      un duplicado, ``target`` = su qty + Σ movimientos vivos del canónico
+      posteriores a ella (ventas en vivo incluidas) y ``delta`` = ``target`` −
+      ``canonical.stock_units`` (puede ser 0 o negativo); exige que el stock del
+      canónico sea su ledger vivo y que ningún movimiento suyo caiga en la fecha
+      del ancla, si no → REVIEW.
     - Compras distintas (SUM): ``delta`` = Σ qty vivos de los duplicados dedup-eados
       por ``source_row_hash`` a nivel de TODO el grupo (una fila compartida por varios
       miembros —canónico o duplicados hermanos— cuenta UNA sola vez).
@@ -535,16 +540,43 @@ def classify_group_stock_decision(
     if group_has_catalog and group_has_purchase:
         return StockDecision(STOCK_REVIEW, None, STOCK_REASON_MIXED)
 
-    # Catálogo puro → el canónico toma el ancla MÁS RECIENTE de TODO el grupo.
+    # Catálogo puro → el canónico toma el ancla MÁS RECIENTE de TODO el grupo,
+    # llevada hacia adelante con lo que el canónico movió DESPUÉS de ella (E-5).
     if group_has_catalog:
+        # (es_del_canónico, movimiento): ante un empate exacto gana el canónico.
         all_anchors = [
-            m for m in canonical.movements if m.source_type == SOURCE_CATALOG_INITIAL_STOCK
+            (True, m) for m in canonical.movements if m.source_type == SOURCE_CATALOG_INITIAL_STOCK
         ]
         for movs in dup_live_by_id.values():
             all_anchors.extend(
-                m for m in movs if m.source_type == SOURCE_CATALOG_INITIAL_STOCK
+                (False, m) for m in movs if m.source_type == SOURCE_CATALOG_INITIAL_STOCK
             )
-        target = max(all_anchors, key=_anchor_sort_key).qty
+        anchor_is_canonical, latest = max(
+            all_anchors, key=lambda a: (*_anchor_sort_key(a[1]), a[0])
+        )
+        if anchor_is_canonical:
+            # E-5: el canónico ya tiene la lectura más reciente y todo lo que pasó
+            # después (ventas del POS, compras); los duplicados sólo traen lecturas
+            # viejas. No hay nada que sumar: tomar la qty del ancla borraba esas
+            # operaciones.
+            return StockDecision(STOCK_MOST_RECENT, 0, STOCK_REASON_MOST_RECENT)
+        # La lectura más reciente es de un duplicado: reemplaza la posición del
+        # canónico a ESA fecha y se conservan sus movimientos posteriores. Para
+        # saber qué tenía a esa fecha, su stock tiene que ser su ledger vivo
+        # completo (incluidas las ventas en vivo, sin source_type); con residuo, o
+        # con un movimiento en la misma fecha que el ancla (no se sabe si fue antes
+        # o después de la lectura), no se adivina: REVIEW.
+        if canonical.stock_units != sum(m.qty for m in canonical.movements):
+            return StockDecision(STOCK_REVIEW, None, STOCK_REASON_RESIDUO)
+        anchor_time = _movement_time(latest)
+        posteriores = 0
+        for m in canonical.movements:
+            when = _movement_time(m)
+            if when == anchor_time:
+                return StockDecision(STOCK_REVIEW, None, STOCK_REASON_MIXED)
+            if when > anchor_time:
+                posteriores += m.qty
+        target = latest.qty + posteriores
         return StockDecision(
             STOCK_MOST_RECENT, target - canonical.stock_units, STOCK_REASON_MOST_RECENT
         )
@@ -1440,6 +1472,33 @@ async def _apply_one_group(
         ).all()
     ]
 
+    # E-6 — las salidas pendientes del POS y los vínculos con proveedores de los
+    # duplicados pasan al canónico (paso 8). Se deciden acá, igual que los alias.
+    from app.persistence.models.pos_stock_discrepancy import (  # noqa: PLC0415
+        PosStockDiscrepancy,
+    )
+
+    discrepancies_moved = [
+        {"id": str(did), "from_product_id": str(pid), "status": status}
+        for did, pid, status in (
+            await session.execute(
+                select(
+                    PosStockDiscrepancy.id,
+                    PosStockDiscrepancy.product_id,
+                    PosStockDiscrepancy.status,
+                )
+                .where(
+                    PosStockDiscrepancy.tenant_id == tenant_id,
+                    PosStockDiscrepancy.product_id.in_(duplicate_ids),
+                )
+                .order_by(PosStockDiscrepancy.id)
+            )
+        ).all()
+    ]
+    links_moved, links_merged = await _plan_supplier_links(
+        session, tenant_id, canonical_id, ordered_dups
+    )
+
     # Delta de stock group-level: UNA vez a stock_units (y más abajo a current_qty).
     canonical_obj.stock_units = stock_before + delta
     recompute_requires_completion(canonical_obj)
@@ -1473,6 +1532,9 @@ async def _apply_one_group(
                 "external_code_transferred": ext_transfer,
                 "external_code_conflicts": ext_conflicts,
                 "aliases_moved": aliases_moved,
+                "discrepancies_moved": discrepancies_moved,
+                "supplier_links_moved": links_moved,
+                "supplier_links_merged": links_merged,
             },
             confidence="HIGH",
         )
@@ -1688,7 +1750,131 @@ async def _apply_one_group(
             .execution_options(synchronize_session=False)
         )
 
+    # 8) E-6 — salidas pendientes y vínculos con proveedores, al canónico. Una
+    # salida pendiente que quedara en el duplicado inactivo se resolvería contra
+    # SU stock (el ajuste entraría ahí) y descontaría la venta del canónico.
+    if discrepancies_moved:
+        # Core: el listener del costo promedio no ve este cambio de producto.
+        marcar_todo_el_historial(
+            session,
+            tenant_id,
+            {canonical_id, *(uuid.UUID(d["from_product_id"]) for d in discrepancies_moved)},
+        )
+        await session.execute(
+            update(PosStockDiscrepancy)
+            .where(
+                PosStockDiscrepancy.tenant_id == tenant_id,
+                PosStockDiscrepancy.id.in_([uuid.UUID(d["id"]) for d in discrepancies_moved]),
+            )
+            .values(product_id=canonical_id)
+            .execution_options(synchronize_session=False)
+        )
+    from app.persistence.models.product_supplier_link import (  # noqa: PLC0415
+        ProductSupplierLink,
+    )
+
+    if links_moved:
+        await session.execute(
+            update(ProductSupplierLink)
+            .where(
+                ProductSupplierLink.tenant_id == tenant_id,
+                ProductSupplierLink.id.in_([uuid.UUID(lk["id"]) for lk in links_moved]),
+            )
+            .values(product_id=canonical_id)
+            .execution_options(synchronize_session=False)
+        )
+    for merged in links_merged:
+        await session.execute(
+            update(ProductSupplierLink)
+            .where(
+                ProductSupplierLink.tenant_id == tenant_id,
+                ProductSupplierLink.id == uuid.UUID(merged["id"]),
+            )
+            .values(voided_at=None, source=merged["source"])
+            .execution_options(synchronize_session=False)
+        )
+
     return ("applied", str(stock_dec.get("kind") or ""))
+
+
+_SUPPLIER_LINK_STRONGER = "purchase_evidence"
+
+
+async def _plan_supplier_links(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    canonical_id: uuid.UUID,
+    ordered_dups: list[uuid.UUID],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """E-6 — qué pasa con los vínculos producto↔proveedor de los duplicados.
+
+    Devuelve ``(movidos, fusionados)``. Por proveedor, el mejor vínculo de los
+    duplicados (vivo antes que anulado, ``purchase_evidence`` antes que
+    ``catalog_declared``) pasa al canónico si el canónico no tiene uno con ese
+    proveedor. Si ya tiene, no se puede mover (único por producto+proveedor):
+    el del canónico absorbe al del duplicado —si éste está vivo, el del canónico
+    queda vivo y con la procedencia más fuerte, que nunca se degrada— y se
+    registran sus valores previos para la reversa. El resto queda en su
+    duplicado inactivo, sin tocar.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.product_supplier_link import (  # noqa: PLC0415
+        ProductSupplierLink,
+    )
+
+    rows = (
+        (
+            await session.execute(
+                select(ProductSupplierLink).where(
+                    ProductSupplierLink.tenant_id == tenant_id,
+                    ProductSupplierLink.product_id.in_([canonical_id, *ordered_dups]),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    canonical_by_supplier = {r.supplier_id: r for r in rows if r.product_id == canonical_id}
+    dup_by_supplier: dict[uuid.UUID, list[Any]] = defaultdict(list)
+    for r in rows:
+        if r.product_id != canonical_id:
+            dup_by_supplier[r.supplier_id].append(r)
+
+    moved: list[dict[str, Any]] = []
+    merged: list[dict[str, Any]] = []
+    for supplier_id in sorted(dup_by_supplier, key=str):
+        best = min(
+            dup_by_supplier[supplier_id],
+            key=lambda r: (
+                r.voided_at is not None,
+                r.source != _SUPPLIER_LINK_STRONGER,
+                str(r.id),
+            ),
+        )
+        own = canonical_by_supplier.get(supplier_id)
+        if own is None:
+            moved.append({"id": str(best.id), "from_product_id": str(best.product_id)})
+            continue
+        if best.voided_at is not None:
+            continue  # un vínculo anulado no le agrega nada al del canónico
+        source = (
+            _SUPPLIER_LINK_STRONGER
+            if _SUPPLIER_LINK_STRONGER in (own.source, best.source)
+            else own.source
+        )
+        if own.voided_at is None and own.source == source:
+            continue  # el del canónico ya dice lo mismo
+        merged.append(
+            {
+                "id": str(own.id),
+                "from_link_id": str(best.id),
+                "prev_source": own.source,
+                "prev_voided_at": _json_scalar(own.voided_at),
+                "source": source,
+            }
+        )
+    return moved, merged
 
 
 async def _validate_source_run(
@@ -2337,6 +2523,12 @@ async def _revert_one_group(
             )
             return ("skipped", _REVERT_IDENTITY_COLLISION)
 
+    # E-6: las salidas pendientes y los vínculos que movió el apply tienen que
+    # seguir como los dejó. Una salida resuelta después sobre el canónico, o un
+    # vínculo que alguien editó, no se devuelve al duplicado.
+    if await _e6_revert_diverged(session, tenant_id, canonical_id, m_after):
+        return ("skipped", _REVERT_STATE_DIVERGED)
+
     # ── (c) MUTACIÓN (inversa exacta, orden INVERSO al apply) ────────────────────
     # 1) DEACTIVATE⁻¹ — reactivar el dup (no-op si ya está activo).
     for da in deactivates:
@@ -2451,7 +2643,115 @@ async def _revert_one_group(
             .execution_options(synchronize_session=False)
         )
 
+    # 8⁻¹) E-6 — salidas pendientes y vínculos de vuelta a su duplicado; el
+    # vínculo del canónico que absorbió uno recupera su anulación y procedencia.
+    from app.persistence.models.pos_stock_discrepancy import (  # noqa: PLC0415
+        PosStockDiscrepancy,
+    )
+    from app.persistence.models.product_supplier_link import (  # noqa: PLC0415
+        ProductSupplierLink,
+    )
+
+    discrepancies_back = m_after.get("discrepancies_moved") or []
+    if discrepancies_back:
+        marcar_todo_el_historial(
+            session,
+            tenant_id,
+            {canonical_id, *(uuid.UUID(d["from_product_id"]) for d in discrepancies_back)},
+        )
+    for moved in discrepancies_back:
+        await session.execute(
+            update(PosStockDiscrepancy)
+            .where(
+                PosStockDiscrepancy.tenant_id == tenant_id,
+                PosStockDiscrepancy.id == uuid.UUID(moved["id"]),
+            )
+            .values(product_id=uuid.UUID(moved["from_product_id"]))
+            .execution_options(synchronize_session=False)
+        )
+    for moved in m_after.get("supplier_links_moved") or []:
+        await session.execute(
+            update(ProductSupplierLink)
+            .where(
+                ProductSupplierLink.tenant_id == tenant_id,
+                ProductSupplierLink.id == uuid.UUID(moved["id"]),
+            )
+            .values(product_id=uuid.UUID(moved["from_product_id"]))
+            .execution_options(synchronize_session=False)
+        )
+    for merged in m_after.get("supplier_links_merged") or []:
+        prev_voided = merged.get("prev_voided_at")
+        await session.execute(
+            update(ProductSupplierLink)
+            .where(
+                ProductSupplierLink.tenant_id == tenant_id,
+                ProductSupplierLink.id == uuid.UUID(merged["id"]),
+            )
+            .values(
+                voided_at=datetime.fromisoformat(prev_voided) if prev_voided else None,
+                source=merged["prev_source"],
+            )
+            .execution_options(synchronize_session=False)
+        )
+
     return ("reverted", "")
+
+
+async def _e6_revert_diverged(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    canonical_id: uuid.UUID,
+    m_after: dict[str, Any],
+) -> bool:
+    """E-6 — ¿cambió algo de lo que el apply movió (salidas pendientes y
+    vínculos con proveedores) desde que lo dejó? Sólo lee."""
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from app.persistence.models.pos_stock_discrepancy import (  # noqa: PLC0415
+        PosStockDiscrepancy,
+    )
+    from app.persistence.models.product_supplier_link import (  # noqa: PLC0415
+        ProductSupplierLink,
+    )
+
+    for moved in m_after.get("discrepancies_moved") or []:
+        row = await session.get(
+            PosStockDiscrepancy, uuid.UUID(moved["id"]), populate_existing=True
+        )
+        if row is None or row.product_id != canonical_id or row.status != moved["status"]:
+            return True
+    for moved in m_after.get("supplier_links_moved") or []:
+        link = await session.get(
+            ProductSupplierLink, uuid.UUID(moved["id"]), populate_existing=True
+        )
+        if link is None or link.product_id != canonical_id:
+            return True
+        # Volver al duplicado no puede chocar con un vínculo que ganó después.
+        taken = (
+            await session.execute(
+                select(func.count())
+                .select_from(ProductSupplierLink)
+                .where(
+                    ProductSupplierLink.tenant_id == tenant_id,
+                    ProductSupplierLink.product_id == uuid.UUID(moved["from_product_id"]),
+                    ProductSupplierLink.supplier_id == link.supplier_id,
+                )
+            )
+        ).scalar_one()
+        if int(taken) != 0:
+            return True
+    for merged in m_after.get("supplier_links_merged") or []:
+        link = await session.get(
+            ProductSupplierLink, uuid.UUID(merged["id"]), populate_existing=True
+        )
+        if (
+            link is None
+            or link.product_id != canonical_id
+            or link.voided_at is not None
+            or link.source != merged["source"]
+        ):
+            return True
+    return False
 
 
 async def revert_dedup_run(
