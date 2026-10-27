@@ -5191,6 +5191,12 @@ async def reread_undo(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=exc.detalle_http()
         ) from exc
+    except reread_service.DeshacerPisaTrabajoManualError as exc:
+        # I4-3/I4-4: frenado antes de tocar nada; la relectura sigue aplicada.
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=exc.detalle_http()
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)

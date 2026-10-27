@@ -158,6 +158,7 @@ from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_ROW_REF_PREFIX,
     UNCLASSIFIED_STATUS_DISMISSED,
+    UNCLASSIFIED_STATUS_IMPORTED,
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
     is_unclassified_row_ref,
@@ -4276,17 +4277,19 @@ async def apply_reread(
     )
 
     # Compuerta: qué pendientes de «Otros» ya existían, para saber cuáles crea
-    # esta relectura (adónde va lo que deja de ser venta/gasto).
-    otros_previos = set(
-        (
+    # esta relectura (adónde va lo que deja de ser venta/gasto). I4-4: con su
+    # estado, para saber también cuáles descarta (el deshacer los devuelve).
+    otros_previos: dict[uuid.UUID, str] = {
+        fila.id: fila.status
+        for fila in (
             await session.execute(
-                select(UnclassifiedRecord.id).where(
+                select(UnclassifiedRecord.id, UnclassifiedRecord.status).where(
                     UnclassifiedRecord.tenant_id == tenant_id,
                     UnclassifiedRecord.uploaded_file_id == file_id,
                 )
             )
-        ).scalars()
-    )
+        ).all()
+    }
 
     result = await _reconcile(
         session, file, tenant_id, summary_for_import, confirmed_fields, run, draft=draft
@@ -4317,9 +4320,8 @@ async def apply_reread(
     )
     if _perdidas_b5e.total:
         raise RereadWouldLeaveSalesWithoutPurchaseError(_perdidas_b5e.total)
-    otros_nuevos = [
-        r.row_data or {}
-        for r in (
+    otros_del_archivo = list(
+        (
             await session.execute(
                 select(UnclassifiedRecord).where(
                     UnclassifiedRecord.tenant_id == tenant_id,
@@ -4327,8 +4329,21 @@ async def apply_reread(
                 )
             )
         ).scalars()
-        if r.id not in otros_previos
-    ]
+    )
+    otros_nuevos = [r.row_data or {} for r in otros_del_archivo if r.id not in otros_previos]
+    # I4-4: lo que esta relectura hizo en «Otros», para que deshacerla lo revierta:
+    # los registros que creó (los borra) y los pendientes que descartó (los
+    # devuelve a pendientes). Sin esto el deshacer des-anulaba las ventas y su
+    # copia seguía pendiente en la bandeja: clasificarla la cargaba dos veces.
+    otros_de_la_relectura = {
+        "creados": [str(r.id) for r in otros_del_archivo if r.id not in otros_previos],
+        "descartados": [
+            str(r.id)
+            for r in otros_del_archivo
+            if otros_previos.get(r.id) == UNCLASSIFIED_STATUS_PENDING
+            and r.status == UNCLASSIFIED_STATUS_DISMISSED
+        ],
+    }
     perdida = medir_perdida_real(
         result.items, result.edited_snapshots, otros_nuevos, result.reemplazos_de_otros
     )
@@ -4535,6 +4550,8 @@ async def apply_reread(
         "receipt": {"version": 1, "columns": result.receipt},
         # Compuerta: lo que se perdió A SABIENDAS (aceptado), para el historial.
         "data_loss": perdida.as_dict() if perdida.hay_perdida else None,
+        # I4-4: ids de «Otros» que crea y que descarta esta relectura (undo).
+        "otros": otros_de_la_relectura,
     }
     # M·1c-2: red de seguridad. Hoy no queda nada en la cola: las compras que
     # anula `_reconcile` las drena el reimport (antes de sellar `updated_at`), y
@@ -4945,6 +4962,205 @@ async def _undo_master_and_product_items(
     return not_reverted
 
 
+#: I4-3/I4-4: código del 409 cuando deshacer una relectura borraría trabajo hecho
+#: a mano DESPUÉS de releer.
+UNDO_PISA_TRABAJO_MANUAL = "UNDO_PISA_TRABAJO_MANUAL"
+_MUESTRAS_DE_TRABAJO_MANUAL = 5
+
+
+class DeshacerPisaTrabajoManualError(ValueError):
+    """I4-3/I4-4: deshacer borraría ventas o gastos que la relectura cargó y el
+    usuario corrigió después (``has_user_edits``), o filas de «Otros» que la
+    relectura creó y el usuario ya clasificó (su venta o gasto quedaría junto a
+    la original des-anulada: la operación dos veces). Se frena entero ANTES de
+    tocar nada: el caller hace rollback y responde 409. Decisión conservadora:
+    no se elige por el usuario entre su corrección y el archivo."""
+
+    CODE = UNDO_PISA_TRABAJO_MANUAL
+
+    def __init__(
+        self, ventas: int, gastos: int, otros: int, muestras: list[dict[str, Any]]
+    ) -> None:
+        partes = []
+        if ventas:
+            partes.append(f"{ventas} venta(s)")
+        if gastos:
+            partes.append(f"{gastos} gasto(s)")
+        lo_editado = " y ".join(partes)
+        frases = []
+        if lo_editado:
+            frases.append(f"borraría {lo_editado} que corregiste a mano después de releer")
+        if otros:
+            frases.append(
+                f"dejaría repetidas {otros} fila(s) de «Otros» que esta relectura "
+                "mandó ahí y ya clasificaste"
+            )
+        mensaje = (
+            "Deshacer esta relectura " + ", y ".join(frases) + ". No se cambió nada. "
+            "Para poder deshacerla, revisá esas operaciones (borrá las que ya no "
+            "quieras) y volvé a intentar."
+        )
+        super().__init__(mensaje)
+        self.user_message = mensaje
+        self.ventas = ventas
+        self.gastos = gastos
+        self.otros = otros
+        self.muestras = muestras
+
+    def detalle_http(self) -> dict[str, Any]:
+        """El ``detail`` del 409: código, mensaje, conteos y muestras."""
+        return {
+            "code": self.CODE,
+            "message": self.user_message,
+            "ventas": self.ventas,
+            "gastos": self.gastos,
+            "otros": self.otros,
+            "muestras": self.muestras,
+        }
+
+
+async def _exigir_undo_sin_trabajo_manual(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    insert_sale_ids: set[uuid.UUID],
+    insert_expense_ids: set[uuid.UUID],
+    otros_creados: list[uuid.UUID],
+) -> None:
+    """I4-3/I4-4: frena el deshacer si borraría trabajo manual posterior a la
+    relectura. Ver ``DeshacerPisaTrabajoManualError``."""
+    muestras: list[dict[str, Any]] = []
+    conteos: dict[str, int] = {"sale": 0, "expense": 0}
+    fuentes: tuple[tuple[str, type[SaleEntry] | type[ExpenseEntry], set[uuid.UUID]], ...] = (
+        ("sale", SaleEntry, insert_sale_ids),
+        ("expense", ExpenseEntry, insert_expense_ids),
+    )
+    for kind, modelo, ids in fuentes:
+        if not ids:
+            continue
+        editados = cast(
+            "list[SaleEntry | ExpenseEntry]",
+            (
+                await session.execute(
+                    select(modelo)
+                    .where(
+                        modelo.tenant_id == tenant_id,
+                        modelo.id.in_(ids),
+                        modelo.has_user_edits.is_(True),
+                    )
+                    .order_by(modelo.transaction_date, modelo.id)
+                )
+            )
+            .scalars()
+            .all(),
+        )
+        conteos[kind] = len(editados)
+        for rec in editados:
+            if len(muestras) < _MUESTRAS_DE_TRABAJO_MANUAL:
+                muestras.append(
+                    {
+                        "kind": kind,
+                        "id": str(rec.id),
+                        "fecha": rec.transaction_date.date().isoformat()
+                        if rec.transaction_date
+                        else None,
+                        "monto": str(rec.amount),
+                    }
+                )
+    clasificados: list[UnclassifiedRecord] = []
+    if otros_creados:
+        clasificados = list(
+            (
+                await session.execute(
+                    select(UnclassifiedRecord)
+                    .where(
+                        UnclassifiedRecord.tenant_id == tenant_id,
+                        UnclassifiedRecord.id.in_(otros_creados),
+                        UnclassifiedRecord.status == UNCLASSIFIED_STATUS_IMPORTED,
+                    )
+                    .order_by(UnclassifiedRecord.id)
+                )
+            ).scalars()
+        )
+        for fila in clasificados:
+            if len(muestras) < _MUESTRAS_DE_TRABAJO_MANUAL:
+                muestras.append(
+                    {"kind": "otros", "id": str(fila.id), "hoja": fila.context_label}
+                )
+    if conteos["sale"] or conteos["expense"] or clasificados:
+        raise DeshacerPisaTrabajoManualError(
+            conteos["sale"], conteos["expense"], len(clasificados), muestras
+        )
+
+
+async def _undo_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID | None,
+    creados: list[uuid.UUID],
+    descartados: list[uuid.UUID],
+) -> None:
+    """I4-4: revierte lo que la relectura hizo en «Otros».
+
+    Los registros que creó se BORRAN: la relectura no pasó, y sus ventas o gastos
+    originales vuelven des-anulados (dejarlos pendientes los cargaba dos veces).
+    Los clasificados después no llegan acá: los frena
+    ``_exigir_undo_sin_trabajo_manual``. Los pendientes que descartó vuelven a
+    PENDING sólo si siguen DISMISSED (si el usuario los tocó después, manda él).
+
+    Huellas de riesgo de columna (``risk:*``): la de una captura creada se borra
+    —si no, una relectura futura no la vuelve a capturar—, salvo que la misma
+    fila tenga un descartado que vuelve; la de un descartado que vuelve se
+    repone, porque ``_reconcile_column_risk`` la borró al descartarlo.
+
+    Un run anterior a I4-4 no guardó estos ids: no se toca «Otros», como antes.
+    """
+    huellas_de: dict[uuid.UUID, str] = {}
+    if creados or descartados:
+        for fila in (
+            await session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.id.in_([*creados, *descartados]),
+                )
+            )
+        ).scalars():
+            ref = _parse_risk_ref(fila.row_data)
+            if ref is not None and file_id is not None:
+                huellas_de[fila.id] = _hash_anchor(
+                    _risk_row_anchor(tenant_id, file_id, ref[0], ref[1])
+                )
+    devueltos: list[UnclassifiedRecord] = []
+    if descartados:
+        devueltos = list(
+            (
+                await session.execute(
+                    select(UnclassifiedRecord).where(
+                        UnclassifiedRecord.tenant_id == tenant_id,
+                        UnclassifiedRecord.id.in_(descartados),
+                        UnclassifiedRecord.status == UNCLASSIFIED_STATUS_DISMISSED,
+                    )
+                )
+            ).scalars()
+        )
+        for fila in devueltos:
+            fila.status = UNCLASSIFIED_STATUS_PENDING
+            fila.resolved_at = None
+    huellas_que_vuelven = {huellas_de[f.id] for f in devueltos if f.id in huellas_de}
+    if creados:
+        await session.execute(
+            delete(UnclassifiedRecord).where(
+                UnclassifiedRecord.tenant_id == tenant_id,
+                UnclassifiedRecord.id.in_(creados),
+            )
+        )
+        await _delete_fingerprints(
+            session,
+            tenant_id,
+            {huellas_de[i] for i in creados if i in huellas_de} - huellas_que_vuelven,
+        )
+    await _restore_fingerprints(session, tenant_id, huellas_que_vuelven)
+
+
 async def undo_reread(
     session: AsyncSession,
     run_id: uuid.UUID,
@@ -4998,6 +5214,32 @@ async def undo_reread(
     )
     items = list(items_res.scalars().all())
 
+    # Los ids de ventas y gastos insertados por el run están en
+    # DataRepairItem.after_json (action == REREAD_INSERT).
+    insert_sale_ids: set[uuid.UUID] = set()
+    insert_expense_ids: set[uuid.UUID] = set()
+    for it in items:
+        if it.action != ACTION_INSERT or not it.after_json:
+            continue
+        kind = it.after_json.get("kind")
+        raw_id = it.after_json.get("id")
+        if not raw_id:
+            continue
+        rid = uuid.UUID(raw_id)
+        if kind == "sale":
+            insert_sale_ids.add(rid)
+        elif kind == "expense":
+            insert_expense_ids.add(rid)
+    _otros_del_run = (run.details_json or {}).get("otros") or {}
+    otros_creados = [uuid.UUID(i) for i in _otros_del_run.get("creados") or ()]
+    otros_descartados = [uuid.UUID(i) for i in _otros_del_run.get("descartados") or ()]
+    # I4-3/I4-4: antes de tocar nada. Borrar una venta corregida a mano después de
+    # releer (o des-anular la original junto a una fila de «Otros» ya clasificada)
+    # perdía o duplicaba ese trabajo sin avisar.
+    await _exigir_undo_sin_trabajo_manual(
+        session, tenant_id, insert_sale_ids, insert_expense_ids, otros_creados
+    )
+
     restored = 0
     removed = 0
 
@@ -5025,23 +5267,8 @@ async def undo_reread(
         e.voided_by_repair_run_id = None
         restored += 1
 
-    # 2. Borrar (hard delete) los registros insertados por el run. Sus ids están en
-    # DataRepairItem.after_json (action == REREAD_INSERT).
-    insert_sale_ids: set[uuid.UUID] = set()
-    insert_expense_ids: set[uuid.UUID] = set()
-    for it in items:
-        if it.action != ACTION_INSERT or not it.after_json:
-            continue
-        kind = it.after_json.get("kind")
-        raw_id = it.after_json.get("id")
-        if not raw_id:
-            continue
-        rid = uuid.UUID(raw_id)
-        if kind == "sale":
-            insert_sale_ids.add(rid)
-        elif kind == "expense":
-            insert_expense_ids.add(rid)
-
+    # 2. Borrar (hard delete) los registros insertados por el run (ninguno
+    # editado a mano: lo frenó `_exigir_undo_sin_trabajo_manual`).
     if insert_sale_ids:
         # M·P2b: un ``delete`` Core esquiva el listener del costo promedio. Una
         # venta sin movimiento borrada mueve ``aproximado``: todo el historial de
@@ -5107,6 +5334,15 @@ async def undo_reread(
             if ref:
                 restored_refs.add(ref)
     await _restore_fingerprints(session, tenant_id, restored_refs)
+
+    # 3b. I4-4: «Otros» — fuera lo que la relectura creó, vuelve lo que descartó.
+    await _undo_otros(
+        session,
+        tenant_id,
+        uuid.UUID(str(_file_id_del_run)) if _file_id_del_run else None,
+        otros_creados,
+        otros_descartados,
+    )
 
     # 4. Inventario: revertir el efecto del reread sobre stock. Los movimientos que
     # el reread voideó se auditaron como REREAD_VOID (kind=movement) y los que
@@ -5259,6 +5495,7 @@ def _trigger_score(
 # Re-export para tests
 __all__ = [
     "ACTION_INSERT",
+    "DeshacerPisaTrabajoManualError",
     "ACTION_VOID",
     "REPAIR_TYPE_REREAD",
     "VOID_REASON_REREAD",
