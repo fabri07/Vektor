@@ -784,12 +784,54 @@ def infer_spreadsheet_type(
     return "general"
 
 
-def rows_to_dicts(headers: list[str], rows: list[list[Any]]) -> list[dict[str, Any]]:
+def _celda_de_fila(valor: Any, conservar_numeros: bool) -> Any:
+    """El valor de una celda tal como viaja en la fila del summary.
+
+    Por default, texto. Con ``conservar_numeros`` un número NATIVO de la planilla
+    (celda numérica de xlsx o resultado de una fórmula calculada) viaja como
+    número (I5-1): pasado a texto, el convenio de la columna lo volvía a
+    interpretar y un ``1.234`` nativo —uno coma doscientos treinta y cuatro—
+    entraba como 1234 sin aviso. Un nativo no tiene formato que interpretar, y la
+    regla E4 dice que no se reinterpreta.
+
+    ``Decimal`` (lo que devuelve el evaluador de fórmulas) viaja como ``int`` o
+    ``float`` porque el summary es JSON; Excel mismo guarda los números como doble, así que
+    no se pierde nada que la planilla tuviera. Un no finito y un booleano siguen
+    como texto, como antes: ninguno es un monto, y un ``NaN`` en JSONB no entra.
+    """
+    import math  # noqa: PLC0415
+    from decimal import Decimal  # noqa: PLC0415
+
+    if conservar_numeros and not isinstance(valor, bool):
+        if isinstance(valor, int):
+            return valor
+        if isinstance(valor, Decimal) and valor.is_finite() and valor == valor.to_integral_value():
+            return int(valor)
+        if isinstance(valor, float | Decimal) and math.isfinite(valor):
+            return float(valor)
+    return str(valor)
+
+
+def _texto_de_celda(valor: Any) -> Any:
+    """Un campo de TEXTO (detalle, cliente, proveedor) de una celda que puede ser
+    un número nativo de xlsx (I5-1): como texto, igual que antes. Un ``0`` es
+    ``"0"``, no un vacío."""
+    if isinstance(valor, int | float) and not isinstance(valor, bool):
+        return str(valor)
+    return valor
+
+
+def rows_to_dicts(
+    headers: list[str], rows: list[list[Any]], *, conservar_numeros: bool = False
+) -> list[dict[str, Any]]:
     """Mapea filas a dicts por header, tolerante a filas irregulares.
 
     Si una fila tiene menos celdas que headers, las faltantes quedan None
     (no se descartan en silencio como hacía `zip(strict=False)`). Filas None y
     celdas extra (más allá de los headers) se ignoran.
+
+    ``conservar_numeros``: el camino xlsx lo pide para que los números nativos no
+    pasen a texto (ver ``_celda_de_fila``). Un CSV no tiene nativos.
     """
     out: list[dict[str, Any]] = []
     n = len(headers)
@@ -797,7 +839,11 @@ def rows_to_dicts(headers: list[str], rows: list[list[Any]]) -> list[dict[str, A
         cells = list(row) if row is not None else []
         out.append(
             {
-                headers[i]: (str(cells[i]) if i < len(cells) and cells[i] is not None else None)
+                headers[i]: (
+                    _celda_de_fila(cells[i], conservar_numeros)
+                    if i < len(cells) and cells[i] is not None
+                    else None
+                )
                 for i in range(n)
             }
         )
@@ -1505,17 +1551,17 @@ def separar_libro_mixto(
             "fecha": (
                 str(fila[col_fecha]) if col_fecha and fila.get(col_fecha) is not None else None
             ),
-            "detalle": fila.get(col_detalle) if col_detalle else None,
+            "detalle": _texto_de_celda(fila.get(col_detalle)) if col_detalle else None,
             "monto": monto,
         }
         if clasificacion.destino == "venta":
-            if col_cliente and fila.get(col_cliente):
-                base["cliente"] = fila.get(col_cliente)
+            if col_cliente and _texto_de_celda(fila.get(col_cliente)):
+                base["cliente"] = _texto_de_celda(fila.get(col_cliente))
             ventas.append(base)
         else:
             base["categoria"] = clasificacion.categoria or str(fila.get(col_tipo)).strip()
-            if col_proveedor and fila.get(col_proveedor):
-                base["proveedor"] = fila.get(col_proveedor)
+            if col_proveedor and _texto_de_celda(fila.get(col_proveedor)):
+                base["proveedor"] = _texto_de_celda(fila.get(col_proveedor))
             gastos.append(base)
     return {
         "columna_de_tipo": col_tipo,
@@ -2330,7 +2376,7 @@ def _parse_spreadsheet(
                         str(c) if c is not None else f"col_{i}"
                         for i, c in enumerate(rows[_hdr])
                     ]
-                    _dicts = rows_to_dicts(_headers, rows[_hdr + 1 :])
+                    _dicts = rows_to_dicts(_headers, rows[_hdr + 1 :], conservar_numeros=True)
                     context_id = f"sheet:{sheet_name}"
                     contexts.append(
                         {
@@ -2374,7 +2420,7 @@ def _parse_spreadsheet(
                 if not data_rows:
                     continue
 
-                dicts = rows_to_dicts(headers, data_rows)
+                dicts = rows_to_dicts(headers, data_rows, conservar_numeros=True)
                 if not primary_headers:
                     primary_headers = headers
 
@@ -2566,7 +2612,7 @@ def _parse_spreadsheet(
         ]
         data_rows = _all[hdr_idx + 1 :]
         analysis = analyze_headers(headers)
-        all_dicts = rows_to_dicts(headers, data_rows)
+        all_dicts = rows_to_dicts(headers, data_rows, conservar_numeros=True)
         _avisar_filas_no_reales(summary, headers, all_dicts)
         preview_rows = all_dicts[:10]
         null_stats = compute_column_null_stats(all_dicts)
