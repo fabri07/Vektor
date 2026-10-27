@@ -329,6 +329,8 @@ async def test_apply_voids_sales_and_creates_run():
         empty.scalars.return_value.all.return_value = []
         empty_vertical = MagicMock()
         empty_vertical.all.return_value = []
+        sin_movimiento = MagicMock()
+        sin_movimiento.scalar_one_or_none.return_value = None
         mock_db = _mock_db_session(
             [
                 files_result,  # detect_misclassified: archivos
@@ -338,6 +340,8 @@ async def test_apply_voids_sales_and_creates_run():
                 empty,  # detect_duplicates: gastos
                 empty_vertical,  # _load_vertical_by_tenant
                 empty,  # detect_misclassified_opex: gastos
+                sin_movimiento,  # T3: el `sale:{id}` vivo de la venta (no tiene)
+                empty,  # T3: liberar_identidades_de (sin vínculos)
             ]
         )
         result = await apply_repair(mock_db, tenant_id=tenant_id, dry_run=False)
