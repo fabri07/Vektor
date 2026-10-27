@@ -481,23 +481,32 @@ async def test_30_legit_identical_sales_not_voided(session: AsyncSession, tenant
 async def test_import_duplicate_sales_voided_reversibly(
     session: AsyncSession, tenant, user
 ) -> None:
-    """Dos ventas idénticas del MISMO archivo (source_upload_id repetido) → una se anula."""
+    """El mismo archivo subido dos veces (``content_hash`` igual) → la copia se anula.
+
+    E-1: dos ventas idénticas de UNA carga son dos ventas (ver
+    ``tests/api/v1/test_reparacion_duplicados_e1.py``); el duplicado es la copia
+    de la re-subida.
+    """
     from app.application.services.data_repair_service import (
         apply_repair,
         detect_duplicate_imports,
     )
     from app.persistence.models.repair import DataRepairItem
 
-    upload_id = uuid.uuid4()
     f = await _make_uploaded_file(
-        session, tenant.tenant_id, user.user_id, {"file_type": "spreadsheet"}
+        session, tenant.tenant_id, user.user_id, {"file_type": "spreadsheet"},
+        created_at=datetime(2026, 6, 2, 10, tzinfo=UTC),
     )
-    upload_id = f.id
+    f2 = await _make_uploaded_file(
+        session, tenant.tenant_id, user.user_id, {"file_type": "spreadsheet"},
+        created_at=datetime(2026, 6, 2, 11, tzinfo=UTC),
+    )
+    f.content_hash = f2.content_hash = "h-ventas"
     s1 = await _make_sale_with_source(
-        session, tenant.tenant_id, amount=Decimal("999"), notes="Coca", source_upload_id=upload_id
+        session, tenant.tenant_id, amount=Decimal("999"), notes="Coca", source_upload_id=f.id
     )
     s2 = await _make_sale_with_source(
-        session, tenant.tenant_id, amount=Decimal("999"), notes="Coca", source_upload_id=upload_id
+        session, tenant.tenant_id, amount=Decimal("999"), notes="Coca", source_upload_id=f2.id
     )
     await session.flush()
 
@@ -513,14 +522,14 @@ async def test_import_duplicate_sales_voided_reversibly(
     await session.refresh(s2)
     assert s1.voided_at is None and s2.voided_at is None
 
-    # apply anula exactamente una (la más nueva) con motivo DUPLICATE
+    # apply anula exactamente una (la de la re-subida) con motivo DUPLICATE
     applied = await apply_repair(session, tenant_id=tenant.tenant_id, dry_run=False)
     assert applied.sales_voided >= 1
     await session.refresh(s1)
     await session.refresh(s2)
     voided = [s for s in (s1, s2) if s.voided_at is not None]
     kept = [s for s in (s1, s2) if s.voided_at is None]
-    assert len(voided) == 1
+    assert voided == [s2]
     assert len(kept) == 1
     assert voided[0].void_reason == "DUPLICATE"
     assert voided[0].voided_by_repair_run_id == applied.run_id

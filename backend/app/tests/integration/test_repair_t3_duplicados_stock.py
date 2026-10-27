@@ -57,25 +57,40 @@ async def tenant(session: AsyncSession) -> Any:
     return t
 
 
-@pytest_asyncio.fixture
-async def archivo(session: AsyncSession, tenant: Any) -> UploadedFile:
-    user = await make_user(session, tenant.tenant_id)
+async def _libro(
+    session: AsyncSession, tid: uuid.UUID, uploaded_by: uuid.UUID, minuto: int
+) -> UploadedFile:
+    """El mismo libro (``content_hash`` igual) subido en el minuto indicado."""
     f = UploadedFile(
         id=uuid.uuid4(),
-        tenant_id=tenant.tenant_id,
-        uploaded_by=user.user_id,
+        tenant_id=tid,
+        uploaded_by=uploaded_by,
         original_filename="libro.xlsx",
-        s3_key="test/libro.xlsx",
+        s3_key=f"test/libro-{minuto}.xlsx",
         content_type="application/vnd.ms-excel",
         size_bytes=1024,
         purpose="ingestion",
         status="uploaded",
         processing_status="DONE",
         parsed_summary_json={"file_type": "spreadsheet"},
+        content_hash="h-libro",
     )
+    f.created_at = datetime(2026, 6, 2, 10, minuto, tzinfo=UTC)
     session.add(f)
     await session.commit()
     return f
+
+
+@pytest_asyncio.fixture
+async def archivo(session: AsyncSession, tenant: Any) -> UploadedFile:
+    user = await make_user(session, tenant.tenant_id)
+    return await _libro(session, tenant.tenant_id, user.user_id, 0)
+
+
+@pytest_asyncio.fixture
+async def resubido(session: AsyncSession, archivo: UploadedFile) -> UploadedFile:
+    """E-1: un duplicado es la copia que entró por re-subir el MISMO archivo."""
+    return await _libro(session, archivo.tenant_id, archivo.uploaded_by, 5)
 
 
 async def _producto(db: AsyncSession, tid: uuid.UUID, nombre: str, stock: int) -> Product:
@@ -207,12 +222,12 @@ async def _items(db: AsyncSession, run_id: uuid.UUID, accion: str) -> list[DataR
 
 
 async def test_duplicado_de_venta_repone_stock_y_pasa_su_identidad_a_la_conservada(
-    session: AsyncSession, tenant: Any, archivo: UploadedFile
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, resubido: UploadedFile
 ) -> None:
     tid = tenant.tenant_id
     coca = await _producto(session, tid, "Coca", 10)
     v1 = await _venta_importada(session, tid, archivo.id, coca, "fila:2")
-    v2 = await _venta_importada(session, tid, archivo.id, coca, "fila:3")
+    v2 = await _venta_importada(session, tid, resubido.id, coca, "fila:3")
     id1 = await _identidad(session, tid, "sale", v1.id)
     id2 = await _identidad(session, tid, "sale", v2.id)
     # Una identidad compartida (el mismo comprobante): la conservada ya la tiene.
@@ -254,12 +269,12 @@ async def test_duplicado_de_venta_repone_stock_y_pasa_su_identidad_a_la_conserva
 
 
 async def test_duplicado_de_compra_baja_el_stock(
-    session: AsyncSession, tenant: Any, archivo: UploadedFile
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, resubido: UploadedFile
 ) -> None:
     tid = tenant.tenant_id
     yerba = await _producto(session, tid, "Yerba", 0)
     g1 = await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
-    g2 = await _compra_importada(session, tid, archivo.id, yerba, "fila:3")
+    g2 = await _compra_importada(session, tid, resubido.id, yerba, "fila:3")
     id2 = await _identidad(session, tid, "expense", g2.id)
     assert await _stock(session, yerba.id) == 20
     (mov_g2,) = [
@@ -284,12 +299,12 @@ async def test_duplicado_de_compra_baja_el_stock(
 
 
 async def test_duplicado_de_compra_ya_vendida_se_saltea_sin_cambios(
-    session: AsyncSession, tenant: Any, archivo: UploadedFile
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, resubido: UploadedFile
 ) -> None:
     tid = tenant.tenant_id
     yerba = await _producto(session, tid, "Yerba", 0)
     g1 = await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
-    g2 = await _compra_importada(session, tid, archivo.id, yerba, "fila:3")
+    g2 = await _compra_importada(session, tid, resubido.id, yerba, "fila:3")
     id2 = await _identidad(session, tid, "expense", g2.id)
     # Se vendieron 15 de las 20: anular una compra de 10 dejaría −5.
     venta = SaleEntry(
@@ -320,16 +335,17 @@ async def test_duplicado_de_compra_ya_vendida_se_saltea_sin_cambios(
 
 
 async def test_con_source_run_id_se_aplican_los_gastos_planificados(
-    session: AsyncSession, tenant: Any, archivo: UploadedFile
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, resubido: UploadedFile
 ) -> None:
     tid = tenant.tenant_id
     yerba = await _producto(session, tid, "Yerba", 0)
     await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
-    g2 = await _compra_importada(session, tid, archivo.id, yerba, "fila:3")
+    g2 = await _compra_importada(session, tid, resubido.id, yerba, "fila:3")
     dry = await apply_repair(session, tenant_id=tid, dry_run=True)
     await session.commit()
-    # Un duplicado que aparece DESPUÉS del dry-run no está en el plan.
-    g3 = await _compra_importada(session, tid, archivo.id, yerba, "fila:4")
+    # Un duplicado que aparece DESPUÉS del dry-run (otra re-subida) no está en el plan.
+    tercera = await _libro(session, tid, archivo.uploaded_by, 9)
+    g3 = await _compra_importada(session, tid, tercera.id, yerba, "fila:4")
     assert await _stock(session, yerba.id) == 30
 
     r = await apply_repair(session, tenant_id=tid, dry_run=False, source_run_id=dry.run_id)
@@ -442,49 +458,55 @@ async def test_void_sale_de_catalogo_mal_clasificado_devuelve_su_descuento(
 
 
 async def test_fila_con_dos_gastos_y_una_compra_se_saltea_sin_cambios(
-    session: AsyncSession, tenant: Any, archivo: UploadedFile
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, resubido: UploadedFile
 ) -> None:
-    """Dos gastos de la MISMA fila y una sola compra: no se sabe de cuál es."""
+    """Dos gastos de la MISMA fila de la re-subida y una sola compra: no se sabe
+    de cuál es."""
     tid = tenant.tenant_id
     yerba = await _producto(session, tid, "Yerba", 0)
     g1 = await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
+    copia = await _compra_importada(session, tid, resubido.id, yerba, "fila:2")
     g2 = ExpenseEntry(
         tenant_id=tid, amount=Decimal("1000.00"), category="INVENTORY", expense_type="COGS",
         transaction_date=_FECHA, description="Compra yerba", payment_method="transfer",
-        provenance="REAL", source_upload_id=archivo.id, source_row_ref="fila:2",
+        provenance="REAL", source_upload_id=resubido.id, source_row_ref="fila:2",
         product_id=yerba.id,
     )
     g2.created_at = datetime(2026, 6, 3, tzinfo=UTC)
     session.add(g2)
     await session.commit()
-    assert await _stock(session, yerba.id) == 10
+    assert await _stock(session, yerba.id) == 20
 
     r = await apply_repair(session, tenant_id=tid, dry_run=False)
     await session.commit()
 
     await session.refresh(g1)
+    await session.refresh(copia)
     await session.refresh(g2)
-    assert g1.voided_at is None and g2.voided_at is None
-    assert await _stock(session, yerba.id) == 10
-    assert len(await _vivos(session, yerba.id, "purchase")) == 1
-    (salteado,) = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
-    assert salteado["reason"] == "compra_sin_par_claro"
+    assert g1.voided_at is None and copia.voided_at is None and g2.voided_at is None
+    assert await _stock(session, yerba.id) == 20
+    assert len(await _vivos(session, yerba.id, "purchase")) == 2
+    # Las dos filas de la re-subida comparten ref: además de copia del original,
+    # son la misma fila aplicada dos veces. Los dos grupos se saltean por lo mismo.
+    salteados = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
+    assert [e["reason"] for e in salteados] == ["compra_sin_par_claro"] * 2
 
 
 
 # ── Revisión adversarial de T3 ───────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("caso", ["import_viejo_sin_fila", "compra_a_mano_sin_archivo"])
+@pytest.mark.parametrize("caso", ["import_viejo_sin_fila", "compra_del_chat_sin_fila"])
 async def test_linea_de_compra_sin_par_no_se_anula_suelta(
-    session: AsyncSession, tenant: Any, archivo: UploadedFile, caso: str
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, resubido: UploadedFile, caso: str
 ) -> None:
     """Una línea de compra sin su ``purchase`` identificable: el grupo se saltea.
 
     Antes el plan daba «sin movimiento» y el gasto se anulaba dejando la compra
     viva (stock inflado). Import viejo: sin ``source_row_ref`` (existe desde
-    20260727_0001), con la categoría vieja «mercaderia». Compra a mano o del
-    chat: ``purchase_group_id`` y sin archivo, en un grupo con una importada.
+    20260727_0001), con la categoría vieja «mercaderia». Compra con
+    ``purchase_group_id`` (la marca del chat) y sin fila. Una compra a mano o del
+    chat SIN archivo ya no entra a ningún grupo (E-1: no es copia de una carga).
     """
     tid = tenant.tenant_id
     yerba = await _producto(session, tid, "Yerba", 0)
@@ -494,7 +516,7 @@ async def test_linea_de_compra_sin_par_no_se_anula_suelta(
             categoria="mercaderia", tipo="OPEX",
         )
         g2 = await _compra_importada(
-            session, tid, archivo.id, yerba, "fila:3", con_fila=False,
+            session, tid, resubido.id, yerba, "fila:3", con_fila=False,
             categoria="mercaderia", tipo="OPEX",
         )
     else:
@@ -502,7 +524,7 @@ async def test_linea_de_compra_sin_par_no_se_anula_suelta(
             session, tid, archivo.id, yerba, "fila:2", descripcion="Yerba — Proveedor"
         )
         g2 = await _compra_importada(
-            session, tid, None, yerba, "fila:3", con_fila=False,
+            session, tid, resubido.id, yerba, "fila:3", con_fila=False,
             descripcion="Yerba — Proveedor",
             custom_fields={"purchase_group_id": str(uuid.uuid4())},
         )
@@ -523,35 +545,40 @@ async def test_linea_de_compra_sin_par_no_se_anula_suelta(
 
 
 async def test_dos_compras_distintas_en_la_fila_que_el_monto_no_distingue_se_saltea(
-    session: AsyncSession, tenant: Any, archivo: UploadedFile
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, resubido: UploadedFile
 ) -> None:
-    """Dos gastos de 1.000 y dos compras en la misma fila: 10 × 100 y 5 × 200.
+    """Dos gastos de 1.000 y dos compras en la misma fila de la re-subida: 10 × 100
+    y 5 × 200.
 
     El monto encaja con las dos y son distintas: no se elige por id.
     """
     tid = tenant.tenant_id
     yerba = await _producto(session, tid, "Yerba", 0)
-    g1 = await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
+    g0 = await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
+    g1 = await _compra_importada(session, tid, resubido.id, yerba, "fila:2")
     g2 = await _compra_importada(
-        session, tid, archivo.id, yerba, "fila:2", qty=5, costo="200"
+        session, tid, resubido.id, yerba, "fila:2", qty=5, costo="200"
     )
     g2.created_at = datetime(2026, 6, 3, tzinfo=UTC)
     await session.commit()
-    assert await _stock(session, yerba.id) == 15
+    assert await _stock(session, yerba.id) == 25
 
     r = await apply_repair(session, tenant_id=tid, dry_run=False)
     await session.commit()
 
+    await session.refresh(g0)
     await session.refresh(g1)
     await session.refresh(g2)
-    assert g1.voided_at is None and g2.voided_at is None
-    assert await _stock(session, yerba.id) == 15
-    (salteado,) = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
-    assert salteado["reason"] == "compra_sin_par_claro"
+    assert g0.voided_at is None and g1.voided_at is None and g2.voided_at is None
+    assert await _stock(session, yerba.id) == 25
+    # Las dos filas de la re-subida comparten ref: además de copia del original,
+    # son la misma fila aplicada dos veces. Los dos grupos se saltean por lo mismo.
+    salteados = [e for e in r.tenant_results if e.get("status") == "SKIPPED"]
+    assert [e["reason"] for e in salteados] == ["compra_sin_par_claro"] * 2
 
 
 async def test_dry_run_acumula_el_efecto_de_grupos_anteriores_sobre_el_producto(
-    session: AsyncSession, tenant: Any, archivo: UploadedFile
+    session: AsyncSession, tenant: Any, archivo: UploadedFile, resubido: UploadedFile
 ) -> None:
     """Dos grupos de compras duplicadas del mismo producto y stock para uno solo.
 
@@ -561,9 +588,9 @@ async def test_dry_run_acumula_el_efecto_de_grupos_anteriores_sobre_el_producto(
     tid = tenant.tenant_id
     yerba = await _producto(session, tid, "Yerba", 0)
     await _compra_importada(session, tid, archivo.id, yerba, "fila:2")
-    await _compra_importada(session, tid, archivo.id, yerba, "fila:3")
+    await _compra_importada(session, tid, resubido.id, yerba, "fila:3")
     await _compra_importada(session, tid, archivo.id, yerba, "fila:4", descripcion="Otra")
-    await _compra_importada(session, tid, archivo.id, yerba, "fila:5", descripcion="Otra")
+    await _compra_importada(session, tid, resubido.id, yerba, "fila:5", descripcion="Otra")
     venta = SaleEntry(
         tenant_id=tid, amount=Decimal("12500"), quantity=25, product_id=yerba.id,
         transaction_date=_FECHA, payment_method="cash", provenance="REAL",
