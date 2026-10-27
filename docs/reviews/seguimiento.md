@@ -158,7 +158,7 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 | X3-1 | crítico | confirmado | Un usuario dado de baja se reactiva solo: resend-verification + verify-email ponen is_active=True y devuelven JWT (mismo rol, PIN y permisos; saltea el cupo de plazas) | mergeado | #195 `e7877cf7` (deploy ok, backfill autorizado) |
 | X6-1 | crítico | confirmado | La cola offline de carga manual (localStorage sin tenant/usuario) se sube con el JWT del siguiente usuario que entra en esa PC: los datos de A quedan en el negocio B | mergeado | #193 `3b9ef5c3` |
 | X6-2 | crítico | confirmado | Conversación del chat cruzada: el store persiste conversationId y mensajes sin dueño, y conversation_service.get_context/persist no validan tenant (lee y pisa turnos de otro negocio) | mergeado | #196 `1788dbca` |
-| X4-1 | grave | plausible | La huella anti-duplicado del chat (tenant+acción+monto+fecha, sin vencimiento) descarta ventas/gastos/compras legítimas; con fecha nula colisiona para siempre | PR abierto | #194 |
+| X4-1 | grave | plausible | La huella anti-duplicado del chat (tenant+acción+monto+fecha, sin vencimiento) descarta ventas/gastos/compras legítimas; con fecha nula colisiona para siempre | mergeado | #194 `63b47835` |
 | X6-3 | normal | confirmado | Sentry recibe X-POS-Terminal (secreto de la caja): sentryScrub no lo cubre | pendiente |  |
 | X3-2 | normal | confirmado | Cambiar/resetear contraseña no revoca refresh tokens (7 días) | pendiente |  |
 | X5-1 | normal | plausible | purge_deleted_file_data.py y void_misclassified_imports.py anulan sin chequear stock negativo / sin revertir movimientos | pendiente |  |
