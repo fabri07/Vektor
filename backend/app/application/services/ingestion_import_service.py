@@ -6326,18 +6326,44 @@ async def _insert_confirmed_data_impl(
             and nombre_col
         )
         # I2-3: tabla suelta con ventas o compras Y productos. El bucle de
-        # productos recorre las MISMAS filas, y `_STOCK_COLS` contiene "cantidad":
-        # la cantidad vendida (o comprada) de cada fila terminaba siendo el stock
-        # ABSOLUTO del producto —la última fila ganaba— y esa apertura inventada
-        # respaldaba las ventas en B·5e. Acá el stock sale sólo de una columna
-        # mapeada a mano a `stock_units`, y nunca de la de la cantidad de la fila.
+        # productos recorre las MISMAS filas, y las heurísticas de catálogo leen
+        # columnas de la fila transaccional: `_STOCK_COLS` contiene "cantidad"
+        # (la cantidad vendida terminaba siendo el stock ABSOLUTO, la última fila
+        # ganaba, y esa apertura inventada respaldaba las ventas en B·5e) y el
+        # precio de venta tomaba el «Precio unitario» de la fila (el POS vendía
+        # al de la última venta). Acá stock, precio y costo del producto salen
+        # sólo de un mapeo explícito a `stock_units`/`sale_price_ars`/
+        # `unit_cost_ars` —hoy sólo por API: el mapeador de una hoja de ventas o
+        # compras no los ofrece—. Lo descartado se avisa en el confirm.
         if wants_productos and (wants_ventas or wants_gastos):
-            _stock_heuristico = stock_col
+            # Una columna que la fila ya usa como venta o compra no es un dato de
+            # catálogo perdido: no se avisa.
+            _usadas = {
+                c
+                for c in (venta_col, gasto_col, qty_col, unit_price_col, fecha_col, nombre_col)
+                if c
+            } | set(target_to_col.values()) | set(custom_field_cols.values())
+            if qty_col is None:
+                _cantidad_heuristica = _find_col(headers, _CANTIDAD_COLS)
+                if _cantidad_heuristica:
+                    _usadas.add(_cantidad_heuristica)
+            _heuristicas = (stock_col, precio_col, costo_col)
             stock_col = target_to_col.get("stock_units")
-            if _stock_heuristico is not None and stock_col is None:
+            precio_col = target_to_col.get("sale_price_ars")
+            costo_col = target_to_col.get("unit_cost_ars")
+            _descartadas = sorted(
+                {
+                    c
+                    for c in _heuristicas
+                    if c and c not in _usadas and c not in (stock_col, precio_col, costo_col)
+                }
+            )
+            if _descartadas:
+                counts["catalogo_descartado_tabla_transaccional"] = len(_descartadas)
+                counts["columnas_catalogo_descartadas"] = _descartadas
                 logger.info(
-                    "ingestion.stock_de_tabla_transaccional_descartado",
-                    columna=_stock_heuristico,
+                    "ingestion.catalogo_de_tabla_transaccional_descartado",
+                    columnas=_descartadas,
                 )
 
         # FASE 3: índice de catálogo en memoria para el LINK de ventas/gastos/compras

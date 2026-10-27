@@ -173,6 +173,19 @@ async def _cuantas(db_session: AsyncSession, tenant: Tenant, modelo: Any) -> int
     return len(list(result.scalars().all()))
 
 
+async def _ventas_a_otros_sin_compra(db_session: AsyncSession, tenant: Tenant) -> None:
+    """I2-3: sin stock declarado por el archivo, las dos ventas van a «Otros»."""
+    assert await _cuantas(db_session, tenant, SaleEntry) == 0
+    otros = (
+        await db_session.execute(
+            select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tenant.tenant_id)
+        )
+    ).scalars().all()
+    assert [(o.context_label or "").split(":")[0] for o in otros] == [
+        MOTIVO_VENTA_SIN_COMPRA
+    ] * 2
+
+
 class TestUnArchivoPlanoYaNoSeRechaza:
     async def test_el_archivo_que_declara_stock_y_ventas_se_confirma(
         self,
@@ -189,14 +202,17 @@ class TestUnArchivoPlanoYaNoSeRechaza:
         stock. Eso es una limitación conocida y acotada de este camino —F-F.2 la
         convierte en un descuento pendiente contado—, no el silencio que motivaba el
         rechazo: antes el usuario no podía importar el archivo en absoluto.
+
+        I2-3: la «cantidad» de la fila de venta ya no es el stock del producto, así
+        que el archivo no declara stock y sus ventas no tienen compra previa: van a
+        «Otros» (B·5e). Antes entraban respaldadas por esa apertura inventada.
         """
         response = await _confirmar(
             client, auth_headers, archivo, _payload("historical_replay")
         )
 
         assert response.status_code == 200, response.text
-        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 2
-        assert await _cuantas(db_session, sample_tenant, UnclassifiedRecord) == 0
+        await _ventas_a_otros_sin_compra(db_session, sample_tenant)
 
     async def test_efecto_sin_hoja_no_se_descarta_en_silencio(
         self,
@@ -274,11 +290,14 @@ class TestUnArchivoPlanoYaNoSeRechaza:
         salida elegir el modo que no tocaba stock. Ese modo ya no existe (F-F.4) y
         el rechazo tampoco: las compras del archivo entran al gate como créditos
         datados, así que respaldan a las ventas del mismo archivo.
+
+        I2-3: entra sin 422, pero la cantidad vendida no es stock declarado: sin
+        compra previa, las ventas van a «Otros».
         """
         response = await _confirmar(client, auth_headers, archivo, _payload())
 
         assert response.status_code == 200, response.text
-        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 2
+        await _ventas_a_otros_sin_compra(db_session, sample_tenant)
 
     async def test_sin_alta_de_productos_el_replay_se_gatea_normalmente(
         self,
@@ -587,7 +606,8 @@ class TestElBloqueoSeAlcanzaDesdeLaPantalla:
             client, auth_headers, archivo, _payload(default_mostrado)
         )
         assert respuesta.status_code == 200, respuesta.text
-        assert await _cuantas(db_session, sample_tenant, SaleEntry) == 2
+        # Igual que `test_el_mismo_archivo_sin_declarar_nada_entra` (I2-3).
+        await _ventas_a_otros_sin_compra(db_session, sample_tenant)
 
 
 class TestUnSaldoDesconocidoNoSacaLaVentaDeLosLibros:

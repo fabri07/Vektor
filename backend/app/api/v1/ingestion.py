@@ -4337,6 +4337,18 @@ async def confirm_file(
             "«Otros» porque no dicen qué artículos y cuántos. Hasta que las resuelvas "
             "desde ahí no cuentan como gasto ni suman stock."
         )
+    if counts.get("catalogo_descartado_tabla_transaccional"):
+        # I2-3: el stock, el precio o el costo de una tabla de ventas o compras no
+        # pisan el catálogo. Sin el aviso, el stock que el archivo traía se perdía
+        # en silencio y el resumen sólo decía cuántos productos se cargaron.
+        _columnas = ", ".join(
+            f"«{c}»" for c in counts.get("columnas_catalogo_descartadas") or []
+        )
+        warnings.append(
+            f"No se cargó en los productos la columna {_columnas}: el stock, el "
+            "precio y el costo de una tabla de ventas o compras no se cargan. Para "
+            "cargarlos, subí el catálogo en una hoja o archivo de productos."
+        )
     if counts.get("filas_sin_cantidad"):
         # E4: la fila traía cantidad y no se pudo usar. Antes entraba como 1
         # unidad y no había nada que avisar porque no había nada que revisar.
