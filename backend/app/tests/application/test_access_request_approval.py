@@ -42,6 +42,7 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import onboarding_service, score_trigger_service
 from app.application.services.access_request_service import (
     AccessRequestService,
     ApprovalResult,
@@ -49,7 +50,7 @@ from app.application.services.access_request_service import (
 from app.domain.access_request import AccessRequestStatus, RequestedPlan
 from app.domain.subscription import AssignablePlan
 from app.domain.verticals import Vertical
-from app.jobs import access_request_worker, score_worker
+from app.jobs import access_request_worker
 from app.persistence.models.access_request import AccessRequest, AccessRequestToken
 from app.persistence.models.auth_token import PasswordResetToken
 from app.persistence.models.business import (
@@ -153,7 +154,7 @@ def encolados() -> Iterator[Encolados]:
             access_request_worker.notify_access_request_account_exists, "delay"
         ) as cuenta_existente,
         unittest.mock.patch.object(
-            score_worker.trigger_score_recalculation, "delay"
+            score_trigger_service.trigger_score_recalculation, "delay"
         ) as score,
     ):
         yield Encolados(
@@ -400,6 +401,7 @@ async def test_el_onboarding_del_primer_login_no_pide_el_rubro(
     client: AsyncClient,
     db_session: AsyncSession,
     encolados: Encolados,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Los 6 números financieros van acá; el rubro ya lo fijó la aprobación.
 
@@ -408,6 +410,18 @@ async def test_el_onboarding_del_primer_login_no_pide_el_rubro(
     que decidió el dueño. Y ``main_concern`` tampoco viaja: la aprobación lo copió
     a ``custom_fields`` desde el screening y el snapshot lo toma de ahí.
     """
+    # E0-B-1: el primer score se pide para DESPUÉS del commit. El fixture
+    # `client` no commitea, así que acá se fija el pedido (con las
+    # BackgroundTasks del endpoint); que el helper espere al commit lo prueban
+    # `test_score_trigger_after_commit.py` y `test_score_despues_del_commit.py`.
+    pedidos: list[tuple[str, str, bool]] = []
+
+    def _registrar(_db: Any, tenant: str, triggered_by: str, background: Any = None) -> None:
+        pedidos.append((tenant, triggered_by, background is not None))
+
+    monkeypatch.setattr(
+        onboarding_service, "trigger_score_recalculation_after_commit", _registrar
+    )
     res = await client.post(
         URL_ONBOARDING,
         json={
@@ -439,9 +453,9 @@ async def test_el_onboarding_del_primer_login_no_pide_el_rubro(
     assert perfil.heuristic_profile_version == f"{VERTICAL_ASIGNADO.value}:v1"
     assert perfil.monthly_sales_estimate_ars == VENTAS_SEMANALES * Decimal("4.3")
 
-    encolados.score.assert_called_once_with(
-        str(perfil.tenant_id), str(snapshot.id)
-    )
+    assert pedidos == [(str(perfil.tenant_id), str(snapshot.id), True)]
+    # Y nada habló con el broker dentro del request, con la transacción abierta.
+    encolados.score.assert_not_called()
 
 
 async def test_el_onboarding_rechaza_un_vertical_code_en_el_body(

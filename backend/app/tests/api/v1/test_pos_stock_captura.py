@@ -572,6 +572,138 @@ class TestElFaltanteSeMideALaFechaDeLaVenta:
         )
 
 
+class TestElAjusteNoReponeVentasQueNuncaDescontaron:
+    """T3 · C-2: el ajuste de B11 resta sólo las ventas que descontaron.
+
+    El escaneo temporal cuenta TODAS las ventas vivas —una importada que el
+    stock no respalda es lo que tiene que encontrar—, pero el ajuste ESCRIBE
+    stock. Con ancla 10, 50 importadas que nunca restaron y 8 en vivo (stock 2),
+    el balance «del escaneo» da −48: una salida pendiente de 5 metía 53
+    unidades y el stock quedaba en 50, 48 que nunca existieron.
+    """
+
+    async def _escenario(
+        self, client: AsyncClient, headers: dict[str, str], db_session: AsyncSession,
+        tenant_id: uuid.UUID,
+    ) -> tuple[str, str]:
+        caja = await _caja(client, headers)
+        pid = await _producto(client, headers, stock=10)
+        # 8 en vivo: descuentan (stock 10 → 2).
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_venta([{"product_id": pid, "quantity": 8}], "800.00"),
+            headers=caja,
+        )
+        assert resp.status_code == 201, resp.text
+        # 50 importadas ANTES de la venta, sin movimiento: nunca descontaron
+        # (import anterior a F-F.4, o pendientes del reproceso).
+        db_session.add(
+            SaleEntry(
+                tenant_id=tenant_id,
+                amount=Decimal("5000.00"),
+                quantity=50,
+                transaction_date=datetime.combine(
+                    today_ar() - timedelta(days=2), time(10, 0)
+                ),
+                payment_method="cash",
+                product_id=uuid.UUID(pid),
+                source_upload_id=uuid.uuid4(),
+            )
+        )
+        await db_session.flush()
+        assert await _stock(db_session, pid) == 2
+        # Sin red, 5 con stock 2: salida pendiente de 5.
+        resp = await client.post(
+            "/api/v1/pos/operations",
+            json=_venta([{"product_id": pid, "quantity": 5}], "500.00"),
+            headers={**caja, "X-POS-Offline": "1"},
+        )
+        assert resp.status_code == 201, resp.text
+        lista = await client.get("/api/v1/pos/stock-discrepancies", headers=headers)
+        assert lista.status_code == 200, lista.text
+        [deuda] = lista.json()
+        assert deuda["pending_units"] == 5
+        return pid, deuda["id"]
+
+    async def test_el_ajuste_es_el_faltante_real_y_el_stock_no_se_infla(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        pid, deuda = await self._escenario(
+            client, auth_headers, db_session, sample_tenant.tenant_id
+        )
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{deuda}/resolve",
+            json={"resolution": "ajuste_de_entrada", "reason": "La mercadería estaba."},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        auditoria = (
+            await db_session.execute(
+                select(DecisionAuditLog).where(
+                    DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                    DecisionAuditLog.decision_type == "POS_STOCK_DISCREPANCY_RESOLVED",
+                )
+            )
+        ).scalar_one()
+        # Había 2 (10 − 8 que descontaron) y salieron 5: faltaban 3, no 53.
+        assert auditoria.decision_data["unidades_ajustadas"] == 3
+        ajustes = (
+            (
+                await db_session.execute(
+                    select(InventoryMovement).where(
+                        InventoryMovement.tenant_id == sample_tenant.tenant_id,
+                        InventoryMovement.product_id == uuid.UUID(pid),
+                        InventoryMovement.source_type == "reconciliation",
+                        InventoryMovement.voided_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [m.qty for m in ajustes] == [3]
+        # 2 + 3 que estaban − 5 que salieron = 0.
+        assert await _stock(db_session, pid) == 0
+
+        # El agregado cierra (resta sólo lo que descontó) y miró el producto.
+        agregado = await check_tenant_inventory_integrity(
+            db_session, sample_tenant.tenant_id
+        )
+        assert agregado["checked"] >= 1, agregado
+        assert agregado["divergences"] == [], agregado
+
+    async def test_el_escaneo_sigue_viendo_las_importadas_pendientes(
+        self,
+        client: AsyncClient,
+        auth_headers: dict[str, str],
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+    ) -> None:
+        """La decisión del dueño: el criterio cambia SÓLO en el ajuste."""
+        pid, deuda = await self._escenario(
+            client, auth_headers, db_session, sample_tenant.tenant_id
+        )
+        resp = await client.post(
+            f"/api/v1/pos/stock-discrepancies/{deuda}/resolve",
+            json={"resolution": "ajuste_de_entrada", "reason": "La mercadería estaba."},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        temporal = await check_products_temporal_divergence(
+            db_session, sample_tenant.tenant_id, product_ids=[uuid.UUID(pid)]
+        )
+        assert temporal.checked >= 1, temporal
+        [divergencia] = temporal.divergences
+        assert divergencia.product_id == pid
+        # 10 + 3 − 50 − 8 − 5: las 50 importadas siguen a la vista.
+        assert divergencia.ending_balance == -50
+        assert divergencia.total_sales == 63
+
+
 class TestExcepcionesAlDescuento:
     """Enumera las ÚNICAS ventas vivas que pueden no haber descontado stock.
 
