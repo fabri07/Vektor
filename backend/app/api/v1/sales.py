@@ -38,6 +38,7 @@ from app.application.services.idempotency import (
     legacy_idempotency_key_claimed,
     record_idempotent_response,
 )
+from app.application.services.inventory_movement_origin import SOURCE_HISTORICAL_REPLAY
 from app.application.services.respaldo_service import exigir_respaldo
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
@@ -671,13 +672,40 @@ async def update_sale(
     before = _sale_snapshot(entry)
     _prev_product_id = entry.product_id
     _prev_quantity = entry.quantity
-    # Efecto en stock SOLO para ventas EN VIVO (source_upload_id is None) y solo si cambia
-    # producto o cantidad. Se computa desde el body ANTES de mutar la entry para poder
-    # validar (NO stock negativo) sin dejar estado sucio si se rechaza.
+    # Efecto en stock solo si cambia producto o cantidad. Se computa desde el body ANTES
+    # de mutar la entry para poder validar (NO stock negativo) sin dejar estado sucio si
+    # se rechaza.
     _new_product_id = body.product_id if "product_id" in body.model_fields_set else _prev_product_id
     _new_quantity = body.quantity if body.quantity is not None else _prev_quantity
     _is_live_sale = entry.source_upload_id is None
     _stock_changed = _new_product_id != _prev_product_id or _new_quantity != _prev_quantity
+    # T3 (C-4, B-9): quién rehace el stock lo dice el LEDGER, no el origen de la fila.
+    # - Con movimiento 'sale' vivo (en vivo, o importada que el confirm ya descontó):
+    #   se repone ese movimiento y se descuenta con los valores nuevos. Antes una
+    #   importada quedaba con el descuento viejo sobre el producto viejo.
+    # - Sin movimiento y con producto: nunca descontó (venta en vivo legada, o
+    #   importada de una hoja que no aplicó su historia) y editarla no la hace
+    #   empezar; antes descontaba la cantidad ENTERA por una corrección de +1.
+    # - Sin producto todavía: asociarlo a una venta en vivo descuenta, como siempre;
+    #   a una importada, sólo si alguna vez descontó (movimiento anulado: le sacaron
+    #   el producto después del confirm). Si nunca lo hizo, su historia no se aplicó.
+    _ultimo_mov = (
+        await stock_service.ultimo_movimiento_de_venta(entry.id, tenant.tenant_id, session)
+        if _stock_changed
+        else None
+    )
+    _had_movement = _ultimo_mov is not None and _ultimo_mov.voided_at is None
+    _rehace_stock = _stock_changed and (
+        _had_movement
+        or (_prev_product_id is None and (_is_live_sale or _ultimo_mov is not None))
+    )
+    # El descuento rehecho conserva la procedencia del que reemplaza; sin uno previo,
+    # el de una importada es historia aplicada.
+    _source_type_rehecho = (
+        _ultimo_mov.source_type
+        if _ultimo_mov is not None
+        else (None if _is_live_sale else SOURCE_HISTORICAL_REPLAY)
+    )
     # B·5e: cambiar el producto o la fecha revalida la compra previa (en vivo o
     # importada). Editar otra cosa de una venta vieja no la vuelve a juzgar.
     _new_date = (
@@ -687,7 +715,7 @@ async def update_sale(
         body.transaction_date is not None and body.transaction_date != entry.transaction_date
     ):
         await exigir_respaldo(session, tenant.tenant_id, [(_new_product_id, _new_date.date())])
-    if _is_live_sale and _stock_changed:
+    if _rehace_stock:
         await stock_service.validate_sale_update_stock(
             entry.id,
             tenant.tenant_id,
@@ -759,20 +787,26 @@ async def update_sale(
     if entry.source_upload_id is not None:
         entry.has_user_edits = True
     saved = await repo.save(entry)
-    # Ajuste de stock (ya validado arriba, no puede dejar negativo). Una venta histórica
-    # importada/releída (source_upload_id presente) NO arranca a descontar por editarla:
-    # su cantidad ya la cuenta la integridad desde sales_entries; descontar acá duplicaría.
-    # Efecto neto: reponer el movimiento viejo (si había) y descontar con los valores
-    # nuevos. decrement_for_sale no-opea si se desasoció el producto (product_id None) → en
-    # ese caso solo repone stock.
+    # Ajuste de stock (ya validado arriba, no puede dejar negativo), sólo si
+    # ``_rehace_stock`` (ver arriba: lo decide el ledger). Efecto neto: reponer el
+    # movimiento viejo (si había) y descontar con los valores nuevos.
+    # decrement_for_sale no-opea si se desasoció el producto (product_id None) → en
+    # ese caso solo repone stock. Al rehacer el de una venta importada, el movimiento
+    # nuevo hereda su archivo: el borrado y la relectura anulan por
+    # ``source_upload_id``, y sin él borrar el archivo dejaría el descuento vivo.
     # M·2a: la cantidad o el producto nuevos llegan sin factor, igual que en el
     # alta. Con un producto fraccionado la venta queda ``sin_costo`` y no 2 g de
     # queso costeados como 2 unidades (revisión de la fase 2).
     if _stock_changed:
         marcar_unidad_no_confirmada(session.info, [saved.id])
-    if _is_live_sale and _stock_changed:
+    if _rehace_stock:
         await stock_service.revert_sale_stock(entry.id, tenant.tenant_id, session)
-        await stock_service.decrement_for_sale(entry, session)
+        await stock_service.decrement_for_sale(
+            entry,
+            session,
+            source_upload_id=entry.source_upload_id,
+            source_type=_source_type_rehecho,
+        )
     _audit_data_change(
         session,
         tenant_id=tenant.tenant_id,

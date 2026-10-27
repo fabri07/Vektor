@@ -1215,6 +1215,49 @@ async def _live_sale_movement(
     return result.scalar_one_or_none()
 
 
+async def venta_descontada(
+    sale_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+) -> bool:
+    """¿La venta tiene HOY un movimiento 'sale' vivo en el ledger?
+
+    T3 (C-4, B-9): es la pregunta que decide si editar o anular una venta toca el
+    stock, y se contesta mirando el ledger, no el origen de la fila. Una venta
+    importada puede estar descontada (el confirm aplica la historia, F-F.4) y una
+    en vivo legada puede no estarlo (anterior a que la carga manual descontara).
+    """
+    return await _live_sale_movement(sale_id, tenant_id, db) is not None
+
+
+async def ultimo_movimiento_de_venta(
+    sale_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    db: AsyncSession,
+) -> InventoryMovement | None:
+    """El movimiento 'sale' de la venta, VIVO o ANULADO: el vivo si hay; si no, el
+    último anulado. None si la venta nunca descontó.
+
+    T3: haber descontado alguna vez es lo que separa «una venta cuya historia se
+    aplicó» de «una que nunca la aplicó». Una importada descontada a la que le
+    sacaron el producto (su movimiento quedó anulado) vuelve a descontar cuando se
+    le asocia otro; sin mirar los anulados, editarla en dos pasos perdía el descuento.
+    También da de qué ``source_type`` era el descuento que se rehace.
+    """
+    result = await db.execute(
+        select(InventoryMovement)
+        .where(
+            InventoryMovement.tenant_id == tenant_id,
+            InventoryMovement.source_event_id == sale_source_event_id(sale_id),
+            InventoryMovement.movement_type == "sale",
+        )
+        # Falso antes que verdadero en SQLite y en Postgres: el vivo primero.
+        .order_by(InventoryMovement.voided_at.is_not(None), InventoryMovement.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def decrement_for_sale_id(
     sale_id: uuid.UUID,
     tenant_id: uuid.UUID,
@@ -1242,6 +1285,9 @@ async def decrement_for_sale_id(
 async def decrement_for_sale(
     sale: SaleEntry,
     db: AsyncSession,
+    *,
+    source_upload_id: uuid.UUID | None = None,
+    source_type: str | None = None,
 ) -> InventoryMovement | None:
     """Descuenta stock por una venta EN VIVO. Idempotente por ``source_event_id="sale:{id}"``.
 
@@ -1261,6 +1307,12 @@ async def decrement_for_sale(
     - Race sync (request) + async (evento, otra sesión sin ver lo no-commiteado): el
       índice único parcial de la migración rechaza el 2º INSERT → ``IntegrityError``
       dentro del savepoint → se revierte solo ese descuento y se trata como no-op.
+
+    ``source_upload_id``/``source_type`` (T3): sólo para REHACER el descuento de una
+    venta importada que se edita. Sin ellos el movimiento nuevo quedaría sin
+    procedencia y el borrado o la relectura del archivo (que anulan por
+    ``source_upload_id``) ya no lo encontrarían: el stock quedaría descontado por
+    una venta que el borrado sí anuló.
     """
     if sale.product_id is None or sale.voided_at is not None:
         return None
@@ -1292,6 +1344,8 @@ async def decrement_for_sale(
                 source_event_id=sale_source_event_id(sale.id),
                 db=db,
                 occurred_at=occurred,
+                source_upload_id=source_upload_id,
+                source_type=source_type,
             )
     except SavepointConflictError:
         # El movimiento ya lo creó la otra rama (request vs evento) → no-op, que es la
@@ -1307,9 +1361,10 @@ async def revert_sale_stock(
     """Revierte el descuento de una venta anulada/editada. Incremental (``void_movement``).
 
     Devuelve ``True`` si había un movimiento de stock que revertir, ``False`` si no
-    (venta sin producto, o histórica importada que nunca descontó — el import no
-    descuenta a propósito). El caller de PATCH usa el bool para NO empezar a trackear
-    stock de una venta que nunca lo trackeó (editar historia importada no debe descontar).
+    (venta sin producto, o que nunca descontó). Busca por ``sale:{id}`` sin mirar el
+    origen: revierte igual el descuento de una venta en vivo que el que el confirm
+    aplicó a una importada. El PATCH decide ANTES, con ``venta_descontada``, si
+    rehace el stock (T3): una venta que nunca descontó no empieza a descontar.
     """
     movement = await _live_sale_movement(sale_id, tenant_id, db)
     if movement is None:
@@ -1330,7 +1385,11 @@ async def validate_sale_update_stock(
     new_quantity: int,
     db: AsyncSession,
 ) -> None:
-    """Valida (SIN mutar) el efecto neto de editar una venta EN VIVO: NO stock negativo.
+    """Valida (SIN mutar) el efecto neto de editar una venta: NO stock negativo.
+
+    T3: vale para cualquier venta con movimiento vivo (en vivo o importada y ya
+    descontada) y para la que recién se asocia a un producto; quién llega acá lo
+    decide el caller mirando el ledger (``venta_descontada``).
 
     Modela ``revert_sale_stock`` (repone ``prev_quantity`` al ``prev_product_id`` si la
     venta tenía movimiento vivo) + ``decrement_for_sale`` (descuenta ``new_quantity`` de
@@ -1345,7 +1404,7 @@ async def validate_sale_update_stock(
     """
     if new_product_id is None or new_quantity <= 0:
         return
-    had_movement = await _live_sale_movement(sale_id, tenant_id, db) is not None
+    had_movement = await venta_descontada(sale_id, tenant_id, db)
     bloqueados = await bloquear_productos(
         db, tenant_id, [pid for pid in (prev_product_id, new_product_id) if pid is not None]
     )

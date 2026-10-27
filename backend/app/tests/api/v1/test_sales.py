@@ -674,8 +674,10 @@ class TestLiveSaleStockDecrement:
     async def test_patch_imported_sale_does_not_auto_decrement(
         self, client: AsyncClient, auth_headers: dict[str, Any], db_session, sample_tenant
     ) -> None:
-        """Editar una venta importada/releída (source_upload_id) NO arranca a descontar:
-        su cantidad ya la cuenta la integridad desde sales_entries."""
+        """Asociarle un producto a una venta importada SIN producto no la hace descontar:
+        su historia no se aplicó al confirmar (no tenía qué descontar) y editarla no la
+        aplica. T3: lo que decide es el ledger, no el origen — una importada que el
+        confirm SÍ descontó rehace su stock al editarla (``test_editar_venta_rehace_stock``)."""
         import uuid as _uuid  # noqa: PLC0415
 
         pid = await _create_product(client, auth_headers, "Aceite", stock=10, price="100.00")
@@ -684,7 +686,7 @@ class TestLiveSaleStockDecrement:
             db_session, sample_tenant.tenant_id, source_upload_id=_uuid.uuid4()
         )
 
-        # Asociar producto + cantidad: por ser importada NO debe descontar stock.
+        # Asociar producto + cantidad: importada y sin movimiento → NO descuenta.
         resp = await client.patch(
             f"/api/v1/sales/{sale_id}",
             json={"product_id": pid, "quantity": 3},
