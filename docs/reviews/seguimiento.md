@@ -165,7 +165,7 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 
 | C-2b | normal | latente | El ajuste de diferencias cuenta ventas EN VIVO sin movimiento de stock (dos criterios de «venta descontada»: el de C-2 vs el ledger de #190) | postergado | Neon 2026-10-27: 0 ventas en vivo con producto y sin movimiento → latente; la única fábrica (E-3) quedó apagada en #191 |
 
-| V-1 | grave | plausible | Eventos de stock (STOCK_DECREASED/ALERT/INCREASED sin defer, SALE_RECORDED de agentes) se emiten antes del commit y encadenan el recálculo del score | pendiente | visto en revisión de #199 |
+| V-1 | grave | plausible | Eventos de stock (STOCK_DECREASED/ALERT/INCREASED sin defer, SALE_RECORDED de agentes) se emiten antes del commit y encadenan el recálculo del score | mergeado | #206 `59a12574` |
 | V-2 | normal | plausible | Gastos y ventas por chat (pending_action) no recalculan el score | pendiente | revisión de #199 |
 | V-3 | normal | plausible | «Otros» resolve/resolve-purchase/importar sugeridos contra un borrado concurrente del archivo: la venta/gasto queda viva colgando de un archivo borrado | pendiente | revisión de #201 |
 
