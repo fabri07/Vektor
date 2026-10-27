@@ -1,8 +1,9 @@
 from typing import Any
 
 from celery import current_app as celery_app
-from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.persistence.db.despues_del_commit import al_confirmar
 
 
 class EventBus:
@@ -52,9 +53,10 @@ class EventBus:
         Acá el fail-safe de ``emit`` no es una comodidad sino un requisito: este
         listener corre DESPUÉS del commit, así que una excepción suya sale por el
         `commit()` del endpoint cuando ya no hay nada que revertir.
-        """
-        sync_session = db.sync_session
 
-        @event.listens_for(sync_session, "after_commit", once=True)
-        def _emit(_session: Any) -> None:
-            EventBus.emit(event_type, payload)
+        V-1: el ``after_commit`` crudo también salta al liberar un savepoint, y con
+        ``once=True`` se consumía ahí, antes del commit real; ``al_confirmar``
+        espera la transacción de nivel superior y descarta lo anotado si hay
+        rollback.
+        """
+        al_confirmar(db, lambda: EventBus.emit(event_type, payload))
