@@ -935,7 +935,8 @@ class RevertirDejaStockNegativoError(StockNegativoError):
         mensaje = (
             f"{operacion} dejaría {productos} producto(s) con stock negativo, porque esa "
             f"mercadería ya se vendió por otro lado ({detalle}). No se cambió nada. "
-            "Corregí primero el stock de esos productos o anulá esas ventas."
+            "Para poder hacerlo, esas ventas necesitan otra fuente: cargá la compra o el stock "
+            "inicial real de esa mercadería, o anulá esas ventas, y volvé a intentar."
         )
         super().__init__(mensaje, user_message=mensaje)
         self.productos = productos
@@ -954,7 +955,7 @@ class RevertirDejaStockNegativoError(StockNegativoError):
 def foto_de_stock(catalogo: CatalogoBloqueado) -> dict[uuid.UUID, int]:
     """El stock de cada producto ANTES de revertir, leído del catálogo ya
     bloqueado (``bloquear_catalogo``: FOR UPDATE en orden de id y refrescado)."""
-    return {pid: int(p.stock_units or 0) for pid, p in catalogo.productos.items()}
+    return {pid: int(p.stock_units) for pid, p in catalogo.productos.items()}
 
 
 async def exigir_reversa_sin_stock_negativo(
