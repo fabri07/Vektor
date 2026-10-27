@@ -244,6 +244,7 @@ class ChatOrchestrator:
                     request.conversation_id,
                     current_attachments,
                     redis,
+                    tenant_id,
                 )
             else:
                 inherited_attachments = await self._recall_pending_files(
@@ -308,7 +309,9 @@ class ChatOrchestrator:
         if request.conversation_id:
             try:
                 svc = ConversationService(redis, db)
-                conversation_ctx = await svc.get_context(request.conversation_id)
+                conversation_ctx = await svc.get_context(
+                    request.conversation_id, tenant_id=tenant_id
+                )
             except Exception as exc:
                 logger.warning(
                     "conversation_context_failed", tenant_id=str(tenant_id), error=str(exc)
@@ -1053,6 +1056,7 @@ class ChatOrchestrator:
         conversation_id: str,
         attachments: list[Any],
         redis: Redis,
+        tenant_id: uuid.UUID,
     ) -> None:
         normalized = self._normalize_attachments(attachments)
         if not normalized:
@@ -1064,7 +1068,7 @@ class ChatOrchestrator:
         }
         try:
             await redis.setex(
-                self._pending_file_key(conversation_id),
+                self._pending_file_key(conversation_id, tenant_id),
                 _PENDING_FILE_TTL_SECONDS,
                 json.dumps(payload),
             )
@@ -1083,7 +1087,7 @@ class ChatOrchestrator:
         tenant_id: uuid.UUID,
     ) -> list[dict[str, str]]:
         try:
-            raw = await redis.get(self._pending_file_key(conversation_id))
+            raw = await redis.get(self._pending_file_key(conversation_id, tenant_id))
         except Exception as exc:
             logger.warning(
                 "pending_file_recall_failed",
@@ -1147,8 +1151,10 @@ class ChatOrchestrator:
         return [a for a in attachments if a.get("file_id") not in imported_ids]
 
     @staticmethod
-    def _pending_file_key(conversation_id: str) -> str:
-        return f"{_PENDING_FILE_KEY_PREFIX}{conversation_id}"
+    def _pending_file_key(conversation_id: str, tenant_id: uuid.UUID) -> str:
+        # Con el tenant adentro (X6-2): con sólo el id, otro negocio que mandara
+        # el mismo conversation_id pisaba el archivo pendiente de éste.
+        return f"{_PENDING_FILE_KEY_PREFIX}{tenant_id}:{conversation_id}"
 
     @staticmethod
     def _is_file_intent(intent: str | None) -> bool:
@@ -1524,8 +1530,11 @@ class ChatOrchestrator:
                 "user",
                 request.message,
                 metadata=user_metadata,
+                tenant_id=tenant_id,
             )
-            await svc.add_turn(conversation_id, "assistant", assistant_message)
+            await svc.add_turn(
+                conversation_id, "assistant", assistant_message, tenant_id=tenant_id
+            )
             await svc.persist(conversation_id, tenant_id, user_id)
         except Exception as exc:
             logger.warning("chat_orchestrator_save_turn_failed", error=str(exc))
