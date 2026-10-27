@@ -213,6 +213,20 @@ class ReclassifyExpenseError(Exception):
     )
 
 
+class ReclassifyPurchaseLineError(Exception):
+    """T3 · B-3: el chat quiso sacar de mercadería una línea de compra.
+
+    El movimiento ``purchase`` seguiría vivo y la mercadería se contaría dos veces
+    (en el stock y como gasto operativo). Falla antes de tocar ningún gasto.
+    """
+
+    user_message = (
+        "No puedo reclasificar ese gasto: es parte de una compra de mercadería y "
+        "la mercadería ya entró al stock. Si la compra está mal, corregí el stock "
+        "con un ajuste desde el producto; la anulación de compras todavía no existe."
+    )
+
+
 async def _resolve_reclassify_target_expenses(
     action: PendingAction,
     db: AsyncSession,
@@ -323,6 +337,18 @@ async def _execute_reclassify_expense(
             payload=payload,
         )
         raise ReclassifyExpenseError(ReclassifyExpenseError.user_message)
+
+    # T3 · B-3: antes de tocar ninguno (la reclasificación masiva es todo o nada).
+    from app.domain.linea_de_compra import es_linea_de_compra_el_gasto  # noqa: PLC0415
+
+    for expense in expenses:
+        if not es_linea_de_compra_el_gasto(expense):
+            continue
+        nueva = "INVENTORY" if target == "reventa" else base_category
+        if nueva != expense.category or infer_expense_type(
+            nueva, product_id=expense.product_id
+        ) != expense.expense_type:
+            raise ReclassifyPurchaseLineError(ReclassifyPurchaseLineError.user_message)
 
     reclassified_ids: list[str] = []
     for expense in expenses:

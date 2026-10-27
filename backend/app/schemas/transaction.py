@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_serializer, field_validator, model_
 
 from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
 from app.domain.expense_categories import EXPENSE_CATEGORIES_PATTERN, TAX_KIND_PATTERN
+from app.domain.linea_de_compra import es_linea_de_compra_el_gasto
 
 # Maximum amount accepted for a single transaction (999,999,999 ARS)
 _MAX_AMOUNT = Decimal("999999999")
@@ -223,6 +224,9 @@ class ExpenseEntryResponse(BaseModel):
     notes: str | None
     custom_fields: dict[str, Any] = {}
     created_at: datetime
+    # T3 · B-3: parte de una compra de mercadería → no se anula ni se le cambia
+    # monto, categoría, fecha o proveedor (la pantalla lo deshabilita; el servidor da 409).
+    is_purchase_line: bool = False
 
     @field_serializer("amount")
     def _serialize_amount(self, v: Decimal) -> float:
@@ -236,6 +240,8 @@ class ExpenseEntryResponse(BaseModel):
             label = self.custom_fields.get("category_label")
             if isinstance(label, str) and label.strip():
                 self.category_label = label.strip()
+        # Misma definición que los guards (`domain/linea_de_compra.py`).
+        self.is_purchase_line = es_linea_de_compra_el_gasto(self)
         return self
 
 
