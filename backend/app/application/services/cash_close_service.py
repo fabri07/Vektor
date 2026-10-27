@@ -14,7 +14,7 @@ import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.work_schedule_service import resolve_schedule
@@ -27,6 +27,7 @@ from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.cash_close import CashClose
+from app.persistence.models.pos_cash_session import PosCashRefund
 from app.persistence.repositories.cash_close_repository import CashCloseRepository
 from app.persistence.repositories.owner_capital_repository import flujo_de_dinero
 from app.persistence.repositories.transaction_repository import (
@@ -88,8 +89,35 @@ class CashCloseService:
         if capital_cash:
             by_method[_CASH_METHOD] = by_method.get(_CASH_METHOD, 0.0) + capital_cash
 
+        # A-4: el reintegro de un ticket de caja de OTRO día. La venta anulada
+        # ya no figura en su día, pero su efectivo entró al cajón ese día: se
+        # le devuelve. Y salió del cajón el día de la anulación: se le resta.
+        # Anulada el mismo día, no hay nada que mover (la venta ya no suma).
+        reintegro_cash = await self._ajuste_por_reintegros(tenant_id, close_date)
+        if reintegro_cash:
+            by_method[_CASH_METHOD] = by_method.get(_CASH_METHOD, 0.0) + reintegro_cash
+
         total = round(sum(by_method.values()), 2)
         return total, {m: round(v, 2) for m, v in by_method.items()}
+
+    async def _ajuste_por_reintegros(self, tenant_id: uuid.UUID, close_date: date) -> float:
+        """``+`` lo reintegrado otro día de ventas de ``close_date``; ``-`` lo
+        reintegrado en ``close_date`` de ventas de otro día (``PosCashRefund``)."""
+        entro = await self._session.scalar(
+            select(func.coalesce(func.sum(PosCashRefund.cash_ars), 0)).where(
+                PosCashRefund.tenant_id == tenant_id,
+                PosCashRefund.sale_date == close_date,
+                PosCashRefund.refund_date != close_date,
+            )
+        )
+        salio = await self._session.scalar(
+            select(func.coalesce(func.sum(PosCashRefund.cash_ars), 0)).where(
+                PosCashRefund.tenant_id == tenant_id,
+                PosCashRefund.refund_date == close_date,
+                PosCashRefund.sale_date != close_date,
+            )
+        )
+        return float(entro or 0) - float(salio or 0)
 
     async def _is_past_close_now(self, tenant_id: uuid.UUID) -> bool:
         """True si hoy es día laboral y la hora ART ya superó el cierre configurado."""

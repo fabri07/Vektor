@@ -21,11 +21,12 @@ ahí, así que no entran al número que se compara contra el conteo físico.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -136,4 +137,52 @@ class PosLateSale(UUIDPrimaryKeyMixin, Base):
     #: Cuánto de esa venta era efectivo: es lo único que habría movido el arqueo.
     #: Se guarda en vez de recalcularlo, porque después puede anularse.
     cash_ars: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PosCashRefund(UUIDPrimaryKeyMixin, Base):
+    """El efectivo que salió del cajón al anular un ticket de otro turno u otro día (A-4).
+
+    Anular un ticket del mismo turno abierto y del mismo día no necesita esto:
+    la operación pasa a ``VOIDED``, deja de sumar y el cajón lo refleja. Pero
+    si el ticket es de AYER, o de un turno ya cerrado, el arqueo de hoy no veía
+    la plata que se le devolvió al cliente y daba un faltante sin explicación.
+    Esta fila dice **de qué cajón salió y qué día**, sin tocar el arqueo firmado
+    del turno o del día de la venta.
+
+    Lo leen ``efectivo_del_turno`` (resta en ``session_id``, devuelve al turno
+    de origen lo que su cajón todavía tiene) y el cierre diario (resta en
+    ``refund_date``, devuelve al día de la venta lo que entró ese día).
+    """
+
+    __tablename__ = "pos_cash_refunds"
+    __table_args__ = (
+        # Anular es idempotente: un ticket devuelve su plata UNA vez.
+        UniqueConstraint("operation_id", name="uq_pos_cash_refunds_operacion"),
+        Index("ix_pos_cash_refunds_tenant_session", "tenant_id", "session_id"),
+        Index("ix_pos_cash_refunds_tenant_fecha", "tenant_id", "refund_date"),
+        CheckConstraint("cash_ars > 0", name="ck_pos_cash_refunds_importe"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    operation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pos_operations.id", ondelete="CASCADE"), nullable=False
+    )
+    #: El turno ABIERTO de cuyo cajón salió la plata. NULL sólo si el ticket no
+    #: tenía turno (venta por API, sin caja): ahí cuenta sólo para el día.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pos_cash_sessions.id", ondelete="CASCADE"), nullable=True
+    )
+    #: El turno de la venta, copiado del ticket: su cajón SÍ tuvo esa plata.
+    origin_client_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Fecha de negocio de la venta y de la devolución (``today_ar()``).
+    sale_date: Mapped[date] = mapped_column(Date, nullable=False)
+    refund_date: Mapped[date] = mapped_column(Date, nullable=False)
+    #: Sólo la parte en efectivo del ticket: es lo único que sale del cajón.
+    cash_ars: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
