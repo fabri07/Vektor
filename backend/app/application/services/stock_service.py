@@ -454,7 +454,11 @@ async def decrement_stock(
     db.add(movement)
     await db.flush()
 
-    EventBus.emit(
+    # V-1: los eventos salen después del commit. Sus handlers encolan el recálculo
+    # del score, que lee la base con otra sesión: emitidos acá, en el medio de la
+    # transacción, calculaban sin la venta (o con una que después hacía rollback).
+    EventBus.emit_after_commit(
+        db,
         "STOCK_DECREASED",
         {
             "tenant_id": str(tenant_id),
@@ -465,7 +469,8 @@ async def decrement_stock(
     )
 
     if balance.current_qty <= effective_threshold(product.low_stock_threshold_units):
-        EventBus.emit(
+        EventBus.emit_after_commit(
+            db,
             "STOCK_ALERT_CREATED",
             {
                 "tenant_id": str(tenant_id),
@@ -674,7 +679,8 @@ async def decrement_stock_bulk(
     # Un aviso por corrida, no uno por venta: ``events.stock_decreased`` sólo encola
     # el recálculo de score del tenant, así que emitirlo 1.187 veces encolaba 1.187
     # veces el mismo recálculo del mismo negocio.
-    EventBus.emit(
+    EventBus.emit_after_commit(
+        db,
         "STOCK_DECREASED",
         {
             "tenant_id": str(tenant_id),
@@ -693,7 +699,8 @@ async def decrement_stock_bulk(
     for product_id, producto in tocados.items():
         balance = balances[product_id]
         if balance.current_qty <= effective_threshold(producto.low_stock_threshold_units):
-            EventBus.emit(
+            EventBus.emit_after_commit(
+                db,
                 "STOCK_ALERT_CREATED",
                 {
                     "tenant_id": str(tenant_id),
@@ -716,7 +723,6 @@ async def increment_stock(
     *,
     supplier_id: uuid.UUID | None = None,
     occurred_at: datetime | None = None,
-    defer_event: bool = False,
     contrato: ContratoDeCosto | None = None,
     source_upload_id: uuid.UUID | None = None,
     source_row_ref: str | None = None,
@@ -777,10 +783,7 @@ async def increment_stock(
         "product_id": str(product_id),
         "qty": qty,
     }
-    if defer_event:
-        EventBus.emit_after_commit(db, "STOCK_INCREASED", event_payload)
-    else:
-        EventBus.emit("STOCK_INCREASED", event_payload)
+    EventBus.emit_after_commit(db, "STOCK_INCREASED", event_payload)
 
     return movement
 
