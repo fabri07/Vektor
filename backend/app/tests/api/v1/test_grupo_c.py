@@ -152,6 +152,7 @@ def _make_cash_state(caja: str, gastos: str) -> MagicMock:
     state = MagicMock()
     state.monthly_fixed_expenses_est = Decimal(gastos)
     state.cash_on_hand_est = Decimal(caja)
+    state.cash_source = "arqueo"
     state.products = []
     return state
 

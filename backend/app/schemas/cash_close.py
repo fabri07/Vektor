@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.domain.business_time import today_ar
+
 
 class CashMethodBreakdown(BaseModel):
     payment_method: str
@@ -49,6 +51,15 @@ class CreateCashCloseRequest(BaseModel):
     voucher_expenses_ars: Decimal | None = Field(default=None, ge=0)
     # Si hay sobrante, registrarlo como otros ingresos (inflow).
     register_surplus_as_income: bool = False
+
+    @field_validator("close_date")
+    @classmethod
+    def _close_date_no_futura(cls, value: date) -> date:
+        # Una fecha futura nunca se persiste (D-5): el modal arma la fecha con el
+        # reloj del navegador, y un cierre del futuro definiría la caja del score.
+        if value > today_ar():
+            raise ValueError("La fecha del cierre de caja no puede ser futura.")
+        return value
 
     @field_validator("cash_denominations")
     @classmethod

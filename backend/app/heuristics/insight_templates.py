@@ -15,7 +15,7 @@ from typing import Any
 
 from app.domain.product import effective_threshold
 from app.domain.verticals import VERTICAL_LABELS, Vertical, parse_vertical
-from app.heuristics.health_engine import margin_net_ratio
+from app.heuristics.health_engine import FUENTES_CON_SALDO, margin_net_ratio
 from app.heuristics.verticals.loader import load_margin_benchmark
 
 
@@ -125,13 +125,27 @@ def render_insight(
     """
     template = TEMPLATES[risk_code]
     description_override: str | None = None
+    title_override: str | None = None
 
-    if risk_code == "CASH_LOW":
+    if risk_code == "CASH_LOW" and getattr(state, "cash_source", None) not in FUENTES_CON_SALDO:
+        # Modo flujo (D-5): no hay saldo medido, así que no se afirma «$0 en
+        # caja» ni una cobertura en días; se dice lo que se midió.
+        entradas = Decimal(str(state.liquid_inflow_est))
+        salidas = Decimal(str(state.liquid_outflow_est))
+        vars_: dict[str, str] = {}
+        title_override = "Tu plata líquida cubre poco lo que sale"
+        description_override = (
+            f"En los últimos 30 días entraron {_fmt_ars(entradas)} y salieron "
+            f"{_fmt_ars(salidas)} en efectivo, transferencia, QR y débito. "
+            "No tenemos un saldo de caja medido: hacé el arqueo del día para saberlo."
+        )
+
+    elif risk_code == "CASH_LOW":
         gastos_fijos = state.monthly_fixed_expenses_est
         caja = state.cash_on_hand_est
         # days of coverage: cash / (fixed_expenses / 30)
         dias_cobertura = int(caja / (gastos_fijos / Decimal("30"))) if gastos_fijos > 0 else 0
-        vars_: dict[str, str] = {
+        vars_ = {
             "dias_cobertura": str(dias_cobertura),
             "caja_ars": _fmt_ars(caja),
             "gastos_fijos": _fmt_ars(gastos_fijos),
@@ -225,7 +239,7 @@ def render_insight(
     else:  # SUPPLIER_DEPENDENCY — no dynamic vars
         vars_ = {}
 
-    title = template.title_tpl.format(**vars_)
+    title = title_override if title_override is not None else template.title_tpl.format(**vars_)
     description = (
         description_override
         if description_override is not None

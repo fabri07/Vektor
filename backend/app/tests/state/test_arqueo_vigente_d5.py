@@ -3,20 +3,30 @@
 El contado es la recaudación neta de UN día. El BSL tomaba el último arqueo, de
 cuando fuera, como saldo con el tier más alto: un único arqueo de hace cuatro
 meses con $200.000 le ganaba al modo flujo y el score de caja medía una caja
-«sana» que no decía nada del presente. Ahora sólo un arqueo de hoy o ayer (AR)
-define la caja; uno más viejo cae al tier siguiente, y fuera de la ventana del
-estado tampoco cuenta como caja observada para la completitud.
+«sana» que no decía nada del presente. Ahora sólo un arqueo de los últimos tres
+días (AR, cubre un fin de semana o un feriado puente) define la caja; uno más
+viejo cae al tier siguiente, y fuera de la ventana del estado tampoco cuenta
+como caja observada para la completitud. Un cierre con fecha futura no se
+acepta, y uno ya guardado no tapa los reales. En modo flujo no hay saldo: ni el
+insight ni la dimensión dicen «$0 en caja», y `cash_ratio` no entra al rubro.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import Any, cast
 
-from sqlalchemy import update
+import pytest
+from httpx import AsyncClient
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.health_score_service import HealthScoreService
 from app.domain.business_time import today_ar
+from app.heuristics.insight_templates import render_insight
+from app.persistence.models.analytics_event import AnalyticsEvent
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.cash_close import CashClose
 from app.persistence.models.transaction import SaleEntry
@@ -100,12 +110,41 @@ async def test_sin_movimientos_un_arqueo_viejo_deja_la_caja_desconocida(
     assert state.data_completeness_score == sin_arqueo.data_completeness_score
 
 
-async def test_un_arqueo_de_ayer_sigue_siendo_el_saldo(
+async def test_un_arqueo_de_hace_tres_dias_sigue_siendo_el_saldo(
+    db_session: AsyncSession, sample_tenant, sample_business_profile: BusinessProfile
+) -> None:
+    """El del viernes vale el lunes: un local que cierra el fin de semana no oscila."""
+    await _perfil_viejo(db_session, sample_business_profile)
+    await _venta_en_efectivo(db_session, sample_tenant.tenant_id)
+    await _arqueo(db_session, sample_tenant.tenant_id, "100.00", today_ar() - timedelta(days=3))
+
+    state = await _estado(db_session, sample_tenant.tenant_id)
+
+    assert state.cash_source == "arqueo"
+    assert state.cash_on_hand_est == Decimal("100.00")
+
+
+async def test_un_arqueo_de_hace_cuatro_dias_ya_no_es_el_saldo(
     db_session: AsyncSession, sample_tenant, sample_business_profile: BusinessProfile
 ) -> None:
     await _perfil_viejo(db_session, sample_business_profile)
     await _venta_en_efectivo(db_session, sample_tenant.tenant_id)
-    await _arqueo(db_session, sample_tenant.tenant_id, "100.00", today_ar() - timedelta(days=1))
+    await _arqueo(db_session, sample_tenant.tenant_id, "100.00", today_ar() - timedelta(days=4))
+
+    state = await _estado(db_session, sample_tenant.tenant_id)
+
+    assert state.cash_source == "flujo"
+
+
+async def test_un_arqueo_con_fecha_futura_no_tapa_el_de_hoy(
+    db_session: AsyncSession, sample_tenant, sample_business_profile: BusinessProfile
+) -> None:
+    """Uno guardado antes de la validación definía la caja para siempre."""
+    await _perfil_viejo(db_session, sample_business_profile)
+    await _arqueo(db_session, sample_tenant.tenant_id, "100.00", today_ar())
+    await _arqueo(
+        db_session, sample_tenant.tenant_id, "999999.00", today_ar() + timedelta(days=365)
+    )
 
     state = await _estado(db_session, sample_tenant.tenant_id)
 
@@ -145,3 +184,75 @@ async def test_el_mismo_contado_en_otra_fecha_invalida_el_cache(
     despues = await _estado(db_session, sample_tenant.tenant_id, redis)
 
     assert despues.cash_source != "arqueo"
+
+
+class TestCierreConFechaFutura:
+    @pytest.fixture(autouse=True)
+    def patch_celery(self, mock_score_trigger):
+        pass
+
+    @staticmethod
+    def _body(fecha: date) -> dict[str, Any]:
+        return {"close_date": str(fecha), "counted_total_ars": "100.00"}
+
+    async def test_un_cierre_con_fecha_futura_da_422_y_no_se_guarda(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/cash-closes",
+            json=self._body(today_ar() + timedelta(days=1)),
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 422
+        assert "futura" in resp.text
+        total = (await db_session.execute(select(func.count(CashClose.id)))).scalar_one()
+        assert total == 0
+
+    async def test_un_cierre_de_hoy_se_guarda(
+        self, client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession
+    ) -> None:
+        resp = await client.post(
+            "/api/v1/cash-closes", json=self._body(today_ar()), headers=auth_headers
+        )
+
+        assert resp.status_code == 201, resp.text
+        total = (await db_session.execute(select(func.count(CashClose.id)))).scalar_one()
+        assert total == 1
+
+
+def test_el_insight_de_caja_en_flujo_no_afirma_un_saldo() -> None:
+    state = SimpleNamespace(
+        cash_source="flujo",
+        cash_on_hand_est=Decimal("0"),
+        monthly_fixed_expenses_est=Decimal("600000"),
+        liquid_inflow_est=Decimal("50000"),
+        liquid_outflow_est=Decimal("200000"),
+    )
+
+    title, description, _ = render_insight("CASH_LOW", state, SimpleNamespace(score_cash=10))
+
+    assert "$0" not in title + description
+    assert "días" not in title
+    assert "$50.000" in description and "$200.000" in description
+
+
+async def test_en_flujo_la_dimension_y_la_muestra_no_dicen_caja_cero(
+    db_session: AsyncSession, sample_tenant, sample_business_profile: BusinessProfile
+) -> None:
+    await _perfil_viejo(db_session, sample_business_profile)
+    sample_business_profile.monthly_fixed_expenses_estimate_ars = Decimal("600000.00")
+    await db_session.commit()
+    await _venta_en_efectivo(db_session, sample_tenant.tenant_id)
+
+    snapshot = await HealthScoreService(db_session).recalculate_for_tenant(
+        tenant_id=sample_tenant.tenant_id, triggered_by="test"
+    )
+    await db_session.commit()
+
+    dimensiones = cast(list[dict[str, Any]], snapshot.dimensions)
+    caja = next(d for d in dimensiones if d["dimension"] == "cash")
+    assert "Caja estimada" not in caja["explanation"]
+    assert "flujo" in caja["explanation"]
+    evento = (await db_session.execute(select(AnalyticsEvent))).scalars().one()
+    assert evento.cash_ratio is None

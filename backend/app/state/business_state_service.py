@@ -67,8 +67,10 @@ logger = get_logger(__name__)
 _LIQUID_METHODS = ("cash", "transfer", "qr", "debit_card")
 
 # Antigüedad máxima (en días AR) de un arqueo para tomar su contado como saldo
-# de caja (D-5): hoy o ayer. Uno más viejo no mide la caja de hoy.
-ARQUEO_VIGENTE_DIAS = 1
+# de caja (D-5). Tres días cubren un local que cierra el fin de semana o un
+# feriado puente: con uno, el score de caja oscilaba cada lunes. Uno más viejo
+# no mide la caja de hoy.
+ARQUEO_VIGENTE_DIAS = 3
 
 CACHE_TTL_SECONDS = 60 * 60 * 24  # 24 h
 
@@ -669,7 +671,9 @@ async def compute_business_state(
     # ── 3c. Último arqueo (CashClose) — saldo medido si existe ──────────────────
     cash_close_result = await session.execute(
         select(CashClose.counted_total_ars, CashClose.close_date)
-        .where(CashClose.tenant_id == tenant_id)
+        # Un cierre con fecha futura (anterior a la validación) no es el último:
+        # definía la caja para siempre y tapaba los arqueos reales.
+        .where(CashClose.tenant_id == tenant_id, CashClose.close_date <= today_ar())
         .order_by(CashClose.close_date.desc())
         .limit(1)
     )
@@ -677,7 +681,7 @@ async def compute_business_state(
     latest_counted_cash = latest_close[0] if latest_close is not None else None
     latest_close_date = latest_close[1] if latest_close is not None else None
     # D-5: el contado es la recaudación neta de UN día, no un saldo que se
-    # arrastra. Sólo un arqueo de hoy o ayer (AR) define la caja; uno de hace
+    # arrastra. Sólo un arqueo de los últimos días (AR) define la caja; uno de hace
     # meses le ganaba al modo flujo con una caja que no medía nada actual.
     arqueo_vigente = latest_close_date is not None and latest_close_date >= (
         today_ar() - timedelta(days=ARQUEO_VIGENTE_DIAS)
@@ -807,7 +811,7 @@ async def compute_business_state(
     )
     # Tiering de la fuente de caja (de más a menos confiable):
     #   1. arqueo       → saldo medido (CashClose.counted_total_ars), sólo
-    #                     de hoy o ayer AR (D-5)
+    #                     de los últimos ARQUEO_VIGENTE_DIAS días AR (D-5)
     #   2. onboarding   → estimado del perfil (solo si onboarding_recent)
     #   3. flujo        → hay movimientos líquidos pero no saldo → modo cobertura
     #   4. desconocido  → sin nada → caja excluida del score (no-invention)

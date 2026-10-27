@@ -19,7 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.analytics_service import AnalyticsService
 from app.application.services.health_config_service import get_margin_benchmark
 from app.domain.product import effective_threshold
-from app.heuristics.health_engine import HealthScoreResult, calculate_health_score
+from app.heuristics.health_engine import (
+    FUENTES_CON_SALDO,
+    HealthScoreResult,
+    calculate_health_score,
+)
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.score import HealthScoreSnapshot
@@ -139,7 +143,16 @@ def _build_dimensions(
     state: BusinessState,
     result: HealthScoreResult,
 ) -> list[dict[str, str | None]]:
-    if state.monthly_fixed_expenses_est > 0:
+    if state.cash_source == "flujo":
+        # Sin saldo medido (D-5): el 0 de `cash_on_hand_est` no es una caja vacía.
+        cash_explanation = (
+            f"Sin saldo de caja medido; se mide la cobertura del flujo líquido: "
+            f"entraron {state.liquid_inflow_est:.2f} ARS y salieron "
+            f"{state.liquid_outflow_est:.2f} ARS en 30 días."
+        )
+    elif state.cash_source not in FUENTES_CON_SALDO:
+        cash_explanation = "Sin datos de caja; la caja no entra al score."
+    elif state.monthly_fixed_expenses_est > 0:
         cash_ratio = state.cash_on_hand_est / state.monthly_fixed_expenses_est
         cash_explanation = (
             f"Caja estimada {state.cash_on_hand_est:.2f} ARS, "
@@ -314,7 +327,9 @@ class HealthScoreService:
             else None
         )
         cash_ratio: float | None = None
-        if state.monthly_fixed_expenses_est > 0:
+        # Sólo con un saldo (D-5): en flujo el 0 entraría a la muestra del rubro
+        # como una caja vacía observada.
+        if state.cash_source in FUENTES_CON_SALDO and state.monthly_fixed_expenses_est > 0:
             cash_ratio = float(state.cash_on_hand_est / state.monthly_fixed_expenses_est)
         low_stock_pct = 0.0
         if state.products:
