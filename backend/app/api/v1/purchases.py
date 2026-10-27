@@ -6,7 +6,7 @@ asociado a un proveedor. Atómico: si una línea falla, no queda nada a medias.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import (
@@ -17,7 +17,9 @@ from app.api.v1.deps import (
 from app.application.services import purchase_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.purchase_service import PurchaseError
-from app.application.services.score_trigger_service import trigger_score_recalculation
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation_after_commit,
+)
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
@@ -34,6 +36,7 @@ router = APIRouter()
 )
 async def create_manual_purchase(
     body: ManualPurchaseRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
     # products/others/suppliers (ver create_product).
@@ -54,5 +57,8 @@ async def create_manual_purchase(
     except PurchaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "manual_purchase_created")
+    # E0-B-1: después del commit de `get_db_session`, no antes (ver el helper).
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "manual_purchase_created", background=background_tasks
+    )
     return result

@@ -20,7 +20,6 @@ from app.api.v1.deps import (
 from app.application.services import owner_capital_service, tenant_categories_service
 from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import (
-    trigger_score_recalculation,
     trigger_score_recalculation_after_commit,
 )
 from app.domain.business_time import fecha_de_negocio
@@ -282,6 +281,7 @@ def _cambia_lo_de_la_compra(body: UpdateExpenseRequest, entry: ExpenseEntry) -> 
 )
 async def create_expense(
     body: CreateExpenseRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     # F3 review final: la auth (rol) va ANTES que el guard 423 — mismo orden que
     # products/others/suppliers (ver create_product).
@@ -342,7 +342,10 @@ async def create_expense(
         custom_fields=custom_fields,
     )
     saved = await repo.save(entry)
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_created")
+    # E0-B-1: después del commit de `get_db_session`, no antes (ver el helper).
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "expense_entry_created", background=background_tasks
+    )
     return saved
 
 
@@ -472,6 +475,7 @@ async def get_expense(
 async def update_expense(
     expense_id: UUID,
     body: UpdateExpenseRequest,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
@@ -571,13 +575,16 @@ async def update_expense(
         before=before,
         after=_expense_snapshot(saved),
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_updated")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "expense_entry_updated", background=background_tasks
+    )
     return saved
 
 
 @router.delete("/{expense_id}", response_model=MessageResponse, summary="Delete an expense entry")
 async def delete_expense(
     expense_id: UUID,
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_modify_access),
     session: AsyncSession = Depends(get_db_session),
@@ -602,5 +609,7 @@ async def delete_expense(
         before=before,
         after=_expense_snapshot(entry),
     )
-    trigger_score_recalculation.delay(str(tenant.tenant_id), "expense_entry_deleted")
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "expense_entry_deleted", background=background_tasks
+    )
     return MessageResponse(message="Expense entry voided.")

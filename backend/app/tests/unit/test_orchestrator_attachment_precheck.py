@@ -290,7 +290,7 @@ async def test_handle_does_not_reimport_already_imported_file(
     )
 
     async def redis_get(key: str):
-        if key == ChatOrchestrator._pending_file_key(conv_id):
+        if key == ChatOrchestrator._pending_file_key(conv_id, tid):
             return pending_payload
         return None
 
@@ -379,7 +379,7 @@ async def test_handle_reuses_pending_file_for_import_turn(db_session, tenant_wit
     )
 
     async def redis_get(key: str):
-        if key == ChatOrchestrator._pending_file_key(conv_id):
+        if key == ChatOrchestrator._pending_file_key(conv_id, tid):
             return pending_payload
         return None
 
@@ -442,7 +442,7 @@ async def test_handle_does_not_reuse_pending_file_when_topic_changes(
     )
 
     async def redis_get(key: str):
-        if key == ChatOrchestrator._pending_file_key(conv_id):
+        if key == ChatOrchestrator._pending_file_key(conv_id, tid):
             return pending_payload
         return None
 
@@ -531,7 +531,7 @@ async def test_handle_unknown_off_topic_does_not_offer_pending_file(
     )
 
     async def redis_get(key: str):
-        if key == ChatOrchestrator._pending_file_key(conv_id):
+        if key == ChatOrchestrator._pending_file_key(conv_id, tid):
             return pending_payload
         return None
 
