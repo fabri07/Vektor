@@ -61,7 +61,6 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services import pos_discrepancy_service
 from app.application.services.inventory_movement_origin import (
     MOVEMENT_CLASS_ANCHOR,
     MOVEMENT_CLASS_IGNORE_SALE,
@@ -73,8 +72,8 @@ from app.application.services.inventory_movement_origin import (
 )
 from app.application.services.inventory_temporal_service import (
     check_products_temporal_divergence,
+    ventas_que_descontaron_por_producto,
 )
-from app.application.services.stock_service import sale_source_event_id
 
 _UUID_PARAM = PG_UUID(as_uuid=True)
 
@@ -97,58 +96,13 @@ async def _applied_sales_qty(
     """Unidades vendidas que DEBEN estar reflejadas en ``stock_units`` (F-H3.d.1).
 
     Ver el criterio en el docstring del módulo: las ventas en vivo cuentan siempre,
-    las importadas sólo si su descuento se aplicó.
-
-    El cruce se hace en Python y no en SQL a propósito. La clave es el texto
-    ``"sale:{id}"``, y armarla en SQL exigiría concatenar el id casteado a texto: en
-    Postgres eso da el UUID con guiones y en SQLite el hex plano, así que el mismo
-    ``EXISTS`` daría distinto según el motor — y el que miente es el de los tests.
-    La segunda query sólo se paga si el producto tiene ventas importadas.
+    las importadas sólo si su descuento se aplicó, y las de salida pendiente (B11)
+    no cuentan. El criterio vive en ``ventas_que_descontaron_por_producto`` y lo
+    comparte el ajuste de B11 (T3 · C-2): si cada uno tuviera el suyo, el ajuste
+    dimensionaría con una cuenta distinta de la que este chequeo cierra.
     """
-    ventas = (
-        await session.execute(
-            text(
-                "SELECT id, quantity, source_upload_id FROM sales_entries "
-                "WHERE tenant_id = :tid AND product_id = :pid AND voided_at IS NULL"
-            ).bindparams(
-                bindparam("tid", type_=_UUID_PARAM), bindparam("pid", type_=_UUID_PARAM)
-            ),
-            {"tid": tenant_id, "pid": product_id},
-        )
-    ).mappings().all()
-
-    # Una venta de caja cuya salida de stock quedó pendiente (B11) todavía no
-    # descontó, así que no puede restarse: su deuda está abierta y a la vista.
-    # Es la MISMA consulta que usa el chequeo temporal, por la misma razón.
-    pendientes = await pos_discrepancy_service.ventas_con_salida_pendiente(
-        session, tenant_id, [product_id]
-    )
-    ventas = [v for v in ventas if _as_uuid(v["id"]) not in pendientes]
-
-    en_vivo = [v for v in ventas if v["source_upload_id"] is None]
-    importadas = [v for v in ventas if v["source_upload_id"] is not None]
-    total = sum(int(v["quantity"] or 0) for v in en_vivo)
-    if not importadas:
-        return total
-
-    aplicados = {
-        row[0]
-        for row in await session.execute(
-            text(
-                "SELECT source_event_id FROM inventory_movements "
-                "WHERE tenant_id = :tid AND product_id = :pid "
-                "AND movement_type = 'sale' AND voided_at IS NULL "
-                "AND source_event_id IS NOT NULL"
-            ).bindparams(
-                bindparam("tid", type_=_UUID_PARAM), bindparam("pid", type_=_UUID_PARAM)
-            ),
-            {"tid": tenant_id, "pid": product_id},
-        )
-    }
-    for venta in importadas:
-        if sale_source_event_id(_as_uuid(venta["id"])) in aplicados:
-            total += int(venta["quantity"] or 0)
-    return total
+    ventas = await ventas_que_descontaron_por_producto(session, tenant_id, [product_id])
+    return sum(v.quantity for v in ventas[product_id])
 
 
 async def check_tenant_inventory_integrity(
