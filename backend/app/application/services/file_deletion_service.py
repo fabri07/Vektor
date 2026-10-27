@@ -56,7 +56,12 @@ from app.application.services.costo_vigente_service import recalcular_pendientes
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
 )
-from app.application.services.stock_service import bloquear_catalogo, void_movement
+from app.application.services.stock_service import (
+    bloquear_catalogo,
+    exigir_reversa_sin_stock_negativo,
+    foto_de_stock,
+    void_movement,
+)
 from app.domain.file_deletion_reasons import PreservationReason
 from app.domain.ingestion_version import INGESTION_VERSION_WITH_LEDGER
 from app.observability.logger import get_logger
@@ -1125,7 +1130,9 @@ async def revert_file_data(
     # archivo y se cruzaba con un ticket del POS o con un import de otro archivo.
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
     await maintenance_lock_service.acquire_import_lock(session, tenant_id)
-    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)  # noqa: F841
+    _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)
+    # I4-5: el stock de cada producto antes de revertir, bajo el candado.
+    _stock_antes = foto_de_stock(_catalogo)
     ahora = datetime.now(UTC)
     contadores = {
         "ventas": 0,
@@ -1190,6 +1197,12 @@ async def revert_file_data(
     for mov in movs_res.scalars().all():
         await void_movement(mov, session, lock_held=True)
         contadores["movimientos_stock"] += 1
+    # I4-5: si lo que el archivo cargó ya se vendió por otro lado (POS, carga
+    # manual, otro archivo), anularlo deja el stock negativo. El borrado se frena
+    # entero (`RevertirDejaStockNegativoError` → 409): nunca un clamp a 0.
+    await exigir_reversa_sin_stock_negativo(
+        session, tenant_id, _stock_antes, operacion="Borrar este archivo"
+    )
 
     # 3. Productos CREADOS por el archivo → desactivar. Solo los del ledger, y
     #    solo si no quedaron ventas vivas de otra fuente apuntándolos (una venta
