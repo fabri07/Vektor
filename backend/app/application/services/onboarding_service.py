@@ -8,8 +8,12 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTasks
 
 from app.application.services.owner_capital_service import registrar_movimiento
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation_after_commit,
+)
 from app.application.services.work_schedule_service import (
     DEFAULT_CLOSE_HOUR,
     DEFAULT_OPEN_HOUR,
@@ -92,17 +96,25 @@ def _derive_confidence(score: int) -> str:
     return "LOW"
 
 
-def _enqueue_score_recalculation(tenant_id: UUID, snapshot_id: UUID) -> None:
-    try:
-        from app.jobs.score_worker import trigger_score_recalculation  # noqa: PLC0415
+def _enqueue_score_recalculation(
+    *,
+    session: AsyncSession,
+    tenant_id: UUID,
+    snapshot_id: UUID,
+    background: BackgroundTasks | None,
+) -> None:
+    """Agenda el primer score del negocio para DESPUÉS del commit (E0-B-1).
 
-        trigger_score_recalculation.delay(str(tenant_id), str(snapshot_id))
-    except Exception:
-        logger.warning(
-            "onboarding.score_enqueue_failed",
-            tenant_id=str(tenant_id),
-            snapshot_id=str(snapshot_id),
-        )
+    Antes era un ``.delay()`` en el medio del submit, con el perfil tomado con
+    ``FOR UPDATE`` y nada commiteado: el worker abría su propia sesión y podía
+    calcular el primer score sin las estimaciones ni el capital inicial. El
+    helper encola en el ``after_commit`` (nunca tras un rollback) y es fail-safe
+    ante un broker caído. El mensaje es el mismo de siempre: ``(tenant_id,
+    snapshot_id)`` a ``jobs.trigger_score_recalculation``.
+    """
+    trigger_score_recalculation_after_commit(
+        session, str(tenant_id), str(snapshot_id), background=background
+    )
 
 
 class OnboardingService:
@@ -111,7 +123,11 @@ class OnboardingService:
         self._repo = BusinessProfileRepository(session)
 
     async def submit(
-        self, tenant_id: UUID, body: OnboardingSubmitRequest, user_id: UUID
+        self,
+        tenant_id: UUID,
+        body: OnboardingSubmitRequest,
+        user_id: UUID,
+        background: BackgroundTasks | None = None,
     ) -> OnboardingSubmitResponse:
         # FOR UPDATE: sin el lock, dos submits a la vez leían los dos
         # `onboarding_completed = False` y pasaban los dos (D·5 lo vuelve
@@ -213,8 +229,13 @@ class OnboardingService:
         bp.data_confidence = confidence
         await self._repo.save(bp)
 
-        # Step 9: enqueue async score recalculation
-        _enqueue_score_recalculation(tenant_id=tenant_id, snapshot_id=snapshot.id)
+        # Step 9: score recalculation, encolado recién cuando el submit commitee
+        _enqueue_score_recalculation(
+            session=self.session,
+            tenant_id=tenant_id,
+            snapshot_id=snapshot.id,
+            background=background,
+        )
 
         logger.info(
             "onboarding.submitted",
