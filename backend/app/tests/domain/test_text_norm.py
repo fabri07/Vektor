@@ -87,3 +87,32 @@ class TestNormalizeBrand:
     @pytest.mark.parametrize("raw", [None, ""])
     def test_none_or_empty_returns_none(self, raw: str | None) -> None:
         assert normalize_brand(raw) is None
+
+
+class TestValoresNoTexto:
+    """I5-1: una celda numérica de xlsx puede llegar como número nativo.
+
+    Un código de barras, un SKU, un nombre o una marca cargados como número
+    siguen siendo texto: los normalizadores no revientan con un ``int``/``float``,
+    un ``float`` entero no arrastra el ``.0`` y un ``0`` es ``"0"``, no vacío.
+    """
+
+    def test_barcode_nativo(self) -> None:
+        assert normalize_barcode(7790001234567) == "7790001234567"
+        assert normalize_barcode(7790001234567.0) == "7790001234567"
+
+    def test_sku_nativo(self) -> None:
+        assert normalize_sku(555) == "555"
+        assert normalize_sku(555.0) == "555"
+        assert normalize_sku(0) == "0"
+
+    def test_nombre_y_marca_nativos(self) -> None:
+        assert normalize_product_name(1001) == "1001"
+        assert normalize_product_name(0) == "0"
+        assert normalize_brand(99) == "99"
+
+    def test_none_sigue_siendo_ausente(self) -> None:
+        assert normalize_barcode(None) is None
+        assert normalize_sku(None) is None
+        assert normalize_product_name(None) == ""
+        assert normalize_brand(None) is None

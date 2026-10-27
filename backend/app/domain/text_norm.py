@@ -13,9 +13,26 @@ migración de hashes ya persistidos.
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from functools import lru_cache
+from typing import Any
+
+
+def como_texto(valor: Any) -> str:
+    """Un valor de celda como texto, para las funciones de esta familia.
+
+    Desde I5-1 una celda numérica de xlsx puede llegar como número nativo; un
+    código de barras, un SKU o un nombre («1001») cargado como número no deja
+    de ser texto. Un ``float`` entero se escribe sin el ``.0`` espurio:
+    ``7790001234567.0`` es ``"7790001234567"``, no un código de 14 dígitos.
+    """
+    if isinstance(valor, str):
+        return valor
+    if isinstance(valor, float) and math.isfinite(valor) and valor.is_integer():
+        return str(int(valor))
+    return str(valor)
 
 
 @lru_cache(maxsize=4096)
@@ -47,7 +64,7 @@ def repair_mojibake(s: str) -> str:
     return fix_encoding(s)
 
 
-def normalize_text(s: str) -> str:
+def normalize_text(s: Any) -> str:
     """NFKD + quita diacríticos + casefold + trim + colapsa espacios internos.
 
     NO repara mojibake a propósito: alimenta ``product_name_normalized`` y demás
@@ -55,7 +72,7 @@ def normalize_text(s: str) -> str:
     dado movería filas que ya están en la base. La reparación vive en
     ``repair_mojibake``, que se aplica sólo a encabezados (``fold_header``).
     """
-    s = unicodedata.normalize("NFKD", s)
+    s = unicodedata.normalize("NFKD", como_texto(s))
     s = "".join(c for c in s if not unicodedata.combining(c))
     return " ".join(s.casefold().split())
 
@@ -67,7 +84,7 @@ _BARCODE_MIN_DIGITS = 8
 _BARCODE_MAX_DIGITS = 14
 
 
-def normalize_barcode(s: str | None) -> str | None:
+def normalize_barcode(s: Any) -> str | None:
     """Código de barras normalizado: SOLO dígitos, y solo si el resultado tiene
     una longitud PLAUSIBLE de barcode (8–14 dígitos). None/vacío → None.
 
@@ -77,6 +94,9 @@ def normalize_barcode(s: str | None) -> str | None:
     por esos 3 dígitos. El campo raw se preserva aparte (columna ``barcode``);
     esto normaliza solo la clave de matching.
     """
+    if s is None:
+        return None
+    s = como_texto(s)
     if not s:
         return None
     digits = re.sub(r"\D", "", s)
@@ -85,25 +105,34 @@ def normalize_barcode(s: str | None) -> str | None:
     return digits
 
 
-def normalize_sku(s: str | None) -> str | None:
+def normalize_sku(s: Any) -> str | None:
     """SKU normalizado (``normalize_text``). None/vacío → None."""
+    if s is None:
+        return None
+    s = como_texto(s)
     if not s:
         return None
     return normalize_text(s) or None
 
 
-def normalize_product_name(s: str | None) -> str:
+def normalize_product_name(s: Any) -> str:
     """Nombre de producto normalizado: colapsa ``[-_]`` → espacio y luego
     ``normalize_text`` (superset para matching: 'Coca-Cola' == 'Coca Cola' ==
     'coca_cola'). '' si vacío.
     """
+    if s is None:
+        return ""
+    s = como_texto(s)
     if not s:
         return ""
     return normalize_text(re.sub(r"[-_]+", " ", s))
 
 
-def normalize_brand(s: str | None) -> str | None:
+def normalize_brand(s: Any) -> str | None:
     """Marca normalizada (``normalize_text``). None/vacío → None."""
+    if s is None:
+        return None
+    s = como_texto(s)
     if not s:
         return None
     return normalize_text(s) or None

@@ -270,3 +270,55 @@ class TestSerialesDeExcel:
         de 1904 perfectamente plausible que nadie iba a notar. Un `True` tampoco
         es el día 1."""
         assert parse_excel_serial(valor) is None
+
+
+class TestFechaConZona:
+    """I6-6: un ISO con zona (``...Z``, ``...-03:00``) es un instante absoluto.
+
+    Se devuelve en hora argentina SIN zona, que es como se guarda una fecha de
+    negocio: con zona, el INSERT del import reventaba en Postgres (columna sin
+    zona) y en SQLite la hora UTC quedaba como local, con el día corrido.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "esperado"),
+        [
+            # 02:30 UTC del 6 son las 23:30 del 5 en Argentina.
+            ("2026-06-06T02:30:00Z", datetime(2026, 6, 5, 23, 30)),
+            ("2026-06-06T02:30:00+00:00", datetime(2026, 6, 5, 23, 30)),
+            # Ya en hora argentina: sólo pierde la zona.
+            ("2026-06-05T23:30:00-03:00", datetime(2026, 6, 5, 23, 30)),
+        ],
+    )
+    def test_se_lleva_a_hora_argentina_sin_zona(self, raw: str, esperado: datetime) -> None:
+        valor = parse_business_datetime(raw)
+        assert valor == esperado
+        assert valor is not None and valor.tzinfo is None
+        assert parse_business_date(raw) == esperado.date()
+
+        columna = parsear_fecha_de_columna(raw, None, hoy=date(2026, 6, 30))
+        assert columna.valor == esperado and columna.motivo is None
+        assert columna.valor is not None and columna.valor.tzinfo is None
+
+    def test_un_datetime_con_zona_tambien(self) -> None:
+        from datetime import UTC
+
+        instante = datetime(2026, 6, 6, 2, 30, tzinfo=UTC)
+        assert parse_business_datetime(instante) == datetime(2026, 6, 5, 23, 30)
+        assert parse_business_date(instante) == date(2026, 6, 5)
+
+    def test_la_fecha_futura_se_mide_despues_de_convertir(self) -> None:
+        """La regla «una fecha futura nunca se persiste» mira el día ARGENTINO.
+
+        01:00 UTC del 7 son las 22:00 del 6 en Argentina: con hoy = 6, es una
+        venta de esta noche y entra. 04:00 UTC del 7 ya es el 7 en Argentina: es
+        futura y no entra.
+        """
+        hoy = date(2026, 6, 6)
+        de_esta_noche = parsear_fecha_de_columna("2026-06-07T01:00:00Z", None, hoy=hoy)
+        assert de_esta_noche.valor == datetime(2026, 6, 6, 22, 0)
+        assert de_esta_noche.motivo is None
+
+        de_manana = parsear_fecha_de_columna("2026-06-07T04:00:00Z", None, hoy=hoy)
+        assert de_manana.valor is None
+        assert de_manana.motivo == MOTIVO_FECHA_FUTURA

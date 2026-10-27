@@ -1357,7 +1357,10 @@ async def _import_master_entities(
         elif not confirmed_fields.get(confirm_key):
             continue
 
-        rows = _rows_for_context(summary.get(bucket_key) or [], ctx_id)
+        # I5-1: los campos de un maestro (CUIT, DNI, teléfono, CP, código) son
+        # texto aunque el xlsx los traiga como número; los importadores de
+        # clientes y proveedores los leen como texto, como antes.
+        rows = _textualizar_nativos(_rows_for_context(summary.get(bucket_key) or [], ctx_id))
         if not rows:
             continue
         mapping = (context_mappings or {}).get(ctx_id) or (
@@ -5119,7 +5122,7 @@ def _normalizar_columnas_numericas(
     entrar con una escala inventada.
     """
     if not columnas or not rows:
-        return rows, {}
+        return _textualizar_nativos(rows), {}
 
     convenios = {
         col: inferir_convenio([fila.get(col) for fila in rows])
@@ -5127,7 +5130,7 @@ def _normalizar_columnas_numericas(
         if any(col in fila for fila in rows)
     }
     if not convenios:
-        return rows, {}
+        return _textualizar_nativos(rows), {}
 
     motivos: dict[int, dict[str, str]] = {}
     normalizadas: list[dict[str, Any]] = []
@@ -5147,7 +5150,40 @@ def _normalizar_columnas_numericas(
             elif interpretado.motivo is not None:
                 motivos.setdefault(indice, {})[col] = interpretado.motivo
         normalizadas.append(copia)
-    return normalizadas, motivos
+    return _textualizar_nativos(normalizadas), motivos
+
+
+def _es_numero_de_celda(valor: Any) -> bool:
+    # `bool` es subclase de `int`; `Decimal` sólo lo produce la normalización.
+    return isinstance(valor, int | float) and not isinstance(valor, bool)
+
+
+def _textualizar_nativos(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Todo número nativo que NO es de una columna numérica vuelve a texto (I5-1).
+
+    El parser xlsx entrega las celdas numéricas como número para que un monto
+    nativo no se reinterprete con el convenio de la columna. Pero sólo los montos,
+    cantidades, precios y costos se benefician: un código de barras, un SKU, un
+    comprobante, un CUIT o un nombre («1001») cargados como número siguen siendo
+    texto, y los ~35 lectores del importador los tratan como texto (``.strip()``,
+    ``re.sub``, ``normalize_*``). Se pasan con el mismo ``str()`` que usaba el
+    parser antes de I5-1, así que para esas columnas nada cambia: un ``0`` es
+    ``"0"``, no un falsy. Corre al final de ``_normalizar_columnas_numericas``,
+    cuando las columnas numéricas ya son ``Decimal``.
+
+    Sin nativos devuelve la MISMA lista (CSV, el camino común, no paga).
+    """
+    if not any(
+        _es_numero_de_celda(v) for fila in rows for k, v in fila.items() if not k.startswith("__")
+    ):
+        return rows
+    return [
+        {
+            k: (str(v) if not k.startswith("__") and _es_numero_de_celda(v) else v)
+            for k, v in fila.items()
+        }
+        for fila in rows
+    ]
 
 
 def _sin_columnas_ignoradas(
