@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +29,7 @@ from app.application.agents.shared.weight_guard import (
     pregunta_por_peso,
 )
 from app.application.security.prompt_defense import wrap_user_input
+from app.domain.business_time import today_ar
 from app.domain.sale_unit import importe
 from app.integrations.anthropic_client import get_anthropic_async_client
 from app.observability.logger import get_logger
@@ -331,9 +332,9 @@ class AgentSupplier(BaseAgent):
     async def _extract_purchase_entities(
         self, message: str
     ) -> tuple[dict[str, Any], LLMCall | None]:
-        from datetime import date  # noqa: PLC0415
-
-        today = date.today().isoformat()
+        # Día de NEGOCIO (AR): de 21 a 24 el día UTC ya es mañana y el LLM
+        # fechaba la compra en el futuro (E0-A-1).
+        today = today_ar().isoformat()
         system = (
             f"Hoy es {today}. Extraé datos de una compra a un proveedor.\n"
             "Retorná SOLO un JSON:\n"
@@ -394,7 +395,7 @@ class AgentSupplier(BaseAgent):
         """Agrega gasto por proveedor en una ventana: total, count, last_date, pct."""
         from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
-        cutoff = date.today() - timedelta(days=days)
+        cutoff = today_ar() - timedelta(days=days)
         assert self._session is not None  # garantizado por _handle_supplier_analysis
         rows = await self._session.execute(
             select(ExpenseEntry).where(
@@ -425,7 +426,7 @@ class AgentSupplier(BaseAgent):
                 "total": float(s["total"]),
                 "count": s["count"],
                 "last_purchase": str(s["last_date"].date()),
-                "days_since": (date.today() - s["last_date"].date()).days,
+                "days_since": (today_ar() - s["last_date"].date()).days,
                 "pct": round(float(s["total"]) / grand_total * 100, 1) if grand_total > 0 else 0.0,
             }
             for name, s in suppliers.items()
@@ -1030,7 +1031,7 @@ class AgentSupplier(BaseAgent):
         from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
         period_days = 90
-        cutoff = date.today() - timedelta(days=period_days)
+        cutoff = today_ar() - timedelta(days=period_days)
 
         assert self._session is not None  # garantizado por _handle_supplier_analysis
         rows = await self._session.execute(

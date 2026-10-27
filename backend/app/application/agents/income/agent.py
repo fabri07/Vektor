@@ -32,7 +32,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
-from app.domain.business_time import now_ar_naive
+from app.domain.business_time import now_ar_naive, today_ar
 from app.domain.verticals import Vertical
 from app.integrations.anthropic_client import get_anthropic_async_client
 
@@ -904,7 +904,6 @@ class AgentIncome(BaseAgent):
             )
 
         # ── rentabilidad / estrella / problemáticos → JOIN ventas × productos ─
-        from datetime import date as _date  # noqa: PLC0415
         from datetime import timedelta as _timedelta
 
         from app.application.agents.shared import analytics  # noqa: PLC0415
@@ -915,7 +914,7 @@ class AgentIncome(BaseAgent):
             SaleRepository,
         )
 
-        to_date = _date.today()
+        to_date = today_ar()
         from_date = to_date - _timedelta(days=30)
         sales = await SaleRepository(self._db).get_sales_by_product(tenant_id, from_date, to_date)
         if not sales:
@@ -1028,7 +1027,6 @@ class AgentIncome(BaseAgent):
 
         Política no-invention: sin ventas → mensaje claro sin llamar al LLM.
         """
-        from datetime import date as _date  # noqa: PLC0415
         from datetime import timedelta as _timedelta
 
         from app.application.agents.shared import analytics  # noqa: PLC0415
@@ -1084,7 +1082,7 @@ class AgentIncome(BaseAgent):
 
         # Datos determinísticos desde repos
         sales_by_customer = await sale_repo.get_sales_by_customer(tenant_id)
-        to_date = _date.today()
+        to_date = today_ar()
         from_date = to_date - _timedelta(days=30)
         sales_by_product = await sale_repo.get_sales_by_product(tenant_id, from_date, to_date)
 

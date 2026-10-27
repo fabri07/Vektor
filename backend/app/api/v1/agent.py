@@ -16,7 +16,7 @@ import hashlib
 import json as json_module
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -54,6 +54,7 @@ from app.application.services.pending_action_service import (
     execute_pending_action,
 )
 from app.config.settings import get_settings
+from app.domain.business_time import AR_TZ, today_ar
 from app.domain.subscription import (
     CHAT_OPERATION_PREFIX,
     SUBSCRIPTION_ERRORS,
@@ -931,7 +932,7 @@ async def get_chat_usage(
     current_user: User = Depends(get_current_user),
     redis: Redis = Depends(get_redis),
 ) -> dict[str, Any]:
-    rate_key = f"rate:chat:{current_user.tenant_id}:{date.today()}"
+    rate_key = f"rate:chat:{current_user.tenant_id}:{today_ar()}"
     count = await redis.get(rate_key)
     return {"messages_today": int(count) if count else 0, "limit": 50}
 
@@ -1069,7 +1070,8 @@ async def chat(
     # El check precede al orquestador; el incr se hace DESPUÉS de respuesta exitosa
     # para no consumir cuota en errores 5xx ajenos al usuario.
     # Si Redis cae, se permite el request (fail-open) con warning.
-    rate_key = f"rate:chat:{tenant_id}:{date.today()}"
+    # El «día» del cupo es el argentino: con el UTC se renovaba a las 21 ART.
+    rate_key = f"rate:chat:{tenant_id}:{today_ar()}"
     try:
         current_count = await redis.get(rate_key)
         if current_count is not None and int(current_count) >= 50:
@@ -1176,7 +1178,7 @@ async def chat(
         try:
             count = await redis.incr(rate_key)
             if count == 1:
-                midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
+                midnight = datetime.combine(today_ar(), time.max, tzinfo=AR_TZ)
                 await redis.expireat(rate_key, midnight)
         except Exception as redis_exc:
             logger.warning(
@@ -1251,7 +1253,7 @@ async def chat_stream(
     user_id = current_user.user_id
 
     # Rate limit compartido con /chat — check previo al stream, incr dentro del generator
-    rate_key = f"rate:chat:{tenant_id}:{date.today()}"
+    rate_key = f"rate:chat:{tenant_id}:{today_ar()}"
     try:
         current_count = await redis.get(rate_key)
         if current_count is not None and int(current_count) >= 50:
@@ -1408,7 +1410,7 @@ async def chat_stream(
                 try:
                     _stream_count = await redis.incr(rate_key)
                     if _stream_count == 1:
-                        _midnight = datetime.combine(date.today(), time.max).replace(tzinfo=UTC)
+                        _midnight = datetime.combine(today_ar(), time.max, tzinfo=AR_TZ)
                         await redis.expireat(rate_key, _midnight)
                 except Exception as _redis_exc:
                     logger.warning(
