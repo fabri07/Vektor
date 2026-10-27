@@ -731,11 +731,15 @@ async def _build_master_previews(
         entity = ctx["entity_type"]
         ctx_id = ctx.get("context_id")
         bucket_key = "clientes_detectados" if entity == "customer" else "proveedores_detectados"
-        rows = _iis._rows_for_context(summary.get(bucket_key) or [], ctx_id or "")
+        # I5-1: un CUIT, un teléfono o un CP cargados como número en el xlsx llegan
+        # nativos; para el maestro son texto, como antes, y así los lee el import.
+        rows = _iis._textualizar_nativos(
+            _iis._rows_for_context(summary.get(bucket_key) or [], ctx_id or "")
+        )
         if not rows:
             continue
         headers = ctx.get("headers") or list(rows[0].keys())
-        sample_rows = ctx.get("preview_rows") or rows[:10]
+        sample_rows = _iis._textualizar_nativos(ctx.get("preview_rows") or rows[:10])
         # Review 7d (Important): este GET puede correr en cada poll/reload de la
         # página — NUNCA debe disparar la 4ª capa LLM (costo + latencia sin cache
         # ni cap), aunque ENABLE_LLM_COLUMN_MAPPING esté prendido. Solo
