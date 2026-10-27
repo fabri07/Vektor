@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
-from app.domain.business_time import today_ar
+from app.domain.business_time import a_hora_de_negocio, fecha_de_negocio, today_ar
 
 # Orden = prioridad. Con hora primero (una fecha con hora también matchearía el
 # formato de solo fecha si se truncara, y perderíamos la hora).
@@ -63,11 +63,17 @@ def parse_business_datetime(raw: Any, *, century_pivot: int | None = None) -> da
 
     ``century_pivot``: para años de 2 dígitos, ``yy > pivot`` cae en 1900 y el
     resto en 2000. Omitirlo deja el comportamiento de ``strptime`` (pivote 69).
+
+    Siempre devuelve hora argentina SIN zona, que es como se guarda una fecha de
+    negocio (I6-6): un ISO con zona (``...Z``, ``...-03:00``) es un instante
+    absoluto y se lleva a hora AR antes de perderla. Devolverlo con zona hacía
+    fallar el INSERT del import en Postgres (columna sin zona) y, en SQLite,
+    guardaba la hora UTC como local y corría el día.
     """
     if raw is None:
         return None
     if isinstance(raw, datetime):
-        return raw
+        return a_hora_de_negocio(raw)
     if isinstance(raw, date):
         return datetime.combine(raw, datetime.min.time())
 
@@ -77,7 +83,7 @@ def parse_business_datetime(raw: Any, *, century_pivot: int | None = None) -> da
 
     # ISO 8601 primero: "2026-06-05T14:30:00", "2026-06-05 14:30:00", "2026-06-05".
     try:
-        return datetime.fromisoformat(text)
+        return a_hora_de_negocio(datetime.fromisoformat(text))
     except ValueError:
         pass
 
@@ -95,7 +101,8 @@ def parse_business_datetime(raw: Any, *, century_pivot: int | None = None) -> da
 def parse_business_date(raw: Any, *, century_pivot: int | None = None) -> date | None:
     """Igual que :func:`parse_business_datetime` pero devuelve ``date``."""
     if isinstance(raw, datetime):
-        return raw.date()
+        # Con zona, el día es el de Argentina, no el UTC (I6-6).
+        return fecha_de_negocio(raw)
     if isinstance(raw, date):
         return raw
     parsed = parse_business_datetime(raw, century_pivot=century_pivot)
@@ -193,10 +200,10 @@ def parse_excel_serial(raw: Any) -> datetime | None:
         if numero != numero or numero in (float("inf"), float("-inf")):
             return None
     elif isinstance(raw, str) and _SOLO_DIGITOS.match(raw.strip()):
-        # El parser de archivos normaliza TODA celda a texto antes de llegar acá,
-        # así que un serial siempre viaja como `"45123"`: rechazar los strings
-        # dejaría esta función sin ningún caso real. Se acepta sólo la forma
-        # puramente numérica, y sólo en columnas que ya se creen de fecha.
+        # En un CSV toda celda es texto, así que un serial viaja como `"45123"`
+        # (el xlsx conserva el número nativo desde I5-1): rechazar los strings
+        # dejaría sin cubrir el caso CSV. Se acepta sólo la forma puramente
+        # numérica, y sólo en columnas que ya se creen de fecha.
         numero = float(raw.strip())
     else:
         return None
