@@ -138,6 +138,9 @@ ERROR_SUSCRIPCION: Final = "suscripcion"
 #: explícita. No reintentable: la persona tiene que mirar el aviso y decidir.
 ERROR_POSIBLE_REPETICION: Final = "posible_repeticion"
 ERROR_TRANSITORIO: Final = "transitorio"
+#: I3-2: el ejecutor superó su soft time limit. No reintentable: el mismo archivo
+#: va a tardar lo mismo la próxima vez.
+ERROR_TIEMPO: Final = "tiempo_excedido"
 ERROR_DESCONOCIDO: Final = "desconocido"
 
 #: Cuáles vale la pena reintentar. El default es NO: un archivo que excede un

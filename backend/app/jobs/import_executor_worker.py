@@ -56,8 +56,13 @@ import asyncio
 import uuid as _uuid
 from typing import TYPE_CHECKING, Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select
 
+from app.application.services.import_limits import (
+    IMPORT_EXECUTE_HARD_LIMIT_SECONDS,
+    IMPORT_EXECUTE_SOFT_LIMIT_SECONDS,
+)
 from app.domain.subscription import (
     SUBSCRIPTION_ERRORS,
     QuotaResource,
@@ -72,6 +77,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _QUEUE = "ingestion"
+
+_MENSAJE_TIEMPO = (
+    f"La importación superó el tiempo máximo de "
+    f"{IMPORT_EXECUTE_SOFT_LIMIT_SECONDS // 60} minutos y se canceló sin guardar "
+    "nada. Dividí el archivo en partes más chicas y confirmalas por separado."
+)
 
 
 def _run(coro: Any) -> Any:
@@ -141,7 +152,19 @@ def publish_import_orders() -> dict[str, int]:
 
 
 # ── Ejecutor ─────────────────────────────────────────────────────────────────
-async def _ejecutar(attempt_id: _uuid.UUID) -> str:
+async def _ejecutar(
+    attempt_id: _uuid.UUID, contexto: dict[str, Any] | None = None
+) -> str:
+    """Reclama y ejecuta el intento.
+
+    ``contexto`` lo llena esta función con lo que el cierre por tiempo necesita
+    (token, tenant, archivo) a medida que lo conoce: si el soft limit cae mientras
+    el loop espera I/O, la excepción sale por ``asyncio.run`` y esta corrutina
+    sólo ve un ``CancelledError`` —que su ``except Exception`` no atrapa—, así que
+    el cierre lo hace ``execute_import`` afuera del loop. Ver ``_cerrar_por_tiempo``.
+    """
+    if contexto is None:
+        contexto = {}
     from app.api.v1.ingestion import confirm_file
     from app.application.services.import_attempt_service import (
         cerrar_intento,
@@ -169,6 +192,7 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
         await session.commit()
     if token is None:
         return "duplicado"
+    contexto["token"] = token
 
     async with factory() as session:
         intento = await session.get(ImportAttempt, attempt_id)
@@ -177,6 +201,8 @@ async def _ejecutar(attempt_id: _uuid.UUID) -> str:
         payload = dict(intento.payload_json or {})
         tenant_id = intento.tenant_id
         file_id = intento.file_id
+        contexto["tenant_id"] = tenant_id
+        contexto["file_id"] = file_id
         payload_version = intento.payload_version
         hash_congelado = intento.file_content_hash
         capacidades_congeladas = intento.capabilities_json
@@ -360,11 +386,17 @@ def _clasificar(exc: BaseException) -> tuple[str, str]:
         ERROR_POSIBLE_REPETICION,
         ERROR_REVISION,
         ERROR_SUSCRIPCION,
+        ERROR_TIEMPO,
         ERROR_TRANSITORIO,
         ERROR_VALIDACION,
     )
     from app.domain.subscription import SubscriptionAccessDenied  # noqa: PLC0415
 
+    if isinstance(exc, SoftTimeLimitExceeded):
+        # I3-2: el soft limit cayó dentro del código del import (no en la espera
+        # de I/O, que sale por `execute_import`). `str(exc)` es vacío: sin esto el
+        # intento quedaba "desconocido" sin una palabra de por qué.
+        return ERROR_TIEMPO, _MENSAJE_TIEMPO
     if isinstance(exc, SUBSCRIPTION_ERRORS):
         return ERROR_SUSCRIPCION, (
             SubscriptionAccessDenied.user_message
@@ -484,7 +516,41 @@ async def _liberar_reserva_del_intento(session: Any, attempt_id: _uuid.UUID) -> 
     )
 
 
-@celery_app.task(name="jobs.execute_import", queue=_QUEUE, max_retries=0)  # type: ignore[misc]
+async def _cerrar_por_tiempo(attempt_id: _uuid.UUID, contexto: dict[str, Any]) -> str:
+    """I3-2: cierre de un intento cuyo soft limit salió por ``asyncio.run``.
+
+    Corre en un loop NUEVO, con sesiones nuevas: las del loop anterior se
+    cerraron (rollback) al cancelarse. Devuelve el archivo a
+    ``NEEDS_CONFIRMATION`` —``confirm_file`` ya lo compensa si el corte cayó
+    adentro del import, pero no si cayó después, en el cierre del intento— y
+    cierra el intento ``FALLADO`` liberando su reserva. Las dos cosas son CAS: si
+    el intento ya había commiteado ``COMPLETADO``, ninguna toca nada.
+    """
+    from app.domain.import_attempt import ERROR_TIEMPO  # noqa: PLC0415
+
+    token = contexto.get("token")
+    if token is None:
+        # Se cortó antes de reclamar: no hay nada nuestro que cerrar.
+        return "tiempo_sin_reclamo"
+    factory, _engine = _sesion_de_worker()
+    tenant_id = contexto.get("tenant_id")
+    file_id = contexto.get("file_id")
+    if tenant_id is not None and file_id is not None:
+        await _compensar_lease_del_archivo(factory, tenant_id, file_id)
+    logger.warning("ingestion.intento.tiempo_excedido", attempt_id=str(attempt_id))
+    return await _cerrar_con_error(factory, attempt_id, token, ERROR_TIEMPO, _MENSAJE_TIEMPO)
+
+
+# Límites PROPIOS (I3-2): con los globales de Celery (240/300 s) un import grande
+# no terminaba nunca y dejaba archivo, intento y cupo trabados. Ver `import_limits`
+# — el hard limit tiene que quedar debajo de los dos leases.
+@celery_app.task(  # type: ignore[misc]
+    name="jobs.execute_import",
+    queue=_QUEUE,
+    max_retries=0,
+    soft_time_limit=IMPORT_EXECUTE_SOFT_LIMIT_SECONDS,
+    time_limit=IMPORT_EXECUTE_HARD_LIMIT_SECONDS,
+)
 def execute_import(attempt_id: str) -> dict[str, str]:
     """Ejecuta UN intento. Tolera la entrega duplicada sin hacer nada.
 
@@ -492,8 +558,17 @@ def execute_import(attempt_id: str) -> dict[str, str]:
     contador, su lease y la recuperación de huérfanos—, no el broker. Dos
     mecanismos de reintento sobre el mismo trabajo se pisan y producen justo lo
     que se quiere evitar: dos ejecuciones a la vez.
+
+    ``SoftTimeLimitExceeded`` se atrapa ACÁ, afuera del loop: si la señal cae
+    mientras el loop espera I/O —lo normal en un import contra Neon—, sale por
+    ``asyncio.run`` y adentro sólo se vio una cancelación.
     """
-    return {"resultado": str(_run(_ejecutar(_uuid.UUID(attempt_id))))}
+    uid = _uuid.UUID(attempt_id)
+    contexto: dict[str, Any] = {}
+    try:
+        return {"resultado": str(_run(_ejecutar(uid, contexto)))}
+    except SoftTimeLimitExceeded:
+        return {"resultado": str(_run(_cerrar_por_tiempo(uid, contexto)))}
 
 
 # ── Recuperación ─────────────────────────────────────────────────────────────
