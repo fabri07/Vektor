@@ -114,7 +114,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I2-9 | normal | confirmado | I-D | «Importar sugeridos» no bloquea las filas: en concurrencia con reclassify/link-product/dismiss duplica la venta o pisa el estado | pendiente |  |
 | I6-8 | normal | confirmado | I-D | La importación en lote de «Otros» lee los PENDING sin FOR UPDATE: compite con reclassify/dismiss y duplica la venta o importa lo descartado | pendiente |  |
 | I5-1 | grave | confirmado | I-E | Los números nativos de Excel se pasan a texto en el parseo y el convenio de la columna los vuelve a interpretar: un valor con 3 decimales entra multiplicado por 1000 sin aviso, o la fila va a «Otros» | mergeado | #202 `2d404cd4` |
-| I5-2 | grave | confirmado | I-E | Dos encabezados repetidos (o dos vacíos en un CSV) se pisan en el dict de la fila: los datos de la primera columna se pierden y el mapeo de las dos colapsa en una | pendiente |  |
+| I5-2 | grave | confirmado | I-E | Dos encabezados repetidos (o dos vacíos en un CSV) se pisan en el dict de la fila: los datos de la primera columna se pierden y el mapeo de las dos colapsa en una | mergeado | #204 `6a5f25e0` |
 | I5-3 | grave | confirmado | I-E | El reconocedor de encabezados ignora calificadores que cambian el significado y propone «unico» un destino que mueve plata o stock | pendiente |  |
 | I6-5 | grave | confirmado | I-E | Convenio de fecha por columna roto cuando las fechas traen hora: una columna mm/dd con hora se interpreta celda por celda (mezcla dmy y mdy) | pendiente |  |
 | I6-6 | grave | confirmado | I-E | Una fecha ISO con zona horaria ('…Z', '…-03:00') entra como datetime con zona y revienta el INSERT del import en Postgres | mergeado | #202 `2d404cd4` |
