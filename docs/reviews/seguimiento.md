@@ -46,9 +46,9 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | D-11 | normal | confirmado | T6 | Los insights nunca se generan: el único que despacha generate_insight es un job que nadie dispara | pendiente |  |
 | E0-B-5 | normal | e0 | T6 | insight_templates: 'or 100' convierte score_cash=0 (la peor caja) en 100 y suprime la variante 'Situación crítica' | pendiente |  |
 | E0-B-6 | normal | e0 | T6 | Narrativa LLM del insight recibe subscores inventados: caja desconocida persistida como 50 y None→0 con 'or 0' | pendiente |  |
-| E0-A-1 | grave | e0 | T7 | Una compra cargada por chat entre las 21 y las 24 ART queda con fecha de mañana y bloquea la venta de hoy de ese producto (B·5e) | pendiente |  |
-| E0-A-2 | grave | e0 | T7 | Un gasto o una salida de caja por chat con entidades del CEO queda fechado mañana a las 00:00 entre las 21 y las 24 ART | pendiente |  |
-| E0-A-3 | grave | e0 | T7 | El cálculo de 'sin rotación' saca las ventas de hoy (compara un DATETIME contra una fecha) y date.today() lo tapa sólo de 21 a 24 ART | pendiente |  |
+| E0-A-1 | grave | e0 | T7 | Una compra cargada por chat entre las 21 y las 24 ART queda con fecha de mañana y bloquea la venta de hoy de ese producto (B·5e) | PR abierto | #200 |
+| E0-A-2 | grave | e0 | T7 | Un gasto o una salida de caja por chat con entidades del CEO queda fechado mañana a las 00:00 entre las 21 y las 24 ART | PR abierto | #200 |
+| E0-A-3 | grave | e0 | T7 | El cálculo de 'sin rotación' saca las ventas de hoy (compara un DATETIME contra una fecha) y date.today() lo tapa sólo de 21 a 24 ART | PR abierto | #200 |
 | E0-A-4 | normal | e0 | T7 | El asistente de Calendar le dice al LLM que 'hoy' es mañana entre las 21 y las 24 ART | pendiente |  |
 | E0-A-5 | normal | e0 | T7 | El cupo diario de 50 mensajes de chat se renueva a las 21:00 ART y no a medianoche | pendiente |  |
 | E0-A-6 | normal | e0 | T7 | Las series diarias de los agentes terminan en un día futuro en cero y pierden el día más viejo entre las 21 y las 24 ART | pendiente |  |
@@ -63,7 +63,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | E0-A-15 | normal | e0 | T7 | Mail semanal: date.today() no molesta con el horario del beat, pero la 'semana' de los cierres de caja es la que recién empieza | pendiente |  |
 | B-8 | normal | confirmado | T7 | date.today() (UTC) en resúmenes, listados por defecto y series diarias | pendiente |  |
 | D-7 | normal | confirmado | T7 | date.today() (UTC) en breakdown, cash-breakdown, forecast y DeterministicFinance; «sin rotación» no ve las ventas de hoy | pendiente |  |
-| E0-B-1 | grave | e0 | T8 | Recálculo de score encolado con .delay() ANTES del commit en gastos, compras manuales, productos y onboarding | pendiente |  |
+| E0-B-1 | grave | e0 | T8 | Recálculo de score encolado con .delay() ANTES del commit en gastos, compras manuales, productos y onboarding | mergeado | #199 `e3f0ea65` (límite: eventos de stock todavía antes del commit) |
 | B-7 | normal | confirmado | T8 | Recálculo de score con .delay() antes del commit en gastos, compras y productos | pendiente |  |
 | B-6 | normal | confirmado | T8 | POST /purchases/manual no pasa por el gate de suscripción, a diferencia de las otras altas de compra y gasto | pendiente |  |
 | B-11 | normal | confirmado | T8 | Altas sin entrada en decision_audit_log: POST /sales, /sales/bulk, /expenses y /products | pendiente |  |
@@ -76,15 +76,15 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I1-1 | critico | confirmado | I-A | El índice de vínculo de ventas y compras incluye productos inactivos: después de una fusión (dedup) o de borrar un producto, las ventas van a «Otros» o quedan en un producto muerto | mergeado | #178 |
 | I1-2 | critico | confirmado | I-A | El tier de tokens de _resolve_product saltea las palabras que no existen en el catálogo: compras y ventas de un producto distinto se pegan a otro que comparte una palabra | mergeado | #178 |
 | I6-1 | critico | confirmado | I-A | Import de clientes/proveedores: un email o teléfono compartido o de relleno ('-', '0') pisa la ficha de OTRA persona aunque el documento sea distinto | mergeado | #179 |
-| I6-3 | grave | confirmado | I-A | La clave por ID externo no incluye la entidad: en una tabla mixta, la venta reclama la clave del gasto y TODOS los gastos se omiten en silencio como 'ya aplicados' | pendiente |  |
-| I6-4 | grave | confirmado | I-A | La letra fiscal se descarta de la clave: Factura A y Factura B con el mismo punto de venta y número colisionan (en AFIP numeran por separado) | pendiente |  |
+| I6-3 | grave | confirmado | I-A | La clave por ID externo no incluye la entidad: en una tabla mixta, la venta reclama la clave del gasto y TODOS los gastos se omiten en silencio como 'ya aplicados' | PR abierto | #203 |
+| I6-4 | grave | confirmado | I-A | La letra fiscal se descarta de la clave: Factura A y Factura B con el mismo punto de venta y número colisionan (en AFIP numeran por separado) | PR abierto | #203 |
 | I6-7 | grave | confirmado | I-A | Resolver una venta o gasto desde «Otros» no reclama la identidad del comprobante: un reimport posterior del mismo documento lo vuelve a aplicar (duplicado) | pendiente |  |
 | I5-4 | grave | confirmado | I-A | sku y barcode no son SINGLE_VALUE: dos columnas al mismo código de identidad se resuelven por orden de columna, sin aviso | pendiente |  |
 | I6-2 | grave | confirmado | I-A | Identidad de operación: sentencias sin tandas pasan el tope de 32.767 parámetros de asyncpg; falla el confirm de archivos grandes y el borrado/relectura de cualquier archivo con más de ~16k operaciones | pendiente |  |
 | I6-10 | normal | plausible | I-A | Celdas numéricas float de xlsx generados por script ('123.0', '1024.0') producen claves de identidad falsas o distintas | pendiente |  |
-| I3-1 | grave | confirmado | I-B | La relectura (preview, apply y undo) no respeta el borrado del archivo: un archivo borrado vuelve a tener ventas, gastos y stock vivos, y ya no se pueden revertir | pendiente |  |
-| I4-1 | grave | confirmado | I-B | La relectura se aplica sobre un archivo YA BORRADO y resucita todos sus datos, sin forma de volver a borrarlo | pendiente |  |
-| I4-2 | grave | confirmado | I-B | «Deshacer relectura» funciona sobre un archivo borrado: des-anula sus ventas, gastos y stock originales | pendiente |  |
+| I3-1 | grave | confirmado | I-B | La relectura (preview, apply y undo) no respeta el borrado del archivo: un archivo borrado vuelve a tener ventas, gastos y stock vivos, y ya no se pueden revertir | PR abierto | #201 |
+| I4-1 | grave | confirmado | I-B | La relectura se aplica sobre un archivo YA BORRADO y resucita todos sus datos, sin forma de volver a borrarlo | PR abierto | #201 |
+| I4-2 | grave | confirmado | I-B | «Deshacer relectura» funciona sobre un archivo borrado: des-anula sus ventas, gastos y stock originales | PR abierto | #201 |
 | I4-3 | grave | confirmado | I-B | Deshacer relectura borra (hard delete) ventas y gastos que el usuario editó DESPUÉS de releer | pendiente |  |
 | I4-4 | grave | confirmado | I-B | El undo de relectura no revierte «Otros»: quedan pendientes que duplican ventas restauradas | pendiente |  |
 | I4-5 | grave | confirmado | I-B | Borrar un archivo, deshacer o releer deja stock_units NEGATIVO (void_movement sin piso ni chequeo) | pendiente |  |
@@ -113,11 +113,11 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I2-5 | grave | confirmado | I-D | «Importar sugeridos» deja entrar lo que el import mandó a «Otros» a propósito: COGS sin artículo, venta sin stock, y ventas sin movimiento de stock ni procedencia | pendiente |  |
 | I2-9 | normal | confirmado | I-D | «Importar sugeridos» no bloquea las filas: en concurrencia con reclassify/link-product/dismiss duplica la venta o pisa el estado | pendiente |  |
 | I6-8 | normal | confirmado | I-D | La importación en lote de «Otros» lee los PENDING sin FOR UPDATE: compite con reclassify/dismiss y duplica la venta o importa lo descartado | pendiente |  |
-| I5-1 | grave | confirmado | I-E | Los números nativos de Excel se pasan a texto en el parseo y el convenio de la columna los vuelve a interpretar: un valor con 3 decimales entra multiplicado por 1000 sin aviso, o la fila va a «Otros» | pendiente |  |
+| I5-1 | grave | confirmado | I-E | Los números nativos de Excel se pasan a texto en el parseo y el convenio de la columna los vuelve a interpretar: un valor con 3 decimales entra multiplicado por 1000 sin aviso, o la fila va a «Otros» | PR abierto | #202 |
 | I5-2 | grave | confirmado | I-E | Dos encabezados repetidos (o dos vacíos en un CSV) se pisan en el dict de la fila: los datos de la primera columna se pierden y el mapeo de las dos colapsa en una | pendiente |  |
 | I5-3 | grave | confirmado | I-E | El reconocedor de encabezados ignora calificadores que cambian el significado y propone «unico» un destino que mueve plata o stock | pendiente |  |
 | I6-5 | grave | confirmado | I-E | Convenio de fecha por columna roto cuando las fechas traen hora: una columna mm/dd con hora se interpreta celda por celda (mezcla dmy y mdy) | pendiente |  |
-| I6-6 | grave | confirmado | I-E | Una fecha ISO con zona horaria ('…Z', '…-03:00') entra como datetime con zona y revienta el INSERT del import en Postgres | pendiente |  |
+| I6-6 | grave | confirmado | I-E | Una fecha ISO con zona horaria ('…Z', '…-03:00') entra como datetime con zona y revienta el INSERT del import en Postgres | PR abierto | #202 |
 | I5-5 | normal | confirmado | I-E | Con ENABLE_LLM_FILE_TYPE_DETECTION prendido, el detector cambia inferred_type y la entidad del contexto pero deja las filas en otros_detectados: archivos detectados como stock, clientes o proveedores no importan nada, y con cualquier confianza | pendiente |  |
 | I5-6 | normal | confirmado | I-E | La 4ª capa LLM de mapeo puede proponer campos de identidad que E6b prohíbe autosugerir; con cualquier confianza propia > 0 pisa columnas sin lectura, y lo aceptado sin tocar se aprende como historial del tenant | pendiente |  |
 | I5-7 | normal | confirmado | I-E | Bloque 5 guarda como «decisión explícita» el mapeo completo (sugerencias y el ignore automático de B·5f) y confunde hojas con los mismos encabezados | pendiente |  |
@@ -127,8 +127,8 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I6-11 | normal | confirmado | I-E | La extracción tabular de remitos toma la fila «Total» como un artículo e interpreta los números celda por celda | pendiente |  |
 | I6-12 | normal | confirmado | I-E | Los lectores de planillas de remitos e import de clientes/proveedores no aplican los topes de ingestion_limits (tamaño expandido, filas, tiempo) | pendiente |  |
 | I3-3 | grave | confirmado | I-F | Un VIEWER puede subir, confirmar e importar archivos (también por la ruta asíncrona), reprocesar y cancelar: los endpoints de ingesta no tienen require_role | mergeado | #176 |
-| I3-2 | grave | confirmado | I-F | jobs.execute_import hereda los límites globales de Celery (240 s soft / 300 s hard): un import grande por la ruta asíncrona no termina nunca y deja el archivo y el intento trabados | pendiente |  |
-| I3-4 | grave | confirmado | I-F | La importación asíncrona nunca dispara el recálculo del score: el ejecutor le pasa a confirm_file un BackgroundTasks() que nadie ejecuta | pendiente |  |
+| I3-2 | grave | confirmado | I-F | jobs.execute_import hereda los límites globales de Celery (240 s soft / 300 s hard): un import grande por la ruta asíncrona no termina nunca y deja el archivo y el intento trabados | mergeado | #198 `849f2fc3` |
+| I3-4 | grave | confirmado | I-F | La importación asíncrona nunca dispara el recálculo del score: el ejecutor le pasa a confirm_file un BackgroundTasks() que nadie ejecuta | mergeado | #199 `e3f0ea65` |
 | I3-5 | normal | confirmado | I-F | La compensación del ejecutor libera el lease de OTRA importación que tiene el archivo | pendiente |  |
 | I3-7 | normal | confirmado | I-F | Un archivo cuyo import murió queda IMPORTING para siempre y DELETE lo rechaza aunque el lease esté vencido | pendiente |  |
 | I3-8 | normal | confirmado | I-F | POST /files/upload con un purpose distinto de 'chat' crea un archivo de ingesta sin content_hash, sin traza y sin gate de suscripción, que después se puede importar salteando el anti-duplicado | pendiente |  |
@@ -164,5 +164,9 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 | X5-1 | normal | plausible | purge_deleted_file_data.py y void_misclassified_imports.py anulan sin chequear stock negativo / sin revertir movimientos | pendiente |  |
 
 | C-2b | normal | latente | El ajuste de diferencias cuenta ventas EN VIVO sin movimiento de stock (dos criterios de «venta descontada»: el de C-2 vs el ledger de #190) | postergado | Neon 2026-10-27: 0 ventas en vivo con producto y sin movimiento → latente; la única fábrica (E-3) quedó apagada en #191 |
+
+| V-1 | grave | plausible | Eventos de stock (STOCK_DECREASED/ALERT/INCREASED sin defer, SALE_RECORDED de agentes) se emiten antes del commit y encadenan el recálculo del score | pendiente | visto en revisión de #199 |
+| V-2 | normal | plausible | Gastos y ventas por chat (pending_action) no recalculan el score | pendiente | revisión de #199 |
+| V-3 | normal | plausible | «Otros» resolve/resolve-purchase/importar sugeridos contra un borrado concurrente del archivo: la venta/gasto queda viva colgando de un archivo borrado | pendiente | revisión de #201 |
 
 Etapa 5 (persistencia, migraciones, scripts): sin críticos (una sola head, lock de migración correcto, migraciones recientes aditivas, scripts con dry-run).
