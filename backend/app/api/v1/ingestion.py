@@ -4646,6 +4646,16 @@ def _fusionar_con_borrador(
     return RereadPreviewRequest.model_validate(datos)
 
 
+def _archivo_borrado_409(exc: Exception) -> HTTPException:
+    """I3-1/I4-1/I4-2: releer o deshacer la relectura de un archivo borrado."""
+    from app.application.services import reread_service  # noqa: PLC0415
+
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"code": reread_service.REREAD_FILE_DELETED, "message": str(exc)},
+    )
+
+
 @router.post(
     "/files/{file_id}/reread/preview",
     response_model=RereadPreviewResponse,
@@ -4681,6 +4691,8 @@ async def reread_preview(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         ) from exc
+    except reread_service.RereadFileDeletedError as exc:
+        raise _archivo_borrado_409(exc) from exc
 
     # E2: la condición era `body.column_mappings`, así que un body con SÓLO una
     # reasignación de hoja (o sólo inclusión, o sólo `stock_treatment`) devolvía
@@ -4826,6 +4838,8 @@ async def reread_preview(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Archivo no encontrado."
         ) from exc
+    except reread_service.RereadFileDeletedError as exc:
+        raise _archivo_borrado_409(exc) from exc
 
     reread_service.mark_session_ready_to_apply(
         run, column_risk_outcome=preview.column_risk_outcome
@@ -4956,6 +4970,8 @@ async def reread_apply(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Sesión de relectura no encontrada.",
         ) from exc
+    except reread_service.RereadFileDeletedError as exc:
+        raise _archivo_borrado_409(exc) from exc
     except (
         reread_service.StaleDraftVersionError,
         reread_service.FileChangedSincePreviewError,
@@ -5138,6 +5154,8 @@ async def reread_undo(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Relectura no encontrada."
         ) from exc
+    except reread_service.RereadFileDeletedError as exc:
+        raise _archivo_borrado_409(exc) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)

@@ -451,15 +451,37 @@ _snapshot_master = snapshot_master
 
 
 async def _load_file(
-    session: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID
+    session: AsyncSession,
+    file_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    *,
+    bloquear: bool = False,
 ) -> UploadedFile | None:
-    result = await session.execute(
-        select(UploadedFile).where(
-            UploadedFile.id == file_id,
-            UploadedFile.tenant_id == tenant_id,
-        )
+    """El archivo, borrado o no: quien lo pide decide con ``_exigir_archivo_vivo``.
+
+    ``bloquear``: con la fila tomada (``FOR UPDATE``) y releída de la base, no de
+    la sesión. Lo usan el apply y el deshacer, DESPUÉS del candado de importación
+    que también toma el borrado: así el ``deleted_at`` que leen es el vigente y
+    un borrado no se cuela hasta que commiteen."""
+    stmt = select(UploadedFile).where(
+        UploadedFile.id == file_id,
+        UploadedFile.tenant_id == tenant_id,
     )
+    if bloquear:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+def _exigir_archivo_vivo(file: UploadedFile) -> None:
+    """I3-1/I4-1/I4-2: sobre un archivo borrado no se relee ni se deshace nada.
+
+    El borrado (F11) ya revirtió sus ventas, gastos y stock; releerlo los volvía a
+    cargar colgando de un archivo que no figura en la lista (y que ya no se puede
+    volver a borrar: da 404), y deshacer su relectura des-anulaba los originales.
+    """
+    if file.deleted_at is not None:
+        raise RereadFileDeletedError(file.id)
 
 
 async def _load_existing_records(
@@ -3596,6 +3618,8 @@ async def start_or_resume_preview_session(
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
+    # I4-1: no se abre una sesión (ni se baja el crudo) de un archivo borrado.
+    _exigir_archivo_vivo(file)
     s3 = s3 or S3Client()
     fresh = await _fresh_summary(file, s3)
     snapshot = await s3.head(file.s3_key)
@@ -3658,6 +3682,23 @@ class FileChangedSincePreviewError(ValueError):
 #: Código con el que el estado del run avisa que la relectura se frenó porque
 #: perdería datos. El frontend lo reconoce por este código.
 REREAD_WOULD_LOSE_DATA = "REREAD_WOULD_LOSE_DATA"
+
+#: I3-1/I4-1/I4-2: código del 409 cuando el archivo ya se borró.
+REREAD_FILE_DELETED = "REREAD_FILE_DELETED"
+#: Motivo con el que el worker cierra un run cuyo archivo se borró en la cola.
+MOTIVO_ARCHIVO_BORRADO = "archivo_borrado"
+
+
+class RereadFileDeletedError(ValueError):
+    """El archivo se borró (F11): no se relee ni se deshace su relectura. Sus
+    datos ya se revirtieron al borrarlo; releer o deshacer los resucitaba."""
+
+    def __init__(self, file_id: uuid.UUID) -> None:
+        super().__init__(
+            "Este archivo ya se eliminó y sus datos se revirtieron: no se puede "
+            "volver a leer ni deshacer su relectura. Si lo necesitás, subilo de nuevo."
+        )
+        self.file_id = file_id
 
 
 #: B·nuevo paso 0 (0c): por qué una edición a mano frena la relectura. Viaja en
@@ -3834,6 +3875,7 @@ async def validate_ready_to_apply(
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
+    _exigir_archivo_vivo(file)
     s3 = s3 or S3Client()
     fresh_snapshot = await s3.head(file.s3_key)
     saved_snapshot = (run.details_json or {}).get("s3_snapshot") or {}
@@ -4037,6 +4079,10 @@ async def preview_reread(
     file = await _load_file(session, file_id, tenant_id)
     if file is None:
         raise FileNotFoundError(file_id)
+    # I4-1: también al retomar una sesión abierta, que no vuelve a mirar el
+    # archivo. Sin candado: el preview no escribe datos del negocio, y el apply
+    # lo vuelve a chequear bajo el candado del borrado.
+    _exigir_archivo_vivo(file)
     s3 = s3 or S3Client()
     fresh = fresh_override if fresh_override is not None else await _fresh_summary(file, s3)
     # F-RR Fase 6: borrador de correcciones EN VIVO de esta sesión, si el
@@ -4163,14 +4209,19 @@ async def apply_reread(
     await maintenance_lock_service.acquire_import_lock(session, tenant_id)
     _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)  # noqa: F841
 
-    file = await _load_file(session, file_id, tenant_id)
+    # I4-1: con el candado de importación ya tomado —el borrado lo pide antes de
+    # marcar el archivo—, la fila bloqueada dice si se borró mientras la sesión
+    # esperaba (otra pestaña, o el run en la cola): no se reimporta lo que el
+    # borrado acaba de revertir. Y el borrado que llegue ahora espera al commit.
+    file = await _load_file(session, file_id, tenant_id, bloquear=True)
+    if file is None:
+        raise FileNotFoundError(file_id)
+    _exigir_archivo_vivo(file)
     # B·5e-2: las compras y el stock inicial que este archivo trae HOY, y desde
     # cuándo respaldan: si la relectura los saca, no puede dejar ventas de otro
     # lado vendiendo algo que no se compró.
     _con_fuente_b5e = await productos_con_fuente_en_archivo(session, tenant_id, file_id)
     _antes_b5e = await primeros_dias_de_fuente(session, tenant_id, _con_fuente_b5e)
-    if file is None:
-        raise FileNotFoundError(file_id)
     s3 = s3 or S3Client()
     fresh = fresh_override if fresh_override is not None else await _fresh_summary(file, s3)
     # F-RR Fase 6: borrador de correcciones EN VIVO de la sesión de preview que
@@ -4900,6 +4951,17 @@ async def undo_reread(
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
     await maintenance_lock_service.acquire_import_lock(session, tenant_id)
     _catalogo = await bloquear_catalogo(session, tenant_id, lock_held=True)  # noqa: F841
+
+    # I4-2: deshacer la relectura de un archivo borrado des-anulaba sus ventas,
+    # gastos y stock originales —los que la relectura había anulado y el borrado
+    # no tocó—. Bajo el mismo candado que el borrado, como el apply.
+    _undo_file_id = (run.details_json or {}).get("file_id")
+    if _undo_file_id:
+        _archivo = await _load_file(
+            session, uuid.UUID(_undo_file_id), tenant_id, bloquear=True
+        )
+        if _archivo is not None:
+            _exigir_archivo_vivo(_archivo)
 
     # Orden determinístico por ``created_at``: ``_undo_master_and_product_items``
     # asume que, para un mismo ``product_id`` con varios ``DataRepairItem`` (Task
