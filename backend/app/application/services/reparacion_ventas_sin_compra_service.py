@@ -47,6 +47,7 @@ from app.application.services import maintenance_lock_service, stock_service
 from app.application.services.ingestion_import_service import (
     ROW_REF_KEY,
     _en_unidad_de_venta,
+    filas_internas_de_identidad,
     filas_internas_de_venta,
 )
 from app.application.services.operation_identity_service import (
@@ -76,6 +77,7 @@ from app.persistence.models.transaction import SaleEntry
 from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_PENDING,
     UnclassifiedRecord,
+    unclassified_row_ref,
 )
 
 REPAIR_TYPE: Final = "B5G_VENTA_SIN_COMPRA_A_OTROS"
@@ -280,6 +282,20 @@ async def reparar(
         }
         if v.source_row_ref:
             fila[ROW_REF_KEY] = v.source_row_ref
+        # I6-7: la identidad que se suelta abajo viaja con la fila, para que
+        # resolverla la vuelva a tomar. Sólo con archivo: la venta resuelta lleva
+        # entonces la referencia de su fila, que es lo que le permite al revert
+        # no confundirla con un re-import (ver `revertir`).
+        if v.source_upload_id is not None:
+            for ident in suyas[:1]:
+                fila.update(
+                    filas_internas_de_identidad(
+                        ident["identity_key"],
+                        ident["content_hash"],
+                        ident["entity_type"],
+                        en_conflicto=False,
+                    )
+                )
         registro = UnclassifiedRecord(
             id=uuid.uuid4(),
             tenant_id=tenant_id,
@@ -426,6 +442,26 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
     conocidas: set[uuid.UUID] = set()
     for ids in (detalle.get("hermanos") or {}).values():
         conocidas.update(uuid.UUID(e) for e in ids)
+    # I6-7: la venta que nació de resolver una fila de ESTA corrida toma la
+    # identidad del comprobante. No es un re-import: sin esto, resolver un renglón
+    # haría que el revert diera por re-importado al hermano todavía pendiente y
+    # borrara su fila sin restaurar la venta.
+    _refs_de_la_corrida = sorted(
+        unclassified_row_ref(uuid.UUID(p["record_id"])) for p in pares_run
+    )
+    for tanda in tandas_de_claves(_refs_de_la_corrida):
+        conocidas.update(
+            (
+                await session.execute(
+                    select(SaleEntry.id).where(
+                        SaleEntry.tenant_id == run.tenant_id,
+                        SaleEntry.source_row_ref.in_(tanda),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
     contenido_de = {
         i["identity_key"]: i["content_hash"]
         for p in pares_run
