@@ -111,6 +111,8 @@ from app.application.services.ingestion_schema_decision_service import (
 from app.application.services.inventory_movement_origin import SOURCE_CATALOG_INITIAL_STOCK
 from app.application.services.inventory_replay_service import run_inventory_replay
 from app.application.services.operation_identity_service import (
+    _IDS_POR_SENTENCIA,
+    en_tandas,
     liberar_identidades_de,
     restaurar_vinculos,
     vinculos_de,
@@ -3756,15 +3758,16 @@ async def _con_identidad(
     session: AsyncSession, tenant_id: uuid.UUID, editados: list[dict[str, Any]]
 ) -> set[str]:
     ids = [uuid.UUID(str(e["id"])) for e in editados if e.get("id")]
-    if not ids:
-        return set()
-    filas = await session.execute(
-        select(OperationIdentityLink.entity_id).where(
-            OperationIdentityLink.tenant_id == tenant_id,
-            OperationIdentityLink.entity_id.in_(ids),
+    salida: set[str] = set()
+    for tanda in en_tandas(ids, _IDS_POR_SENTENCIA):  # I6-2: tope de asyncpg
+        filas = await session.execute(
+            select(OperationIdentityLink.entity_id).where(
+                OperationIdentityLink.tenant_id == tenant_id,
+                OperationIdentityLink.entity_id.in_(tanda),
+            )
         )
-    )
-    return {str(i) for i in filas.scalars()}
+        salida.update(str(i) for i in filas.scalars())
+    return salida
 
 
 def texto_de_perdida(perdida: PerdidaDeRelectura) -> str:
