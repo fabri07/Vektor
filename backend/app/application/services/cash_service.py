@@ -2,14 +2,19 @@
 
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.respaldo_service import exigir_respaldo
-from app.domain.business_time import now_ar_naive
+from app.domain.business_time import (
+    a_hora_de_negocio,
+    fecha_de_negocio,
+    now_ar_naive,
+    today_ar,
+)
 from app.domain.date_parsing import parse_business_datetime
 from app.domain.expense_categories import (
     infer_expense_type,
@@ -75,6 +80,17 @@ _normalize_payment_method = normalize_payment_method
 
 
 
+class FechaFuturaError(ValueError):
+    """La carga del chat trae una fecha de negocio posterior a hoy (día AR)."""
+
+    def __init__(self, fecha: date) -> None:
+        super().__init__(f"Fecha futura: {fecha.isoformat()}")
+        self.user_message = (
+            f"La fecha {fecha.strftime('%d/%m/%Y')} es posterior a hoy y no la puedo "
+            "registrar. Decime la fecha real de la operación."
+        )
+
+
 def _coerce_transaction_date(value: object) -> datetime:
     """Fecha de una carga MANUAL: si el usuario no informó ninguna, "ahora" es la
     respuesta correcta (está registrando algo que pasa en este momento).
@@ -88,7 +104,12 @@ def _coerce_transaction_date(value: object) -> datetime:
     parsed = parse_business_datetime(value)
     if parsed is None:
         raise ValueError(f"Fecha no reconocida: {value!r}")
-    return parsed
+    # Una fecha futura nunca se persiste (E0-A-1/E0-A-2): de 21 a 24 ART el
+    # día UTC ya es mañana, y una compra fechada mañana bloquea la venta de hoy
+    # de ese producto (B·5e). Se compara contra el día AR, no el del servidor.
+    if fecha_de_negocio(parsed) > today_ar():
+        raise FechaFuturaError(fecha_de_negocio(parsed))
+    return a_hora_de_negocio(parsed)
 
 
 async def save_sale(

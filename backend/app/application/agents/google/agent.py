@@ -346,9 +346,10 @@ class AgentGoogle(BaseAgent):
     async def _extract_calendar_event_data(
         self, message: str
     ) -> tuple[dict[str, Any], LLMCall | None]:
-        from datetime import date  # noqa: PLC0415
+        from app.domain.business_time import today_ar  # noqa: PLC0415
 
-        today = date.today().isoformat()
+        # Día AR: el UTC ya es mañana de 21 a 24 y el evento caía un día después.
+        today = today_ar().isoformat()
 
         system = (
             f"Hoy es {today}. Sos el asistente de Véktor.\n"

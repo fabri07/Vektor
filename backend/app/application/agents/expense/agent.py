@@ -29,7 +29,7 @@ from app.application.agents.shared.schemas import (
     RiskLevel,
     UsageSummary,
 )
-from app.domain.business_time import now_ar_naive
+from app.domain.business_time import now_ar_naive, today_ar
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     normalize_expense_category,
@@ -117,7 +117,7 @@ class AgentExpense(BaseAgent):
 
     def _extract_transaction_date(self, message: str) -> str:
         message_lower = message.lower()
-        today = date.today()
+        today = today_ar()
 
         iso_match = re.search(r"\b(20\d{2})-(\d{2})-(\d{2})\b", message_lower)
         if iso_match is not None:
@@ -294,11 +294,15 @@ class AgentExpense(BaseAgent):
         # Usar entities pre-extraídas del CEO si están disponibles
         pre_entities = getattr(task, "entities", {}) or {}
         if pre_entities.get("amount"):
+            # Sin fecha del CEO: AHORA en hora AR, como el camino sin entidades.
+            # El día UTC de `date.today()` lo fechaba mañana de 21 a 24 (E0-A-2).
             entities: dict[str, Any] = {
                 "amount": str(pre_entities["amount"]),
                 "category": pre_entities.get("category", "OTHER"),
                 "description": pre_entities.get("description", "Gasto"),
-                "transaction_date": pre_entities.get("transaction_date", date.today().isoformat()),
+                "transaction_date": pre_entities.get(
+                    "transaction_date", now_ar_naive().isoformat()
+                ),
                 "payment_method": pre_entities.get("payment_method", "other"),
                 "is_recurring": pre_entities.get("is_recurring", False),
                 "notes": request.message.strip(),
@@ -438,7 +442,7 @@ class AgentExpense(BaseAgent):
 
             from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
-            cutoff = date.today() - timedelta(days=90)
+            cutoff = today_ar() - timedelta(days=90)
             rows = await self._db.execute(
                 select(ExpenseEntry).where(
                     ExpenseEntry.tenant_id == tenant_id,
@@ -489,7 +493,7 @@ class AgentExpense(BaseAgent):
 
             from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
-            cutoff = date.today() - timedelta(days=90)
+            cutoff = today_ar() - timedelta(days=90)
             rows = await self._db.execute(
                 select(
                     ExpenseEntry.is_recurring,
@@ -543,7 +547,7 @@ class AgentExpense(BaseAgent):
             from app.domain.margen import SUPUESTO_ALICUOTA_RI  # noqa: PLC0415
             from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
 
-            cutoff = date.today() - timedelta(days=30)
+            cutoff = today_ar() - timedelta(days=30)
             fixed_q = await self._db.execute(
                 select(func.coalesce(func.sum(ExpenseEntry.amount), 0)).where(
                     ExpenseEntry.tenant_id == tenant_id,
@@ -608,7 +612,7 @@ class AgentExpense(BaseAgent):
         # ── clasificar_gastos (default) ───────────────────────────────────────
         from datetime import timedelta  # noqa: PLC0415
 
-        cutoff = date.today() - timedelta(days=90)
+        cutoff = today_ar() - timedelta(days=90)
         by_cat = await repo.expenses_by_category(tenant_id, from_date=cutoff)
         if not by_cat:
             return self._analysis_response(
@@ -1077,7 +1081,7 @@ class AgentExpense(BaseAgent):
             )
         entities: dict[str, Any] = {
             "amount": str(amount),
-            "transaction_date": pre_entities.get("transaction_date", date.today().isoformat()),
+            "transaction_date": pre_entities.get("transaction_date", now_ar_naive().isoformat()),
             "description": pre_entities.get("description", "Pago / salida de caja"),
             "payment_method": pre_entities.get("payment_method")
             or self._extract_payment_method(request.message),
@@ -1147,7 +1151,7 @@ class AgentExpense(BaseAgent):
             )
 
         repo = ExpenseRepository(self._db)
-        cutoff = date.today() - timedelta(days=90)
+        cutoff = today_ar() - timedelta(days=90)
         by_cat = await repo.expenses_by_category(tenant_id, from_date=cutoff)
 
         # Sin gastos → nada que narrar

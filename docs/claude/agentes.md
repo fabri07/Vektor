@@ -117,6 +117,8 @@ Agregar/quitar requiere actualizar `RiskEngine` y sus tests.
 
 **Extras:** `agents/supplier/preflight.py` — validaciones pre-envío Gmail.
 
+**«Hoy» del chat = día AR (T7: E0-A-1, E0-A-2, E0-A-3):** el server corre en UTC y de 21 a 24 ART `date.today()` ya es mañana. Los agentes (`supplier`, `expense`, `income`, `google`) usan `today_ar()` para el «Hoy es …» del prompt y los cortes de ventana, y el default de fecha de un gasto o salida de caja con entidades del CEO es `now_ar_naive()` (hora real, no 00:00). Defensa: `cash_service._coerce_transaction_date` (embudo de venta/gasto/compra por chat) rechaza una fecha de negocio posterior a `today_ar()` con `FechaFuturaError` (mensaje al usuario, no se escribe nada): una compra fechada mañana dejaba sin respaldo la venta de hoy (B·5e). «Sin rotación» de `/insights/breakdown` filtra por `func.date(transaction_date)`, no contra la fecha pelada (sacaba las ventas de hoy). El cupo diario de `/agent/chat` y `/agent/usage` es el del día AR (antes se renovaba a las 21). Tests: `app/tests/api/v1/test_fechas_chat_t7.py` (reloj de server en UTC a las 22:30 ART, sin freezegun).
+
 ## Sistema de Memoria (cuatro capas)
 
 | Capa | Servicio | TTL | Qué almacena |

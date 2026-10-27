@@ -15,6 +15,7 @@ from app.api.v1.deps import (
     get_current_user,
     require_active_subscription_for_insights,
 )
+from app.domain.business_time import today_ar
 from app.domain.product import DEFAULT_LOW_STOCK_THRESHOLD_UNITS
 from app.domain.sale_unit import formatear_cantidad, valor_de_stock
 from app.persistence.db.session import get_db_session
@@ -258,7 +259,7 @@ async def get_business_breakdown(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> BusinessBreakdownResponse:
-    today = date.today()
+    today = today_ar()
     from_date = today - timedelta(days=days)
 
     expense_repo = ExpenseRepository(session)
@@ -325,8 +326,11 @@ async def get_business_breakdown(
         .where(
             SaleEntry.tenant_id == tenant.tenant_id,
             SaleEntry.voided_at.is_(None),
-            SaleEntry.transaction_date >= from_date,
-            SaleEntry.transaction_date <= today,
+            # `transaction_date` es DATETIME: contra la fecha pelada, `<= today`
+            # es «<= hoy 00:00» y sacaba las ventas de hoy (E0-A-3). Por día,
+            # como el resto de los repositorios.
+            func.date(SaleEntry.transaction_date) >= from_date,
+            func.date(SaleEntry.transaction_date) <= today,
             SaleEntry.product_id == Product.id,
         )
         .correlate(Product)
@@ -487,7 +491,7 @@ async def get_cash_breakdown(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> CashBreakdownResponse:
-    today = date.today()
+    today = today_ar()
     from_date = today - timedelta(days=days)
 
     sale_repo = SaleRepository(session)
