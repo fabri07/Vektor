@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
 
+import { errorCode, mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
 import { ingestionService } from "@/services/ingestion.service";
 import type {
   ColumnMapping,
@@ -75,7 +76,8 @@ export function FileInterpretationReview({
   contextualColumnRisk: ContextualColumnRisk[];
   impact: RereadImpactProjection;
   onPreviewUpdated: (preview: RereadPreviewResponse) => void;
-  onError: (message: string) => void;
+  /** `code`: el del 409 del servidor, si vino (p. ej. `REREAD_FILE_DELETED`). */
+  onError: (message: string, code?: string | null) => void;
 }) {
   const [activeContextId, setActiveContextId] = useState<string | null>(
     sheets[0]?.context_id ?? null,
@@ -235,8 +237,11 @@ export function FileInterpretationReview({
           : undefined,
       });
       onPreviewUpdated(preview);
-    } catch {
-      onError("No se pudo actualizar la vista previa con la corrección.");
+    } catch (e) {
+      onError(
+        mensajeDelServidor(e) ?? "No se pudo actualizar la vista previa con la corrección.",
+        errorCode(e),
+      );
     } finally {
       setUpdating(false);
     }
