@@ -163,4 +163,6 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 | X3-2 | normal | confirmado | Cambiar/resetear contraseña no revoca refresh tokens (7 días) | pendiente |  |
 | X5-1 | normal | plausible | purge_deleted_file_data.py y void_misclassified_imports.py anulan sin chequear stock negativo / sin revertir movimientos | pendiente |  |
 
+| C-2b | normal | latente | El ajuste de diferencias cuenta ventas EN VIVO sin movimiento de stock (dos criterios de «venta descontada»: el de C-2 vs el ledger de #190) | postergado | Neon 2026-10-27: 0 ventas en vivo con producto y sin movimiento → latente; la única fábrica (E-3) quedó apagada en #191 |
+
 Etapa 5 (persistencia, migraciones, scripts): sin críticos (una sola head, lock de migración correcto, migraciones recientes aditivas, scripts con dry-run).
