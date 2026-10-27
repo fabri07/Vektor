@@ -889,7 +889,9 @@ async def test_el_lote_no_importa_dos_veces_el_comprobante_de_dos_archivos(
                 context_label="Venta sin compra previa", suggested_entity="sale",
                 status="PENDING",
                 row_data={
-                    "fecha": "05/03/2024", "total": total, "cantidad": "1",
+                    # ISO, como la escribe B·5e: una fecha corta ambigua sin el
+                    # convenio de su columna no entra en lote (I2-4).
+                    "fecha": "2024-03-05", "total": total, "cantidad": "1",
                     "producto": vela.name, IDENTITY_CLAIM_KEY: clave,
                     IDENTITY_HASH_KEY: "H", "__identity_entity__": "sale",
                 },
