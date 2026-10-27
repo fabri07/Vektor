@@ -16,7 +16,8 @@ import hashlib
 import json as json_module
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import anthropic
@@ -368,6 +369,94 @@ def _payload_for_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+#: X4-1: cuánto dura la huella del chat. Frena el doble envío y la doble
+#: confirmación, que llegan a segundos; pasado esto, el mismo contenido es otra
+#: operación (la venta de $1000 de mañana).
+VENTANA_HUELLA_CHAT = timedelta(minutes=5)
+
+#: Lo que entra a la huella: sólo campos DETERMINÍSTICOS de la operación. Nada de
+#: texto redactado por el LLM (`description`, `category`, `product_description`):
+#: el mismo «pagué 5000 de luz» mandado dos veces puede volver como «Luz» y como
+#: «Pago de luz», y la huella tiene que darlo igual. Lo que distingue «luz» de
+#: «flete» es el mensaje CRUDO del usuario, que entra aparte.
+_CAMPOS_DE_LA_HUELLA = (
+    "amount",
+    "transaction_date",
+    "date",
+    "payment_method",
+    "product_id",
+    "quantity",
+    "qty",
+    "customer_id",
+    "supplier_id",
+)
+_CAMPOS_NUMERICOS_DE_LA_HUELLA = frozenset({"amount", "quantity", "qty"})
+
+#: Dónde queda el texto crudo del usuario en el payload de la pendiente: el
+#: confirm llega en otro request y ya no tiene el mensaje a mano.
+CLAVE_MENSAJE_USUARIO = "_mensaje_usuario"
+
+#: Lo que ve el usuario cuando la huella frena una operación (X4-1).
+MENSAJE_DUPLICADO_CHAT = (
+    "Esta operación ya fue registrada: llegó igual hace menos de 5 minutos y la tomé "
+    "como repetida. Si fue otra operación igual, mandala de nuevo en unos minutos o "
+    "aclaralo en el mensaje (por ejemplo, «otra venta de $1000»)."
+)
+
+#: Prefijo propio: no choca con las huellas viejas (`sha256(tenant:tipo:monto:fecha)`,
+#: que quedan sin uso) ni con las `idem:` de los POST de alta.
+_PREFIJO_HUELLA_CHAT = "chat:"
+
+
+def _normalizar_texto(valor: Any) -> str | None:
+    """Trim, minúsculas y espacios colapsados: «Pagué  5000 de Luz » == «pagué 5000 de luz»."""
+    if not isinstance(valor, str):
+        return None
+    texto = " ".join(valor.split()).lower()
+    return texto or None
+
+
+def _normalizar_campo(clave: str, valor: Any) -> Any:
+    """«5000», 5000 y «5000.00» son el mismo monto."""
+    if clave in _CAMPOS_NUMERICOS_DE_LA_HUELLA and valor is not None:
+        try:
+            return str(Decimal(str(valor)).normalize())
+        except (InvalidOperation, ValueError):
+            return str(valor)
+    return valor
+
+
+def _huella_chat(action: PendingAction, tenant_id: uuid.UUID) -> str:
+    """Huella de la operación (X4-1): campos determinísticos + el mensaje crudo.
+
+    Antes era ``tenant:tipo:monto:fecha``: «5000 de luz» y «5000 de flete» del
+    mismo día eran la misma operación, y una venta sin fecha dejaba ``…:None``
+    tomada para siempre. La posición en el grupo entra porque dos tareas del
+    mismo plan son dos operaciones aunque digan lo mismo.
+    """
+    crudo = action.payload or {}
+    datos = _payload_for_fingerprint(crudo)
+    # El mensaje lo estampa el chat al crear la pendiente; `notes` es el mismo
+    # texto crudo que gastos y compras ya guardan (camino sin chat, p. ej. tests).
+    mensaje = _normalizar_texto(
+        crudo.get(CLAVE_MENSAJE_USUARIO) or datos.get(CLAVE_MENSAJE_USUARIO)
+    ) or _normalizar_texto(datos.get("notes"))
+    campos = {k: _normalizar_campo(k, datos.get(k)) for k in _CAMPOS_DE_LA_HUELLA}
+    canonico = json_module.dumps(
+        {
+            "tenant": str(tenant_id),
+            "tipo": str(action.action_type),
+            "posicion": action.group_position,
+            "campos": campos,
+            "mensaje": mensaje,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return _PREFIJO_HUELLA_CHAT + hashlib.sha256(canonico.encode()).hexdigest()
+
+
 async def _register_operation_fingerprint(
     *,
     action: PendingAction,
@@ -378,19 +467,18 @@ async def _register_operation_fingerprint(
         return False
 
     from app.application.services.idempotency import (  # noqa: PLC0415
-        claim_operation_fingerprint,
+        claim_operation_fingerprint_con_ventana,
     )
 
-    payload = _payload_for_fingerprint(action.payload or {})
-    raw = (
-        f"{tenant_id}:{action.action_type}"
-        f":{payload.get('amount', '')}:{payload.get('transaction_date', payload.get('date', ''))}"
+    # El claim inserta con savepoint y devuelve True si la huella era nueva (o
+    # estaba vencida); aquí la semántica es inversa: True == duplicado.
+    claimed = await claim_operation_fingerprint_con_ventana(
+        db,
+        tenant_id,
+        _huella_chat(action, tenant_id),
+        str(action.action_type),
+        VENTANA_HUELLA_CHAT,
     )
-    fingerprint = hashlib.sha256(raw.encode()).hexdigest()
-
-    # claim_operation_fingerprint inserta con savepoint y devuelve True si el
-    # fingerprint era nuevo; aquí la semántica es inversa: True == duplicado.
-    claimed = await claim_operation_fingerprint(db, tenant_id, fingerprint, str(action.action_type))
     return not claimed
 
 
@@ -419,7 +507,7 @@ async def _execute_local_action(
             action.executed_at = datetime.now(UTC)
             return {
                 "status": "duplicate",
-                "message": "Esta operación ya fue registrada.",
+                "message": MENSAJE_DUPLICADO_CHAT,
                 "execution_status": "DUPLICATE",
             }
         action.execution_status = "SUCCEEDED"
@@ -458,6 +546,7 @@ async def _process_agent_action(
     role_code: str,
     db: AsyncSession,
     redis: Redis,
+    mensaje_usuario: str | None = None,
 ) -> dict[str, Any] | None:
     if agent_response.status == "error":
         return None
@@ -488,6 +577,8 @@ async def _process_agent_action(
             action_type_tr = str(tr.get("action_type") or ActionType.ANSWER_HELP_REQUEST)
             payload_tr = dict(tr.get("payload") or {})
             payload_tr.setdefault(AUTOMATION_PAYLOAD_AGENT_KEY, str(tr.get("agent") or ""))
+            if mensaje_usuario:
+                payload_tr.setdefault(CLAVE_MENSAJE_USUARIO, mensaje_usuario)
             risk_level_tr = str(tr.get("risk_level") or "MEDIUM")
 
             pending = await create_pending_action(
@@ -534,6 +625,11 @@ async def _process_agent_action(
             external_system=external_system,
         )
         auto_execute = automation_rule is not None
+
+    # Después de buscar la regla automática: el mensaje no es parte de lo que
+    # una regla compara, sólo de la huella (X4-1).
+    if mensaje_usuario:
+        payload.setdefault(CLAVE_MENSAJE_USUARIO, mensaje_usuario)
 
     if auto_execute:
         action = await create_pending_action(
@@ -1065,6 +1161,7 @@ async def chat(
         role_code=current_user.role_code,
         db=db,
         redis=redis,
+        mensaje_usuario=body.message,
     )
     await _maybe_record_pending_pointer(
         agent_response=agent_response,
@@ -1251,6 +1348,7 @@ async def chat_stream(
                 role_code=current_user.role_code,
                 db=db,
                 redis=redis,
+                mensaje_usuario=body.message,
             )
             await _maybe_record_pending_pointer(
                 agent_response=agent_response,
