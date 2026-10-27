@@ -11414,6 +11414,13 @@ async def bulk_import_unclassified(
                     # B·5e-2: la tarea del POS señala una venta que YA existe.
                     UnclassifiedRecord.source != "pos",
                 )
+                # I2-9 / I6-8: con V-4 una venta del lote descuenta stock, así que
+                # una fila que otra sesión está resolviendo (reclassify,
+                # link-product o dismiss la toman con FOR UPDATE) no puede entrar
+                # también acá: se saltea y queda para la próxima corrida. Una que
+                # la otra sesión ya resolvió y commiteó no vuelve como PENDING.
+                # Orden de candados: shared → import → filas → productos.
+                .with_for_update(skip_locked=True)
             )
         )
         .scalars()
@@ -11437,15 +11444,45 @@ async def bulk_import_unclassified(
     ] = defaultdict(list)
     _archivo_del_reclamo: dict[tuple[str, str], uuid.UUID | None] = {}
 
+    def _columnas(rec: UnclassifiedRecord) -> dict[str, Any]:
+        # Las claves `__` son del sistema: ninguna es una columna del archivo, y
+        # por substring alguna se leería como una («__convenios_de_fecha__» como
+        # fecha, «__row_ref__» como código).
+        return {k: v for k, v in (rec.row_data or {}).items() if not str(k).startswith("__")}
+
+    # El producto de cada venta, resuelto una vez. Los candidatos se bloquean
+    # JUNTOS y en orden de id antes de la primera fila, como la venta del POS
+    # (`bloquear_productos`): bloquearlos de a uno en el orden de los registros
+    # se cruzaba con una venta de varios productos y podía trabarse.
+    _producto_de: dict[uuid.UUID, uuid.UUID | None] = {}
+    for rec in records:
+        if rec.suggested_entity != "sale":
+            continue
+        _cols = _columnas(rec)
+        _producto_de[rec.id] = _resolve_product(
+            _by_sku,
+            _by_name,
+            _clean_str(_row_val(_cols, _NOMBRE_COLS), 299),
+            _clean_str(_row_val(_cols, _SKU_COLS), 99),
+            _by_token,
+            by_barcode=_identity_indexes.by_barcode,
+            by_alias=_identity_indexes.by_alias,
+            by_name_activo=_identity_indexes.by_name,
+            barcode=_clean_str(_row_val(_cols, _BARCODE_COLS), 64),
+        )
+    # Referencia fuerte a los bloqueados hasta el final: el identity map es débil.
+    _bloqueados = await stock_service.bloquear_productos(
+        session, tenant_id, {p for p in _producto_de.values() if p is not None}
+    )
+
     for i, rec in enumerate(records):
         # B1: idempotencia anclada en el UnclassifiedRecord (importar el mismo
-        # sugerido dos veces = 0 filas nuevas). El registro queda IMPORTED igual,
-        # pero la huella protege ante reintentos concurrentes / estados sucios.
-        if await _register_import_row_fingerprint(
-            session,
-            tenant_id,
-            f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{rec.id}",
-        ):
+        # sugerido dos veces = 0 filas nuevas). Sólo se MIRA acá: la huella se
+        # registra cuando la fila de verdad se importa (abajo), así una fila que
+        # queda en `needs_manual` (sin stock, sin compra previa…) se puede
+        # reintentar con el lote cuando el dueño lo resuelve.
+        _ancla_otros = f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{rec.id}"
+        if await _import_row_seen(session, tenant_id, _ancla_otros):
             counts["skipped"] += 1
             continue
         row: dict[str, Any] = rec.row_data or {}
@@ -11485,10 +11522,7 @@ async def bulk_import_unclassified(
         ):
             counts["needs_manual"] += 1
             continue
-        # Las claves `__` son del sistema: ninguna es una columna del archivo, y
-        # por substring alguna se leería como una («__convenios_de_fecha__» como
-        # fecha, «__row_ref__» como código).
-        cols_fila = {k: v for k, v in row.items() if not str(k).startswith("__")}
+        cols_fila = _columnas(rec)
         fecha = _fecha_de_fila_de_otros(row, cols_fila)
         amount = (
             _parse_amount(_row_val(cols_fila, _VENTA_TOTAL_COLS))
@@ -11509,17 +11543,7 @@ async def bulk_import_unclassified(
         _ref_otros = unclassified_row_ref(rec.id) if rec.uploaded_file_id else None
 
         if rec.suggested_entity == "sale":
-            product_id = _resolve_product(
-                _by_sku,
-                _by_name,
-                _nombre_fila,
-                _sku_fila,
-                _by_token,
-                by_barcode=_identity_indexes.by_barcode,
-                by_alias=_identity_indexes.by_alias,
-                by_name_activo=_identity_indexes.by_name,
-                barcode=_barcode_fila,
-            )
+            product_id = _producto_de[rec.id]
             qty, _qty_motivo = _cantidad_de_venta(_row_val(cols_fila, _CANTIDAD_COLS))
             if _qty_motivo is not None:
                 # E4: misma regla que el import. La fila ya está en "Otros"; una
@@ -11650,6 +11674,7 @@ async def bulk_import_unclassified(
                     *_efecto_otros,
                 )
             )
+        await _register_import_row_fingerprint(session, tenant_id, _ancla_otros)
         rec.status = UNCLASSIFIED_STATUS_IMPORTED
         rec.resolved_at = datetime.now(UTC)
         if (i + 1) % _flush_every == 0:

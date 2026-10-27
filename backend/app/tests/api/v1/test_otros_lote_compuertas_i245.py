@@ -29,9 +29,11 @@ from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services import stock_service
 from app.application.services.file_parsing import parse_uploaded_content
 from app.application.services.ingestion_import_service import CONVENIOS_DE_FECHA_KEY
 from app.domain.business_time import today_ar
+from app.domain.contrato_de_costo import ContratoDeCosto
 from app.persistence.models.file import PROCESSING_STATUS_NEEDS_CONFIRMATION, UploadedFile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
@@ -379,3 +381,90 @@ async def test_un_gasto_vinculado_a_un_producto_es_una_compra_y_queda_en_otros(
         compra.id
     ]
     assert isinstance(gasto.transaction_date, datetime)
+
+
+# ── La fila pendiente se puede reintentar; los candados, en orden ─────────────
+
+
+async def test_sin_stock_cargo_stock_y_reintento_el_lote(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Una venta de 3 con 1 unidad queda pendiente. El dueño carga 10 más y
+    reintenta: la fila entra. Antes la huella se registraba antes de las
+    compuertas y la fila salía «ya importada» (`skipped`) para siempre."""
+    tid = sample_tenant.tenant_id
+    vela = await producto_con_compra(db_session, tid, nombre=_VELA, stock=1)
+    archivo = await _archivo(db_session, tid)
+    fila = _fila_de_otros(
+        tid, archivo,
+        {"fecha": "2025-05-01", "producto": _VELA, "cantidad": "3", "total": "3600"},
+        "sale",
+    )
+    db_session.add(fila)
+    await db_session.commit()
+
+    primera = await _importar_sugeridos(client, auth_headers, "sale")
+    assert (primera["imported_sales"], primera["needs_manual"]) == (0, 1), primera
+
+    await stock_service.registrar_apertura_manual(
+        vela.id, tid, 10, ContratoDeCosto(unit_cost_final=Decimal("10")), db_session,
+        fecha=datetime(2025, 4, 1, 9), confirmado_por=None,
+    )
+    await db_session.commit()
+
+    segunda = await _importar_sugeridos(client, auth_headers, "sale")
+    assert (segunda["imported_sales"], segunda["skipped"]) == (1, 0), segunda
+    (registro,) = await _todos(db_session, UnclassifiedRecord, UnclassifiedRecord.id == fila.id)
+    assert registro.status == "IMPORTED"
+    (producto,) = await _todos(db_session, Product, Product.id == vela.id)
+    assert producto.stock_units == 8
+
+    # Y la importada sí queda con su huella: una tercera corrida no la duplica.
+    registro.status = "PENDING"
+    db_session.add(registro)
+    await db_session.commit()
+    tercera = await _importar_sugeridos(client, auth_headers, "sale")
+    assert (tercera["imported_sales"], tercera["skipped"]) == (0, 1), tercera
+
+
+async def test_el_lote_bloquea_los_productos_juntos_y_en_orden_de_id(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Como la venta del POS: el primer candado de producto del lote los toma a
+    todos, ordenados por id. De a uno, en el orden de los registros, se cruzaba
+    con una venta de varios productos."""
+    tid = sample_tenant.tenant_id
+    productos = [
+        await producto_con_compra(db_session, tid, nombre=n) for n in (_VELA, "Difusor bambu")
+    ]
+    archivo = await _archivo(db_session, tid)
+    # Los registros en el orden INVERSO al de los ids.
+    for p in sorted(productos, key=lambda p: p.id, reverse=True):
+        db_session.add(
+            _fila_de_otros(
+                tid, archivo,
+                {"fecha": "2025-05-01", "producto": p.name, "cantidad": "1", "total": "1200"},
+                "sale",
+            )
+        )
+    await db_session.commit()
+
+    llamadas: list[list[uuid.UUID]] = []
+    original = stock_service.bloquear_productos
+
+    async def _espia(db: AsyncSession, tenant_id: uuid.UUID, ids: Any, **kw: Any) -> Any:
+        ids = list(ids)
+        llamadas.append(ids)
+        return await original(db, tenant_id, ids, **kw)
+
+    monkeypatch.setattr(stock_service, "bloquear_productos", _espia)
+    cuerpo = await _importar_sugeridos(client, auth_headers, "sale")
+    assert cuerpo["imported_sales"] == 2, cuerpo
+    assert sorted(llamadas[0]) == sorted(p.id for p in productos)
