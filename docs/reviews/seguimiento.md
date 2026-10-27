@@ -18,14 +18,14 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | B-5 | grave | confirmado | T2 | La compra manual suma stock sobre una instancia vieja del producto: pisa ventas concurrentes | mergeado | #180 |
 | C-3 | grave | confirmado | T2 | El replay de inventario descuenta sobre Product sin lock y con el stock posiblemente viejo del identity map: pisa ventas en vivo y el clamp a 0 deja el ledger desalineado | mergeado | #181 |
 | E0-B-3 | grave | e0 | T2 | Aplicar ventas históricas (decrement_stock_bulk) pisa stock_units con un valor absoluto calculado desde un saldo leído sin lock: se pierden ventas en vivo concurrentes y el clamp esconde la sobreventa | mergeado | #181 |
-| B-3 | grave | confirmado | T3 | Anular o editar el gasto de una compra deja vivo el movimiento de stock: stock, costo y respaldo quedan como si la compra existiera | pendiente |  |
-| C-4 | grave | confirmado | T3 | Editar producto o cantidad de una venta importada cuyo descuento ya se aplicó (replay) no revierte ni rehace el movimiento: stock mal en los dos productos | pendiente |  |
-| B-9 | normal | plausible | T3 | PATCH /sales ignora si la venta tenía movimiento y empieza a descontar el total de una venta que nunca descontó | pendiente |  |
-| E-2 | grave | confirmado | T3 | VOID_DUPLICATE anula ventas y gastos sin devolver su movimiento de stock ni soltar su identidad | pendiente |  |
-| E-3 | grave | confirmado | T3 | La corrección de ventas del chat (UPDATE_SALE) cambia cantidad, producto e importe sin ajustar el stock ya descontado | pendiente |  |
+| B-3 | grave | confirmado | T3 | Anular o editar el gasto de una compra deja vivo el movimiento de stock: stock, costo y respaldo quedan como si la compra existiera | PR abierto | #192 (sólo bloqueo; anular compra entera después del 30/10) |
+| C-4 | grave | confirmado | T3 | Editar producto o cantidad de una venta importada cuyo descuento ya se aplicó (replay) no revierte ni rehace el movimiento: stock mal en los dos productos | PR abierto | #190 |
+| B-9 | normal | plausible | T3 | PATCH /sales ignora si la venta tenía movimiento y empieza a descontar el total de una venta que nunca descontó | PR abierto | #190 |
+| E-2 | grave | confirmado | T3 | VOID_DUPLICATE anula ventas y gastos sin devolver su movimiento de stock ni soltar su identidad | PR abierto | #191 |
+| E-3 | grave | confirmado | T3 | La corrección de ventas del chat (UPDATE_SALE) cambia cantidad, producto e importe sin ajustar el stock ya descontado | PR abierto | #191 |
 | C-2 | grave | confirmado | T3 | balance_reconstruido_a cuenta ventas importadas que nunca descontaron stock: el ajuste de reconciliación de B11 infla el stock | pendiente |  |
-| E0-B-2 | grave | e0 | T3 | La merma por chat (REGISTER_STOCK_LOSS) no valida stock: el piso max(0, …) oculta stock negativo y desalinea stock_units del ledger y del balance | pendiente |  |
-| C-5 | normal | confirmado | T3 | register_stock_loss acepta una merma mayor que el stock: clampa stock_units a 0 pero registra el movimiento y la auditoría por la cantidad entera | pendiente |  |
+| E0-B-2 | grave | e0 | T3 | La merma por chat (REGISTER_STOCK_LOSS) no valida stock: el piso max(0, …) oculta stock negativo y desalinea stock_units del ledger y del balance | mergeado | #189 `19326e2e` |
+| C-5 | normal | confirmado | T3 | register_stock_loss acepta una merma mayor que el stock: clampa stock_units a 0 pero registra el movimiento y la auditoría por la cantidad entera | mergeado | #189 `19326e2e` |
 | E-1 | grave | confirmado | T4 | El detector de duplicados de DATA_QUALITY_REPAIR anula ventas y gastos legítimos repetidos dentro del mismo archivo | pendiente |  |
 | E-5 | grave | confirmado | T4 | El dedup MOST_RECENT pisa el stock del canónico con la cantidad del ancla y borra las ventas y compras posteriores | pendiente |  |
 | E-6 | grave | confirmado | T4 | Fusionar productos no re-apunta pos_stock_discrepancies ni product_supplier_links: la salida pendiente del POS se resuelve sobre el duplicado inactivo | pendiente |  |
@@ -155,10 +155,10 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 
 | Id | Sev. | Estado hallazgo | Hallazgo | Estado | PR / nota |
 |---|---|---|---|---|---|
-| X3-1 | crítico | confirmado | Un usuario dado de baja se reactiva solo: resend-verification + verify-email ponen is_active=True y devuelven JWT (mismo rol, PIN y permisos; saltea el cupo de plazas) | pendiente |  |
-| X6-1 | crítico | confirmado | La cola offline de carga manual (localStorage sin tenant/usuario) se sube con el JWT del siguiente usuario que entra en esa PC: los datos de A quedan en el negocio B | pendiente |  |
-| X6-2 | crítico | confirmado | Conversación del chat cruzada: el store persiste conversationId y mensajes sin dueño, y conversation_service.get_context/persist no validan tenant (lee y pisa turnos de otro negocio) | pendiente | incluye el candidato de Etapa 4 (historial sin tenant) |
-| X4-1 | grave | plausible | La huella anti-duplicado del chat (tenant+acción+monto+fecha, sin vencimiento) descarta ventas/gastos/compras legítimas; con fecha nula colisiona para siempre | pendiente | confirmar con test |
+| X3-1 | crítico | confirmado | Un usuario dado de baja se reactiva solo: resend-verification + verify-email ponen is_active=True y devuelven JWT (mismo rol, PIN y permisos; saltea el cupo de plazas) | PR abierto | #195 |
+| X6-1 | crítico | confirmado | La cola offline de carga manual (localStorage sin tenant/usuario) se sube con el JWT del siguiente usuario que entra en esa PC: los datos de A quedan en el negocio B | PR abierto | #193 |
+| X6-2 | crítico | confirmado | Conversación del chat cruzada: el store persiste conversationId y mensajes sin dueño, y conversation_service.get_context/persist no validan tenant (lee y pisa turnos de otro negocio) | PR abierto | #196 |
+| X4-1 | grave | plausible | La huella anti-duplicado del chat (tenant+acción+monto+fecha, sin vencimiento) descarta ventas/gastos/compras legítimas; con fecha nula colisiona para siempre | PR abierto | #194 |
 | X6-3 | normal | confirmado | Sentry recibe X-POS-Terminal (secreto de la caja): sentryScrub no lo cubre | pendiente |  |
 | X3-2 | normal | confirmado | Cambiar/resetear contraseña no revoca refresh tokens (7 días) | pendiente |  |
 | X5-1 | normal | plausible | purge_deleted_file_data.py y void_misclassified_imports.py anulan sin chequear stock negativo / sin revertir movimientos | pendiente |  |
