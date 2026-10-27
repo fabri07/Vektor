@@ -6325,6 +6325,20 @@ async def _insert_confirmed_data_impl(
             and (summary.get("has_producto") or inferred_type == "stock")
             and nombre_col
         )
+        # I2-3: tabla suelta con ventas o compras Y productos. El bucle de
+        # productos recorre las MISMAS filas, y `_STOCK_COLS` contiene "cantidad":
+        # la cantidad vendida (o comprada) de cada fila terminaba siendo el stock
+        # ABSOLUTO del producto —la última fila ganaba— y esa apertura inventada
+        # respaldaba las ventas en B·5e. Acá el stock sale sólo de una columna
+        # mapeada a mano a `stock_units`, y nunca de la de la cantidad de la fila.
+        if wants_productos and (wants_ventas or wants_gastos):
+            _stock_heuristico = stock_col
+            stock_col = target_to_col.get("stock_units")
+            if _stock_heuristico is not None and stock_col is None:
+                logger.info(
+                    "ingestion.stock_de_tabla_transaccional_descartado",
+                    columna=_stock_heuristico,
+                )
 
         # FASE 3: índice de catálogo en memoria para el LINK de ventas/gastos/compras
         # (tiers sku exacto → nombre → tokens, con SKU-que-gana-sobre-nombre). Una
