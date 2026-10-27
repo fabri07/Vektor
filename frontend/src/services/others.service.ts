@@ -97,7 +97,7 @@ export interface BulkImportResult {
   imported_sales: number;
   imported_expenses: number;
   skipped: number; // ya importados (idempotencia)
-  needs_manual: number; // no parsearon (fecha/monto ilegible) → completar a mano
+  needs_manual: number; // no pasan las compuertas de a una (fecha/monto, stock, compra previa, mercadería) → resolver a mano
 }
 
 export const othersService = {

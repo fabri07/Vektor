@@ -135,7 +135,7 @@ export default function OtrosPage() {
         `${total} registro(s) importados (${result.imported_sales} ventas, ` +
         `${result.imported_expenses} gastos)` +
         (result.needs_manual > 0
-          ? `; ${result.needs_manual} hay que resolverlos de a uno (sin fecha o monto legible, o compras de mercadería, que van con sus artículos).`
+          ? `; ${result.needs_manual} hay que resolverlos de a uno (sin fecha o monto legible, con fecha futura o que no se sabe si es día/mes, ventas sin stock o sin compra previa, o compras de mercadería, que van con sus artículos).`
           : ".");
       toast(msg, "success");
       await invalidate();

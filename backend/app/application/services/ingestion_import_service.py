@@ -119,6 +119,7 @@ from app.domain.cross_field_buffer import CrossFieldBuffer, CrossKind, is_ficha_
 from app.domain.date_parsing import (
     CAMPOS_DE_FECHA,
     MOTIVO_FECHA_FUTURA,
+    ConvenioDeFecha,
     inferir_convenio_de_fecha,
     parse_business_date,
     parse_business_datetime,
@@ -2096,6 +2097,13 @@ def _sku_del_archivo(raw: Any) -> str | None:
 #: Prefijo `__` como el resto de las claves del sistema: no cuenta como contenido
 #: de fila y no llega a la base.
 ORIGINALES_KEY = "__originales__"
+#: I2-4 — el orden día/mes que la columna decidió en la carga (E4), por columna:
+#: ``{columna: "dmy" | "mdy" | ""}`` (``""`` = columna contradictoria). Viaja
+#: dentro de ``ORIGINALES_KEY`` (no como columna de la fila: ninguna otra lectura
+#: lo ve) y «Otros» lo guarda en el ``row_data`` como JSON, con el prefijo ``__``
+#: que la bandeja oculta. Sin esto, «Importar sugeridos» releía el original celda
+#: por celda: en una columna mm/dd, «04/03/2026» volvía como 4 de marzo.
+CONVENIOS_DE_FECHA_KEY = "__convenios_de_fecha__"
 
 
 def _fila_con_articulo(nombre: Any, cantidad: Any) -> bool:
@@ -2251,6 +2259,12 @@ def _capture_unclassified(
         # es del sistema, no del archivo.
         if row_ref and len(rows) == 1:
             _persistido[ROW_REF_KEY] = row_ref
+        # I2-4: con el convenio de su columna, «Importar sugeridos» lee la fecha
+        # como la leyó la carga.
+        if _originales.get(CONVENIOS_DE_FECHA_KEY):
+            _persistido[CONVENIOS_DE_FECHA_KEY] = json.dumps(
+                _originales[CONVENIOS_DE_FECHA_KEY], sort_keys=True
+            )
         session.add(
             UnclassifiedRecord(
                 tenant_id=tenant_id,
@@ -5040,9 +5054,15 @@ def _normalizar_columnas_de_fecha(
         copia = dict(fila)
         if ORIGINALES_KEY in copia:
             copia[ORIGINALES_KEY] = dict(copia[ORIGINALES_KEY])
+        # I2-4: el convenio de cada columna queda con la fila, por si termina en
+        # «Otros» (copia propia: la fila de entrada no se toca).
+        _convenios_fila = dict(
+            (copia.get(ORIGINALES_KEY) or {}).get(CONVENIOS_DE_FECHA_KEY) or {}
+        )
         for col, convenio in convenios.items():
             if col not in copia:
                 continue
+            _convenios_fila[col] = convenio.orden if convenio is not None else ""
             interpretada = parsear_fecha_de_columna(copia[col], convenio)
             if interpretada.valor is not None:
                 copia.setdefault(ORIGINALES_KEY, {})[col] = copia[col]
@@ -5059,6 +5079,8 @@ def _normalizar_columnas_de_fecha(
                     # que la fila llegue sin fecha, como cualquier otro motivo.
                     copia.setdefault(ORIGINALES_KEY, {})[col] = copia[col]
                     copia[col] = None
+        if _convenios_fila:
+            copia.setdefault(ORIGINALES_KEY, {})[CONVENIOS_DE_FECHA_KEY] = _convenios_fila
         normalizadas.append(copia)
     return normalizadas, motivos
 
@@ -11356,6 +11378,31 @@ async def _insert_multisheet_data(
     return counts
 
 
+def _fecha_de_fila_de_otros(
+    row: dict[str, Any], cols_fila: dict[str, Any]
+) -> datetime | None:
+    """I2-4: la fecha de una fila de «Otros» leída como la leyó la carga.
+
+    Con el convenio día/mes que la columna decidió en el import
+    (``CONVENIOS_DE_FECHA_KEY``), no celda por celda. Una fila capturada antes
+    de guardarlo —o de una columna contradictoria— se lee sin convenio: lo
+    inequívoco (ISO, nativo, «13/04/2026») entra; una fecha corta ambigua
+    («04/03/2026») queda para resolver a mano. Una fecha futura nunca: queda
+    como ilegible (``MOTIVO_FECHA_FUTURA``), igual que en el import.
+    """
+    columna = _row_col(cols_fila, _FECHA_COLS)
+    if columna is None:
+        return None
+    convenio: ConvenioDeFecha | None = None
+    try:
+        orden = json.loads(str(row.get(CONVENIOS_DE_FECHA_KEY) or "{}")).get(columna)
+    except (ValueError, AttributeError):
+        orden = None
+    if orden in ("dmy", "mdy"):
+        convenio = ConvenioDeFecha(orden=orden, origen="inequivoco")
+    return parsear_fecha_de_columna(cols_fila[columna], convenio).valor
+
+
 async def bulk_import_unclassified(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -11374,6 +11421,12 @@ async def bulk_import_unclassified(
     ``needs_manual`` = no parsearon (fecha/monto ilegible) y requieren que el
     usuario los complete en el modal por registro. Antes se mezclaban en un solo
     contador y la UI no podía decir cuántos exigían atención (F6-A5).
+
+    Las MISMAS compuertas que la resolución de a una (I2-4, I2-5, V-4): la fecha
+    se lee con el convenio de su columna y nunca futura; una venta necesita
+    producto, compra previa y stock, y lo descuenta; un gasto nunca queda COGS
+    (eso es una compra de mercadería, que va con sus artículos). Lo que no pasa
+    queda PENDING y cuenta en ``needs_manual``.
     """
     from datetime import UTC  # noqa: PLC0415
 
@@ -11407,6 +11460,13 @@ async def bulk_import_unclassified(
                     # B·5e-2: la tarea del POS señala una venta que YA existe.
                     UnclassifiedRecord.source != "pos",
                 )
+                # I2-9 / I6-8: con V-4 una venta del lote descuenta stock, así que
+                # una fila que otra sesión está resolviendo (reclassify,
+                # link-product o dismiss la toman con FOR UPDATE) no puede entrar
+                # también acá: se saltea y queda para la próxima corrida. Una que
+                # la otra sesión ya resolvió y commiteó no vuelve como PENDING.
+                # Orden de candados: shared → import → filas → productos.
+                .with_for_update(skip_locked=True)
             )
         )
         .scalars()
@@ -11430,15 +11490,45 @@ async def bulk_import_unclassified(
     ] = defaultdict(list)
     _archivo_del_reclamo: dict[tuple[str, str], uuid.UUID | None] = {}
 
+    def _columnas(rec: UnclassifiedRecord) -> dict[str, Any]:
+        # Las claves `__` son del sistema: ninguna es una columna del archivo, y
+        # por substring alguna se leería como una («__convenios_de_fecha__» como
+        # fecha, «__row_ref__» como código).
+        return {k: v for k, v in (rec.row_data or {}).items() if not str(k).startswith("__")}
+
+    # El producto de cada venta, resuelto una vez. Los candidatos se bloquean
+    # JUNTOS y en orden de id antes de la primera fila, como la venta del POS
+    # (`bloquear_productos`): bloquearlos de a uno en el orden de los registros
+    # se cruzaba con una venta de varios productos y podía trabarse.
+    _producto_de: dict[uuid.UUID, uuid.UUID | None] = {}
+    for rec in records:
+        if rec.suggested_entity != "sale":
+            continue
+        _cols = _columnas(rec)
+        _producto_de[rec.id] = _resolve_product(
+            _by_sku,
+            _by_name,
+            _clean_str(_row_val(_cols, _NOMBRE_COLS), 299),
+            _clean_str(_row_val(_cols, _SKU_COLS), 99),
+            _by_token,
+            by_barcode=_identity_indexes.by_barcode,
+            by_alias=_identity_indexes.by_alias,
+            by_name_activo=_identity_indexes.by_name,
+            barcode=_clean_str(_row_val(_cols, _BARCODE_COLS), 64),
+        )
+    # Referencia fuerte a los bloqueados hasta el final: el identity map es débil.
+    _bloqueados = await stock_service.bloquear_productos(
+        session, tenant_id, {p for p in _producto_de.values() if p is not None}
+    )
+
     for i, rec in enumerate(records):
         # B1: idempotencia anclada en el UnclassifiedRecord (importar el mismo
-        # sugerido dos veces = 0 filas nuevas). El registro queda IMPORTED igual,
-        # pero la huella protege ante reintentos concurrentes / estados sucios.
-        if await _register_import_row_fingerprint(
-            session,
-            tenant_id,
-            f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{rec.id}",
-        ):
+        # sugerido dos veces = 0 filas nuevas). Sólo se MIRA acá: la huella se
+        # registra cuando la fila de verdad se importa (abajo), así una fila que
+        # queda en `needs_manual` (sin stock, sin compra previa…) se puede
+        # reintentar con el lote cuando el dueño lo resuelve.
+        _ancla_otros = f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{rec.id}"
+        if await _import_row_seen(session, tenant_id, _ancla_otros):
             counts["skipped"] += 1
             continue
         row: dict[str, Any] = rec.row_data or {}
@@ -11478,11 +11568,12 @@ async def bulk_import_unclassified(
         ):
             counts["needs_manual"] += 1
             continue
-        fecha = _parse_date(_row_val(row, _FECHA_COLS))
+        cols_fila = _columnas(rec)
+        fecha = _fecha_de_fila_de_otros(row, cols_fila)
         amount = (
-            _parse_amount(_row_val(row, _VENTA_TOTAL_COLS))
-            or _parse_amount(_row_val(row, _GASTO_AMOUNT_COLS))
-            or _parse_amount(_row_val(row, _VENTA_AMOUNT_COLS))
+            _parse_amount(_row_val(cols_fila, _VENTA_TOTAL_COLS))
+            or _parse_amount(_row_val(cols_fila, _GASTO_AMOUNT_COLS))
+            or _parse_amount(_row_val(cols_fila, _VENTA_AMOUNT_COLS))
         )
         if fecha is None or amount is None:
             # F6-A5: no parseó (fecha o monto ilegible) → requiere completarlo a
@@ -11490,22 +11581,16 @@ async def bulk_import_unclassified(
             # poder decir cuántos exigen atención del usuario.
             counts["needs_manual"] += 1
             continue
-        desc = _clean_str(_row_val(row, _NOMBRE_COLS), 499)
-        pay_raw = _clean_str(_row_val(row, _PAGO_COLS), 30)
-        product_id = _resolve_product(
-            _by_sku,
-            _by_name,
-            _clean_str(_row_val(row, _NOMBRE_COLS), 299),
-            _clean_str(_row_val(row, _SKU_COLS), 99),
-            _by_token,
-            by_barcode=_identity_indexes.by_barcode,
-            by_alias=_identity_indexes.by_alias,
-            by_name_activo=_identity_indexes.by_name,
-            barcode=_clean_str(_row_val(row, _BARCODE_COLS), 64),
-        )
+        desc = _clean_str(_row_val(cols_fila, _NOMBRE_COLS), 499)
+        pay_raw = _clean_str(_row_val(cols_fila, _PAGO_COLS), 30)
+        _nombre_fila = _clean_str(_row_val(cols_fila, _NOMBRE_COLS), 299)
+        _sku_fila = _clean_str(_row_val(cols_fila, _SKU_COLS), 99)
+        _barcode_fila = _clean_str(_row_val(cols_fila, _BARCODE_COLS), 64)
+        _ref_otros = unclassified_row_ref(rec.id) if rec.uploaded_file_id else None
 
         if rec.suggested_entity == "sale":
-            qty, _qty_motivo = _cantidad_de_venta(_row_val(row, _CANTIDAD_COLS))
+            product_id = _producto_de[rec.id]
+            qty, _qty_motivo = _cantidad_de_venta(_row_val(cols_fila, _CANTIDAD_COLS))
             if _qty_motivo is not None:
                 # E4: misma regla que el import. La fila ya está en "Otros"; una
                 # cantidad ilegible la deja donde está, para completarla a mano,
@@ -11539,6 +11624,17 @@ async def bulk_import_unclassified(
             # de venta y la venta guarda unidades base.
             if product_id in _factores:
                 qty = a_unidades_base(qty, _factores[product_id])
+            # V-4 / I2-5: como POST /sales y la resolución de a una, hay que TENER
+            # el stock (control real; también la venta que el import mandó a
+            # «Otros» por «Venta sin stock que la respalde»). Se mira antes de
+            # escribir nada, con el producto bloqueado hasta el commit: las ventas
+            # del lote se descuentan en orden y la que ya no alcanza queda
+            # pendiente.
+            try:
+                await stock_service.check_stock_available(product_id, tenant_id, qty, session)
+            except stock_service.InsufficientStockError:
+                counts["needs_manual"] += 1
+                continue
             _venta_otros = SaleEntry(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
@@ -11552,19 +11648,44 @@ async def bulk_import_unclassified(
                 source_upload_id=rec.uploaded_file_id,
                 # Como `reclassify`: la venta nacida de esta fila se reconoce por
                 # su referencia (el revert de B·5g no la toma por un re-import).
-                source_row_ref=(
-                    unclassified_row_ref(rec.id) if rec.uploaded_file_id else None
-                ),
+                source_row_ref=_ref_otros,
             )
             session.add(_venta_otros)
+            await session.flush()
+            # V-4: el mismo descuento que `_registrar_venta_desde_otros`, con el
+            # archivo de la fila: borrarlo devuelve la venta Y el stock.
+            _mov_otros = await stock_service.decrement_for_sale(_venta_otros, session)
+            if _mov_otros is not None and rec.uploaded_file_id is not None:
+                _mov_otros.source_upload_id = rec.uploaded_file_id
             _efecto_otros: tuple[str, uuid.UUID] = ("sale", _venta_otros.id)
             counts["imported_sales"] += 1
         else:
-            cat_raw_otros = _clean_str(_row_val_categoria(row), 99)
+            cat_raw_otros = _clean_str(_row_val_categoria(cols_fila), 99)
             cat_code, cat_label, _ = classify_expense_with_vertical(cat_raw_otros, _vertical)
             if cat_code == "INVENTORY":
                 # B·5b: una compra de mercadería se resuelve de a una, diciendo qué
                 # artículos la componen. En lote se crearía un gasto sin stock.
+                counts["needs_manual"] += 1
+                continue
+            # I2-5: el control final del import (B·5b-2). Un vínculo fuerte con un
+            # producto (código, SKU, nombre exacto) haría del gasto un COGS: es una
+            # compra de mercadería, y en lote no se sabe qué artículos ni cuántos
+            # ni entra el stock → de a una, con `resolve-purchase`. El parecido de
+            # palabras («Pago luz» ~ «Lámpara luz») no vincula: la categoría manda
+            # y el gasto queda OPEX, como en la resolución de a una.
+            if (
+                _vinculo_fuerte(
+                    _by_sku,
+                    _by_name,
+                    _nombre_fila,
+                    _sku_fila,
+                    _identity_indexes.by_barcode,
+                    _barcode_fila,
+                    _identity_indexes.by_alias,
+                    _identity_indexes.by_name,
+                )
+                is not None
+            ):
                 counts["needs_manual"] += 1
                 continue
             expense = ExpenseEntry(
@@ -11579,9 +11700,11 @@ async def bulk_import_unclassified(
                 payment_method=normalize_payment_method(pay_raw) if pay_raw else "transfer",
                 provenance="REAL",
                 source_upload_id=rec.uploaded_file_id,
+                # I2-5: como `reclassify`; sin la referencia, la relectura lo
+                # tomaba como un registro viejo (`legacy_records`).
+                source_row_ref=_ref_otros,
             )
-            expense.product_id = product_id
-            expense.expense_type = infer_expense_type(cat_code, product_id=product_id)
+            expense.expense_type = infer_expense_type(cat_code)
             if cat_label:
                 expense.custom_fields = {"category_label": cat_label}
             session.add(expense)
@@ -11597,6 +11720,7 @@ async def bulk_import_unclassified(
                     *_efecto_otros,
                 )
             )
+        await _register_import_row_fingerprint(session, tenant_id, _ancla_otros)
         rec.status = UNCLASSIFIED_STATUS_IMPORTED
         rec.resolved_at = datetime.now(UTC)
         if (i + 1) % _flush_every == 0:
