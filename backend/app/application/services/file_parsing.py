@@ -837,6 +837,64 @@ def _detect_header_row(rows: list[list[Any]], *, max_scan: int = 15) -> int:
     return 0
 
 
+def encabezados_unicos(fila: list[Any], hoja: str | None = None) -> tuple[list[str], list[str]]:
+    """Los encabezados de una fila, sin repetidos, y los avisos de lo renombrado (I5-2).
+
+    El dict de cada fila se arma por encabezado: dos «Precio» (doble encabezado
+    «Compra | Venta» arriba) o dos columnas sin título en un CSV eran la MISMA
+    clave, ganaba la última y la otra columna desaparecía sin aviso; en el mapeo
+    las dos leían el mismo dato. Determinística —depende sólo de la fila—, así que
+    preview, relectura y confirm dan los mismos nombres. Un encabezado que NO se
+    repite conserva su nombre (los mapeos guardados siguen resolviendo igual):
+
+    - celda ``None`` → ``col_{i}``, como siempre en xlsx;
+    - texto repetido → la primera conserva el nombre, las siguientes
+      ``Precio (2)``, ``Precio (3)``…;
+    - vacío repetido (``""`` de un CSV) → cada uno ``col_{i}`` por su posición.
+
+    Un nombre generado que choque con otro encabezado del archivo suma sufijo.
+    """
+    nombres = [str(c) if c is not None else f"col_{i}" for i, c in enumerate(fila)]
+    if len(set(nombres)) == len(nombres):
+        return nombres, []
+    cuenta: dict[str, int] = {}
+    for n in nombres:
+        cuenta[n] = cuenta.get(n, 0) + 1
+    ocupados = {n for n in nombres if n.strip()}
+    vistos: set[str] = set()
+    resultado: list[str] = []
+    renombrados: list[str] = []
+    vacios: list[str] = []
+    for i, n in enumerate(nombres):
+        if cuenta[n] == 1 or (n.strip() and n not in vistos):
+            vistos.add(n)
+            resultado.append(n)
+            continue
+        base, k = (f"col_{i}", 1) if not n.strip() else (n, 2)
+        candidato = base if k == 1 else f"{base} ({k})"
+        while candidato in ocupados:
+            k += 1
+            candidato = f"{base} ({k})"
+        ocupados.add(candidato)
+        resultado.append(candidato)
+        (vacios if not n.strip() else renombrados).append(candidato)
+    donde = f" de la hoja «{hoja}»" if hoja else ""
+    avisos: list[str] = []
+    if renombrados:
+        avisos.append(
+            f"El encabezado{donde} tiene columnas con el mismo nombre; para no perder "
+            "los datos de ninguna, las repetidas se renombraron "
+            + ", ".join(f"«{c}»" for c in renombrados)
+            + ". Revisá a qué campo va cada una."
+        )
+    if vacios:
+        avisos.append(
+            f"El encabezado{donde} tiene {len(vacios)} columnas sin título; se "
+            "nombraron " + ", ".join(f"«{c}»" for c in vacios) + "."
+        )
+    return resultado, avisos
+
+
 # ── Libro Diario (doble encabezado: Dinero/Mercadería × Ingreso/Egreso) ───────
 # Formato típico de libros contables manuales en Excel: una fila superior con
 # grupos en celdas combinadas ("Dinero", "Mercadería") y una segunda fila con
@@ -2185,8 +2243,20 @@ def _parse_spreadsheet(
 
         # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
         hdr_idx = _detect_header_row(rows)
-        headers = rows[hdr_idx]
+        headers, _avisos_enc = encabezados_unicos(rows[hdr_idx])
+        summary["warnings"].extend(_avisos_enc)
         data_rows = rows[hdr_idx + 1 :]
+        # I5-2: una celda con dato más allá del último encabezado no tiene
+        # columna donde ir; no se inventa una, pero se avisa.
+        _fuera = sum(
+            1 for r in data_rows if any((c or "").strip() for c in r[len(headers) :])
+        )
+        if _fuera:
+            summary["warnings"].append(
+                f"{_fuera} fila(s) traen datos a la derecha de la última columna con "
+                "encabezado; esos datos no se leen. Agregale un título a esa columna "
+                "si los necesitás."
+            )
         analysis = analyze_headers(headers)
         all_dicts = rows_to_dicts(headers, data_rows)
         _avisar_filas_no_reales(summary, headers, all_dicts)
@@ -2326,10 +2396,8 @@ def _parse_spreadsheet(
                     # los contaría dos veces. Se preserva sin clasificar por si el
                     # usuario la quiere.
                     _hdr = _detect_header_row(rows)
-                    _headers = [
-                        str(c) if c is not None else f"col_{i}"
-                        for i, c in enumerate(rows[_hdr])
-                    ]
+                    _headers, _avisos_enc = encabezados_unicos(rows[_hdr], sheet_name)
+                    summary["warnings"].extend(_avisos_enc)
                     _dicts = rows_to_dicts(_headers, rows[_hdr + 1 :])
                     context_id = f"sheet:{sheet_name}"
                     contexts.append(
@@ -2366,10 +2434,8 @@ def _parse_spreadsheet(
 
                 # Detecta la fila de encabezado real de la hoja.
                 hdr_idx = _detect_header_row(rows)
-                headers = [
-                    str(c) if c is not None else f"col_{i}"
-                    for i, c in enumerate(rows[hdr_idx])
-                ]
+                headers, _avisos_enc = encabezados_unicos(rows[hdr_idx], sheet_name)
+                summary["warnings"].extend(_avisos_enc)
                 data_rows = rows[hdr_idx + 1 :]
                 if not data_rows:
                     continue
@@ -2560,10 +2626,8 @@ def _parse_spreadsheet(
 
         # Detecta la fila de encabezado real (salta títulos/filas en blanco arriba).
         hdr_idx = _detect_header_row(_all)
-        headers = [
-            str(cell) if cell is not None else f"col_{index}"
-            for index, cell in enumerate(_all[hdr_idx])
-        ]
+        headers, _avisos_enc = encabezados_unicos(_all[hdr_idx])
+        summary["warnings"].extend(_avisos_enc)
         data_rows = _all[hdr_idx + 1 :]
         analysis = analyze_headers(headers)
         all_dicts = rows_to_dicts(headers, data_rows)
