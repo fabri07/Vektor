@@ -52,6 +52,7 @@ from app.application.services.ingestion_import_service import (
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
     restaurar_vinculos,
+    tandas_de_claves,
     vinculos_de,
 )
 from app.application.services.respaldo_service import (
@@ -62,6 +63,7 @@ from app.application.services.respaldo_service import (
     motivo_sin_respaldo,
     primeros_dias_de_fuente,
 )
+from app.domain.operation_identity import claves_equivalentes, es_equivalencia_exacta
 from app.domain.transaction import PaymentMethod
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.cash_close import CashClose
@@ -304,10 +306,12 @@ async def reparar(
     )
     # Los renglones hermanos que siguen colgados del mismo comprobante (otra
     # venta del documento, respaldada): el revert no los confunde con un re-import.
-    claves = sorted({i["identity_key"] for ids in identidades.values() for i in ids})
+    contenido_de = {
+        i["identity_key"]: i["content_hash"] for ids in identidades.values() for i in ids
+    }
     hermanos = {
         clave: sorted(str(e) for e in ids)
-        for clave, ids in (await _ventas_vinculadas(session, tenant_id, claves)).items()
+        for clave, ids in (await _ventas_vinculadas(session, tenant_id, contenido_de)).items()
     }
     run.details_json = {
         "repair_type": REPAIR_TYPE,
@@ -347,26 +351,61 @@ class Reversion:
 
 
 async def _ventas_vinculadas(
-    session: AsyncSession, tenant_id: uuid.UUID, claves: list[str]
+    session: AsyncSession, tenant_id: uuid.UUID, contenido_de: dict[str, str]
 ) -> dict[str, set[uuid.UUID]]:
-    """``{clave: ventas VIVAS colgadas de esa identidad}``."""
-    if not claves:
+    """``{clave: ventas VIVAS colgadas de esa identidad}``.
+
+    ``contenido_de`` es ``{clave del snapshot: su content_hash}``. I6-3/I6-4: un
+    import posterior puede haber tomado el MISMO documento con la otra forma de
+    clave (la ``k2`` con entidad o con letra, si el snapshot es ``k1``): también
+    cuenta, o el revert no vería el re-import y dejaría dos ventas vivas. Las
+    del ID externo son el mismo documento con certeza; entre una clave sin letra
+    y una con letra decide el contenido (la de la otra letra no es un
+    re-import).
+    """
+    if not contenido_de:
         return {}
-    filas = await session.execute(
-        select(OperationIdentity.identity_key, OperationIdentityLink.entity_id)
-        .join(OperationIdentityLink, OperationIdentityLink.identity_id == OperationIdentity.id)
-        .join(SaleEntry, SaleEntry.id == OperationIdentityLink.entity_id)
-        .where(
-            OperationIdentity.tenant_id == tenant_id,
-            OperationIdentity.identity_key.in_(claves),
-            OperationIdentityLink.entity_type == "sale",
-            SaleEntry.tenant_id == tenant_id,
-            SaleEntry.voided_at.is_(None),
+    origen: dict[str, str] = {clave: clave for clave in contenido_de}
+    for clave in contenido_de:
+        for eq in claves_equivalentes(clave, "sale"):
+            origen.setdefault(eq, clave)
+    # En tandas: con las equivalentes son hasta siete claves por comprobante, y
+    # miles de candidatas pasarían el límite de parámetros de asyncpg.
+    filas: list[Any] = []
+    for tanda in tandas_de_claves(sorted(origen)):
+        filas.extend(
+            (
+                await session.execute(
+                    select(
+                        OperationIdentity.identity_key,
+                        OperationIdentity.content_hash,
+                        OperationIdentityLink.entity_id,
+                    )
+                    .join(
+                        OperationIdentityLink,
+                        OperationIdentityLink.identity_id == OperationIdentity.id,
+                    )
+                    .join(SaleEntry, SaleEntry.id == OperationIdentityLink.entity_id)
+                    .where(
+                        OperationIdentity.tenant_id == tenant_id,
+                        OperationIdentity.identity_key.in_(tanda),
+                        OperationIdentityLink.entity_type == "sale",
+                        SaleEntry.tenant_id == tenant_id,
+                        SaleEntry.voided_at.is_(None),
+                    )
+                )
+            ).all()
         )
-    )
     out: dict[str, set[uuid.UUID]] = {}
-    for clave, eid in filas.all():
-        out.setdefault(clave, set()).add(eid)
+    for clave, contenido, eid in filas:
+        propia = origen[clave]
+        if (
+            clave != propia
+            and not es_equivalencia_exacta(clave)
+            and contenido != contenido_de[propia]
+        ):
+            continue
+        out.setdefault(propia, set()).add(eid)
     return out
 
 
@@ -387,12 +426,16 @@ async def revertir(session: AsyncSession, run_id: uuid.UUID) -> Reversion:
     conocidas: set[uuid.UUID] = set()
     for ids in (detalle.get("hermanos") or {}).values():
         conocidas.update(uuid.UUID(e) for e in ids)
-    claves = sorted(
-        {i["identity_key"] for p in pares_run for i in (p.get("identidades") or [])}
-    )
+    contenido_de = {
+        i["identity_key"]: i["content_hash"]
+        for p in pares_run
+        for i in (p.get("identidades") or [])
+    }
     reimportadas = {
         clave
-        for clave, ids in (await _ventas_vinculadas(session, run.tenant_id, claves)).items()
+        for clave, ids in (
+            await _ventas_vinculadas(session, run.tenant_id, contenido_de)
+        ).items()
         if ids - conocidas
     }
     for par in pares_run:

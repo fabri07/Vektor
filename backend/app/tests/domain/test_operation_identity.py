@@ -23,8 +23,11 @@ from app.domain.operation_identity import (
     LineaEfectiva,
     SinClave,
     clave_de_operacion,
+    claves_equivalentes,
+    forma_k1,
     hay_columnas_de_identidad,
     huella_de_contenido,
+    leer_letra_del_numero,
     leer_numero_de_comprobante,
     normalizar_serie,
     normalizar_tipo_de_comprobante,
@@ -96,13 +99,113 @@ def test_el_mismo_comprobante_escrito_distinto_da_la_misma_clave() -> None:
     assert a.clave == b.clave
 
 
-def test_la_letra_fiscal_no_distingue_documentos() -> None:
-    """Factura A y Factura B con mismo emisor, punto de venta y número no pueden
-    coexistir: la letra es el régimen impositivo, no el documento."""
+def test_la_letra_fiscal_distingue_documentos() -> None:
+    """I6-4: en AFIP la numeración es correlativa por punto de venta Y por tipo
+    de comprobante, y la letra es parte del tipo (Factura A = CbteTipo 1,
+    Factura B = 6). La A 0001-00000123 y la B 0001-00000123 son dos facturas."""
     a = clave_de_operacion(fila_compra(tipo="Factura A"), COLS_COMPRA, "expense")
     b = clave_de_operacion(fila_compra(tipo="Factura B"), COLS_COMPRA, "expense")
     assert isinstance(a, ClaveDeOperacion) and isinstance(b, ClaveDeOperacion)
-    assert a.clave == b.clave
+    assert a.clave != b.clave
+
+
+def test_la_letra_puede_venir_adentro_del_numero() -> None:
+    """I6-4: "A 0001-00000123" con tipo "Factura" es la Factura A — la letra
+    está en el dato, como el punto de venta del formato PPPP-NNNNNNNN."""
+    cols = {k: v for k, v in COLS_COMPRA.items() if k != "document_series"}
+    en_el_numero = clave_de_operacion(
+        fila_compra(tipo="Factura", comprobante="A 0001-00000123"), cols, "expense"
+    )
+    pegada = clave_de_operacion(
+        fila_compra(tipo="FCA", comprobante="0001-00000123"), cols, "expense"
+    )
+    en_el_tipo = clave_de_operacion(fila_compra(), COLS_COMPRA, "expense")
+    assert isinstance(en_el_numero, ClaveDeOperacion)
+    assert isinstance(pegada, ClaveDeOperacion)
+    assert isinstance(en_el_tipo, ClaveDeOperacion)
+    assert en_el_numero.clave == pegada.clave == en_el_tipo.clave
+    assert ":factura:a:" in en_el_tipo.clave
+
+
+def test_sin_letra_fiscal_la_clave_es_la_de_siempre() -> None:
+    """Sin letra fiscal (no vino, no es fiscal, o vinieron dos distintas) la clave
+    es la k1 de antes, byte a byte: ningún formato queda con menos protección.
+    "FC" es factura SIN letra, no factura C."""
+    for tipo, numero in (
+        ("Factura", "00000123"),
+        ("FC", "00000123"),
+        ("Factura X", "00000123"),
+        ("Factura A", "B 0001-00000123"),
+    ):
+        r = clave_de_operacion(fila_compra(tipo=tipo, comprobante=numero), COLS_COMPRA, "expense")
+        assert isinstance(r, ClaveDeOperacion), tipo
+        assert r.clave == "k1:doc:30712345678:factura:1:123", tipo
+
+
+def test_una_letra_suelta_no_fiscal_se_descarta_como_siempre() -> None:
+    """"Remito R", "Recibo X", "Ticket X": el tipo se reconoce y la letra se
+    descarta, como antes. No se vuelven tipo desconocido."""
+    for tipo, codigo in (
+        ("Remito X", "remito"),
+        ("Remito R", "remito"),
+        ("Recibo X", "recibo"),
+        ("Ticket X", "ticket"),
+    ):
+        r = clave_de_operacion(fila_compra(tipo=tipo), COLS_COMPRA, "expense")
+        assert isinstance(r, ClaveDeOperacion), tipo
+        assert r.clave == f"k1:doc:30712345678:{codigo}:1:123", tipo
+
+
+def test_fce_no_es_la_factura_e() -> None:
+    """FCE es la Factura de Crédito Electrónica MiPyME (numeración propia), no
+    la factura E. Como antes, no es un tipo del catálogo."""
+    assert normalizar_tipo_de_comprobante("FCE") is None
+    r = clave_de_operacion(fila_compra(tipo="FCE"), COLS_COMPRA, "expense")
+    assert r == SinClave(MOTIVO_TIPO_DESCONOCIDO)
+
+
+def test_la_letra_del_numero_se_lee_solo_al_inicio_separada() -> None:
+    assert leer_letra_del_numero("A 0001-00000123") == "a"
+    assert leer_letra_del_numero("A-0001-00000123") == "a"
+    for sin_letra in ("1234e5", "B2B-0001-1", "0001A00001234", "0001-00000123", "X 0001-1"):
+        assert leer_letra_del_numero(sin_letra) is None, sin_letra
+
+
+def test_los_formatos_sin_letra_conservan_la_clave_vieja_byte_a_byte() -> None:
+    """Remito y ticket no cambiaron: sus claves guardadas tienen que seguir
+    matcheando sin ninguna lectura extra."""
+    r = clave_de_operacion(fila_compra(tipo="Remito"), COLS_COMPRA, "expense")
+    assert isinstance(r, ClaveDeOperacion)
+    assert r.clave == "k1:doc:30712345678:remito:1:123"
+    assert claves_equivalentes(r.clave, "expense") == []
+
+
+def test_venta_y_gasto_con_el_mismo_id_externo_no_colisionan() -> None:
+    """I6-3: el sistema garantiza el ID único dentro de SU tabla, no entre
+    ventas y compras. En una tabla mixta la misma fila produce las dos."""
+    cols = {**COLS_COMPRA, "external_operation_id": "id", "external_source": "sistema"}
+    fila = fila_compra(id="77", sistema="Tango")
+    venta = clave_de_operacion(fila, cols, "sale")
+    gasto = clave_de_operacion(fila, cols, "expense")
+    assert isinstance(venta, ClaveDeOperacion) and isinstance(gasto, ClaveDeOperacion)
+    assert venta.clave == "k2:ext:sale:tango:77"
+    assert gasto.clave == "k2:ext:expense:tango:77"
+
+
+def test_las_claves_equivalentes_conectan_las_dos_formas() -> None:
+    """Lo guardado antes (sin entidad, sin letra) y lo de hoy se encuentran en
+    las dos direcciones: el import busca una, el revert de B·5g la otra."""
+    assert claves_equivalentes("k2:ext:sale:tango:77", "sale") == ["k1:ext:tango:77"]
+    assert claves_equivalentes("k1:ext:tango:77", "sale") == ["k2:ext:sale:tango:77"]
+    assert claves_equivalentes("k2:doc:propio:factura:a:1:123", "sale") == [
+        "k1:doc:propio:factura:1:123"
+    ]
+    assert "k2:doc:propio:factura:b:1:123" in claves_equivalentes(
+        "k1:doc:propio:factura:1:123", "sale"
+    )
+    assert forma_k1("k2:doc:propio:factura:a:1:123#3", "sale") == (
+        "k1:doc:propio:factura:1:123#3"
+    )
 
 
 def test_id_externo_con_sistema_declarado_gana_sobre_el_comprobante() -> None:
@@ -111,7 +214,7 @@ def test_id_externo_con_sistema_declarado_gana_sobre_el_comprobante() -> None:
         fila_compra(id="OP-1024", sistema="Tango"), cols, "expense"
     )
     assert isinstance(clave, ClaveDeOperacion)
-    assert clave.clave.startswith("k1:ext:tango:op-1024")
+    assert clave.clave.startswith("k2:ext:expense:tango:op-1024")
 
 
 def test_id_de_linea_explicito_baja_la_granularidad_a_linea() -> None:

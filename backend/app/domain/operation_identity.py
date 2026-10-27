@@ -29,7 +29,9 @@ Concretamente:
 
 * **Sistema de origen declarado.** Un ``external_operation_id`` sin decir de qué
   sistema salió no identifica nada: el "1024" de un sistema y el "1024" de otro
-  son dos operaciones distintas. Sin ``external_source`` no hay clave.
+  son dos operaciones distintas. Sin ``external_source`` no hay clave. Y la
+  entidad entra en la clave (I6-3): el sistema garantiza el ID único dentro de
+  su tabla de ventas o de compras, no entre las dos.
 * **Emisor con identificador estable, y el emisor correcto.** En una COMPRA el
   emisor es el proveedor, y se lo identifica por CUIT/CUIL — nunca por nombre
   ("Distribuidora San Juan" y "DISTRIB. SAN JUAN SRL" son la misma empresa escrita
@@ -41,7 +43,9 @@ Concretamente:
   entre tipos y entre puntos de venta: la factura A 0001-00000123 y el remito
   0001-00000123 comparten número y no son el mismo documento. Qué componentes
   exige cada formato lo dice ``FORMATOS_DE_COMPROBANTE``; un tipo que no está en
-  el catálogo no produce clave, porque no sabemos qué lo distingue.
+  el catálogo no produce clave, porque no sabemos qué lo distingue. La letra
+  fiscal también distingue (I6-4): la Factura A y la Factura B del mismo punto
+  de venta se numeran por separado, así que cuando viene entra en la clave.
 * **La línea no se inventa.** Dos renglones del mismo remito pueden traer el mismo
   producto con cantidades, precios o descuentos distintos, y el orden de los
   renglones cambia si alguien reordena la planilla. Derivar la identidad de la
@@ -83,9 +87,24 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-#: Versión de la representación de CLAVE. Subirla invalida el matcheo con las
-#: claves ya guardadas (a propósito: si la forma cambió, no son comparables).
-CLAVE_VERSION = "k1"
+#: Versión de la representación de CLAVE. Va POR FORMATO, no global: subirla
+#: invalida el matcheo con las claves ya guardadas de ese formato (a propósito: si
+#: la forma cambió, no son comparables).
+#:
+#: I6-3/I6-4: ``k2`` es la de los formatos que cambiaron — el ID externo lleva la
+#: ENTIDAD (``k2:ext:{entity}:{sistema}:{id}``) y el comprobante con letra FISCAL
+#: (A/B/C/E/M/T) de un tipo que se numera por letra lleva la LETRA
+#: (``k2:doc:{emisor}:{tipo}:{letra}:{serie}:{numero}``). Todo lo demás —remito,
+#: ticket, y cualquier comprobante sin letra fiscal— sigue en ``k1`` byte a byte,
+#: la MISMA clave de antes: ningún formato queda con menos protección que antes.
+#: Las ``k1`` y las ``k2`` del mismo documento se reconocen entre sí con
+#: ``claves_equivalentes`` (ver ``operation_identity_service``), así que ni un
+#: reimport de lo ya importado ni dos exportaciones que escriben la letra distinto
+#: duplican nada. No se migra ninguna clave guardada.
+CLAVE_VERSION = "k2"
+#: Versión de los formatos que no cambiaron, y de toda clave guardada antes de
+#: I6-3/I6-4.
+CLAVE_VERSION_K1 = "k1"
 #: Versión de la representación de CONTENIDO. Misma lógica.
 CONTENIDO_VERSION = "c1"
 
@@ -167,27 +186,47 @@ class FormatoDeComprobante:
     ``exige_serie`` es el punto de venta en los comprobantes fiscales argentinos:
     el número se reinicia por punto de venta, así que sin él "00000123" identifica
     tantas facturas como bocas de facturación tenga el emisor.
+
+    ``usa_letra`` (I6-4): en AFIP la numeración es correlativa por punto de venta
+    **y por tipo de comprobante**, y la letra es parte del tipo (Factura A =
+    CbteTipo 1, Factura B = 6: cada una con su secuencia). Un Responsable
+    Inscripto que emite A y B desde el mismo punto de venta repite números en las
+    dos letras. Por eso, en estos tipos, una letra fiscal que venga entra en la
+    clave. Sin letra fiscal (no vino, no es fiscal, o vinieron dos distintas) la
+    clave es la de siempre, sin letra: no es una regla nueva, es no quedar con
+    menos protección que antes — y la colisión A/B que deja va a «Otros» como
+    conflicto de contenido, que es lo que pasaba.
     """
 
     codigo: str
     etiqueta: str
     exige_serie: bool
+    usa_letra: bool = False
 
 
 #: Catálogo CERRADO. Un tipo que no está acá no produce clave fuerte
 #: (``MOTIVO_TIPO_DESCONOCIDO``): no sabemos qué componentes lo distinguen, y
 #: suponer que el número alcanza es exactamente el error que este módulo evita.
 FORMATOS_DE_COMPROBANTE: dict[str, FormatoDeComprobante] = {
-    "factura": FormatoDeComprobante("factura", "Factura", exige_serie=True),
-    "nota_credito": FormatoDeComprobante("nota_credito", "Nota de crédito", exige_serie=True),
-    "nota_debito": FormatoDeComprobante("nota_debito", "Nota de débito", exige_serie=True),
-    "recibo": FormatoDeComprobante("recibo", "Recibo", exige_serie=True),
+    "factura": FormatoDeComprobante("factura", "Factura", exige_serie=True, usa_letra=True),
+    "nota_credito": FormatoDeComprobante(
+        "nota_credito", "Nota de crédito", exige_serie=True, usa_letra=True
+    ),
+    "nota_debito": FormatoDeComprobante(
+        "nota_debito", "Nota de débito", exige_serie=True, usa_letra=True
+    ),
+    "recibo": FormatoDeComprobante("recibo", "Recibo", exige_serie=True, usa_letra=True),
     "remito": FormatoDeComprobante("remito", "Remito", exige_serie=True),
     "ticket": FormatoDeComprobante("ticket", "Ticket", exige_serie=True),
 }
 
+#: Letras de los comprobantes fiscales argentinos (A, B, C, M, E de exportación,
+#: T de turismo). Otra letra suelta ("Remito R", "Factura X") se tolera y se
+#: descarta, como siempre: no distingue numeración.
+LETRAS_FISCALES: frozenset[str] = frozenset({"a", "b", "c", "e", "m", "t"})
+
 #: Cómo se escribe cada tipo en una planilla real. Se normaliza el texto (sin
-#: tildes, sin puntuación) antes de buscar acá.
+#: tildes, espacios repetidos) antes de buscar acá.
 _ALIAS_DE_TIPO: dict[str, str] = {
     "factura": "factura",
     "fc": "factura",
@@ -217,26 +256,91 @@ _ALIAS_DE_TIPO: dict[str, str] = {
     "t": "ticket",
 }
 
+#: Los alias que traen la letra pegada. "fc" es FACTURA sin letra (así lo
+#: escriben Tango y la mayoría: "FC A 0001-…"), no "factura C".
+_LETRA_DEL_ALIAS: dict[str, str] = {"fa": "a", "fb": "b"}
 
-def normalizar_tipo_de_comprobante(valor: Any) -> str | None:
-    """Texto de la celda → código del catálogo, o ``None`` si no se reconoce.
+#: Abreviaturas a las que se les pega la letra sin espacio ("FCA", "NCB"), y qué
+#: letras se aceptan así. Sólo A/B/C/M: "FCE" es la Factura de Crédito
+#: Electrónica MiPyME (numeración propia), no la "factura E", y "FE" suele ser
+#: "factura electrónica". Adivinar ahí es adivinar identidad.
+_BASES_CON_LETRA_PEGADA: frozenset[str] = frozenset({"fc", "nc", "nd"})
+_LETRAS_PEGABLES: frozenset[str] = frozenset({"a", "b", "c", "m"})
 
-    Tolera la letra fiscal pegada ("Factura A", "FC-B"): la letra distingue el
-    régimen impositivo, no el documento — dos comprobantes no pueden compartir
-    emisor, punto de venta y número y diferir sólo en la letra.
-    """
+
+def _tipo_k1(valor: Any) -> str | None:
+    """El tipo como lo leyó siempre Véktor: alias, o alias + una letra suelta al
+    final (cualquiera: "Remito R", "Factura X"), que se descarta. Es la lectura
+    que decide SI hay clave; la letra fiscal se lee aparte."""
     texto = _normalizar(valor)
     if not texto:
         return None
     if texto in _ALIAS_DE_TIPO:
         return _ALIAS_DE_TIPO[texto]
-    # "factura a" / "fc b" / "nc c": se saca la letra fiscal final y se reintenta.
     partes = texto.rsplit(" ", 1)
-    if len(partes) == 2 and len(partes[1]) == 1 and partes[1].isalpha():
-        base = partes[0]
-        if base in _ALIAS_DE_TIPO:
-            return _ALIAS_DE_TIPO[base]
+    if (
+        len(partes) == 2
+        and len(partes[1]) == 1
+        and partes[1].isalpha()
+        and partes[0] in _ALIAS_DE_TIPO
+    ):
+        return _ALIAS_DE_TIPO[partes[0]]
     return None
+
+
+def leer_tipo_de_comprobante(valor: Any) -> tuple[str | None, str | None]:
+    """Texto de la celda → ``(código del catálogo, letra fiscal)``.
+
+    ``(None, None)`` si el tipo no se reconoce; la letra es ``None`` si no viene
+    o no es fiscal. "Factura A", "FC B", "FCA" y "FA" traen la letra; "Factura",
+    "FC" y "Remito R", no (el remito R se lee como remito, como siempre).
+    """
+    texto = _normalizar(valor)
+    tipo = _tipo_k1(valor)
+    if tipo is not None:
+        if texto in _LETRA_DEL_ALIAS:
+            return tipo, _LETRA_DEL_ALIAS[texto]
+        partes = texto.rsplit(" ", 1)
+        if len(partes) == 2 and partes[1] in LETRAS_FISCALES:
+            return tipo, partes[1]
+        return tipo, None
+    # "fca" / "ncb": la letra pegada a la abreviatura.
+    if (
+        len(texto) == 3
+        and texto[:-1] in _BASES_CON_LETRA_PEGADA
+        and texto[-1] in _LETRAS_PEGABLES
+    ):
+        return _ALIAS_DE_TIPO[texto[:-1]], texto[-1]
+    return None, None
+
+
+def normalizar_tipo_de_comprobante(valor: Any) -> str | None:
+    """Texto de la celda → código del catálogo, o ``None`` si no se reconoce.
+
+    Tolera la letra pegada ("Factura A", "FCA"), pero acá sólo devuelve el tipo:
+    la letra la lee ``leer_tipo_de_comprobante``, y SÍ distingue el documento
+    (I6-4: cada letra tiene su propia numeración).
+    """
+    return leer_tipo_de_comprobante(valor)[0]
+
+
+#: La letra al principio del número, separada del punto de venta: "A 0001-123",
+#: "A-0001-00000123". Nada más: "1234e5", "B2B-0001-1" o "0001A00001234" no
+#: traen una letra fiscal, traen letras.
+_LETRA_AL_INICIO = re.compile(r"([a-z])[ -]+\d+[^0-9a-z]+\d+")
+
+
+def leer_letra_del_numero(valor: Any) -> str | None:
+    """La letra fiscal escrita al inicio del número, o ``None``.
+
+    Leerla no es adivinar: está en el dato, igual que el punto de venta del
+    formato ``PPPP-NNNNNNNN``. Por eso se acepta sólo esa forma exacta.
+    """
+    texto = _normalizar(valor)
+    coincide = _LETRA_AL_INICIO.fullmatch(texto) if texto else None
+    if coincide is None or coincide.group(1) not in LETRAS_FISCALES:
+        return None
+    return coincide.group(1)
 
 
 # ── Normalización ────────────────────────────────────────────────────────────
@@ -282,9 +386,10 @@ def leer_numero_de_comprobante(valor: Any) -> tuple[str, str]:
     texto = _normalizar(valor)
     if not texto:
         return "", ""
-    # Se conservan sólo dígitos y separadores; la letra fiscal ("A 0001-123") ya
-    # la distingue `document_type`, y el prefijo alfabético de algunos sistemas
-    # ("FC0001-123") no aporta identidad que no esté en el tipo.
+    # Se conservan sólo dígitos y separadores; la letra fiscal ("A 0001-123") la
+    # lee aparte `leer_letra_del_numero` (I6-4: distingue el documento), y el
+    # prefijo alfabético de algunos sistemas ("FC0001-123") no aporta identidad
+    # que no esté en el tipo.
     partes = [p for p in re.split(r"[^0-9]+", texto) if p]
     if not partes:
         # Identificador alfanumérico raro: se conserva normalizado (sigue siendo
@@ -349,17 +454,21 @@ def clave_de_operacion(
     # 1) ID de la operación en el sistema de origen. Gana sobre el comprobante:
     #    es el identificador que ese sistema garantiza único, mientras que el
     #    comprobante se reconstruye de tres columnas.
+    #    I6-3: la ENTIDAD entra en la clave. El sistema garantiza el ID único
+    #    dentro de SU tabla, no entre ventas y compras: muchos numeran cada tabla
+    #    por separado, y una tabla mixta (Libro Diario) produce venta y gasto desde
+    #    las mismas filas. Sin la entidad, la venta reclamaba la clave del gasto y
+    #    todos los gastos se omitían como «ya aplicados».
     id_externo = _normalizar(celda("external_operation_id"))
     if id_externo:
         sistema = _normalizar(celda("external_source"))
         if not sistema:
             return SinClave(MOTIVO_SISTEMA_NO_DECLARADO)
+        base_ext = f"{CLAVE_VERSION}:ext:{entity}:{sistema}:{id_externo}"
         linea = _normalizar(celda("external_line_id"))
         if linea:
-            return ClaveDeOperacion(
-                f"{CLAVE_VERSION}:ext:{sistema}:{id_externo}#{linea}", "linea"
-            )
-        return ClaveDeOperacion(f"{CLAVE_VERSION}:ext:{sistema}:{id_externo}", "documento")
+            return ClaveDeOperacion(f"{base_ext}#{linea}", "linea")
+        return ClaveDeOperacion(base_ext, "documento")
 
     # 2) Identidad de comprobante.
     numero_crudo = celda("invoice_number")
@@ -373,7 +482,7 @@ def clave_de_operacion(
 
     if not _normalizar(tipo_crudo):
         return SinClave(MOTIVO_TIPO_NO_DECLARADO)
-    tipo = normalizar_tipo_de_comprobante(tipo_crudo)
+    tipo, letra_del_tipo = leer_tipo_de_comprobante(tipo_crudo)
     if tipo is None:
         return SinClave(MOTIVO_TIPO_DESCONOCIDO)
     formato = FORMATOS_DE_COMPROBANTE[tipo]
@@ -391,11 +500,80 @@ def clave_de_operacion(
     if emisor is None:
         return SinClave(MOTIVO_EMISOR_SIN_IDENTIFICADOR)
 
-    base = f"{CLAVE_VERSION}:doc:{emisor}:{tipo}:{serie}:{numero}"
+    # I6-4: la letra fiscal, de la columna de tipo o del inicio del número. Una
+    # sola letra fiscal → entra en la clave. Ninguna, o dos distintas → la clave
+    # de siempre, sin letra (con la misma protección que antes; la colisión que
+    # queda va a «Otros» como conflicto de contenido).
+    letras = {
+        letra
+        for letra in (letra_del_tipo, leer_letra_del_numero(numero_crudo))
+        if letra
+    }
+    if formato.usa_letra and len(letras) == 1:
+        base = f"{CLAVE_VERSION}:doc:{emisor}:{tipo}:{letras.pop()}:{serie}:{numero}"
+    else:
+        base = f"{CLAVE_VERSION_K1}:doc:{emisor}:{tipo}:{serie}:{numero}"
     linea = _normalizar(celda("external_line_id"))
     if linea:
         return ClaveDeOperacion(f"{base}#{linea}", "linea")
     return ClaveDeOperacion(base, "documento")
+
+
+def forma_k1(clave: str, entity: str) -> str:
+    """La clave que este mismo documento tenía antes de I6-3/I6-4 (sin la
+    entidad en el ID externo, sin la letra en el comprobante). Una clave que no
+    cambió es su propia forma k1.
+
+    Es con lo que se agrupa lo que la regla vieja trataba como UN documento (la
+    Factura A y la B del mismo número en un archivo), porque la huella guardada
+    se calculó sobre ese grupo.
+    """
+    prefijo_ext = f"{CLAVE_VERSION}:ext:{entity}:"
+    if clave.startswith(prefijo_ext):
+        return f"{CLAVE_VERSION_K1}:ext:{clave[len(prefijo_ext):]}"
+    if clave.startswith(f"{CLAVE_VERSION}:doc:"):
+        _, _, emisor, tipo, _letra, resto = clave.split(":", 5)
+        return f"{CLAVE_VERSION_K1}:doc:{emisor}:{tipo}:{resto}"
+    return clave
+
+
+def claves_equivalentes(clave: str, entity: str) -> list[str]:
+    """Las otras formas que puede tener guardadas el MISMO documento.
+
+    Existe por compatibilidad, no como identidad nueva: en producción hay
+    identidades ``k1`` (sin entidad, sin letra), un worker viejo del deploy en
+    paralelo puede seguir escribiéndolas, y dos exportaciones del mismo
+    comprobante pueden escribir la letra o no. Ninguna se migra; se las BUSCA, y
+    la decisión que se toma con ellas es conservadora (ver
+    ``operation_identity_service._decidir_por_equivalentes``):
+
+    * ``k2`` → su forma ``k1``.
+    * ``k1:ext`` → ``k2:ext:{entity}`` (la misma operación, con certeza).
+    * ``k1:doc`` de un tipo con letra → la ``k2`` con cada letra fiscal (alguna
+      de ellas puede ser este documento; cuál, lo dice el contenido).
+    """
+    k1 = forma_k1(clave, entity)
+    if k1 != clave:
+        return [k1]
+    if clave.startswith(f"{CLAVE_VERSION_K1}:ext:"):
+        return [f"{CLAVE_VERSION}:ext:{entity}:{clave[len(CLAVE_VERSION_K1) + 5:]}"]
+    if clave.startswith(f"{CLAVE_VERSION_K1}:doc:"):
+        _, _, emisor, tipo, resto = clave.split(":", 4)
+        formato = FORMATOS_DE_COMPROBANTE.get(tipo)
+        if formato is not None and formato.usa_letra:
+            return [
+                f"{CLAVE_VERSION}:doc:{emisor}:{tipo}:{letra}:{resto}"
+                for letra in sorted(LETRAS_FISCALES)
+            ]
+    return []
+
+
+def es_equivalencia_exacta(clave: str) -> bool:
+    """¿Las equivalentes de ``clave`` son el MISMO documento sin mirar el
+    contenido? Sólo las del ID externo (la entidad agregada no cambia la
+    operación). Entre un comprobante sin letra y uno con letra decide el
+    contenido: la ``k1`` sin letra puede ser la de la otra letra."""
+    return ":ext:" in clave
 
 
 def _emisor(celda: Callable[[str], Any], entity: str) -> str | None:

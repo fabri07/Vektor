@@ -65,6 +65,8 @@ from app.domain.operation_identity import (
     LineaEfectiva,
     SinClave,
     clave_de_operacion,
+    claves_equivalentes,
+    forma_k1,
     hay_columnas_de_identidad,
     huella_de_contenido,
 )
@@ -270,9 +272,17 @@ async def planificar_identidades(
         return plan
 
     contenidos = {clave: huella_de_contenido(doc.lineas) for clave, doc in documentos.items()}
+    # I6-3/I6-4: las otras formas guardables de cada documento (``k1`` ↔ ``k2``).
+    # Se leen en la MISMA query que las reclamadas: no cuestan un statement.
+    equivalentes = {clave: claves_equivalentes(clave, entity) for clave in documentos}
 
     ganadas, existentes = await _reclamar(
-        session, tenant_id, file_id, contenidos=contenidos, entity=entity
+        session,
+        tenant_id,
+        file_id,
+        contenidos=contenidos,
+        entity=entity,
+        leer_ademas=sorted({e for eqs in equivalentes.values() for e in eqs}),
     )
     plan.reclamadas = ganadas
 
@@ -296,6 +306,16 @@ async def planificar_identidades(
                     "revisala antes de aplicarla."
                 )
 
+    _decidir_por_equivalentes(
+        plan,
+        entity=entity,
+        documentos=documentos,
+        contenidos=contenidos,
+        equivalentes=equivalentes,
+        existentes=existentes,
+        ganadas=ganadas,
+    )
+
     logger.info(
         "ingestion.identidad.plan",
         tenant_id=str(tenant_id),
@@ -309,6 +329,90 @@ async def planificar_identidades(
     return plan
 
 
+#: Lo que ve el usuario en «Otros» cuando lo que choca es el mismo comprobante
+#: guardado en la otra forma de clave (con o sin la letra, o de antes de que la
+#: clave distinguiera venta de gasto): no se puede saber si es el mismo
+#: documento corregido o el de la otra letra.
+MOTIVO_CONFLICTO_EQUIVALENTE = (
+    "Ya hay una operación cargada con el mismo comprobante o ID de origen (en un "
+    "archivo que escribía la letra del comprobante distinto, o de antes de que "
+    "Véktor la distinguiera) y con datos distintos. Puede ser otro comprobante "
+    "o una corrección: revisala antes de aplicarla."
+)
+
+
+def _decidir_por_equivalentes(
+    plan: PlanDeIdentidad,
+    *,
+    entity: str,
+    documentos: dict[str, _Documento],
+    contenidos: dict[str, str],
+    equivalentes: dict[str, list[str]],
+    existentes: dict[str, tuple[uuid.UUID, str, str]],
+    ganadas: set[str],
+) -> None:
+    """I6-3/I6-4: lo que la clave da por NUEVO se vuelve a mirar contra el mismo
+    documento guardado en su otra forma (``claves_equivalentes``).
+
+    Sin esto, reimportar un archivo ya importado con la clave vieja lo aplicaría
+    entero de nuevo (la clave nueva no está guardada en ningún lado), y dos
+    exportaciones del mismo comprobante —una con «Factura A», otra con «FC»—
+    entrarían las dos. Nada se migra; se busca. La decisión es conservadora:
+
+    * La guardada tiene que ser de la MISMA entidad. Es justo lo que la clave
+      vieja del ID externo no distinguía (I6-3): si es de la otra entidad, no
+      dice nada de ésta, y los gastos que la regla vieja omitió entran ahora.
+    * Mismo contenido → ``ya_aplicada``. Contra una ``k1`` se compara además con
+      el grupo que armaba la regla vieja: la A y la B del mismo número en un
+      archivo eran UN documento, con una huella.
+    * Contenido distinto → ``conflicto``, nunca ``nueva``: entre una clave con
+      letra y una sin letra, «la otra letra» y «la misma corregida» son
+      indistinguibles, y aplicarla podría duplicar. Va a «Otros» con la clave
+      GUARDADA, que es la que está tomada: así el candado de «Otros» (409) la ve.
+
+    Las reclamaciones nuevas de esas filas no producen efecto y se devuelven al
+    cierre, como cualquier otra.
+    """
+    # El grupo de la regla vieja: todo lo de este plan con la misma forma k1.
+    grupos_k1: dict[str, list[LineaEfectiva]] = defaultdict(list)
+    for clave, doc in documentos.items():
+        grupos_k1[forma_k1(clave, entity)].extend(doc.lineas)
+
+    for clave, doc in documentos.items():
+        if plan.decision.get(doc.filas[0]) != DECISION_NUEVA:
+            continue
+        guardadas = [
+            (eq, existentes[eq])
+            for eq in equivalentes.get(clave, ())
+            # Una equivalente que reclamó ESTE plan no es «lo guardado»: es otra
+            # fila del mismo archivo («Factura A 0001-123» y «FC 0001-123»
+            # juntos). Entre hermanos del mismo archivo nadie bloquea a nadie:
+            # entran los dos (cada uno con su clave), como en main, donde eran
+            # dos renglones del mismo documento y se aplicaban los dos.
+            if eq in existentes and existentes[eq][2] == entity and eq not in ganadas
+        ]
+        if not guardadas:
+            continue
+        coincide: tuple[str, uuid.UUID] | None = None
+        for eq, (ident, contenido, _) in guardadas:
+            grupo = grupos_k1.get(eq) if eq == forma_k1(clave, entity) else None
+            if contenido == contenidos[clave] or (
+                grupo is not None and contenido == huella_de_contenido(grupo)
+            ):
+                coincide = (eq, ident)
+                break
+        eq, ident = coincide or (guardadas[0][0], guardadas[0][1][0])
+        plan.identity_id[eq] = ident
+        for indice in doc.filas:
+            plan.clave[indice] = eq
+            if coincide is not None:
+                plan.decision[indice] = DECISION_YA_APLICADA
+                plan.motivo.pop(indice, None)
+            else:
+                plan.decision[indice] = DECISION_CONFLICTO
+                plan.motivo[indice] = MOTIVO_CONFLICTO_EQUIVALENTE
+
+
 async def _reclamar(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -316,11 +420,15 @@ async def _reclamar(
     *,
     contenidos: dict[str, str],
     entity: str,
-) -> tuple[set[str], dict[str, tuple[uuid.UUID, str]]]:
+    leer_ademas: list[str] | None = None,
+) -> tuple[set[str], dict[str, tuple[uuid.UUID, str, str]]]:
     """Toma el candado de todas las claves del archivo en UNA sentencia.
 
-    Devuelve ``(claves ganadas, {clave: (id, content_hash)} de las que ya
-    estaban)``. La segunda query sólo se paga si algo se perdió.
+    Devuelve ``(claves ganadas, {clave: (id, content_hash, entity_type)}``) de
+    las ganadas, las perdidas y las de ``leer_ademas`` (las del mismo documento
+    en su otra forma de clave, I6-3/I6-4, que sólo se leen y nunca se reclaman).
+    Todo eso se lee en UNA query (hasta ``_CLAVES_POR_LECTURA``), después del
+    INSERT.
     """
     filas = [
         {
@@ -357,36 +465,66 @@ async def _reclamar(
         )
     else:  # pragma: no cover — sin ON CONFLICT no hay candado: se declara nulo
         logger.warning("ingestion.identidad.dialecto_sin_upsert", dialecto=dialecto)
-        return set(), await _leer_existentes(session, tenant_id, list(contenidos))
+        return set(), await _leer_con_entidad(
+            session, tenant_id, sorted(set(contenidos) | set(leer_ademas or ()))
+        )
 
-    ganadas = set((await session.execute(sentencia)).scalars().all())
-    perdidas = [clave for clave in contenidos if clave not in ganadas]
-    existentes = await _leer_existentes(session, tenant_id, perdidas) if perdidas else {}
+    ganadas: set[str] = set((await session.execute(sentencia)).scalars().all())
     # Las ganadas también necesitan su id para colgar vínculos: se leen de una,
-    # junto con las perdidas, en vez de pagar una query por grupo.
-    if ganadas:
-        existentes.update(await _leer_existentes(session, tenant_id, sorted(ganadas)))
+    # junto con las perdidas y las equivalentes, en vez de pagar una query por grupo.
+    existentes = await _leer_con_entidad(
+        session, tenant_id, sorted(set(contenidos) | set(leer_ademas or ()))
+    )
     return ganadas, existentes
+
+
+#: Claves por query. Un comprobante sin letra se busca también con cada letra
+#: fiscal (siete claves por documento): sin tope, un archivo grande pasaría el
+#: límite de parámetros de asyncpg (32.767). Hasta este tamaño es UNA query.
+_CLAVES_POR_LECTURA = 5000
+
+
+def tandas_de_claves(claves: list[str]) -> list[list[str]]:
+    """``claves`` partidas en tandas de ``_CLAVES_POR_LECTURA``. La usa todo el
+    que arma un ``IN`` con claves y sus equivalentes (el import y el revert de
+    B·5g): un ``IN`` sin tope pasa el límite de parámetros de asyncpg."""
+    tope = _CLAVES_POR_LECTURA
+    return [claves[desde : desde + tope] for desde in range(0, len(claves), tope)]
+
+
+async def _leer_con_entidad(
+    session: AsyncSession, tenant_id: uuid.UUID, claves: list[str]
+) -> dict[str, tuple[uuid.UUID, str, str]]:
+    salida: dict[str, tuple[uuid.UUID, str, str]] = {}
+    for tanda in tandas_de_claves(claves):
+        filas = (
+            await session.execute(
+                select(
+                    OperationIdentity.identity_key,
+                    OperationIdentity.id,
+                    OperationIdentity.content_hash,
+                    OperationIdentity.entity_type,
+                ).where(
+                    OperationIdentity.tenant_id == tenant_id,
+                    OperationIdentity.identity_key.in_(tanda),
+                )
+            )
+        ).all()
+        salida.update(
+            {clave: (ident, contenido, entidad) for clave, ident, contenido, entidad in filas}
+        )
+    return salida
 
 
 async def _leer_existentes(
     session: AsyncSession, tenant_id: uuid.UUID, claves: list[str]
 ) -> dict[str, tuple[uuid.UUID, str]]:
-    if not claves:
-        return {}
-    filas = (
-        await session.execute(
-            select(
-                OperationIdentity.identity_key,
-                OperationIdentity.id,
-                OperationIdentity.content_hash,
-            ).where(
-                OperationIdentity.tenant_id == tenant_id,
-                OperationIdentity.identity_key.in_(claves),
-            )
-        )
-    ).all()
-    return {clave: (ident, contenido) for clave, ident, contenido in filas}
+    return {
+        clave: (ident, contenido)
+        for clave, (ident, contenido, _) in (
+            await _leer_con_entidad(session, tenant_id, claves)
+        ).items()
+    }
 
 
 async def cerrar_plan(
@@ -600,7 +738,7 @@ async def restaurar_vinculos(
         _, existentes = await _reclamar(
             session, tenant_id, file_id, contenidos=contenidos, entity=entidad
         )
-        ids.update({clave: ident for clave, (ident, _) in existentes.items()})
+        ids.update({clave: ident for clave, (ident, _, _) in existentes.items()})
     nuevos = [
         (ids[ident["identity_key"]], tipo, eid)
         for tipo, eid, ident in vinculos
