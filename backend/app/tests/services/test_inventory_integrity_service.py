@@ -419,3 +419,44 @@ async def test_live_sale_without_its_movement_still_diverges(
     assert len(result["divergences"]) == 1
     assert result["divergences"][0]["sales_qty"] == 30
     assert result["divergences"][0]["stock_esperado"] == 20
+
+
+async def test_criterio_compartido_por_lote_de_productos(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """T3 · C-2: el criterio de «qué venta descontó» vive en una función por lote.
+
+    La usan el agregado y el ajuste de B11 (``balance_reconstruido_a`` con
+    ``solo_descontadas``). En un solo llamado para dos productos: la en vivo
+    cuenta siempre, la importada sólo con su movimiento ``sale:{id}`` vivo, y
+    el movimiento de un producto no habilita la venta de otro.
+    """
+    from app.application.services.inventory_temporal_service import (
+        ventas_que_descontaron_por_producto,
+    )
+
+    tid = sample_tenant.tenant_id
+    uno = await _make_product(db_session, tid, stock_units=0, name="Lote uno")
+    dos = await _make_product(db_session, tid, stock_units=0, name="Lote dos")
+    en_vivo = _sale(tid, uno.id, 7)
+    aplicada = _imported_sale(tid, uno.id, 30, uuid.uuid4())
+    sin_aplicar = _imported_sale(tid, uno.id, 40, uuid.uuid4())
+    aplicada_dos = _imported_sale(tid, dos.id, 12, uuid.uuid4())
+    sin_aplicar_dos = _imported_sale(tid, dos.id, 9, uuid.uuid4())
+    db_session.add_all([en_vivo, aplicada, sin_aplicar, aplicada_dos, sin_aplicar_dos])
+    await db_session.flush()
+    for producto, venta in ((uno, aplicada), (dos, aplicada_dos), (uno, sin_aplicar_dos)):
+        # El último está en el producto equivocado: no habilita la venta de `dos`.
+        movimiento = _movement(tid, producto.id, -venta.quantity, "sale", None)
+        movimiento.source_event_id = sale_source_event_id(venta.id)
+        db_session.add(movimiento)
+    anulado = _movement(tid, uno.id, -40, "sale", None)
+    anulado.source_event_id = sale_source_event_id(sin_aplicar.id)
+    anulado.voided_at = datetime(2026, 6, 2, tzinfo=UTC)
+    db_session.add(anulado)
+    await db_session.flush()
+
+    ventas = await ventas_que_descontaron_por_producto(db_session, tid, [uno.id, dos.id])
+
+    assert sorted(v.quantity for v in ventas[uno.id]) == [7, 30]
+    assert [v.quantity for v in ventas[dos.id]] == [12]
