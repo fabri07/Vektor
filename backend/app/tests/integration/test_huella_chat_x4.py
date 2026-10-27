@@ -7,7 +7,8 @@ misma huella: el segundo salía «ya fue registrada», quedaba SUCCEEDED y no se
 persistía. Una venta sin fecha (``date: None``) dejaba la clave ``…:None`` tomada
 para siempre: toda venta posterior de ese monto sin fecha se perdía, días después.
 
-Ahora la huella cubre TODO el contenido de la acción y vence a los pocos minutos:
+Ahora la huella son los campos determinísticos de la operación más el mensaje
+crudo del usuario (nunca el texto que redacta el LLM), y vence a los 5 minutos:
 sigue frenando el doble envío y la doble confirmación de la MISMA operación, no
 dos operaciones distintas.
 """
@@ -25,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.agent import MENSAJE_DUPLICADO_CHAT
 from app.application.agents.shared.schemas import AgentResponse, RiskLevel
 from app.main import create_app
 from app.persistence.db.redis_client import get_redis
@@ -42,8 +44,11 @@ from app.utils.security import create_access_token
 from .conftest import FakeRedis, make_tenant, make_user
 
 
-def _gasto(descripcion: str, categoria: str) -> AgentResponse:
-    """Gasto auto-ejecutable, con la fecha SIN hora que fija el agente de gastos."""
+def _gasto(mensaje: str, descripcion: str, categoria: str) -> AgentResponse:
+    """Gasto auto-ejecutable, con la fecha SIN hora que fija el agente de gastos.
+
+    ``descripcion`` y ``categoria`` las redacta el LLM: el mismo mensaje puede
+    volver con otras."""
     return AgentResponse(
         request_id=str(uuid.uuid4()),
         agent_name="agent_cash",
@@ -58,7 +63,7 @@ def _gasto(descripcion: str, categoria: str) -> AgentResponse:
                 "description": descripcion,
                 "transaction_date": "2026-10-20",
                 "payment_method": "cash",
-                "notes": f"pagué 5000 de {descripcion.lower()}",
+                "notes": mensaje,
             },
             "summary": f"Gasto registrado: {descripcion} por $5000",
         },
@@ -135,17 +140,24 @@ async def _contar(session: AsyncSession, modelo: Any, tenant: Tenant) -> int:
     )
 
 
-async def _chat(ac: AsyncClient, headers: dict[str, str], respuesta: AgentResponse) -> Any:
+async def _chat(
+    ac: AsyncClient, headers: dict[str, str], respuesta: AgentResponse, mensaje: str
+) -> Any:
     with patch("app.api.v1.agent.ChatOrchestrator") as orquestador:
         orquestador.return_value.handle = AsyncMock(return_value=respuesta)
-        resp = await ac.post("/api/v1/agent/chat", json={"message": "x"}, headers=headers)
+        resp = await ac.post("/api/v1/agent/chat", json={"message": mensaje}, headers=headers)
     assert resp.status_code == 200, resp.text
     return resp.json()
 
 
-async def _vender(ac: AsyncClient, headers: dict[str, str], respuesta: AgentResponse) -> Any:
+async def _vender(
+    ac: AsyncClient,
+    headers: dict[str, str],
+    respuesta: AgentResponse,
+    mensaje: str = "vendí una vela a 1000",
+) -> Any:
     """Venta por el camino real: el chat la deja pendiente y el dueño confirma."""
-    data = await _chat(ac, headers, respuesta)
+    data = await _chat(ac, headers, respuesta, mensaje)
     pendiente = data["pending_action_id"]
     assert pendiente, data
     with patch("app.application.services.stock_service.EventBus.emit"):
@@ -170,10 +182,12 @@ async def _envejecer_huellas(session: AsyncSession, tenant: Tenant, dias: int) -
 async def test_dos_gastos_distintos_del_mismo_monto_el_mismo_dia_se_registran_los_dos(
     ac: AsyncClient, session: AsyncSession, negocio: Tenant, dueno: dict[str, str]
 ) -> None:
-    await _chat(ac, dueno, _gasto("Luz", "UTILITIES"))
-    segundo = await _chat(ac, dueno, _gasto("Flete", "LOGISTICS"))
+    await _chat(ac, dueno, _gasto("pagué 5000 de luz", "Luz", "UTILITIES"), "pagué 5000 de luz")
+    segundo = await _chat(
+        ac, dueno, _gasto("pagué 5000 de flete", "Flete", "LOGISTICS"), "pagué 5000 de flete"
+    )
 
-    assert "ya fue registrada" not in (segundo["message"] or "")
+    assert segundo["message"] != MENSAJE_DUPLICADO_CHAT
     gastos = (
         (
             await session.execute(
@@ -205,6 +219,7 @@ async def test_dos_ventas_sin_fecha_con_otro_medio_de_pago_al_toque_se_registran
 ) -> None:
     producto = await producto_con_compra(session, negocio.tenant_id)
 
+    # El MISMO mensaje: lo que distingue las dos ventas es el medio de pago.
     await _vender(ac, dueno, _venta(producto, "cash"))
     segunda = await _vender(ac, dueno, _venta(producto, "transfer"))
 
@@ -218,10 +233,29 @@ async def test_dos_ventas_sin_fecha_con_otro_medio_de_pago_al_toque_se_registran
 async def test_el_mismo_gasto_enviado_dos_veces_al_toque_sale_duplicado(
     ac: AsyncClient, session: AsyncSession, negocio: Tenant, dueno: dict[str, str]
 ) -> None:
-    await _chat(ac, dueno, _gasto("Luz", "UTILITIES"))
-    segundo = await _chat(ac, dueno, _gasto("Luz", "UTILITIES"))
+    mensaje = "pagué 5000 de luz"
+    await _chat(ac, dueno, _gasto(mensaje, "Luz", "UTILITIES"), mensaje)
+    segundo = await _chat(ac, dueno, _gasto(mensaje, "Luz", "UTILITIES"), mensaje)
 
-    assert segundo["message"] == "Esta operación ya fue registrada."
+    assert segundo["message"] == MENSAJE_DUPLICADO_CHAT
+    assert "5 minutos" in segundo["message"]
+    assert await _contar(session, ExpenseEntry, negocio) == 1
+
+
+async def test_el_mismo_mensaje_redactado_distinto_por_el_llm_sigue_saliendo_duplicado(
+    ac: AsyncClient, session: AsyncSession, negocio: Tenant, dueno: dict[str, str]
+) -> None:
+    """El reintento de un stream cortado: mismo mensaje del usuario, pero el LLM
+    redacta otra descripción y otra categoría. Es la MISMA operación."""
+    await _chat(ac, dueno, _gasto("Pagué 5000 de luz", "Luz", "UTILITIES"), "Pagué 5000 de luz")
+    segundo = await _chat(
+        ac,
+        dueno,
+        _gasto("  pagué 5000  de LUZ ", "Pago de luz", "OTHER"),
+        "  pagué 5000  de LUZ ",
+    )
+
+    assert segundo["message"] == MENSAJE_DUPLICADO_CHAT
     assert await _contar(session, ExpenseEntry, negocio) == 1
 
 
@@ -243,7 +277,7 @@ async def test_confirmar_dos_veces_la_misma_pendiente_no_duplica_la_venta(
     ac: AsyncClient, session: AsyncSession, negocio: Tenant, dueno: dict[str, str]
 ) -> None:
     producto = await producto_con_compra(session, negocio.tenant_id)
-    data = await _chat(ac, dueno, _venta(producto))
+    data = await _chat(ac, dueno, _venta(producto), "vendí una vela a 1000")
     pendiente = data["pending_action_id"]
 
     with patch("app.application.services.stock_service.EventBus.emit"):
@@ -294,3 +328,17 @@ async def test_dos_tareas_iguales_del_mismo_plan_se_registran_las_dos(
     assert resp.status_code == 200, resp.text
     assert resp.json()["group_execution_status"] == "SUCCEEDED", resp.json()
     assert await _contar(session, ExpenseEntry, negocio) == 2
+
+
+async def test_otra_venta_igual_aclarada_en_el_mensaje_se_registra_al_toque(
+    ac: AsyncClient, session: AsyncSession, negocio: Tenant, dueno: dict[str, str]
+) -> None:
+    """Lo que sugiere el mensaje de duplicado: «otra venta de $1000». La venta no
+    trae `notes`; el mensaje crudo lo estampa el chat en la pendiente."""
+    producto = await producto_con_compra(session, negocio.tenant_id)
+
+    await _vender(ac, dueno, _venta(producto), "vendí una vela a 1000")
+    segunda = await _vender(ac, dueno, _venta(producto), "otra venta de una vela a 1000")
+
+    assert segunda["execution_status"] == "SUCCEEDED", segunda
+    assert await _contar(session, SaleEntry, negocio) == 2
