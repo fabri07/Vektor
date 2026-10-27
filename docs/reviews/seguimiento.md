@@ -46,11 +46,11 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | D-11 | normal | confirmado | T6 | Los insights nunca se generan: el único que despacha generate_insight es un job que nadie dispara | pendiente |  |
 | E0-B-5 | normal | e0 | T6 | insight_templates: 'or 100' convierte score_cash=0 (la peor caja) en 100 y suprime la variante 'Situación crítica' | pendiente |  |
 | E0-B-6 | normal | e0 | T6 | Narrativa LLM del insight recibe subscores inventados: caja desconocida persistida como 50 y None→0 con 'or 0' | pendiente |  |
-| E0-A-1 | grave | e0 | T7 | Una compra cargada por chat entre las 21 y las 24 ART queda con fecha de mañana y bloquea la venta de hoy de ese producto (B·5e) | PR abierto | #200 |
-| E0-A-2 | grave | e0 | T7 | Un gasto o una salida de caja por chat con entidades del CEO queda fechado mañana a las 00:00 entre las 21 y las 24 ART | PR abierto | #200 |
-| E0-A-3 | grave | e0 | T7 | El cálculo de 'sin rotación' saca las ventas de hoy (compara un DATETIME contra una fecha) y date.today() lo tapa sólo de 21 a 24 ART | PR abierto | #200 |
-| E0-A-4 | normal | e0 | T7 | El asistente de Calendar le dice al LLM que 'hoy' es mañana entre las 21 y las 24 ART | pendiente |  |
-| E0-A-5 | normal | e0 | T7 | El cupo diario de 50 mensajes de chat se renueva a las 21:00 ART y no a medianoche | pendiente |  |
+| E0-A-1 | grave | e0 | T7 | Una compra cargada por chat entre las 21 y las 24 ART queda con fecha de mañana y bloquea la venta de hoy de ese producto (B·5e) | mergeado | #200 `826d5b3c` |
+| E0-A-2 | grave | e0 | T7 | Un gasto o una salida de caja por chat con entidades del CEO queda fechado mañana a las 00:00 entre las 21 y las 24 ART | mergeado | #200 `826d5b3c` |
+| E0-A-3 | grave | e0 | T7 | El cálculo de 'sin rotación' saca las ventas de hoy (compara un DATETIME contra una fecha) y date.today() lo tapa sólo de 21 a 24 ART | mergeado | #200 `826d5b3c` |
+| E0-A-4 | normal | e0 | T7 | El asistente de Calendar le dice al LLM que 'hoy' es mañana entre las 21 y las 24 ART | mergeado | #200 `826d5b3c` |
+| E0-A-5 | normal | e0 | T7 | El cupo diario de 50 mensajes de chat se renueva a las 21:00 ART y no a medianoche | mergeado | #200 `826d5b3c` |
 | E0-A-6 | normal | e0 | T7 | Las series diarias de los agentes terminan en un día futuro en cero y pierden el día más viejo entre las 21 y las 24 ART | pendiente |  |
 | E0-A-7 | normal | e0 | T7 | /sales/summary y el listado por defecto de /sales corren la ventana de 30 días a mañana entre las 21 y las 24 ART | pendiente |  |
 | E0-A-8 | normal | e0 | T7 | /expenses/summary, el listado y el conteo por defecto de /expenses corren la ventana un día entre las 21 y las 24 ART | pendiente |  |
@@ -58,7 +58,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | E0-A-10 | normal | e0 | T7 | El forecast de caja calculado entre las 21 y las 24 ART arranca un día tarde y queda cacheado 6 h | pendiente |  |
 | E0-A-11 | normal | e0 | T7 | ValidationGate calcula el aviso de fecha futura con el día UTC y entre las 21 y las 24 ART tolera dos días | pendiente |  |
 | E0-A-12 | normal | e0 | T7 | Los clientes inactivos se marcan unas horas antes entre las 21 y las 24 ART | pendiente |  |
-| E0-A-13 | normal | e0 | T7 | Los análisis de productos estrella/problemáticos y de clientes del agente de ingresos corren la ventana de 30 días | pendiente |  |
+| E0-A-13 | normal | e0 | T7 | Los análisis de productos estrella/problemáticos y de clientes del agente de ingresos corren la ventana de 30 días | mergeado | #200 `826d5b3c` |
 | E0-A-14 | normal | e0 | T7 | El dashboard de marketing corre un día la ventana de métricas sociales entre las 21 y las 24 ART | pendiente |  |
 | E0-A-15 | normal | e0 | T7 | Mail semanal: date.today() no molesta con el horario del beat, pero la 'semana' de los cierres de caja es la que recién empieza | pendiente |  |
 | B-8 | normal | confirmado | T7 | date.today() (UTC) en resúmenes, listados por defecto y series diarias | pendiente |  |
