@@ -168,5 +168,13 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 | V-1 | grave | plausible | Eventos de stock (STOCK_DECREASED/ALERT/INCREASED sin defer, SALE_RECORDED de agentes) se emiten antes del commit y encadenan el recálculo del score | mergeado | #206 `59a12574` |
 | V-2 | normal | plausible | Gastos y ventas por chat (pending_action) no recalculan el score | pendiente | revisión de #199 |
 | V-3 | normal | plausible | «Otros» resolve/resolve-purchase/importar sugeridos contra un borrado concurrente del archivo: la venta/gasto queda viva colgando de un archivo borrado | pendiente | revisión de #201 |
+| V-4 | normal | confirmado | «Importar sugeridos» de «Otros» crea ventas sin descontar stock | pendiente | revisión de #208 |
+| V-5 | normal | confirmado | «Importar sugeridos» no lee montos «1000.00» que escribe el propio Véktor, y las filas con cliente «Local» van al modal: las filas B·5e/B·5g nunca entran por el lote | pendiente | revisión de #208 |
+| V-6 | menor | confirmado (preexistente) | Una fila «ya aplicada» de tabla suelta deja además una fila «Fila sin monto» en «Otros» | pendiente | revisión de #208 |
+| V-7 | menor | plausible | Resolución de a una en «Otros» (bloquea producto → reclama identidad) contra un import concurrente (al revés): deadlock detectado por Postgres (500, sin corrupción) | pendiente | revisión de #208 |
+| V-8 | normal | confirmado | Extracción de remitos/clientes/proveedores arma encabezados por su cuenta: dos encabezados repetidos se pisan (I5-2 sólo cubrió file_parsing) | pendiente | revisión de #204 |
+| V-9 | normal | confirmado | Borrado/relectura de archivos con más de ~32.000 operaciones: huellas (`_delete_import_fingerprints`, reread) e `id.in_` del deshacer sin tandas (I6-2 cubrió identidad) | pendiente | revisión de #207 |
+| V-10 | normal | confirmado | `data_repair_service` (l.1076/1612) y la reversa de fusión (`product_dedup_service.py:2416`) restan stock sin piso | pendiente | revisión de #207 |
+| V-11 | menor | confirmado | `HEALTH_SCORE_UPDATED` (agents/health/agent.py:216) no tiene handler; `on_confirmed_sale` de AgentCash/AgentIncome es código muerto | pendiente | revisión de #206 |
 
 Etapa 5 (persistencia, migraciones, scripts): sin críticos (una sola head, lock de migración correcto, migraciones recientes aditivas, scripts con dry-run).
