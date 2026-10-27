@@ -1,6 +1,7 @@
 import * as Sentry from "@sentry/nextjs";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { useChatStore } from "@/stores/chatStore";
 
 interface AuthUser {
   id: string;
@@ -26,6 +27,14 @@ interface AuthState {
   logout: () => void;
 }
 
+// La conversación del chat guardada en esta PC es de un usuario (X6-2): con
+// otro usuario o sin sesión se descarta.
+function _syncChatOwner(user: AuthUser | null): void {
+  useChatStore
+    .getState()
+    .bindOwner(user ? { userId: user.id, tenantId: user.tenant_id } : null);
+}
+
 // Sentry: tag por negocio, sin email/nombre (privacidad de datos de PyMEs
 // argentinas) — espejo del backend (deps.py::get_current_user). Alcanza con
 // el id para medir cuántos usuarios/tenants distintos pisan un error de UI.
@@ -48,14 +57,25 @@ export const useAuthStore = create<AuthState>()(
       _hasHydrated: false,
       setAuth: (token, refreshToken, user) => {
         _syncSentryContext(user);
+        _syncChatOwner(user);
         set({ token, refreshToken, user });
       },
       setTokens: (token, refreshToken) => set({ token, refreshToken }),
       updateUser: (patch) =>
-        set((state) => (state.user ? { user: { ...state.user, ...patch } } : {})),
+        set((state) => {
+          if (!state.user) return {};
+          const user = { ...state.user, ...patch };
+          // `/auth/me` puede traer a otra persona que la guardada (X6-2): su
+          // conversación no es la del usuario anterior.
+          if (user.id !== state.user.id || user.tenant_id !== state.user.tenant_id) {
+            _syncChatOwner(user);
+          }
+          return { user };
+        }),
       setHasHydrated: (state) => set({ _hasHydrated: state }),
       logout: () => {
         _syncSentryContext(null);
+        _syncChatOwner(null);
         set({ token: null, refreshToken: null, user: null });
         if (typeof window !== "undefined") {
           window.location.href = "/login";
@@ -73,6 +93,7 @@ export const useAuthStore = create<AuthState>()(
         // Sesión ya persistida (reload de página, no un login nuevo): sin
         // esto, el contexto de Sentry quedaría vacío hasta el próximo login.
         _syncSentryContext(state?.user ?? null);
+        _syncChatOwner(state?.user ?? null);
         state?.setHasHydrated(true);
       },
     },

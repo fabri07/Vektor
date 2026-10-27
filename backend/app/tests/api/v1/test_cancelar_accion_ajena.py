@@ -282,7 +282,9 @@ async def test_no_por_texto_no_cancela_la_de_otro(
     action = await _pendiente(db_session, duenio)
     redis = _nl.FakeRedis()
     conv_id = str(uuid.uuid4())
-    await _nl._seed_pending_pointer(redis, db_session, conv_id, pending_action_id=str(action.id))
+    await _nl._seed_pending_pointer(
+        redis, db_session, conv_id, tenant_id=duenio.tenant_id, pending_action_id=str(action.id)
+    )
 
     resp = await _try_nl_confirmation(
         body=ChatRequest(message="no", conversation_id=conv_id),
@@ -309,7 +311,12 @@ async def test_no_por_texto_no_cancela_un_grupo_con_una_ajena(
     redis = _nl.FakeRedis()
     conv_id = str(uuid.uuid4())
     await _nl._seed_pending_pointer(
-        redis, db_session, conv_id, pending_action_id=None, approval_group_id=group_id
+        redis,
+        db_session,
+        conv_id,
+        tenant_id=duenio.tenant_id,
+        pending_action_id=None,
+        approval_group_id=group_id,
     )
 
     resp = await _try_nl_confirmation(

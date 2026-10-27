@@ -667,7 +667,9 @@ async def _try_nl_confirmation(
     )
 
     conv_svc = ConversationService(redis, db)
-    pending = await conv_svc.get_pending_action(body.conversation_id)
+    pending = await conv_svc.get_pending_action(
+        body.conversation_id, tenant_id=current_user.tenant_id
+    )
     if pending is None or pending.get("status") != "requires_approval":
         return None
 
@@ -722,12 +724,12 @@ async def _try_nl_confirmation(
         except PendingActionForbiddenError:
             return _resp("forbidden", MENSAJE_CANCELAR_AJENA, is_error=True)
         except PendingActionNotFoundError:
-            await conv_svc.clear_pending_action(body.conversation_id)
+            await conv_svc.clear_pending_action(body.conversation_id, tenant_id=tenant_id)
             return None
         except (PendingActionConflictError, ValueError):
-            await conv_svc.clear_pending_action(body.conversation_id)
+            await conv_svc.clear_pending_action(body.conversation_id, tenant_id=tenant_id)
             return None
-        await conv_svc.clear_pending_action(body.conversation_id)
+        await conv_svc.clear_pending_action(body.conversation_id, tenant_id=tenant_id)
         return _resp("cancelled", "Listo, cancelé esa acción. ¿Necesitás algo más?")
 
     # ── Afirmación: ejecutar — exige rol OWNER/ADMIN ──────────────────────────
@@ -752,20 +754,20 @@ async def _try_nl_confirmation(
                 redis=redis,
             )
     except PendingActionNotFoundError:
-        await conv_svc.clear_pending_action(body.conversation_id)
+        await conv_svc.clear_pending_action(body.conversation_id, tenant_id=tenant_id)
         return None
     except PendingActionExpiredError:
-        await conv_svc.clear_pending_action(body.conversation_id)
+        await conv_svc.clear_pending_action(body.conversation_id, tenant_id=tenant_id)
         return _resp(
             "expired",
             "Esa acción ya venció. Volvé a enviar el mensaje original y la procesamos de nuevo.",
             is_error=True,
         )
     except ValueError:
-        await conv_svc.clear_pending_action(body.conversation_id)
+        await conv_svc.clear_pending_action(body.conversation_id, tenant_id=tenant_id)
         return None
 
-    await conv_svc.clear_pending_action(body.conversation_id)
+    await conv_svc.clear_pending_action(body.conversation_id, tenant_id=tenant_id)
 
     # Propagar el resultado REAL de la ejecución (no asumir éxito). Para grupos,
     # tomar el estado del grupo y el action_type representativo del primer task.
@@ -804,6 +806,7 @@ async def _maybe_record_pending_pointer(
     *,
     agent_response: AgentResponse,
     conversation_id: str | None,
+    tenant_id: uuid.UUID,
     db: AsyncSession,
     redis: Redis,
 ) -> None:
@@ -817,6 +820,7 @@ async def _maybe_record_pending_pointer(
     conv_svc = ConversationService(redis, db)
     await conv_svc.record_pending_action(
         conversation_id,
+        tenant_id=tenant_id,
         pending_action_id=agent_response.pending_action_id,
         approval_group_id=agent_response.approval_group_id,
         status="requires_approval",
@@ -1065,6 +1069,7 @@ async def chat(
     await _maybe_record_pending_pointer(
         agent_response=agent_response,
         conversation_id=body.conversation_id,
+        tenant_id=current_user.tenant_id,
         db=db,
         redis=redis,
     )
@@ -1250,6 +1255,7 @@ async def chat_stream(
             await _maybe_record_pending_pointer(
                 agent_response=agent_response,
                 conversation_id=body.conversation_id,
+                tenant_id=current_user.tenant_id,
                 db=db,
                 redis=redis,
             )
