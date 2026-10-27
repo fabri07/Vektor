@@ -142,6 +142,10 @@ class PosOperationRequest(BaseModel):
 class PosVoidRequest(BaseModel):
     #: Por qué se anula. Queda en la auditoría; no cambia qué se revierte.
     reason: str | None = Field(default=None, max_length=300)
+    #: A-4: el turno ABIERTO de esta caja, de cuyo cajón sale el reintegro de un
+    #: ticket de otro turno u otro día. Opcional: sin él, el servidor usa el
+    #: único turno abierto de la caja (o del usuario, sin caja).
+    client_session_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class PosOperationLineResponse(BaseModel):

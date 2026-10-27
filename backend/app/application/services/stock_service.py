@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -453,7 +454,11 @@ async def decrement_stock(
     db.add(movement)
     await db.flush()
 
-    EventBus.emit(
+    # V-1: los eventos salen después del commit. Sus handlers encolan el recálculo
+    # del score, que lee la base con otra sesión: emitidos acá, en el medio de la
+    # transacción, calculaban sin la venta (o con una que después hacía rollback).
+    EventBus.emit_after_commit(
+        db,
         "STOCK_DECREASED",
         {
             "tenant_id": str(tenant_id),
@@ -464,7 +469,8 @@ async def decrement_stock(
     )
 
     if balance.current_qty <= effective_threshold(product.low_stock_threshold_units):
-        EventBus.emit(
+        EventBus.emit_after_commit(
+            db,
             "STOCK_ALERT_CREATED",
             {
                 "tenant_id": str(tenant_id),
@@ -673,7 +679,8 @@ async def decrement_stock_bulk(
     # Un aviso por corrida, no uno por venta: ``events.stock_decreased`` sólo encola
     # el recálculo de score del tenant, así que emitirlo 1.187 veces encolaba 1.187
     # veces el mismo recálculo del mismo negocio.
-    EventBus.emit(
+    EventBus.emit_after_commit(
+        db,
         "STOCK_DECREASED",
         {
             "tenant_id": str(tenant_id),
@@ -692,7 +699,8 @@ async def decrement_stock_bulk(
     for product_id, producto in tocados.items():
         balance = balances[product_id]
         if balance.current_qty <= effective_threshold(producto.low_stock_threshold_units):
-            EventBus.emit(
+            EventBus.emit_after_commit(
+                db,
                 "STOCK_ALERT_CREATED",
                 {
                     "tenant_id": str(tenant_id),
@@ -715,7 +723,6 @@ async def increment_stock(
     *,
     supplier_id: uuid.UUID | None = None,
     occurred_at: datetime | None = None,
-    defer_event: bool = False,
     contrato: ContratoDeCosto | None = None,
     source_upload_id: uuid.UUID | None = None,
     source_row_ref: str | None = None,
@@ -776,10 +783,7 @@ async def increment_stock(
         "product_id": str(product_id),
         "qty": qty,
     }
-    if defer_event:
-        EventBus.emit_after_commit(db, "STOCK_INCREASED", event_payload)
-    else:
-        EventBus.emit("STOCK_INCREASED", event_payload)
+    EventBus.emit_after_commit(db, "STOCK_INCREASED", event_payload)
 
     return movement
 
@@ -905,6 +909,95 @@ class StockNegativoError(Exception):
     def __init__(self, message: str, *, user_message: str | None = None) -> None:
         super().__init__(message)
         self.user_message = user_message
+
+
+#: I4-5: código del 409 cuando revertir un archivo (borrado F11, deshacer o
+#: aplicar una relectura) dejaría stock negativo.
+REVERT_STOCK_NEGATIVO = "REVERT_STOCK_NEGATIVO"
+_MUESTRAS_DE_STOCK_NEGATIVO = 5
+
+
+class RevertirDejaStockNegativoError(StockNegativoError):
+    """I4-5: la reversa dejaría productos con stock negativo: esa mercadería ya
+    se vendió por otro lado (POS, carga manual, otro archivo). Se frena entera,
+    antes de commitear: el caller hace rollback y responde 409.
+
+    ``muestras``: hasta 5 productos con ``stock_actual`` (antes de revertir) y
+    ``quedaria`` (después). ``productos``: cuántos son en total.
+    """
+
+    CODE = REVERT_STOCK_NEGATIVO
+
+    def __init__(self, operacion: str, productos: int, muestras: list[dict[str, Any]]) -> None:
+        detalle = "; ".join(
+            f"«{m['nombre']}»: stock actual {m['stock_actual']}, quedaría {m['quedaria']}"
+            for m in muestras
+        )
+        if productos > len(muestras):
+            detalle += f"; y {productos - len(muestras)} más"
+        mensaje = (
+            f"{operacion} dejaría {productos} producto(s) con stock negativo, porque esa "
+            f"mercadería ya se vendió por otro lado ({detalle}). No se cambió nada. "
+            "Para poder hacerlo, esas ventas necesitan otra fuente: cargá la compra o el stock "
+            "inicial real de esa mercadería, o anulá esas ventas, y volvé a intentar."
+        )
+        super().__init__(mensaje, user_message=mensaje)
+        self.productos = productos
+        self.muestras = muestras
+
+    def detalle_http(self) -> dict[str, Any]:
+        """El ``detail`` del 409: código, mensaje y muestras."""
+        return {
+            "code": self.CODE,
+            "message": self.user_message,
+            "productos": self.productos,
+            "muestras": self.muestras,
+        }
+
+
+def foto_de_stock(catalogo: CatalogoBloqueado) -> dict[uuid.UUID, int]:
+    """El stock de cada producto ANTES de revertir, leído del catálogo ya
+    bloqueado (``bloquear_catalogo``: FOR UPDATE en orden de id y refrescado)."""
+    return {pid: int(p.stock_units) for pid, p in catalogo.productos.items()}
+
+
+async def exigir_reversa_sin_stock_negativo(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    antes: dict[uuid.UUID, int],
+    *,
+    operacion: str,
+) -> None:
+    """I4-5: después de revertir, con la transacción abierta y el catálogo
+    bloqueado, ningún producto puede haber quedado con stock negativo POR la
+    reversa. ``void_movement`` resta sin piso a propósito (un paso intermedio
+    puede bajar de 0 y el reimport volver a subir): el piso va acá, sobre el
+    estado final. Nunca un clamp: se frena con ``RevertirDejaStockNegativoError``.
+
+    Sólo cuenta el que quedó negativo Y bajó: un producto que ya estaba negativo
+    antes (cola offline del POS) y la reversa no lo empeoró no frena nada.
+    """
+    await db.flush()
+    filas = (
+        await db.execute(
+            select(Product.id, Product.name, Product.stock_units)
+            .where(Product.tenant_id == tenant_id, Product.stock_units < 0)
+            .order_by(Product.name, Product.id)
+        )
+    ).all()
+    faltantes = [f for f in filas if f.stock_units < antes.get(f.id, 0)]
+    if not faltantes:
+        return
+    muestras = [
+        {
+            "product_id": str(f.id),
+            "nombre": f.name,
+            "stock_actual": antes.get(f.id, 0),
+            "quedaria": int(f.stock_units),
+        }
+        for f in faltantes[:_MUESTRAS_DE_STOCK_NEGATIVO]
+    ]
+    raise RevertirDejaStockNegativoError(operacion, len(faltantes), muestras)
 
 
 async def _producto_para_stock_manual(

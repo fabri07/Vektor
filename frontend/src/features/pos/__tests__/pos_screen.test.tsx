@@ -511,7 +511,8 @@ describe("acceso y permisos", () => {
     await act(async () => {
       fireEvent.click(confirmar);
     });
-    expect(svc.voidOperation).toHaveBeenCalledWith("op1", "cobré de más");
+    // A-4: viaja el turno abierto de la pantalla, de cuyo cajón sale el reintegro.
+    expect(svc.voidOperation).toHaveBeenCalledWith("op1", "cobré de más", "turno-test");
     expect(await screen.findByText(/anulado/)).toBeInTheDocument();
   });
 });

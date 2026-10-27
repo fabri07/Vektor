@@ -19,7 +19,12 @@ Lo que este módulo protege
    fiado no están en el cajón. Se lee de ``pos_tenders``, así que en un pago
    mixto (B9) entra sólo la parte en efectivo.
 
-4. **El arqueo del turno no es el arqueo del día.** ``cash_closes`` es uno por
+4. **Un reintegro sale del cajón de HOY** (A-4). Anular un ticket de otro turno
+   u otro día deja un ``PosCashRefund``: resta en el turno abierto de cuyo
+   cajón salió la plata y le devuelve al turno de la venta lo que su cajón
+   todavía tiene. El arqueo firmado del turno de la venta no se toca.
+
+5. **El arqueo del turno no es el arqueo del día.** ``cash_closes`` es uno por
    (tenant, fecha) y es del negocio entero; esto es por cajero y por caja. Son
    granos distintos y **no se cruzan**: sumarlos contaría dos veces.
 """
@@ -27,7 +32,7 @@ Lo que este módulo protege
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -42,6 +47,7 @@ from app.persistence.models.pos_cash_session import (
     ESTADO_ABANDONADO,
     ESTADO_ABIERTO,
     ESTADO_CERRADO,
+    PosCashRefund,
     PosCashSession,
     PosLateSale,
 )
@@ -209,6 +215,10 @@ async def efectivo_del_turno(
     lleva el marcador ``mixed`` y sólo el tender sabe cuánto fue en efectivo.
 
     Una operación anulada no suma: su plata volvió al cliente.
+
+    A-4: si la plata se le devolvió desde OTRO turno (``PosCashRefund``), el
+    cajón de este todavía la tiene y se vuelve a sumar; y lo que se devolvió
+    desde ESTE cajón por un ticket ajeno o de otro día, se resta.
     """
     total = (
         await session.execute(
@@ -225,7 +235,127 @@ async def efectivo_del_turno(
             )
         )
     ).scalar_one()
-    return Decimal(str(total))
+    ajuste = (await ajustes_por_reintegro(session, tenant_id, [client_session_id])).get(
+        client_session_id, Decimal("0")
+    )
+    return Decimal(str(total)) + ajuste
+
+
+async def ajustes_por_reintegro(
+    session: AsyncSession, tenant_id: uuid.UUID, client_session_ids: list[str]
+) -> dict[str, Decimal]:
+    """Lo que los reintegros (A-4) le suman o le restan al cajón de cada turno.
+
+    ``+`` lo devuelto por un ticket de este turno (su cajón lo cobró y lo sigue
+    teniendo: la plata salió de otro); ``-`` lo devuelto DESDE este turno. Un
+    reintegro del mismo turno de la venta se cancela con su propio ticket
+    anulado: queda ``-`` su efectivo, que es lo que salió del cajón.
+    """
+    if not client_session_ids:
+        return {}
+    ajustes: dict[str, Decimal] = {}
+    de_origen = (
+        await session.execute(
+            select(
+                PosCashRefund.origin_client_session_id,
+                func.coalesce(func.sum(PosCashRefund.cash_ars), 0),
+            )
+            .where(
+                PosCashRefund.tenant_id == tenant_id,
+                PosCashRefund.origin_client_session_id.in_(client_session_ids),
+            )
+            .group_by(PosCashRefund.origin_client_session_id)
+        )
+    ).tuples().all()
+    for cid, monto in de_origen:
+        if cid is not None:
+            ajustes[cid] = ajustes.get(cid, Decimal("0")) + Decimal(str(monto))
+    desde = (
+        await session.execute(
+            select(
+                PosCashSession.client_session_id,
+                func.coalesce(func.sum(PosCashRefund.cash_ars), 0),
+            )
+            .join(PosCashSession, PosCashSession.id == PosCashRefund.session_id)
+            .where(
+                PosCashRefund.tenant_id == tenant_id,
+                PosCashSession.tenant_id == tenant_id,
+                PosCashSession.client_session_id.in_(client_session_ids),
+            )
+            .group_by(PosCashSession.client_session_id)
+        )
+    ).tuples().all()
+    for cid, monto in desde:
+        ajustes[cid] = ajustes.get(cid, Decimal("0")) - Decimal(str(monto))
+    return ajustes
+
+
+async def turno_abierto_para_reintegro(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    user_id: uuid.UUID,
+    solo_propios: bool,
+    terminal_id: uuid.UUID | None,
+    client_session_id: str | None,
+) -> PosCashSession | None:
+    """El turno ABIERTO de cuyo cajón sale un reintegro (A-4). Sin candado.
+
+    Si la caja lo dice (``client_session_id``) es ése, y tiene que estar abierto
+    y —para un cajero— ser suyo: el encargado puede nombrar a propósito el turno
+    de otro. Si no lo dice, el único abierto **de este usuario** en esta caja
+    (sin caja, el único suyo): nunca se descuenta en silencio del turno de otro
+    usuario —con el dueño y un cajero en la misma PC, el reintegro del dueño
+    caía en el arqueo ciego del cajero—. Con más de uno no se adivina.
+    ``None`` = no hay uno inequívoco.
+    """
+    if client_session_id is not None:
+        sesion = await obtener_por_client_id(session, tenant_id, client_session_id)
+        if sesion is None or not sesion.esta_abierto:
+            return None
+        if solo_propios and sesion.user_id != user_id:
+            return None
+        return sesion
+    stmt = select(PosCashSession).where(
+        PosCashSession.tenant_id == tenant_id,
+        PosCashSession.status == ESTADO_ABIERTO,
+        PosCashSession.user_id == user_id,
+    )
+    if terminal_id is not None:
+        stmt = stmt.where(PosCashSession.terminal_id == terminal_id)
+    candidatos = list((await session.execute(stmt.limit(2))).scalars().all())
+    return candidatos[0] if len(candidatos) == 1 else None
+
+
+async def registrar_reintegro(
+    session: AsyncSession,
+    operacion: PosOperation,
+    *,
+    sesion: PosCashSession | None,
+    cash_ars: Decimal,
+    refund_date: date,
+    user_id: uuid.UUID | None,
+    ahora: datetime | None = None,
+) -> PosCashRefund:
+    """Deja asentado que el efectivo de ``operacion`` salió hoy del cajón (A-4).
+
+    El llamador ya bloqueó el turno con ``FOR SHARE`` y vio que sigue abierto:
+    así un cierre en vuelo o lo suma, o espera a que esto commitee.
+    """
+    reintegro = PosCashRefund(
+        tenant_id=operacion.tenant_id,
+        operation_id=operacion.id,
+        session_id=sesion.id if sesion is not None else None,
+        origin_client_session_id=operacion.client_session_id,
+        sale_date=operacion.operation_date.date(),
+        refund_date=refund_date,
+        cash_ars=cash_ars,
+        user_id=user_id,
+        created_at=ahora or datetime.now(UTC),
+    )
+    session.add(reintegro)
+    await session.flush()
+    return reintegro
 
 
 async def resumen_de_turnos(
@@ -235,7 +365,8 @@ async def resumen_de_turnos(
     consultas y no dos por turno: el panel del encargado lista hasta 200.
 
     Misma regla que ``efectivo_del_turno`` —tenders en efectivo de operaciones
-    vivas—; la cantidad de tickets es lo que deja distinguir un turno basura
+    vivas, más los ajustes por reintegro (A-4, dos consultas más, también en
+    lote)—; la cantidad de tickets es lo que deja distinguir un turno basura
     (cero ventas) de uno que hay que contar.
     """
     if not client_session_ids:
@@ -271,8 +402,12 @@ async def resumen_de_turnos(
             )
         ).tuples().all()
     )
+    ajustes = await ajustes_por_reintegro(session, tenant_id, client_session_ids)
     return {
-        cid: (Decimal(str(efectivo.get(cid, 0))), int(tickets.get(cid, 0)))
+        cid: (
+            Decimal(str(efectivo.get(cid, 0))) + ajustes.get(cid, Decimal("0")),
+            int(tickets.get(cid, 0)),
+        )
         for cid in client_session_ids
     }
 

@@ -13,6 +13,8 @@ interface VoidLastTicketProps {
   onVoided: (op: PosOperationResult) => void;
   /** Rótulo del botón; por defecto, el del último ticket. */
   label?: string;
+  /** A-4: el turno abierto de esta pantalla, de cuyo cajón sale un reintegro. */
+  clientSessionId?: string | null;
 }
 
 /**
@@ -23,7 +25,12 @@ interface VoidLastTicketProps {
  * interceptor reintenta. El motivo se pide siempre; para un cajero es
  * obligatorio en el servidor.
  */
-export function VoidLastTicket({ operation, onVoided, label }: VoidLastTicketProps) {
+export function VoidLastTicket({
+  operation,
+  onVoided,
+  label,
+  clientSessionId,
+}: VoidLastTicketProps) {
   const [abierto, setAbierto] = useState(false);
   const [motivo, setMotivo] = useState("");
   const [enviando, setEnviando] = useState(false);
@@ -43,7 +50,7 @@ export function VoidLastTicket({ operation, onVoided, label }: VoidLastTicketPro
     setEnviando(true);
     setError(null);
     try {
-      const r = await posService.voidOperation(operation.id, motivo.trim());
+      const r = await posService.voidOperation(operation.id, motivo.trim(), clientSessionId);
       onVoided(r);
       setAbierto(false);
     } catch (e) {

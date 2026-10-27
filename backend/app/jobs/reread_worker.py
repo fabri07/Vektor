@@ -53,6 +53,10 @@ async def aplicar_relectura(run_id: str, file_id: str, tenant_id: str) -> dict[s
     from app.application.services.reread_service import (  # noqa: PLC0415
         _strip_bulky_fields,
     )
+    from app.application.services.stock_service import (  # noqa: PLC0415
+        REVERT_STOCK_NEGATIVO,
+        RevertirDejaStockNegativoError,
+    )
     from app.config.settings import get_settings  # noqa: PLC0415
     from app.persistence.models.repair import DataRepairRun  # noqa: PLC0415
 
@@ -149,6 +153,13 @@ async def aplicar_relectura(run_id: str, file_id: str, tenant_id: str) -> dict[s
                     # I4-1: el archivo se borró con el run en la cola. Tampoco es
                     # una falla: no se aplica nada y el run queda cerrado.
                     logger.info("reread.apply.file_deleted", run_id=run_id)
+                elif isinstance(exc, RevertirDejaStockNegativoError):
+                    # I4-5: dejaría stock negativo. Regla de negocio, no falla.
+                    logger.info(
+                        "reread.apply.blocked_negative_stock",
+                        run_id=run_id,
+                        productos=exc.productos,
+                    )
                 else:
                     logger.error(
                         "reread.apply.failed", run_id=run_id, error=str(exc)
@@ -163,6 +174,12 @@ async def aplicar_relectura(run_id: str, file_id: str, tenant_id: str) -> dict[s
                         details["error"] = str(exc)[:500]
                         if isinstance(exc, reread_service.RereadFileDeletedError):
                             details["reason"] = reread_service.MOTIVO_ARCHIVO_BORRADO
+                        elif isinstance(exc, RevertirDejaStockNegativoError):
+                            # I4-5: el mensaje entero (no cabe en 500) y el código
+                            # para que la pantalla lo distinga.
+                            details["error"] = exc.user_message
+                            details["reason"] = REVERT_STOCK_NEGATIVO
+                            details["negative_stock"] = exc.detalle_http()
                         r.details_json = details
                         await s2.commit()
                 return {"status": "FAILED", "error": str(exc)[:200]}

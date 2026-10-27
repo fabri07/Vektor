@@ -3,13 +3,11 @@ Score trigger service — thin shim that dispatches Celery tasks.
 Imported by API endpoints to schedule async recalculations.
 """
 
-from typing import Any
-
-from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTasks
 
 from app.jobs.celery_app import celery_app
+from app.persistence.db.despues_del_commit import al_confirmar
 
 
 def trigger_score_recalculation_after_commit(
@@ -27,8 +25,9 @@ def trigger_score_recalculation_after_commit(
     recalcularía con los datos que se están revirtiendo.
 
     Mismo mecanismo que ``EventBus.emit_after_commit`` (``stock_service``,
-    ``pending_action_service``): el listener ``after_commit`` de SQLAlchemy. Si la
-    transacción hace rollback, el task nunca se encola.
+    ``pending_action_service``): ``al_confirmar``, que espera el commit de nivel
+    superior (no el de un savepoint). Si la transacción hace rollback, el task
+    nunca se encola.
 
     ``background`` (las ``BackgroundTasks`` del endpoint) saca además el
     ``.delay()`` del camino de la respuesta. Sin él, la llamada al broker corre
@@ -42,7 +41,6 @@ def trigger_score_recalculation_after_commit(
     Fuera de un request (worker de Celery, scripts) se llama sin ``background``:
     ahí no hay respuesta que proteger y el encolado va en línea con el commit.
     """
-    sync_session = db.sync_session
 
     def _encolar() -> None:
         # Fail-safe OBLIGATORIO: acá la transacción YA commiteó. Si el broker está
@@ -62,14 +60,17 @@ def trigger_score_recalculation_after_commit(
                 triggered_by=triggered_by,
             )
 
-    @event.listens_for(sync_session, "after_commit", once=True)
-    def _disparar(_session: Any) -> None:
+    def _disparar() -> None:
         if background is not None:
             # `_encolar` es sync: Starlette lo corre en un threadpool, así que el
             # I/O bloqueante del broker no traba el event loop.
             background.add_task(_encolar)
             return
         _encolar()
+
+    # V-1: no un ``after_commit`` con ``once=True``, que se consumía al liberar el
+    # primer savepoint (antes del commit real) y sobrevivía a un rollback.
+    al_confirmar(db, _disparar)
 
 
 @celery_app.task(name="jobs.trigger_score_recalculation", queue="scores")  # type: ignore[misc]

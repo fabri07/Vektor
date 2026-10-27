@@ -427,7 +427,8 @@ async def _reclamar(
     entity: str,
     leer_ademas: list[str] | None = None,
 ) -> tuple[set[str], dict[str, tuple[uuid.UUID, str, str]]]:
-    """Toma el candado de todas las claves del archivo en UNA sentencia.
+    """Toma el candado de todas las claves del archivo (I6-2: en tandas de
+    ``_FILAS_POR_INSERT``; un solo INSERT pasaba el tope de asyncpg).
 
     Devuelve ``(claves ganadas, {clave: (id, content_hash, entity_type)}``) de
     las ganadas, las perdidas y las de ``leer_ademas`` (las del mismo documento
@@ -450,31 +451,35 @@ async def _reclamar(
     dialecto = bind.dialect.name if bind is not None else ""
     # Un alias por rama (y no uno compartido) porque los dos `insert` son tipos
     # distintos: es el mismo patrón que `_persist_import_fingerprints`.
-    if dialecto == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert as _pg_insert  # noqa: PLC0415
-
-        sentencia = (
-            _pg_insert(OperationIdentity)
-            .values(filas)
-            .on_conflict_do_nothing(index_elements=["tenant_id", "identity_key"])
-            .returning(OperationIdentity.identity_key)
-        )
-    elif dialecto == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert as _sqlite_insert  # noqa: PLC0415
-
-        sentencia = (
-            _sqlite_insert(OperationIdentity)
-            .values(filas)
-            .on_conflict_do_nothing(index_elements=["tenant_id", "identity_key"])
-            .returning(OperationIdentity.identity_key)
-        )
-    else:  # pragma: no cover — sin ON CONFLICT no hay candado: se declara nulo
+    if dialecto not in ("postgresql", "sqlite"):  # pragma: no cover
+        # Sin ON CONFLICT no hay candado: se declara nulo.
         logger.warning("ingestion.identidad.dialecto_sin_upsert", dialecto=dialecto)
         return set(), await _leer_con_entidad(
             session, tenant_id, sorted(set(contenidos) | set(leer_ademas or ()))
         )
 
-    ganadas: set[str] = set((await session.execute(sentencia)).scalars().all())
+    ganadas: set[str] = set()
+    # I6-2: en tandas (6 parámetros por fila).
+    for tanda in en_tandas(filas, _FILAS_POR_INSERT):
+        if dialecto == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as _pg_insert  # noqa: PLC0415
+
+            sentencia = (
+                _pg_insert(OperationIdentity)
+                .values(tanda)
+                .on_conflict_do_nothing(index_elements=["tenant_id", "identity_key"])
+                .returning(OperationIdentity.identity_key)
+            )
+        else:
+            from sqlalchemy.dialects.sqlite import insert as _sqlite_insert  # noqa: PLC0415
+
+            sentencia = (
+                _sqlite_insert(OperationIdentity)
+                .values(tanda)
+                .on_conflict_do_nothing(index_elements=["tenant_id", "identity_key"])
+                .returning(OperationIdentity.identity_key)
+            )
+        ganadas.update((await session.execute(sentencia)).scalars().all())
     # Las ganadas también necesitan su id para colgar vínculos: se leen de una,
     # junto con las perdidas y las equivalentes, en vez de pagar una query por grupo.
     existentes = await _leer_con_entidad(
@@ -487,14 +492,25 @@ async def _reclamar(
 #: fiscal (siete claves por documento): sin tope, un archivo grande pasaría el
 #: límite de parámetros de asyncpg (32.767). Hasta este tamaño es UNA query.
 _CLAVES_POR_LECTURA = 5000
+#: I6-2: filas por INSERT multi-VALUES. Cada fila lleva 6 parámetros (6.000 por
+#: sentencia): el ``.values(filas)`` NO pasa por el insertmanyvalues de
+#: SQLAlchemy, que sólo parte el executemany.
+_FILAS_POR_INSERT = 1000
+#: I6-2: ids por ``IN`` en las sentencias por efecto o por identidad.
+_IDS_POR_SENTENCIA = 5000
+
+
+def en_tandas[T](items: list[T], tope: int) -> list[list[T]]:
+    """``items`` partidos en tandas de a lo sumo ``tope``, en orden (I6-2: el
+    tope de 32.767 parámetros de asyncpg)."""
+    return [items[desde : desde + tope] for desde in range(0, len(items), tope)]
 
 
 def tandas_de_claves(claves: list[str]) -> list[list[str]]:
     """``claves`` partidas en tandas de ``_CLAVES_POR_LECTURA``. La usa todo el
     que arma un ``IN`` con claves y sus equivalentes (el import y el revert de
     B·5g): un ``IN`` sin tope pasa el límite de parámetros de asyncpg."""
-    tope = _CLAVES_POR_LECTURA
-    return [claves[desde : desde + tope] for desde in range(0, len(claves), tope)]
+    return en_tandas(claves, _CLAVES_POR_LECTURA)
 
 
 async def _leer_con_entidad(
@@ -560,12 +576,13 @@ async def cerrar_plan(
             if ident is not None and ident not in con_efecto:
                 sobrantes.add(ident)
     if sobrantes:
-        await session.execute(
-            delete(OperationIdentity).where(
-                OperationIdentity.tenant_id == tenant_id,
-                OperationIdentity.id.in_(sorted(sobrantes)),
+        for tanda in en_tandas(sorted(sobrantes), _IDS_POR_SENTENCIA):  # I6-2
+            await session.execute(
+                delete(OperationIdentity).where(
+                    OperationIdentity.tenant_id == tenant_id,
+                    OperationIdentity.id.in_(tanda),
+                )
             )
-        )
         logger.info(
             "ingestion.identidad.reclamos_devueltos",
             tenant_id=str(tenant_id),
@@ -592,26 +609,32 @@ async def _persistir_vinculos(
     ]
     bind = session.bind
     dialecto = bind.dialect.name if bind is not None else ""
-    if dialecto == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert as _pg_insert  # noqa: PLC0415
+    # I6-2: en tandas, como `_reclamar` (6 parámetros por fila).
+    for tanda in en_tandas(filas, _FILAS_POR_INSERT):
+        if dialecto == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as _pg_insert  # noqa: PLC0415
 
-        await session.execute(
-            _pg_insert(OperationIdentityLink)
-            .values(filas)
-            .on_conflict_do_nothing(index_elements=["identity_id", "entity_type", "entity_id"])
-        )
-    elif dialecto == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert as _sqlite_insert  # noqa: PLC0415
+            await session.execute(
+                _pg_insert(OperationIdentityLink)
+                .values(tanda)
+                .on_conflict_do_nothing(
+                    index_elements=["identity_id", "entity_type", "entity_id"]
+                )
+            )
+        elif dialecto == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert as _sqlite_insert  # noqa: PLC0415
 
-        await session.execute(
-            _sqlite_insert(OperationIdentityLink)
-            .values(filas)
-            .on_conflict_do_nothing(index_elements=["identity_id", "entity_type", "entity_id"])
-        )
-    else:  # pragma: no cover
-        from sqlalchemy import insert as _plain  # noqa: PLC0415
+            await session.execute(
+                _sqlite_insert(OperationIdentityLink)
+                .values(tanda)
+                .on_conflict_do_nothing(
+                    index_elements=["identity_id", "entity_type", "entity_id"]
+                )
+            )
+        else:  # pragma: no cover
+            from sqlalchemy import insert as _plain  # noqa: PLC0415
 
-        await session.execute(_plain(OperationIdentityLink).values(filas))
+            await session.execute(_plain(OperationIdentityLink).values(tanda))
 
 
 async def liberar_identidades_de(
@@ -629,55 +652,70 @@ async def liberar_identidades_de(
     """
     if not efectos:
         return 0
-    condiciones = [
-        (OperationIdentityLink.entity_type == tipo) & (OperationIdentityLink.entity_id == eid)
-        for tipo, eid in efectos
+    # I6-2: por tipo y con ``IN`` por tandas, no un ``OR`` de pares (2
+    # parámetros por efecto: pasado ~16k ventas+gastos el borrado y la
+    # relectura fallaban SIEMPRE, aunque el archivo no tuviera identidades).
+    # Mismo conjunto: (tipo, id) con el tipo fijo por tanda.
+    por_tipo: dict[str, set[uuid.UUID]] = defaultdict(set)
+    for tipo, eid in efectos:
+        por_tipo[tipo].add(eid)
+    tandas = [
+        (tipo, tanda)
+        for tipo, ids in sorted(por_tipo.items())
+        for tanda in en_tandas(sorted(ids), _IDS_POR_SENTENCIA)
     ]
-    from sqlalchemy import or_  # noqa: PLC0415
 
-    afectadas = set(
-        (
-            await session.execute(
-                select(OperationIdentityLink.identity_id).where(
-                    OperationIdentityLink.tenant_id == tenant_id, or_(*condiciones)
+    def _de(tipo: str, tanda: list[uuid.UUID]) -> Any:
+        return (
+            (OperationIdentityLink.tenant_id == tenant_id)
+            & (OperationIdentityLink.entity_type == tipo)
+            & OperationIdentityLink.entity_id.in_(tanda)
+        )
+
+    afectadas: set[uuid.UUID] = set()
+    for tipo, tanda in tandas:
+        afectadas.update(
+            (
+                await session.execute(
+                    select(OperationIdentityLink.identity_id).where(_de(tipo, tanda))
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
     if not afectadas:
+        # Sin vínculos (el archivo no traía identidades): sólo las lecturas.
         return 0
-    await session.execute(
-        delete(OperationIdentityLink).where(
-            OperationIdentityLink.tenant_id == tenant_id, or_(*condiciones)
-        )
-    )
+    for tipo, tanda in tandas:
+        await session.execute(delete(OperationIdentityLink).where(_de(tipo, tanda)))
     # Sólo las que quedaron sin vínculos. El `NOT EXISTS` se resuelve después del
     # DELETE: si se leyera antes, una identidad con dos efectos —uno revertido y
     # otro no— se vería como huérfana y se soltaría de más.
-    vivos = set(
-        (
-            await session.execute(
-                select(OperationIdentityLink.identity_id).where(
-                    OperationIdentityLink.identity_id.in_(sorted(afectadas))
+    vivos: set[uuid.UUID] = set()
+    for tanda_ids in en_tandas(sorted(afectadas), _IDS_POR_SENTENCIA):
+        vivos.update(
+            (
+                await session.execute(
+                    select(OperationIdentityLink.identity_id).where(
+                        OperationIdentityLink.identity_id.in_(tanda_ids)
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
     huerfanas = afectadas - vivos
     if vivos & afectadas:
         await _resellar_sin_respaldo(session, tenant_id, sorted(vivos & afectadas))
     if not huerfanas:
         return 0
-    await session.execute(
-        delete(OperationIdentity).where(
-            OperationIdentity.tenant_id == tenant_id,
-            OperationIdentity.id.in_(sorted(huerfanas)),
+    for tanda_ids in en_tandas(sorted(huerfanas), _IDS_POR_SENTENCIA):
+        await session.execute(
+            delete(OperationIdentity).where(
+                OperationIdentity.tenant_id == tenant_id,
+                OperationIdentity.id.in_(tanda_ids),
+            )
         )
-    )
     logger.info(
         "ingestion.identidad.liberadas",
         tenant_id=str(tenant_id),
@@ -755,22 +793,29 @@ async def vinculos_de(
     if not efectos:
         return {}
     pedidos = set(efectos)
-    filas = (
-        await session.execute(
-            select(
-                OperationIdentityLink.entity_type,
-                OperationIdentityLink.entity_id,
-                OperationIdentity.identity_key,
-                OperationIdentity.content_hash,
-                OperationIdentity.entity_type,
-            )
-            .join(OperationIdentity, OperationIdentity.id == OperationIdentityLink.identity_id)
-            .where(
-                OperationIdentityLink.tenant_id == tenant_id,
-                OperationIdentityLink.entity_id.in_(sorted({eid for _, eid in efectos})),
-            )
+    filas: list[Any] = []
+    for tanda in en_tandas(sorted({eid for _, eid in efectos}), _IDS_POR_SENTENCIA):  # I6-2
+        filas.extend(
+            (
+                await session.execute(
+                    select(
+                        OperationIdentityLink.entity_type,
+                        OperationIdentityLink.entity_id,
+                        OperationIdentity.identity_key,
+                        OperationIdentity.content_hash,
+                        OperationIdentity.entity_type,
+                    )
+                    .join(
+                        OperationIdentity,
+                        OperationIdentity.id == OperationIdentityLink.identity_id,
+                    )
+                    .where(
+                        OperationIdentityLink.tenant_id == tenant_id,
+                        OperationIdentityLink.entity_id.in_(tanda),
+                    )
+                )
+            ).all()
         )
-    ).all()
     foto: dict[tuple[str, uuid.UUID], list[dict[str, str]]] = defaultdict(list)
     for tipo, eid, clave, contenido, entidad in filas:
         if (tipo, eid) in pedidos:

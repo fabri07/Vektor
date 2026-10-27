@@ -1115,6 +1115,7 @@ function PosRegister() {
               <VoidLastTicket
                 key={lastOperation.id}
                 operation={lastOperation}
+                clientSessionId={turno?.clientSessionId ?? null}
                 onVoided={(op) => {
                   setLastOperation(op);
                   setScanMsg(`Ticket de ${formatCents(toCents(op.total_ars) ?? 0)} anulado.`);
@@ -1146,6 +1147,7 @@ function PosRegister() {
             <RecentTickets
               refreshKey={`${lastOperation?.id ?? ""}:${lastOperation?.status ?? ""}`}
               canVoid={canVoid}
+              clientSessionId={turno?.clientSessionId ?? null}
               onReprint={(id) => {
                 void printReceipt(id);
                 focusScan();

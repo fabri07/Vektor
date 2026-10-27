@@ -158,7 +158,6 @@ async def registrar_compra(
             session,
             supplier_id=proveedor_id,
             occurred_at=fecha,
-            defer_event=True,
             contrato=linea.contrato,
             source_upload_id=source_upload_id,
             source_row_ref=source_row_ref,
