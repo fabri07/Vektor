@@ -36,6 +36,13 @@ class User(TimestampMixin, Base):
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Baja hecha por el dueño (`DELETE /users/{id}`, X3-1). `is_active=False` solo
+    # no alcanza: también es el estado de un registro pendiente de verificar el
+    # email, y la verificación activa. Con esto seteado, ni `resend-verification`
+    # ni `verify-email` actúan sobre la cuenta. NULL = nunca dada de baja.
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Step-up auth — PIN de 4 dígitos (bcrypt). NULL = todavía no configurado.
     pin_hash: Mapped[str | None] = mapped_column(Text, nullable=True)

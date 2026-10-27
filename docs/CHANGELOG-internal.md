@@ -95,5 +95,6 @@
 | `20261021_0002` | CHECK `ck_sales_entries_void_reason` suma `REPAIR_SALE_WITHOUT_PURCHASE` (`NOT VALID`→`VALIDATE`, superconjunto) — la reparación explícita de ventas históricas sin compra previa (B·5g, `scripts/ventas_sin_compra_a_otros.py --apply`), ver `docs/claude/plataforma.md` |
 | `20261021_0003` | CHECK `ck_repair_items_action` suma `UPDATE_CUSTOMER_CROSS_FIELD`/`UPDATE_SUPPLIER_CROSS_FIELD` (`NOT VALID`→`VALIDATE`, superconjunto; el downgrade borra antes esas filas) — un ítem de ledger por campo de ficha completado desde otra sección (B·6), ver `docs/claude/ingesta.md` |
 | `20261021_0004` | `product_aliases` (ORM: `ProductAlias`; único `(tenant_id, alias_normalizado)`, sin FK al archivo) — alias de producto aprendidos al vincular una venta de «Otros» (B·8a), ver `docs/claude/ingesta.md` |
+| `20261026_0001` | `users.deactivated_at` (TIMESTAMPTZ NULL) + backfill conservador de bajas previas — una baja de `DELETE /users/{id}` no se reactiva con `verify-email` (X3-1), ver `docs/claude/maestros.md` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.

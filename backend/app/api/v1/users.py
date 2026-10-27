@@ -1,5 +1,6 @@
 """User management endpoints."""
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -193,5 +194,8 @@ async def delete_user(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot deactivate yourself."
         )
     user.is_active = False
+    # Marca la baja (X3-1): sin esto la cuenta queda igual que un registro
+    # pendiente de verificar y `verify-email` la reactiva sin pasar por el dueño.
+    user.deactivated_at = datetime.now(UTC)
     await repo.save(user)
     return MessageResponse(message="User deactivated.")
