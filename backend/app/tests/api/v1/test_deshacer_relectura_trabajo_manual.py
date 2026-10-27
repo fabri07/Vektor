@@ -39,7 +39,7 @@ from app.integrations.s3 import S3Client
 from app.persistence.models.file import PROCESSING_STATUS_DONE, UploadedFile
 from app.persistence.models.repair import DataRepairRun
 from app.persistence.models.tenant import Tenant
-from app.persistence.models.transaction import ExpenseEntry
+from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_STATUS_DISMISSED,
     UNCLASSIFIED_STATUS_IMPORTED,
@@ -75,20 +75,53 @@ def _s3_con_la_relectura(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(S3Client, "head", _head)
 
 
-async def _importar(s: AsyncSession, tenant_id: uuid.UUID) -> uuid.UUID:
-    """Archivo de compras confirmado como el confirm real: efectos + ledger."""
+#: Archivo de VENTAS de las velas que compra el de compras (B·5e-1: sin compra
+#: previa la venta iría a «Otros»).
+_HEADERS_VENTAS = ["fecha", "producto", "cantidad", "monto"]
+
+
+def _venta(dia: int, monto: str) -> dict[str, str]:
+    return {
+        "fecha": f"2024-03-{dia:02d}",
+        "producto": esc.PRODUCTO,
+        "cantidad": "1",
+        "monto": monto,
+    }
+
+
+def _summary_ventas(filas: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "ventas",
+        "multi_sheet": False,
+        "has_venta": True,
+        "row_count": len(filas),
+        "headers": _HEADERS_VENTAS,
+        "ventas_detectadas": filas,
+        "preview_rows": filas,
+        "confirmed_fields": {"ventas": True},
+    }
+
+
+async def _importar(
+    s: AsyncSession, tenant_id: uuid.UUID, summary: dict[str, Any] | None = None
+) -> uuid.UUID:
+    """Archivo confirmado como el confirm real: efectos + ledger. Por defecto, el
+    de compras."""
+    summary = summary or esc.summary(_FILAS)
+    tipo = "ventas" if summary.get("inferred_type") == "ventas" else "gastos"
     file_id = uuid.uuid4()
     s.add(
         UploadedFile(
             id=file_id,
             tenant_id=tenant_id,
-            original_filename="compras.xlsx",
-            s3_key=f"tenants/{tenant_id}/compras.xlsx",
+            original_filename=f"{tipo}.xlsx",
+            s3_key=f"tenants/{tenant_id}/{tipo}-{file_id}.xlsx",
             content_type="application/vnd.ms-excel",
             size_bytes=1,
-            purpose="gastos",
+            purpose=tipo,
             processing_status=PROCESSING_STATUS_DONE,
-            parsed_summary_json=esc.summary(_FILAS),
+            parsed_summary_json=summary,
             ingestion_version=INGESTION_VERSION,
         )
     )
@@ -97,8 +130,8 @@ async def _importar(s: AsyncSession, tenant_id: uuid.UUID) -> uuid.UUID:
     counts = await insert_confirmed_data(
         s,
         tenant_id,
-        esc.summary(_FILAS),
-        {"gastos": True},
+        summary,
+        {tipo: True},
         return_details=True,
         uploaded_file_id=file_id,
     )
@@ -148,8 +181,8 @@ async def _releer(s: AsyncSession, file_id: uuid.UUID, tenant_id: uuid.UUID) -> 
     return resultado.run_id
 
 
-async def _gasto_insertado(s: AsyncSession, run_id: uuid.UUID) -> str:
-    """El id del gasto que la relectura insertó (el de la fila corregida)."""
+async def _gasto_insertado(s: AsyncSession, run_id: uuid.UUID, kind: str = "expense") -> str:
+    """El id del gasto (o venta) que la relectura insertó (el de la fila corregida)."""
     run = await s.get(DataRepairRun, run_id)
     assert run is not None
     from app.persistence.models.repair import DataRepairItem  # noqa: PLC0415
@@ -165,9 +198,9 @@ async def _gasto_insertado(s: AsyncSession, run_id: uuid.UUID) -> str:
     ids = [
         str((it.after_json or {})["id"])
         for it in items
-        if (it.after_json or {}).get("kind") == "expense"
+        if (it.after_json or {}).get("kind") == kind
     ]
-    assert ids, "la relectura tenía que insertar al menos un gasto"
+    assert ids, f"la relectura tenía que insertar al menos un {kind}"
     return ids[0]
 
 
@@ -178,13 +211,27 @@ async def _run(s: AsyncSession, run_id: uuid.UUID) -> DataRepairRun:
     return run
 
 
-def _es_trabajo_manual(r: Any, *, gastos: int = 0, otros: int = 0) -> dict[str, Any]:
+def _es_trabajo_manual(
+    r: Any, *, ventas: int = 0, gastos: int = 0, anuladas: int = 0, otros: int = 0
+) -> dict[str, Any]:
     assert r.status_code == 409, r.text
     detalle = r.json()["detail"]
     assert detalle["code"] == reread_service.UNDO_PISA_TRABAJO_MANUAL
-    assert (detalle["ventas"], detalle["gastos"], detalle["otros"]) == (0, gastos, otros)
+    assert (
+        detalle["ventas"],
+        detalle["gastos"],
+        detalle["anuladas"],
+        detalle["otros"],
+    ) == (ventas, gastos, anuladas, otros)
     assert detalle["muestras"], "el 409 trae muestras"
+    # El bloqueo es definitivo: el mensaje no promete un remedio que no existe.
+    total = ventas + gastos + anuladas + otros
+    assert detalle["message"].startswith(
+        "Esta relectura ya no se puede deshacer automáticamente porque después "
+        f"corregiste, anulaste o clasificaste {total} operación(es)"
+    ), detalle["message"]
     assert "No se cambió nada" in detalle["message"]
+    assert "volvé a intentar" not in detalle["message"]
     return detalle
 
 
@@ -220,10 +267,11 @@ async def test_deshacer_con_un_gasto_corregido_despues_de_releer_da_409_y_no_toc
     assert detalle["muestras"][0] == {
         "kind": "expense",
         "id": gasto_id,
+        "motivo": "corregida",
         "fecha": "2024-03-05",
         "monto": "2500.00",
     }
-    assert "corregiste a mano" in detalle["message"]
+    assert "1 gasto(s) corregido(s)" in detalle["message"]
     # Nada escrito: la corrección sigue, el original sigue anulado, el run aplicado.
     assert await _gastos_vivos(db_session, fid) == antes
     gasto = await db_session.get(ExpenseEntry, uuid.UUID(gasto_id))
@@ -248,6 +296,102 @@ async def test_deshacer_sin_correcciones_posteriores_sigue_andando(
 
     assert r.status_code == 200, r.text
     assert await _gastos_vivos(db_session, fid) == originales
+    assert (await _run(db_session, run_id)).status == "REVERTED"
+
+
+async def _ventas_vivas(s: AsyncSession, file_id: uuid.UUID) -> dict[str, str]:
+    """``{id: monto}`` de las ventas vivas del archivo."""
+    s.expire_all()
+    filas = (
+        await s.execute(
+            select(SaleEntry.id, SaleEntry.amount).where(
+                SaleEntry.source_upload_id == file_id, SaleEntry.voided_at.is_(None)
+            )
+        )
+    ).all()
+    return {str(i): str(m) for i, m in filas}
+
+
+async def _archivo_de_ventas_releido(
+    s: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[uuid.UUID, uuid.UUID, str, dict[str, str]]:
+    """Compras, después ventas; la relectura de las ventas corrige un monto.
+    Devuelve ``(archivo, run, venta insertada, ventas originales)``."""
+    await _importar(s, tenant_id)
+    ventas = [_venta(10, "3000"), _venta(11, "3100")]
+    fid = await _importar(s, tenant_id, _summary_ventas(ventas))
+    originales = await _ventas_vivas(s, fid)
+    assert len(originales) == 2, originales
+    _RELEIDO["summary"] = _summary_ventas([_venta(10, "3050"), ventas[1]])
+    run_id = await _releer(s, fid, tenant_id)
+    return fid, run_id, await _gasto_insertado(s, run_id, "sale"), originales
+
+
+async def test_deshacer_con_una_venta_corregida_despues_de_releer_da_409(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    tid = sample_tenant.tenant_id
+    fid, run_id, venta_id, _originales = await _archivo_de_ventas_releido(db_session, tid)
+    r = await client.patch(
+        f"/api/v1/sales/{venta_id}", json={"notes": "cobrada en efectivo"}, headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+    await db_session.commit()
+    antes = await _ventas_vivas(db_session, fid)
+
+    r = await client.post(f"/api/v1/ingestion/files/{fid}/reread/undo", headers=auth_headers)
+
+    detalle = _es_trabajo_manual(r, ventas=1)
+    (muestra,) = detalle["muestras"]
+    assert (muestra["kind"], muestra["id"], muestra["motivo"]) == ("sale", venta_id, "corregida")
+    assert await _ventas_vivas(db_session, fid) == antes
+    assert (await _run(db_session, run_id)).status == "APPLIED"
+
+
+async def test_deshacer_con_una_venta_anulada_a_mano_da_409_y_no_la_resucita(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """``DELETE /sales`` anula sin marcar ``has_user_edits``: deshacer borraba la
+    anulada y des-anulaba la original, devolviendo la venta que el usuario sacó."""
+    tid = sample_tenant.tenant_id
+    fid, run_id, venta_id, _originales = await _archivo_de_ventas_releido(db_session, tid)
+    r = await client.delete(f"/api/v1/sales/{venta_id}", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    await db_session.commit()
+    antes = await _ventas_vivas(db_session, fid)
+    assert venta_id not in antes and len(antes) == 1
+
+    r = await client.post(f"/api/v1/ingestion/files/{fid}/reread/undo", headers=auth_headers)
+
+    detalle = _es_trabajo_manual(r, anuladas=1)
+    (muestra,) = detalle["muestras"]
+    assert (muestra["kind"], muestra["id"], muestra["motivo"]) == ("sale", venta_id, "anulada")
+    assert "1 venta(s) o gasto(s) anulado(s)" in detalle["message"]
+    # Nada escrito: la anulada sigue anulada (y existe), la original sigue anulada.
+    assert await _ventas_vivas(db_session, fid) == antes
+    assert await db_session.get(SaleEntry, uuid.UUID(venta_id)) is not None
+    assert (await _run(db_session, run_id)).status == "APPLIED"
+
+
+async def test_deshacer_una_relectura_de_ventas_sin_tocar_sigue_andando(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    tid = sample_tenant.tenant_id
+    fid, run_id, _venta_id, originales = await _archivo_de_ventas_releido(db_session, tid)
+
+    r = await client.post(f"/api/v1/ingestion/files/{fid}/reread/undo", headers=auth_headers)
+
+    assert r.status_code == 200, r.text
+    assert await _ventas_vivas(db_session, fid) == originales
     assert (await _run(db_session, run_id)).status == "REVERTED"
 
 
@@ -303,7 +447,8 @@ async def test_deshacer_con_una_fila_de_otros_ya_clasificada_da_409_y_no_toca_na
     detalle = _es_trabajo_manual(r, otros=1)
     assert detalle["muestras"][0]["kind"] == "otros"
     assert detalle["muestras"][0]["id"] == otro_id
-    assert "ya clasificaste" in detalle["message"]
+    assert detalle["muestras"][0]["motivo"] == "clasificada"
+    assert "1 fila(s) de «Otros» clasificada(s)" in detalle["message"]
     assert await _otros(db_session, fid) == {otro_id: UNCLASSIFIED_STATUS_IMPORTED}
     assert await _gastos_vivos(db_session, fid) == vivos
     assert (await _run(db_session, run_id)).status == "APPLIED"

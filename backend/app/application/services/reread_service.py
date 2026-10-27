@@ -72,7 +72,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTasks
@@ -4970,40 +4970,47 @@ _MUESTRAS_DE_TRABAJO_MANUAL = 5
 
 class DeshacerPisaTrabajoManualError(ValueError):
     """I4-3/I4-4: deshacer borraría ventas o gastos que la relectura cargó y el
-    usuario corrigió después (``has_user_edits``), o filas de «Otros» que la
-    relectura creó y el usuario ya clasificó (su venta o gasto quedaría junto a
-    la original des-anulada: la operación dos veces). Se frena entero ANTES de
-    tocar nada: el caller hace rollback y responde 409. Decisión conservadora:
-    no se elige por el usuario entre su corrección y el archivo."""
+    usuario corrigió (``has_user_edits``) o anuló a mano después, o filas de
+    «Otros» que la relectura creó y el usuario ya clasificó (su venta o gasto
+    quedaría junto a la original des-anulada: la operación dos veces). Se frena
+    entero ANTES de tocar nada: el caller hace rollback y responde 409.
+
+    Decisión conservadora: el bloqueo es DEFINITIVO. No hay forma de "des-hacer"
+    esas acciones (``has_user_edits`` no vuelve a False, una compra de mercadería
+    no se borra, un «Otros» clasificado no vuelve) y no se elige por el usuario
+    entre su trabajo y el archivo: el mensaje lo dice así, sin prometer remedio."""
 
     CODE = UNDO_PISA_TRABAJO_MANUAL
 
     def __init__(
-        self, ventas: int, gastos: int, otros: int, muestras: list[dict[str, Any]]
+        self,
+        ventas: int,
+        gastos: int,
+        anuladas: int,
+        otros: int,
+        muestras: list[dict[str, Any]],
     ) -> None:
         partes = []
         if ventas:
-            partes.append(f"{ventas} venta(s)")
+            partes.append(f"{ventas} venta(s) corregida(s)")
         if gastos:
-            partes.append(f"{gastos} gasto(s)")
-        lo_editado = " y ".join(partes)
-        frases = []
-        if lo_editado:
-            frases.append(f"borraría {lo_editado} que corregiste a mano después de releer")
+            partes.append(f"{gastos} gasto(s) corregido(s)")
+        if anuladas:
+            partes.append(f"{anuladas} venta(s) o gasto(s) anulado(s)")
         if otros:
-            frases.append(
-                f"dejaría repetidas {otros} fila(s) de «Otros» que esta relectura "
-                "mandó ahí y ya clasificaste"
-            )
+            partes.append(f"{otros} fila(s) de «Otros» clasificada(s)")
+        total = ventas + gastos + anuladas + otros
         mensaje = (
-            "Deshacer esta relectura " + ", y ".join(frases) + ". No se cambió nada. "
-            "Para poder deshacerla, revisá esas operaciones (borrá las que ya no "
-            "quieras) y volvé a intentar."
+            "Esta relectura ya no se puede deshacer automáticamente porque después "
+            f"corregiste, anulaste o clasificaste {total} operación(es) que salieron "
+            f"de ella ({', '.join(partes)}). No se cambió nada. Corregí a mano lo que "
+            "haga falta."
         )
         super().__init__(mensaje)
         self.user_message = mensaje
         self.ventas = ventas
         self.gastos = gastos
+        self.anuladas = anuladas
         self.otros = otros
         self.muestras = muestras
 
@@ -5014,6 +5021,7 @@ class DeshacerPisaTrabajoManualError(ValueError):
             "message": self.user_message,
             "ventas": self.ventas,
             "gastos": self.gastos,
+            "anuladas": self.anuladas,
             "otros": self.otros,
             "muestras": self.muestras,
         }
@@ -5027,9 +5035,16 @@ async def _exigir_undo_sin_trabajo_manual(
     otros_creados: list[uuid.UUID],
 ) -> None:
     """I4-3/I4-4: frena el deshacer si borraría trabajo manual posterior a la
-    relectura. Ver ``DeshacerPisaTrabajoManualError``."""
+    relectura. Ver ``DeshacerPisaTrabajoManualError``.
+
+    Anulada cuenta CUALQUIER anulación de un insertado, no sólo la manual
+    (``DELETE /sales`` y ``/expenses`` anulan con ``VOID_REASON_MANUAL`` sin
+    marcar ``has_user_edits``): deshacer la borraba y des-anulaba la original,
+    resucitando lo que el usuario sacó. Otra relectura posterior no llega acá
+    (sólo se deshace la última aplicada) y el archivo borrado frena antes
+    (I4-2), así que una anulación viva es de alguien más: se frena."""
     muestras: list[dict[str, Any]] = []
-    conteos: dict[str, int] = {"sale": 0, "expense": 0}
+    conteos: dict[str, int] = {"sale": 0, "expense": 0, "anuladas": 0}
     fuentes: tuple[tuple[str, type[SaleEntry] | type[ExpenseEntry], set[uuid.UUID]], ...] = (
         ("sale", SaleEntry, insert_sale_ids),
         ("expense", ExpenseEntry, insert_expense_ids),
@@ -5037,7 +5052,7 @@ async def _exigir_undo_sin_trabajo_manual(
     for kind, modelo, ids in fuentes:
         if not ids:
             continue
-        editados = cast(
+        tocados = cast(
             "list[SaleEntry | ExpenseEntry]",
             (
                 await session.execute(
@@ -5045,7 +5060,10 @@ async def _exigir_undo_sin_trabajo_manual(
                     .where(
                         modelo.tenant_id == tenant_id,
                         modelo.id.in_(ids),
-                        modelo.has_user_edits.is_(True),
+                        or_(
+                            modelo.has_user_edits.is_(True),
+                            modelo.voided_at.is_not(None),
+                        ),
                     )
                     .order_by(modelo.transaction_date, modelo.id)
                 )
@@ -5053,13 +5071,15 @@ async def _exigir_undo_sin_trabajo_manual(
             .scalars()
             .all(),
         )
-        conteos[kind] = len(editados)
-        for rec in editados:
+        for rec in tocados:
+            anulada = rec.voided_at is not None
+            conteos["anuladas" if anulada else kind] += 1
             if len(muestras) < _MUESTRAS_DE_TRABAJO_MANUAL:
                 muestras.append(
                     {
                         "kind": kind,
                         "id": str(rec.id),
+                        "motivo": "anulada" if anulada else "corregida",
                         "fecha": rec.transaction_date.date().isoformat()
                         if rec.transaction_date
                         else None,
@@ -5084,11 +5104,16 @@ async def _exigir_undo_sin_trabajo_manual(
         for fila in clasificados:
             if len(muestras) < _MUESTRAS_DE_TRABAJO_MANUAL:
                 muestras.append(
-                    {"kind": "otros", "id": str(fila.id), "hoja": fila.context_label}
+                    {
+                        "kind": "otros",
+                        "id": str(fila.id),
+                        "motivo": "clasificada",
+                        "hoja": fila.context_label,
+                    }
                 )
-    if conteos["sale"] or conteos["expense"] or clasificados:
+    if any(conteos.values()) or clasificados:
         raise DeshacerPisaTrabajoManualError(
-            conteos["sale"], conteos["expense"], len(clasificados), muestras
+            conteos["sale"], conteos["expense"], conteos["anuladas"], len(clasificados), muestras
         )
 
 
