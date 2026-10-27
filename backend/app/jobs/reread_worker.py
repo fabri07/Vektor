@@ -145,6 +145,10 @@ async def aplicar_relectura(run_id: str, file_id: str, tenant_id: str) -> dict[s
                 # Sentry). El run queda FAILED con el motivo para la pantalla.
                 if isinstance(exc, reread_service.RereadWouldLeaveSalesWithoutPurchaseError):
                     logger.info("reread.apply.blocked_sales_without_purchase", run_id=run_id)
+                elif isinstance(exc, reread_service.RereadFileDeletedError):
+                    # I4-1: el archivo se borró con el run en la cola. Tampoco es
+                    # una falla: no se aplica nada y el run queda cerrado.
+                    logger.info("reread.apply.file_deleted", run_id=run_id)
                 else:
                     logger.error(
                         "reread.apply.failed", run_id=run_id, error=str(exc)
@@ -157,6 +161,8 @@ async def aplicar_relectura(run_id: str, file_id: str, tenant_id: str) -> dict[s
                         r.completed_at = datetime.now(UTC)
                         details = _strip_bulky_fields(r.details_json or {})
                         details["error"] = str(exc)[:500]
+                        if isinstance(exc, reread_service.RereadFileDeletedError):
+                            details["reason"] = reread_service.MOTIVO_ARCHIVO_BORRADO
                         r.details_json = details
                         await s2.commit()
                 return {"status": "FAILED", "error": str(exc)[:200]}

@@ -3,6 +3,7 @@ import React from "react";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AxiosError, AxiosHeaders } from "axios";
 
 import { FileListSection } from "../FileListSection";
 import {
@@ -635,6 +636,90 @@ describe("FileListSection — compuerta de relectura (B1)", () => {
         screen.getByRole("button", { name: /^deshacer relectura$/i }),
       ).toBeInTheDocument(),
     );
+  });
+});
+
+// ── I3-1/I4-1/I4-2: el archivo se borró en otra pestaña ─────────────────────
+
+const ARCHIVO_BORRADO = "Este archivo ya se eliminó y sus datos se revirtieron.";
+
+function error409(detail: unknown): AxiosError {
+  return new AxiosError("409", "ERR_BAD_REQUEST", undefined, undefined, {
+    status: 409,
+    statusText: "Conflict",
+    headers: {},
+    config: { headers: new AxiosHeaders() },
+    data: { detail },
+  });
+}
+
+const BORRADO = { code: "REREAD_FILE_DELETED", message: ARCHIVO_BORRADO };
+
+describe("FileListSection — relectura de un archivo que se borró", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test("el apply cierra la relectura, refresca la lista y dice por qué", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadApply.mockRejectedValue(error409(BORRADO));
+    renderList();
+    await abrirPreview(user);
+    const pedidasAntes = mockListFiles.mock.calls.length;
+
+    await user.click(screen.getByRole("button", { name: /aplicar relectura/i }));
+
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(ARCHIVO_BORRADO, "error"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /aplicar relectura/i })).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(mockListFiles.mock.calls.length).toBeGreaterThan(pedidasAntes));
+  });
+
+  test("otro error del apply vuelve al preview para reintentar (control)", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadApply.mockRejectedValue(new Error("red"));
+    renderList();
+    await abrirPreview(user);
+
+    await user.click(screen.getByRole("button", { name: /aplicar relectura/i }));
+
+    await waitFor(() =>
+      expect(mockAddToast).toHaveBeenCalledWith("No se pudo iniciar la relectura.", "error"),
+    );
+    expect(await screen.findByRole("button", { name: /aplicar relectura/i })).toBeInTheDocument();
+  });
+
+  test("el preview muestra el motivo del servidor y refresca la lista", async () => {
+    const user = userEvent.setup();
+    setupRereadMocks();
+    mockRereadPreview.mockRejectedValue(error409(BORRADO));
+    renderList();
+    await user.click(await screen.findByTitle("Volver a leer este archivo"));
+    const pedidasAntes = mockListFiles.mock.calls.length;
+    await user.click(await screen.findByRole("button", { name: /sí, releer/i }));
+
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(ARCHIVO_BORRADO, "error"));
+    await waitFor(() => expect(mockListFiles.mock.calls.length).toBeGreaterThan(pedidasAntes));
+  });
+
+  test("deshacer cierra el modal y dice por qué", async () => {
+    const user = userEvent.setup();
+    mockRereadUndo.mockRejectedValue(error409(BORRADO));
+    await driveToResultPhase(user);
+    const pedidasAntes = mockListFiles.mock.calls.length;
+
+    await confirmUndo(user);
+
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(ARCHIVO_BORRADO, "error"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /^deshacer relectura$/i }),
+      ).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(mockListFiles.mock.calls.length).toBeGreaterThan(pedidasAntes));
   });
 });
 
