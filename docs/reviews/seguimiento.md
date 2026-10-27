@@ -34,7 +34,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | E-8 | normal | confirmado | T4 | B·5g: un renglón de un comprobante con hermanos vivos no puede volver a entrar al re-subir el archivo, contra lo que promete el código | pendiente |  |
 | E-11 | normal | plausible | T4 | M·R guarda como monto anulado el de todos los candidatos aunque bajo el lock se anulen menos | pendiente |  |
 | A-3 | grave | confirmado | T5 | VIEWER/ANALYST pueden abrir y cerrar turnos ajenos y firmar el arqueo | mergeado | #182 (R-2) |
-| A-4 | grave | confirmado | T5 | Anular un ticket de un turno o día ya cerrado no deja egreso de caja: el reintegro descuadra el arqueo de hoy | pendiente |  |
+| A-4 | grave | confirmado | T5 | Anular un ticket de un turno o día ya cerrado no deja egreso de caja: el reintegro descuadra el arqueo de hoy | mergeado | #205 `954eb6d0` |
 | A-5 | normal | confirmado | T5 | Cierre de caja diario: el sobrante registrado se fecha hoy aunque se cierre otro día, y se acepta una fecha futura | pendiente |  |
 | A-6 | normal | confirmado | T5 | cash_received_ars sin decimal_places: el vuelto se calcula con un redondeo distinto del que guarda la base | pendiente |  |
 | D-4 | grave | confirmado | T6 | La configuración de margen dice «margen bruto, 35/20 por rubro», pero el motor la aplica al margen NETO | pendiente |  |
