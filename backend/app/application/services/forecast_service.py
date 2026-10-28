@@ -7,11 +7,19 @@ Algoritmo en 3 tiers según datos disponibles:
   Tier 3 — 90+ días: patrón semanal + tendencia lineal, horizonte 60 días
 
 No requiere tabla propia en esta fase: los resultados se cachean en Redis (TTL 6h).
+
+Tarjeta de crédito (D-3/R-10, decisión del dueño 2026-10-28): lo vendido con
+crédito entra a caja N días corridos después de la venta (N por tenant, por
+defecto 14; `health_config_service.get_credit_card_settlement_days`). Se proyecta
+aparte del ingreso líquido: cada día futuro suma el crédito vendido N días antes
+—real si ese día ya pasó, promedio del historial de crédito si todavía no—, y
+nunca entra además al promedio del ingreso líquido.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from uuid import UUID
@@ -21,6 +29,8 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.facts_service import DELAYED_METHODS, FIADO_METHODS
+from app.application.services.health_config_service import get_credit_card_settlement_days
+from app.domain.business_time import today_ar
 from app.observability.logger import get_logger
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._pos_tender_scope import tenders_mixtos, venta_no_mixta
@@ -32,7 +42,7 @@ logger = get_logger(__name__)
 _CACHE_TTL = 60 * 60 * 6  # 6 horas
 
 #: Ventas que NO son plata en caja el día de la venta: el fiado (deuda a cobrar)
-#: y la tarjeta de crédito (se acredita después; D-3/R-10). Es la resta de
+#: y la tarjeta de crédito (se acredita N días después; D-3/R-10). Es la resta de
 #: ``FactsService._split_liquidez``.
 _FUERA_DE_CAJA_INMEDIATA = FIADO_METHODS | DELAYED_METHODS
 
@@ -53,17 +63,20 @@ class ForecastResult:
     horizon_days: int
     points: list[ForecastPoint]
     message: str | None = None
-    # D-3/R-10: lo vendido con tarjeta de crédito en la ventana, que la
-    # proyección NO cuenta como ingreso (no se sabe cuándo se acredita). 0.0 es
-    # un valor medido: no hubo ventas con crédito.
+    # D-3/R-10: lo vendido con tarjeta de crédito que a hoy todavía no se
+    # acreditó (venta + N días > hoy). 0.0 es un valor medido.
     credito_sin_acreditar_ars: float = 0.0
+    # A cuántos días corridos de la venta se cuenta el crédito (configurable).
+    credit_card_settlement_days: int = 14
 
 
-def _cache_key(tenant_id: UUID) -> str:
+def _cache_key(tenant_id: UUID, settlement_days: int) -> str:
     # v2 (T1): el ingreso de caja dejó de contar el fiado y dos veces los
     # cobros; un blob viejo serviría 6 h la proyección inflada.
     # v3 (D-3/R-10): tampoco cuenta la tarjeta de crédito el día de la venta.
-    return f"forecast:cash:v3:{tenant_id}"
+    # v4: el crédito entra a N días; N va en la clave para que cambiarlo no
+    # sirva la proyección calculada con el N anterior.
+    return f"forecast:cash:v4:{tenant_id}:n{settlement_days}"
 
 
 def _dia(v: object) -> date:
@@ -83,10 +96,8 @@ async def ingresos_de_caja_por_dia(
     cobros: una venta fiada de $1.000 cobrada después daba $2.000 de ingreso de
     caja. Es la resta de ``FactsService._split_liquidez``.
 
-    La tarjeta de crédito (D-3/R-10) no entra NUNCA, ni el día de la venta ni
-    corrida a una fecha: el plazo de acreditación no está cargado en ningún
-    lado y un plazo fijo sería inventar la fecha. Lo que queda afuera lo informa
-    ``credito_sin_acreditar`` para que la pantalla lo diga.
+    La tarjeta de crédito (D-3/R-10) no entra acá: la proyección la suma aparte,
+    N días después de la venta (``credito_por_dia``).
     """
     dia_venta = func.date(SaleEntry.transaction_date).label("day")
     ventas_q = (
@@ -121,26 +132,58 @@ async def ingresos_de_caja_por_dia(
     return por_dia
 
 
-async def credito_sin_acreditar(tenant_id: UUID, db: AsyncSession, desde: date) -> float:
-    """Lo vendido con tarjeta de crédito desde ``desde`` (D-3/R-10): las ventas
-    con ese método y la parte con crédito de un pago mixto, con el mismo alcance
-    que ``ingresos_de_caja_por_dia``. Es lo que la proyección deja afuera."""
-    ventas_q = select(func.coalesce(func.sum(SaleEntry.amount), 0)).where(
-        SaleEntry.tenant_id == tenant_id,
-        SaleEntry.voided_at.is_(None),
-        SaleEntry.transaction_date >= desde,
-        es_venta(),
-        venta_no_mixta(),
-        func.lower(SaleEntry.payment_method).in_(DELAYED_METHODS),
+async def credito_por_dia(tenant_id: UUID, db: AsyncSession, desde: date) -> dict[date, float]:
+    """Lo vendido con tarjeta de crédito cada día (fecha de la VENTA) desde
+    ``desde`` (D-3/R-10): las ventas con ese método y la parte con crédito de un
+    pago mixto, con el mismo alcance que ``ingresos_de_caja_por_dia``."""
+    dia_venta = func.date(SaleEntry.transaction_date).label("day")
+    ventas_q = (
+        select(dia_venta, func.sum(SaleEntry.amount).label("total"))
+        .where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+            SaleEntry.transaction_date >= desde,
+            es_venta(),
+            venta_no_mixta(),
+            func.lower(SaleEntry.payment_method).in_(DELAYED_METHODS),
+        )
+        .group_by(dia_venta)
     )
     mixtos = tenders_mixtos(tenant_id, desde)
-    mixtos_q = select(func.coalesce(func.sum(mixtos.c.amount_ars), 0)).where(
-        func.lower(mixtos.c.payment_method).in_(DELAYED_METHODS)
+    dia_mixto = func.date(mixtos.c.sale_date).label("day")
+    mixtos_q = (
+        select(dia_mixto, func.sum(mixtos.c.amount_ars).label("total"))
+        .where(func.lower(mixtos.c.payment_method).in_(DELAYED_METHODS))
+        .group_by(dia_mixto)
     )
-    total = 0.0
+    por_dia: dict[date, float] = {}
     for q in (ventas_q, mixtos_q):
-        total += float((await db.execute(q)).scalar_one() or 0)
-    return total
+        for r in (await db.execute(q)).all():
+            d = _dia(r.day)
+            por_dia[d] = por_dia.get(d, 0.0) + float(r.total or 0)
+    return por_dia
+
+
+async def dias_con_ventas(tenant_id: UUID, db: AsyncSession, desde: date) -> set[date]:
+    """Días con cualquier venta o cobro, con el método que sea (M-1/M-3): un
+    día que sólo vendió con crédito o fiado es un día con datos."""
+    dia = func.date(SaleEntry.transaction_date).label("day")
+    q = (
+        select(dia)
+        .where(
+            SaleEntry.tenant_id == tenant_id,
+            SaleEntry.voided_at.is_(None),
+            SaleEntry.transaction_date >= desde,
+        )
+        .group_by(dia)
+    )
+    return {_dia(r.day) for r in (await db.execute(q)).all()}
+
+
+def credito_sin_acreditar(credito: dict[date, float], today: date, settlement_days: int) -> float:
+    """Lo vendido con crédito que a ``today`` todavía no se acreditó: venta + N > hoy."""
+    corte = today - timedelta(days=settlement_days)
+    return sum(v for d, v in credito.items() if corte < d <= today)
 
 
 async def get_forecast(
@@ -150,7 +193,8 @@ async def get_forecast(
     force_refresh: bool = False,
 ) -> ForecastResult:
     """Devuelve el forecast cacheado o lo recalcula si expiró o no existe."""
-    key = _cache_key(tenant_id)
+    settlement_days = await get_credit_card_settlement_days(tenant_id, db)
+    key = _cache_key(tenant_id, settlement_days)
 
     if not force_refresh:
         cached = await redis.get(key)
@@ -160,7 +204,7 @@ async def get_forecast(
             except Exception:
                 pass
 
-    result = await _compute_forecast(tenant_id, db)
+    result = await _compute_forecast(tenant_id, db, settlement_days)
 
     try:
         await redis.setex(key, _CACHE_TTL, _serialize(result))
@@ -170,15 +214,64 @@ async def get_forecast(
     return result
 
 
-async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult:
+class _Modelo:
+    """Proyección de una serie diaria: promedio sobre los días de historial,
+    ajuste por día de semana (tier ≥ 2) y tendencia lineal (tier 3)."""
+
+    def __init__(
+        self,
+        serie: dict[date, float],
+        data_days: int,
+        tier: int,
+        today: date,
+        dias_de_venta: Iterable[date],
+    ) -> None:
+        self.avg = sum(serie.values()) / max(data_days, 1)
+        self.wd_mult = [1.0] * 7
+        self.trend_daily = 0.0
+        self.tier = tier
+        if tier < 2:
+            return
+        # m-1: el promedio de cada día de semana divide por los días que tuvieron
+        # cualquier venta, no sólo los que tuvieron fila en esta serie.
+        wd_sum = [0.0] * 7
+        wd_cnt = [0] * 7
+        for d in set(dias_de_venta) | set(serie):
+            wd_cnt[d.weekday()] += 1
+        for d, v in serie.items():
+            wd_sum[d.weekday()] += v
+        for wd in range(7):
+            if wd_cnt[wd] > 0 and self.avg > 0:
+                self.wd_mult[wd] = (wd_sum[wd] / wd_cnt[wd]) / self.avg
+        if tier == 3:
+            recent_30 = [v for d, v in serie.items() if d >= today - timedelta(days=30)]
+            old_30 = [v for d, v in serie.items() if d <= today - timedelta(days=60)]
+            if recent_30 and old_30:
+                recent_avg = sum(recent_30) / len(recent_30)
+                old_avg = sum(old_30) / len(old_30)
+                self.trend_daily = (recent_avg - old_avg) / 60
+
+    def valor(self, dia: date, i: int) -> float:
+        """Lo esperado para ``dia``, que está ``i`` días después de hoy."""
+        trend_adj = self.trend_daily * i if self.tier == 3 else 0.0
+        return max(0.0, self.avg * self.wd_mult[dia.weekday()] + trend_adj)
+
+
+async def _compute_forecast(
+    tenant_id: UUID, db: AsyncSession, settlement_days: int | None = None
+) -> ForecastResult:
     """Obtiene datos de los últimos 180 días y calcula el forecast."""
-    today = date.today()
+    if settlement_days is None:
+        settlement_days = await get_credit_card_settlement_days(tenant_id, db)
+    today = today_ar()
     window_start = today - timedelta(days=180)
 
     # Agregados DIARIOS: agrupar por func.date() para no fragmentar por hora/minuto
     # ahora que transaction_date es un timestamp.
     daily_income = await ingresos_de_caja_por_dia(tenant_id, db, window_start)
-    credito = await credito_sin_acreditar(tenant_id, db, window_start)
+    daily_credit = await credito_por_dia(tenant_id, db, window_start)
+    dias_de_venta = await dias_con_ventas(tenant_id, db, window_start)
+    pendiente = round(credito_sin_acreditar(daily_credit, today, settlement_days), 2)
 
     expense_day = func.date(ExpenseEntry.transaction_date).label("day")
     expense_q = (
@@ -200,7 +293,9 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
         if f.salidas:
             daily_expense[f.dia] = daily_expense.get(f.dia, 0.0) + float(f.salidas)
 
-    all_dates = sorted(set(list(daily_income.keys()) + list(daily_expense.keys())))
+    # M-1/M-2/M-3: los días con datos salen de TODAS las ventas (cualquier
+    # método) y los gastos, no sólo del ingreso líquido.
+    all_dates = sorted(dias_de_venta | set(daily_income) | set(daily_expense))
 
     if not all_dates:
         return ForecastResult(
@@ -210,7 +305,8 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
             horizon_days=0,
             points=[],
             message="Sin datos suficientes para proyectar.",
-            credito_sin_acreditar_ars=round(credito, 2),
+            credito_sin_acreditar_ars=pendiente,
+            credit_card_settlement_days=settlement_days,
         )
 
     data_days = (all_dates[-1] - all_dates[0]).days + 1
@@ -225,41 +321,9 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
             horizon_days=0,
             points=[],
             message=f"Necesitás al menos 14 días de datos para proyectar (tenés {data_days}).",
-            credito_sin_acreditar_ars=round(credito, 2),
+            credito_sin_acreditar_ars=pendiente,
+            credit_card_settlement_days=settlement_days,
         )
-
-    # Promedios globales
-    total_days = max(data_days, 1)
-    avg_income = sum(daily_income.values()) / total_days
-    avg_expense = sum(daily_expense.values()) / total_days
-
-    if data_days >= 30:
-        # Ajuste por día de semana
-        wd_income_sum = [0.0] * 7
-        wd_income_cnt = [0] * 7
-        for d, v in daily_income.items():
-            wd = d.weekday()
-            wd_income_sum[wd] += v
-            wd_income_cnt[wd] += 1
-
-        wd_mult = [1.0] * 7
-        for wd in range(7):
-            if wd_income_cnt[wd] > 0 and avg_income > 0:
-                wd_avg = wd_income_sum[wd] / wd_income_cnt[wd]
-                wd_mult[wd] = wd_avg / avg_income
-
-        # Tendencia lineal simple (solo Tier 3, 90+ días)
-        trend_daily = 0.0
-        if data_days >= 90:
-            recent_30 = [v for d, v in daily_income.items() if d >= today - timedelta(days=30)]
-            old_30 = [v for d, v in daily_income.items() if d <= today - timedelta(days=60)]
-            if recent_30 and old_30:
-                recent_avg = sum(recent_30) / len(recent_30)
-                old_avg = sum(old_30) / len(old_30)
-                trend_daily = (recent_avg - old_avg) / 60
-    else:
-        wd_mult = [1.0] * 7
-        trend_daily = 0.0
 
     tier = 1 if data_days < 30 else (2 if data_days < 90 else 3)
     horizon = 14 if tier == 1 else (30 if tier == 2 else 60)
@@ -272,12 +336,21 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
             "la proyección puede no reflejar la actividad actual."
         )
 
+    liquido = _Modelo(daily_income, data_days, tier, today, dias_de_venta)
+    credito = _Modelo(daily_credit, data_days, tier, today, dias_de_venta)
+    avg_expense = sum(daily_expense.values()) / data_days
+
     points: list[ForecastPoint] = []
     for i in range(1, horizon + 1):
         future = today + timedelta(days=i)
-        wd = future.weekday()
-        trend_adj = trend_daily * i if tier == 3 else 0.0
-        proj_income = max(0.0, avg_income * wd_mult[wd] + trend_adj)
+        # El crédito que se acredita ``future`` es el vendido N días antes:
+        # conocido si ese día ya pasó; si no, el esperado para ese día de venta.
+        dia_de_venta = future - timedelta(days=settlement_days)
+        if dia_de_venta <= today:
+            credito_del_dia = daily_credit.get(dia_de_venta, 0.0)
+        else:
+            credito_del_dia = credito.valor(dia_de_venta, (dia_de_venta - today).days)
+        proj_income = liquido.valor(future, i) + credito_del_dia
         points.append(
             ForecastPoint(
                 date=future.isoformat(),
@@ -294,7 +367,8 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
         horizon_days=horizon,
         points=points,
         message=message,
-        credito_sin_acreditar_ars=round(credito, 2),
+        credito_sin_acreditar_ars=pendiente,
+        credit_card_settlement_days=settlement_days,
     )
 
 

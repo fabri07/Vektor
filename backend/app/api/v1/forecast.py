@@ -31,9 +31,12 @@ class CashForecastResponse(BaseModel):
     horizon_days: int
     points: list[ForecastPointResponse]
     message: str | None = None
-    # D-3/R-10: vendido con tarjeta de crédito en el historial, que la
-    # proyección no cuenta como ingreso de caja (no se sabe cuándo se acredita).
+    # D-3/R-10: vendido con tarjeta de crédito que a hoy todavía no se acreditó
+    # (venta + N días > hoy). La proyección lo suma el día que se acredita.
     credit_card_pending_ars: float = 0.0
+    # A cuántos días corridos de la venta se cuenta el crédito (configurable en
+    # /settings/health-config).
+    credit_card_settlement_days: int
 
 
 @router.get("/cash", response_model=CashForecastResponse, summary="Proyección de caja")
@@ -50,6 +53,9 @@ async def get_cash_forecast(
     - Tier 1 (14-30 días): 14 días de proyección, confianza BAJA
     - Tier 2 (30-90 días): 30 días de proyección, confianza MEDIA
     - Tier 3 (90+ días): 60 días de proyección, confianza ALTA
+
+    Lo vendido con tarjeta de crédito entra N días corridos después de la venta
+    (``credit_card_settlement_days``, por defecto 14).
     """
     result: ForecastResult = await get_forecast(
         tenant_id=tenant.tenant_id,
@@ -73,4 +79,5 @@ async def get_cash_forecast(
         ],
         message=result.message,
         credit_card_pending_ars=result.credito_sin_acreditar_ars,
+        credit_card_settlement_days=result.credit_card_settlement_days,
     )

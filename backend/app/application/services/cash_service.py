@@ -67,11 +67,27 @@ def normalize_payment_method(value: str | None) -> str:
 
     Tolera tildes y separadores ("Cuenta_Corriente", "débito automático",
     "Mercado-Pago") normalizando la clave antes del lookup.
+
+    Tarjetas (G-2, D-3): si la clave no está en el mapa, una palabra «credito»
+    la hace crédito («Tarjeta de crédito», «Crédito 3 cuotas», «Visa crédito») y
+    una «debito», débito («Tarjeta de débito», «Visa débito»). «Tarjeta» o «Visa»
+    solos son ambiguos y quedan en 'other'; con las dos palabras, o «nota de
+    crédito» (un comprobante, no un medio de pago), también. Sólo es el camino
+    de entrada: lo importado antes con estas frases sigue guardado como 'other'.
     """
     if not value:
         return "other"
     key = re.sub(r"[.\s\-_/]+", " ", strip_accents(str(value).strip().lower())).strip()
-    return _PAYMENT_METHOD_MAP.get(key, "other")
+    canonico = _PAYMENT_METHOD_MAP.get(key)
+    if canonico is not None:
+        return canonico
+    palabras = set(key.split())
+    credito, debito = "credito" in palabras, "debito" in palabras
+    if "nota" in palabras or credito == debito:
+        return "other"
+    if debito and "automatico" in palabras:
+        return "transfer"  # «débito automático de la tarjeta»: sale del banco
+    return "credit_card" if credito else "debit_card"
 
 
 # Alias interno legacy.

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import {
   CartesianGrid,
@@ -91,12 +92,20 @@ export function ForecastPanel() {
         (lo que te queda). Es una proyección, no una certeza.
       </p>
 
-      {(data.credit_card_pending_ars ?? 0) > 0 && (
-        <p className="mt-1 text-xs leading-5 text-vektor-muted" data-testid="forecast-credito-sin-acreditar">
-          No cuenta {formatARS(data.credit_card_pending_ars ?? 0)} vendidos con tarjeta de crédito
-          en el historial: esa plata se acredita más adelante y no sabemos cuándo.
-        </p>
-      )}
+      <p className="mt-1 text-xs leading-5 text-vektor-muted" data-testid="forecast-acreditacion-credito">
+        Las ventas con tarjeta de crédito se cuentan a {data.credit_card_settlement_days}{" "}
+        {data.credit_card_settlement_days === 1 ? "día" : "días"} de la venta. Lo cambiás en{" "}
+        <Link href="/settings?tab=salud" className="underline hover:text-vektor-body">
+          Configuración → Score de salud
+        </Link>
+        .
+        {(data.credit_card_pending_ars ?? 0) > 0 && (
+          <span data-testid="forecast-credito-sin-acreditar">
+            {" "}Vendido con crédito que todavía no se acreditó:{" "}
+            {formatARS(data.credit_card_pending_ars ?? 0)}.
+          </span>
+        )}
+      </p>
 
       <div className="mt-3 mb-4">
         <span className={`text-sm font-semibold ${isPositive ? "text-emerald-400" : "text-vk-danger"}`}>
