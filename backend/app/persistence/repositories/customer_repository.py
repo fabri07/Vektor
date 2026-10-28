@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.business_time import today_ar
 from app.persistence.models._sentinel import SENTINEL_FLAG_KEY
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import SaleEntry
@@ -150,7 +151,7 @@ class CustomerRepository:
 
         Returns list[dict]: customer_id, customer_name, last_sale_date (date | None).
         """
-        cutoff = date.today() - timedelta(days=days)
+        cutoff = today_ar() - timedelta(days=days)
         last_sale_sq = (
             select(
                 SaleEntry.customer_id.label("customer_id"),

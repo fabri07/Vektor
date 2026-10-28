@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
+from app.domain.business_time import today_ar
 from app.domain.date_parsing import parse_business_date
 from app.domain.numeric_parsing import inferir_convenio, parsear_monto
 from app.observability.logger import get_logger
@@ -188,7 +189,7 @@ class ValidationGate:
             return ValidationResult(passed=False, rejection_reason="all_dates_invalid")
 
         if dates:
-            today = date.today()
+            today = today_ar()
             future_limit = today + timedelta(days=1)
             past_limit = today - timedelta(days=730)
 

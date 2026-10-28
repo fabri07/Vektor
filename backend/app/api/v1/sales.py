@@ -43,6 +43,7 @@ from app.application.services.respaldo_service import exigir_respaldo
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
+from app.domain.business_time import today_ar
 from app.domain.sale_unit import importe
 from app.persistence.costeo_de_ventas import marcar_unidad_no_confirmada
 from app.persistence.db.session import get_db_session
@@ -187,7 +188,7 @@ async def sales_summary(
     session: AsyncSession = Depends(get_db_session),
 ) -> SaleSummaryResponse:
     repo = SaleRepository(session)
-    to_date = date.today()
+    to_date = today_ar()
     from_date = to_date - timedelta(days=30)
     total = await repo.total_revenue(tenant.tenant_id, from_date=from_date, to_date=to_date)
     count = await repo.count_by_date_range(tenant.tenant_id, from_date=from_date, to_date=to_date)
@@ -224,7 +225,7 @@ async def list_sales(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[SaleEntryResponse]:
     if from_date is None:
-        from_date = date.today() - timedelta(days=30)
+        from_date = today_ar() - timedelta(days=30)
     repo = SaleRepository(session)
     ventas = await repo.list_by_tenant(
         tenant.tenant_id,

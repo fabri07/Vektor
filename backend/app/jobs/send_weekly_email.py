@@ -92,7 +92,7 @@ def _build_html(
         <tr>
           <td style="padding:12px 0;border-bottom:1px solid #f3f4f6;">
             <p style="margin:0 0 4px 0;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;">Cierres de caja</p>
-            <p style="margin:0;font-size:14px;color:#374151;">{cash_closes_count} esta semana · Diferencia acumulada: <strong style="color:{diff_color};">{_format_signed_ars(cash_diff_ars)}</strong></p>
+            <p style="margin:0;font-size:14px;color:#374151;">{cash_closes_count} la semana pasada · Diferencia acumulada: <strong style="color:{diff_color};">{_format_signed_ars(cash_diff_ars)}</strong></p>
           </td>
         </tr>"""
 
@@ -204,7 +204,7 @@ def _build_plain(
         sign = "+" if cash_diff_ars >= 0 else "-"
         diff_fmt = f"{sign}$ {abs(int(cash_diff_ars)):,}".replace(",", ".")
         lines.append(
-            f"Cierres de caja: {cash_closes_count} esta semana · "
+            f"Cierres de caja: {cash_closes_count} la semana pasada · "
             f"Diferencia acumulada: {diff_fmt}"
         )
     lines.append(f"Valor protegido acumulado: $ {int(value_protected_ars):,}".replace(",", "."))
@@ -286,19 +286,22 @@ async def _gather_email_data(
             action_text = momentum.active_goal_json.get("action")
         value_protected_ars = momentum.estimated_value_protected_ars or Decimal("0")
 
-    # Cierres de caja de la semana (Sprint 20): cantidad + diferencia acumulada
-    from datetime import date as _date  # noqa: PLC0415
+    # Cierres de caja de la semana que TERMINÓ (Sprint 20; E0-A-15): el beat corre
+    # el lunes, y «desde el lunes de esta semana» era ese mismo día (cero o un
+    # cierre). La semana va del lunes al domingo pasados, en día AR.
     from datetime import timedelta as _timedelta  # noqa: PLC0415
 
+    from app.domain.business_time import today_ar  # noqa: PLC0415
     from app.persistence.models.cash_close import CashClose  # noqa: PLC0415
 
-    today = _date.today()
-    week_start = today - _timedelta(days=today.weekday())  # lunes de esta semana
+    today = today_ar()
+    week_end = today - _timedelta(days=today.weekday() + 1)  # domingo pasado
+    week_start = week_end - _timedelta(days=6)  # el lunes anterior
     cash_result = await session.execute(
         select(CashClose).where(
             CashClose.tenant_id == tenant_id,
             CashClose.close_date >= week_start,
-            CashClose.close_date <= today,
+            CashClose.close_date <= week_end,
         )
     )
     cash_closes = list(cash_result.scalars().all())

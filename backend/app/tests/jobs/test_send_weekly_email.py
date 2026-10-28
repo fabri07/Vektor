@@ -8,7 +8,7 @@ Tests for send_weekly_email job.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest_asyncio
@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.domain.business_time import AR_TZ, today_ar
 from app.jobs.celery_app import celery_app
 from app.jobs.send_weekly_email import _build_html, _build_plain, _gather_email_data
 from app.persistence.db.base import Base
@@ -26,6 +27,7 @@ from app.persistence.models.business import Insight, MomentumProfile
 from app.persistence.models.score import HealthScoreSnapshot, WeeklyScoreHistory
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
+from app.tests._reloj_ar import reloj_utc
 from app.utils.security import hash_password
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
@@ -263,35 +265,46 @@ class TestEmailContent:
         assert data["cash_closes_count"] == 0
         assert data["cash_diff_ars"] == Decimal("0")
 
-    async def test_gather_with_cash_close_in_week(
+    async def test_gather_cuenta_los_cierres_de_la_semana_que_termino(
         self,
         session: AsyncSession,
         tenant: Tenant,
         owner_user: User,
         health_score: HealthScoreSnapshot,
     ) -> None:
-        from datetime import date as _date  # noqa: PLC0415
-
+        """E0-A-15: el beat corre el lunes; la semana es la de lunes a domingo
+        pasados, no «desde el lunes de esta semana» (ese mismo día). Y el lunes
+        es el día AR: a las 22:30 ART el día UTC ya es martes."""
         from app.persistence.models.cash_close import CashClose  # noqa: PLC0415
 
-        # Cierre de hoy (siempre dentro de la semana actual y único por fecha).
-        today = _date.today()
-        session.add(
-            CashClose(
+        # Un lunes ya pasado (el reloj real no lo alcanza a ninguna hora).
+        hoy = today_ar() - timedelta(days=7)
+        lunes = hoy - timedelta(days=hoy.weekday())
+        lunes_2230 = datetime(lunes.year, lunes.month, lunes.day, 22, 30, tzinfo=AR_TZ)
+
+        def _cierre(dia: date, diferencia: str) -> CashClose:
+            return CashClose(
                 tenant_id=tenant.tenant_id,
-                close_date=today,
+                close_date=dia,
                 expected_total_ars=Decimal("1000.00"),
-                counted_total_ars=Decimal("500.00"),
-                difference_ars=Decimal("-500.00"),
+                counted_total_ars=Decimal("1000.00") + Decimal(diferencia),
+                difference_ars=Decimal(diferencia),
                 breakdown_by_method={},
             )
-        )
+
+        session.add_all([
+            _cierre(lunes - timedelta(days=8), "-900.00"),  # domingo anterior: afuera
+            _cierre(lunes - timedelta(days=7), "-500.00"),  # lunes de la semana pasada
+            _cierre(lunes - timedelta(days=1), "-200.00"),  # domingo pasado
+            _cierre(lunes, "-50.00"),  # hoy: la semana nueva, afuera
+        ])
         await session.commit()
 
-        data = await _gather_email_data(tenant.tenant_id, session)
+        with reloj_utc(lunes_2230):
+            data = await _gather_email_data(tenant.tenant_id, session)
         assert data is not None
-        assert data["cash_closes_count"] == 1
-        assert data["cash_diff_ars"] == Decimal("-500.00")
+        assert data["cash_closes_count"] == 2
+        assert data["cash_diff_ars"] == Decimal("-700.00")
 
     async def test_html_includes_cash_closes_row(self) -> None:
         html = _build_html(
@@ -307,7 +320,7 @@ class TestEmailContent:
             cash_diff_ars=Decimal("-300"),
         )
         assert "Cierres de caja" in html
-        assert "3 esta semana" in html
+        assert "3 la semana pasada" in html
         assert "−$ 300" in html  # diferencia negativa con signo
 
     async def test_html_omits_cash_row_when_no_closes(self) -> None:
@@ -337,7 +350,7 @@ class TestEmailContent:
             cash_closes_count=2,
             cash_diff_ars=Decimal("150"),
         )
-        assert "Cierres de caja: 2 esta semana" in plain
+        assert "Cierres de caja: 2 la semana pasada" in plain
         assert "+$ 150" in plain
 
 
