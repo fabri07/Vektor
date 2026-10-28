@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,7 @@ from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import SaleEntry
 from app.persistence.repositories.health_score_repository import HealthScoreRepository
+from app.tests.heuristics.test_health_engine_regression import _state
 
 
 @pytest_asyncio.fixture
@@ -29,6 +31,19 @@ async def kiosco_profile(
     profile.updated_at = datetime.now(UTC)
     await db_session.commit()
     return profile
+
+
+def _guardar_objetivo_bruto(
+    db_session: AsyncSession, tenant: Tenant, target: float, warning: float
+) -> None:
+    for key, value in (("target_margin_pct", target), ("warning_margin_pct", warning)):
+        db_session.add(
+            BusinessHeuristicOverride(
+                tenant_id=tenant.tenant_id,
+                param_key=key,
+                param_value={"value": value},
+            )
+        )
 
 
 class TestHealthScoreService:
@@ -110,14 +125,7 @@ class TestHealthScoreService:
         `score_trigger_service` ni `score_worker` lo atrapan, se llevaba puesto el
         recálculo del tenant (y el rebuild semanal de los que venían después).
         """
-        for key, value in (("target_margin_pct", 35.0), ("warning_margin_pct", 20.0)):
-            db_session.add(
-                BusinessHeuristicOverride(
-                    tenant_id=sample_tenant.tenant_id,
-                    param_key=key,
-                    param_value={"value": value},
-                )
-            )
+        _guardar_objetivo_bruto(db_session, sample_tenant, 35.0, 20.0)
         await db_session.flush()
 
         svc = HealthScoreService(db_session)
@@ -129,3 +137,47 @@ class TestHealthScoreService:
 
         assert snapshot.tenant_id == sample_tenant.tenant_id
         assert snapshot.triggered_by == "test_override"
+
+    async def test_el_objetivo_bruto_no_es_la_vara_del_margen_neto(
+        self,
+        db_session: AsyncSession,
+        sample_tenant: Tenant,
+        kiosco_profile: BusinessProfile,
+    ) -> None:
+        """D-4: el objetivo de /settings/health-config es margen BRUTO.
+
+        El score puntúa el NETO contra el benchmark neto del rubro (kiosco
+        8-14%). Antes el override se convertía en la vara del neto: con 35/20
+        guardado, un neto sano del 12% caía a MARGIN_LOW. Con o sin objetivo
+        guardado, el subscore de margen y la procedencia tienen que ser iguales.
+        """
+        # Neto 12% = (100k − 68k − 20k) / 100k: sano para un kiosco (8-14%) y
+        # debajo del 20% de alerta que el dueño guardó pensando en el bruto.
+        estado = _state(
+            monthly_sales_est=Decimal("100000"),
+            monthly_inventory_cost_est=Decimal("68000"),
+            monthly_fixed_expenses_est=Decimal("20000"),
+        )
+        estado.tenant_id = sample_tenant.tenant_id
+        svc = HealthScoreService(db_session)
+        with patch(
+            "app.application.services.health_score_service.compute_business_state",
+            new=AsyncMock(return_value=estado),
+        ):
+            sin_objetivo = await svc.recalculate_for_tenant(
+                tenant_id=sample_tenant.tenant_id, triggered_by="sin_objetivo"
+            )
+            await db_session.commit()
+            assert sin_objetivo.score_margin is not None, "premisa: hay margen que puntuar"
+
+            _guardar_objetivo_bruto(db_session, sample_tenant, 35.0, 20.0)
+            await db_session.commit()
+            con_objetivo = await svc.recalculate_for_tenant(
+                tenant_id=sample_tenant.tenant_id, triggered_by="con_objetivo"
+            )
+            await db_session.commit()
+
+        assert con_objetivo.score_margin == sin_objetivo.score_margin
+        assert con_objetivo.benchmark_provenance == sin_objetivo.benchmark_provenance
+        assert con_objetivo.benchmark_provenance != "tenant_override"
+        assert con_objetivo.primary_risk_code == sin_objetivo.primary_risk_code

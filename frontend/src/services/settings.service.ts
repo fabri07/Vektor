@@ -7,6 +7,8 @@ export interface HealthConfig {
   target_margin_pct: number;
   warning_margin_pct: number;
   is_custom: boolean;
+  /** D-4: objetivo de margen BRUTO por producto; el score mide el neto contra el rubro. */
+  margin_kind: "bruto";
 }
 
 export interface WorkSchedule {

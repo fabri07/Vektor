@@ -36,7 +36,6 @@ from app.application.agents.shared.schemas import (
     UsageSummary,
 )
 from app.application.agents.shared.vertical_lookup import load_tenant_vertical
-from app.application.services.health_config_service import get_margin_benchmark
 from app.domain.verticals import UnknownVerticalError, Vertical, parse_vertical
 from app.heuristics.verticals import weakest_confidence
 from app.heuristics.verticals.loader import load_vertical_heuristics
@@ -163,20 +162,17 @@ class AgentHealth(BaseAgent):
         # ── 2. Benchmark efectivo ────────────────────────────────────────────
         # Se resuelve ANTES del gate y se reusa en el paso 3. El gate mide la
         # confianza de la vara, así que tiene que mirar la MISMA vara que después
-        # puntúa: si el tenant declaró su objetivo de margen en /settings, esa es
-        # la vara, y no la del JSON del rubro. Calcularlo dos veces —una para
-        # gatear, otra para puntuar— las deja libres de divergir, y divergirían
-        # justo en el caso que este mecanismo existe para cubrir: un rubro sin
-        # fuente sectorial (`STATIC_PROVISIONAL`) en un tenant CON override.
+        # puntúa. Calcularlo dos veces —una para gatear, otra para puntuar— las
+        # deja libres de divergir.
+        #
+        # Es la del JSON del rubro: el objetivo de /settings/health-config es
+        # margen BRUTO por producto y acá se puntúa el NETO (D-4), igual que en
+        # `HealthScoreService`.
         #
         # `vertical` ya viene parseado de `_load_business_meta`: re-parsear
         # `state.vertical_code` sería hacer dos veces el mismo trabajo y agregar
         # un segundo punto donde el rubro puede fallar de forma distinta.
-        try:
-            tenant_benchmark = await get_margin_benchmark(uuid.UUID(request.business_id), self._db)
-        except Exception:
-            tenant_benchmark = None  # fallback a benchmark por vertical
-        benchmark = tenant_benchmark or load_vertical_heuristics(vertical).margin
+        benchmark = load_vertical_heuristics(vertical).margin
 
         # ── 2b. ValidationGate — datos insuficientes → empty state ───────────
         # Se gatea con la confianza EFECTIVA, no solo con la de los datos: medir
