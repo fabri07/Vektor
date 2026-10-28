@@ -115,4 +115,3 @@ async def test_la_columna_us_con_hora_entra_con_cada_fecha_en_su_mes(
         # Sin el arreglo: 3 de ABRIL, leída dd/mm celda por celda.
         Decimal("6300"): datetime(2026, 3, 4, 11, 0),
     }
-
