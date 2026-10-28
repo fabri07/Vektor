@@ -1292,34 +1292,63 @@ def read_header(normalized: str, entity_type: str) -> HeaderReading:
         concept=analisis.concept,
         qualifiers=quals,
     )
-    reglas = RESOLUCION.get(entity_type, {}).get(analisis.concept)
-    if reglas is None:
+    regla = _regla_aplicable(analisis.concept, quals, entity_type)
+    if regla is None:
         return sin_campo
+    if regla.target is not None:
+        return HeaderReading(
+            "unico",
+            target=regla.target,
+            concept=analisis.concept,
+            qualifiers=quals,
+        )
+    if regla.opciones:
+        return HeaderReading(
+            "ambiguo",
+            options=regla.opciones,
+            duda=regla.duda,
+            concept=analisis.concept,
+            qualifiers=quals,
+        )
+    return HeaderReading(
+        "sin_evidencia",
+        duda=regla.duda,
+        concept=analisis.concept,
+        qualifiers=quals,
+    )
 
-    for regla in reglas:
+
+def _regla_aplicable(
+    concept: str, quals: frozenset[str], entity_type: str
+) -> ReglaDeTarget | None:
+    """La primera regla del concepto cuyos calificadores están todos presentes."""
+    for regla in RESOLUCION.get(entity_type, {}).get(concept, ()):
         if regla.si <= quals:
-            if regla.target is not None:
-                return HeaderReading(
-                    "unico",
-                    target=regla.target,
-                    concept=analisis.concept,
-                    qualifiers=quals,
-                )
-            if regla.opciones:
-                return HeaderReading(
-                    "ambiguo",
-                    options=regla.opciones,
-                    duda=regla.duda,
-                    concept=analisis.concept,
-                    qualifiers=quals,
-                )
-            return HeaderReading(
-                "sin_evidencia",
-                duda=regla.duda,
-                concept=analisis.concept,
-                qualifiers=quals,
-            )
-    return sin_campo
+            return regla
+    return None
+
+
+def duda_del_calificador(normalized: str, entity_type: str) -> str | None:
+    """I5-3: la duda que le puso un CALIFICADOR del encabezado, o ``None``.
+
+    Para el importador, no para la pantalla. «Stock mínimo», «Código proveedor»
+    o «N° Venta» no se mapean solos, pero el confirm tenía una tercera capa —la
+    heurística por nombre (`_STOCK_COLS`, `_SKU_COLS`, los montos), que matchea
+    por substring— y con el campo sin mapear volvía a leerlas como stock, SKU o
+    monto. Esto es lo que esa capa consulta para no hacerlo.
+
+    Sólo cuenta la duda de una regla CON calificador: la de «esta hoja no tiene
+    un campo para eso» o la de «Precio» sin más (tres precios posibles) no dice
+    que la columna sea otra cosa, y la heurística sigue teniendo derecho a
+    mirarla como siempre.
+    """
+    analisis = analyze_header(normalized)
+    if analisis.concept is None:
+        return None
+    regla = _regla_aplicable(analisis.concept, analisis.qualifiers, entity_type)
+    if regla is None or not regla.si or regla.target is not None:
+        return None
+    return regla.duda
 
 
 def heuristic_target(

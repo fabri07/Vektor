@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -4929,6 +4930,49 @@ def _row_val(
     return None
 
 
+@functools.lru_cache(maxsize=4096)
+def _calificador_en_duda(columna: str, entidad: str) -> bool:
+    """¿El reconocedor de encabezados dejó esta columna en duda por un calificador?
+
+    Ver `duda_del_calificador`. Cacheado: se consulta por fila y por columna, y
+    el encabezado de una hoja se repite en cada una.
+    """
+    from app.application.services.column_mapping_service import (  # noqa: PLC0415
+        _normalize_col,
+        duda_del_calificador,
+    )
+
+    return duda_del_calificador(_normalize_col(str(columna)), entidad) is not None
+
+
+def _vedadas_a_la_heuristica(
+    columnas: Iterable[str],
+    entidad: str,
+    cols: dict[str, str],
+    cf_cols: dict[str, str] | None = None,
+) -> set[str]:
+    """I5-3: columnas que la heurística por nombre NO puede tomar para stock,
+    código (SKU / barras), marca o monto cuando ese campo no se mapeó.
+
+    Son tres: las mapeadas a OTRO campo, las mandadas a un campo propio y las que
+    el reconocedor dejó en duda por un calificador («Stock mínimo», «Código
+    proveedor», «N° Venta»). Sin esto la duda de la pantalla no servía de nada:
+    el mapeo no las asignaba, el campo quedaba vacío y `_STOCK_COLS` / `_SKU_COLS`
+    —que matchean por substring— cargaban el umbral como stock de apertura y el
+    código del proveedor como la identidad del producto. Y mandarlas a un campo
+    propio, que es lo que la duda propone, las guardaba ahí Y en stock/SKU.
+
+    ``entidad`` es la de la lectura: la hoja para los montos, ``"product"`` para
+    stock, códigos y marca, que son datos del producto en cualquier hoja.
+
+    Las columnas sin revisar y sin calificador siguen al alcance de la heurística:
+    hay imports sin mapeo que dependen de ella.
+    """
+    vedadas = set(cols.values()) | set((cf_cols or {}).values())
+    vedadas.update(c for c in columnas if _calificador_en_duda(c, entidad))
+    return vedadas
+
+
 def _resolve_target_cols(
     mapping: dict[str, str],
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], set[str]]:
@@ -6269,6 +6313,41 @@ async def _insert_confirmed_data_impl(
             if "expiry_date" in target_to_col:
                 expiry_col = target_to_col["expiry_date"]
                 _expiry_explicit = True
+
+        # I5-3: lo que la heurística eligió por nombre para un campo SIN mapear no
+        # puede ser una columna vedada (mapeada a otro campo, a un campo propio, o
+        # en duda por un calificador): «Stock mínimo» como stock de apertura,
+        # «Código proveedor» como SKU o marca, «N° Venta» como monto. Se resuelve
+        # de nuevo sobre las libres, como `_reservadas` arriba.
+        _ved_producto = _vedadas_a_la_heuristica(
+            headers, "product", target_to_col, custom_field_cols
+        )
+        _libres_producto = [h for h in headers if h not in _ved_producto]
+        if "stock_units" not in target_to_col and stock_col in _ved_producto:
+            stock_col = _find_col(_libres_producto, _STOCK_COLS)
+        if "barcode" not in target_to_col and barcode_col in _ved_producto:
+            barcode_col = _find_col(_libres_producto, _BARCODE_COLS)
+        if "sku" not in target_to_col and sku_col in _ved_producto:
+            sku_col = _find_col(_libres_producto, _SKU_COLS)
+            if sku_col is not None and sku_col == barcode_col:
+                sku_col = None
+        if "supplier_name" not in target_to_col and supplier_col in _ved_producto:
+            supplier_col = _find_col(_libres_producto, _PROVEEDOR_COLS)
+        if inferred_type != "stock" and "amount" not in target_to_col:
+            _ved_venta = _vedadas_a_la_heuristica(
+                headers, "sale", target_to_col, custom_field_cols
+            )
+            if venta_col in _ved_venta:
+                venta_col = _find_col(
+                    [h for h in headers if h not in _ved_venta], _VENTA_AMOUNT_COLS
+                )
+            _ved_gasto = _vedadas_a_la_heuristica(
+                headers, "expense", target_to_col, custom_field_cols
+            )
+            if gasto_col in _ved_gasto:
+                gasto_col = _find_col(
+                    [h for h in headers if h not in _ved_gasto], _GASTO_AMOUNT_COLS
+                )
 
         # E4: las columnas numéricas se interpretan ACÁ, con la columna entera a la
         # vista, antes de leer la primera fila. Es el único momento en que se puede
@@ -9132,6 +9211,21 @@ async def _insert_multisheet_data(
             return row.get(col)
         return _row_val(row, keywords)
 
+    def _val_del_producto(
+        row: dict[str, Any],
+        cols: dict[str, str],
+        cf_cols: dict[str, str] | None,
+        campo: str,
+        keywords: set[str] | tuple[str, ...],
+    ) -> Any:
+        """Como `_val`, para stock y códigos: la heurística no relee lo vedado (I5-3)."""
+        col = cols.get(campo)
+        if col:
+            return row.get(col)
+        return _row_val(
+            row, keywords, skip=_vedadas_a_la_heuristica(row, "product", cols, cf_cols)
+        )
+
     def _custom_fields(row: dict[str, Any], cf_cols: dict[str, str]) -> dict[str, str]:
         out: dict[str, str] = {}
         for cf_key, src in cf_cols.items():
@@ -9176,17 +9270,19 @@ async def _insert_multisheet_data(
     def _venta_nombre_producto(row: dict[str, Any], cols: dict[str, str]) -> Any:
         return _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
 
-    def _venta_producto_id(row: dict[str, Any], cols: dict[str, str]) -> uuid.UUID | None:
+    def _venta_producto_id(
+        row: dict[str, Any], cols: dict[str, str], cf_cols: dict[str, str]
+    ) -> uuid.UUID | None:
         return _resolve_product(
             _by_sku,
             _by_name,
             _venta_nombre_producto(row, cols),
-            _val(row, cols.get("sku"), _SKU_COLS),
+            _val_del_producto(row, cols, cf_cols, "sku", _SKU_COLS),
             _by_token,
             by_barcode=_identity_indexes.by_barcode,
             by_alias=_identity_indexes.by_alias,
             by_name_activo=_identity_indexes.by_name,
-            barcode=_val(row, cols.get("barcode"), _BARCODE_COLS),
+            barcode=_val_del_producto(row, cols, cf_cols, "barcode", _BARCODE_COLS),
         )
 
     async def _add_sale(
@@ -9206,7 +9302,9 @@ async def _insert_multisheet_data(
         # "monto del archivo" salía de la columna del precio y toda fila con
         # cantidad > 1 se reportaba como discrepancia contra un total que nadie
         # escribió.
-        _mapeadas = set(cols.values())
+        # I5-3: ni una columna que el usuario mandó a un campo propio, ni una que
+        # el reconocedor dejó en duda («N° Venta» contiene `venta`).
+        _mapeadas = _vedadas_a_la_heuristica(row, "sale", cols, cf_cols)
         amount = (
             _parse_amount(row.get(amount_col))
             if amount_col
@@ -9311,12 +9409,12 @@ async def _insert_multisheet_data(
         _registrar_monto_derivado(cf, _linea, counts)
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         _venta_producto = _venta_nombre_producto(row, cols)
-        entry.product_id = _venta_producto_id(row, cols)
+        entry.product_id = _venta_producto_id(row, cols, cf_cols)
         if entry.product_id is None:
             # B·5e: con qué se vincula al final (si el producto nace en este mismo
             # import) y qué decía el archivo si igual va a «Otros».
-            _sku_raw = _val(row, cols.get("sku"), _SKU_COLS)
-            _bar_raw = _val(row, cols.get("barcode"), _BARCODE_COLS)
+            _sku_raw = _val_del_producto(row, cols, cf_cols, "sku", _SKU_COLS)
+            _bar_raw = _val_del_producto(row, cols, cf_cols, "barcode", _BARCODE_COLS)
             if _venta_producto or _sku_raw or _bar_raw:
                 session.info.setdefault(_B5E_VINCULO_PENDIENTE, {})[entry.id] = (
                     _venta_producto, _sku_raw, _bar_raw,
@@ -9401,7 +9499,7 @@ async def _insert_multisheet_data(
         # puede releerse como el monto. Con `unit_price` en el catálogo de
         # `expense`, "precio_compra" es ahora un target explícito y la heurística
         # del monto ("compra", "costo") se lo llevaría puesto.
-        _mapeadas_gasto = set(cols.values())
+        _mapeadas_gasto = _vedadas_a_la_heuristica(row, "expense", cols, cf_cols)
         amount = (
             _parse_amount(row.get(amount_col))
             if amount_col
@@ -9608,8 +9706,8 @@ async def _insert_multisheet_data(
                 )
         # FASE 3 + F2-T5: link al catálogo (barcode → sku → nombre → tokens).
         _exp_name = _val(row, cols.get("product_name") or cols.get("name"), _NOMBRE_COLS)
-        _exp_sku = _val(row, cols.get("sku"), _SKU_COLS)
-        _exp_barcode = _val(row, cols.get("barcode"), _BARCODE_COLS)
+        _exp_sku = _val_del_producto(row, cols, cf_cols, "sku", _SKU_COLS)
+        _exp_barcode = _val_del_producto(row, cols, cf_cols, "barcode", _BARCODE_COLS)
         expense.product_id = _resolve_product(
             _by_sku,
             _by_name,
@@ -9878,7 +9976,17 @@ async def _insert_multisheet_data(
         # ese caso NO participa como marca: un mismo producto comprado en dos
         # tiendas no debe duplicarse por identidad de marca (F2-T2 usa
         # `normalize_brand(store_name)` en la clave de identidad).
-        _store_col = cols.get("supplier_name") or _row_col(row, _PROVEEDOR_COLS)
+        # I5-3: tampoco la marca sale de lo vedado — «Código proveedor» contiene
+        # `proveedor` y su código terminaba como marca del producto. Los cruzados
+        # (`supplier:name`) no están en `cols` y se siguen encontrando acá.
+        _store_col = cols.get("supplier_name") or _row_col(
+            {
+                k: v
+                for k, v in row.items()
+                if k not in _vedadas_a_la_heuristica(row, "product", cols, cf_cols)
+            },
+            _PROVEEDOR_COLS,
+        )
         store_name: str | None = _clean_str(
             row.get(_store_col) if _store_col else None, 300
         )
@@ -10011,10 +10119,16 @@ async def _insert_multisheet_data(
         _list_mapped = cols.get("list_price_ars")
         list_price = _parse_amount(row.get(_list_mapped)) if _list_mapped else None
         # Sin truncar, igual que el otro lector de catálogo.
-        stock_val = _parse_qty(_val(row, cols.get("stock_units"), _STOCK_COLS))
-        sku = _sku_del_archivo(_val(row, cols.get("sku"), _SKU_COLS))
+        # I5-3: sin campo mapeado, la heurística no toma lo vedado («Stock
+        # mínimo» como stock de apertura, «Código proveedor» como SKU).
+        stock_val = _parse_qty(
+            _val_del_producto(row, cols, cf_cols, "stock_units", _STOCK_COLS)
+        )
+        sku = _sku_del_archivo(_val_del_producto(row, cols, cf_cols, "sku", _SKU_COLS))
         # F2-T5: código de barras (columna mapeada o detección por keyword).
-        barcode = _clean_str(_val(row, cols.get("barcode"), _BARCODE_COLS), 64)
+        barcode = _clean_str(
+            _val_del_producto(row, cols, cf_cols, "barcode", _BARCODE_COLS), 64
+        )
         # FASE E: categoría canónica del vertical; sin columna → None.
         cat_raw = _clean_str(
             row.get(cols["category"]) if cols.get("category") else _row_val_categoria(row),
@@ -10174,7 +10288,8 @@ async def _insert_multisheet_data(
             _factor = existing.base_units_per_sale_unit or 1
             _stock_base = (
                 _cantidad_base_de_documento(
-                    _val(row, cols.get("stock_units"), _STOCK_COLS), _factor
+                    _val_del_producto(row, cols, cf_cols, "stock_units", _STOCK_COLS),
+                    _factor,
                 )
                 if _factor > 1
                 else stock_val
@@ -10723,9 +10838,9 @@ async def _insert_multisheet_data(
                 _cid = str(_ctx.get("context_id") or "")
                 if (proyeccion.effect_for(_cid) if proyeccion else None) != HISTORICAL_REPLAY:
                     continue
-                _rows, _cols, _, _ = _filas_y_mapeo(_ctx, contar=False)
+                _rows, _cols, _cf_cols, _ = _filas_y_mapeo(_ctx, contar=False)
                 for _idx, _row in enumerate(_rows):
-                    _pid = _venta_producto_id(_row, _cols)
+                    _pid = _venta_producto_id(_row, _cols, _cf_cols)
                     _fecha = _venta_fecha(_row, _cols)
                     if _pid is None or _fecha is None:
                         # Sin producto o sin fecha la fila ya tiene su propio destino

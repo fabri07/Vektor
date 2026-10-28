@@ -23,6 +23,7 @@ quede atado al catálogo de campos de la base.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from app.domain.header_keys import STOPWORDS
@@ -332,6 +333,11 @@ class HeaderAnalysis:
     tokens: tuple[str, ...]
 
 
+#: «nº» al comienzo de una palabra (ver `tokenize`). En mayúscula también: el
+#: llamador normaliza a minúscula, pero `tokenize` no lo exige.
+_N_ORDINAL = re.compile(r"(?<![^\W_])[nN]\u00ba")
+
+
 def tokenize(normalized: str) -> tuple[str, ...]:
     """Tokens de un header ya normalizado (lowercase + guiones bajos).
 
@@ -344,6 +350,11 @@ def tokenize(normalized: str) -> tuple[str, ...]:
     Las preposiciones vacías se descartan salvo ``con``/``sin``, que sí significan
     algo: son las que distinguen un precio de un impuesto.
     """
+    # I5-3: «Nº» con el ordinal (U+00BA, el de los teclados en español) se
+    # pliega en NFKD a `no`, que está excluido a propósito («Monto no gravado»):
+    # se lo lleva al «n°» con el signo de grados ANTES del plegado, y sólo como
+    # comienzo de palabra, para que «Nº Venta» sea un identificador como «N° Venta».
+    normalized = _N_ORDINAL.sub("n°", normalized)
     partes = normalize_text(normalized).replace("-", "_").replace(".", "_").split("_")
     return tuple(p for p in partes if p and (p not in STOPWORDS or p in INCLUSION))
 
