@@ -4312,6 +4312,15 @@ async def confirm_file(
             f"{counts['envios_sin_fecha']} envío(s) no se registraron porque su fila "
             "no tiene una fecha reconocible."
         )
+    if counts.get("envios_sin_compra_aplicada"):
+        # I2-1: el flete de un comprobante cuyas compras no entraron en esta carga
+        # (ya estaban cargadas por otro archivo, chocaron o fueron a «Otros»).
+        warnings.append(
+            f"{counts['envios_sin_compra_aplicada']} envío(s) no se registraron "
+            "porque ninguna compra de su comprobante entró en esta carga: ya estaban "
+            "cargadas desde otro archivo o quedaron en «Otros». Si resolvés la "
+            "compra desde «Otros», cargá el envío ahí."
+        )
     if counts.get("filas_sin_monto"):
         # El texto dejó de afirmar que el archivo "no traía" el total: con la
         # política de E4 también cae acá la fila que SÍ lo traía y no se pudo
