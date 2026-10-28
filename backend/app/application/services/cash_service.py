@@ -68,6 +68,8 @@ _CONTEXTO_TARJETA = frozenset(
 )
 #: Contexto de fiado: «a crédito», «crédito de la casa», «en cuenta corriente»…
 _CONTEXTO_FIADO = frozenset({"fiado", "libreta", "corriente", "cte", "ctacte"})
+#: Contexto bancario (N-3): «cuenta corriente» también es la cuenta del banco.
+_CONTEXTO_BANCARIO = frozenset({"transferencia", "transf", "banco", "bancaria", "bancario"})
 
 
 def normalize_payment_method(value: str | None) -> str:
@@ -76,7 +78,10 @@ def normalize_payment_method(value: str | None) -> str:
     Tolera tildes y separadores ("Cuenta_Corriente", "débito automático",
     "Mercado-Pago", "Fiado (crédito)") normalizando la clave antes del lookup.
 
-    Frases sin match exacto (G-2/N-2, revisión #217), en este orden:
+    Frases sin match exacto (G-2/N-2/N-3, revisión #217), en este orden:
+      - bancario: «transferencia», «transf», «banco», «bancaria» → 'transfer';
+        «cheque» → 'other', como el mapa («Transferencia cuenta corriente»,
+        «Cheque cuenta corriente»: la cuenta corriente del banco, no fiado).
       - fiado: «fiado», «libreta», «cuenta corriente», «cta cte», «de la casa» o
         «a crédito» (salvo «tarjeta a crédito») → 'account' (el canónico del
         fiado, el que dispara el guard de fiado del import). Si además dice
@@ -101,6 +106,10 @@ def normalize_payment_method(value: str | None) -> str:
     palabras = set(key.split())
     credito, debito = "credito" in palabras, "debito" in palabras
     relleno = f" {key} "
+    if palabras & _CONTEXTO_BANCARIO:
+        return "transfer"
+    if "cheque" in palabras:
+        return "other"
     if (
         palabras & _CONTEXTO_FIADO
         or " de la casa " in relleno
