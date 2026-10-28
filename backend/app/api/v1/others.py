@@ -61,6 +61,8 @@ from app.application.services.ingestion_import_service import (
     IDENTITY_ENTITY_KEY,
     IDENTITY_HASH_KEY,
     IDENTITY_REF_KEY,
+    interpretar_fecha_de_fila_de_otros,
+    monto_de_fila_de_otros,
 )
 from app.application.services.operation_identity_service import (
     aplicada_desde_otro_origen,
@@ -95,6 +97,7 @@ from app.domain.costo_vigente import (
     custom_fields_tras_editar_costo,
     snapshot_claves_del_costo,
 )
+from app.domain.date_parsing import MOTIVO_FECHA_AMBIGUA, MOTIVO_FECHA_FUTURA
 from app.domain.expense_categories import (
     EXPENSE_CATEGORY_LABELS_ES,
     classify_expense_with_vertical,
@@ -200,6 +203,19 @@ class LinkProductRequest(BaseModel):
     product_id: UUID
     #: En la unidad de venta. Si no viene, la de la fila (tiene que ser entera).
     quantity: int | None = Field(default=None, ge=1)
+    #: V-16: si no viene, la de la fila leída como la lee el lote (convenio de su
+    #: columna). Hace falta cuando la de la fila es ambigua, ilegible o futura
+    #: (422 `FECHA_REQUERIDA`).
+    transaction_date: datetime | None = None
+
+    @field_validator("transaction_date")
+    @classmethod
+    def transaction_date_not_future(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if fecha_de_negocio(value) > today_ar():
+            raise ValueError("transaction_date cannot be in the future.")
+        return a_hora_de_negocio(value)
 
 
 class ResolvePurchaseRequest(BaseModel):
@@ -1272,7 +1288,7 @@ async def reclassify_record(
     except ValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=exc.errors(),
+            detail=_errores_de_validacion(exc),
         ) from exc
 
     record.status = UNCLASSIFIED_STATUS_IMPORTED
@@ -1282,6 +1298,16 @@ async def reclassify_record(
         session, str(tenant.tenant_id), "unclassified_reclassified"
     )
     return MessageResponse(message=f"Registro importado como {label}.")
+
+
+def _errores_de_validacion(exc: ValidationError) -> list[Any]:
+    """Los errores de un schema de creación, serializables.
+
+    ``exc.errors()`` trae en ``ctx`` la excepción del validador (un ``ValueError``
+    de «no puede ser futura» o de un monto NaN): como ``detail`` de un
+    ``HTTPException`` no se puede pasar a JSON y la respuesta era un 500 (V-16).
+    """
+    return cast(list[Any], exc.errors(include_url=False, include_context=False))
 
 
 def _cantidad_de_la_fila(raw: Any) -> int | None:
@@ -1295,6 +1321,43 @@ def _cantidad_de_la_fila(raw: Any) -> int | None:
     if valor != valor.to_integral_value() or valor < 1:
         return None
     return int(valor)
+
+
+def _fecha_de_la_venta(row: dict[str, Any] | None) -> datetime:
+    """V-16: la fecha de la fila como la lee el lote (`interpretar_fecha_de_fila_de_otros`).
+
+    Antes iba cruda a `CreateSaleRequest` y «13/04/2026» terminaba en un 422 de
+    validación ilegible. Una fecha corta ambigua sin convenio guardado
+    («04/03/2026») NUNCA se adivina (decisión del dueño, 2026-10-27), y una futura
+    nunca entra: 422 `FECHA_REQUERIDA` para que la persona la indique.
+    """
+    interpretada = interpretar_fecha_de_fila_de_otros(row)
+    if interpretada is not None and interpretada.valor is not None:
+        return interpretada.valor
+    original = "" if interpretada is None or interpretada.original is None else str(
+        interpretada.original
+    ).strip()
+    motivo = interpretada.motivo if interpretada is not None else None
+    if motivo == MOTIVO_FECHA_AMBIGUA:
+        mensaje = (
+            f"La fecha «{original}» se puede leer como día/mes o como mes/día, y el "
+            "archivo no dice cuál: indicá la fecha de la venta."
+        )
+    elif motivo == MOTIVO_FECHA_FUTURA:
+        mensaje = (
+            f"La fecha «{original}» es posterior a hoy: indicá la fecha real de la venta."
+        )
+    else:
+        mensaje = "La fila no trae una fecha que se pueda leer: indicá la fecha de la venta."
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={
+            "code": "FECHA_REQUERIDA",
+            "message": mensaje,
+            "motivo": motivo,
+            "original": original or None,
+        },
+    )
 
 
 def _conflicto_de_alias(code: str, referencia: str, producto: str) -> HTTPException:
@@ -1423,10 +1486,25 @@ async def link_product(
                 "message": "La cantidad de la fila no es un número entero: indicala.",
             },
         )
+    fecha = body.transaction_date or _fecha_de_la_venta(record.row_data)
+    # V-16: el monto, como lo lee el lote (antes crudo: «1.234,50» daba 422).
+    monto = monto_de_fila_de_otros(record.row_data)
+    if monto is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "MONTO_REQUERIDO",
+                "message": (
+                    "El monto de la fila no se puede leer sin adivinar (falta, no es un "
+                    "número o «12.500» puede ser doce mil quinientos o doce coma cinco): "
+                    "resolvela desde «Editar» escribiendo el monto."
+                ),
+            },
+        )
     try:
         sale_req = CreateSaleRequest(
-            amount=record.row_data.get("monto"),
-            transaction_date=record.row_data.get("fecha"),
+            amount=monto,
+            transaction_date=fecha,
             quantity=cantidad,
             payment_method=record.row_data.get("medio_de_pago") or "cash",
             product_id=producto.id,
@@ -1434,7 +1512,7 @@ async def link_product(
         )
     except ValidationError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_errores_de_validacion(exc)
         ) from exc
     await _registrar_venta_desde_otros(session, tenant.tenant_id, record, sale_req)
     await session.flush()

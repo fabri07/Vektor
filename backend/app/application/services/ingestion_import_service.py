@@ -121,6 +121,7 @@ from app.domain.date_parsing import (
     CAMPOS_DE_FECHA,
     MOTIVO_FECHA_FUTURA,
     ConvenioDeFecha,
+    FechaInterpretada,
     inferir_convenio_de_fecha,
     parse_business_date,
     parse_business_datetime,
@@ -1929,6 +1930,15 @@ def _import_row_anchor(
     )
 
 
+def ancla_de_fila_de_otros(tenant_id: uuid.UUID, record_id: uuid.UUID) -> str:
+    """Ancla de la huella del lote de «Otros» (B1): anclada en el ``UnclassifiedRecord``.
+
+    Pública para el script de V-16 (`limpiar_huellas_otros.py`), que tiene que
+    reconocer exactamente la huella que mira el lote.
+    """
+    return f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{record_id}"
+
+
 async def _fila_que_no_se_escribe(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -2221,6 +2231,21 @@ ORIGINALES_KEY = "__originales__"
 #: por celda: en una columna mm/dd, «04/03/2026» volvía como 4 de marzo.
 CONVENIOS_DE_FECHA_KEY = "__convenios_de_fecha__"
 
+# V-16: la fila de «Otros» la escribió Véktor (venta sacada por B·5e/B·5g) y su
+# ``monto`` es ``str(Decimal)`` («1200.00»), no una celda del archivo. Sólo con
+# esta marca el lote y `link-product` aceptan esa forma; una fila de archivo
+# sigue la lectura por columna sin excepción.
+MONTO_CANONICO_KEY = "__monto_canonico__"
+
+
+def es_clave_reservada(clave: Any) -> bool:
+    """¿``clave`` tiene la forma de una clave del sistema (``__x__``)?
+
+    Una columna del archivo con esa forma no llega al ``row_data`` de «Otros»:
+    las reservadas las escribe sólo Véktor (ver ``_capture_unclassified``)."""
+    texto = str(clave).strip()
+    return len(texto) > 4 and texto.startswith("__") and texto.endswith("__")
+
 
 def _fila_con_articulo(nombre: Any, cantidad: Any) -> bool:
     """B·5b-2: ¿la fila de una compra de mercadería dice QUÉ artículo y CUÁNTOS?
@@ -2297,6 +2322,7 @@ def _capture_unclassified(
     row_ref: str | None = None,
     context_id: str | None = None,
     skip_blank_rows: bool = True,
+    internas: dict[str, str] | None = None,
 ) -> int:
     """FASE F: persiste filas no clasificadas en la bandeja "Otros".
 
@@ -2340,6 +2366,14 @@ def _capture_unclassified(
     tener algo que decir — lo que la identifica es su ``__risk_ref__``, no sus
     valores. Es un opt-out explícito y no una excepción implícita por la forma
     del payload: un caller nuevo que capture filas de una hoja hereda el guard.
+
+    **Las claves reservadas no vienen del archivo** (V-16, revalidación). Toda
+    clave ``__x__`` de la fila se descarta: una columna del archivo que se llamara
+    ``__monto_canonico__`` o ``__convenios_de_fecha__`` habilitaba la forma
+    canónica del monto o decidía el orden día/mes de una fecha. Las que Véktor
+    escribe llegan por ``internas`` (la identidad, el cliente, la marca canónica,
+    la correlación de riesgo), por ``row_ref`` o desde ``ORIGINALES_KEY``, y se
+    agregan después del volcado. Aplican a todas las filas de la llamada.
     """
     from app.persistence.models.unclassified_record import (  # noqa: PLC0415
         UnclassifiedRecord,
@@ -2353,10 +2387,10 @@ def _capture_unclassified(
         )
     count = 0
     for row in rows:
-        _originales = row.get(ORIGINALES_KEY) or {}
-        row_data = {
-            k: v for k, v in row.items() if k not in ("__context__", ORIGINALES_KEY)
-        }
+        _originales = row.get(ORIGINALES_KEY)
+        if not isinstance(_originales, dict):
+            _originales = {}
+        row_data = {k: v for k, v in row.items() if not es_clave_reservada(k)}
         if not row_data or (skip_blank_rows and not _fila_con_contenido(row_data)):
             continue
         # Se guarda lo que el archivo DECÍA, no lo que Véktor entendió. La fila
@@ -2373,6 +2407,8 @@ def _capture_unclassified(
         # Se agrega DESPUÉS del volcado para que una columna del archivo que se
         # llamara igual no pueda pisar el vínculo (ni al revés): la clave reservada
         # es del sistema, no del archivo.
+        for clave, valor in (internas or {}).items():
+            _persistido[clave] = "" if valor is None else str(valor)
         if row_ref and len(rows) == 1:
             _persistido[ROW_REF_KEY] = row_ref
         # I2-4: con el convenio de su columna, «Importar sugeridos» lee la fecha
@@ -2480,16 +2516,10 @@ async def _capture_column_risk_rows(
         # para que la relectura pueda resolver el "Otros" al aparecer corregida la
         # fila. Va aparte de las columnas problemáticas (headers/label la excluyen;
         # ``/otros`` oculta las keys ``__``).
-        _payload = {
-            **row_data,
-            RISK_REF_KEY: json.dumps(
-                {"context_id": context_id, "row_index": row_index}
-            ),
-        }
         captured = _capture_unclassified(
             session,
             tenant_id,
-            rows=[_payload],
+            rows=[row_data],
             headers=(sorted(row_data) or None),
             source=source,
             uploaded_file_id=uploaded_file_id,
@@ -2502,6 +2532,9 @@ async def _capture_column_risk_rows(
             row_ref=_source_row_ref(
                 _import_row_anchor(tenant_id, uploaded_file_id, context_id, row_index)
             ),
+            internas={
+                RISK_REF_KEY: json.dumps({"context_id": context_id, "row_index": row_index})
+            },
         )
         if captured == 0:
             # Fila combinada vacía (nada que capturar): no hay nada persistido,
@@ -5909,10 +5942,15 @@ async def _ventas_sin_compra_a_otros(
                 ),
                 "medio_de_pago": venta.payment_method,
                 "detalle": venta.notes,
+            }
+            # Las internas van aparte: `_capture_unclassified` descarta toda clave
+            # `__x__` de la fila (podría venir del archivo).
+            internas: dict[str, str] = {
+                MONTO_CANONICO_KEY: "1",
                 **filas_internas_de_venta(venta),
             }
             for _ident in identidades.get(("sale", venta.id), [])[:1]:
-                fila.update(
+                internas.update(
                     filas_internas_de_identidad(
                         _ident["identity_key"],
                         _ident["content_hash"],
@@ -5931,6 +5969,7 @@ async def _ventas_sin_compra_a_otros(
                 suggested_entity="sale",
                 row_ref=venta.source_row_ref,
                 skip_blank_rows=False,
+                internas=internas,
             )
         if venta.product_id is not None:
             await stock_service.revert_sale_stock(venta.id, tenant_id, session)
@@ -7001,18 +7040,16 @@ async def _insert_confirmed_data_impl(
                 counts["otros"] += _capture_unclassified(
                     session,
                     tenant_id,
-                    rows=[
-                        {
-                            **row,
-                            IDENTITY_REF_KEY: _clave_conflicto,
-                            **filas_internas_de_identidad(
-                                _clave_conflicto,
-                                _plan_conflicto.contenido.get(row_index),
-                                "sale" if _dec_venta == DECISION_CONFLICTO else "expense",
-                                en_conflicto=True,
-                            ),
-                        }
-                    ],
+                    rows=[row],
+                    internas={
+                        IDENTITY_REF_KEY: _clave_conflicto,
+                        **filas_internas_de_identidad(
+                            _clave_conflicto,
+                            _plan_conflicto.contenido.get(row_index),
+                            "sale" if _dec_venta == DECISION_CONFLICTO else "expense",
+                            en_conflicto=True,
+                        ),
+                    },
                     headers=headers,
                     source=source,
                     uploaded_file_id=uploaded_file_id,
@@ -11450,18 +11487,16 @@ async def _insert_multisheet_data(
                     counts["otros"] += _capture_unclassified(
                         session,
                         tenant_id,
-                        rows=[
-                            {
-                                **row,
-                                IDENTITY_REF_KEY: _plan_ident.clave.get(_i, ""),
-                                **filas_internas_de_identidad(
-                                    _plan_ident.clave.get(_i),
-                                    _plan_ident.contenido.get(_i),
-                                    str(entity),
-                                    en_conflicto=True,
-                                ),
-                            }
-                        ],
+                        rows=[row],
+                        internas={
+                            IDENTITY_REF_KEY: _plan_ident.clave.get(_i, ""),
+                            **filas_internas_de_identidad(
+                                _plan_ident.clave.get(_i),
+                                _plan_ident.contenido.get(_i),
+                                str(entity),
+                                en_conflicto=True,
+                            ),
+                        },
                         headers=ctx.get("headers"),
                         source=source,
                         uploaded_file_id=uploaded_file_id,
@@ -11837,9 +11872,102 @@ async def _insert_multisheet_data(
     return counts
 
 
+def columnas_de_fila_de_otros(row: dict[str, Any] | None) -> dict[str, Any]:
+    """Las columnas del archivo de una fila de «Otros», sin las claves del sistema.
+
+    Las claves `__` son del sistema: ninguna es una columna del archivo, y por
+    substring alguna se leería como una («__convenios_de_fecha__» como fecha,
+    «__row_ref__» como código).
+    """
+    return {k: v for k, v in (row or {}).items() if not str(k).startswith("__")}
+
+
+def interpretar_fecha_de_fila_de_otros(row: dict[str, Any] | None) -> FechaInterpretada | None:
+    """V-16: la fecha de una fila de «Otros» como la lee el lote, con el motivo.
+
+    La usan `link-product` y el lote (vía ``_fecha_de_fila_de_otros``): una
+    misma fila no puede dar una fecha en un camino y otra en el otro. ``None`` si
+    la fila no tiene columna de fecha.
+    """
+    row = row or {}
+    return _interpretar_fecha_de_fila(row, columnas_de_fila_de_otros(row))
+
+
+def monto_de_fila_de_otros(row: dict[str, Any] | None) -> Decimal | None:
+    """V-16: el monto de una fila de «Otros» como lo lee el lote.
+
+    ``None`` si no hay un monto positivo legible: «12.500» sin convenio es
+    ambiguo y no se adivina, igual que en la carga.
+    """
+    row = row or {}
+    return _monto_de_fila(row, columnas_de_fila_de_otros(row))
+
+
+#: La forma en que Véktor escribe el monto de una fila que saca a «Otros»
+#: (``str(Decimal)``: «1200.00»). Vale SÓLO con ``MONTO_CANONICO_KEY``: en una
+#: fila de archivo un «12.50» en una columna de coma decimal es un dato
+#: incompatible con su columna, y ahí manda la columna.
+_MONTO_CANONICO = re.compile(r"^\d+\.\d{1,2}$")
+
+#: Las columnas que SON el monto de la operación, en orden de prioridad. Si la
+#: fila tiene una, el monto sale de ésa o de ninguna (V-16): caer a otra columna
+#: convertía el precio unitario o el costo en el monto de la venta.
+_MONTO_EXPLICITO_COLS: tuple[str, ...] = (
+    "importe_total", "total_venta", "monto_total", "total", "monto", "importe",
+)
+
+
+def _monto_de_otros(raw: Any, canonico: bool) -> Decimal | None:
+    valor = _parse_amount(raw)
+    if valor is not None or not canonico:
+        return valor
+    texto = str(raw).strip() if isinstance(raw, str) else ""
+    if _MONTO_CANONICO.match(texto):
+        monto = Decimal(texto)
+        return monto if monto > 0 else None
+    return None
+
+
+def _col_de_monto_explicito(cols_fila: dict[str, Any]) -> str | None:
+    """La columna del monto: primero por nombre EXACTO, recién después por substring.
+
+    Por substring, «subtotal» o «total_iva» (vacías) le ganaban a «monto» o a
+    «total» por el orden de las columnas, y la fila quedaba sin monto. Con una
+    sola columna parecida («subtotal» y nada más) sigue el substring, y si está
+    vacía la fila queda a resolver a mano: no se adivina otra."""
+    for nombre in _MONTO_EXPLICITO_COLS:
+        for key in cols_fila:
+            if str(key).lower().strip().replace(" ", "_") == nombre:
+                return key
+    return _row_col(cols_fila, _MONTO_EXPLICITO_COLS)
+
+
+def _monto_de_fila(row: dict[str, Any], cols_fila: dict[str, Any]) -> Decimal | None:
+    canonico = str(row.get(MONTO_CANONICO_KEY) or "") == "1"
+    columna = _col_de_monto_explicito(cols_fila)
+    if columna is not None:
+        return _monto_de_otros(cols_fila[columna], canonico)
+    # Sin columna de monto (una hoja con «gasto», «costo» o «precio_venta»): la
+    # cascada de siempre por palabra clave. Sus conjuntos traen columnas que no
+    # son montos («proveedor», «medio_de_pago» por «pago»), así que acá sí sigue
+    # a la próxima cuando una no se lee.
+    return (
+        _monto_de_otros(_row_val(cols_fila, _VENTA_TOTAL_COLS), canonico)
+        or _monto_de_otros(_row_val(cols_fila, _GASTO_AMOUNT_COLS), canonico)
+        or _monto_de_otros(_row_val(cols_fila, _VENTA_AMOUNT_COLS), canonico)
+    )
+
+
 def _fecha_de_fila_de_otros(
     row: dict[str, Any], cols_fila: dict[str, Any]
 ) -> datetime | None:
+    interpretada = _interpretar_fecha_de_fila(row, cols_fila)
+    return interpretada.valor if interpretada is not None else None
+
+
+def _interpretar_fecha_de_fila(
+    row: dict[str, Any], cols_fila: dict[str, Any]
+) -> FechaInterpretada | None:
     """I2-4: la fecha de una fila de «Otros» leída como la leyó la carga.
 
     Con el convenio día/mes que la columna decidió en el import
@@ -11859,7 +11987,7 @@ def _fecha_de_fila_de_otros(
         orden = None
     if orden in ("dmy", "mdy"):
         convenio = ConvenioDeFecha(orden=orden, origen="inequivoco")
-    return parsear_fecha_de_columna(cols_fila[columna], convenio).valor
+    return parsear_fecha_de_columna(cols_fila[columna], convenio)
 
 
 async def bulk_import_unclassified(
@@ -11950,10 +12078,7 @@ async def bulk_import_unclassified(
     _archivo_del_reclamo: dict[tuple[str, str], uuid.UUID | None] = {}
 
     def _columnas(rec: UnclassifiedRecord) -> dict[str, Any]:
-        # Las claves `__` son del sistema: ninguna es una columna del archivo, y
-        # por substring alguna se leería como una («__convenios_de_fecha__» como
-        # fecha, «__row_ref__» como código).
-        return {k: v for k, v in (rec.row_data or {}).items() if not str(k).startswith("__")}
+        return columnas_de_fila_de_otros(rec.row_data)
 
     # El producto de cada venta, resuelto una vez. Los candidatos se bloquean
     # JUNTOS y en orden de id antes de la primera fila, como la venta del POS
@@ -11986,7 +12111,7 @@ async def bulk_import_unclassified(
         # registra cuando la fila de verdad se importa (abajo), así una fila que
         # queda en `needs_manual` (sin stock, sin compra previa…) se puede
         # reintentar con el lote cuando el dueño lo resuelve.
-        _ancla_otros = f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{rec.id}"
+        _ancla_otros = ancla_de_fila_de_otros(tenant_id, rec.id)
         if await _import_row_seen(session, tenant_id, _ancla_otros):
             counts["skipped"] += 1
             continue
@@ -12029,11 +12154,7 @@ async def bulk_import_unclassified(
             continue
         cols_fila = _columnas(rec)
         fecha = _fecha_de_fila_de_otros(row, cols_fila)
-        amount = (
-            _parse_amount(_row_val(cols_fila, _VENTA_TOTAL_COLS))
-            or _parse_amount(_row_val(cols_fila, _GASTO_AMOUNT_COLS))
-            or _parse_amount(_row_val(cols_fila, _VENTA_AMOUNT_COLS))
-        )
+        amount = _monto_de_fila(row, cols_fila)
         if fecha is None or amount is None:
             # F6-A5: no parseó (fecha o monto ilegible) → requiere completarlo a
             # mano en el modal. Distinto de "ya importado" (skipped): la UI debe

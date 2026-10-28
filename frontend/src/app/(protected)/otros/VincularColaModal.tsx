@@ -82,6 +82,10 @@ export function mensajeVincular(error: unknown): string {
       return detail.message ?? "Ese nombre ya es de otro producto del catálogo.";
     case "CANTIDAD_REQUERIDA":
       return "La cantidad de esta venta no es un número entero: escribila en la unidad de venta.";
+    case "FECHA_REQUERIDA":
+      // V-16: el backend dice cuál es la fecha y por qué no la toma (ambigua,
+      // futura o ilegible). Nunca se adivina.
+      return detail.message ?? "No se puede saber la fecha de esta venta: indicala.";
     case "RECORD_ALREADY_RESOLVED":
       return "Esta venta ya se había resuelto.";
     case "NOT_A_SALE":
@@ -124,11 +128,29 @@ export function errorDeCantidad(raw: string): string | null {
   return null;
 }
 
+/** `null` si la fecha sirve (`yyyy-mm-dd`, no posterior a hoy); si no, por qué. */
+export function errorDeFecha(raw: string, hoy: Date = new Date()): string | null {
+  const v = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return "Ingresá la fecha.";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hoyIso = `${hoy.getFullYear()}-${pad(hoy.getMonth() + 1)}-${pad(hoy.getDate())}`;
+  if (v > hoyIso) return "La fecha no puede ser posterior a hoy.";
+  return null;
+}
+
 interface FilaConFalla {
   record: UnclassifiedRecordResponse;
   code: string | null;
   mensaje: string;
   cantidad: string;
+  fecha: string;
+  /**
+   * Lo que el backend ya pidió para esta fila. Se acumula: si al mandar la
+   * cantidad responde que falta la fecha, la cantidad escrita se sigue mandando
+   * (si no, el reintento volvía a pedirla y la fila no salía nunca).
+   */
+  pideCantidad: boolean;
+  pideFecha: boolean;
 }
 
 const inputCls =
@@ -265,7 +287,16 @@ export function VincularColaModal({
         }
         // Un error de la fila (su comprobante, su compra, su stock): se lista y se
         // sigue con la próxima, que pasa a ser la que crea el alias.
-        nuevasFallas.push({ record, code, mensaje: mensajeVincular(error), cantidad: "" });
+        nuevasFallas.push({
+          record,
+          code,
+          mensaje: mensajeVincular(error),
+          // La cantidad que se escribió arriba para esta fila no se pierde.
+          cantidad: usarCantidad ? cantidadPedida.valor : "",
+          fecha: "",
+          pideCantidad: usarCantidad || code === "CANTIDAD_REQUERIDA",
+          pideFecha: code === "FECHA_REQUERIDA",
+        });
       }
     }
     if (cancelado.current) {
@@ -294,8 +325,11 @@ export function VincularColaModal({
 
   const reintentar = async (falla: FilaConFalla) => {
     if (corriendo) return;
-    const conCantidad = falla.code === "CANTIDAD_REQUERIDA";
-    const problema = conCantidad ? errorDeCantidad(falla.cantidad) : null;
+    const conCantidad = falla.pideCantidad;
+    const conFecha = falla.pideFecha;
+    const problema =
+      (conCantidad ? errorDeCantidad(falla.cantidad) : null) ??
+      (conFecha ? errorDeFecha(falla.fecha) : null);
     if (problema) {
       setFallas((prev) =>
         prev.map((f) => (f.record.id === falla.record.id ? { ...f, mensaje: problema } : f)),
@@ -307,6 +341,7 @@ export function VincularColaModal({
       await othersService.linkProduct(falla.record.id, {
         product_id: productoId,
         ...(conCantidad ? { quantity: Number(falla.cantidad.trim()) } : {}),
+        ...(conFecha ? { transaction_date: `${falla.fecha.trim()}T00:00:00` } : {}),
       });
       if (cancelado.current) {
         onCambiosTrasCerrar?.();
@@ -327,10 +362,17 @@ export function VincularColaModal({
         if (resto.length === 0) siguiente();
         return;
       }
+      const code = codigoDeError(error);
       setFallas((prev) =>
         prev.map((f) =>
           f.record.id === falla.record.id
-            ? { ...f, code: codigoDeError(error), mensaje: mensajeVincular(error) }
+            ? {
+                ...f,
+                code,
+                mensaje: mensajeVincular(error),
+                pideCantidad: f.pideCantidad || code === "CANTIDAD_REQUERIDA",
+                pideFecha: f.pideFecha || code === "FECHA_REQUERIDA",
+              }
             : f,
         ),
       );
@@ -341,6 +383,8 @@ export function VincularColaModal({
 
   const setCantidadFalla = (id: string, cantidad: string) =>
     setFallas((prev) => prev.map((f) => (f.record.id === id ? { ...f, cantidad } : f)));
+  const setFechaFalla = (id: string, fecha: string) =>
+    setFallas((prev) => prev.map((f) => (f.record.id === id ? { ...f, fecha } : f)));
 
   const pendientesDelGrupo = grupo ? grupo.records.filter((r) => !hechas.has(r.id)).length : 0;
 
@@ -490,7 +534,7 @@ export function VincularColaModal({
                   </span>
                   <span className="text-vk-danger">{f.mensaje}</span>
                   <span className="flex items-center gap-2">
-                    {f.code === "CANTIDAD_REQUERIDA" ? (
+                    {f.pideCantidad ? (
                       <input
                         aria-label={`Cantidad de la venta del ${f.record.row_data?.fecha ?? ""}`}
                         className={`${inputCls} w-24`}
@@ -499,6 +543,15 @@ export function VincularColaModal({
                         step={1}
                         value={f.cantidad}
                         onChange={(e) => setCantidadFalla(f.record.id, e.target.value)}
+                      />
+                    ) : null}
+                    {f.pideFecha ? (
+                      <input
+                        aria-label={`Fecha de la venta del ${f.record.row_data?.fecha || "—"}`}
+                        className={inputCls}
+                        type="date"
+                        value={f.fecha}
+                        onChange={(e) => setFechaFalla(f.record.id, e.target.value)}
                       />
                     ) : null}
                     <button

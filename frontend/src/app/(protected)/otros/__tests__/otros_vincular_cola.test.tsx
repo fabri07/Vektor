@@ -10,7 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import type { UnclassifiedRecordResponse } from "@/services/others.service";
 import { othersService } from "@/services/others.service";
-import { VincularColaModal } from "../VincularColaModal";
+import { errorDeFecha, VincularColaModal } from "../VincularColaModal";
 import OtrosPage from "../page";
 
 jest.mock("@/services/others.service", () => ({
@@ -356,6 +356,79 @@ it("«Reintentar» pide la cantidad y la manda", async () => {
   fireEvent.click(boton);
   await screen.findByText(/Terminaste la cola/);
   expect(svc.linkProduct).toHaveBeenLastCalledWith("r2", { product_id: "p-yerba", quantity: 3 });
+});
+
+it("FECHA_REQUERIDA (V-16): muestra el motivo del backend, pide la fecha y la manda", async () => {
+  svc.linkProduct!
+    .mockResolvedValueOnce("ok")
+    .mockRejectedValueOnce(
+      axiosError(422, {
+        code: "FECHA_REQUERIDA",
+        message: "La fecha «04/03/2026» se puede leer como día/mes o como mes/día.",
+      }),
+    )
+    .mockResolvedValueOnce("ok");
+  await abrirCola([venta("r1", "Queso"), venta("r2", "Queso")]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+
+  expect(await screen.findByText(/se puede leer como día\/mes o como mes\/día/)).toBeInTheDocument();
+  const boton = screen.getByRole("button", { name: /Reintentar la venta del 2026-10-02 por/ });
+  fireEvent.click(boton);
+  expect(await screen.findByText("Ingresá la fecha.")).toBeInTheDocument();
+  expect(svc.linkProduct).toHaveBeenCalledTimes(2);
+
+  fireEvent.change(screen.getByLabelText("Fecha de la venta del 2026-10-02"), {
+    target: { value: "2026-03-04" },
+  });
+  fireEvent.click(boton);
+  await screen.findByText(/Terminaste la cola/);
+  expect(svc.linkProduct).toHaveBeenLastCalledWith("r2", {
+    product_id: "p-yerba",
+    transaction_date: "2026-03-04T00:00:00",
+  });
+});
+
+it("cantidad y después fecha: el reintento manda las dos y no vuelve a pedir la cantidad", async () => {
+  svc.linkProduct!
+    .mockResolvedValueOnce("ok")
+    .mockRejectedValueOnce(axiosError(422, { code: "CANTIDAD_REQUERIDA" }))
+    .mockRejectedValueOnce(
+      axiosError(422, { code: "FECHA_REQUERIDA", message: "La fecha «04/03/2026» es ambigua." }),
+    )
+    .mockResolvedValueOnce("ok");
+  await abrirCola([venta("r1", "Queso"), venta("r2", "Queso", { cantidad: "1,5" })]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+
+  const boton = await screen.findByRole("button", {
+    name: /Reintentar la venta del 2026-10-02 por/,
+  });
+  fireEvent.change(screen.getByLabelText("Cantidad de la venta del 2026-10-02"), {
+    target: { value: "3" },
+  });
+  fireEvent.click(boton);
+  expect(await screen.findByText("La fecha «04/03/2026» es ambigua.")).toBeInTheDocument();
+  expect(svc.linkProduct).toHaveBeenLastCalledWith("r2", { product_id: "p-yerba", quantity: 3 });
+  // La cantidad ya escrita sigue a la vista, y aparece la fecha.
+  expect(screen.getByLabelText("Cantidad de la venta del 2026-10-02")).toHaveValue(3);
+  fireEvent.change(screen.getByLabelText("Fecha de la venta del 2026-10-02"), {
+    target: { value: "2026-03-04" },
+  });
+  fireEvent.click(boton);
+  await screen.findByText(/Terminaste la cola/);
+  expect(svc.linkProduct).toHaveBeenLastCalledWith("r2", {
+    product_id: "p-yerba",
+    quantity: 3,
+    transaction_date: "2026-03-04T00:00:00",
+  });
+});
+
+it("errorDeFecha: la fecha indicada no puede ser posterior a hoy", () => {
+  const hoy = new Date(2026, 9, 27);
+  expect(errorDeFecha("2026-10-27", hoy)).toBeNull();
+  expect(errorDeFecha("2026-10-28", hoy)).toBe("La fecha no puede ser posterior a hoy.");
+  expect(errorDeFecha("", hoy)).toBe("Ingresá la fecha.");
 });
 
 it("al pasar a la referencia siguiente el producto elegido no se arrastra", async () => {

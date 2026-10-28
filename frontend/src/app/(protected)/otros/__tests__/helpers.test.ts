@@ -2,20 +2,27 @@ import type { UnclassifiedRecordResponse } from "@/services/others.service";
 import { agruparPorReferencia, esQueryAfectadaPorVincular, prefill, toIsoDate } from "../helpers";
 
 describe("toIsoDate", () => {
-  it("normaliza dd/mm/yyyy a ISO (convención AR)", () => {
-    // 12/03/2024 = 12 de marzo, no 3 de diciembre.
-    expect(toIsoDate("12/03/2024")).toBe("2024-03-12");
-    // 03/04/2026 = 3 de abril (dd/mm antes que mm/dd).
-    expect(toIsoDate("03/04/2026")).toBe("2026-04-03");
+  it("normaliza dd/mm/yyyy inequívoco a ISO", () => {
+    // 13/03/2024: 13 no puede ser mes.
+    expect(toIsoDate("13/03/2024")).toBe("2024-03-13");
+    // Mismo número de los dos lados: las dos lecturas son el mismo día.
+    expect(toIsoDate("04/04/2026")).toBe("2026-04-04");
+  });
+
+  it("V-16: una fecha corta ambigua no se adivina (queda vacía)", () => {
+    // 3 de abril o 4 de marzo: la escribe la persona.
+    expect(toIsoDate("03/04/2026")).toBe("");
+    expect(toIsoDate("12/03/2024")).toBe("");
+    expect(toIsoDate("05-06-26")).toBe("");
   });
 
   it("acepta guiones y año de 2 dígitos con el pivote de strptime (69)", () => {
-    expect(toIsoDate("05-06-26")).toBe("2026-06-05");
-    expect(toIsoDate("05/06/26")).toBe("2026-06-05");
+    expect(toIsoDate("15-06-26")).toBe("2026-06-15");
+    expect(toIsoDate("15/06/26")).toBe("2026-06-15");
     // Pivote 69: 00–68 → 20xx, 69–99 → 19xx (igual que el backend).
-    expect(toIsoDate("05/06/68")).toBe("2068-06-05");
-    expect(toIsoDate("05/06/69")).toBe("1969-06-05");
-    expect(toIsoDate("05/06/99")).toBe("1999-06-05");
+    expect(toIsoDate("15/06/68")).toBe("2068-06-15");
+    expect(toIsoDate("15/06/69")).toBe("1969-06-15");
+    expect(toIsoDate("15/06/99")).toBe("1999-06-15");
   });
 
   it("rechaza fechas calendáricamente imposibles", () => {
@@ -47,7 +54,7 @@ describe("prefill", () => {
       source: "ingestion",
       context_label: "Fila sin fecha reconocible",
       headers: ["fecha", "monto"],
-      row_data: { fecha: "12/03/2024", monto: "5000" },
+      row_data: { fecha: "13/03/2024", monto: "5000" },
       suggested_entity: "sale",
       suggested_category: null,
       suggested_category_label: null,
@@ -56,8 +63,16 @@ describe("prefill", () => {
       created_at: "2026-07-21T10:00:00Z",
     } as unknown as UnclassifiedRecordResponse;
     const pre = prefill(record);
-    expect(pre.date).toBe("2024-03-12");
+    expect(pre.date).toBe("2024-03-13");
     expect(pre.amount).toBe("5000");
+  });
+
+  it("V-16: con una fecha ambigua deja la fecha vacía (no la adivina)", () => {
+    const record = {
+      id: "r2",
+      row_data: { fecha: "04/03/2026", monto: "5000" },
+    } as unknown as UnclassifiedRecordResponse;
+    expect(prefill(record).date).toBe("");
   });
 });
 
