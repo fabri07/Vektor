@@ -183,5 +183,6 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 | V-16 | normal | confirmado | Filas de «Otros» que quedaron en needs_manual antes de #214 tienen la huella puesta y el lote las saltea (limpiar con script, OK del dueño); link-product pasa la fecha cruda (dd/mm → 422); backlog sin convenio: fechas ambiguas ahora van a resolver de a una | pendiente | revisión de #214 |
 | V-17 | normal | confirmado | `send_weekly_email.py:295` usa `date.today()`; la ventana de 30 días del BSL sale de la fecha UTC (corre un día después de las 21 ART) | pendiente | implementación de D-5 |
 | V-18 | menor | confirmado | `CashCloseModal.tsx:159-164` sólo trata el 409: con la PC en zona horaria adelantada el 422 de fecha futura (D-5) muestra «No se pudo registrar el cierre.» sin explicar; mostrar el mensaje del 422 o armar la fecha en hora AR | pendiente | revalidación de #209 |
+| V-19 | normal | confirmado | Mismo archivo: «Factura A 0001-123» y «FC 0001-123» con el mismo monto entran las dos sin aviso. Dueño 2026-10-28: entran las dos + aviso de posible duplicado si las dos quedaron cargadas | mergeado | #216 `bade5879` |
 
 Etapa 5 (persistencia, migraciones, scripts): sin críticos (una sola head, lock de migración correcto, migraciones recientes aditivas, scripts con dry-run).
