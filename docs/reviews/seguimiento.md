@@ -88,7 +88,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I4-3 | grave | confirmado | I-B | Deshacer relectura borra (hard delete) ventas y gastos que el usuario editó DESPUÉS de releer | mergeado | #213 `2f7f568f` |
 | I4-4 | grave | confirmado | I-B | El undo de relectura no revierte «Otros»: quedan pendientes que duplican ventas restauradas | mergeado | #213 `2f7f568f` |
 | I4-5 | grave | confirmado | I-B | Borrar un archivo, deshacer o releer deja stock_units NEGATIVO (void_movement sin piso ni chequeo) | mergeado | #207 `0affce51` |
-| I4-6 | grave | confirmado | I-B | La relectura nunca vuelve a leer las filas que el import anterior mandó a «Otros» (sin fecha, sin monto, total, conflicto, venta sin stock o sin compra) | pendiente |  |
+| I4-6 | grave | confirmado | I-B | La relectura nunca vuelve a leer las filas que el import anterior mandó a «Otros» (sin fecha, sin monto, total, conflicto, venta sin stock o sin compra) | mergeado | #221 `a04efb80` |
 | I3-6 | normal | confirmado | I-B | «La relectura respeta el lease del import» se verifica sólo en el endpoint: el worker de la relectura aplica sin volver a mirar el lease | pendiente |  |
 | I4-7 | normal | confirmado | I-B | Con autoflush=False, el borrado ve como «vivas» las ventas y gastos del propio archivo y conserva sus maestros y productos con un motivo falso | pendiente |  |
 | I4-8 | normal | confirmado | I-B | El borrado ignora lo que hizo una relectura sobre clientes y proveedores (REREAD_MASTER_*), y la relectura no registra los campos cruzados de B·6 | pendiente |  |
@@ -99,7 +99,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I4-13 | normal | confirmado | I-B | El aviso de «carga repetida masiva» cruza ventas con gastos y cuenta de más cada clave repetida | pendiente |  |
 | I4-14 | normal | confirmado | I-B | El diagnóstico de cola mide la antigüedad con `created_at`: una sesión reusada aparece «trabada» al instante | pendiente |  |
 | I1-3 | grave | confirmado | I-C | Una compra de mercadería con cantidad decimal de un producto por unidad que ya existe deja un gasto COGS sin stock ni movimiento, sin avisar | mergeado | #222 `07f14f18` |
-| I1-4 | grave | plausible | I-C | Las filas que F8 manda a «Otros» se borran del bucket y corren los índices: su __row_ref__ coincide con el source_row_ref de la fila siguiente, y la relectura anula la venta o gasto clasificado a mano sin medirlo como pérdida | pendiente |  |
+| I1-4 | grave | plausible | I-C | Las filas que F8 manda a «Otros» se borran del bucket y corren los índices: su __row_ref__ coincide con el source_row_ref de la fila siguiente, y la relectura anula la venta o gasto clasificado a mano sin medirlo como pérdida | mergeado | #221 `a04efb80` |
 | I2-1 | grave | confirmado | I-C | El costo del envío se cobra de nuevo en otro archivo aunque todas sus compras quedaron como «ya aplicadas» (E6b) | pendiente |  |
 | I2-2 | grave | confirmado | I-C | El gate de replay cuenta como consumo ventas que después no se insertan (ya aplicadas, salteadas por huella, en conflicto) | pendiente |  |
 | I2-3 | grave | confirmado | I-C | Tabla suelta con Ventas+Productos tildados: la cantidad vendida de cada fila pasa a ser el stock absoluto del producto | mergeado | #210 `45a8cee4` |
