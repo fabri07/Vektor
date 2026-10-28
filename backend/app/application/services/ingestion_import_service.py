@@ -2050,6 +2050,91 @@ def _source_row_ref(anchor: str | None) -> str | None:
     return hashlib.sha256(anchor.encode()).hexdigest()
 
 
+#: V-19 — cuántas muestras de posibles duplicados viajan en ``counts``. El aviso
+#: muestra éstas; el total va aparte.
+_MUESTRAS_DE_POSIBLES_DUPLICADOS = 3
+#: V-19 — ``[(plan, hoja)]`` de los planes de identidad de la corrida, para que
+#: el wrapper avise al final, después de B·5e (que saca ventas ya insertadas).
+_V19_PLANES = "v19_planes_de_identidad"
+#: V-19 — cómo se nombra la entidad del par en la muestra.
+_ENTIDAD_DEL_PAR = {"sale": "venta", "expense": "compra"}
+
+
+def _guardar_planes_para_v19(
+    session: AsyncSession, planes: list[tuple[PlanDeIdentidad, str | None]]
+) -> None:
+    """V-19: deja los planes con candidatos para ``_avisar_posibles_duplicados``."""
+    con_pares = [(p, h) for p, h in planes if p.posibles_duplicados]
+    if con_pares:
+        session.info.setdefault(_V19_PLANES, []).extend(con_pares)
+
+
+async def _avisar_posibles_duplicados(
+    session: AsyncSession, tenant_id: uuid.UUID, counts: dict[str, Any]
+) -> None:
+    """V-19: los pares «con letra / sin letra» que entraron LOS DOS, a
+    ``counts`` (total + hasta tres muestras en castellano). Va al FINAL del
+    import, después de B·5e: recién ahí se sabe qué ventas y gastos siguen
+    cargados. Se avisa y nada más: pueden ser dos comprobantes, y colapsarlos
+    podría borrar plata.
+
+    El mismo par de filas puede salir de dos planes —una tabla mixta (Libro
+    Diario) produce venta Y gasto desde las mismas filas—: se cuenta una vez,
+    con las dos entidades en la muestra."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
+    planes: list[tuple[PlanDeIdentidad, str | None]] = session.info.pop(_V19_PLANES, [])
+    if not planes:
+        return
+    ids: dict[str, set[uuid.UUID]] = {"sale": set(), "expense": set()}
+    for plan, _ in planes:
+        for par in plan.posibles_duplicados:
+            for fila in (par.fila_con_letra, par.fila_sin_letra):
+                ids.setdefault(par.entidad, set()).update(plan.efectos_de(fila, par.entidad))
+    vivos: set[uuid.UUID] = set()
+    for modelo, entidad in ((SaleEntry, "sale"), (ExpenseEntry, "expense")):
+        lote = sorted(ids.get(entidad) or ())
+        for desde in range(0, len(lote), 5000):
+            vivos.update(
+                (
+                    await session.execute(
+                        select(modelo.id).where(
+                            modelo.tenant_id == tenant_id,
+                            modelo.id.in_(lote[desde : desde + 5000]),
+                            modelo.voided_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            )
+
+    entidades: dict[tuple[str, int, int], list[str]] = {}
+    textos: dict[tuple[str, int, int], str] = {}
+    for plan, hoja in planes:
+        en_hoja = f" de la hoja «{hoja}»" if hoja else ""
+        for par in plan.pares_que_entraron(vivos):
+            clave = (hoja or "", par.fila_con_letra, par.fila_sin_letra)
+            nombre = _ENTIDAD_DEL_PAR.get(par.entidad, par.entidad)
+            if nombre not in entidades.setdefault(clave, []):
+                entidades[clave].append(nombre)
+            textos.setdefault(
+                clave,
+                f"fila {par.fila_con_letra + 1} («{par.comprobante_con_letra}») y "
+                f"fila {par.fila_sin_letra + 1} («{par.comprobante_sin_letra}»){en_hoja}",
+            )
+    if not textos:
+        return
+    counts["posibles_duplicados_sin_letra"] = counts.get(
+        "posibles_duplicados_sin_letra", 0
+    ) + len(textos)
+    muestras: list[str] = counts.setdefault("posibles_duplicados_sin_letra_muestras", [])
+    for clave, texto in textos.items():
+        if len(muestras) >= _MUESTRAS_DE_POSIBLES_DUPLICADOS:
+            break
+        muestras.append(f"{' y '.join(entidades[clave])}: {texto}")
+
+
 def _registrar_monto_derivado(
     cf: dict[str, str], linea: LineAmount, counts: dict[str, Any]
 ) -> None:
@@ -3534,6 +3619,42 @@ def _es_fraccion_positiva(qty_raw: Any) -> bool:
         and monto.valor > 0
         and monto.valor != monto.valor.to_integral_value()
     )
+
+
+async def _compra_sin_unidades_base(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_id: uuid.UUID,
+    qty_raw: Any,
+    product_cache: dict[uuid.UUID, Any] | None,
+) -> tuple[str, str] | None:
+    """I1-3: ¿la cantidad escrita de una compra con producto NO da unidades base?
+
+    `_hay_cantidad` acepta «2,5» (puede ser un producto por peso), pero con un
+    producto por unidad `_apply_purchase_to_stock` la descarta en silencio y
+    quedaba un gasto COGS sin stock ni movimiento. Se decide con el factor del
+    MISMO producto que va a usar la suma de stock (caché o sesión, igual que
+    ahí). Devuelve ``(rótulo de «Otros», contador)`` o None si la cantidad sirve.
+    Sólo para filas con producto y `_hay_cantidad`.
+    """
+    if _parse_qty(qty_raw) > 0:
+        return None
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    product = product_cache.get(product_id) if product_cache is not None else None
+    if product is None:
+        product = await session.get(Product, product_id)
+    factor = 1
+    if product is not None and product.tenant_id == tenant_id:
+        factor = product.base_units_per_sale_unit or 1
+    if _cantidad_base_de_documento(qty_raw, factor) > 0:
+        return None
+    motivo = parsear_cantidad(qty_raw).motivo
+    if motivo is None:
+        # Defensa: una cantidad legible que igual no da unidades (hoy `_hay_cantidad`
+        # ya frena el «0»). No dice cuántos entraron, como una celda vacía.
+        return MOTIVO_COMPRA_SIN_ARTICULOS, "compras_sin_articulos"
+    return _label_cantidad_ilegible(motivo), "filas_sin_cantidad"
 
 
 def _cantidad_de_venta(qty_raw: Any) -> tuple[int, str | None]:
@@ -5409,6 +5530,8 @@ async def insert_confirmed_data(
         )
 
     _cross_buffer = CrossFieldBuffer() if apply_cross_fields else None
+    # V-19: nada de una corrida anterior que haya salido por excepción.
+    session.info.pop(_V19_PLANES, None)
     sa_event.listen(session.sync_session, "after_flush", _anotar_ventas_nuevas)
     try:
         counts = await _insert_confirmed_data_impl(
@@ -5458,6 +5581,8 @@ async def insert_confirmed_data(
             counts, source,
         )
     session.info.pop(_B5E_VINCULO_PENDIENTE, None)
+    # V-19: después de B·5e, que saca ventas ya insertadas.
+    await _avisar_posibles_duplicados(session, tenant_id, counts)
     # Bloque 5: persistir las decisiones EXPLÍCITAS de esta corrida por huella
     # de esquema — nunca sugerencias. `context_mappings`/`context_entity`/
     # `context_confirmed`/`shipping_decisions` (y `stock_treatment` en su forma
@@ -7412,13 +7537,35 @@ async def _insert_confirmed_data_impl(
                                     barcode=_exp_barcode,
                                     by_barcode=_identity_indexes.by_barcode,
                                 )
+                    _es_cogs = (
+                        infer_expense_type(cat_code, product_id=expense.product_id)
+                        == "COGS"
+                    )
+                    # I1-3: ver el gemelo multihoja.
+                    _sin_unidades = (
+                        await _compra_sin_unidades_base(
+                            session, tenant_id, expense.product_id, exp_qty_raw,
+                            _product_cache,
+                        )
+                        if not _captured_to_otros
+                        and _es_cogs
+                        and expense.product_id is not None
+                        and _hay_cantidad(exp_qty_raw)
+                        else None
+                    )
                     if (
                         not _captured_to_otros
-                        and infer_expense_type(cat_code, product_id=expense.product_id)
-                        == "COGS"
-                        and (expense.product_id is None or not _hay_cantidad(exp_qty_raw))
+                        and _es_cogs
+                        and (
+                            expense.product_id is None
+                            or not _hay_cantidad(exp_qty_raw)
+                            or _sin_unidades is not None
+                        )
                     ):
                         # B·5b-2, control final: ver el gemelo multihoja.
+                        _rotulo, _contador = _sin_unidades or (
+                            MOTIVO_COMPRA_SIN_ARTICULOS, "compras_sin_articulos"
+                        )
                         counts["otros"] += _capture_unclassified(
                             session,
                             tenant_id,
@@ -7426,13 +7573,11 @@ async def _insert_confirmed_data_impl(
                             headers=headers,
                             source=source,
                             uploaded_file_id=uploaded_file_id,
-                            context_label=MOTIVO_COMPRA_SIN_ARTICULOS,
+                            context_label=_rotulo,
                             suggested_entity="expense",
                             row_ref=_source_row_ref(_row_anchor),
                         )
-                        counts["compras_sin_articulos"] = (
-                            counts.get("compras_sin_articulos", 0) + 1
-                        )
+                        counts[_contador] = counts.get(_contador, 0) + 1
                         _captured_to_otros_rows.add(row_index)
                         _captured_to_otros = True
                     # Review F2 #4: la cola de "aplicar el gasto" se saltea SIN
@@ -7609,6 +7754,8 @@ async def _insert_confirmed_data_impl(
         # no produjeron nada. Acá y no al final de la función porque los planes
         # sólo existen dentro de esta rama; en la misma transacción que los
         # efectos, para que un import revertido se lleve sus identidades.
+        # V-19: se avisa al final del import (ver `_avisar_posibles_duplicados`).
+        _guardar_planes_para_v19(session, [(_plan_ventas, None), (_plan_gastos, None)])
         await cerrar_plan(session, tenant_id, uploaded_file_id, _planes_identidad_plano)
 
         # E6a — el envío se cobra acá, DESPUÉS de las líneas y con la misma
@@ -7670,6 +7817,13 @@ async def _insert_confirmed_data_impl(
 
         if wants_productos:
             assert nombre_col is not None  # wants_productos implica nombre_col presente
+            # I2-6: el tratamiento de ESTA tabla, no el global. La relectura (y la
+            # API) mandan `{context_id: tratamiento}` también para una tabla suelta,
+            # y el global de un dict es apertura: una compra se volvía apertura y
+            # la relectura anulaba sus COGS. Mismo criterio que el multihoja.
+            _stock_is_purchase_plano = stock_is_purchase_for(
+                _ctx_plano or _ctx_inline or "table"
+            )
             _skipped_brands: set[str] = set()
             # Cambio 1: asegurar la definición de "marca" UNA vez por import, no
             # una consulta por producto (N+1 sobre un catálogo de miles de filas).
@@ -7943,7 +8097,7 @@ async def _insert_confirmed_data_impl(
                             uploaded_file_id=uploaded_file_id,
                             source_row_ref=_prod_row_ref,
                             balance_index=_balance_index,
-                            is_purchase=stock_is_purchase,
+                            is_purchase=_stock_is_purchase_plano,
                             base_units_per_sale_unit=_factor,
                         )
                     if sku:
@@ -8205,7 +8359,7 @@ async def _insert_confirmed_data_impl(
                         uploaded_file_id=uploaded_file_id,
                         source_row_ref=_prod_row_ref,
                         balance_index=_balance_index,
-                        is_purchase=stock_is_purchase,
+                        is_purchase=_stock_is_purchase_plano,
                     )
                     if return_details:
                         product_details.append(
@@ -8997,6 +9151,8 @@ async def _insert_multisheet_data(
     # parte 2 arregló — manda a corregir un mapeo que estaba perfecto.
     _motivos_numericos_del_archivo: Counter[str] = Counter()
     _planes_identidad: list[PlanDeIdentidad] = []
+    #: V-19: la hoja de cada plan de ``_planes_identidad``, en el mismo orden.
+    _hojas_de_planes: list[str] = []
     _efectos_de_la_fila: list[tuple[str, uuid.UUID]] = []
     _skipped_brands: set[str] = set()
     # Cambio 1: asegurar la definición de "marca"/"tienda_original" UNA vez por
@@ -9859,13 +10015,29 @@ async def _insert_multisheet_data(
         # FASE D: discriminador COGS/OPEX (producto del catálogo/recién creado o
         # categoría INVENTORY) + stock desde compras con cantidad.
         expense.expense_type = infer_expense_type(cat_code, product_id=expense.product_id)
+        # I1-3: una cantidad escrita que no da unidades base con el factor del
+        # producto («2,5» de uno por unidad) no sumaría stock: tampoco es una compra.
+        _sin_unidades = (
+            await _compra_sin_unidades_base(
+                session, tenant_id, expense.product_id, exp_qty_raw, product_cache
+            )
+            if expense.expense_type == "COGS"
+            and expense.product_id is not None
+            and _hay_cantidad(exp_qty_raw)
+            else None
+        )
         if expense.expense_type == "COGS" and (
-            expense.product_id is None or not _hay_cantidad(exp_qty_raw)
+            expense.product_id is None
+            or not _hay_cantidad(exp_qty_raw)
+            or _sin_unidades is not None
         ):
             # B·5b-2, control final: después de resolver el producto, una compra de
             # mercadería que sigue sin artículo (una cantidad con decimales de un
             # producto nuevo no lo crea) o sin cantidad (vínculo fuerte, sin cuántos)
             # no se registra como gasto COGS suelto: va a «Otros».
+            _rotulo, _contador = _sin_unidades or (
+                MOTIVO_COMPRA_SIN_ARTICULOS, "compras_sin_articulos"
+            )
             counts["otros"] += _capture_unclassified(
                 session,
                 tenant_id,
@@ -9873,12 +10045,12 @@ async def _insert_multisheet_data(
                 headers=None,
                 source=source,
                 uploaded_file_id=uploaded_file_id,
-                context_label=MOTIVO_COMPRA_SIN_ARTICULOS,
+                context_label=_rotulo,
                 suggested_entity="expense",
                 row_ref=row_ref,
                 context_id=context_id,
             )
-            counts["compras_sin_articulos"] = counts.get("compras_sin_articulos", 0) + 1
+            counts[_contador] = counts.get(_contador, 0) + 1
             return True
         # Sentinela: compra de mercadería (con product_id) SIN proveedor informado
         # → "No identificado" (UNO por tenant). No aplica a OPEX sin producto.
@@ -11042,6 +11214,7 @@ async def _insert_multisheet_data(
                 entity=entity,
             )
             _planes_identidad.append(_plan_ident)
+            _hojas_de_planes.append(str(ctx.get("label") or ""))
             for _i, row in enumerate(rows):
                 # B1: idempotencia por (archivo, contexto, índice). Chequeo
                 # READ-ONLY; la huella se registra recién DESPUÉS y solo si la
@@ -11452,6 +11625,10 @@ async def _insert_multisheet_data(
     # transacción que los efectos— porque si el import se revierte, las
     # identidades se tienen que ir con él: no puede quedar una identidad
     # reclamada por un import que no ocurrió.
+    # V-19: se avisa al final del import (ver `_avisar_posibles_duplicados`).
+    _guardar_planes_para_v19(
+        session, list(zip(_planes_identidad, _hojas_de_planes, strict=True))
+    )
     await cerrar_plan(session, tenant_id, uploaded_file_id, _planes_identidad)
 
     await session.flush()
