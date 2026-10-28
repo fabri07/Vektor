@@ -273,8 +273,8 @@ class TestEmailContent:
         health_score: HealthScoreSnapshot,
     ) -> None:
         """E0-A-15: el beat corre el lunes; la semana es la de lunes a domingo
-        pasados, no «desde el lunes de esta semana» (ese mismo día). Y el lunes
-        es el día AR: a las 22:30 ART el día UTC ya es martes."""
+        pasados, no «desde el lunes de esta semana» (ese mismo día). El borde
+        AR/UTC lo fija el test del domingo, abajo."""
         from app.persistence.models.cash_close import CashClose  # noqa: PLC0415
 
         # Un lunes ya pasado (el reloj real no lo alcanza a ninguna hora).
@@ -305,6 +305,47 @@ class TestEmailContent:
         assert data is not None
         assert data["cash_closes_count"] == 2
         assert data["cash_diff_ars"] == Decimal("-700.00")
+
+    async def test_gather_un_domingo_a_las_2230_ar_no_cuenta_la_semana_abierta(
+        self,
+        session: AsyncSession,
+        tenant: Tenant,
+        owner_user: User,
+        health_score: HealthScoreSnapshot,
+    ) -> None:
+        """E0-A-15: el domingo de 21 a 24 ART el día UTC ya es lunes. Con el día
+        UTC, la «semana que terminó» sería la que cierra HOY, todavía abierta; con
+        el día AR es la anterior."""
+        from app.persistence.models.cash_close import CashClose  # noqa: PLC0415
+
+        # Un domingo ya pasado (el reloj real no lo alcanza a ninguna hora).
+        base = today_ar() - timedelta(days=7)
+        domingo = base - timedelta(days=base.weekday() + 1)
+        domingo_2230 = datetime(
+            domingo.year, domingo.month, domingo.day, 22, 30, tzinfo=AR_TZ
+        )
+
+        def _cierre(dia: date, diferencia: str) -> CashClose:
+            return CashClose(
+                tenant_id=tenant.tenant_id,
+                close_date=dia,
+                expected_total_ars=Decimal("1000.00"),
+                counted_total_ars=Decimal("1000.00") + Decimal(diferencia),
+                difference_ars=Decimal(diferencia),
+                breakdown_by_method={},
+            )
+
+        session.add_all([
+            _cierre(domingo - timedelta(days=7), "-300.00"),  # domingo anterior: entra
+            _cierre(domingo, "-40.00"),  # hoy: semana abierta, afuera
+        ])
+        await session.commit()
+
+        with reloj_utc(domingo_2230):
+            data = await _gather_email_data(tenant.tenant_id, session)
+        assert data is not None
+        assert data["cash_closes_count"] == 1
+        assert data["cash_diff_ars"] == Decimal("-300.00")
 
     async def test_html_includes_cash_closes_row(self) -> None:
         html = _build_html(
