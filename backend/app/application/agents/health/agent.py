@@ -342,6 +342,8 @@ class AgentHealth(BaseAgent):
                         "net_total": net_total,
                         "critical_days_threshold": critical_days,
                         "risk_code": "CASH_LOW",
+                        # D-3/R-10: el crédito entra a N días de la venta.
+                        "credit_card_settlement_days": forecast.credit_card_settlement_days,
                     },
                     confidence=forecast.confidence,
                 )
@@ -350,7 +352,11 @@ class AgentHealth(BaseAgent):
                 "liquidez_ok",
                 f"No veo riesgo de quedarte sin caja en los próximos {horizon} días. "
                 f"Tu flujo neto proyectado es ${net_total:,.0f}.",
-                {"horizon_days": horizon, "net_total": net_total},
+                {
+                    "horizon_days": horizon,
+                    "net_total": net_total,
+                    "credit_card_settlement_days": forecast.credit_card_settlement_days,
+                },
                 confidence=forecast.confidence,
             )
 
@@ -366,6 +372,12 @@ class AgentHealth(BaseAgent):
             )
         else:
             lines.append("El saldo acumulado se mantiene positivo en todo el horizonte.")
+        dias = forecast.credit_card_settlement_days
+        lines.append(
+            f"Las ventas con tarjeta de crédito las cuento a {dias} "
+            f"{'día' if dias == 1 else 'días'} de la venta (lo cambiás en Configuración → "
+            "Margen objetivo)."
+        )
         return self._analysis_response(
             request,
             "proyectar_caja",
@@ -375,6 +387,7 @@ class AgentHealth(BaseAgent):
                 "net_total": net_total,
                 "tier": forecast.tier,
                 "first_negative_day": first_negative_day,
+                "credit_card_settlement_days": dias,
             },
             confidence=forecast.confidence,
         )

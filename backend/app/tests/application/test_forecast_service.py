@@ -6,6 +6,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.forecast_service import get_forecast
+from app.domain.business_time import today_ar
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
 
@@ -27,7 +28,7 @@ async def _seed_daily_cashflow(
     *,
     end_date: date | None = None,
 ) -> None:
-    last_day = end_date or date.today()
+    last_day = end_date or today_ar()
     first_day = last_day - timedelta(days=days - 1)
     for index in range(days):
         day = first_day + timedelta(days=index)
@@ -98,7 +99,7 @@ async def test_forecast_tier_3_after_90_days(db_session, sample_tenant) -> None:
 
 
 async def test_forecast_marks_stale_data_as_low_confidence(db_session, sample_tenant) -> None:
-    stale_end = date.today() - timedelta(days=10)
+    stale_end = today_ar() - timedelta(days=10)
     await _seed_daily_cashflow(db_session, sample_tenant.tenant_id, 45, end_date=stale_end)
 
     result = await get_forecast(sample_tenant.tenant_id, db_session, FakeRedis(), True)  # type: ignore[arg-type]  # test double / fixture

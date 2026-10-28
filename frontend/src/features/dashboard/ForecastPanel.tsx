@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import {
   CartesianGrid,
@@ -89,6 +90,21 @@ export function ForecastPanel() {
         Estimación de cómo va a entrar y salir la plata en los próximos días, según tu
         historial. La línea azul son ingresos, la roja egresos y la verde punteada el neto
         (lo que te queda). Es una proyección, no una certeza.
+      </p>
+
+      <p className="mt-1 text-xs leading-5 text-vektor-muted" data-testid="forecast-acreditacion-credito">
+        Las ventas con tarjeta de crédito se cuentan a {data.credit_card_settlement_days}{" "}
+        {data.credit_card_settlement_days === 1 ? "día" : "días"} de la venta. Lo cambiás en{" "}
+        <Link href="/settings?tab=salud" className="underline hover:text-vektor-body">
+          Configuración → Margen objetivo
+        </Link>
+        .
+        {(data.credit_card_pending_ars ?? 0) > 0 && (
+          <span data-testid="forecast-credito-sin-acreditar">
+            {" "}Vendido con crédito que todavía no se acreditó:{" "}
+            {formatARS(data.credit_card_pending_ars ?? 0)}.
+          </span>
+        )}
       </p>
 
       <div className="mt-3 mb-4">

@@ -6,6 +6,9 @@ import { settingsService } from "@/services/settings.service";
 import { useToastStore } from "@/stores/toastStore";
 
 const DEFAULTS = { target: 35, warning: 20 };
+// D-3/R-10: ≈ 10 días hábiles, el plazo legal de liquidación de la tarjeta de crédito.
+const DEFAULT_CREDIT_DAYS = 14;
+const MAX_CREDIT_DAYS = 60;
 // D-4: son los predeterminados GENÉRICOS de Véktor para el margen bruto, iguales
 // para todos los rubros (antes decía «valores por vertical», que era falso).
 const VEKTOR_DEFAULTS = "35% objetivo / 20% alerta (predeterminados de Véktor)";
@@ -62,6 +65,7 @@ export function HealthConfigPanel() {
 
   const [target, setTarget] = useState<number>(DEFAULTS.target);
   const [warning, setWarning] = useState<number>(DEFAULTS.warning);
+  const [creditDays, setCreditDays] = useState<string>(String(DEFAULT_CREDIT_DAYS));
   const [synced, setSynced] = useState(false);
 
   // Sincronizar sliders con el server state cuando llega la respuesta.
@@ -69,9 +73,32 @@ export function HealthConfigPanel() {
     if (config && !synced) {
       setTarget(Math.round(config.target_margin_pct));
       setWarning(Math.round(config.warning_margin_pct));
+      setCreditDays(String(config.credit_card_settlement_days ?? DEFAULT_CREDIT_DAYS));
       setSynced(true);
     }
   }, [config, synced]);
+
+  const creditDaysNum = Number(creditDays);
+  const creditDaysValid =
+    creditDays.trim() !== "" &&
+    Number.isInteger(creditDaysNum) &&
+    creditDaysNum >= 0 &&
+    creditDaysNum <= MAX_CREDIT_DAYS;
+
+  const saveCreditMutation = useMutation({
+    mutationFn: async () => {
+      const res = await settingsService.updateCreditCardSettlementDays(creditDaysNum);
+      if (!res) throw new Error("save_failed");
+      return res;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["health-config"] });
+      // La proyección de caja cambia con N.
+      qc.invalidateQueries({ queryKey: ["forecast", "cash"] });
+      toast.add("Plazo de la tarjeta de crédito guardado.", "success");
+    },
+    onError: () => toast.add("No se pudo guardar el plazo de la tarjeta de crédito.", "error"),
+  });
 
   const saveMutation = useMutation({
     mutationFn: () =>
@@ -89,10 +116,12 @@ export function HealthConfigPanel() {
       if (data) {
         setTarget(Math.round(data.target_margin_pct));
         setWarning(Math.round(data.warning_margin_pct));
+        setCreditDays(String(data.credit_card_settlement_days ?? DEFAULT_CREDIT_DAYS));
         setSynced(false);
       }
       qc.invalidateQueries({ queryKey: ["health-config"] });
-      toast.add("Valores de margen restaurados a los predeterminados.", "success");
+      qc.invalidateQueries({ queryKey: ["forecast", "cash"] });
+      toast.add("Margen y plazo de la tarjeta de crédito restaurados a los predeterminados.", "success");
     },
     onError: () => toast.add("No se pudo restaurar la configuración.", "error"),
   });
@@ -164,7 +193,7 @@ export function HealthConfigPanel() {
           >
             {saveMutation.isPending ? "Guardando…" : "Guardar"}
           </button>
-          {config?.is_custom && (
+          {(config?.is_custom || config?.credit_card_settlement_days_is_custom) && (
             <button
               type="button"
               disabled={resetMutation.isPending}
@@ -175,6 +204,50 @@ export function HealthConfigPanel() {
             </button>
           )}
         </div>
+      </div>
+
+      <div>
+        <h3 className="text-base font-semibold text-vk-text-primary">
+          Tarjeta de crédito en la proyección de caja
+        </h3>
+        <p className="mt-1 text-sm text-vk-text-muted">
+          Lo que vendés con tarjeta de crédito no entra a la caja el día de la venta. La
+          proyección lo suma estos días corridos después. Por defecto son{" "}
+          {DEFAULT_CREDIT_DAYS} (unos 10 días hábiles, el plazo legal de liquidación); 0 lo
+          cuenta el mismo día de la venta.
+        </p>
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-vk-border-w bg-vk-surface-w p-5 shadow-vk-sm">
+        <label htmlFor="credit-card-settlement-days" className="text-sm font-medium text-vk-text-primary">
+          Días hasta la acreditación
+        </label>
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            id="credit-card-settlement-days"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={MAX_CREDIT_DAYS}
+            step={1}
+            value={creditDays}
+            onChange={(e) => setCreditDays(e.target.value)}
+            className="w-24 rounded-lg border border-vk-border-w bg-transparent px-3 py-2 text-sm tabular-nums text-vk-text-primary"
+          />
+          <button
+            type="button"
+            disabled={!creditDaysValid || saveCreditMutation.isPending}
+            onClick={() => saveCreditMutation.mutate()}
+            className="rounded-full bg-vk-blue px-5 py-2 text-sm font-medium text-white hover:bg-vk-blue-hover transition-colors disabled:opacity-50"
+          >
+            {saveCreditMutation.isPending ? "Guardando…" : "Guardar plazo"}
+          </button>
+        </div>
+        {!creditDaysValid && (
+          <p className="rounded-lg border border-vk-danger/30 bg-vk-danger-bg px-4 py-2 text-xs text-vk-danger">
+            Tiene que ser un número entero de 0 a {MAX_CREDIT_DAYS}.
+          </p>
+        )}
       </div>
     </div>
   );

@@ -7,6 +7,9 @@ export interface HealthConfig {
   target_margin_pct: number;
   warning_margin_pct: number;
   is_custom: boolean;
+  /** D-3/R-10: a cuántos días corridos de la venta entra a caja lo vendido con crédito (0–60). */
+  credit_card_settlement_days: number;
+  credit_card_settlement_days_is_custom: boolean;
   /** D-4: objetivo de margen BRUTO por producto; el score mide el neto contra el rubro. */
   margin_kind: "bruto";
 }
@@ -36,6 +39,19 @@ export const settingsService = {
       const res = await api.patch<HealthConfig>("/settings/health-config", {
         target_margin_pct,
         warning_margin_pct,
+      });
+      return res.data;
+    } catch {
+      return null;
+    }
+  },
+
+  async updateCreditCardSettlementDays(
+    credit_card_settlement_days: number,
+  ): Promise<HealthConfig | null> {
+    try {
+      const res = await api.patch<HealthConfig>("/settings/health-config", {
+        credit_card_settlement_days,
       });
       return res.data;
     } catch {

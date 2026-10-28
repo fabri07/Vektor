@@ -62,16 +62,73 @@ _PAYMENT_METHOD_MAP = {
 }
 
 
+#: Contexto de tarjeta: sin alguna de estas palabras, «crédito» NO es tarjeta (N-2).
+_CONTEXTO_TARJETA = frozenset(
+    {"tarjeta", "tc", "visa", "master", "mastercard", "amex", "cabal", "naranja", "cuotas"}
+)
+#: Contexto de fiado: «a crédito», «crédito de la casa», «en cuenta corriente»…
+_CONTEXTO_FIADO = frozenset({"fiado", "libreta", "corriente", "cte", "ctacte"})
+#: Contexto bancario (N-3/N-5): «cuenta corriente» también es la cuenta del banco.
+#: Una transferencia explícita nunca es tarjeta; «banco» solo sí puede serlo
+#: («Visa crédito Banco Nación»).
+_TRANSFERENCIA = frozenset({"transferencia", "transf"})
+_BANCO = frozenset({"banco", "bancaria", "bancario"})
+
+
 def normalize_payment_method(value: str | None) -> str:
     """Texto libre → código canónico de método de pago; sin match → 'other'.
 
     Tolera tildes y separadores ("Cuenta_Corriente", "débito automático",
-    "Mercado-Pago") normalizando la clave antes del lookup.
+    "Mercado-Pago", "Fiado (crédito)") normalizando la clave antes del lookup.
+
+    Frases sin match exacto (G-2/N-2/N-3, revisión #217), en este orden:
+      - «transferencia» o «transf» → 'transfer', siempre (nunca es tarjeta).
+      - «banco», «bancaria», «bancario» → 'transfer' sólo si no hay contexto de
+        tarjeta, «crédito» ni «débito» («Visa crédito Banco Nación» es tarjeta).
+      - «cheque» → 'other', como el mapa («Transferencia cuenta corriente»,
+        «Cheque cuenta corriente»: la cuenta corriente del banco, no fiado).
+      - fiado: «fiado», «libreta», «cuenta corriente», «cta cte», «de la casa» o
+        «a crédito» (salvo «tarjeta a crédito») → 'account' (el canónico del
+        fiado, el que dispara el guard de fiado del import). Si además dice
+        «débito» es ambiguo → 'other'.
+      - «nota de crédito/débito» (un comprobante) → 'other'; «crédito fiscal»
+        también, porque no tiene contexto de tarjeta.
+      - «crédito» con contexto de tarjeta («tarjeta», «tc», «visa», «master»,
+        «amex», «cabal», «naranja», «cuotas») → 'credit_card'; sin ese
+        contexto → 'other' («crédito personal»).
+      - «débito» → 'debit_card' («Tarjeta de débito», «Visa débito»); «débito
+        automático …» → 'transfer'.
+      - «Tarjeta» o «Visa» solos, o con «crédito» y «débito» juntos → 'other'.
+    «crédito» sola sigue en el mapa → 'credit_card', como antes del PR. Sólo es
+    el camino de entrada: lo importado antes con estas frases sigue como 'other'.
     """
     if not value:
         return "other"
-    key = re.sub(r"[.\s\-_/]+", " ", strip_accents(str(value).strip().lower())).strip()
-    return _PAYMENT_METHOD_MAP.get(key, "other")
+    key = re.sub(r"[.,;:()\[\]\s\-_/]+", " ", strip_accents(str(value).strip().lower())).strip()
+    canonico = _PAYMENT_METHOD_MAP.get(key)
+    if canonico is not None:
+        return canonico
+    palabras = set(key.split())
+    credito, debito = "credito" in palabras, "debito" in palabras
+    relleno = f" {key} "
+    if palabras & _TRANSFERENCIA:
+        return "transfer"
+    if palabras & _BANCO and not (palabras & _CONTEXTO_TARJETA or credito or debito):
+        return "transfer"
+    if "cheque" in palabras:
+        return "other"
+    if (
+        palabras & _CONTEXTO_FIADO
+        or " de la casa " in relleno
+        or (" a credito " in relleno and not palabras & _CONTEXTO_TARJETA)
+    ):
+        return "other" if debito else "account"
+    if "nota" in palabras or credito == debito:
+        return "other"
+    if debito:
+        # «débito automático de la tarjeta»: sale del banco.
+        return "transfer" if "automatico" in palabras else "debit_card"
+    return "credit_card" if palabras & _CONTEXTO_TARJETA else "other"
 
 
 # Alias interno legacy.

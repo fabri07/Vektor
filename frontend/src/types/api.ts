@@ -79,6 +79,10 @@ export interface CashForecastResponse {
   horizon_days: number;
   points: ForecastPoint[];
   message: string | null;
+  /** D-3/R-10: vendido con tarjeta de crédito que todavía no se acreditó (venta + N días > hoy). */
+  credit_card_pending_ars?: number;
+  /** D-3/R-10: a cuántos días corridos de la venta se cuenta el crédito (configurable). */
+  credit_card_settlement_days: number;
 }
 
 export interface CategoryBreakdownItem {
