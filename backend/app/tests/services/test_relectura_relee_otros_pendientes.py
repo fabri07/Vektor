@@ -230,19 +230,21 @@ async def test_la_fila_que_sigue_sin_leerse_queda_una_sola_vez_en_otros(
     assert await huellas_presentes(db_session, tenant.tenant_id, {ref}) == {ref}
 
 
-async def test_el_preview_cuenta_como_nueva_la_fila_pendiente(
+async def test_el_preview_cuenta_aparte_la_fila_pendiente(
     db_session: AsyncSession,
     tenant: Tenant,
     producto: Product,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """El preview decía «sin cambios» para la fila que el apply sí va a cargar."""
+    """El preview decía «sin cambios» para la fila que el apply sí va a cargar.
+    Tampoco la promete como nueva (puede volver a caer): va aparte."""
     archivo = await _archivo_de_ventas(db_session, tenant, monkeypatch)
 
     _servir(monkeypatch, _CSV_CORREGIDO)
     preview = await reread_service.preview_reread(db_session, archivo.id, tenant.tenant_id)
 
-    assert preview.new == 1
+    assert preview.retried_from_others == 1
+    assert preview.new == 0
     assert preview.unchanged == 0
 
 

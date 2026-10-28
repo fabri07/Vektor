@@ -288,6 +288,9 @@ class RereadPreview:
     # Filas cuya huella ya está registrada (import previo): el reimport las saltea
     # → no son nuevas ni se duplican. Evita el "todo nuevo" engañoso.
     unchanged: int = 0
+    #: I4-6: filas pendientes en «Otros» que el apply vuelve a intentar. Pueden
+    #: entrar o volver a caer: el preview no reproduce el ruteo, no las promete.
+    retried_from_others: int = 0
     # Impacto en el catálogo de productos (estimado): altas + reposiciones de stock.
     products_new: int = 0
     products_restock: int = 0
@@ -327,6 +330,7 @@ class RereadPreview:
             "new": self.new,
             "to_void": self.to_void,
             "unchanged": self.unchanged,
+            "retried_from_others": self.retried_from_others,
             "products_new": self.products_new,
             "products_restock": self.products_restock,
             "to_replace": self.to_replace,
@@ -1224,6 +1228,23 @@ _ROW_BUCKETS_RIESGO: tuple[str, ...] = (
 )
 
 
+def _se_preserva(rec: SaleEntry | ExpenseEntry) -> bool:
+    """Los DOS motivos por los que el reimport no toca un registro.
+
+    Se pregunta una sola vez y desde acá, porque cada guard que lo re-derive
+    por su cuenta puede quedarse con la mitad: fue exactamente lo que pasó con
+    el movimiento de la venta editada (V28). El preview usa la misma (I4-6).
+    """
+    return bool(getattr(rec, "has_user_edits", False)) or is_unclassified_row_ref(
+        rec.source_row_ref
+    )
+
+
+def _refs_preservadas(registros: list[SaleEntry | ExpenseEntry]) -> set[str]:
+    """Las ``source_row_ref`` de lo que el reimport no toca (``_se_preserva``)."""
+    return {rec.source_row_ref for rec in registros if _se_preserva(rec) and rec.source_row_ref}
+
+
 async def _pendientes_a_releer(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -1241,6 +1262,14 @@ async def _pendientes_a_releer(
     de columna (las resuelve ``_reconcile_column_risk`` con su propia huella, y
     su ``ROW_REF_KEY`` es el de otra fila, I1-4) y las refs de lo preservado
     (``excluir``): esa huella es la de un registro que el reimport no toca.
+
+    La huella es de la FILA, no de la captura: una fila de la tabla suelta puede
+    dejar un gasto en los libros y una venta en «Otros» con la misma ref, o dos
+    capturas. Liberarla reimporta la fila entera, así que también quedan afuera
+    las refs con trabajo del usuario sobre un hermano (``_refs_con_hermano_resuelto_a_mano``):
+    una operación del archivo anulada por algo que no es una relectura, o un
+    pendiente descartado a mano. Releerlas resucitaba ese gasto o devolvía la
+    venta descartada a la bandeja.
     """
     candidatas: dict[uuid.UUID, str] = {}
     for fila in (
@@ -1258,8 +1287,81 @@ async def _pendientes_a_releer(
             candidatas[fila.id] = ref
     if not candidatas:
         return {}
+    bloqueadas = await _refs_con_hermano_resuelto_a_mano(session, tenant_id, file_id)
+    candidatas = {i: ref for i, ref in candidatas.items() if ref not in bloqueadas}
+    if not candidatas:
+        return {}
     presentes = await huellas_presentes(session, tenant_id, set(candidatas.values()))
     return {i: ref for i, ref in candidatas.items() if ref in presentes}
+
+
+async def _refs_con_hermano_resuelto_a_mano(
+    session: AsyncSession, tenant_id: uuid.UUID, file_id: uuid.UUID
+) -> set[str]:
+    """I4-6 (revisión) — refs de filas de este archivo en las que el usuario ya
+    resolvió algo a mano, y que por eso la relectura no puede reimportar enteras.
+
+    - Una venta o un gasto del archivo anulado por algo que NO es una relectura
+      (``DELETE /sales`` o ``/expenses``, la reparación de duplicados, B·5g…):
+      ``_load_existing_records`` sólo trae los vivos, así que nadie lo preserva,
+      y la fila entera volvía a cargarlo.
+    - Un pendiente del archivo DISMISSED que no descartó una relectura APLICADA de
+      este archivo (``details_json["otros"]["descartados"]``): lo descartó el
+      usuario, o un camino que no deja rastro, y ante la duda se respeta. Sin la
+      excepción, la segunda relectura de una fila que volvió a caer quedaría
+      trabada por la copia vieja que la primera descartó. Las capturas de riesgo
+      no cuentan: su ``ROW_REF_KEY`` es el de otra fila (I1-4).
+    """
+    bloqueadas: set[str] = set()
+    for modelo in (SaleEntry, ExpenseEntry):
+        bloqueadas.update(
+            ref
+            for ref in (
+                await session.execute(
+                    select(modelo.source_row_ref).where(
+                        modelo.tenant_id == tenant_id,
+                        modelo.source_upload_id == file_id,
+                        modelo.voided_at.is_not(None),
+                        modelo.source_row_ref.is_not(None),
+                        or_(
+                            modelo.void_reason.is_(None),
+                            modelo.void_reason != VOID_REASON_REREAD,
+                        ),
+                    )
+                )
+            ).scalars()
+            if ref
+        )
+    descartados_por_relectura: set[str] = set()
+    for run in (
+        await session.execute(
+            select(DataRepairRun).where(
+                DataRepairRun.tenant_id == tenant_id,
+                DataRepairRun.repair_type == REPAIR_TYPE_REREAD,
+                DataRepairRun.dry_run.is_(False),
+                DataRepairRun.status == "APPLIED",
+            )
+        )
+    ).scalars():
+        detalles = run.details_json or {}
+        if detalles.get("file_id") != str(file_id):
+            continue
+        otros = detalles.get("otros") or {}
+        descartados_por_relectura.update(str(i) for i in otros.get("descartados") or ())
+    for fila in (
+        await session.execute(
+            select(UnclassifiedRecord).where(
+                UnclassifiedRecord.tenant_id == tenant_id,
+                UnclassifiedRecord.uploaded_file_id == file_id,
+                UnclassifiedRecord.status == UNCLASSIFIED_STATUS_DISMISSED,
+            )
+        )
+    ).scalars():
+        datos = fila.row_data or {}
+        ref = str(datos.get(_ROW_REF_KEY) or "")
+        if ref and not datos.get(_RISK_REF_KEY) and str(fila.id) not in descartados_por_relectura:
+            bloqueadas.add(ref)
+    return bloqueadas
 
 
 async def _resolver_pendientes_releidos(
@@ -1309,7 +1411,10 @@ async def _resolver_pendientes_releidos(
     refs_con_copia_nueva = {
         str((f.row_data or {}).get(_ROW_REF_KEY) or "")
         for f in filas.values()
-        if f.id not in releidos and f.status == UNCLASSIFIED_STATUS_PENDING
+        if f.id not in releidos
+        and f.status == UNCLASSIFIED_STATUS_PENDING
+        # Una captura de riesgo guarda la ref de la fila siguiente (I1-4).
+        and not (f.row_data or {}).get(_RISK_REF_KEY)
     }
     a_reponer: set[str] = set()
     por_hoja: dict[str, int] = defaultdict(int)
@@ -1527,20 +1632,7 @@ async def _reconcile(
     # Refs de las filas EDITADAS (preservadas): el reimport las saltea, así que su
     # InventoryMovement NO debe voidearse (si lo voidáramos sin recrearlo, el stock
     # quedaría subestimado). Se preservan movimiento + registro juntos.
-    def _se_preserva(rec: SaleEntry | ExpenseEntry) -> bool:
-        """Los DOS motivos por los que el reimport no toca un registro.
-
-        Se pregunta una sola vez y desde acá, porque cada guard que lo re-derive
-        por su cuenta puede quedarse con la mitad: fue exactamente lo que pasó con
-        el movimiento de la venta editada (V28).
-        """
-        return bool(getattr(rec, "has_user_edits", False)) or is_unclassified_row_ref(
-            rec.source_row_ref
-        )
-
-    preserved_refs: set[str] = {
-        rec.source_row_ref for rec in all_existing if _se_preserva(rec) and rec.source_row_ref
-    }
+    preserved_refs = _refs_preservadas(all_existing)
     # F-F.4 — la MISMA regla para el descuento de una venta preservada.
     #
     # El movimiento de descuento no lleva `source_row_ref` (lo identifica
@@ -3158,8 +3250,16 @@ def _estimate_reread(
     catalog: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
     by_alias: dict[str, list[uuid.UUID]] | None = None,
     by_name_activo: dict[str, list[uuid.UUID]] | None = None,
+    pendientes_a_releer: set[str] | None = None,
 ) -> RereadPreview:
-    """Proyecta la relectura **en memoria, sin tocar la DB** (sub-segundo)."""
+    """Proyecta la relectura **en memoria, sin tocar la DB** (sub-segundo).
+
+    ``pendientes_a_releer``: las refs de «Otros» cuya huella el apply libera
+    (I4-6). El preview no reproduce el ruteo a «Otros» (fecha ilegible, sin
+    monto, venta sin compra), así que no sabe si esa fila entra o vuelve a caer:
+    se cuenta aparte (``retried_from_others``), ni nueva ni sin cambios.
+    """
+    reintentar = pendientes_a_releer or set()
     file_id = file.id
     recon = _split_records(sales, expenses)
     all_recs: list[SaleEntry | ExpenseEntry] = [*sales, *expenses]
@@ -3174,6 +3274,7 @@ def _estimate_reread(
     update_count = 0
     new_count = 0
     unchanged_count = 0
+    retried_count = 0
     update_samples: list[dict[str, Any]] = []
     new_samples: list[dict[str, Any]] = []
 
@@ -3195,6 +3296,8 @@ def _estimate_reread(
                 update_samples.append(
                     {"action": "update", "before": before, "after": _fresh_row_snapshot(row, kind)}
                 )
+        elif fp in reintentar:
+            retried_count += 1
         elif fp in fingerprints:
             # Huella ya registrada (import previo) y NO se va a anular → el reimport
             # la saltea: ni nueva ni duplicada. Esto evita el "todo nuevo" engañoso.
@@ -3240,6 +3343,7 @@ def _estimate_reread(
         new=new_count,
         to_void=len(recon.non_edited),
         unchanged=unchanged_count,
+        retried_from_others=retried_count,
         products_new=products_new,
         products_restock=products_restock,
         legacy_fallback=recon.legacy_fallback,
@@ -4352,17 +4456,22 @@ async def preview_reread(
         tenant_id,
         _anclas_candidatas(tenant_id, file_id, _contextos_del_summary(fresh)),
     )
-    # I4-6: el apply libera la huella de los pendientes de «Otros», así que su
-    # fila no es «sin cambios»: entra (o vuelve a caer) como en una carga limpia.
-    fingerprints -= set(
-        (await _pendientes_a_releer(session, tenant_id, file_id, set())).values()
+    # I4-6: el apply libera la huella de los pendientes de «Otros» (con las MISMAS
+    # exclusiones: lo preservado y lo resuelto a mano), así que su fila no es «sin
+    # cambios»; tampoco es «nueva»: puede volver a caer. Se cuenta aparte.
+    _reintentar = set(
+        (
+            await _pendientes_a_releer(
+                session, tenant_id, file_id, _refs_preservadas([*sales, *expenses])
+            )
+        ).values()
     )
     catalog = await _load_product_index(session, tenant_id)
     # B·8a: los alias y los nombres de productos ACTIVOS, como el reimport real.
     _identidad = await _load_product_identity_indexes(session, tenant_id)
     preview = _estimate_reread(
         file, tenant_id, fresh, confirmed_fields, sales, expenses, fingerprints, catalog,
-        _identidad.by_alias, _identidad.by_name,
+        _identidad.by_alias, _identidad.by_name, _reintentar,
     )
     preview.column_risk_outcome = resolved.outcome
     preview.column_risk_ambiguous = resolved.ambiguous_rows
