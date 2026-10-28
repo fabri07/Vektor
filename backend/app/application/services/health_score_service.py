@@ -143,12 +143,19 @@ def _build_dimensions(
     state: BusinessState,
     result: HealthScoreResult,
 ) -> list[dict[str, str | None]]:
-    if state.cash_source == "flujo":
+    if state.cash_source == "flujo" and mide_caja_por_flujo(state):
         # Sin saldo medido (D-5): el 0 de `cash_on_hand_est` no es una caja vacía.
         cash_explanation = (
             f"Sin saldo de caja medido; se mide la cobertura del flujo líquido: "
             f"entraron {state.liquid_inflow_est:.2f} ARS y salieron "
             f"{state.liquid_outflow_est:.2f} ARS en 30 días."
+        )
+    elif state.cash_source == "flujo":
+        # V-23: sin salidas líquidas no hay ratio de cobertura; la caja no puntúa.
+        cash_explanation = (
+            f"Sin saldo de caja medido y sin salidas en el flujo líquido de 30 días "
+            f"(entraron {state.liquid_inflow_est:.2f} ARS); la caja no entra al score: "
+            f"cargá los pagos y gastos, o hacé el arqueo."
         )
     elif mide_caja_por_flujo(state):
         # Con saldo y sin gastos fijos (D-10): no hay días; se mide el flujo.
@@ -166,8 +173,12 @@ def _build_dimensions(
             f"equivale a {cash_ratio:.2f}x de gastos fijos."
         )
     else:
-        # D-10: sin gastos fijos no hay días de cobertura; la caja no puntúa.
-        cash_explanation = "Sin gastos fijos cargados; la caja no entra al score."
+        # D-10 y V-23: sin gastos fijos ni salidas líquidas no hay días ni
+        # cobertura; la caja no puntúa.
+        cash_explanation = (
+            "Sin gastos fijos cargados ni salidas líquidas en 30 días; la caja no "
+            "entra al score: cargá los gastos fijos o los movimientos de salida."
+        )
 
     margin_explanation = margin_explanation_for(state, result)
 
