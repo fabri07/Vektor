@@ -9,6 +9,7 @@ import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-librar
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import type { UnclassifiedRecordResponse } from "@/services/others.service";
+import { customersService } from "@/services/customers.service";
 import { ReclassifyModal } from "../ReclassifyModal";
 
 jest.mock("@/services/products.service", () => ({
@@ -122,6 +123,19 @@ it("el nombre de pila solo no sugiere una ficha con apellido", async () => {
   abrir(fila({ cliente: "Ana" }), jest.fn());
   const cliente = await screen.findByLabelText("Cliente al que se le fió");
   await waitFor(() => expect(screen.getByRole("option", { name: "Ana Pérez" })).toBeInTheDocument());
+  expect(cliente).toHaveValue("");
+});
+
+it("con «Pedro» y «Pedro Gómez», «Pedro» no sugiere a nadie", async () => {
+  (customersService.getAllCustomers as jest.Mock).mockResolvedValueOnce([
+    { id: "c-pedro", name: "Pedro", last_name: null, is_sentinel: false },
+    { id: "c-gomez", name: "Pedro", last_name: "Gómez", is_sentinel: false },
+  ]);
+  abrir(fila({ cliente: "Pedro" }), jest.fn());
+  const cliente = await screen.findByLabelText("Cliente al que se le fió");
+  await waitFor(() =>
+    expect(screen.getByRole("option", { name: "Pedro Gómez" })).toBeInTheDocument(),
+  );
   expect(cliente).toHaveValue("");
 });
 

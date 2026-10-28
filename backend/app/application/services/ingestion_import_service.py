@@ -5872,6 +5872,15 @@ async def _ventas_sin_compra_a_otros(
         session, tenant_id, uploaded_file_id, a_sacar, crudos, nombres, factores, source
     )
     sin_producto = sum(1 for v in sacadas if v.product_id is None)
+    # V-24 (M-1b): el aviso de fiados asignados por nombre cuenta sólo los que
+    # quedaron como venta.
+    _por_nombre = sum(
+        1 for v in sacadas if (v.custom_fields or {}).get("_customer_match") == "nombre"
+    )
+    if _por_nombre:
+        counts["ventas_fiado_asignadas_por_nombre"] = max(
+            0, int(counts.get("ventas_fiado_asignadas_por_nombre", 0)) - _por_nombre
+        )
     counts["ventas"] = max(0, int(counts.get("ventas", 0)) - len(sacadas))
     counts["ventas_sin_compra"] = (
         counts.get("ventas_sin_compra", 0) + len(sacadas) - sin_producto
@@ -6014,7 +6023,8 @@ async def _cliente_por_nombre_para_fiado(
         from app.persistence.models.customer import Customer  # noqa: PLC0415
 
         await session.flush()  # las fichas que la hoja de clientes del archivo creó
-        indice = {}
+        elegibles: dict[str, set[uuid.UUID]] = defaultdict(set)
+        bloqueos: set[str] = set()
         for c in (
             await session.execute(
                 select(Customer).where(
@@ -6024,13 +6034,21 @@ async def _cliente_por_nombre_para_fiado(
         ).scalars():
             if c.is_sentinel:
                 continue
-            # Con apellido, hace falta nombre + apellido: «Pedro» solo puede ser
-            # cualquier Pedro sin ficha (M-1b). Sin apellido, el nombre es todo.
-            forma = normalize_text(
-                f"{c.name} {c.last_name}" if (c.last_name or "").strip() else (c.name or "")
-            )
-            if forma:
-                indice[forma] = None if forma in indice and indice[forma] != c.id else c.id
+            pila = normalize_text(c.name or "")
+            if (c.last_name or "").strip():
+                # Con apellido, hace falta nombre + apellido: «Pedro» solo puede
+                # ser cualquier Pedro sin ficha (M-1b). Y su nombre de pila
+                # BLOQUEA: con «Pedro» y «Pedro Gómez», «Pedro» es ambiguo,
+                # aunque nunca elige a la ficha con apellido.
+                elegibles[normalize_text(f"{c.name} {c.last_name}")].add(c.id)
+                bloqueos.add(pila)
+            else:
+                elegibles[pila].add(c.id)
+        indice = {
+            forma: (next(iter(ids)) if len(ids) == 1 and forma not in bloqueos else None)
+            for forma, ids in elegibles.items()
+            if forma
+        }
         session.info[_V24_CLIENTES_POR_NOMBRE] = indice
     return indice.get(nombre)
 

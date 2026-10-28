@@ -65,11 +65,15 @@ function nombreCompleto(c: CustomerResponse): string {
 /**
  * V-24: el cliente que el archivo nombraba, si coincide con UNA sola ficha. Con
  * apellido hace falta nombre + apellido (el de pila solo no alcanza), como el
- * import.
+ * import; y si el nombre buscado es el de pila de una ficha con apellido, es
+ * ambiguo: no se sugiere a nadie.
  */
 function clienteSugerido(nombre: string, clientes: CustomerResponse[]): string {
   const buscado = normalizarNombre(nombre);
   if (!buscado) return "";
+  if (clientes.some((c) => c.last_name?.trim() && normalizarNombre(c.name) === buscado)) {
+    return "";
+  }
   const ids = new Set(
     clientes.filter((c) => normalizarNombre(nombreCompleto(c)) === buscado).map((c) => c.id),
   );

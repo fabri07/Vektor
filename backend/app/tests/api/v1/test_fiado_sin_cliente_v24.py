@@ -648,3 +648,43 @@ async def test_el_confirm_avisa_los_fiados_asignados_por_nombre(
         x.startswith("1 venta(s) fiadas se asignaron al cliente por su nombre")
         for x in r.json()["warnings"]
     ), r.json()["warnings"]
+
+
+# ── Revalidación de #225 (menores finales) ────────────────────────────────────
+
+
+async def test_pedro_con_pedro_y_pedro_gomez_es_ambiguo(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """«Pedro» puede ser la ficha sin apellido o Pedro Gómez: ante la duda, a
+    «Otros». «Pedro Gómez» completo sí elige a la suya."""
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    gomez = Customer(tenant_id=tid, name="Pedro", last_name="Gómez")
+    db_session.add_all([Customer(tenant_id=tid, name="Pedro"), gomez])
+    await db_session.commit()
+    counts = await _importar_con_nombre(db_session, tid, "Fiado", "Pedro")
+    assert await _ventas(db_session, tid) == []
+    assert counts["ventas_fiado_cliente_no_identificado"] == 1
+    assert counts.get("ventas_fiado_asignadas_por_nombre", 0) == 0
+
+    await _importar_con_nombre(db_session, tid, "Fiado", "Pedro Gómez")
+    (venta,) = await _ventas(db_session, tid)
+    assert venta.customer_id == gomez.id
+
+
+async def test_el_aviso_por_nombre_no_cuenta_lo_que_b5e_saco(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El fiado se asignó por nombre, pero B·5e lo sacó a «Otros» por no tener
+    compra: el aviso no puede contarlo como asignado."""
+    tid = sample_tenant.tenant_id
+    db_session.add_all([
+        Product(tenant_id=tid, name="Yerba", sale_price_ars=Decimal("1000"), stock_units=50),
+        Customer(tenant_id=tid, name="Pedro"),
+    ])
+    await db_session.commit()
+    counts = await _importar_con_nombre(db_session, tid, "Fiado", "Pedro")
+    assert await _ventas(db_session, tid) == []
+    assert counts["ventas_sin_compra"] == 1
+    assert counts.get("ventas_fiado_asignadas_por_nombre", 0) == 0
