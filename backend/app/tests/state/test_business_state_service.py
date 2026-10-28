@@ -666,8 +666,25 @@ async def test_la_caja_observada_no_depende_del_calendario(
     flujo durante los 7 días del alta. Si la procedencia de la caja se leyera de
     ahí, un tenant con movimientos líquidos reales valdría 8 puntos el día 1 y
     20 el día 8 sin que cambie un solo dato.
+
+    V-26: la caja observada exige una salida líquida (o un arqueo); con sólo
+    ventas el día 8 queda sin medir y no suma, que es correcto: el día 1 suma
+    el saldo DECLARADO, que vence a los 7 días. Por eso hay un gasto en
+    efectivo: la evidencia real de caja es la misma los dos días.
     """
     await _cargar_ventas(db_session, sample_tenant.tenant_id, 12)
+    db_session.add(
+        ExpenseEntry(
+            tenant_id=sample_tenant.tenant_id,
+            amount=Decimal("3000.00"),
+            description="Bolsas",
+            category="SUPPLIES",
+            expense_type="OPEX",
+            transaction_date=datetime.now(UTC).date() - timedelta(days=2),
+            payment_method="cash",
+        )
+    )
+    await db_session.commit()
 
     # Día 1: el perfil se acaba de tocar → el tiering elige "onboarding".
     recien_dado_de_alta = await compute_business_state(
