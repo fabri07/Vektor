@@ -5996,7 +5996,8 @@ async def _cliente_por_nombre_para_fiado(
     sólo si la fila no trae ninguna clave (documento, contacto o código: una
     clave que no matchea es un dato que contradice, no se tapa con el nombre) y
     el nombre normalizado coincide con UNA sola ficha activa, que no sea el
-    centinela, por su nombre o por nombre + apellido. Cero o más de una: ``None``
+    centinela: por nombre + apellido si la ficha tiene apellido (el nombre de
+    pila solo no alcanza), por su nombre si no. Cero o más de una: ``None``
     (el fiado va a «Otros»). Para los otros medios no cambia nada.
     """
     if not _es_fiado(payment_method) or ref.outcome != "unresolved" or ref.codigo:
@@ -6023,10 +6024,12 @@ async def _cliente_por_nombre_para_fiado(
         ).scalars():
             if c.is_sentinel:
                 continue
-            formas = {normalize_text(c.name or "")}
-            if c.last_name:
-                formas.add(normalize_text(f"{c.name} {c.last_name}"))
-            for forma in formas - {""}:
+            # Con apellido, hace falta nombre + apellido: «Pedro» solo puede ser
+            # cualquier Pedro sin ficha (M-1b). Sin apellido, el nombre es todo.
+            forma = normalize_text(
+                f"{c.name} {c.last_name}" if (c.last_name or "").strip() else (c.name or "")
+            )
+            if forma:
                 indice[forma] = None if forma in indice and indice[forma] != c.id else c.id
         session.info[_V24_CLIENTES_POR_NOMBRE] = indice
     return indice.get(nombre)
@@ -7499,6 +7502,9 @@ async def _insert_confirmed_data_impl(
                         entry.customer_id = _por_nombre
                         cf["_customer_resolution"] = "matched"
                         cf["_customer_match"] = "nombre"
+                        counts["ventas_fiado_asignadas_por_nombre"] = (
+                            counts.get("ventas_fiado_asignadas_por_nombre", 0) + 1
+                        )
                     else:
                         entry.customer_id = await _get_local_sentinel()
                         cf["_customer_resolution"] = _cust_ref.outcome
@@ -10006,6 +10012,9 @@ async def _insert_multisheet_data(
             entry.customer_id = _por_nombre
             cf["_customer_resolution"] = "matched"
             cf["_customer_match"] = "nombre"
+            counts["ventas_fiado_asignadas_por_nombre"] = (
+                counts.get("ventas_fiado_asignadas_por_nombre", 0) + 1
+            )
         else:
             entry.customer_id = await _get_local_sentinel()
             cf["_customer_resolution"] = _cust_ref.outcome

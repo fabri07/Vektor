@@ -4147,6 +4147,13 @@ async def confirm_file(
             f"{_fiados_sin_nombre} venta(s) fiadas fueron a «Otros» porque no dicen a "
             "qué cliente se le fió: elegí el cliente desde «Otros»."
         )
+    # M-1b: el dueño ve cuántas deudas se asignaron sólo por el nombre.
+    if counts.get("ventas_fiado_asignadas_por_nombre"):
+        warnings.append(
+            f"{counts['ventas_fiado_asignadas_por_nombre']} venta(s) fiadas se asignaron "
+            "al cliente por su nombre (el archivo no traía documento ni código): "
+            "revisá que sean de esa persona en su cuenta corriente."
+        )
     if _fiados_nombrados:
         warnings.append(
             f"{_fiados_nombrados} venta(s) fiadas fueron a «Otros» porque el cliente "

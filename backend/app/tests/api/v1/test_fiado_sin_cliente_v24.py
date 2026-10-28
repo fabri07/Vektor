@@ -587,3 +587,64 @@ async def test_los_avisos_dicen_lo_que_paso(
     ), w
     assert not any("quedaron asignadas a «Local»" in x for x in w), w
     assert data["message"].startswith("Archivo procesado: 2 línea(s) quedaron pendientes"), data
+
+
+# ── Revalidación de #225 (M-1b) ───────────────────────────────────────────────
+
+
+async def test_el_nombre_de_pila_solo_no_alcanza_si_la_ficha_tiene_apellido(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """«Pedro» puede ser cualquier Pedro sin ficha: la deuda no se le asigna a
+    «Pedro Gómez» por un dato parcial. Va a «Otros», con su nombre."""
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    db_session.add(Customer(tenant_id=tid, name="Pedro", last_name="Gómez"))
+    await db_session.commit()
+    counts = await _importar_con_nombre(db_session, tid, "Fiado", "Pedro")
+    assert await _ventas(db_session, tid) == []
+    (rec,) = await _otros(db_session, tid)
+    assert (rec.context_label, rec.row_data["cliente"]) == (MOTIVO_FIADO_SIN_CLIENTE, "Pedro")
+    assert counts.get("ventas_fiado_asignadas_por_nombre", 0) == 0
+
+
+async def test_una_ficha_sin_apellido_se_encuentra_por_su_nombre(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    pedro = Customer(tenant_id=tid, name="Pedro")
+    db_session.add(pedro)
+    await db_session.commit()
+    counts = await _importar_con_nombre(db_session, tid, "Fiado", "PEDRO")
+    (venta,) = await _ventas(db_session, tid)
+    assert venta.customer_id == pedro.id
+    assert counts["ventas_fiado_asignadas_por_nombre"] == 1
+
+
+async def test_el_confirm_avisa_los_fiados_asignados_por_nombre(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    pedro = Customer(tenant_id=tid, name="Pedro", last_name="Gómez")
+    db_session.add(pedro)
+    await db_session.commit()
+    f = await _archivo(db_session, tid, [_fila("2000", "Fiado", cliente="Pedro Gómez")])
+    r = await client.post(
+        f"/api/v1/ingestion/files/{f.id}/confirm",
+        json={"confirmed_fields": {"ventas": True},
+              "column_mappings": [{"source_column": c, "target_field": t} for c, t in {
+                  "fecha": "transaction_date", "venta": "amount", "producto": "product_name",
+                  "cantidad": "quantity", "medio_pago": "payment_method",
+                  "cliente": "customer_name"}.items()]},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    (venta,) = await _ventas(db_session, tid)
+    assert (venta.payment_method, venta.customer_id) == ("account", pedro.id)
+    assert any(
+        x.startswith("1 venta(s) fiadas se asignaron al cliente por su nombre")
+        for x in r.json()["warnings"]
+    ), r.json()["warnings"]

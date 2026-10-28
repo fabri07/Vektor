@@ -118,6 +118,13 @@ it("el cliente que nombraba el archivo queda sugerido", async () => {
   expect(screen.getByText(/El archivo decía: «pedro gomez»/)).toBeInTheDocument();
 });
 
+it("el nombre de pila solo no sugiere una ficha con apellido", async () => {
+  abrir(fila({ cliente: "Ana" }), jest.fn());
+  const cliente = await screen.findByLabelText("Cliente al que se le fió");
+  await waitFor(() => expect(screen.getByRole("option", { name: "Ana Pérez" })).toBeInTheDocument());
+  expect(cliente).toHaveValue("");
+});
+
 it("cambiar el medio a propósito viaja como marca explícita y sin cliente", async () => {
   const onSave = jest.fn();
   abrir(fila(), onSave);
