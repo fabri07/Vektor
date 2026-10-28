@@ -59,7 +59,8 @@ class HealthScoreV2Response(BaseModel):
     id: UUID
     tenant_id: UUID
     score_total: int
-    score_cash: int
+    #: ``None`` = caja ausente (D-10/E0-B-6): sin saldo ni flujo, o sin gastos fijos.
+    score_cash: int | None
     #: ``None`` = margen ausente (M·2b-3): sin costo suficiente no hay subscore.
     score_margin: int | None
     score_stock: int

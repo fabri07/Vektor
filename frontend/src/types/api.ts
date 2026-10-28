@@ -148,7 +148,8 @@ export interface HealthScoreV2Response {
   id: string;
   tenant_id: string;
   score_total: number;
-  score_cash: number;
+  // null = caja sin medir (sin saldo ni flujo, o sin gastos fijos): no es 0 ni 50.
+  score_cash: number | null;
   // null = margen ausente (sin costo suficiente de lo vendido): no es 0.
   score_margin: number | null;
   score_stock: number;

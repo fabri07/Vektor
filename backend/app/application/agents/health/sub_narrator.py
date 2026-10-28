@@ -39,10 +39,12 @@ def _build_prompt(scores: ComponentScoresV2, business_name: str) -> str:
         if scores.margin_score is None
         else f"{scores.margin_score}/100"
     )
+    # D-10/E0-B-6: la caja sin medir tampoco es un número.
+    cash_label = "sin medir" if scores.cash_score is None else f"{scores.cash_score}/100"
     return (
         f"Negocio: {wrap_user_input(business_name)}\n"
         f"Score de salud: {scores.total_score}/100\n"
-        f"- Caja: {scores.cash_score}/100\n"
+        f"- Caja: {cash_label}\n"
         f"- Inventario: {scores.stock_score}/100\n"
         f"- Proveedores: {scores.supplier_score}/100\n"
         f"- Márgenes: {margin_label}\n"

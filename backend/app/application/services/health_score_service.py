@@ -158,7 +158,8 @@ def _build_dimensions(
             f"equivale a {cash_ratio:.2f}x de gastos fijos."
         )
     else:
-        cash_explanation = "Sin gastos fijos cargados; score de caja neutral."
+        # D-10: sin gastos fijos no hay días de cobertura; la caja no puntúa.
+        cash_explanation = "Sin gastos fijos cargados; la caja no entra al score."
 
     margin_explanation = margin_explanation_for(state, result)
 
@@ -196,9 +197,14 @@ def _build_dimensions(
     return [
         {
             "dimension": "cash",
-            "value": str(result.score_cash),
-            "weight": "0.30",
-            "weighted_value": f"{Decimal(result.score_cash) * Decimal('0.30'):.3f}",
+            # Ausente (D-10/E0-B-6): sin valor ni peso, como el margen.
+            "value": None if result.score_cash is None else str(result.score_cash),
+            "weight": "0.00" if result.score_cash is None else "0.30",
+            "weighted_value": (
+                "0.000"
+                if result.score_cash is None
+                else f"{Decimal(result.score_cash) * Decimal('0.30'):.3f}"
+            ),
             "explanation": cash_explanation,
         },
         {

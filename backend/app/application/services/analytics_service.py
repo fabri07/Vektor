@@ -36,7 +36,7 @@ class AnalyticsService:
         *,
         vertical_code: str,
         score_total: int,
-        score_cash: int,
+        score_cash: int | None,
         score_margin: int | None,
         score_stock: int,
         score_supplier: int,

@@ -150,16 +150,18 @@ def render_insight(
             "caja_ars": _fmt_ars(caja),
             "gastos_fijos": _fmt_ars(gastos_fijos),
         }
-        # Severity-aware description variants — gated por score_cash del snapshot
-        score_cash_val = int(getattr(result, "score_cash", 100) or 100)
-        if score_cash_val < 30:
+        # Severity-aware description variants — gated por score_cash del snapshot.
+        # Sin `or` (E0-B-5): un 0 es la peor caja, no la mejor; un `None` (caja
+        # sin medir) no elige variante.
+        score_cash_val = getattr(result, "score_cash", None)
+        if score_cash_val is not None and int(score_cash_val) < 30:
             description_override = (
                 f"Situación crítica: con {_fmt_ars(caja)} en caja y "
                 f"{_fmt_ars(gastos_fijos)} de gastos fijos mensuales, "
                 f"tu cobertura operativa es de solo {dias_cobertura} días. "
                 "El riesgo de no poder afrontar pagos es inmediato."
             )
-        elif score_cash_val < 60:
+        elif score_cash_val is not None and int(score_cash_val) < 60:
             description_override = (
                 f"Con {_fmt_ars(caja)} en caja y {_fmt_ars(gastos_fijos)} de gastos fijos "
                 f"mensuales, tenés cobertura para {dias_cobertura} días. Margen muy ajustado."
