@@ -16,6 +16,7 @@ import type {
   UnclassifiedRecordResponse,
 } from "@/services/others.service";
 import { productsService, type ProductCategoryOption } from "@/services/products.service";
+import { customersService, type CustomerResponse } from "@/services/customers.service";
 import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
 import { PurchaseTermsFields } from "@/features/purchases/PurchaseTermsFields";
 import {
@@ -37,6 +38,44 @@ interface LineaDeCompra {
 }
 
 const NUEVA_LINEA: LineaDeCompra = { productId: "", quantity: "1", amount: "" };
+
+/** Los medios de pago del selector (los canónicos que guarda el backend). */
+const MEDIOS_DE_PAGO = ["cash", "transfer", "debit_card", "credit_card", "qr", "account"];
+const FIADO = "account";
+
+/** Opciones extra de `reclassify` que no son campos de la entidad. */
+export interface OpcionesDeReclassify {
+  /** V-24: el usuario cambió a propósito el medio de una fila importada fiada. */
+  cambiar_medio_de_pago?: boolean;
+}
+
+function normalizarNombre(texto: string): string {
+  return texto
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function nombreCompleto(c: CustomerResponse): string {
+  return `${c.name}${c.last_name?.trim() ? ` ${c.last_name.trim()}` : ""}`;
+}
+
+/** V-24: el cliente que el archivo nombraba, si coincide con UNA sola ficha. */
+function clienteSugerido(nombre: string, clientes: CustomerResponse[]): string {
+  const buscado = normalizarNombre(nombre);
+  if (!buscado) return "";
+  const ids = new Set(
+    clientes
+      .filter(
+        (c) =>
+          normalizarNombre(c.name) === buscado || normalizarNombre(nombreCompleto(c)) === buscado,
+      )
+      .map((c) => c.id),
+  );
+  return ids.size === 1 ? [...ids][0]! : "";
+}
 
 /** Categorías de gasto que se pueden elegir: mercadería no (va como compra). */
 const GASTO_CATEGORIES = ALL_CATEGORIES.filter((c) => c !== "INVENTORY");
@@ -61,7 +100,11 @@ export function ReclassifyModal({
   productCategories: ProductCategoryOption[];
   saving: boolean;
   onClose: () => void;
-  onSave: (entityType: ReclassifyEntityType, fields: Record<string, unknown>) => void;
+  onSave: (
+    entityType: ReclassifyEntityType,
+    fields: Record<string, unknown>,
+    opciones?: OpcionesDeReclassify,
+  ) => void;
   onLink: (targetProductId: string) => void;
   onResolvePurchase: (payload: ResolvePurchasePayload) => void;
 }) {
@@ -85,6 +128,8 @@ export function ReclassifyModal({
   // rechaza. Se elige acá, con la misma búsqueda que la compra.
   const [ventaProducto, setVentaProducto] = useState("");
   const [ventaCantidad, setVentaCantidad] = useState("1");
+  // V-24: el fiado lleva a quién se le fió (nunca «Local»).
+  const [clienteId, setClienteId] = useState("");
 
   const { data: productos = [], isError: productosError } = useQuery({
     queryKey: ["products-list"],
@@ -92,6 +137,28 @@ export function ReclassifyModal({
     enabled: !!record && (entityType === "purchase" || entityType === "sale"),
     staleTime: 60 * 1000,
   });
+
+  // La forma de pago que guardó el import (B·5e/V-24 la escriben canónica).
+  const medioDeLaFila = String(record?.row_data?.medio_de_pago ?? "");
+  const esFiadoDeLaFila = medioDeLaFila === FIADO;
+  const clienteDeLaFila = String(record?.row_data?.cliente ?? "").trim();
+  const pideCliente = entityType === "sale" && paymentMethod === FIADO;
+
+  // Sin el centinela «Local»: un fiado necesita un cliente real.
+  const { data: clientes = [], isError: clientesError } = useQuery({
+    queryKey: ["customers-list"],
+    queryFn: () => customersService.getAllCustomers(),
+    enabled: !!record && pideCliente,
+    staleTime: 60 * 1000,
+  });
+
+  // El cliente que nombraba el archivo, si es uno solo, queda elegido.
+  useEffect(() => {
+    if (pideCliente && !clienteId && clienteDeLaFila) {
+      const sugerido = clienteSugerido(clienteDeLaFila, clientes);
+      if (sugerido) setClienteId(sugerido);
+    }
+  }, [pideCliente, clienteDeLaFila, clientes, clienteId]);
 
   useEffect(() => {
     if (!record) return;
@@ -126,7 +193,9 @@ export function ReclassifyModal({
     setProductCategory(
       entity === "product" && record.suggested_category ? record.suggested_category : "",
     );
-    setPaymentMethod("cash");
+    const medio = String(record.row_data?.medio_de_pago ?? "");
+    setPaymentMethod(MEDIOS_DE_PAGO.includes(medio) ? medio : "cash");
+    setClienteId("");
     setEmail("");
     setPhone("");
     setVentaProducto("");
@@ -190,18 +259,30 @@ export function ReclassifyModal({
       return;
     }
     if (entityType === "sale") {
-      if (!ventaProducto || !/^\d+$/.test(ventaCantidad) || Number(ventaCantidad) < 1) {
+      if (
+        !ventaProducto ||
+        !/^\d+$/.test(ventaCantidad) ||
+        Number(ventaCantidad) < 1 ||
+        (pideCliente && !clienteId)
+      ) {
         setIntento(true);
         return;
       }
-      onSave("sale", {
+      const campos = {
         amount: num,
         transaction_date: isoDate,
         payment_method: paymentMethod,
         product_id: ventaProducto,
         quantity: Number(ventaCantidad),
         notes: text || null,
-      });
+        ...(pideCliente ? { customer_id: clienteId } : {}),
+      };
+      // Lo eligió la persona en el selector: la fila decía fiado.
+      if (esFiadoDeLaFila && paymentMethod !== FIADO) {
+        onSave("sale", campos, { cambiar_medio_de_pago: true });
+      } else {
+        onSave("sale", campos);
+      }
     } else if (entityType === "expense") {
       onSave("expense", {
         amount: num,
@@ -582,6 +663,44 @@ export function ReclassifyModal({
               <option value="account">Cuenta corriente</option>
             </select>
           </label>
+        ) : null}
+        {entityType === "sale" && esFiadoDeLaFila && paymentMethod !== FIADO ? (
+          <p className="text-xs text-vk-warning">
+            El archivo la registró como fiada. Si la importás así, entra como cobrada.
+          </p>
+        ) : null}
+        {pideCliente ? (
+          <div className="grid gap-1">
+            <label className="grid gap-1 text-sm text-vektor-body">
+              Cliente al que se le fió
+              <select
+                className={inputCls}
+                value={clienteId}
+                onChange={(e) => setClienteId(e.target.value)}
+                aria-required="true"
+              >
+                <option value="">Elegí un cliente…</option>
+                {clientes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {nombreCompleto(c)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {clienteDeLaFila ? (
+              <span className="text-xs text-vk-text-muted">
+                El archivo decía: «{clienteDeLaFila}».
+              </span>
+            ) : null}
+            {clientesError ? (
+              <span className="text-xs text-vk-danger">No se pudieron cargar los clientes.</span>
+            ) : null}
+            {intento && !clienteId ? (
+              <span className="text-xs text-vk-danger">
+                El fiado necesita un cliente registrado (no «Local»).
+              </span>
+            ) : null}
+          </div>
         ) : null}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">

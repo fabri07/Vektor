@@ -9,7 +9,7 @@ import { PageWrapper } from "@/components/layout/PageWrapper";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Modal } from "@/components/ui/Modal";
-import { ReclassifyModal } from "./ReclassifyModal";
+import { ReclassifyModal, type OpcionesDeReclassify } from "./ReclassifyModal";
 import { OthersGroups } from "./OthersGroups";
 import { VincularColaModal } from "./VincularColaModal";
 import { esQueryAfectadaPorVincular, prefill, rowPreview } from "./helpers";
@@ -135,7 +135,7 @@ export default function OtrosPage() {
         `${total} registro(s) importados (${result.imported_sales} ventas, ` +
         `${result.imported_expenses} gastos)` +
         (result.needs_manual > 0
-          ? `; ${result.needs_manual} hay que resolverlos de a uno (sin fecha o monto legible, con fecha futura o que no se sabe si es día/mes, ventas sin stock o sin compra previa, o compras de mercadería, que van con sus artículos).`
+          ? `; ${result.needs_manual} hay que resolverlos de a uno (sin fecha o monto legible, con fecha futura o que no se sabe si es día/mes, ventas sin stock o sin compra previa, ventas fiadas, que necesitan el cliente, o compras de mercadería, que van con sus artículos).`
           : ".");
       toast(msg, "success");
       await invalidate();
@@ -150,6 +150,7 @@ export default function OtrosPage() {
       fields,
       targetProductId,
       pesesAlConflicto,
+      opciones,
     }: {
       id: string;
       entityType: ReclassifyEntityType;
@@ -157,12 +158,15 @@ export default function OtrosPage() {
       targetProductId?: string;
       /** E6b: el usuario ya confirmó que quiere aplicarla igual (ver el 409). */
       pesesAlConflicto?: boolean;
+      /** V-24: el usuario cambió el medio de una fila importada fiada. */
+      opciones?: OpcionesDeReclassify;
     }) =>
       othersService.reclassify(id, {
         entity_type: entityType,
         fields,
         ...(targetProductId ? { target_product_id: targetProductId } : {}),
         ...(pesesAlConflicto ? { aplicar_pese_al_conflicto: true } : {}),
+        ...(opciones?.cambiar_medio_de_pago ? { cambiar_medio_de_pago: true } : {}),
       }),
     onSuccess: async (_, vars) => {
       setReclassifying(null);
@@ -237,7 +241,8 @@ export default function OtrosPage() {
         code === "SALE_WITHOUT_PURCHASE" ||
         code === "SALE_NEEDS_PRODUCT" ||
         code === "SALE_PRODUCT_NOT_FOUND" ||
-        code === "POS_SALE_ALREADY_RECORDED"
+        code === "POS_SALE_ALREADY_RECORDED" ||
+        code === "FIADO_CAMBIO_DE_MEDIO"
       ) {
         // B·5e: el servidor dice qué falta (la compra de X, el producto).
         toast(mensajeDelServidor(error) ?? "Falta la compra o el producto.", "error");
@@ -519,9 +524,9 @@ export default function OtrosPage() {
         productCategories={productCategories}
         saving={reclassifyMutation.isPending || resolvePurchaseMutation.isPending}
         onClose={() => setReclassifying(null)}
-        onSave={(entityType, fields) =>
+        onSave={(entityType, fields, opciones) =>
           reclassifying &&
-          reclassifyMutation.mutate({ id: reclassifying.id, entityType, fields })
+          reclassifyMutation.mutate({ id: reclassifying.id, entityType, fields, opciones })
         }
         onLink={(targetProductId) =>
           reclassifying &&

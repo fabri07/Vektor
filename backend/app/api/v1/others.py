@@ -57,6 +57,7 @@ from app.application.services.file_deletion_service import (
 )
 from app.application.services.ingestion_import_service import (
     CUSTOMER_REF_KEY,
+    FIADO_SIN_CLIENTE_KEY,
     IDENTITY_CLAIM_KEY,
     IDENTITY_ENTITY_KEY,
     IDENTITY_HASH_KEY,
@@ -187,6 +188,11 @@ class ReclassifyRequest(BaseModel):
     # aplicar. Sin este flag el endpoint responde 409; con él, el usuario declara
     # que revisó y que la quiere igual.
     aplicar_pese_al_conflicto: bool = False
+    # V-24: la fila es un fiado que el import sacó por no tener cliente. El modal
+    # lo manda en `true` sólo cuando el usuario cambió el medio de pago a
+    # propósito; sin él, resolverla con otro medio es 422 (un modal viejo manda
+    # «Efectivo» por defecto y el fiado entraría a caja como cobrado).
+    cambiar_medio_de_pago: bool = False
 
 
 class ResolvePurchaseLine(BaseModel):
@@ -913,6 +919,7 @@ async def _registrar_venta_desde_otros(
     sale_req: CreateSaleRequest,
     *,
     aplicar_pese_al_conflicto: bool = False,
+    cambiar_medio_de_pago: bool = False,
 ) -> SaleEntry:
     """La venta de una fila de «Otros». Fuente única de `reclassify` (como venta)
     y de `link-product` (B·8a): las dos salidas tienen que dar la misma venta.
@@ -935,8 +942,28 @@ async def _registrar_venta_desde_otros(
       venta que se sacó a «Otros» (`__customer_id__`), si sigue existiendo: si no,
       una venta fiada volvería sin cliente y la deuda se perdería.
 
+    - V-24: una fila de fiado sin cliente (`FIADO_SIN_CLIENTE_KEY`) se resuelve
+      como fiado (y entonces con cliente real) salvo que el pedido diga
+      `cambiar_medio_de_pago`: 422 `FIADO_CAMBIO_DE_MEDIO`, sin escribir nada.
+
     No marca la fila como importada: eso lo hace quien la llama, al final.
     """
+    if (
+        (record.row_data or {}).get(FIADO_SIN_CLIENTE_KEY)
+        and sale_req.payment_method != FIADO_PAYMENT_METHOD
+        and not cambiar_medio_de_pago
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "FIADO_CAMBIO_DE_MEDIO",
+                "message": (
+                    "Esta venta se importó como fiada: para importarla, elegí a qué "
+                    "cliente se le fió. Si en realidad no fue fiada, cambiá la forma "
+                    "de pago y confirmá el cambio."
+                ),
+            },
+        )
     await _exigir_identidad_libre(
         session,
         tenant_id,
@@ -1065,6 +1092,7 @@ async def reclassify_record(
                 record,
                 CreateSaleRequest(**body.fields),
                 aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
+                cambiar_medio_de_pago=body.cambiar_medio_de_pago,
             )
             label = "venta"
         elif body.entity_type == "expense":

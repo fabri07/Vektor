@@ -5598,6 +5598,7 @@ async def insert_confirmed_data(
     _cross_buffer = CrossFieldBuffer() if apply_cross_fields else None
     # V-19: nada de una corrida anterior que haya salido por excepción.
     session.info.pop(_V19_PLANES, None)
+    session.info.pop(_V24_CLIENTES_POR_NOMBRE, None)
     sa_event.listen(session.sync_session, "after_flush", _anotar_ventas_nuevas)
     try:
         counts = await _insert_confirmed_data_impl(
@@ -5627,6 +5628,7 @@ async def insert_confirmed_data(
         await session.flush()
     finally:
         sa_event.remove(session.sync_session, "after_flush", _anotar_ventas_nuevas)
+        session.info.pop(_V24_CLIENTES_POR_NOMBRE, None)
 
     # M·1c-2: red de seguridad por si algún camino del import salió antes de
     # cerrar sus costos. Vacía = no-op.
@@ -5879,6 +5881,10 @@ async def _ventas_sin_compra_a_otros(
 
 #: V-24: el motivo (``context_label``) con que un fiado sin cliente va a «Otros».
 MOTIVO_FIADO_SIN_CLIENTE: Final = "Fiado sin cliente: indicá a quién se le fió"
+#: Interna: la fila es un fiado que V-24 sacó por no tener cliente. Resolverla
+#: con otro medio de pago exige que el usuario lo pida (`reclassify`), y el lote
+#: nunca la importa.
+FIADO_SIN_CLIENTE_KEY: Final = "__fiado_sin_cliente__"
 
 
 async def _fiados_sin_cliente_a_otros(
@@ -5945,16 +5951,85 @@ async def _fiados_sin_cliente_a_otros(
         nombres,
         factores,
         source,
+        fiado_sin_cliente=True,
     )
     counts["ventas"] = max(0, int(counts.get("ventas", 0)) - len(sacadas))
     counts["ventas_fiado_sin_cliente"] = (
         counts.get("ventas_fiado_sin_cliente", 0) + len(sacadas)
     )
+    for venta in sacadas:
+        cf = venta.custom_fields or {}
+        # El aviso distingue la fila que nombra un cliente que no se identificó
+        # de la que no nombra ninguno.
+        if cf.get("_customer_reference_raw"):
+            counts["ventas_fiado_cliente_no_identificado"] = (
+                counts.get("ventas_fiado_cliente_no_identificado", 0) + 1
+            )
+        # F7c ya la contó como venta de «Local» (anónima / no resuelta): no lo es.
+        _bucket = _REFERENCE_OUTCOME_SUFFIX.get(str(cf.get("_customer_resolution") or ""))
+        if _bucket and counts.get(f"ventas_cliente_{_bucket}"):
+            counts[f"ventas_cliente_{_bucket}"] -= 1
 
 
 def _es_fiado(payment_method: str | None) -> bool:
     """Sin distinguir mayúsculas, como `es_cobro_de_fiado`."""
     return (payment_method or "").strip().lower() == PaymentMethod.ACCOUNT.value
+
+
+#: ``session.info``: ``{nombre normalizado: id del cliente | None si es ambiguo}``,
+#: armado una vez por import (``insert_confirmed_data`` lo limpia).
+_V24_CLIENTES_POR_NOMBRE = "v24_clientes_por_nombre"
+
+
+async def _cliente_por_nombre_para_fiado(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    record: dict[str, Any],
+    ref: RowReferenceResolution,
+    payment_method: str | None,
+) -> uuid.UUID | None:
+    """V-24 (M-1): el cliente de un fiado que la fila nombra SÓLO por su nombre.
+
+    F7c no vincula por nombre (no es clave fuerte): para un contado da igual,
+    va a «Local». Un fiado no puede ir ahí, y la libreta típica nombra al
+    cliente sin documento: sin esto, todo fiado iría a «Otros» de a uno. Vale
+    sólo si la fila no trae ninguna clave (documento, contacto o código: una
+    clave que no matchea es un dato que contradice, no se tapa con el nombre) y
+    el nombre normalizado coincide con UNA sola ficha activa, que no sea el
+    centinela, por su nombre o por nombre + apellido. Cero o más de una: ``None``
+    (el fiado va a «Otros»). Para los otros medios no cambia nada.
+    """
+    if not _es_fiado(payment_method) or ref.outcome != "unresolved" or ref.codigo:
+        return None
+    if record_keys(record, doc_fields=_CUSTOMER_DOC_FIELDS):
+        return None
+    nombre = normalize_text(str(record.get("name") or ""))
+    if not nombre:
+        return None
+    indice: dict[str, uuid.UUID | None] | None = session.info.get(_V24_CLIENTES_POR_NOMBRE)
+    if indice is None:
+        from sqlalchemy import select  # noqa: PLC0415
+
+        from app.persistence.models.customer import Customer  # noqa: PLC0415
+
+        await session.flush()  # las fichas que la hoja de clientes del archivo creó
+        indice = {}
+        for c in (
+            await session.execute(
+                select(Customer).where(
+                    Customer.tenant_id == tenant_id, Customer.deactivated_at.is_(None)
+                )
+            )
+        ).scalars():
+            if c.is_sentinel:
+                continue
+            formas = {normalize_text(c.name or "")}
+            if c.last_name:
+                formas.add(normalize_text(f"{c.name} {c.last_name}"))
+            for forma in formas - {""}:
+                indice[forma] = None if forma in indice and indice[forma] != c.id else c.id
+        session.info[_V24_CLIENTES_POR_NOMBRE] = indice
+    return indice.get(nombre)
 
 
 async def _ventas_nuevas_a_juzgar(
@@ -6019,13 +6094,18 @@ async def _sacar_ventas_a_otros(
     nombres: dict[uuid.UUID, str],
     factores: dict[uuid.UUID, int],
     source: str,
+    *,
+    fiado_sin_cliente: bool = False,
 ) -> list[Any]:
     """Saca de las ventas las ya insertadas en esta corrida y manda su fila a
     «Otros» con su motivo (B·5e, V-24): revierte el descuento de stock, suelta la
     identidad de operación (viaja con la fila, para que resolverla la vuelva a
     tomar) y conserva la fila, su ``row_ref`` y la marca de monto canónico. Una
     relectura que vuelve a mandar la misma fila con el mismo motivo no la
-    duplica. Devuelve las ventas sacadas."""
+    duplica. ``fiado_sin_cliente`` (V-24): la fila lleva la marca
+    ``FIADO_SIN_CLIENTE_KEY`` y NO el cliente de la venta, que es el centinela:
+    resolverla nunca puede caer a «Local» por defecto. Devuelve las ventas
+    sacadas."""
     from sqlalchemy import select  # noqa: PLC0415
 
     from app.application.services.operation_identity_service import (  # noqa: PLC0415
@@ -6097,7 +6177,11 @@ async def _sacar_ventas_a_otros(
             # `__x__` de la fila (podría venir del archivo).
             internas: dict[str, str] = {
                 MONTO_CANONICO_KEY: "1",
-                **filas_internas_de_venta(venta),
+                **(
+                    {FIADO_SIN_CLIENTE_KEY: "1"}
+                    if fiado_sin_cliente
+                    else filas_internas_de_venta(venta)
+                ),
             }
             for _ident in identidades.get(("sale", venta.id), [])[:1]:
                 internas.update(
@@ -7396,22 +7480,35 @@ async def _insert_confirmed_data_impl(
                     # unresolved. Nunca crea: solo vincula contra un cliente
                     # existente (maestro importado arriba o ya en la DB) o cae al
                     # sentinela "Local" con traza si la referencia no matchea.
+                    _cust_record = _customer_reference_record(row, target_to_col)
                     _cust_ref = _classify_row_reference(
-                        _customer_reference_record(row, target_to_col),
+                        _cust_record,
                         doc_fields=_CUSTOMER_DOC_FIELDS,
                         existing_index=_customer_identity_index,
                         anonymous_name_tokens=_ANONYMOUS_CUSTOMER_TOKENS,
+                    )
+                    # V-24 (M-1): un fiado que nombra a un único cliente por su nombre.
+                    _por_nombre = await _cliente_por_nombre_para_fiado(
+                        session, tenant_id, _cust_record, _cust_ref, entry.payment_method
                     )
                     if _cust_ref.outcome == "matched":
                         assert _cust_ref.entity is not None
                         entry.customer_id = _cust_ref.entity.id
                         cf["_customer_resolution"] = "matched"
+                    elif _por_nombre is not None:
+                        entry.customer_id = _por_nombre
+                        cf["_customer_resolution"] = "matched"
+                        cf["_customer_match"] = "nombre"
                     else:
                         entry.customer_id = await _get_local_sentinel()
                         cf["_customer_resolution"] = _cust_ref.outcome
                         if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                             cf["_customer_reference_raw"] = _cust_ref.raw_value
-                    _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+                    _bump_reference_counts(
+                        counts,
+                        "ventas_cliente",
+                        "matched" if _por_nombre is not None else _cust_ref.outcome,
+                    )
                     _bump_codigo_fallido(counts, "ventas_cliente", _cust_ref)
                     # B·6: sólo sobre la ficha identificada; el centinela nunca.
                     _capturar_cruzados_de_la_fila(
@@ -9890,22 +9987,33 @@ async def _insert_multisheet_data(
         # F7c: resolución de cliente por fila — matched/anonymous/unresolved.
         # Nunca crea: solo vincula (maestro importado arriba o ya en la DB) o cae
         # al sentinela "Local" con traza si la referencia no matchea.
+        _cust_record = _customer_reference_record(row, cols)
         _cust_ref = _classify_row_reference(
-            _customer_reference_record(row, cols),
+            _cust_record,
             doc_fields=_CUSTOMER_DOC_FIELDS,
             existing_index=_customer_identity_index,
             anonymous_name_tokens=_ANONYMOUS_CUSTOMER_TOKENS,
+        )
+        # V-24 (M-1): un fiado que nombra a un único cliente por su nombre.
+        _por_nombre = await _cliente_por_nombre_para_fiado(
+            session, tenant_id, _cust_record, _cust_ref, entry.payment_method
         )
         if _cust_ref.outcome == "matched":
             assert _cust_ref.entity is not None
             entry.customer_id = _cust_ref.entity.id
             cf["_customer_resolution"] = "matched"
+        elif _por_nombre is not None:
+            entry.customer_id = _por_nombre
+            cf["_customer_resolution"] = "matched"
+            cf["_customer_match"] = "nombre"
         else:
             entry.customer_id = await _get_local_sentinel()
             cf["_customer_resolution"] = _cust_ref.outcome
             if _cust_ref.outcome == "unresolved" and _cust_ref.raw_value:
                 cf["_customer_reference_raw"] = _cust_ref.raw_value
-        _bump_reference_counts(counts, "ventas_cliente", _cust_ref.outcome)
+        _bump_reference_counts(
+            counts, "ventas_cliente", "matched" if _por_nombre is not None else _cust_ref.outcome
+        )
         _bump_codigo_fallido(counts, "ventas_cliente", _cust_ref)
         # B·6: sólo sobre la ficha identificada; el centinela nunca.
         _capturar_cruzados_de_la_fila(
@@ -12327,7 +12435,7 @@ async def bulk_import_unclassified(
             # Una venta fiada (o con su cliente guardado) se resuelve de a una:
             # en lote se crearía sin cliente —un fiado huérfano, y la deuda
             # perdida—. El modal aplica las reglas de cliente de POST /sales.
-            if row.get(CUSTOMER_REF_KEY) or (
+            if row.get(CUSTOMER_REF_KEY) or row.get(FIADO_SIN_CLIENTE_KEY) or (
                 pay_raw and normalize_payment_method(pay_raw) == PaymentMethod.ACCOUNT.value
             ):
                 counts["needs_manual"] += 1

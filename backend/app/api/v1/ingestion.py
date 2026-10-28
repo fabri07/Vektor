@@ -4102,8 +4102,13 @@ async def confirm_file(
     # caso normal es el documento (foto/PDF/texto): F6-A4 no le extrae fecha, así
     # que cada línea con monto se captura en «Otros» y no hay venta ni gasto que
     # anunciar. "Datos confirmados" se leía como que el archivo ya estaba cargado.
-    _pendientes_de_revision = counts.get("otros", 0) + counts.get(
-        "filas_riesgo_a_otros", 0
+    _pendientes_de_revision = (
+        counts.get("otros", 0)
+        + counts.get("filas_riesgo_a_otros", 0)
+        # B·5e y V-24: las ventas que el import sacó a «Otros» por regla.
+        + counts.get("ventas_sin_compra", 0)
+        + counts.get("ventas_sin_producto", 0)
+        + counts.get("ventas_fiado_sin_cliente", 0)
     )
     if parts:
         message = f"Importados: {', '.join(parts)}. La puntuación será recalculada."
@@ -4133,11 +4138,21 @@ async def confirm_file(
             f"{counts['ventas_sin_producto']} venta(s) fueron a «Otros» porque no dicen "
             "qué producto se vendió: elegilo desde «Otros»."
         )
-    # V-24: un fiado necesita a quién se le fió.
-    if counts.get("ventas_fiado_sin_cliente"):
+    # V-24: un fiado necesita a quién se le fió. Se distingue la fila que no
+    # nombra a nadie de la que nombra un cliente que no se pudo identificar.
+    _fiados_nombrados = counts.get("ventas_fiado_cliente_no_identificado", 0)
+    _fiados_sin_nombre = counts.get("ventas_fiado_sin_cliente", 0) - _fiados_nombrados
+    if _fiados_sin_nombre > 0:
         warnings.append(
-            f"{counts['ventas_fiado_sin_cliente']} venta(s) fiadas fueron a «Otros» "
-            "porque no dicen a qué cliente se le fió: elegí el cliente desde «Otros»."
+            f"{_fiados_sin_nombre} venta(s) fiadas fueron a «Otros» porque no dicen a "
+            "qué cliente se le fió: elegí el cliente desde «Otros»."
+        )
+    if _fiados_nombrados:
+        warnings.append(
+            f"{_fiados_nombrados} venta(s) fiadas fueron a «Otros» porque el cliente "
+            "que nombran no se pudo identificar con seguridad (no hay una sola ficha "
+            "con ese nombre, o el documento, contacto o código no coincide): elegilo "
+            "desde «Otros»."
         )
     # Una columna que el usuario mapeó a otra sección y el importador NO escribió.
     # Pasa cuando el destino todavía no está implementado (F-D) o cuando el

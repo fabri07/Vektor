@@ -388,3 +388,202 @@ async def test_un_fiado_de_local_que_ya_estaba_no_se_toca(
     )
     await db_session.commit()
     assert [v.id for v in await _ventas(db_session, tid)] == [vieja.id]
+
+
+# ── Revisión de #225 ──────────────────────────────────────────────────────────
+
+
+async def _fila_de_fiado_en_otros(
+    client: AsyncClient, headers: dict[str, str], db: AsyncSession, tid: uuid.UUID
+) -> tuple[UnclassifiedRecord, Product]:
+    yerba = await producto_con_compra(db, tid, nombre="Yerba", stock=100)
+    f = await _archivo(db, tid, [_fila("2000", "Fiado")])
+    await _confirmar(client, headers, f)
+    (rec,) = await _otros(db, tid)
+    return rec, yerba
+
+
+def _como_el_modal_viejo(product_id: uuid.UUID, medio: str = "cash") -> dict[str, Any]:
+    """Lo que mandaba ReclassifyModal: «Efectivo» por defecto y sin cliente."""
+    return {
+        "amount": 2000, "transaction_date": f"{HACE_3}T00:00:00", "payment_method": medio,
+        "product_id": str(product_id), "quantity": 2, "notes": None,
+    }
+
+
+async def test_la_fila_de_fiado_no_guarda_el_centinela_y_lleva_su_marca(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """G-1: el `__customer_id__` de la fila era «Local»: resolverla sin elegir
+    cliente la dejaba de «Local»."""
+    from app.application.services.ingestion_import_service import (
+        CUSTOMER_REF_KEY,
+        FIADO_SIN_CLIENTE_KEY,
+    )
+
+    rec, _ = await _fila_de_fiado_en_otros(
+        client, auth_headers, db_session, sample_tenant.tenant_id
+    )
+    assert CUSTOMER_REF_KEY not in rec.row_data
+    assert rec.row_data[FIADO_SIN_CLIENTE_KEY] == "1"
+
+
+async def test_el_modal_viejo_no_convierte_el_fiado_en_efectivo_de_local(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """G-1, deploy en paralelo: el modal viejo manda «Efectivo» por defecto. El
+    fiado no puede terminar como venta cobrada de «Local» sin que nadie lo elija."""
+    tid = sample_tenant.tenant_id
+    rec, yerba = await _fila_de_fiado_en_otros(client, auth_headers, db_session, tid)
+    r = await client.post(
+        f"/api/v1/others/{rec.id}/reclassify",
+        json={"entity_type": "sale", "fields": _como_el_modal_viejo(yerba.id)},
+        headers=auth_headers,
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["code"] == "FIADO_CAMBIO_DE_MEDIO"
+    assert await _ventas(db_session, tid) == []
+    assert await _stock(db_session, yerba.id) == 100
+    assert [o.status for o in await _otros(db_session, tid)] == ["PENDING"]
+
+
+async def test_cambiar_el_medio_a_proposito_si_se_puede(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Si en realidad no fue fiada, la persona lo dice y entra con ese medio."""
+    tid = sample_tenant.tenant_id
+    rec, yerba = await _fila_de_fiado_en_otros(client, auth_headers, db_session, tid)
+    r = await client.post(
+        f"/api/v1/others/{rec.id}/reclassify",
+        json={"entity_type": "sale", "fields": _como_el_modal_viejo(yerba.id),
+              "cambiar_medio_de_pago": True},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    (venta,) = await _ventas(db_session, tid)
+    assert venta.payment_method == "cash"
+
+
+async def test_como_fiado_sin_cliente_sigue_siendo_400(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Sin `__customer_id__` = «Local» en la fila, tampoco cae al centinela."""
+    tid = sample_tenant.tenant_id
+    rec, yerba = await _fila_de_fiado_en_otros(client, auth_headers, db_session, tid)
+    r = await client.post(
+        f"/api/v1/others/{rec.id}/reclassify",
+        json={"entity_type": "sale", "fields": _como_el_modal_viejo(yerba.id, "account")},
+        headers=auth_headers,
+    )
+    assert r.status_code == 400, r.text
+    assert await _ventas(db_session, tid) == []
+
+
+async def _importar_con_nombre(
+    db: AsyncSession, tid: uuid.UUID, pago: str, cliente: str, **extra: Any
+) -> dict[str, Any]:
+    f = await _archivo(db, tid, [_fila("2000", pago, cliente=cliente, **extra)])
+    mapeo = {"cliente": "customer_name", **({"dni": "customer_dni"} if "dni" in extra else {})}
+    counts = await insert_confirmed_data(
+        db, tid, f.parsed_summary_json or {}, {"ventas": True},
+        uploaded_file_id=f.id, column_mappings=mapeo,
+    )
+    await db.commit()
+    return counts
+
+
+async def test_el_fiado_con_el_nombre_de_una_sola_ficha_se_importa_con_ella(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """M-1: la libreta nombra al cliente sin documento. Un nombre que coincide
+    (sin tildes ni mayúsculas) con UNA ficha alcanza para el fiado."""
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    pedro = Customer(tenant_id=tid, name="Pedro", last_name="Gómez")
+    db_session.add(pedro)
+    await db_session.commit()
+    counts = await _importar_con_nombre(db_session, tid, "Libreta", "pedro gomez")
+    (venta,) = await _ventas(db_session, tid)
+    assert (venta.payment_method, venta.customer_id) == ("account", pedro.id)
+    assert counts.get("ventas_fiado_sin_cliente", 0) == 0
+    assert counts.get("ventas_cliente_no_resuelto", 0) == 0
+    assert counts["ventas_cliente_identificado"] == 1
+
+
+async def test_dos_fichas_con_el_mismo_nombre_no_se_adivina(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    db_session.add_all([
+        Customer(tenant_id=tid, name="Pedro Gómez"),
+        Customer(tenant_id=tid, name="Pedro", last_name="Gomez"),
+    ])
+    await db_session.commit()
+    counts = await _importar_con_nombre(db_session, tid, "Fiado", "Pedro Gómez")
+    assert await _ventas(db_session, tid) == []
+    assert counts["ventas_fiado_cliente_no_identificado"] == 1
+    # La venta que V-24 sacó ya no cuenta como «no resuelta» (asignada a «Local»).
+    assert counts.get("ventas_cliente_no_resuelto", 0) == 0
+
+
+async def test_un_documento_que_no_coincide_no_se_tapa_con_el_nombre(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    db_session.add(Customer(tenant_id=tid, name="Pedro Gómez", dni="30111222"))
+    await db_session.commit()
+    await _importar_con_nombre(db_session, tid, "Fiado", "Pedro Gómez", dni="27999888")
+    assert await _ventas(db_session, tid) == []
+    assert len(await _otros(db_session, tid)) == 1
+
+
+async def test_el_contado_con_nombre_sigue_yendo_a_local(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """La regla de F7c no cambia para los otros medios: el nombre no vincula."""
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    db_session.add(Customer(tenant_id=tid, name="Pedro Gómez"))
+    await db_session.commit()
+    await _importar_con_nombre(db_session, tid, "Efectivo", "Pedro Gómez")
+    (venta,) = await _ventas(db_session, tid)
+    assert venta.customer_id == await resolve_or_create_local_sentinel(db_session, tid)
+
+
+async def test_los_avisos_dicen_lo_que_paso(
+    client: AsyncClient, auth_headers: dict[str, str], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """M-1 / m-1 / m-2: un fiado que nombra a alguien que no está, y otro que no
+    nombra a nadie. Ni «no dicen a qué cliente» para el primero, ni «quedaron
+    asignadas a «Local»» para ninguno, ni «Datos confirmados» sin importar nada."""
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre="Yerba")
+    f = await _archivo(
+        db_session, tid,
+        [_fila("2000", "Fiado", cliente="Pedro Gómez"), _fila("3000", "Fiado", cliente="")],
+    )
+    r = await client.post(
+        f"/api/v1/ingestion/files/{f.id}/confirm",
+        json={"confirmed_fields": {"ventas": True},
+              "column_mappings": [{"source_column": c, "target_field": t} for c, t in {
+                  "fecha": "transaction_date", "venta": "amount", "producto": "product_name",
+                  "cantidad": "quantity", "medio_pago": "payment_method",
+                  "cliente": "customer_name"}.items()]},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    w = data["warnings"]
+    assert any(x.startswith("1 venta(s) fiadas fueron a «Otros» porque no dicen") for x in w), w
+    assert any(
+        x.startswith("1 venta(s) fiadas fueron a «Otros» porque el cliente que nombran") for x in w
+    ), w
+    assert not any("quedaron asignadas a «Local»" in x for x in w), w
+    assert data["message"].startswith("Archivo procesado: 2 línea(s) quedaron pendientes"), data
