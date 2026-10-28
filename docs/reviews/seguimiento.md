@@ -38,7 +38,7 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | A-5 | normal | confirmado | T5 | Cierre de caja diario: el sobrante registrado se fecha hoy aunque se cierre otro día, y se acepta una fecha futura | pendiente |  |
 | A-6 | normal | confirmado | T5 | cash_received_ars sin decimal_places: el vuelto se calcula con un redondeo distinto del que guarda la base | pendiente |  |
 | D-4 | grave | confirmado | T6 | La configuración de margen dice «margen bruto, 35/20 por rubro», pero el motor la aplica al margen NETO | pendiente |  |
-| D-5 | grave | confirmado | T6 | El score usa el contado de cualquier arqueo viejo como saldo de caja, aunque es la recaudación neta de un día | pendiente |  |
+| D-5 | grave | confirmado | T6 | El score usa el contado de cualquier arqueo viejo como saldo de caja, aunque es la recaudación neta de un día | mergeado | #209 `e6eacf7f` |
 | D-6 | normal | confirmado | T6 | La ventana del BSL es de 31 días (30 después de las 21 ART), contra 30 del período anterior: el crecimiento queda sesgado | pendiente |  |
 | D-8 | normal | confirmado | T6 | El forecast proyecta ventas en los días de la semana en que el negocio no vende y calcula mal la tendencia | pendiente |  |
 | D-9 | normal | confirmado | T6 | El sobrestock marca como capital inmovilizado productos que no tienen stock | pendiente |  |
@@ -182,5 +182,6 @@ Barrido sólo de críticos (seguridad, cruce de tenants, pérdida de plata); la 
 | V-15 | normal | confirmado | Deshacer relectura des-anula ventas sin chequear B·5e; el mensaje dice «anulaste» aunque la anulación venga de una reparación | pendiente | revisión de #213 |
 | V-16 | normal | confirmado | Filas de «Otros» que quedaron en needs_manual antes de #214 tienen la huella puesta y el lote las saltea (limpiar con script, OK del dueño); link-product pasa la fecha cruda (dd/mm → 422); backlog sin convenio: fechas ambiguas ahora van a resolver de a una | pendiente | revisión de #214 |
 | V-17 | normal | confirmado | `send_weekly_email.py:295` usa `date.today()`; la ventana de 30 días del BSL sale de la fecha UTC (corre un día después de las 21 ART) | pendiente | implementación de D-5 |
+| V-18 | menor | confirmado | `CashCloseModal.tsx:159-164` sólo trata el 409: con la PC en zona horaria adelantada el 422 de fecha futura (D-5) muestra «No se pudo registrar el cierre.» sin explicar; mostrar el mensaje del 422 o armar la fecha en hora AR | pendiente | revalidación de #209 |
 
 Etapa 5 (persistencia, migraciones, scripts): sin críticos (una sola head, lock de migración correcto, migraciones recientes aditivas, scripts con dry-run).
