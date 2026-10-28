@@ -349,6 +349,8 @@ def check_nonempty_import(
         # regla, con su motivo: es una decisión sobre la fila, no un mapeo roto.
         + counts.get("ventas_sin_compra", 0)
         + counts.get("ventas_sin_producto", 0)
+        # V-24: un fiado sin cliente, lo mismo.
+        + counts.get("ventas_fiado_sin_cliente", 0)
     )
     # E8: en un DOCUMENTO (foto/PDF/texto), quedar en «Otros» es el resultado
     # correcto del camino, no un fallback que tape una pérdida. Esos archivos no
@@ -5559,7 +5561,8 @@ async def insert_confirmed_data(
     callers: ingestión, chat, reread, data-repair). Las funciones internas crean
     ``SaleEntry`` sin ``customer_id``; acá, tras un ``flush`` (prod corre con
     ``autoflush=False``, así que los inserts pendientes no se ven sin él), una sola
-    query reasigna las huérfanas al sentinela "Local". Idempotente.
+    query reasigna las huérfanas al sentinela "Local". Idempotente. Antes, el
+    fiado nuevo sin cliente real va a «Otros» (V-24): nunca a "Local".
     """
     from app.application.services.customer_sentinel import (  # noqa: PLC0415
         assign_orphan_sales_to_local,
@@ -5630,6 +5633,14 @@ async def insert_confirmed_data(
     await cerrar_costos_del_lote(
         session, tenant_id, counts.get("product_details") if return_details else None
     )
+    # V-24: un fiado sin cliente real no se acepta (POST /sales da 400): a
+    # «Otros», antes de que el cierre lo deje en «Local» y antes de B·5e (un solo
+    # motivo por fila). Para todo caller: ninguno puede dejar una deuda de nadie.
+    if _ventas_nuevas:
+        await _fiados_sin_cliente_a_otros(
+            session, tenant_id, uploaded_file_id, set(_ventas_nuevas), _filas_previas,
+            counts, source,
+        )
     await assign_orphan_sales_to_local(session, tenant_id)
     # B·5e: toda venta con compra previa. Al final, con las compras y aperturas
     # del archivo ya escritas, para que el orden de las hojas o de las filas no
@@ -5825,29 +5836,9 @@ async def _ventas_sin_compra_a_otros(
     confirmar (M·2d-1b: la confirma el usuario después; sin esto el primer
     import de catálogo + historial mandaría todo a «Otros»).
     """
-    from sqlalchemy import select  # noqa: PLC0415
-
-    from app.application.services.operation_identity_service import (  # noqa: PLC0415
-        liberar_identidades_de,
-        vinculos_de,
-    )
-    from app.persistence.models.product import Product  # noqa: PLC0415
     from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
-    from app.persistence.models.unclassified_record import UnclassifiedRecord  # noqa: PLC0415
 
-    nuevas = [
-        v
-        for v in (
-            await session.execute(
-                select(SaleEntry).where(
-                    SaleEntry.tenant_id == tenant_id,
-                    SaleEntry.id.in_(nuevas_ids),
-                    SaleEntry.voided_at.is_(None),
-                )
-            )
-        ).scalars()
-        if not (v.source_row_ref and v.source_row_ref in filas_previas)
-    ]
+    nuevas = await _ventas_nuevas_a_juzgar(session, tenant_id, nuevas_ids, filas_previas)
     if not nuevas:
         return
     crudos = await _vincular_ventas_pendientes(session, tenant_id, nuevas)
@@ -5859,33 +5850,7 @@ async def _ventas_sin_compra_a_otros(
             session, tenant_id, [(uploaded_file_id, pid) for pid in pids]
         )
     }
-    nombres: dict[uuid.UUID, str] = {}
-    factores: dict[uuid.UUID, int] = {}
-    if pids:
-        for prod in (
-            await session.execute(
-                select(Product.id, Product.name, Product.base_units_per_sale_unit).where(
-                    Product.tenant_id == tenant_id, Product.id.in_(pids)
-                )
-            )
-        ).all():
-            nombres[prod[0]] = prod[1]
-            factores[prod[0]] = int(prod[2] or 1)
-    # Una relectura que vuelve a mandar la misma fila no la duplica en «Otros».
-    ya_pendientes: set[tuple[str | None, str]] = set()
-    if uploaded_file_id is not None:
-        ya_pendientes = {
-            ((fila[0] or {}).get(ROW_REF_KEY), fila[1] or "")
-            for fila in (
-                await session.execute(
-                    select(UnclassifiedRecord.row_data, UnclassifiedRecord.context_label).where(
-                        UnclassifiedRecord.tenant_id == tenant_id,
-                        UnclassifiedRecord.uploaded_file_id == uploaded_file_id,
-                        UnclassifiedRecord.status == "PENDING",
-                    )
-                )
-            ).all()
-        }
+    nombres, factores = await _nombres_y_factores(session, tenant_id, pids)
     a_sacar: list[tuple[SaleEntry, str]] = []
     for venta in nuevas:
         if es_cobro_de_fiado(venta.payment_method):
@@ -5901,6 +5866,191 @@ async def _ventas_sin_compra_a_otros(
             a_sacar.append((venta, _motivo))
     if not a_sacar:
         return
+    sacadas = await _sacar_ventas_a_otros(
+        session, tenant_id, uploaded_file_id, a_sacar, crudos, nombres, factores, source
+    )
+    sin_producto = sum(1 for v in sacadas if v.product_id is None)
+    counts["ventas"] = max(0, int(counts.get("ventas", 0)) - len(sacadas))
+    counts["ventas_sin_compra"] = (
+        counts.get("ventas_sin_compra", 0) + len(sacadas) - sin_producto
+    )
+    counts["ventas_sin_producto"] = counts.get("ventas_sin_producto", 0) + sin_producto
+
+
+#: V-24: el motivo (``context_label``) con que un fiado sin cliente va a «Otros».
+MOTIVO_FIADO_SIN_CLIENTE: Final = "Fiado sin cliente: indicá a quién se le fió"
+
+
+async def _fiados_sin_cliente_a_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    nuevas_ids: set[uuid.UUID],
+    filas_previas: set[str],
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """V-24: un fiado necesita a quién se le fió; si no, a «Otros».
+
+    La fila de un archivo que no nombra un cliente existente cae al centinela
+    «Local» (por fila, F7c) o queda sin cliente hasta que el cierre la manda ahí.
+    Para un fiado (``account``) eso es una deuda a cobrar de nadie: sale de la
+    caja y de la proyección y nunca se cobra. Como POST /sales (400) y el lote de
+    «Otros» (``needs_manual``), no se acepta: la venta que nace en este import
+    fiada sin cliente real se saca —con su stock y su identidad, por el mismo
+    camino que B·5e— y su fila va a «Otros» con el motivo, para resolverla
+    eligiendo el cliente. Se juzgan sólo las ventas NUEVAS de la corrida (una
+    fila que ya era venta no se re-juzga: el fiado histórico en «Local» queda).
+
+    Va ANTES de B·5e: una venta fiada sin cliente y además sin compra va a
+    «Otros» una sola vez y con este motivo, porque sólo se resuelve de a una
+    (el lote nunca importa un fiado), y ahí el modal exige las dos cosas.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models._sentinel import SENTINEL_FLAG_KEY  # noqa: PLC0415
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+
+    nuevas = await _ventas_nuevas_a_juzgar(session, tenant_id, nuevas_ids, filas_previas)
+    fiadas = [v for v in nuevas if _es_fiado(v.payment_method)]
+    if not fiadas:
+        return
+    # Por el flag, no por el nombre (como `resolve_or_create_local_sentinel`).
+    centinelas = set(
+        (
+            await session.execute(
+                select(Customer.id).where(
+                    Customer.tenant_id == tenant_id,
+                    Customer.custom_fields[SENTINEL_FLAG_KEY].as_string() == "true",
+                )
+            )
+        ).scalars()
+    )
+    sin_cliente = [v for v in fiadas if v.customer_id is None or v.customer_id in centinelas]
+    if not sin_cliente:
+        return
+    pids = {v.product_id for v in sin_cliente if v.product_id is not None}
+    nombres, factores = await _nombres_y_factores(session, tenant_id, pids)
+    # Sólo se MIRA lo que decía el archivo de la venta todavía sin producto: el
+    # vínculo pendiente lo resuelve (y lo consume) B·5e, para las que quedan.
+    crudos: dict[uuid.UUID, tuple[Any, Any, Any]] = dict(
+        session.info.get(_B5E_VINCULO_PENDIENTE) or {}
+    )
+    sacadas = await _sacar_ventas_a_otros(
+        session,
+        tenant_id,
+        uploaded_file_id,
+        [(v, MOTIVO_FIADO_SIN_CLIENTE) for v in sin_cliente],
+        crudos,
+        nombres,
+        factores,
+        source,
+    )
+    counts["ventas"] = max(0, int(counts.get("ventas", 0)) - len(sacadas))
+    counts["ventas_fiado_sin_cliente"] = (
+        counts.get("ventas_fiado_sin_cliente", 0) + len(sacadas)
+    )
+
+
+def _es_fiado(payment_method: str | None) -> bool:
+    """Sin distinguir mayúsculas, como `es_cobro_de_fiado`."""
+    return (payment_method or "").strip().lower() == PaymentMethod.ACCOUNT.value
+
+
+async def _ventas_nuevas_a_juzgar(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    nuevas_ids: set[uuid.UUID],
+    filas_previas: set[str],
+) -> list[Any]:
+    """Las ventas vivas que nacieron en esta corrida, sin las filas que ya eran
+    venta antes (la relectura las vuelve a crear con otro id: re-juzgarlas sería
+    una reparación histórica automática)."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import SaleEntry  # noqa: PLC0415
+
+    if not nuevas_ids:
+        return []
+    return [
+        v
+        for v in (
+            await session.execute(
+                select(SaleEntry).where(
+                    SaleEntry.tenant_id == tenant_id,
+                    SaleEntry.id.in_(nuevas_ids),
+                    SaleEntry.voided_at.is_(None),
+                )
+            )
+        ).scalars()
+        if not (v.source_row_ref and v.source_row_ref in filas_previas)
+    ]
+
+
+async def _nombres_y_factores(
+    session: AsyncSession, tenant_id: uuid.UUID, pids: set[uuid.UUID]
+) -> tuple[dict[uuid.UUID, str], dict[uuid.UUID, int]]:
+    """Nombre y factor de unidad de venta de cada producto."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.product import Product  # noqa: PLC0415
+
+    nombres: dict[uuid.UUID, str] = {}
+    factores: dict[uuid.UUID, int] = {}
+    if pids:
+        for prod in (
+            await session.execute(
+                select(Product.id, Product.name, Product.base_units_per_sale_unit).where(
+                    Product.tenant_id == tenant_id, Product.id.in_(pids)
+                )
+            )
+        ).all():
+            nombres[prod[0]] = prod[1]
+            factores[prod[0]] = int(prod[2] or 1)
+    return nombres, factores
+
+
+async def _sacar_ventas_a_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    a_sacar: list[tuple[Any, str]],
+    crudos: dict[uuid.UUID, tuple[Any, Any, Any]],
+    nombres: dict[uuid.UUID, str],
+    factores: dict[uuid.UUID, int],
+    source: str,
+) -> list[Any]:
+    """Saca de las ventas las ya insertadas en esta corrida y manda su fila a
+    «Otros» con su motivo (B·5e, V-24): revierte el descuento de stock, suelta la
+    identidad de operación (viaja con la fila, para que resolverla la vuelva a
+    tomar) y conserva la fila, su ``row_ref`` y la marca de monto canónico. Una
+    relectura que vuelve a mandar la misma fila con el mismo motivo no la
+    duplica. Devuelve las ventas sacadas."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.application.services.operation_identity_service import (  # noqa: PLC0415
+        liberar_identidades_de,
+        vinculos_de,
+    )
+    from app.persistence.models.unclassified_record import UnclassifiedRecord  # noqa: PLC0415
+
+    if not a_sacar:
+        return []
+    # Una relectura que vuelve a mandar la misma fila no la duplica en «Otros».
+    ya_pendientes: set[tuple[str | None, str]] = set()
+    if uploaded_file_id is not None:
+        ya_pendientes = {
+            ((fila[0] or {}).get(ROW_REF_KEY), fila[1] or "")
+            for fila in (
+                await session.execute(
+                    select(UnclassifiedRecord.row_data, UnclassifiedRecord.context_label).where(
+                        UnclassifiedRecord.tenant_id == tenant_id,
+                        UnclassifiedRecord.uploaded_file_id == uploaded_file_id,
+                        UnclassifiedRecord.status == "PENDING",
+                    )
+                )
+            ).all()
+        }
     # I6-7: la identidad que se suelta abajo viaja con la fila, para que
     # resolverla la vuelva a tomar (ver `IDENTITY_CLAIM_KEY`). Se lee ANTES de
     # soltarla: una identidad huérfana se borra con su clave y su contenido.
@@ -5910,14 +6060,9 @@ async def _ventas_sin_compra_a_otros(
         identidades.update(
             await vinculos_de(session, tenant_id, _ids_a_sacar[desde : desde + 5000])
         )
-    sacadas: list[SaleEntry] = []
-    sin_producto = sin_compra = 0
+    sacadas: list[Any] = []
     for venta, _motivo in a_sacar:
         dia = venta.transaction_date.date()
-        if venta.product_id is None:
-            sin_producto += 1
-        else:
-            sin_compra += 1
         motivo = _motivo[:200]
         if not (venta.source_row_ref and (venta.source_row_ref, motivo) in ya_pendientes):
             nombre_crudo, sku_crudo, barcode_crudo = crudos.get(venta.id, (None, None, None))
@@ -5940,7 +6085,12 @@ async def _ventas_sin_compra_a_otros(
                 "codigo_de_barras": (
                     str(barcode_crudo).strip() if barcode_crudo not in (None, "") else None
                 ),
+                # V-24: el lote reconoce el fiado por esta columna y lo deja para
+                # resolverlo de a una.
                 "medio_de_pago": venta.payment_method,
+                # El cliente que el archivo nombró y no se encontró (F7c): ayuda
+                # a elegir a quién se le fió.
+                "cliente": (venta.custom_fields or {}).get("_customer_reference_raw"),
                 "detalle": venta.notes,
             }
             # Las internas van aparte: `_capture_unclassified` descarta toda clave
@@ -5974,15 +6124,11 @@ async def _ventas_sin_compra_a_otros(
         if venta.product_id is not None:
             await stock_service.revert_sale_stock(venta.id, tenant_id, session)
         sacadas.append(venta)
-    if not sacadas:
-        return
     await liberar_identidades_de(session, tenant_id, [("sale", v.id) for v in sacadas])
     for venta in sacadas:
         await session.delete(venta)
     await session.flush()
-    counts["ventas"] = max(0, int(counts.get("ventas", 0)) - len(sacadas))
-    counts["ventas_sin_compra"] = counts.get("ventas_sin_compra", 0) + sin_compra
-    counts["ventas_sin_producto"] = counts.get("ventas_sin_producto", 0) + sin_producto
+    return sacadas
 
 
 async def _stamp_updated_at_on_product_details(

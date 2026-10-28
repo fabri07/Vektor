@@ -4133,6 +4133,12 @@ async def confirm_file(
             f"{counts['ventas_sin_producto']} venta(s) fueron a «Otros» porque no dicen "
             "qué producto se vendió: elegilo desde «Otros»."
         )
+    # V-24: un fiado necesita a quién se le fió.
+    if counts.get("ventas_fiado_sin_cliente"):
+        warnings.append(
+            f"{counts['ventas_fiado_sin_cliente']} venta(s) fiadas fueron a «Otros» "
+            "porque no dicen a qué cliente se le fió: elegí el cliente desde «Otros»."
+        )
     # Una columna que el usuario mapeó a otra sección y el importador NO escribió.
     # Pasa cuando el destino todavía no está implementado (F-D) o cuando el
     # rollout que lo habilita está apagado para el tenant. El contador existía

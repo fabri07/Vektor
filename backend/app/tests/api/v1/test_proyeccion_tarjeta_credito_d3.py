@@ -35,12 +35,16 @@ from app.application.services.forecast_service import (
     credito_por_dia,
     ingresos_de_caja_por_dia,
 )
-from app.application.services.ingestion_import_service import insert_confirmed_data
+from app.application.services.ingestion_import_service import (
+    MOTIVO_FIADO_SIN_CLIENTE,
+    insert_confirmed_data,
+)
 from app.domain.business_time import today_ar
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.unclassified_record import UnclassifiedRecord
 from app.persistence.repositories.transaction_repository import SaleRepository
 from app.tests._respaldo import producto_con_compra
 from app.tests.integration.test_pago_mixto_lectores import _operacion
@@ -566,7 +570,8 @@ async def test_una_transferencia_importada_no_queda_como_fiado_de_local(
     """N-3: «Transferencia cuenta corriente» es plata cobrada por el banco. Antes
     de este arreglo iba a `account` y, como el import pone «Local» a toda venta
     sin cliente, quedaba como deuda de «Local». El control («Cta. cte.») sí es
-    fiado: muestra que el escenario lo detectaría."""
+    fiado: muestra que el escenario lo detectaría. Desde V-24 ese fiado sin
+    cliente no queda como deuda de «Local»: va a «Otros», a elegir el cliente."""
     tid = sample_tenant.tenant_id
     await producto_con_compra(db_session, tid, nombre="Yerba", dia=HOY - timedelta(days=60))
     archivo = UploadedFile(
@@ -603,6 +608,13 @@ async def test_una_transferencia_importada_no_queda_como_fiado_de_local(
         ).scalars()
     }
     assert ventas["1000.00"].payment_method == "transfer"
-    assert ventas["2000.00"].payment_method == "account"
-    deudas = await SaleRepository(db_session).get_receivables_by_customer(tid)
-    assert [(d["customer_name"], float(d["total_owed"])) for d in deudas] == [("Local", 2000.0)]
+    assert "2000.00" not in ventas
+    (fiado,) = (
+        await db_session.execute(
+            select(UnclassifiedRecord).where(UnclassifiedRecord.tenant_id == tid)
+        )
+    ).scalars().all()
+    assert (fiado.context_label, fiado.row_data["medio_de_pago"]) == (
+        MOTIVO_FIADO_SIN_CLIENTE, "account"
+    )
+    assert await SaleRepository(db_session).get_receivables_by_customer(tid) == []
