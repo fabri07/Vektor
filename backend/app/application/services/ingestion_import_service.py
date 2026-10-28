@@ -2080,6 +2080,91 @@ def _source_row_ref(anchor: str | None) -> str | None:
     return hashlib.sha256(anchor.encode()).hexdigest()
 
 
+#: V-19 — cuántas muestras de posibles duplicados viajan en ``counts``. El aviso
+#: muestra éstas; el total va aparte.
+_MUESTRAS_DE_POSIBLES_DUPLICADOS = 3
+#: V-19 — ``[(plan, hoja)]`` de los planes de identidad de la corrida, para que
+#: el wrapper avise al final, después de B·5e (que saca ventas ya insertadas).
+_V19_PLANES = "v19_planes_de_identidad"
+#: V-19 — cómo se nombra la entidad del par en la muestra.
+_ENTIDAD_DEL_PAR = {"sale": "venta", "expense": "compra"}
+
+
+def _guardar_planes_para_v19(
+    session: AsyncSession, planes: list[tuple[PlanDeIdentidad, str | None]]
+) -> None:
+    """V-19: deja los planes con candidatos para ``_avisar_posibles_duplicados``."""
+    con_pares = [(p, h) for p, h in planes if p.posibles_duplicados]
+    if con_pares:
+        session.info.setdefault(_V19_PLANES, []).extend(con_pares)
+
+
+async def _avisar_posibles_duplicados(
+    session: AsyncSession, tenant_id: uuid.UUID, counts: dict[str, Any]
+) -> None:
+    """V-19: los pares «con letra / sin letra» que entraron LOS DOS, a
+    ``counts`` (total + hasta tres muestras en castellano). Va al FINAL del
+    import, después de B·5e: recién ahí se sabe qué ventas y gastos siguen
+    cargados. Se avisa y nada más: pueden ser dos comprobantes, y colapsarlos
+    podría borrar plata.
+
+    El mismo par de filas puede salir de dos planes —una tabla mixta (Libro
+    Diario) produce venta Y gasto desde las mismas filas—: se cuenta una vez,
+    con las dos entidades en la muestra."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.transaction import ExpenseEntry, SaleEntry  # noqa: PLC0415
+
+    planes: list[tuple[PlanDeIdentidad, str | None]] = session.info.pop(_V19_PLANES, [])
+    if not planes:
+        return
+    ids: dict[str, set[uuid.UUID]] = {"sale": set(), "expense": set()}
+    for plan, _ in planes:
+        for par in plan.posibles_duplicados:
+            for fila in (par.fila_con_letra, par.fila_sin_letra):
+                ids.setdefault(par.entidad, set()).update(plan.efectos_de(fila, par.entidad))
+    vivos: set[uuid.UUID] = set()
+    for modelo, entidad in ((SaleEntry, "sale"), (ExpenseEntry, "expense")):
+        lote = sorted(ids.get(entidad) or ())
+        for desde in range(0, len(lote), 5000):
+            vivos.update(
+                (
+                    await session.execute(
+                        select(modelo.id).where(
+                            modelo.tenant_id == tenant_id,
+                            modelo.id.in_(lote[desde : desde + 5000]),
+                            modelo.voided_at.is_(None),
+                        )
+                    )
+                ).scalars()
+            )
+
+    entidades: dict[tuple[str, int, int], list[str]] = {}
+    textos: dict[tuple[str, int, int], str] = {}
+    for plan, hoja in planes:
+        en_hoja = f" de la hoja «{hoja}»" if hoja else ""
+        for par in plan.pares_que_entraron(vivos):
+            clave = (hoja or "", par.fila_con_letra, par.fila_sin_letra)
+            nombre = _ENTIDAD_DEL_PAR.get(par.entidad, par.entidad)
+            if nombre not in entidades.setdefault(clave, []):
+                entidades[clave].append(nombre)
+            textos.setdefault(
+                clave,
+                f"fila {par.fila_con_letra + 1} («{par.comprobante_con_letra}») y "
+                f"fila {par.fila_sin_letra + 1} («{par.comprobante_sin_letra}»){en_hoja}",
+            )
+    if not textos:
+        return
+    counts["posibles_duplicados_sin_letra"] = counts.get(
+        "posibles_duplicados_sin_letra", 0
+    ) + len(textos)
+    muestras: list[str] = counts.setdefault("posibles_duplicados_sin_letra_muestras", [])
+    for clave, texto in textos.items():
+        if len(muestras) >= _MUESTRAS_DE_POSIBLES_DUPLICADOS:
+            break
+        muestras.append(f"{' y '.join(entidades[clave])}: {texto}")
+
+
 def _registrar_monto_derivado(
     cf: dict[str, str], linea: LineAmount, counts: dict[str, Any]
 ) -> None:
@@ -5396,6 +5481,8 @@ async def insert_confirmed_data(
         )
 
     _cross_buffer = CrossFieldBuffer() if apply_cross_fields else None
+    # V-19: nada de una corrida anterior que haya salido por excepción.
+    session.info.pop(_V19_PLANES, None)
     sa_event.listen(session.sync_session, "after_flush", _anotar_ventas_nuevas)
     try:
         counts = await _insert_confirmed_data_impl(
@@ -5445,6 +5532,8 @@ async def insert_confirmed_data(
             counts, source,
         )
     session.info.pop(_B5E_VINCULO_PENDIENTE, None)
+    # V-19: después de B·5e, que saca ventas ya insertadas.
+    await _avisar_posibles_duplicados(session, tenant_id, counts)
     # Bloque 5: persistir las decisiones EXPLÍCITAS de esta corrida por huella
     # de esquema — nunca sugerencias. `context_mappings`/`context_entity`/
     # `context_confirmed`/`shipping_decisions` (y `stock_treatment` en su forma
@@ -7580,6 +7669,8 @@ async def _insert_confirmed_data_impl(
         # no produjeron nada. Acá y no al final de la función porque los planes
         # sólo existen dentro de esta rama; en la misma transacción que los
         # efectos, para que un import revertido se lleve sus identidades.
+        # V-19: se avisa al final del import (ver `_avisar_posibles_duplicados`).
+        _guardar_planes_para_v19(session, [(_plan_ventas, None), (_plan_gastos, None)])
         await cerrar_plan(session, tenant_id, uploaded_file_id, _planes_identidad_plano)
 
         # E6a — el envío se cobra acá, DESPUÉS de las líneas y con la misma
@@ -9033,6 +9124,8 @@ async def _insert_multisheet_data(
     # parte 2 arregló — manda a corregir un mapeo que estaba perfecto.
     _motivos_numericos_del_archivo: Counter[str] = Counter()
     _planes_identidad: list[PlanDeIdentidad] = []
+    #: V-19: la hoja de cada plan de ``_planes_identidad``, en el mismo orden.
+    _hojas_de_planes: list[str] = []
     _efectos_de_la_fila: list[tuple[str, uuid.UUID]] = []
     _skipped_brands: set[str] = set()
     # Cambio 1: asegurar la definición de "marca"/"tienda_original" UNA vez por
@@ -11079,6 +11172,7 @@ async def _insert_multisheet_data(
                 )
             )
             _planes_identidad.append(_plan_ident)
+            _hojas_de_planes.append(str(ctx.get("label") or ""))
             #: I2-1: filas de esta hoja que persistieron una compra en ESTA corrida.
             _filas_con_compra: set[int] = set()
             for _i, row in enumerate(rows):
@@ -11311,7 +11405,11 @@ async def _insert_multisheet_data(
                 )
         # I2-2: un plan anticipado que el recorrido no llegó a usar se cierra igual,
         # para que sus reclamaciones se devuelvan y no queden huérfanas.
-        _planes_identidad.extend(_planes_de_ventas_anticipados.values())
+        # V-19: cada plan con su hoja (el aviso los zipea con strict=True); un plan
+        # que no se usó no aplicó nada, así que no aporta pares.
+        for _cid_sin_usar, _plan_sin_usar in _planes_de_ventas_anticipados.items():
+            _planes_identidad.append(_plan_sin_usar)
+            _hojas_de_planes.append(_cid_sin_usar)
     else:
         # ── Legacy: summaries sin mapping_contexts. Detección por keyword por tipo. ──
         #
@@ -11501,6 +11599,10 @@ async def _insert_multisheet_data(
     # transacción que los efectos— porque si el import se revierte, las
     # identidades se tienen que ir con él: no puede quedar una identidad
     # reclamada por un import que no ocurrió.
+    # V-19: se avisa al final del import (ver `_avisar_posibles_duplicados`).
+    _guardar_planes_para_v19(
+        session, list(zip(_planes_identidad, _hojas_de_planes, strict=True))
+    )
     await cerrar_plan(session, tenant_id, uploaded_file_id, _planes_identidad)
 
     await session.flush()

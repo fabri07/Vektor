@@ -55,12 +55,16 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.operation_identity import (
+    CLAVE_VERSION,
+    CLAVE_VERSION_K1,
+    FORMATOS_DE_COMPROBANTE,
     ClaveDeOperacion,
     LineaEfectiva,
     SinClave,
@@ -79,6 +83,20 @@ DECISION_NUEVA = "nueva"
 DECISION_YA_APLICADA = "ya_aplicada"
 DECISION_CONFLICTO = "conflicto"
 DECISION_SIN_CLAVE = "sin_clave"
+
+
+@dataclass(frozen=True)
+class PosibleDuplicado:
+    """V-19: dos filas del mismo archivo que entraron las dos y pueden ser el
+    mismo comprobante, una escrita con la letra y la otra sin. ``fila_*`` es el
+    índice de la fila en su contexto; ``comprobante_*``, cómo lo escribe el
+    archivo; ``entidad``, la del plan (``sale``/``expense``)."""
+
+    entidad: str
+    fila_con_letra: int
+    comprobante_con_letra: str
+    fila_sin_letra: int
+    comprobante_sin_letra: str
 
 
 @dataclass
@@ -106,6 +124,14 @@ class PlanDeIdentidad:
     reclamadas: set[str] = field(default_factory=set)
     #: Vínculos acumulados en memoria; se persisten en lote al cierre.
     vinculos: list[tuple[uuid.UUID, str, uuid.UUID]] = field(default_factory=list)
+    #: V-19: pares de este archivo que pueden ser el mismo comprobante (ver
+    #: ``_posibles_duplicados_sin_letra``). Sólo se avisa, y sólo de los que
+    #: entraron los dos: ver ``pares_que_entraron``.
+    posibles_duplicados: list[PosibleDuplicado] = field(default_factory=list)
+    #: V-19: los efectos que produjo cada fila (``registrar_efecto``), por
+    #: entidad. Si siguen vivos al final del import se mira recién ahí: B·5e
+    #: saca después del loop las ventas sin compra previa.
+    efectos_por_fila: dict[int, list[tuple[str, uuid.UUID]]] = field(default_factory=dict)
 
     @property
     def activo(self) -> bool:
@@ -113,12 +139,32 @@ class PlanDeIdentidad:
         devuelve un plan vacío y el importador no paga nada."""
         return bool(self.decision)
 
+    def efectos_de(self, fila: int, entidad: str) -> list[uuid.UUID]:
+        """V-19: los ids de lo que la fila cargó como ``entidad``."""
+        return [i for tipo, i in self.efectos_por_fila.get(fila, ()) if tipo == entidad]
+
+    def pares_que_entraron(self, vivos: set[uuid.UUID]) -> list[PosibleDuplicado]:
+        """V-19: los posibles duplicados cuyas DOS filas cargaron una venta o un
+        gasto que sigue en ``vivos`` al final del import. Si una fue a «Otros»
+        (sin compra previa —B·5e la saca después del loop—, sin fecha, sin
+        monto, riesgo de columna), avisar «se cargaron los dos, anulá uno» haría
+        anular la única que entró."""
+        return [
+            par
+            for par in self.posibles_duplicados
+            if all(
+                any(i in vivos for i in self.efectos_de(fila, par.entidad))
+                for fila in (par.fila_con_letra, par.fila_sin_letra)
+            )
+        ]
+
     def registrar_efecto(self, row_index: int, entity_type: str, entity_id: uuid.UUID) -> None:
         """La fila produjo un efecto persistido: se lo cuelga a su identidad.
 
         Sin esto la identidad quedaría reclamada y huérfana, y se devolvería al
         cierre — o sea, el archivo se podría volver a importar entero.
         """
+        self.efectos_por_fila.setdefault(row_index, []).append((entity_type, entity_id))
         clave = self.clave.get(row_index)
         if clave is None:
             return
@@ -320,6 +366,9 @@ async def planificar_identidades(
         existentes=existentes,
         ganadas=ganadas,
     )
+    plan.posibles_duplicados = _posibles_duplicados_sin_letra(
+        plan, documentos=documentos, rows=rows, cols=cols, entity=entity
+    )
 
     logger.info(
         "ingestion.identidad.plan",
@@ -332,6 +381,95 @@ async def planificar_identidades(
         sin_clave=sum(1 for d in plan.decision.values() if d == DECISION_SIN_CLAVE),
     )
     return plan
+
+
+def _comprobante_como_viene(fila: dict[str, Any], cols: dict[str, str]) -> str:
+    """El comprobante como lo escribe el archivo («FC 0001-00000123»): es lo
+    que la persona busca en su planilla, no la clave normalizada."""
+
+    def celda(campo: str) -> str:
+        col = cols.get(campo)
+        valor = fila.get(col) if col else None
+        return "" if valor is None else str(valor).strip()
+
+    numero = celda("invoice_number")
+    serie = celda("document_series")
+    if serie:
+        numero = f"{serie}-{numero}"
+    return " ".join(p for p in (celda("document_type"), numero) if p)
+
+
+def _monto_del_documento(doc: _Documento) -> Decimal | None:
+    """El total del documento, o ``None`` si alguna línea no tiene monto
+    (sin el total no se puede decir «mismo monto»)."""
+    total = Decimal(0)
+    for linea in doc.lineas:
+        if linea.monto is None:
+            return None
+        total += linea.monto
+    return total
+
+
+def _posibles_duplicados_sin_letra(
+    plan: PlanDeIdentidad,
+    *,
+    documentos: dict[str, _Documento],
+    rows: list[dict[str, Any]],
+    cols: dict[str, str],
+    entity: str,
+) -> list[PosibleDuplicado]:
+    """V-19: «Factura A 0001-123» y «FC 0001-123» en el MISMO archivo, con el
+    mismo monto. Tienen claves distintas (``k2`` con la letra, ``k1`` sin) y
+    entran las dos (``_decidir_por_equivalentes``: entre hermanos del mismo
+    archivo nadie bloquea a nadie), y está bien que entren: pueden ser dos
+    ventas, y colapsarlas podría borrar plata. Pero también pueden ser la misma
+    factura escrita dos veces. Decisión del dueño (2026-10-28): no se colapsa
+    nada, se AVISA.
+
+    Par = misma forma ``k1`` (mismo emisor, tipo, punto de venta y número; la
+    entidad la da el plan), una con letra fiscal y la otra de un tipo que usa
+    letra sin ninguna, y mismo total. Dos letras explícitas distintas (A y B) no
+    son par: son dos comprobantes.
+
+    Esto arma los candidatos ANTES de escribir nada. Que las DOS filas hayan
+    cargado algo que sigue vivo se mira al final del import
+    (``PlanDeIdentidad.pares_que_entraron``): una «ya aplicada», una en
+    conflicto o una que fue a «Otros» no produce efecto, y no se avisa.
+    """
+    con_letra: dict[str, list[_Documento]] = defaultdict(list)
+    sin_letra: dict[str, list[_Documento]] = defaultdict(list)
+    for clave, doc in documentos.items():
+        if clave.startswith(f"{CLAVE_VERSION}:doc:"):
+            con_letra[forma_k1(clave, entity)].append(doc)
+        elif clave.startswith(f"{CLAVE_VERSION_K1}:doc:"):
+            tipo = clave.split(":", 4)[3]
+            formato = FORMATOS_DE_COMPROBANTE.get(tipo)
+            if formato is not None and formato.usa_letra:
+                sin_letra[clave].append(doc)
+
+    pares: list[PosibleDuplicado] = []
+    for k1, docs_sin in sin_letra.items():
+        for doc_sin in docs_sin:
+            monto = _monto_del_documento(doc_sin)
+            if monto is None:
+                continue
+            for doc_con in con_letra.get(k1, ()):
+                if _monto_del_documento(doc_con) != monto:
+                    continue
+                pares.append(
+                    PosibleDuplicado(
+                        entidad=entity,
+                        fila_con_letra=doc_con.filas[0],
+                        comprobante_con_letra=_comprobante_como_viene(
+                            rows[doc_con.filas[0]], cols
+                        ),
+                        fila_sin_letra=doc_sin.filas[0],
+                        comprobante_sin_letra=_comprobante_como_viene(
+                            rows[doc_sin.filas[0]], cols
+                        ),
+                    )
+                )
+    return sorted(pares, key=lambda p: (min(p.fila_con_letra, p.fila_sin_letra), p.fila_sin_letra))
 
 
 #: Lo que ve el usuario en «Otros» cuando lo que choca es el mismo comprobante
