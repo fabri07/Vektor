@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.analytics_service import AnalyticsService
-from app.application.services.health_config_service import get_margin_benchmark
 from app.domain.product import effective_threshold
 from app.heuristics.health_engine import (
     FUENTES_CON_SALDO,
@@ -272,16 +271,15 @@ class HealthScoreService:
         analytics_svc = AnalyticsService(self._session)
 
         # ── 2. Benchmark de margen ────────────────────────────────────────────
-        # Solo el override del tenant puede desplazar al benchmark del vertical.
-        # El camino data-driven quedó desconectado del scoring: su muestra contaba
-        # eventos de recálculo en vez de negocios distintos, así que un solo
-        # negocio recalculado cinco veces reemplazaba el benchmark normativo de
-        # todo el rubro por la mediana de sí mismo. `None` acá = usar el JSON del
-        # vertical (lo resuelve `calculate_health_score`).
-        tenant_benchmark = await get_margin_benchmark(tenant_id, self._session)
+        # El del JSON del rubro, siempre (`None` = lo resuelve
+        # `calculate_health_score`). El camino data-driven quedó desconectado del
+        # scoring: su muestra contaba eventos de recálculo en vez de negocios
+        # distintos. Y el objetivo de /settings/health-config tampoco entra (D-4):
+        # es margen BRUTO por producto, y acá se puntúa el NETO; aplicarlo
+        # convertía un neto sano del 12% de un kiosco en MARGIN_LOW contra 20%.
 
         # ── 3. Heuristic Engine ───────────────────────────────────────────────
-        result = calculate_health_score(state, benchmark=tenant_benchmark)
+        result = calculate_health_score(state, benchmark=None)
         dimensions = _build_dimensions(state, result)
 
         # ── 4. Persist snapshot ───────────────────────────────────────────────

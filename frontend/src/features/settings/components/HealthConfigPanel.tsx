@@ -6,7 +6,9 @@ import { settingsService } from "@/services/settings.service";
 import { useToastStore } from "@/stores/toastStore";
 
 const DEFAULTS = { target: 35, warning: 20 };
-const VERTICAL_DEFAULTS = "35% objetivo / 20% alerta (valores por vertical)";
+// D-4: son los predeterminados GENÉRICOS de Véktor para el margen bruto, iguales
+// para todos los rubros (antes decía «valores por vertical», que era falso).
+const VEKTOR_DEFAULTS = "35% objetivo / 20% alerta (predeterminados de Véktor)";
 
 function SliderField({
   label,
@@ -109,25 +111,30 @@ export function HealthConfigPanel() {
     <div className="space-y-6">
       <div>
         <h3 className="text-base font-semibold text-vk-text-primary">
-          Objetivo de margen
+          Objetivo de margen bruto por producto
         </h3>
         <p className="mt-1 text-sm text-vk-text-muted">
-          Configurá los umbrales de margen bruto que Véktor usa para calcular la
-          dimensión &quot;Márgenes&quot; en tu score de salud. Los demás factores (caja,
-          inventario, proveedores, crecimiento) siguen los benchmarks del rubro.{" "}
+          Configurá el margen bruto (precio de venta contra costo) que querés
+          lograr en cada producto. El chat lo usa para sugerir precios y para
+          señalar los productos que quedan por debajo de tu umbral de alerta.{" "}
           {!config?.is_custom && (
             <span className="text-vk-text-secondary">
               Usando valores por defecto:{" "}
-              <strong className="text-vk-text-primary">{VERTICAL_DEFAULTS}</strong>.
+              <strong className="text-vk-text-primary">{VEKTOR_DEFAULTS}</strong>.
             </span>
           )}
+        </p>
+        <p className="mt-2 text-sm text-vk-text-muted">
+          Tu score de salud no usa estos valores: la dimensión &quot;Márgenes&quot; mide
+          el margen neto (después de los gastos operativos) contra el rango sano
+          de tu rubro.
         </p>
       </div>
 
       <div className="space-y-6 rounded-xl border border-vk-border-w bg-vk-surface-w p-5 shadow-vk-sm">
         <SliderField
           label="Margen objetivo"
-          hint="Por encima de este valor el score de márgenes es ≥ 90. Es tu meta de rentabilidad bruta."
+          hint="Margen bruto que buscás en cada producto. El chat sugiere precios para llegar a este valor."
           value={target}
           min={5}
           max={80}
@@ -135,7 +142,7 @@ export function HealthConfigPanel() {
         />
         <SliderField
           label="Umbral de alerta"
-          hint="Por debajo de este valor el score de márgenes entra en zona de advertencia."
+          hint="Un producto con margen bruto por debajo de este valor se marca como de margen bajo."
           value={warning}
           min={1}
           max={79}
