@@ -46,6 +46,11 @@ _RISK_DESCRIPTIONS: dict[str, str] = {
     "GROWTH_STAGNANT": "Las ventas son la dimensión más floja: crecen poco, no crecen o caen",
 }
 
+# Fuentes de caja que traen un SALDO (D-5). En «flujo» y «desconocido»
+# `cash_on_hand_est` vale 0 porque no hay saldo, no porque la caja esté vacía:
+# ningún texto ni métrica puede afirmar «$0 en caja».
+FUENTES_CON_SALDO = ("arqueo", "onboarding")
+
 # Tie-break order: earlier index wins
 _DIMENSION_PRIORITY = ["cash", "margin", "stock", "supplier", "growth"]
 
@@ -393,7 +398,7 @@ def calculate_health_score(
             getattr(state, "liquid_outflow_est", Decimal("0")),
         )
         cash_known = True
-    elif cash_source in ("arqueo", "onboarding"):
+    elif cash_source in FUENTES_CON_SALDO:
         s_cash = _score_cash(state.cash_on_hand_est, state.monthly_fixed_expenses_est, config)
         cash_known = True
     else:  # desconocido — placeholder neutro, NO se muestra (gated por cash_source)
