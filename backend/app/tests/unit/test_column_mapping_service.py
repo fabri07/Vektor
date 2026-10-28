@@ -532,6 +532,9 @@ def test_single_value_fields_cubre_dinero_cantidad_y_fecha() -> None:
         # producen un número raro que salte en un total.
         "external_code",
         "external_source",
+        # I5-4: el SKU y el código de barras son la identidad del producto.
+        "sku",
+        "barcode",
     }
     # Campos donde varias columnas pueden ser legítimas: fuera del bloqueo.
     assert "notes" not in SINGLE_VALUE_FIELDS["sale"]

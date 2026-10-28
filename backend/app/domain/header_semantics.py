@@ -264,6 +264,25 @@ CALIFICADORES: dict[str, str] = {
     "nro": "identificador",
     "numero": "identificador",
     "n": "identificador",
+    # I5-3: «N° Venta» llega con el símbolo (no se pliega a `n`) y «Num venta»
+    # abreviado. Sin esto el núcleo débil `venta` quedaba solo y la columna del
+    # número de orden se proponía como MONTO. `no` queda afuera a propósito:
+    # «Monto no gravado» es un monto.
+    "n°": "identificador",
+    "num": "identificador",
+    # I5-3: lo que cambia QUÉ cantidad es. «Cantidad vendida» no es el stock de
+    # hoy y «Stock mínimo» es un umbral de reposición: en un catálogo, sin estos
+    # calificadores los dos entraban como stock de apertura.
+    "vendida": "vendido",
+    "vendidas": "vendido",
+    "vendido": "vendido",
+    "vendidos": "vendido",
+    "minimo": "umbral",
+    "minima": "umbral",
+    "min": "umbral",
+    "maximo": "umbral",
+    "maxima": "umbral",
+    "max": "umbral",
     # «Tipo cliente» no es un cliente: es su clasificación. Solo califica.
     "tipo": "clasificador",
 }
