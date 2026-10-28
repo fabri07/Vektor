@@ -30,7 +30,9 @@ from app.application.services.column_mapping_service import (
     read_header,
 )
 from app.application.services.ingestion_import_service import (
+    EmptyImportError,
     _vedadas_a_la_heuristica,
+    check_nonempty_import,
     insert_confirmed_data,
 )
 from app.domain.header_semantics import tokenize
@@ -508,3 +510,100 @@ class TestNumeroConOrdinal:
         # La n tiene que abrir la palabra: «desdenº» no es «desde» + «nº».
         assert "n°" in tokenize("nº_venta")
         assert "n°" not in tokenize("desdenº_venta")
+
+
+async def test_la_marca_calcula_las_vedadas_una_vez_por_fila(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rendimiento (revalidación de I5-3): la búsqueda de la marca recalculaba las
+    vedadas por CADA clave de la fila —columnas² por fila de catálogo, decenas de
+    segundos de más en un confirm sincrónico grande—. Con 40 columnas, las
+    llamadas por fila no pueden crecer con el ancho de la hoja."""
+    from app.application.services import ingestion_import_service as svc
+
+    llamadas = 0
+    original = svc._vedadas_a_la_heuristica
+
+    def _contada(*args: Any, **kwargs: Any) -> set[str]:
+        nonlocal llamadas
+        llamadas += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(svc, "_vedadas_a_la_heuristica", _contada)
+    relleno = {f"Dato {i}": str(i) for i in range(40)}
+    fila = {"Productos": "Vela aromática 200g", "Precio venta": "2100", **relleno}
+    summary = _summary(list(fila), fila)
+    await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"productos": True},
+        context_mappings={_CTX: {"Productos": "name", "Precio venta": "sale_price_ars"}},
+        context_confirmed={_CTX: True},
+        uploaded_file_id=await _upload(db_session, sample_tenant.tenant_id),
+    )
+    await db_session.flush()
+    prod = (
+        await db_session.execute(
+            select(Product).where(Product.tenant_id == sample_tenant.tenant_id)
+        )
+    ).scalars().one()
+    assert prod.name == "Vela aromática 200g"
+    assert 0 < llamadas < 10, llamadas
+
+
+def _gasto_plano_sin_mapeo(col: str) -> dict[str, Any]:
+    filas = [{"fecha": "2024-03-10", "concepto": "Luz", col: "1500"}]
+    return {
+        "file_type": "spreadsheet",
+        "inferred_type": "gastos",
+        "multi_sheet": False,
+        "has_gasto": True,
+        "row_count": 1,
+        "headers": list(filas[0]),
+        "gastos_detectados": filas,
+        "preview_rows": filas,
+    }
+
+
+class TestTotalDelComprobanteSinMapeo:
+    """Cambio declarado de I5-3: `por_comprobante` veda el monto. Un archivo SIN
+    mapeo (chat `IMPORT_TABULAR_FILE`, confirm plano sin mapeos) cuyo único monto
+    es el total del comprobante ya no se importa: no se inserta nada y
+    `check_nonempty_import` corta con `EmptyImportError`, que pide mapear. Es lo
+    conservador: repetido en cada línea, ese total inflaría cada fila."""
+
+    @pytest.mark.parametrize("col", ["total_factura", "monto_factura", "total_comprobante"])
+    async def test_el_total_del_comprobante_no_es_el_monto_y_pide_mapear(
+        self, db_session: AsyncSession, sample_tenant: Tenant, col: str
+    ) -> None:
+        tid = sample_tenant.tenant_id
+        summary = _gasto_plano_sin_mapeo(col)
+        counts = await insert_confirmed_data(
+            db_session, tid, summary, {"gastos": True},
+            column_mappings=None, uploaded_file_id=await _upload(db_session, tid),
+        )
+        await db_session.flush()
+        gastos = (
+            await db_session.execute(select(ExpenseEntry).where(ExpenseEntry.tenant_id == tid))
+        ).scalars().all()
+        assert gastos == []
+        assert not counts.get("gastos")
+        with pytest.raises(EmptyImportError):
+            check_nonempty_import(counts, summary, {"gastos": True})
+
+    async def test_control_un_total_a_secas_sigue_entrando(
+        self, db_session: AsyncSession, sample_tenant: Tenant
+    ) -> None:
+        tid = sample_tenant.tenant_id
+        summary = _gasto_plano_sin_mapeo("total")
+        counts = await insert_confirmed_data(
+            db_session, tid, summary, {"gastos": True},
+            column_mappings=None, uploaded_file_id=await _upload(db_session, tid),
+        )
+        await db_session.flush()
+        gastos = (
+            await db_session.execute(select(ExpenseEntry).where(ExpenseEntry.tenant_id == tid))
+        ).scalars().all()
+        assert [g.amount for g in gastos] == [Decimal("1500")]
+        check_nonempty_import(counts, summary, {"gastos": True})

@@ -10151,14 +10151,15 @@ async def _insert_multisheet_data(
         # I5-3: tampoco la marca sale de lo vedado — «Código proveedor» contiene
         # `proveedor` y su código terminaba como marca del producto. Los cruzados
         # (`supplier:name`) no están en `cols` y se siguen encontrando acá.
-        _store_col = cols.get("supplier_name") or _row_col(
-            {
-                k: v
-                for k, v in row.items()
-                if k not in _vedadas_a_la_heuristica(row, "product", cols, cf_cols)
-            },
-            _PROVEEDOR_COLS,
-        )
+        # Las vedadas se calculan UNA vez por fila: adentro de la comprensión se
+        # recalculaban por cada clave y el costo crecía con columnas².
+        _store_col = cols.get("supplier_name")
+        if not _store_col:
+            _vedadas_marca = _vedadas_a_la_heuristica(row, "product", cols, cf_cols)
+            _store_col = _row_col(
+                {k: v for k, v in row.items() if k not in _vedadas_marca},
+                _PROVEEDOR_COLS,
+            )
         store_name: str | None = _clean_str(
             row.get(_store_col) if _store_col else None, 300
         )
