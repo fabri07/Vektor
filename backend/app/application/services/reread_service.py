@@ -954,6 +954,9 @@ async def _refs_de_filas_clasificadas(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     clasificados: list[SaleEntry | ExpenseEntry],
+    file_id: uuid.UUID | None = None,
+    summary: dict[str, Any] | None = None,
+    filas_ruteadas: dict[str, set[int]] | None = None,
 ) -> dict[uuid.UUID, str]:
     """F-O.2 — ``{id del registro clasificado: source_row_ref de su fila}``.
 
@@ -962,6 +965,13 @@ async def _refs_de_filas_clasificadas(
     insertaría. Una fila capturada por un camino que no tenía el ancla a mano no
     lo trae y queda fuera del dict — degrada a F-O.1 (se preserva), que no pierde
     nada.
+
+    I1-4: la captura de riesgo de columna (F8, ``__risk_ref__``) NO usa su
+    ``ROW_REF_KEY``: guarda el índice ORIGINAL de la fila, y el import numera
+    después de sacar las ruteadas, así que esa ref es la de la fila siguiente
+    (que siempre vuelve a entrar y hacía anular la clasificada). Se recalcula
+    con la numeración de ESTE reimport (``_ref_de_fila_ruteada``); sin el
+    summary y las ruteadas no se puede, y se preserva.
     """
     if not clasificados:
         return {}
@@ -988,9 +998,18 @@ async def _refs_de_filas_clasificadas(
         .scalars()
         .all()
     )
-    ref_de_fila = {
-        fila.id: str((fila.row_data or {}).get(_ROW_REF_KEY) or "") for fila in filas
-    }
+    ref_de_fila: dict[uuid.UUID, str] = {}
+    for fila in filas:
+        datos = fila.row_data or {}
+        if not datos.get(_RISK_REF_KEY):
+            ref_de_fila[fila.id] = str(datos.get(_ROW_REF_KEY) or "")
+            continue
+        riesgo = _parse_risk_ref(datos)
+        if riesgo is None or file_id is None or summary is None or filas_ruteadas is None:
+            continue
+        ref_de_fila[fila.id] = (
+            _ref_de_fila_ruteada(tenant_id, file_id, summary, filas_ruteadas, *riesgo) or ""
+        )
     return {
         rec_id: ref_de_fila.get(fila_id, "")
         for rec_id, fila_id in por_registro.items()
@@ -1139,15 +1158,191 @@ async def _descartar_recapturas_ya_clasificadas(
         .all()
     )
     for fila in pendientes:
+        # I1-4: el `ROW_REF_KEY` de una captura de riesgo es el de otra fila, y
+        # nunca es copia de una clasificada (la huella `risk:*` sigue viva).
+        if (fila.row_data or {}).get(_RISK_REF_KEY):
+            continue
         if str((fila.row_data or {}).get(_ROW_REF_KEY) or "") in refs:
             fila.status = UNCLASSIFIED_STATUS_DISMISSED
             fila.resolved_at = ahora
+
+
+def _ref_de_fila_ruteada(
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    summary: dict[str, Any],
+    filas_ruteadas: dict[str, set[int]],
+    context_id: str,
+    row_index: int,
+) -> str | None:
+    """I1-4 — la ``source_row_ref`` con la que ESTE reimport cargaría la fila que
+    una captura de riesgo identifica por ``(context_id, índice original)``.
+
+    F8 saca del bucket las filas ruteadas antes de importar, así que cada fila
+    corre tantos lugares como ruteadas tenga antes en su contexto. Devuelve
+    ``None`` si la fila sigue ruteada (no entra) o si la numeración del import no
+    se puede reproducir con certeza; el caller la preserva (F-O.1), que no pierde
+    nada. El despacho copia el de ``insert_confirmed_data``: por hoja ancla con el
+    ``context_id``; la tabla suelta, con el contexto vacío sobre un solo bucket.
+    """
+    ruteadas = filas_ruteadas.get(context_id, set())
+    if row_index in ruteadas:
+        return None
+    if summary.get("inferred_type") == "mixed" or summary.get("multi_sheet"):
+        contextos = {
+            c.get("context_id")
+            for c in summary.get("mapping_contexts") or []
+            if isinstance(c, dict)
+        }
+        if context_id not in contextos:
+            return None
+        ancla_ctx: str | None = context_id
+    else:
+        buckets = [
+            b
+            for b in _ROW_BUCKETS_RIESGO
+            if any(
+                isinstance(r, dict) and r.get("__context__", "table") == context_id
+                for r in summary.get(b) or []
+            )
+        ]
+        if context_id != "table" or len(buckets) > 1:
+            return None
+        ancla_ctx = None
+    corrida = row_index - sum(1 for i in ruteadas if i < row_index)
+    return _hash_anchor(_row_anchor(tenant_id, file_id, ancla_ctx, corrida))
+
+
+#: Los buckets de filas que recorre F8 (``column_risk._ROW_BUCKETS``).
+_ROW_BUCKETS_RIESGO: tuple[str, ...] = (
+    "ventas_detectadas",
+    "gastos_detectados",
+    "stock_detectado",
+    "clientes_detectados",
+    "proveedores_detectados",
+    "otros_detectados",
+)
+
+
+async def _pendientes_a_releer(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    excluir: set[str],
+) -> dict[uuid.UUID, str]:
+    """I4-6 — ``{id: ref}`` de los pendientes de «Otros» de este archivo que la
+    relectura vuelve a leer.
+
+    Una fila que el import mandó a «Otros» (sin fecha, sin monto, total,
+    conflicto, venta sin compra) registra su huella en el ancla de la fila: es
+    output persistido. Sin liberarla, el reimport la saltea para siempre y una
+    corrección del archivo o del mapeo nunca la alcanza. Entran las que guardan
+    su ``ROW_REF_KEY`` y cuya huella existe. Quedan afuera las capturas de riesgo
+    de columna (las resuelve ``_reconcile_column_risk`` con su propia huella, y
+    su ``ROW_REF_KEY`` es el de otra fila, I1-4) y las refs de lo preservado
+    (``excluir``): esa huella es la de un registro que el reimport no toca.
+    """
+    candidatas: dict[uuid.UUID, str] = {}
+    for fila in (
+        await session.execute(
+            select(UnclassifiedRecord).where(
+                UnclassifiedRecord.tenant_id == tenant_id,
+                UnclassifiedRecord.uploaded_file_id == file_id,
+                UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+            )
+        )
+    ).scalars():
+        datos = fila.row_data or {}
+        ref = str(datos.get(_ROW_REF_KEY) or "")
+        if ref and not datos.get(_RISK_REF_KEY) and ref not in excluir:
+            candidatas[fila.id] = ref
+    if not candidatas:
+        return {}
+    presentes = await huellas_presentes(session, tenant_id, set(candidatas.values()))
+    return {i: ref for i, ref in candidatas.items() if ref in presentes}
+
+
+async def _resolver_pendientes_releidos(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    releidos: dict[uuid.UUID, str],
+    tipos_nuevos: dict[str, set[str]],
+    ahora: datetime,
+) -> list[dict[str, Any]]:
+    """I4-6 — después del reimport, cada pendiente releído queda en uno de tres
+    estados, sin perder ni duplicar:
+
+    - su fila entró como venta o gasto → DISMISSED (resuelto por la relectura).
+      ``tipos_nuevos`` es ``{ref: tipos que ESTA relectura cargó de esa fila y
+      antes no estaban}``: una fila con venta y gasto deja el gasto en los libros
+      y la venta en «Otros» con la MISMA ref, y que el gasto vuelva a entrar no
+      dice nada de la venta. Con la entidad sugerida se exige ese tipo; sin
+      ella, que algo nuevo haya entrado;
+    - volvió a caer a «Otros» con una captura nueva → DISMISSED el viejo: manda
+      la captura nueva, que dice por qué cae HOY;
+    - nada la tomó (la fila ya no está, su hoja no se importó, B·5e no la
+      re-capturó) → sigue como estaba, y su huella se repone si nadie la volvió
+      a registrar.
+
+    DISMISSED y no borrado, como F8: queda el rastro, y el deshacer (I4-4) los
+    devuelve a PENDING porque estaban pendientes antes de la relectura. Devuelve
+    el conteo por hoja con motivo ``releida``.
+    """
+    if not releidos:
+        return []
+    filas = {
+        f.id: f
+        for f in (
+            await session.execute(
+                select(UnclassifiedRecord).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.uploaded_file_id == file_id,
+                    or_(
+                        UnclassifiedRecord.id.in_(list(releidos)),
+                        UnclassifiedRecord.status == UNCLASSIFIED_STATUS_PENDING,
+                    ),
+                )
+            )
+        ).scalars()
+    }
+    refs_con_copia_nueva = {
+        str((f.row_data or {}).get(_ROW_REF_KEY) or "")
+        for f in filas.values()
+        if f.id not in releidos and f.status == UNCLASSIFIED_STATUS_PENDING
+    }
+    a_reponer: set[str] = set()
+    por_hoja: dict[str, int] = defaultdict(int)
+    for fila_id, ref in releidos.items():
+        fila = filas.get(fila_id)
+        if fila is None:
+            continue
+        nuevos = tipos_nuevos.get(ref, set())
+        entro = (
+            fila.suggested_entity in nuevos
+            if fila.suggested_entity in _TIPOS_OPERACION
+            else bool(nuevos)
+        )
+        if entro or ref in refs_con_copia_nueva:
+            if fila.status == UNCLASSIFIED_STATUS_PENDING:
+                fila.status = UNCLASSIFIED_STATUS_DISMISSED
+                fila.resolved_at = ahora
+                por_hoja[fila.context_id or ""] += 1
+        else:
+            a_reponer.add(ref)
+    await _restore_fingerprints(session, tenant_id, a_reponer)
+    return [
+        {"hoja": hoja, "motivo": DISMISS_REASON_REREAD, "descartados": n}
+        for hoja, n in sorted(por_hoja.items())
+    ]
 
 
 #: Motivos por los que la relectura descarta un pendiente sin haberlo importado.
 #: Set cerrado y en castellano — es lo que se muestra en el conteo por hoja.
 DISMISS_REASON_DERIVED = "hoja_derivada"
 DISMISS_REASON_NOT_SELECTED = "hoja_no_seleccionada"
+#: I4-6: la relectura volvió a leer la fila (entró, o cayó de nuevo con otra captura).
+DISMISS_REASON_REREAD = "releida"
 
 
 async def _descartar_pendientes_de_contextos_no_importados(
@@ -1301,6 +1496,7 @@ async def _reconcile(
     run: DataRepairRun,
     dry_run: bool = False,
     draft: dict[str, Any] | None = None,
+    filas_ruteadas: dict[str, set[int]] | None = None,
 ) -> RereadApplyResult:
     """Núcleo de la relectura. Asume estar dentro de una transacción que el
     caller commitea (apply) o rollbackea (preview).
@@ -1377,9 +1573,23 @@ async def _reconcile(
     # vuelve a "Otros" y la captura re-registra la huella — y la de más abajo
     # descarta esa captura nueva, porque el usuario ya la resolvió.
     refs_de_otros = await _refs_de_filas_clasificadas(
-        session, tenant_id, recon.others_records
+        session,
+        tenant_id,
+        recon.others_records,
+        file_id,
+        fresh,
+        filas_ruteadas if filas_ruteadas is not None else {},
     )
     fingerprints_to_delete |= {ref for ref in refs_de_otros.values() if ref}
+
+    # I4-6 — y la de lo que sigue PENDIENTE en «Otros». Es el mismo movimiento
+    # que F-O.2, para la fila que nadie clasificó todavía: si el archivo o el
+    # mapeo se corrigieron, la fila entra como en una carga limpia; si no, vuelve
+    # a caer y `_resolver_pendientes_releidos` deja una sola copia.
+    pendientes_releidos = await _pendientes_a_releer(
+        session, tenant_id, file_id, preserved_refs
+    )
+    fingerprints_to_delete |= set(pendientes_releidos.values())
 
     # ── Fallback legacy: recomputar anchors del archivo y borrar los que NO
     # matcheen por contenido a un registro editado. (Best-effort; la primera
@@ -1722,6 +1932,27 @@ async def _reconcile(
         _refs_reimportadas,
         run,
         dry_run,
+    )
+    _tipos_previos: dict[str, set[str]] = defaultdict(set)
+    for rec in all_existing:
+        if rec.source_row_ref:
+            _tipos_previos[rec.source_row_ref].add(
+                "sale" if isinstance(rec, SaleEntry) else "expense"
+            )
+    _tipos_nuevos: dict[str, set[str]] = defaultdict(set)
+    for item in inserted_items:
+        _after = item.after_json or {}
+        _ref = str(_after.get("source_row_ref") or "")
+        _tipo = str(_after.get("kind") or "")
+        if _ref and _tipo not in _tipos_previos.get(_ref, set()):
+            _tipos_nuevos[_ref].add(_tipo)
+    _pendientes_descartados += await _resolver_pendientes_releidos(
+        session,
+        tenant_id,
+        file_id,
+        pendientes_releidos,
+        _tipos_nuevos,
+        datetime.now(UTC),
     )
 
     # ``new`` = inserciones que no corresponden a un registro voldado (su ref no
@@ -4121,6 +4352,11 @@ async def preview_reread(
         tenant_id,
         _anclas_candidatas(tenant_id, file_id, _contextos_del_summary(fresh)),
     )
+    # I4-6: el apply libera la huella de los pendientes de «Otros», así que su
+    # fila no es «sin cambios»: entra (o vuelve a caer) como en una carga limpia.
+    fingerprints -= set(
+        (await _pendientes_a_releer(session, tenant_id, file_id, set())).values()
+    )
     catalog = await _load_product_index(session, tenant_id)
     # B·8a: los alias y los nombres de productos ACTIVOS, como el reimport real.
     _identidad = await _load_product_identity_indexes(session, tenant_id)
@@ -4292,7 +4528,19 @@ async def apply_reread(
     }
 
     result = await _reconcile(
-        session, file, tenant_id, summary_for_import, confirmed_fields, run, draft=draft
+        session,
+        file,
+        tenant_id,
+        summary_for_import,
+        confirmed_fields,
+        run,
+        draft=draft,
+        # I1-4: con qué numeración entra cada fila que F8 ruteó a «Otros».
+        filas_ruteadas=(
+            {cid: set(filas) for cid, filas in resolved.applied.routed_rows.items()}
+            if resolved.applied is not None
+            else {}
+        ),
     )
     result.clientes = clientes_count
     result.proveedores = proveedores_count
