@@ -100,8 +100,8 @@ Estados: **pendiente** · **parcial** (el PR cerró una parte; la nota dice qué
 | I4-14 | normal | confirmado | I-B | El diagnóstico de cola mide la antigüedad con `created_at`: una sesión reusada aparece «trabada» al instante | pendiente |  |
 | I1-3 | grave | confirmado | I-C | Una compra de mercadería con cantidad decimal de un producto por unidad que ya existe deja un gasto COGS sin stock ni movimiento, sin avisar | mergeado | #222 `07f14f18` |
 | I1-4 | grave | plausible | I-C | Las filas que F8 manda a «Otros» se borran del bucket y corren los índices: su __row_ref__ coincide con el source_row_ref de la fila siguiente, y la relectura anula la venta o gasto clasificado a mano sin medirlo como pérdida | mergeado | #221 `a04efb80` |
-| I2-1 | grave | confirmado | I-C | El costo del envío se cobra de nuevo en otro archivo aunque todas sus compras quedaron como «ya aplicadas» (E6b) | pendiente |  |
-| I2-2 | grave | confirmado | I-C | El gate de replay cuenta como consumo ventas que después no se insertan (ya aplicadas, salteadas por huella, en conflicto) | pendiente |  |
+| I2-1 | grave | confirmado | I-C | El costo del envío se cobra de nuevo en otro archivo aunque todas sus compras quedaron como «ya aplicadas» (E6b) | mergeado | #220 `b45068c7` |
+| I2-2 | grave | confirmado | I-C | El gate de replay cuenta como consumo ventas que después no se insertan (ya aplicadas, salteadas por huella, en conflicto) | mergeado | #220 `b45068c7` |
 | I2-3 | grave | confirmado | I-C | Tabla suelta con Ventas+Productos tildados: la cantidad vendida de cada fila pasa a ser el stock absoluto del producto | mergeado | #210 `45a8cee4` |
 | I2-6 | grave | confirmado | I-C | Tabla suelta: el tratamiento de stock por hoja ({context_id: ...}) se ignora y la compra se registra como apertura | mergeado | #222 `07f14f18` |
 | I1-5 | normal | confirmado | I-C | Gate de historical_replay con productos por peso: compara la cantidad de la venta en kg contra el saldo en gramos y nunca frena | pendiente |  |
