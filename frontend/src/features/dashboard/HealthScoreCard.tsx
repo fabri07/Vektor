@@ -182,8 +182,9 @@ export function HealthScoreCard({
               Datos insuficientes para el análisis
             </p>
             <p className="mt-2 max-w-md text-sm leading-6 text-vektor-body">
-              Cargá al menos ventas del último mes y tus gastos fijos
-              para ver el score de salud del negocio.
+              Cargá al menos ventas del último mes y tus gastos fijos, o
+              hacé el arqueo de caja del día, para ver el score de salud del
+              negocio.
             </p>
           </div>
           <Link

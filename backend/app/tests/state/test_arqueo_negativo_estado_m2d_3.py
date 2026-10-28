@@ -47,7 +47,7 @@ async def _estado(db: AsyncSession, tenant_id):
     )
 
 
-async def test_un_arqueo_negativo_no_es_saldo_pero_es_caja_observada(
+async def test_un_arqueo_negativo_no_es_saldo_ni_caja_observada(
     db_session: AsyncSession, sample_tenant, sample_business_profile: BusinessProfile
 ) -> None:
     await _perfil_viejo(db_session, sample_business_profile)
@@ -58,9 +58,9 @@ async def test_un_arqueo_negativo_no_es_saldo_pero_es_caja_observada(
 
     assert state.cash_source != "arqueo"
     assert state.cash_on_hand_est >= 0
-    # Contar la caja es un dato observado: la completitud sube igual que con
-    # un arqueo positivo.
-    assert state.data_completeness_score > sin_arqueo.data_completeness_score
+    # V-26 (revisión #227): un arqueo que no define el saldo no lo usa el
+    # motor, así que tampoco suma como caja observada. Antes sí sumaba.
+    assert state.data_completeness_score == sin_arqueo.data_completeness_score
 
 
 async def test_un_arqueo_positivo_sigue_siendo_el_saldo(
@@ -75,7 +75,7 @@ async def test_un_arqueo_positivo_sigue_siendo_el_saldo(
     assert state.cash_on_hand_est == Decimal("100.00")
 
 
-async def test_negativo_y_positivo_valen_lo_mismo_para_la_completitud(
+async def test_solo_el_arqueo_positivo_suma_a_la_completitud(
     db_session: AsyncSession, sample_tenant, sample_business_profile: BusinessProfile
 ) -> None:
     await _perfil_viejo(db_session, sample_business_profile)
@@ -92,7 +92,9 @@ async def test_negativo_y_positivo_valen_lo_mismo_para_la_completitud(
     await db_session.commit()
     positivo = await _estado(db_session, sample_tenant.tenant_id)
 
-    assert negativo.data_completeness_score == positivo.data_completeness_score
+    # V-26 (revisión #227): el positivo define el saldo y suma la caja; el
+    # negativo no (antes valían lo mismo).
+    assert positivo.data_completeness_score > negativo.data_completeness_score
 
 
 async def test_un_arqueo_nuevo_invalida_el_cache_del_estado(

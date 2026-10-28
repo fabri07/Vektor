@@ -293,6 +293,16 @@ def _deserialize_state(raw: str) -> BusinessState:
 PESO_DECLARADO = 0.4
 
 
+def arqueo_define_saldo(arqueo_vigente: bool, contado: Decimal | None) -> bool:
+    """¿El último arqueo es el saldo de caja? Vigente (D-5) y no negativo (M·2d-3).
+
+    Única definición: con ella el BSL elige `cash_source == "arqueo"` y la
+    completitud cuenta el arqueo como caja observada (V-26). Un arqueo viejo o
+    negativo no define la caja, el motor no lo usa, y tampoco suma.
+    """
+    return arqueo_vigente and contado is not None and contado >= 0
+
+
 def hay_salidas_liquidas(liquid_outflow_est: Decimal) -> bool:
     """¿Hubo egresos líquidos (efectivo, transferencia, QR, débito) en la ventana?
 
@@ -697,9 +707,7 @@ async def compute_business_state(
     arqueo_vigente = latest_close_date is not None and latest_close_date >= (
         today_ar() - timedelta(days=ARQUEO_VIGENTE_DIAS)
     )
-    # Y sólo un arqueo dentro de la ventana es caja observada para la
-    # completitud (invariante 5b): uno viejo no es dato del período.
-    arqueo_en_ventana = latest_close_date is not None and latest_close_date >= window_start
+    arqueo_es_saldo = arqueo_define_saldo(arqueo_vigente, latest_counted_cash)
 
     # total expense count (for fingerprint)
     expense_count_result = await session.execute(
@@ -830,8 +838,8 @@ async def compute_business_state(
     # El contado del arqueo es el neto del día sin el fondo: un negativo es un
     # cierre válido (M·2d-3: se retiró más de lo que entró), pero no un saldo —
     # en el cajón quedó el fondo menos esa diferencia. La caja se mide con el
-    # tier siguiente; el arqueo sigue contando como dato observado.
-    if arqueo_vigente and latest_counted_cash is not None and latest_counted_cash >= 0:
+    # tier siguiente, y tampoco cuenta como caja observada (V-26).
+    if arqueo_es_saldo and latest_counted_cash is not None:
         cash_on_hand_est = Decimal(str(latest_counted_cash))
         cash_source = "arqueo"
     elif onboarding_recent and profile.cash_on_hand_estimate_ars is not None:
@@ -855,19 +863,20 @@ async def compute_business_state(
     has_sales = monthly_sales_est > 0
     has_inventory_cost = monthly_inventory_cost_est > 0
     has_fixed_expenses = monthly_fixed_expenses_est > 0
-    # Caja OBSERVADA (V-26): un arqueo de la ventana o alguna salida líquida. Un
-    # arqueo negativo no es saldo (M·2d-3) pero sigue siendo caja observada; uno
-    # fuera de la ventana, no (D-5). Entradas solas no: el motor deja esa caja
-    # sin medir (V-23) y sumarle 20 llevaba a MEDIUM un negocio con sólo ventas.
-    # A propósito NO se mira `cash_source`: su tiering prefiere el estimado del
-    # onboarding por sobre el flujo durante los 7 días del alta, así que atarse a
-    # él haría que la caja de un tenant con movimientos reales valiera 8 el día
-    # 1 y 20 el día 8 sin que cambie un solo dato.
-    cash_observado = arqueo_en_ventana or hay_salidas_liquidas(liquid_outflow_est)
-    # Caja "presente": observada, o el saldo DECLARADO del alta (pesa
-    # `PESO_DECLARADO`, invariante 5b) sólo si el motor lo puede medir: con
-    # gastos fijos contra los que contar días. Sin fijos ni salidas el motor la
-    # deja sin medir (D-10) y tampoco suma (V-26).
+    # Caja OBSERVADA (V-26): el arqueo que define el saldo (vigente y ≥ 0, el
+    # mismo predicado del tiering) o alguna salida líquida. Un arqueo viejo o
+    # negativo no lo usa el motor y no suma. Entradas solas tampoco: el motor
+    # deja esa caja sin medir (V-23) y sumarle 20 llevaba a MEDIUM un negocio
+    # con sólo ventas. Para lo OBSERVADO no se mira el `cash_source` que ganó:
+    # el tiering prefiere el estimado del onboarding por sobre el flujo durante
+    # los 7 días del alta, y la evidencia real de caja tiene que valer lo mismo
+    # el día 1 que el día 8.
+    cash_observado = arqueo_es_saldo or hay_salidas_liquidas(liquid_outflow_est)
+    # Caja "presente": observada, o el saldo DECLARADO del alta cuando ganó el
+    # tiering (acá sí se mira `cash_source`; pesa `PESO_DECLARADO`, invariante
+    # 5b), sólo si el motor lo puede medir: con gastos fijos contra los que
+    # contar días. Sin fijos ni salidas el motor la deja sin medir (D-10) y
+    # tampoco suma (V-26).
     has_cash_on_hand = cash_observado or (
         cash_source == "onboarding" and monthly_fixed_expenses_est > 0
     )

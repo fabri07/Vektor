@@ -7,10 +7,11 @@ ventas en efectivo y 5 productos daba 25 + 20 + 10 = 55 → MEDIUM: pasaba la
 compuerta de no-invención y mostraba un score calculado sin caja.
 
 Decisión del dueño (2026-10-28): la caja cuenta como OBSERVADA sólo con un
-arqueo de la ventana o alguna salida líquida (`hay_salidas_liquidas`, el mismo
-predicado que usa el motor). El saldo DECLARADO del alta sigue valiendo
-`PESO_DECLARADO` (invariante 5b), pero sólo si el motor lo puede medir (hay
-gastos fijos contra los que contar días).
+arqueo o alguna salida líquida (`hay_salidas_liquidas`, el mismo predicado que
+usa el motor). Revisión #227: el arqueo, sólo si es el que define el saldo
+(`arqueo_define_saldo`: vigente y ≥ 0); uno viejo o negativo no suma. El saldo
+DECLARADO del alta sigue valiendo `PESO_DECLARADO` (invariante 5b), pero sólo
+si el motor lo puede medir (hay gastos fijos contra los que contar días).
 """
 
 from __future__ import annotations
@@ -34,10 +35,10 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.state.business_state_service import (
     BusinessState,
+    arqueo_define_saldo,
     compute_business_state,
     hay_salidas_liquidas,
 )
-from app.tests.heuristics.test_health_engine import _make_state
 from app.tests.state.test_business_state_service import FakeRedis
 
 
@@ -195,23 +196,127 @@ async def test_el_saldo_declarado_sin_fijos_ni_salidas_no_suma(
     assert con_fijos.data_completeness_score == pytest.approx(35.0 + 8.0 + 6.0)
 
 
-@pytest.mark.parametrize(
-    ("entradas", "salidas"),
-    [("50000", "0"), ("0", "0"), ("50000", "1000"), ("0", "1000")],
-)
-def test_el_motor_y_la_completitud_usan_la_misma_regla_de_salidas(
-    entradas: str, salidas: str
+@pytest.mark.parametrize("contado", ["100000.00", "-500.00"], ids=["viejo", "negativo"])
+async def test_un_arqueo_que_no_define_el_saldo_no_suma(
+    contado: str,
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_business_profile: BusinessProfile,
 ) -> None:
-    state = _make_state(
-        cash_source="flujo",
-        cash_on_hand_est=Decimal("0"),
-        liquid_inflow_est=Decimal(entradas),
-        liquid_outflow_est=Decimal(salidas),
+    """Revisión #227: un arqueo de la ventana pero no vigente (hace 10 días) o
+    uno de hoy negativo no definen la caja (D-5, M·2d-3) y el motor no los usa.
+    Sumaban 20 observados: con sólo ventas daba 55 → MEDIUM con la caja sin
+    medir. Ahora cuenta sólo el arqueo que define el saldo."""
+    await _sin_estimados(db_session, sample_business_profile)
+    await _solo_ventas_en_efectivo(db_session, sample_tenant.tenant_id)
+    fecha = today_ar() if contado.startswith("-") else today_ar() - timedelta(days=10)
+    db_session.add(
+        CashClose(
+            tenant_id=sample_tenant.tenant_id,
+            close_date=fecha,
+            expected_total_ars=Decimal(contado),
+            counted_total_ars=Decimal(contado),
+            difference_ars=Decimal("0"),
+            breakdown_by_method={},
+            result_code="BALANCED",
+        )
     )
+    await db_session.commit()
 
+    state = await _estado(db_session, sample_tenant.tenant_id)
+
+    assert state.cash_source == "flujo"
+    assert calculate_health_score(state).score_cash is None
+    assert state.data_completeness_score == pytest.approx(35.0)
+    assert state.confidence_level == "LOW"
+
+
+def test_el_arqueo_que_define_el_saldo_es_vigente_y_no_negativo() -> None:
+    assert arqueo_define_saldo(True, Decimal("0"))
+    assert arqueo_define_saldo(True, Decimal("100"))
+    assert not arqueo_define_saldo(True, Decimal("-1"))
+    assert not arqueo_define_saldo(True, None)
+    assert not arqueo_define_saldo(False, Decimal("100"))
+
+
+async def _gasto_variable_en_efectivo(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    # No recurrente ni mercadería: mueve sólo la caja, no los fijos ni el costo.
+    db.add(
+        ExpenseEntry(
+            tenant_id=tenant_id,
+            amount=Decimal("3000.00"),
+            description="Bolsas",
+            category="SUPPLIES",
+            expense_type="OPEX",
+            transaction_date=today_ar() - timedelta(days=2),
+            payment_method="cash",
+        )
+    )
+    await db.commit()
+
+
+@pytest.mark.parametrize(
+    ("cobro", "con_salida", "arqueo"),
+    [
+        ("cash", False, None),  # sólo entradas
+        ("cash", True, None),  # entradas y salidas
+        ("credit_card", True, None),  # sólo salidas
+        ("cash", False, "viejo"),
+        ("cash", False, "negativo"),
+        ("cash", True, "vigente"),
+    ],
+)
+async def test_la_completitud_cuenta_la_caja_sii_el_motor_la_mide(
+    cobro: str,
+    con_salida: bool,
+    arqueo: str | None,
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    sample_business_profile: BusinessProfile,
+) -> None:
+    """La completitud REAL del BSL contra el motor: los 20 de la caja están si y
+    sólo si el motor mide la caja. Queda fuera, a propósito, el caso que aceptó
+    el dueño: arqueo vigente sin fijos ni salidas (suma y el motor no mide)."""
+    await _sin_estimados(db_session, sample_business_profile)
+    hoy = today_ar()
+    for i in range(12):
+        db_session.add(
+            SaleEntry(
+                tenant_id=sample_tenant.tenant_id,
+                amount=Decimal("5000.00"),
+                quantity=1,
+                transaction_date=hoy - timedelta(days=(i % 25) + 1),
+                payment_method=cobro,
+            )
+        )
+    await db_session.commit()
+    if con_salida:
+        await _gasto_variable_en_efectivo(db_session, sample_tenant.tenant_id)
+    if arqueo is not None:
+        contado = "-500.00" if arqueo == "negativo" else "60000.00"
+        fecha = hoy - timedelta(days=10) if arqueo == "viejo" else hoy
+        db_session.add(
+            CashClose(
+                tenant_id=sample_tenant.tenant_id,
+                close_date=fecha,
+                expected_total_ars=Decimal(contado),
+                counted_total_ars=Decimal(contado),
+                difference_ars=Decimal("0"),
+                breakdown_by_method={},
+                result_code="BALANCED",
+            )
+        )
+        await db_session.commit()
+
+    state = await _estado(db_session, sample_tenant.tenant_id)
     medida = calculate_health_score(state).score_cash is not None
-    assert medida == hay_salidas_liquidas(Decimal(salidas))
+
+    puntos_de_caja = state.data_completeness_score - 25.0  # ventas observadas
+    assert puntos_de_caja == pytest.approx(20.0 if medida else 0.0)
     assert medida == (not caja_sin_medir(state))
+    assert medida == (
+        hay_salidas_liquidas(state.liquid_outflow_est) or state.cash_source == "arqueo"
+    )
 
 
 # ── Servicio + API ────────────────────────────────────────────────────────────

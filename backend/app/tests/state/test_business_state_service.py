@@ -711,6 +711,39 @@ async def test_la_caja_observada_no_depende_del_calendario(
     )
 
 
+async def test_con_solo_ventas_el_dia_8_pierde_el_saldo_declarado(
+    db_session: AsyncSession,
+    sample_tenant,
+    kiosco_profile: BusinessProfile,
+) -> None:
+    """V-26 (revisión #227): el caso de sólo ventas que el test de calendario
+    ya no cubre. Sin salidas ni arqueo no hay caja observada: el día 1 suma el
+    saldo DECLARADO del alta (20 × 0,4 = 8, con fijos declarados contra los que
+    medirlo); el día 8 ese estimado vence (`onboarding_recent`), el motor queda
+    sin medir la caja y la completitud baja exactamente esos 8. Con este perfil
+    cruza la compuerta: 51 → 43, MEDIUM → LOW, y la UI pide datos.
+    """
+    await _cargar_ventas(db_session, sample_tenant.tenant_id, 12)
+
+    dia_1 = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+    kiosco_profile.updated_at = datetime.now(UTC) - timedelta(days=8)
+    await db_session.commit()
+    dia_8 = await compute_business_state(
+        tenant_id=sample_tenant.tenant_id,
+        session=db_session,
+        redis=FakeRedis(),  # type: ignore[arg-type]  # test double / fixture
+    )
+
+    assert dia_1.cash_source == "onboarding"
+    assert dia_8.cash_source == "flujo"
+    assert dia_1.data_completeness_score - dia_8.data_completeness_score == pytest.approx(8.0)
+    assert dia_8.confidence_level == "LOW"
+
+
 # ── M·2b-3: el margen de la salud ES el de FactsService ─────────────────────
 
 
