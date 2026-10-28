@@ -203,7 +203,7 @@ async def test_factura_a_y_fc_con_el_mismo_numero_y_monto_entran_las_dos_y_avisa
     avisos = _aviso(cuerpo)
     assert len(avisos) == 1, cuerpo.get("warnings")
     assert avisos[0].startswith("1 par(es)")
-    assert "fila 1 («Factura A 0001-00000123»)" in avisos[0]
+    assert "venta: fila 1 («Factura A 0001-00000123»)" in avisos[0]
     assert "fila 2 («FC 0001-00000123»)" in avisos[0]
     assert "Se cargaron los dos" in avisos[0]
     assert ("de la hoja «Ventas»" in avisos[0]) is con_otra_hoja
@@ -338,3 +338,102 @@ async def test_compras_factura_a_y_fc_del_mismo_proveedor_avisan_y_entran_las_do
     avisos = _aviso(cuerpo)
     assert len(avisos) == 1, cuerpo.get("warnings")
     assert "«FC 0001-00000077»" in avisos[0]
+
+
+# ── Sólo se avisa de lo que entró ─────────────────────────────────────────────
+async def test_si_las_dos_van_a_otros_no_avisa(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    counts_del_import: list[dict[str, Any]],
+) -> None:
+    """Sin compra previa del producto (B·5e) las dos van a «Otros»: «se cargaron
+    los dos, anulá uno» sería falso."""
+    tid = sample_tenant.tenant_id
+    filas = [_factura("Factura A"), _factura("FC")]
+
+    cuerpo = await _vender(client, auth_headers, db_session, sample_tenant, filas)
+
+    assert not await _ventas(db_session, tid)
+    assert not _aviso(cuerpo), cuerpo.get("warnings")
+    assert "posibles_duplicados_sin_letra" not in counts_del_import[-1]
+
+
+@pytest.mark.parametrize("con_otra_hoja", [False, True], ids=["una_hoja", "multihoja"])
+async def test_si_una_entra_y_la_otra_va_a_otros_no_avisa(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    counts_del_import: list[dict[str, Any]],
+    con_otra_hoja: bool,
+) -> None:
+    """La FC sin fecha va a «Otros» (F6-A2). Si el aviso mandara a anular una,
+    el usuario anularía la ÚNICA venta cargada."""
+    tid = sample_tenant.tenant_id
+    await productos_con_compra(db_session, tid, ["Vela aromatica"])
+    sin_fecha = _factura("FC")
+    sin_fecha[0] = None
+    filas = [_factura("Factura A"), sin_fecha]
+
+    cuerpo = await _vender(
+        client, auth_headers, db_session, sample_tenant, filas, con_otra_hoja=con_otra_hoja
+    )
+
+    assert len(await _ventas(db_session, tid)) == 1
+    assert not _aviso(cuerpo), cuerpo.get("warnings")
+    assert "posibles_duplicados_sin_letra" not in counts_del_import[-1]
+
+
+# ── Tabla mixta: el mismo par como venta y como compra ───────────────────────
+# `cliente` y `concepto` (sin mapear) están para que el clasificador lea la hoja
+# como general (ventas Y gastos), que es lo que es un Libro Diario.
+_H_DIARIO = [
+    "fecha", "tipo", "pto", "nro", "cliente", "concepto", "articulo", "cantidad", "total",
+    "cuit",
+]
+_MAPEO_DIARIO = {
+    "fecha": "transaction_date",
+    "tipo": "document_type",
+    "pto": "document_series",
+    "nro": "invoice_number",
+    "articulo": "product_name",
+    "cantidad": "quantity",
+    "total": "amount",
+    "cuit": "supplier_cuit",
+}
+
+
+def _asiento(tipo: str) -> list[Any]:
+    return [
+        "2024-03-05", tipo, "0001", "00000123", "Ana", "Venta", "Vela aromatica", 1, 1200,
+        "30-71234567-8",
+    ]
+
+
+async def test_tabla_mixta_cuenta_el_par_una_vez_con_las_dos_entidades(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+    counts_del_import: list[dict[str, Any]],
+) -> None:
+    """Un Libro Diario con CUIT produce venta Y gasto desde las mismas filas: el
+    par sale de los dos planes, pero son las mismas dos filas — un par."""
+    tid = sample_tenant.tenant_id
+    await productos_con_compra(db_session, tid, ["Vela aromatica"])
+
+    cuerpo = await _confirmar(
+        client, auth_headers, db_session, sample_tenant,
+        headers=_H_DIARIO, filas=[_asiento("Factura A"), _asiento("FC")],
+        mapeo=_MAPEO_DIARIO, campos={"ventas": True, "gastos": True}, hoja="Diario",
+    )
+
+    assert len(await _ventas(db_session, tid)) == 2
+    assert len(await _gastos(db_session, tid)) == 2
+    avisos = _aviso(cuerpo)
+    assert len(avisos) == 1, cuerpo.get("warnings")
+    assert avisos[0].startswith("1 par(es)")
+    assert "venta y compra: fila 1" in avisos[0]
+    assert counts_del_import[-1]["posibles_duplicados_sin_letra"] == 1

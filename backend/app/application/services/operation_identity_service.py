@@ -90,8 +90,9 @@ class PosibleDuplicado:
     """V-19: dos filas del mismo archivo que entraron las dos y pueden ser el
     mismo comprobante, una escrita con la letra y la otra sin. ``fila_*`` es el
     índice de la fila en su contexto; ``comprobante_*``, cómo lo escribe el
-    archivo."""
+    archivo; ``entidad``, la del plan (``sale``/``expense``)."""
 
+    entidad: str
     fila_con_letra: int
     comprobante_con_letra: str
     fila_sin_letra: int
@@ -123,9 +124,14 @@ class PlanDeIdentidad:
     reclamadas: set[str] = field(default_factory=set)
     #: Vínculos acumulados en memoria; se persisten en lote al cierre.
     vinculos: list[tuple[uuid.UUID, str, uuid.UUID]] = field(default_factory=list)
-    #: V-19: pares de este archivo que entraron los dos y pueden ser el mismo
-    #: comprobante (ver ``_posibles_duplicados_sin_letra``). Sólo se avisa.
+    #: V-19: pares de este archivo que pueden ser el mismo comprobante (ver
+    #: ``_posibles_duplicados_sin_letra``). Sólo se avisa, y sólo de los que
+    #: entraron los dos: ver ``pares_que_entraron``.
     posibles_duplicados: list[PosibleDuplicado] = field(default_factory=list)
+    #: V-19: los efectos que produjo cada fila (``registrar_efecto``), por
+    #: entidad. Si siguen vivos al final del import se mira recién ahí: B·5e
+    #: saca después del loop las ventas sin compra previa.
+    efectos_por_fila: dict[int, list[tuple[str, uuid.UUID]]] = field(default_factory=dict)
 
     @property
     def activo(self) -> bool:
@@ -133,12 +139,32 @@ class PlanDeIdentidad:
         devuelve un plan vacío y el importador no paga nada."""
         return bool(self.decision)
 
+    def efectos_de(self, fila: int, entidad: str) -> list[uuid.UUID]:
+        """V-19: los ids de lo que la fila cargó como ``entidad``."""
+        return [i for tipo, i in self.efectos_por_fila.get(fila, ()) if tipo == entidad]
+
+    def pares_que_entraron(self, vivos: set[uuid.UUID]) -> list[PosibleDuplicado]:
+        """V-19: los posibles duplicados cuyas DOS filas cargaron una venta o un
+        gasto que sigue en ``vivos`` al final del import. Si una fue a «Otros»
+        (sin compra previa —B·5e la saca después del loop—, sin fecha, sin
+        monto, riesgo de columna), avisar «se cargaron los dos, anulá uno» haría
+        anular la única que entró."""
+        return [
+            par
+            for par in self.posibles_duplicados
+            if all(
+                any(i in vivos for i in self.efectos_de(fila, par.entidad))
+                for fila in (par.fila_con_letra, par.fila_sin_letra)
+            )
+        ]
+
     def registrar_efecto(self, row_index: int, entity_type: str, entity_id: uuid.UUID) -> None:
         """La fila produjo un efecto persistido: se lo cuelga a su identidad.
 
         Sin esto la identidad quedaría reclamada y huérfana, y se devolvería al
         cierre — o sea, el archivo se podría volver a importar entero.
         """
+        self.efectos_por_fila.setdefault(row_index, []).append((entity_type, entity_id))
         clave = self.clave.get(row_index)
         if clave is None:
             return
@@ -402,15 +428,17 @@ def _posibles_duplicados_sin_letra(
 
     Par = misma forma ``k1`` (mismo emisor, tipo, punto de venta y número; la
     entidad la da el plan), una con letra fiscal y la otra de un tipo que usa
-    letra sin ninguna, mismo total, y las DOS nuevas en este import (si una ya
-    estaba aplicada, el aviso sería sobre algo que este confirm no cargó). Dos
-    letras explícitas distintas (A y B) no son par: son dos comprobantes.
+    letra sin ninguna, y mismo total. Dos letras explícitas distintas (A y B) no
+    son par: son dos comprobantes.
+
+    Esto arma los candidatos ANTES de escribir nada. Que las DOS filas hayan
+    cargado algo que sigue vivo se mira al final del import
+    (``PlanDeIdentidad.pares_que_entraron``): una «ya aplicada», una en
+    conflicto o una que fue a «Otros» no produce efecto, y no se avisa.
     """
     con_letra: dict[str, list[_Documento]] = defaultdict(list)
     sin_letra: dict[str, list[_Documento]] = defaultdict(list)
     for clave, doc in documentos.items():
-        if plan.decision.get(doc.filas[0]) != DECISION_NUEVA:
-            continue
         if clave.startswith(f"{CLAVE_VERSION}:doc:"):
             con_letra[forma_k1(clave, entity)].append(doc)
         elif clave.startswith(f"{CLAVE_VERSION_K1}:doc:"):
@@ -430,6 +458,7 @@ def _posibles_duplicados_sin_letra(
                     continue
                 pares.append(
                     PosibleDuplicado(
+                        entidad=entity,
                         fila_con_letra=doc_con.filas[0],
                         comprobante_con_letra=_comprobante_como_viene(
                             rows[doc_con.filas[0]], cols
