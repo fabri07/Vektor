@@ -308,6 +308,62 @@ async def test_una_por_fila_el_flete_de_la_fila_ya_aplicada_no_se_recobra(
     assert r["envios_sin_compra_aplicada"] == 1
 
 
+# Revalidación del PR #220: con ``una_por_hoja`` el comprobante de un flete sin
+# número pasó a ser la hoja entera, y en el acumulado el flete de una compra «ya
+# aplicada» se volvía a cobrar porque entraba OTRA compra de la hoja.
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["tabla_suelta", "por_hoja"])
+async def test_una_por_hoja_el_flete_en_la_fila_de_una_compra_ya_aplicada_no_se_recobra(
+    db_session: AsyncSession, sample_tenant: Tenant, multi: bool
+) -> None:
+    """La fila que trae la cifra es una compra: el flete es de ESA compra y se
+    cobra sólo si ella entra. Que entre «Difusor» no habilita el de «Vela»."""
+    tid = sample_tenant.tenant_id
+    vieja = _sin_nro("C-1", "Vela", "6000", "2000")
+    await _importar_compras(db_session, tid, [vieja], multi=multi)
+    assert await _logistica(db_session, tid) == ["2000.00"]
+
+    r = await _importar_compras(
+        db_session, tid, [vieja, _sin_nro("C-2", "Difusor", "3600")], multi=multi
+    )
+
+    assert r.get("gastos") == 1, r
+    assert await _logistica(db_session, tid) == ["2000.00"], (
+        f"el flete de la compra ya aplicada se cobró de nuevo: {r}"
+    )
+    assert r["envios_sin_compra_aplicada"] == 1
+
+
+#: Compras con número propio y el flete al pie sin número: ninguna compra es «sin
+#: comprobante», así que el comprobante del flete es la hoja entera.
+_NUMERADAS_CON_FLETE_AL_PIE = [
+    _compra("C-1", "0001-00000123", "Sur", "Vela", "6000", ""),
+    _compra("C-2", "0001-00000124", "Sur", "Difusor", "3600", ""),
+    {**_sin_nro("", "", "", "2000"), "sistema": ""},
+]
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["tabla_suelta", "por_hoja"])
+async def test_el_flete_sin_compra_propia_mira_la_hoja_entera(
+    db_session: AsyncSession, sample_tenant: Tenant, multi: bool
+) -> None:
+    """Sin la vuelta a «la hoja entera» el flete no tiene compras que mirar y se
+    cobra siempre: también en el reupload, con todas las compras «ya aplicadas»."""
+    tid = sample_tenant.tenant_id
+    primero = await _importar_compras(db_session, tid, _NUMERADAS_CON_FLETE_AL_PIE, multi=multi)
+    assert primero.get("gastos") == 2, primero
+    assert await _logistica(db_session, tid) == ["2000.00"], primero
+
+    r = await _importar_compras(db_session, tid, _NUMERADAS_CON_FLETE_AL_PIE, multi=multi)
+
+    assert r.get("gastos", 0) == 0, r
+    assert await _logistica(db_session, tid) == ["2000.00"], (
+        f"el flete al pie se cobró de nuevo con las compras ya aplicadas: {r}"
+    )
+    assert r["envios_sin_compra_aplicada"] == 1
+
+
 # ── I2-2: el gate de replay no cuenta lo que no se escribe ───────────────────
 
 _PRODUCTO = "Vela aromatica 200g"
@@ -573,3 +629,62 @@ async def test_tabla_suelta_la_compra_ya_importada_no_es_credito_otra_vez(
     )
     assert not await _ventas(db_session, tid)
     assert await _stock(db_session, producto) == 7
+
+
+# ── V-19 con un plan anticipado que el recorrido no usa ──────────────────────
+
+_COLS_V19 = {
+    "fecha": "transaction_date",
+    "tipo": "document_type",
+    "pto": "document_series",
+    "nro": "invoice_number",
+    "articulo": "product_name",
+    "cantidad": "quantity",
+    "total": "amount",
+}
+
+
+def _factura(tipo: str) -> dict[str, str]:
+    return {
+        "fecha": "2024-03-05", "tipo": tipo, "pto": "0001", "nro": "00000123",
+        "articulo": _PRODUCTO, "cantidad": "1", "total": "1200", "__context__": "v",
+    }
+
+
+async def test_hoja_de_ventas_replay_vacia_no_desalinea_el_aviso_v19(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """El gate planifica la hoja «Ventas2» (replay, 0 filas) y el recorrido la
+    saltea: su plan se cierra igual y tiene que llevar su hoja al lado, o el zip
+    estricto del aviso V-19 revienta el confirm (``ValueError``)."""
+    tid = sample_tenant.tenant_id
+    await producto_con_compra(db_session, tid, nombre=_PRODUCTO, stock=20, costo=Decimal("600"))
+    up = await _archivo(db_session, tid)
+    counts = await insert_confirmed_data(
+        db_session,
+        tid,
+        {
+            "file_type": "spreadsheet",
+            "inferred_type": "ventas",
+            "multi_sheet": True,
+            "has_venta": True,
+            "row_count": 2,
+            "mapping_contexts": [
+                {"context_id": "v", "label": "Ventas", "entity_type": "sale",
+                 "source_kind": "sheet", "headers": list(_COLS_V19), "row_count": 2},
+                {"context_id": "v2", "label": "Ventas2", "entity_type": "sale",
+                 "source_kind": "sheet", "headers": list(_COLS_V19), "row_count": 0},
+            ],
+            "ventas_detectadas": [_factura("Factura A"), _factura("FC")],
+        },
+        {"ventas": True},
+        context_mappings={"v": dict(_COLS_V19), "v2": dict(_COLS_V19)},
+        context_confirmed={"v": True, "v2": True},
+        inventory_effect={"v": HISTORICAL_REPLAY, "v2": HISTORICAL_REPLAY},
+        uploaded_file_id=up,
+    )
+    await db_session.commit()
+
+    assert len(await _ventas(db_session, tid)) == 2, counts
+    assert counts.get("posibles_duplicados_sin_letra") == 1, counts
+    assert "Ventas" in str(counts.get("posibles_duplicados_sin_letra_muestras")), counts

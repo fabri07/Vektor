@@ -197,7 +197,6 @@ from app.domain.purchase_group import (
     build_purchase_groups,
 )
 from app.domain.purchase_shipping import (
-    SIN_COMPROBANTE_UNA_POR_FILA,
     ShippingCharge,
     ShippingLine,
     identidad_de_comprobante,
@@ -8760,17 +8759,19 @@ async def cobrar_envios_de_la_hoja(
             or (_cantidad_col and _parse_amount(_row.get(_cantidad_col)))
         )
     }
-    _sin_comprobante_hoja = (shipping_decisions or {}).get(ctx_id or "")
 
-    def _compras_del_cargo(_cargo: ShippingCharge, *, por_linea: bool) -> set[int]:
+    def _compras_del_cargo(_cargo: ShippingCharge) -> set[int]:
         """I2-1: las filas de compra del comprobante del cargo.
 
-        Con número: las de su proveedor + número. Sin número: con ``una_por_fila``
-        o el flete de línea, la propia fila si es una compra; con ``una_por_hoja``
-        la hoja ES el comprobante (las compras sin comprobante propio). Si el
-        flete viene en una fila sola —o su proveedor está vacío o escrito distinto
-        y no coincide con ninguna compra—, su comprobante es la hoja entera: no
-        hay de dónde atarlo más fino, y dejarlo afuera perdería un gasto real.
+        Con número: las de su proveedor + número. Sin número: si la fila que trae
+        la cifra es ella misma una compra, el flete es de ESA fila —con cualquier
+        decisión, también ``una_por_hoja``: en el libro acumulado, que entre otra
+        compra de la hoja no habilita el flete de una «ya aplicada»—. Si la fila
+        del flete no es una compra (flete al pie), la hoja ES el comprobante: las
+        compras sin comprobante propio. Y si nada de eso es
+        una compra —o su proveedor está vacío o escrito distinto y no coincide
+        con ninguna—, su comprobante es la hoja entera: no hay de dónde atarlo
+        más fino, y dejarlo afuera perdería un gasto real.
         """
         if _cargo.invoice:
             propias = {
@@ -8779,11 +8780,8 @@ async def cobrar_envios_de_la_hoja(
                 if (_prov_de(rows[i]), _comp_de(rows[i])) == (_cargo.supplier, _cargo.invoice)
             }
         else:
-            propias = (
-                _filas_de_compra & set(_cargo.row_indexes)
-                if por_linea or _sin_comprobante_hoja == SIN_COMPROBANTE_UNA_POR_FILA
-                else set()
-            )
+            # Revalidación del PR #220: la fila del flete manda antes que la hoja.
+            propias = _filas_de_compra & set(_cargo.row_indexes)
             if not propias:
                 propias = {
                     i
@@ -8886,7 +8884,7 @@ async def cobrar_envios_de_la_hoja(
         # se avisa; si la compra se resuelve desde «Otros», el flete viaja ahí.
         # Una hoja sin ninguna fila de compra cobra como siempre: no hay compra
         # salteada que delate un duplicado.
-        _compras = _compras_del_cargo(_cargo, por_linea=namespace == "envio_linea")
+        _compras = _compras_del_cargo(_cargo)
         if _compras and not (_compras & filas_con_compra):
             counts["envios_sin_compra_aplicada"] = (
                 counts.get("envios_sin_compra_aplicada", 0) + 1
