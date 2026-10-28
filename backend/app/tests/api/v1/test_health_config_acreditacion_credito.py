@@ -13,6 +13,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.heuristic_override import BusinessHeuristicOverride
 from app.persistence.models.tenant import Tenant
 
@@ -55,6 +56,16 @@ async def test_cambiar_n_solo_no_toca_los_margenes(
         "credit_card_settlement_days": 30
     }
     assert (await client.get(URL, headers=auth_headers)).json()["credit_card_settlement_days"] == 30
+    (audit,) = (
+        await db_session.execute(
+            select(DecisionAuditLog).where(
+                DecisionAuditLog.tenant_id == sample_tenant.tenant_id,
+                DecisionAuditLog.decision_type == "CREDIT_CARD_SETTLEMENT_DAYS_UPDATED",
+            )
+        )
+    ).scalars().all()
+    assert audit.decision_data["before"]["credit_card_settlement_days"] == 14
+    assert audit.decision_data["after"]["credit_card_settlement_days"] == 30
 
 
 async def test_cambiar_los_margenes_conserva_n(

@@ -1,9 +1,9 @@
 """Settings router — configuración del tenant.
 
 Endpoints:
-  GET  /settings/health-config       → obtener configuración de margen
-  PATCH /settings/health-config      → actualizar objetivo de margen
-  DELETE /settings/health-config     → resetear a valores por vertical
+  GET  /settings/health-config       → objetivo de margen BRUTO (análisis por producto)
+  PATCH /settings/health-config      → actualizar objetivo de margen bruto
+  DELETE /settings/health-config     → resetear a los predeterminados de Véktor
   GET  /settings/work-schedule       → obtener días y horarios laborales
   PATCH /settings/work-schedule      → actualizar días y horarios laborales
   GET  /settings/fiscal-condition    → condición fiscal (guía del arqueo)
@@ -76,9 +76,13 @@ async def update_health_config(
     current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> HealthConfigResponse:
-    """Actualiza los objetivos de margen del tenant. Requiere permiso de modificación + PIN."""
+    """Actualiza el objetivo de margen bruto del tenant. Requiere permiso de modificación.
+
+    D-4: no mueve el health score (mide el neto contra el rubro), así que no
+    dispara recálculo; el cambio queda en decision_audit_log.
+    """
     svc = HealthConfigService(db)
-    return await svc.update(current_user.tenant_id, body)
+    return await svc.update(current_user.tenant_id, current_user.user_id, body)
 
 
 @router.delete("/health-config", response_model=HealthConfigResponse)
@@ -86,9 +90,9 @@ async def reset_health_config(
     current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
 ) -> HealthConfigResponse:
-    """Resetea la configuración de margen a los valores por vertical."""
+    """Resetea el objetivo de margen bruto a los predeterminados de Véktor."""
     svc = HealthConfigService(db)
-    return await svc.reset(current_user.tenant_id)
+    return await svc.reset(current_user.tenant_id, current_user.user_id)
 
 
 @router.get("/work-schedule", response_model=WorkScheduleResponse)

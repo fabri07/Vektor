@@ -30,6 +30,7 @@ function config(over: Partial<HealthConfig> = {}): HealthConfig {
     is_custom: false,
     credit_card_settlement_days: 14,
     credit_card_settlement_days_is_custom: false,
+    margin_kind: "bruto",
     ...over,
   };
 }

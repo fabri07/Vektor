@@ -4312,6 +4312,15 @@ async def confirm_file(
             f"{counts['envios_sin_fecha']} envío(s) no se registraron porque su fila "
             "no tiene una fecha reconocible."
         )
+    if counts.get("envios_sin_compra_aplicada"):
+        # I2-1: el flete de un comprobante cuyas compras no entraron en esta carga
+        # (ya estaban cargadas por otro archivo, chocaron o fueron a «Otros»).
+        warnings.append(
+            f"{counts['envios_sin_compra_aplicada']} envío(s) no se registraron "
+            "porque todas las compras de su comprobante se saltearon en esta carga: "
+            "ya estaban cargadas desde otro archivo o quedaron en «Otros». "
+            "Si resolvés la compra desde «Otros», cargá el envío ahí."
+        )
     if counts.get("filas_sin_monto"):
         # El texto dejó de afirmar que el archivo "no traía" el total: con la
         # política de E4 también cae acá la fila que SÍ lo traía y no se pudo
@@ -4351,6 +4360,21 @@ async def confirm_file(
             f"No se cargó en los productos {_columnas}: el stock, el "
             "precio y el costo de una tabla de ventas o compras no se cargan. Para "
             "cargarlos, subí el catálogo en una hoja o archivo de productos."
+        )
+    if counts.get("posibles_duplicados_sin_letra"):
+        # V-19: «Factura A 0001-123» y «FC 0001-123» con el mismo monto entran
+        # las dos (pueden ser dos ventas), pero pueden ser la misma escrita dos
+        # veces. No se decide sola: se avisa qué revisar.
+        _pares = counts["posibles_duplicados_sin_letra"]
+        _muestras = counts.get("posibles_duplicados_sin_letra_muestras") or []
+        _detalle = "; ".join(_muestras)
+        if _pares > len(_muestras):
+            _detalle += f" y {_pares - len(_muestras)} más"
+        warnings.append(
+            f"{_pares} par(es) de comprobantes pueden estar repetidos: mismo punto de "
+            "venta, número y monto, y a uno le falta la letra (A, B, C…) "
+            f"({_detalle}). Se cargaron los dos. Revisá si son el mismo comprobante "
+            "escrito dos veces y, si lo son, anulá uno."
         )
     if counts.get("filas_sin_cantidad"):
         # E4: la fila traía cantidad y no se pudo usar. Antes entraba como 1

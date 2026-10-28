@@ -532,7 +532,7 @@ const TABS = [
   { id: "general", label: "General" },
   { id: "seguridad", label: "Seguridad" },
   { id: "automatizaciones", label: "Automatizaciones" },
-  { id: "salud", label: "Score de salud" },
+  { id: "salud", label: "Margen objetivo" },
   { id: "horarios", label: "Horarios" },
   { id: "ayuda", label: "Ayuda" },
 ] as const;

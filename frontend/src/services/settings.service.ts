@@ -10,6 +10,8 @@ export interface HealthConfig {
   /** D-3/R-10: a cuántos días corridos de la venta entra a caja lo vendido con crédito (0–60). */
   credit_card_settlement_days: number;
   credit_card_settlement_days_is_custom: boolean;
+  /** D-4: objetivo de margen BRUTO por producto; el score mide el neto contra el rubro. */
+  margin_kind: "bruto";
 }
 
 export interface WorkSchedule {
