@@ -31,6 +31,9 @@ class CashForecastResponse(BaseModel):
     horizon_days: int
     points: list[ForecastPointResponse]
     message: str | None = None
+    # D-3/R-10: vendido con tarjeta de crédito en el historial, que la
+    # proyección no cuenta como ingreso de caja (no se sabe cuándo se acredita).
+    credit_card_pending_ars: float = 0.0
 
 
 @router.get("/cash", response_model=CashForecastResponse, summary="Proyección de caja")
@@ -69,4 +72,5 @@ async def get_cash_forecast(
             for p in result.points
         ],
         message=result.message,
+        credit_card_pending_ars=result.credito_sin_acreditar_ars,
     )

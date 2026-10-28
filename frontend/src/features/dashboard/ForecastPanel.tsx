@@ -91,6 +91,13 @@ export function ForecastPanel() {
         (lo que te queda). Es una proyección, no una certeza.
       </p>
 
+      {(data.credit_card_pending_ars ?? 0) > 0 && (
+        <p className="mt-1 text-xs leading-5 text-vektor-muted" data-testid="forecast-credito-sin-acreditar">
+          No cuenta {formatARS(data.credit_card_pending_ars ?? 0)} vendidos con tarjeta de crédito
+          en el historial: esa plata se acredita más adelante y no sabemos cuándo.
+        </p>
+      )}
+
       <div className="mt-3 mb-4">
         <span className={`text-sm font-semibold ${isPositive ? "text-emerald-400" : "text-vk-danger"}`}>
           Neto proyectado: {isPositive ? "+" : ""}{formatARSCompact(totalNet)}

@@ -221,9 +221,9 @@ async def test_un_cobro_parcial_deja_deuda_y_no_suma_ingreso(
 async def test_la_caja_proyectada_saca_el_fiado_y_cuenta_el_resto(
     db_session: AsyncSession, sample_tenant: Tenant
 ) -> None:
-    """Toda venta menos el fiado, como la resta de FactsService. La tarjeta de
-    crédito se sigue contando el día de la venta (correrla es otra decisión) y
-    `other` (un medio que el import no reconoce) también: antes de T1 contaba."""
+    """Toda venta menos el fiado y la tarjeta de crédito (D-3/R-10: se acredita
+    después), como la resta de FactsService. `other` (un medio que el import no
+    reconoce) sigue contando: antes de T1 contaba."""
     tid = sample_tenant.tenant_id
     mediodia = datetime.combine(HOY, time(12, 0))
     for metodo, importe in (
@@ -253,7 +253,7 @@ async def test_la_caja_proyectada_saca_el_fiado_y_cuenta_el_resto(
         tenders=[("cash", "150"), ("qr", "50"), ("account", "100")],
     )
     await db_session.commit()
-    assert await ingresos_de_caja_por_dia(tid, db_session, DIA_VENTA) == {HOY: 6250.0}
+    assert await ingresos_de_caja_por_dia(tid, db_session, DIA_VENTA) == {HOY: 1250.0}
 
 
 async def test_un_cobro_de_otro_negocio_no_baja_la_deuda(

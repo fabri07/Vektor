@@ -20,7 +20,7 @@ from redis.asyncio import Redis
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services.facts_service import FIADO_METHODS
+from app.application.services.facts_service import DELAYED_METHODS, FIADO_METHODS
 from app.observability.logger import get_logger
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._pos_tender_scope import tenders_mixtos, venta_no_mixta
@@ -30,6 +30,11 @@ from app.persistence.repositories.owner_capital_repository import flujo_de_diner
 logger = get_logger(__name__)
 
 _CACHE_TTL = 60 * 60 * 6  # 6 horas
+
+#: Ventas que NO son plata en caja el día de la venta: el fiado (deuda a cobrar)
+#: y la tarjeta de crédito (se acredita después; D-3/R-10). Es la resta de
+#: ``FactsService._split_liquidez``.
+_FUERA_DE_CAJA_INMEDIATA = FIADO_METHODS | DELAYED_METHODS
 
 
 @dataclass
@@ -48,12 +53,17 @@ class ForecastResult:
     horizon_days: int
     points: list[ForecastPoint]
     message: str | None = None
+    # D-3/R-10: lo vendido con tarjeta de crédito en la ventana, que la
+    # proyección NO cuenta como ingreso (no se sabe cuándo se acredita). 0.0 es
+    # un valor medido: no hubo ventas con crédito.
+    credito_sin_acreditar_ars: float = 0.0
 
 
 def _cache_key(tenant_id: UUID) -> str:
     # v2 (T1): el ingreso de caja dejó de contar el fiado y dos veces los
     # cobros; un blob viejo serviría 6 h la proyección inflada.
-    return f"forecast:cash:v2:{tenant_id}"
+    # v3 (D-3/R-10): tampoco cuenta la tarjeta de crédito el día de la venta.
+    return f"forecast:cash:v3:{tenant_id}"
 
 
 def _dia(v: object) -> date:
@@ -67,13 +77,16 @@ async def ingresos_de_caja_por_dia(
     """Plata que ENTRA a caja cada día desde ``desde`` (T1).
 
     Es una proyección de caja, no de ventas: entra toda venta MENOS el fiado
-    (``FIADO_METHODS``: es deuda a cobrar), la parte no fiada de un pago mixto de
-    caja (B9) y los cobros de fiado el día que se cobran. Antes sumaba toda venta
-    más los cobros: una venta fiada de $1.000 cobrada después daba $2.000 de
-    ingreso de caja. Es la resta de ``FactsService._split_liquidez`` salvo la
-    tarjeta de crédito, que la proyección sigue contando el día de la venta
-    (FactsService la saca de la caja de hoy; correrla a su acreditación es una
-    decisión aparte).
+    (``FIADO_METHODS``: es deuda a cobrar) y MENOS la tarjeta de crédito
+    (``DELAYED_METHODS``), la parte líquida de un pago mixto de caja (B9) y los
+    cobros de fiado el día que se cobran. Antes sumaba toda venta más los
+    cobros: una venta fiada de $1.000 cobrada después daba $2.000 de ingreso de
+    caja. Es la resta de ``FactsService._split_liquidez``.
+
+    La tarjeta de crédito (D-3/R-10) no entra NUNCA, ni el día de la venta ni
+    corrida a una fecha: el plazo de acreditación no está cargado en ningún
+    lado y un plazo fijo sería inventar la fecha. Lo que queda afuera lo informa
+    ``credito_sin_acreditar`` para que la pantalla lo diga.
     """
     dia_venta = func.date(SaleEntry.transaction_date).label("day")
     ventas_q = (
@@ -87,7 +100,7 @@ async def ingresos_de_caja_por_dia(
                 and_(
                     es_venta(),
                     venta_no_mixta(),
-                    func.lower(SaleEntry.payment_method).not_in(FIADO_METHODS),
+                    func.lower(SaleEntry.payment_method).not_in(_FUERA_DE_CAJA_INMEDIATA),
                 ),
             ),
         )
@@ -97,7 +110,7 @@ async def ingresos_de_caja_por_dia(
     dia_mixto = func.date(mixtos.c.sale_date).label("day")
     mixtos_q = (
         select(dia_mixto, func.sum(mixtos.c.amount_ars).label("total"))
-        .where(func.lower(mixtos.c.payment_method).not_in(FIADO_METHODS))
+        .where(func.lower(mixtos.c.payment_method).not_in(_FUERA_DE_CAJA_INMEDIATA))
         .group_by(dia_mixto)
     )
     por_dia: dict[date, float] = {}
@@ -106,6 +119,28 @@ async def ingresos_de_caja_por_dia(
             d = _dia(r.day)
             por_dia[d] = por_dia.get(d, 0.0) + float(r.total or 0)
     return por_dia
+
+
+async def credito_sin_acreditar(tenant_id: UUID, db: AsyncSession, desde: date) -> float:
+    """Lo vendido con tarjeta de crédito desde ``desde`` (D-3/R-10): las ventas
+    con ese método y la parte con crédito de un pago mixto, con el mismo alcance
+    que ``ingresos_de_caja_por_dia``. Es lo que la proyección deja afuera."""
+    ventas_q = select(func.coalesce(func.sum(SaleEntry.amount), 0)).where(
+        SaleEntry.tenant_id == tenant_id,
+        SaleEntry.voided_at.is_(None),
+        SaleEntry.transaction_date >= desde,
+        es_venta(),
+        venta_no_mixta(),
+        func.lower(SaleEntry.payment_method).in_(DELAYED_METHODS),
+    )
+    mixtos = tenders_mixtos(tenant_id, desde)
+    mixtos_q = select(func.coalesce(func.sum(mixtos.c.amount_ars), 0)).where(
+        func.lower(mixtos.c.payment_method).in_(DELAYED_METHODS)
+    )
+    total = 0.0
+    for q in (ventas_q, mixtos_q):
+        total += float((await db.execute(q)).scalar_one() or 0)
+    return total
 
 
 async def get_forecast(
@@ -143,6 +178,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
     # Agregados DIARIOS: agrupar por func.date() para no fragmentar por hora/minuto
     # ahora que transaction_date es un timestamp.
     daily_income = await ingresos_de_caja_por_dia(tenant_id, db, window_start)
+    credito = await credito_sin_acreditar(tenant_id, db, window_start)
 
     expense_day = func.date(ExpenseEntry.transaction_date).label("day")
     expense_q = (
@@ -174,6 +210,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
             horizon_days=0,
             points=[],
             message="Sin datos suficientes para proyectar.",
+            credito_sin_acreditar_ars=round(credito, 2),
         )
 
     data_days = (all_dates[-1] - all_dates[0]).days + 1
@@ -188,6 +225,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
             horizon_days=0,
             points=[],
             message=f"Necesitás al menos 14 días de datos para proyectar (tenés {data_days}).",
+            credito_sin_acreditar_ars=round(credito, 2),
         )
 
     # Promedios globales
@@ -256,6 +294,7 @@ async def _compute_forecast(tenant_id: UUID, db: AsyncSession) -> ForecastResult
         horizon_days=horizon,
         points=points,
         message=message,
+        credito_sin_acreditar_ars=round(credito, 2),
     )
 
 

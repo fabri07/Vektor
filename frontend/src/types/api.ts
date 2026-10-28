@@ -79,6 +79,8 @@ export interface CashForecastResponse {
   horizon_days: number;
   points: ForecastPoint[];
   message: string | null;
+  /** D-3/R-10: vendido con tarjeta de crédito que la proyección no cuenta como caja. */
+  credit_card_pending_ars?: number;
 }
 
 export interface CategoryBreakdownItem {
