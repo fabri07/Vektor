@@ -22,6 +22,7 @@ from app.heuristics.health_engine import (
     FUENTES_CON_SALDO,
     HealthScoreResult,
     calculate_health_score,
+    mide_caja_por_flujo,
 )
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
@@ -146,6 +147,13 @@ def _build_dimensions(
         # Sin saldo medido (D-5): el 0 de `cash_on_hand_est` no es una caja vacía.
         cash_explanation = (
             f"Sin saldo de caja medido; se mide la cobertura del flujo líquido: "
+            f"entraron {state.liquid_inflow_est:.2f} ARS y salieron "
+            f"{state.liquid_outflow_est:.2f} ARS en 30 días."
+        )
+    elif mide_caja_por_flujo(state):
+        # Con saldo y sin gastos fijos (D-10): no hay días; se mide el flujo.
+        cash_explanation = (
+            f"Sin gastos fijos cargados; se mide la cobertura del flujo líquido: "
             f"entraron {state.liquid_inflow_est:.2f} ARS y salieron "
             f"{state.liquid_outflow_est:.2f} ARS en 30 días."
         )

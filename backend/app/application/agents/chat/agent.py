@@ -405,9 +405,13 @@ class AgentChat(BaseAgent):
             lines.append(f"Score de salud: {s}/100")
         if (comps := result.get("components")) and isinstance(comps, dict):
             for k, v in comps.items():
-                lines.append(
-                    f"  {k}: {v:.0f}/100" if isinstance(v, float) else f"  {k}: {v}"
-                )
+                # Un componente ausente (caja o margen sin medir) no es «None».
+                if v is None:
+                    lines.append(f"  {k}: sin medir")
+                else:
+                    lines.append(
+                        f"  {k}: {v:.0f}/100" if isinstance(v, float) else f"  {k}: {v}"
+                    )
         if (alerts := result.get("alerts")) and isinstance(alerts, list):
             for a in alerts[:3]:
                 if isinstance(a, dict):

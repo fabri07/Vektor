@@ -197,6 +197,27 @@ def _score_cash_coverage(liquid_inflow: Decimal, liquid_outflow: Decimal) -> int
     return _band_score(ratio, _COVERAGE_BANDS)
 
 
+def mide_caja_por_flujo(state: object) -> bool:
+    """¿La caja se puntúa por cobertura de flujo líquido y no por días de saldo?
+
+    Sí en modo «flujo» y también con saldo (arqueo u onboarding) pero sin gastos
+    fijos contra los que medirlo, si hay movimientos líquidos (D-10): un arqueo no
+    puede esconder una quema de caja que el flujo sí mide. Única definición: la
+    usan el motor, el insight `CASH_LOW` y la explicación de la dimensión.
+    """
+    cash_source = getattr(state, "cash_source", "desconocido")
+    if cash_source == "flujo":
+        return True
+    if cash_source not in FUENTES_CON_SALDO:
+        return False
+    if getattr(state, "monthly_fixed_expenses_est", Decimal("0")) > 0:
+        return False  # hay fijos: días de runway sobre el saldo
+    return (
+        getattr(state, "liquid_inflow_est", Decimal("0")) > 0
+        or getattr(state, "liquid_outflow_est", Decimal("0")) > 0
+    )
+
+
 # ── Margin score ──────────────────────────────────────────────────────────────
 
 
@@ -393,10 +414,11 @@ def calculate_health_score(
     #   arqueo / onboarding → días de runway (hay saldo)
     #   flujo               → cobertura líquida (no hay saldo, sí movimientos)
     #   desconocido         → sin dato: caja excluida del total y del riesgo
-    # Con saldo pero sin gastos fijos tampoco hay número (D-10): ausente.
+    # Con saldo pero sin gastos fijos no hay días de runway (D-10): se mide la
+    # cobertura del flujo si hay movimientos; si tampoco los hay, ausente.
     cash_source = getattr(state, "cash_source", "desconocido")
     s_cash: int | None
-    if cash_source == "flujo":
+    if mide_caja_por_flujo(state):
         s_cash = _score_cash_coverage(
             getattr(state, "liquid_inflow_est", Decimal("0")),
             getattr(state, "liquid_outflow_est", Decimal("0")),

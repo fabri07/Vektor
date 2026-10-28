@@ -1,8 +1,9 @@
 """D-10, E0-B-5, E0-B-6: ningún subscore de caja que nadie midió.
 
 - D-10: con saldo (arqueo u onboarding) pero sin gastos fijos, `_score_cash`
-  devolvía un 60 «neutral» que pesaba 30% en el total. Ahora la caja queda
-  AUSENTE: fuera del total y del riesgo, y se persiste `None`.
+  devolvía un 60 «neutral» que pesaba 30% en el total. Ahora, si hay
+  movimientos líquidos, se mide la cobertura del flujo (como sin arqueo); si
+  no, la caja queda AUSENTE: fuera del total y del riesgo, y se persiste `None`.
 - E0-B-6: la caja desconocida se persistía como 50 y la narrativa del insight
   lo leía como dato; los demás subscores iban con `or 0`. Ahora la caja sin
   medir se persiste `None` y el prompt dice «sin medir».
@@ -92,6 +93,75 @@ def test_con_saldo_y_sin_gastos_fijos_la_caja_queda_ausente() -> None:
     assert result.primary_risk_code != "CASH_LOW"
 
 
+def test_un_arqueo_no_esconde_la_quema_de_caja_que_el_flujo_mide() -> None:
+    """Con saldo, sin fijos y con movimientos líquidos se mide la cobertura del
+    flujo, igual que sin arqueo: el dato más confiable no borra una medición."""
+    comun: dict[str, Any] = {
+        "monthly_fixed_expenses_est": Decimal("0"),
+        "liquid_inflow_est": Decimal("50000"),
+        "liquid_outflow_est": Decimal("200000"),
+        "supplier_count": 5,
+    }
+    sin_arqueo = calculate_health_score(
+        _make_state(cash_source="flujo", cash_on_hand_est=Decimal("0"), **comun)
+    )
+    con_arqueo = calculate_health_score(
+        _make_state(cash_source="arqueo", cash_on_hand_est=Decimal("1000"), **comun)
+    )
+
+    assert sin_arqueo.score_cash is not None and sin_arqueo.score_cash <= 14
+    assert sin_arqueo.primary_risk_code == "CASH_LOW"
+    assert con_arqueo.score_cash == sin_arqueo.score_cash
+    assert con_arqueo.primary_risk_code == "CASH_LOW"
+    assert con_arqueo.score_total == sin_arqueo.score_total
+
+
+def test_con_arqueo_sin_fijos_la_dimension_explica_el_flujo() -> None:
+    from app.application.services.health_score_service import (  # noqa: PLC0415
+        _build_dimensions,
+    )
+
+    state = _make_state(
+        cash_source="arqueo",
+        cash_on_hand_est=Decimal("1000"),
+        monthly_fixed_expenses_est=Decimal("0"),
+        liquid_inflow_est=Decimal("50000"),
+        liquid_outflow_est=Decimal("200000"),
+    )
+
+    caja = next(
+        d for d in _build_dimensions(state, calculate_health_score(state))
+        if d["dimension"] == "cash"
+    )
+
+    assert caja["weight"] == "0.30"
+    assert "flujo líquido" in str(caja["explanation"])
+    assert "no entra al score" not in str(caja["explanation"])
+
+
+def test_caja_desconocida_queda_fuera_del_total() -> None:
+    state = _make_state(cash_source="desconocido", cash_on_hand_est=Decimal("0"))
+
+    result = calculate_health_score(state)
+
+    assert result.score_cash is None
+    assert result.margin_status != "ausente"
+    assert result.score_margin is not None
+    # Renormalización de los otros cuatro: 0,20 + 0,10 + 0,20 + 0,20 = 0,70.
+    sin_caja = round(
+        (
+            result.score_stock * 0.20
+            + result.score_supplier * 0.10
+            + result.score_margin * 0.20
+            + result.score_growth * 0.20
+        )
+        / 0.70
+    )
+    assert state.data_completeness_score >= 60  # sin tope por completitud
+    assert result.score_total == sin_caja
+    assert result.primary_risk_code != "CASH_LOW"
+
+
 async def test_con_arqueo_y_sin_gastos_fijos_se_persiste_caja_ausente_y_la_api_la_da_nula(
     client: AsyncClient,
     auth_headers: dict[str, Any],
@@ -178,13 +248,27 @@ def test_score_cash_cero_da_la_variante_critica() -> None:
     assert descripcion.startswith("Situación crítica")
 
 
-def test_score_cash_nulo_no_elige_variante_de_severidad() -> None:
-    _, descripcion, _ = render_insight(
-        "CASH_LOW", _estado_con_saldo(), SimpleNamespace(score_cash=None)
+def test_con_saldo_sin_fijos_el_insight_no_inventa_dias_de_cobertura() -> None:
+    """Con arqueo y sin gastos fijos, CASH_LOW dice el flujo medido: el código
+    base afirmaba «cobertura para 0 días» o «Situación crítica» sobre una
+    división que no se pudo hacer."""
+    state = SimpleNamespace(
+        cash_source="arqueo",
+        cash_on_hand_est=Decimal("1000"),
+        monthly_fixed_expenses_est=Decimal("0"),
+        liquid_inflow_est=Decimal("50000"),
+        liquid_outflow_est=Decimal("200000"),
     )
 
+    titulo, descripcion, _ = render_insight("CASH_LOW", state, SimpleNamespace(score_cash=5))
+
+    assert " 0 días" not in titulo + descripcion
+    assert "cobertura para" not in descripcion
     assert "Situación crítica" not in descripcion
-    assert "Margen muy ajustado" not in descripcion
+    assert "$50.000" in descripcion and "$200.000" in descripcion
+    # Hay un saldo medido: no se le pide al dueño un arqueo que ya hizo.
+    assert "hacé el arqueo" not in descripcion
+    assert "gastos fijos" in descripcion
 
 
 # ── E0-B-6 ────────────────────────────────────────────────────────────────────
@@ -270,3 +354,75 @@ async def test_la_narrativa_recibe_caja_sin_medir_y_no_un_numero(
             await s.execute(select(Insight).where(Insight.tenant_id == tenant_id))
         ).scalar_one()
         assert insight.description == "Narrativa de prueba."
+
+
+# ── Lectores: chat e informe ──────────────────────────────────────────────────
+
+
+def test_el_chat_dice_sin_medir_y_no_none() -> None:
+    from app.application.agents.chat.agent import AgentChat  # noqa: PLC0415
+    from app.application.agents.shared.schemas import (  # noqa: PLC0415
+        AgentResponse,
+        RiskLevel,
+    )
+
+    respuesta = AgentResponse(
+        request_id=str(uuid.uuid4()),
+        agent_name="agent_health",
+        status="success",
+        risk_level=RiskLevel.LOW,
+        result={"components": {"cash": None, "stock": 70}},
+    )
+
+    texto = AgentChat._format_agent_result(respuesta)
+
+    assert "  cash: sin medir" in texto
+    assert "None" not in texto
+    assert "  stock: 70" in texto
+
+
+def _snapshot_sin_caja() -> HealthScoreSnapshot:
+    ahora = datetime(2026, 10, 28, 10, 0, 0)
+    return HealthScoreSnapshot(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        total_score=Decimal("70"),
+        level="FAIR",
+        dimensions=[],
+        triggered_by="test",
+        snapshot_date=ahora,
+        created_at=ahora,
+        score_cash=None,
+        score_margin=70,
+        score_stock=70,
+        score_supplier=70,
+        score_growth=70,
+        primary_risk_code="SUPPLIER_DEPENDENCY",
+        confidence_level="MEDIUM",
+        data_completeness_score=Decimal("70"),
+    )
+
+
+def test_el_docx_muestra_la_caja_sin_medir() -> None:
+    import io  # noqa: PLC0415
+
+    from docx import Document  # noqa: PLC0415
+
+    from app.application.services.report_export_service import generate_docx  # noqa: PLC0415
+
+    doc = Document(io.BytesIO(generate_docx(_snapshot_sin_caja(), "", "Demo")))
+
+    filas = [[c.text for c in r.cells] for r in doc.tables[0].rows]
+    assert ["Caja", "—", "Sin medir"] in filas
+
+
+def test_el_pdf_muestra_la_caja_sin_medir() -> None:
+    import reportlab.platypus as platypus  # noqa: PLC0415
+
+    from app.application.services.report_export_service import generate_pdf  # noqa: PLC0415
+
+    with patch("reportlab.platypus.Table", wraps=platypus.Table) as tabla:
+        generate_pdf(_snapshot_sin_caja(), "", "Demo")
+
+    filas = tabla.call_args.args[0]
+    assert ["Caja", "—", "Sin medir"] in filas

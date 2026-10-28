@@ -15,7 +15,11 @@ from typing import Any
 
 from app.domain.product import effective_threshold
 from app.domain.verticals import VERTICAL_LABELS, Vertical, parse_vertical
-from app.heuristics.health_engine import FUENTES_CON_SALDO, margin_net_ratio
+from app.heuristics.health_engine import (
+    FUENTES_CON_SALDO,
+    margin_net_ratio,
+    mide_caja_por_flujo,
+)
 from app.heuristics.verticals.loader import load_margin_benchmark
 
 
@@ -127,17 +131,26 @@ def render_insight(
     description_override: str | None = None
     title_override: str | None = None
 
-    if risk_code == "CASH_LOW" and getattr(state, "cash_source", None) not in FUENTES_CON_SALDO:
+    if risk_code == "CASH_LOW" and (
+        getattr(state, "cash_source", None) not in FUENTES_CON_SALDO or mide_caja_por_flujo(state)
+    ):
         # Modo flujo (D-5): no hay saldo medido, así que no se afirma «$0 en
-        # caja» ni una cobertura en días; se dice lo que se midió.
+        # caja» ni una cobertura en días; se dice lo que se midió. También con
+        # saldo y sin gastos fijos (D-10): sin fijos no hay días que contar.
         entradas = Decimal(str(state.liquid_inflow_est))
         salidas = Decimal(str(state.liquid_outflow_est))
         vars_: dict[str, str] = {}
         title_override = "Tu plata líquida cubre poco lo que sale"
+        cierre = (
+            # Hay saldo, pero sin fijos no hay días de cobertura que afirmar.
+            "Sin gastos fijos cargados no podemos decir para cuántos días alcanza "
+            "tu caja: cargalos para saberlo."
+            if getattr(state, "cash_source", None) in FUENTES_CON_SALDO
+            else "No tenemos un saldo de caja medido: hacé el arqueo del día para saberlo."
+        )
         description_override = (
             f"En los últimos 30 días entraron {_fmt_ars(entradas)} y salieron "
-            f"{_fmt_ars(salidas)} en efectivo, transferencia, QR y débito. "
-            "No tenemos un saldo de caja medido: hacé el arqueo del día para saberlo."
+            f"{_fmt_ars(salidas)} en efectivo, transferencia, QR y débito. {cierre}"
         )
 
     elif risk_code == "CASH_LOW":
