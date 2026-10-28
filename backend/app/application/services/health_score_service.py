@@ -22,6 +22,7 @@ from app.heuristics.health_engine import (
     FUENTES_CON_SALDO,
     HealthScoreResult,
     calculate_health_score,
+    mide_caja_por_flujo,
 )
 from app.observability.logger import get_logger
 from app.persistence.models.audit import DecisionAuditLog
@@ -149,6 +150,13 @@ def _build_dimensions(
             f"entraron {state.liquid_inflow_est:.2f} ARS y salieron "
             f"{state.liquid_outflow_est:.2f} ARS en 30 días."
         )
+    elif mide_caja_por_flujo(state):
+        # Con saldo y sin gastos fijos (D-10): no hay días; se mide el flujo.
+        cash_explanation = (
+            f"Sin gastos fijos cargados; se mide la cobertura del flujo líquido: "
+            f"entraron {state.liquid_inflow_est:.2f} ARS y salieron "
+            f"{state.liquid_outflow_est:.2f} ARS en 30 días."
+        )
     elif state.cash_source not in FUENTES_CON_SALDO:
         cash_explanation = "Sin datos de caja; la caja no entra al score."
     elif state.monthly_fixed_expenses_est > 0:
@@ -158,7 +166,8 @@ def _build_dimensions(
             f"equivale a {cash_ratio:.2f}x de gastos fijos."
         )
     else:
-        cash_explanation = "Sin gastos fijos cargados; score de caja neutral."
+        # D-10: sin gastos fijos no hay días de cobertura; la caja no puntúa.
+        cash_explanation = "Sin gastos fijos cargados; la caja no entra al score."
 
     margin_explanation = margin_explanation_for(state, result)
 
@@ -196,9 +205,14 @@ def _build_dimensions(
     return [
         {
             "dimension": "cash",
-            "value": str(result.score_cash),
-            "weight": "0.30",
-            "weighted_value": f"{Decimal(result.score_cash) * Decimal('0.30'):.3f}",
+            # Ausente (D-10/E0-B-6): sin valor ni peso, como el margen.
+            "value": None if result.score_cash is None else str(result.score_cash),
+            "weight": "0.00" if result.score_cash is None else "0.30",
+            "weighted_value": (
+                "0.000"
+                if result.score_cash is None
+                else f"{Decimal(result.score_cash) * Decimal('0.30'):.3f}"
+            ),
             "explanation": cash_explanation,
         },
         {

@@ -81,6 +81,12 @@ def should_skip_insight(confidence_level: str | None, data_completeness: float) 
     return confidence_level is None or confidence_level == "LOW" or data_completeness < 50
 
 
+def _subscore_txt(valor: int | None) -> str:
+    """Subscore para el prompt de la narrativa: «sin medir» si es ``None``,
+    nunca ``or 0`` (E0-B-6: el LLM leía la peor situación donde no había dato)."""
+    return "sin medir" if valor is None else f"{valor}/100"
+
+
 # ── Main async implementation ─────────────────────────────────────────────────
 
 
@@ -173,6 +179,9 @@ async def _run(tenant_id_str: str) -> None:
                             if snapshot.score_margin is None
                             else f"{snapshot.score_margin}/100"
                         )
+                        # E0-B-6: un subscore `None` tampoco es 0/100 (la peor
+                        # situación). La caja sin medir ya se persiste `None`.
+                        caja_txt = _subscore_txt(snapshot.score_cash)
                         _client = get_anthropic_async_client(_anthropic.AsyncAnthropic)
                         _resp = await _client.messages.create(
                             model="claude-haiku-4-5",
@@ -196,12 +205,14 @@ async def _run(tenant_id_str: str) -> None:
                                     "content": (
                                         f"Negocio: {business_name}\n"
                                         f"Score de salud: {float(snapshot.total_score):.0f}/100\n"
-                                        f"  - Liquidez/Caja: {snapshot.score_cash or 0}/100\n"
-                                        f"  - Inventario: {snapshot.score_stock or 0}/100\n"
-                                        f"  - Proveedores: {snapshot.score_supplier or 0}/100\n"
+                                        f"  - Liquidez/Caja: {caja_txt}\n"
+                                        f"  - Inventario: "
+                                        f"{_subscore_txt(snapshot.score_stock)}\n"
+                                        f"  - Proveedores: "
+                                        f"{_subscore_txt(snapshot.score_supplier)}\n"
                                         f"  - Margen comercial: {margen_txt}\n"
                                         f"  - Crecimiento de ventas: "
-                                        f"{snapshot.score_growth or 0}/100\n"
+                                        f"{_subscore_txt(snapshot.score_growth)}\n"
                                         f"Riesgo principal: {risk_code}\n"
                                         # Lo que ya calculó Véktor: el LLM narra
                                         # sobre esos números, nunca inventa otros.

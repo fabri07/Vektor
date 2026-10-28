@@ -127,6 +127,9 @@ def generate_pdf(
     for label, val in dims:
         if val is not None:
             table_data.append([label, str(val), _score_label(val)])
+        elif label == "Caja":
+            # Caja sin medir (D-10/E0-B-6): se dice, no se borra la fila.
+            table_data.append([label, "—", "Sin medir"])
 
     table = Table(table_data, colWidths=[5 * cm, 3 * cm, 5 * cm])
     table.setStyle(
@@ -202,6 +205,12 @@ def generate_docx(
             row[0].text = label
             row[1].text = str(val)
             row[2].text = _score_label(val)
+        elif label == "Caja":
+            # Caja sin medir (D-10/E0-B-6): se dice, no se borra la fila.
+            row = table.add_row().cells
+            row[0].text = label
+            row[1].text = "—"
+            row[2].text = "Sin medir"
 
     doc.add_paragraph()
 

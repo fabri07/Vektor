@@ -15,7 +15,7 @@ export interface HealthScoreLatest {
   id: string;
   tenant_id: string;
   score_total: number;
-  score_cash: number;
+  score_cash: number | null;    // null = caja sin medir (no es 0 ni 50)
   score_margin: number | null;   // null = margen ausente (sin costo suficiente)
   score_stock: number;
   score_supplier: number;

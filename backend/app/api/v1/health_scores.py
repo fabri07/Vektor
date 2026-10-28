@@ -242,7 +242,9 @@ async def get_latest_score(
     snapshot = await repo.get_latest(tenant.tenant_id)
 
     # Sin snapshot: verificar si hay datos del tenant para decidir entre CALCULATING y NO_DATA.
-    if snapshot is None or snapshot.score_cash is None:
+    # Marca de snapshot F1-01: `score_stock`, que siempre se escribe. `score_cash`
+    # puede ser `None` en uno nuevo (caja sin medir, D-10/E0-B-6).
+    if snapshot is None or snapshot.score_stock is None:
         ventas_q = sa_select(func.count(SaleEntry.id)).where(
             SaleEntry.tenant_id == tenant.tenant_id,
             SaleEntry.voided_at.is_(None),
@@ -319,7 +321,7 @@ async def get_score_history_v2(
             id=s.id,
             tenant_id=s.tenant_id,
             score_total=int(s.total_score),
-            score_cash=s.score_cash or 0,
+            score_cash=s.score_cash,
             score_margin=s.score_margin,
             score_stock=s.score_stock or 0,
             score_supplier=s.score_supplier or 0,
@@ -333,7 +335,7 @@ async def get_score_history_v2(
             **_margin_fields(s.score_inputs_json),
         )
         for s in snapshots
-        if s.score_cash is not None  # only F1-01 snapshots
+        if s.score_stock is not None  # only F1-01 snapshots
     ]
 
 

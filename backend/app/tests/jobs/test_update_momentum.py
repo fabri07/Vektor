@@ -287,3 +287,24 @@ async def test_value_protected_increases_with_margin_improvement(session: AsyncS
     # margin_recovered = 100_000 * (40 / 100) * 0.30 = 12_000
     assert mp.estimated_value_protected_ars is not None
     assert float(mp.estimated_value_protected_ars) > 0
+
+
+async def test_la_caja_sin_medir_no_es_la_dimension_debil(session: AsyncSession) -> None:
+    """D-10/E0-B-6: una caja `None` (sin medir) no es un 0 que gane el objetivo."""
+    tenant = _tenant()
+    session.add(tenant)
+    await session.commit()
+    snap = _score(tenant.tenant_id, total=60, stock=70, supplier=40, margin=60)
+    snap.score_cash = None
+    session.add(snap)
+    await session.commit()
+
+    await run_momentum_update(tenant.tenant_id, session)
+
+    mp = (
+        await session.execute(
+            select(MomentumProfile).where(MomentumProfile.tenant_id == tenant.tenant_id)
+        )
+    ).scalar_one()
+    assert mp.active_goal_json is not None
+    assert mp.active_goal_json["weak_dimension"] == "supplier"

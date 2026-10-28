@@ -134,6 +134,7 @@ def test_kiosco_critical_cash_scores_low() -> None:
     )
     result: HealthScoreResult = calculate_health_score(state)
 
+    assert result.score_cash is not None
     assert result.score_cash <= 14, f"Expected score_cash <= 14, got {result.score_cash}"
     assert result.primary_risk_code == "CASH_LOW"
 
@@ -281,6 +282,7 @@ def test_primary_risk_cash_wins_when_cash_is_lower_than_margin() -> None:
     result: HealthScoreResult = calculate_health_score(state)
 
     assert result.score_margin is not None
+    assert result.score_cash is not None
     assert result.score_cash < result.score_margin
     assert result.primary_risk_code == "CASH_LOW"
 
@@ -364,6 +366,7 @@ def test_cash_coverage_mode_scores_from_liquid_flow() -> None:
     )
     result = calculate_health_score(state)
     assert result.cash_source == "flujo"
+    assert result.score_cash is not None
     assert result.score_cash >= 90, f"score_cash={result.score_cash}"
     # No dispara CASH_LOW con caja sana
     assert result.primary_risk_code != "CASH_LOW"
@@ -380,6 +383,7 @@ def test_cash_coverage_burning_cash_scores_low() -> None:
         supplier_count=5,
     )
     result = calculate_health_score(state)
+    assert result.score_cash is not None
     assert result.score_cash <= 14, f"score_cash={result.score_cash}"
 
 
@@ -438,6 +442,7 @@ def test_margen_ausente_sale_del_total_y_del_riesgo() -> None:
     assert result.margin_status == "ausente"
     assert result.margin_reason == "cobertura de costo 9,0%"
     assert result.primary_risk_code != "MARGIN_LOW"
+    assert result.score_cash is not None
     expected = round(
         (
             result.score_cash * 0.30

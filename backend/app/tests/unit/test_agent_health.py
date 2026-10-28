@@ -77,7 +77,7 @@ def _mock_anthropic_client(narrative_text: str = "Narrativa de prueba.") -> Magi
 
 
 def _make_scores_v2(
-    cash: int = 70,
+    cash: int | None = 70,
     stock: int = 70,
     supplier: int = 70,
     margin: int = 70,
@@ -253,6 +253,20 @@ def test_alerts_cash_warning():
     types = [a["type"] for a in alerts]
     assert "WARNING" in types
     assert "CRITICAL" not in types
+
+
+def test_caja_sin_medir_no_alerta_ni_se_narra_como_numero():
+    """D-10/E0-B-6: `cash_score=None` no dispara alerta ni sugerencia de caja,
+    y el prompt del narrador dice «sin medir»."""
+    from app.application.agents.health.agent import AgentHealth
+    from app.application.agents.health.sub_narrator import _build_prompt
+
+    agent = AgentHealth()
+    scores = _make_scores_v2(cash=None, stock=100, supplier=100, margin=100, growth=100)
+
+    assert all(a["component"] != "cash" for a in agent._build_alerts(scores))
+    assert not any("caja" in s for s in agent._suggest_actions(scores))
+    assert "- Caja: sin medir" in _build_prompt(scores, "Kiosco")
 
 
 def test_alerts_growth_low():

@@ -236,11 +236,13 @@ async def run_momentum_update(tenant_id: _uuid.UUID, session: Any) -> None:  # n
     latest: HealthScoreSnapshot | None = latest_score_q.scalar_one_or_none()
 
     if latest is not None:
-        subscores: dict[str, int] = {
-            "cash": latest.score_cash or 0,
-            "stock": latest.score_stock or 0,
-            "supplier": latest.score_supplier or 0,
-        }
+        # Una caja sin medir (D-10/E0-B-6, `None`) tampoco es la más débil. Va
+        # primera: en un empate `min` elige la caja, como antes.
+        subscores: dict[str, int] = {}
+        if latest.score_cash is not None:
+            subscores["cash"] = latest.score_cash
+        subscores["stock"] = latest.score_stock or 0
+        subscores["supplier"] = latest.score_supplier or 0
         # Un margen ausente (M·2b-3, sin costo suficiente) no es la dimensión
         # débil: no tiene número. Antes el `or 0` lo volvía el peor de todos.
         if latest.score_margin is not None:

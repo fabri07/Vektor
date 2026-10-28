@@ -69,7 +69,10 @@ _DIMENSION_RISK_CODE: dict[str, str] = {
 @dataclass(frozen=True)
 class HealthScoreResult:
     score_total: int
-    score_cash: int
+    #: ``None`` = caja AUSENTE (D-10/E0-B-6): sin saldo ni flujo, o con saldo
+    #: pero sin gastos fijos contra los que medirlo. Se excluye del total y del
+    #: riesgo, y se persiste ``None``: antes iba un 50 o un 60 que nadie midió.
+    score_cash: int | None
     #: ``None`` = margen AUSENTE (M·2b-3): sin costo suficiente no hay subscore;
     #: se excluye del total y del riesgo, igual que la caja desconocida.
     score_margin: int | None
@@ -151,16 +154,15 @@ def _score_cash(
     cash_on_hand: Decimal,
     monthly_fixed_expenses: Decimal,
     config: VerticalHeuristicConfig,
-) -> int:
+) -> int | None:
     """
     cash_days = cash_on_hand / daily fixed expenses.
-    If expenses are zero (no data), return 60 as a neutral-low default.
+    Sin gastos fijos no hay días de cobertura que medir: ``None`` (caja ausente,
+    D-10). Antes devolvía un 60 «neutral» que pesaba 30% en el total.
     """
     if monthly_fixed_expenses <= 0:
-        return 60
+        return None
     daily_fixed_expenses = monthly_fixed_expenses / Decimal("30")
-    if daily_fixed_expenses <= 0:
-        return 60
     cash_days = float(cash_on_hand / daily_fixed_expenses)
     return _band_score(cash_days, _cash_bands(config))
 
@@ -193,6 +195,27 @@ def _score_cash_coverage(liquid_inflow: Decimal, liquid_outflow: Decimal) -> int
         return 75 if liquid_inflow > 0 else 50
     ratio = float(liquid_inflow / liquid_outflow)
     return _band_score(ratio, _COVERAGE_BANDS)
+
+
+def mide_caja_por_flujo(state: object) -> bool:
+    """¿La caja se puntúa por cobertura de flujo líquido y no por días de saldo?
+
+    Sí en modo «flujo» y también con saldo (arqueo u onboarding) pero sin gastos
+    fijos contra los que medirlo, si hay movimientos líquidos (D-10): un arqueo no
+    puede esconder una quema de caja que el flujo sí mide. Única definición: la
+    usan el motor, el insight `CASH_LOW` y la explicación de la dimensión.
+    """
+    cash_source = getattr(state, "cash_source", "desconocido")
+    if cash_source == "flujo":
+        return True
+    if cash_source not in FUENTES_CON_SALDO:
+        return False
+    if getattr(state, "monthly_fixed_expenses_est", Decimal("0")) > 0:
+        return False  # hay fijos: días de runway sobre el saldo
+    return (
+        getattr(state, "liquid_inflow_est", Decimal("0")) > 0
+        or getattr(state, "liquid_outflow_est", Decimal("0")) > 0
+    )
 
 
 # ── Margin score ──────────────────────────────────────────────────────────────
@@ -391,19 +414,19 @@ def calculate_health_score(
     #   arqueo / onboarding → días de runway (hay saldo)
     #   flujo               → cobertura líquida (no hay saldo, sí movimientos)
     #   desconocido         → sin dato: caja excluida del total y del riesgo
+    # Con saldo pero sin gastos fijos no hay días de runway (D-10): se mide la
+    # cobertura del flujo si hay movimientos; si tampoco los hay, ausente.
     cash_source = getattr(state, "cash_source", "desconocido")
-    if cash_source == "flujo":
+    s_cash: int | None
+    if mide_caja_por_flujo(state):
         s_cash = _score_cash_coverage(
             getattr(state, "liquid_inflow_est", Decimal("0")),
             getattr(state, "liquid_outflow_est", Decimal("0")),
         )
-        cash_known = True
     elif cash_source in FUENTES_CON_SALDO:
         s_cash = _score_cash(state.cash_on_hand_est, state.monthly_fixed_expenses_est, config)
-        cash_known = True
-    else:  # desconocido — placeholder neutro, NO se muestra (gated por cash_source)
-        s_cash = 50
-        cash_known = False
+    else:  # desconocido
+        s_cash = None
 
     s_margin = _score_margin(state, benchmark)
     net_ratio = margin_net_ratio(state)
@@ -420,16 +443,11 @@ def calculate_health_score(
     }
 
     # Fórmula v2 (Stage 5a): cash×0.30 + stock×0.20 + supplier×0.10 + margin×0.20 + growth×0.20.
-    # Una dimensión AUSENTE (caja desconocida, margen sin costo suficiente) se
+    # Una dimensión AUSENTE (caja sin medir, margen sin costo suficiente) se
     # excluye y se re-normalizan los pesos restantes (no-invention: no metemos un
     # 0/50 falso que arrastre el total).
     weights = {"cash": 0.30, "stock": 0.20, "supplier": 0.10, "margin": 0.20, "growth": 0.20}
-    ausentes = {d for d, v in scores.items() if v is None}
-    if not cash_known:
-        ausentes.add("cash")
-    present: dict[str, int] = {
-        d: v for d, v in scores.items() if d not in ausentes and v is not None
-    }
+    present: dict[str, int] = {d: v for d, v in scores.items() if v is not None}
     total_weight = sum(weights[d] for d in present)
     total = round(sum(v * weights[d] for d, v in present.items()) / total_weight)
     if state.data_completeness_score < 40:

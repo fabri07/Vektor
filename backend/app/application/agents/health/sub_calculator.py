@@ -21,7 +21,8 @@ from app.state.business_state_service import BusinessState
 class ComponentScoresV2(BaseModel):
     """Score de cada dimensión (0–100, entero)."""
 
-    cash_score: int
+    #: ``None`` = caja ausente (D-10/E0-B-6): sin saldo ni flujo, o sin gastos fijos.
+    cash_score: int | None
     stock_score: int
     supplier_score: int
     #: ``None`` = margen ausente (M·2b-3): sin costo suficiente no hay subscore.

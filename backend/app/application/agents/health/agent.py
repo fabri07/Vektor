@@ -100,7 +100,7 @@ class AgentHealth(BaseAgent):
 
     def _suggest_actions(self, scores: ComponentScoresV2) -> list[str]:
         suggestions: list[str] = []
-        if scores.cash_score < 60:
+        if scores.cash_score is not None and scores.cash_score < 60:
             suggestions.append(
                 "Revisá tu cobertura de caja — considerá adelantar cobros pendientes."
             )
@@ -477,11 +477,12 @@ class AgentHealth(BaseAgent):
 
     def _build_alerts(self, scores: ComponentScoresV2) -> list[dict[str, str]]:
         alerts: list[dict[str, str]] = []
-        if scores.cash_score < 30:
+        # Caja sin medir (`None`): no hay cobertura que alertar.
+        if scores.cash_score is not None and scores.cash_score < 30:
             alerts.append(
                 {"type": "CRITICAL", "message": "Cobertura de caja crítica", "component": "cash"}
             )
-        elif scores.cash_score < 60:
+        elif scores.cash_score is not None and scores.cash_score < 60:
             alerts.append(
                 {"type": "WARNING", "message": "Cobertura de caja baja", "component": "cash"}
             )
