@@ -108,7 +108,12 @@ _LIBRO = [
 
 
 async def _importar_compras(
-    db: AsyncSession, tenant_id: uuid.UUID, filas: list[dict[str, Any]], *, multi: bool
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    filas: list[dict[str, Any]],
+    *,
+    multi: bool,
+    decision: str = "una_por_hoja",
 ) -> dict[str, Any]:
     upload_id = await _archivo(db, tenant_id)
     counts = await insert_confirmed_data(
@@ -136,7 +141,7 @@ async def _importar_compras(
         context_confirmed={_CTX: True},
         source="ingestion",
         uploaded_file_id=upload_id,
-        shipping_decisions={_CTX: "una_por_hoja"},
+        shipping_decisions={_CTX: decision},
         purchase_cost_decisions={_CTX: PurchaseCostDecision(context_id=_CTX)},
     )
     await db.commit()
@@ -220,6 +225,86 @@ async def test_el_comprobante_que_va_entero_a_otros_no_cobra_flete(
     assert await _logistica(db_session, tid) == ["2000.00"], (
         f"el flete de un comprobante que fue a «Otros» se cobró igual: {r}"
     )
+    assert r["envios_sin_compra_aplicada"] == 1
+
+
+# Revisión del PR #220: el flete SIN comprobante en su propia fila. La fila que
+# trae sólo «Envío: 2000» nunca es una compra; atar el cobro a SUS filas dejaba
+# sin cobrar un flete legítimo aunque las compras de la hoja entraran.
+
+
+def _sin_nro(idop: str, articulo: str, total: str, envio: str = "") -> dict[str, Any]:
+    return {
+        **_compra(idop, "", "Sur", articulo, total, envio),
+        "cantidad": "2" if articulo else "",
+    }
+
+
+#: Dos compras de «Sur» sin número y el flete al pie, en una fila sin artículo ni
+#: monto (ni ID de origen: no es una operación).
+_HOJA_CON_FLETE_AL_PIE = [
+    _sin_nro("C-1", "Vela", "6000"),
+    _sin_nro("C-2", "Difusor", "3600"),
+    {**_sin_nro("", "", "", "2000"), "sistema": ""},
+]
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["tabla_suelta", "por_hoja"])
+@pytest.mark.parametrize("decision", ["una_por_hoja", "una_por_fila"])
+async def test_el_flete_en_fila_propia_sin_comprobante_se_cobra(
+    db_session: AsyncSession, sample_tenant: Tenant, multi: bool, decision: str
+) -> None:
+    """Las compras de la hoja SÍ entran en esta corrida: el flete se cobra."""
+    tid = sample_tenant.tenant_id
+    r = await _importar_compras(
+        db_session, tid, _HOJA_CON_FLETE_AL_PIE, multi=multi, decision=decision
+    )
+    assert r.get("gastos") == 2, r
+    assert await _logistica(db_session, tid) == ["2000.00"], (
+        f"el flete de la hoja no se cobró con sus compras adentro: {r}"
+    )
+    assert not r.get("envios_sin_compra_aplicada"), r
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["tabla_suelta", "por_hoja"])
+@pytest.mark.parametrize("decision", ["una_por_hoja", "una_por_fila"])
+async def test_el_flete_al_pie_no_se_cobra_si_todas_las_compras_ya_estaban(
+    db_session: AsyncSession, sample_tenant: Tenant, multi: bool, decision: str
+) -> None:
+    """La misma hoja como archivo nuevo: las dos compras «ya aplicadas» por E6b.
+    El flete al pie no tiene compra que lo acompañe y no se cobra otra vez."""
+    tid = sample_tenant.tenant_id
+    await _importar_compras(
+        db_session, tid, _HOJA_CON_FLETE_AL_PIE, multi=multi, decision=decision
+    )
+    r = await _importar_compras(
+        db_session, tid, _HOJA_CON_FLETE_AL_PIE, multi=multi, decision=decision
+    )
+    assert r.get("gastos", 0) == 0, r
+    assert await _logistica(db_session, tid) == ["2000.00"], (
+        f"el flete al pie se cobró de nuevo con las compras ya aplicadas: {r}"
+    )
+    assert r["envios_sin_compra_aplicada"] == 1
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["tabla_suelta", "por_hoja"])
+async def test_una_por_fila_el_flete_de_la_fila_ya_aplicada_no_se_recobra(
+    db_session: AsyncSession, sample_tenant: Tenant, multi: bool
+) -> None:
+    """Con ``una_por_fila`` el flete de una fila de compra es de ESA fila: en el
+    acumulado, que entre la compra nueva no habilita el flete de la vieja."""
+    tid = sample_tenant.tenant_id
+    vieja = _sin_nro("C-1", "Vela", "6000", "500")
+    await _importar_compras(db_session, tid, [vieja], multi=multi, decision="una_por_fila")
+    r = await _importar_compras(
+        db_session,
+        tid,
+        [vieja, _sin_nro("C-2", "Difusor", "3600", "300")],
+        multi=multi,
+        decision="una_por_fila",
+    )
+    assert r.get("gastos") == 1, r
+    assert await _logistica(db_session, tid) == ["300.00", "500.00"], r
     assert r["envios_sin_compra_aplicada"] == 1
 
 

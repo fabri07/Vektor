@@ -4317,9 +4317,9 @@ async def confirm_file(
         # (ya estaban cargadas por otro archivo, chocaron o fueron a «Otros»).
         warnings.append(
             f"{counts['envios_sin_compra_aplicada']} envío(s) no se registraron "
-            "porque ninguna compra de su comprobante entró en esta carga: ya estaban "
-            "cargadas desde otro archivo o quedaron en «Otros». Si resolvés la "
-            "compra desde «Otros», cargá el envío ahí."
+            "porque todas las compras de su comprobante se saltearon en esta carga: "
+            "ya estaban cargadas desde otro archivo o quedaron en «Otros». "
+            "Si resolvés la compra desde «Otros», cargá el envío ahí."
         )
     if counts.get("filas_sin_monto"):
         # El texto dejó de afirmar que el archivo "no traía" el total: con la

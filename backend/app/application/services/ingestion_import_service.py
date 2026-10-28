@@ -197,8 +197,10 @@ from app.domain.purchase_group import (
     build_purchase_groups,
 )
 from app.domain.purchase_shipping import (
+    SIN_COMPROBANTE_UNA_POR_FILA,
     ShippingCharge,
     ShippingLine,
+    identidad_de_comprobante,
     plan_line_shipping,
     plan_shipping_charges,
 )
@@ -8587,11 +8589,54 @@ async def cobrar_envios_de_la_hoja(
     def _comp_de(_row: dict[str, Any]) -> str:
         return (_clean_str(_row.get(_comp_col), 99) or "").strip().lower() if _comp_col else ""
 
-    # I2-1: los comprobantes (proveedor + número, misma normalización que el
-    # agrupamiento del flete) con alguna compra persistida en esta corrida.
-    _comprobantes_con_compra = {
-        (_prov_de(rows[i]), _comp_de(rows[i])) for i in filas_con_compra if i < len(rows)
+    # I2-1: las filas de COMPRA de la hoja —las que persistieron una en esta
+    # corrida y las que la intentaron (monto, artículo o cantidad) y se
+    # salteaban: ya aplicadas, en conflicto o a «Otros»—. La fila que trae sólo
+    # el flete («Envío: 2000» al pie) no es una compra: no decide nada.
+    _amount_col = cols.get("amount")
+    _articulo_col = cols.get("product_name")
+    _cantidad_col = cols.get("quantity")
+    _filas_de_compra = set(filas_con_compra) | {
+        _idx
+        for _idx, _row in enumerate(rows)
+        if not es_fila_de_total_dict(_row)
+        and (
+            (_amount_col and _parse_amount(_row.get(_amount_col)))
+            or (_articulo_col and _clean_str(_row.get(_articulo_col), 199))
+            or (_cantidad_col and _parse_amount(_row.get(_cantidad_col)))
+        )
     }
+    _sin_comprobante_hoja = (shipping_decisions or {}).get(ctx_id or "")
+
+    def _compras_del_cargo(_cargo: ShippingCharge, *, por_linea: bool) -> set[int]:
+        """I2-1: las filas de compra del comprobante del cargo.
+
+        Con número: las de su proveedor + número. Sin número: con ``una_por_fila``
+        o el flete de línea, la propia fila si es una compra; con ``una_por_hoja``
+        la hoja ES el comprobante (las compras sin comprobante propio). Si el
+        flete viene en una fila sola —o su proveedor está vacío o escrito distinto
+        y no coincide con ninguna compra—, su comprobante es la hoja entera: no
+        hay de dónde atarlo más fino, y dejarlo afuera perdería un gasto real.
+        """
+        if _cargo.invoice:
+            propias = {
+                i
+                for i in _filas_de_compra
+                if (_prov_de(rows[i]), _comp_de(rows[i])) == (_cargo.supplier, _cargo.invoice)
+            }
+        else:
+            propias = (
+                _filas_de_compra & set(_cargo.row_indexes)
+                if por_linea or _sin_comprobante_hoja == SIN_COMPROBANTE_UNA_POR_FILA
+                else set()
+            )
+            if not propias:
+                propias = {
+                    i
+                    for i in _filas_de_compra
+                    if identidad_de_comprobante(_prov_de(rows[i]), _comp_de(rows[i])) is None
+                }
+        return propias or _filas_de_compra
 
     def _leer_envios(col: str) -> list[ShippingLine]:
         leidas: list[ShippingLine] = []
@@ -8680,17 +8725,15 @@ async def cobrar_envios_de_la_hoja(
             session, tenant_id, _anchor, seen_fp
         ):
             return False
-        # I2-1: el flete acompaña a la compra. Si ninguna línea del comprobante
-        # persistió una compra en esta corrida —todas «ya aplicadas» por otro
+        # I2-1: el flete acompaña a la compra. Si el comprobante tiene compras y
+        # NINGUNA persistió en esta corrida —todas «ya aplicadas» por otro
         # archivo, en conflicto o en «Otros»—, cobrarlo de nuevo lo duplica:
         # el ancla lleva el archivo y en un archivo nuevo es otra. No se cobra y
         # se avisa; si la compra se resuelve desde «Otros», el flete viaja ahí.
-        _con_compra = (
-            (_cargo.supplier, _cargo.invoice) in _comprobantes_con_compra
-            if _cargo.invoice
-            else any(i in filas_con_compra for i in _cargo.row_indexes)
-        )
-        if not _con_compra:
+        # Una hoja sin ninguna fila de compra cobra como siempre: no hay compra
+        # salteada que delate un duplicado.
+        _compras = _compras_del_cargo(_cargo, por_linea=namespace == "envio_linea")
+        if _compras and not (_compras & filas_con_compra):
             counts["envios_sin_compra_aplicada"] = (
                 counts.get("envios_sin_compra_aplicada", 0) + 1
             )
