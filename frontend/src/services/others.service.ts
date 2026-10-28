@@ -166,9 +166,14 @@ export const othersService = {
   /**
    * B·8a: la venta es de este producto y lo que decía el archivo
    * (`row_data.producto`) queda como alias suyo. `quantity` sólo si la de la
-   * fila no es entera (el backend responde 422 `CANTIDAD_REQUERIDA`).
+   * fila no es entera (el backend responde 422 `CANTIDAD_REQUERIDA`);
+   * `transaction_date` sólo si la de la fila es ambigua, ilegible o futura
+   * (422 `FECHA_REQUERIDA`, V-16).
    */
-  async linkProduct(id: string, payload: { product_id: string; quantity?: number }): Promise<string> {
+  async linkProduct(
+    id: string,
+    payload: { product_id: string; quantity?: number; transaction_date?: string },
+  ): Promise<string> {
     const res = await api.post<{ message: string }>(`/others/${id}/link-product`, payload);
     return res.data.message;
   },

@@ -120,6 +120,7 @@ from app.domain.date_parsing import (
     CAMPOS_DE_FECHA,
     MOTIVO_FECHA_FUTURA,
     ConvenioDeFecha,
+    FechaInterpretada,
     inferir_convenio_de_fecha,
     parse_business_date,
     parse_business_datetime,
@@ -1925,6 +1926,15 @@ def _import_row_anchor(
         f"{tenant_id}:{_IMPORT_ROW_ACTION}:"
         f"{uploaded_file_id or ''}:{context_id or ''}:{row_index}"
     )
+
+
+def ancla_de_fila_de_otros(tenant_id: uuid.UUID, record_id: uuid.UUID) -> str:
+    """Ancla de la huella del lote de «Otros» (B1): anclada en el ``UnclassifiedRecord``.
+
+    Pública para el script de V-16 (`limpiar_huellas_otros.py`), que tiene que
+    reconocer exactamente la huella que mira el lote.
+    """
+    return f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{record_id}"
 
 
 def _risk_row_anchor(
@@ -11378,9 +11388,37 @@ async def _insert_multisheet_data(
     return counts
 
 
+def columnas_de_fila_de_otros(row: dict[str, Any] | None) -> dict[str, Any]:
+    """Las columnas del archivo de una fila de «Otros», sin las claves del sistema.
+
+    Las claves `__` son del sistema: ninguna es una columna del archivo, y por
+    substring alguna se leería como una («__convenios_de_fecha__» como fecha,
+    «__row_ref__» como código).
+    """
+    return {k: v for k, v in (row or {}).items() if not str(k).startswith("__")}
+
+
+def interpretar_fecha_de_fila_de_otros(row: dict[str, Any] | None) -> FechaInterpretada | None:
+    """V-16: la fecha de una fila de «Otros» como la lee el lote, con el motivo.
+
+    La usan `link-product` y el lote (vía ``_fecha_de_fila_de_otros``): una
+    misma fila no puede dar una fecha en un camino y otra en el otro. ``None`` si
+    la fila no tiene columna de fecha.
+    """
+    row = row or {}
+    return _interpretar_fecha_de_fila(row, columnas_de_fila_de_otros(row))
+
+
 def _fecha_de_fila_de_otros(
     row: dict[str, Any], cols_fila: dict[str, Any]
 ) -> datetime | None:
+    interpretada = _interpretar_fecha_de_fila(row, cols_fila)
+    return interpretada.valor if interpretada is not None else None
+
+
+def _interpretar_fecha_de_fila(
+    row: dict[str, Any], cols_fila: dict[str, Any]
+) -> FechaInterpretada | None:
     """I2-4: la fecha de una fila de «Otros» leída como la leyó la carga.
 
     Con el convenio día/mes que la columna decidió en el import
@@ -11400,7 +11438,7 @@ def _fecha_de_fila_de_otros(
         orden = None
     if orden in ("dmy", "mdy"):
         convenio = ConvenioDeFecha(orden=orden, origen="inequivoco")
-    return parsear_fecha_de_columna(cols_fila[columna], convenio).valor
+    return parsear_fecha_de_columna(cols_fila[columna], convenio)
 
 
 async def bulk_import_unclassified(
@@ -11491,10 +11529,7 @@ async def bulk_import_unclassified(
     _archivo_del_reclamo: dict[tuple[str, str], uuid.UUID | None] = {}
 
     def _columnas(rec: UnclassifiedRecord) -> dict[str, Any]:
-        # Las claves `__` son del sistema: ninguna es una columna del archivo, y
-        # por substring alguna se leería como una («__convenios_de_fecha__» como
-        # fecha, «__row_ref__» como código).
-        return {k: v for k, v in (rec.row_data or {}).items() if not str(k).startswith("__")}
+        return columnas_de_fila_de_otros(rec.row_data)
 
     # El producto de cada venta, resuelto una vez. Los candidatos se bloquean
     # JUNTOS y en orden de id antes de la primera fila, como la venta del POS
@@ -11527,7 +11562,7 @@ async def bulk_import_unclassified(
         # registra cuando la fila de verdad se importa (abajo), así una fila que
         # queda en `needs_manual` (sin stock, sin compra previa…) se puede
         # reintentar con el lote cuando el dueño lo resuelve.
-        _ancla_otros = f"{tenant_id}:{_IMPORT_ROW_ACTION}:unclassified:{rec.id}"
+        _ancla_otros = ancla_de_fila_de_otros(tenant_id, rec.id)
         if await _import_row_seen(session, tenant_id, _ancla_otros):
             counts["skipped"] += 1
             continue
