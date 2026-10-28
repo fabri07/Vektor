@@ -62,6 +62,7 @@ from app.application.services.ingestion_import_service import (
     IDENTITY_HASH_KEY,
     IDENTITY_REF_KEY,
     interpretar_fecha_de_fila_de_otros,
+    monto_de_fila_de_otros,
 )
 from app.application.services.operation_identity_service import (
     aplicada_desde_otro_origen,
@@ -1287,7 +1288,7 @@ async def reclassify_record(
     except ValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=exc.errors(),
+            detail=_errores_de_validacion(exc),
         ) from exc
 
     record.status = UNCLASSIFIED_STATUS_IMPORTED
@@ -1297,6 +1298,16 @@ async def reclassify_record(
         session, str(tenant.tenant_id), "unclassified_reclassified"
     )
     return MessageResponse(message=f"Registro importado como {label}.")
+
+
+def _errores_de_validacion(exc: ValidationError) -> list[Any]:
+    """Los errores de un schema de creación, serializables.
+
+    ``exc.errors()`` trae en ``ctx`` la excepción del validador (un ``ValueError``
+    de «no puede ser futura» o de un monto NaN): como ``detail`` de un
+    ``HTTPException`` no se puede pasar a JSON y la respuesta era un 500 (V-16).
+    """
+    return cast(list[Any], exc.errors(include_url=False, include_context=False))
 
 
 def _cantidad_de_la_fila(raw: Any) -> int | None:
@@ -1476,9 +1487,23 @@ async def link_product(
             },
         )
     fecha = body.transaction_date or _fecha_de_la_venta(record.row_data)
+    # V-16: el monto, como lo lee el lote (antes crudo: «1.234,50» daba 422).
+    monto = monto_de_fila_de_otros(record.row_data)
+    if monto is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "MONTO_REQUERIDO",
+                "message": (
+                    "El monto de la fila no se puede leer sin adivinar (falta, no es un "
+                    "número o «12.500» puede ser doce mil quinientos o doce coma cinco): "
+                    "resolvela desde «Editar» escribiendo el monto."
+                ),
+            },
+        )
     try:
         sale_req = CreateSaleRequest(
-            amount=record.row_data.get("monto"),
+            amount=monto,
             transaction_date=fecha,
             quantity=cantidad,
             payment_method=record.row_data.get("medio_de_pago") or "cash",
@@ -1487,7 +1512,7 @@ async def link_product(
         )
     except ValidationError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_errores_de_validacion(exc)
         ) from exc
     await _registrar_venta_desde_otros(session, tenant.tenant_id, record, sale_req)
     await session.flush()

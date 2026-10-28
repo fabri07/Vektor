@@ -20,9 +20,10 @@ function _buildIso(y: string, mo: string, d: string): string {
  *
  * Sin esto, un valor como "12/03/2024" se seteaba tal cual y el input (que solo
  * acepta ISO) quedaba VACÍO — justo el caso que F6-A genera en volumen al rutear
- * filas a /otros. Convención AR, espejo del parser de backend (date_parsing.py):
- * dd/mm/yyyy ANTES que mm/dd/yyyy (03/04/2026 = 3 de abril). Devuelve "" si no
- * reconoce el formato (el usuario completa a mano).
+ * filas a /otros. Sólo se prellena lo INEQUÍVOCO (V-16, criterio del dueño): ISO,
+ * o una fecha corta en la que un número no puede ser mes («13/04/2026»). Una
+ * fecha corta ambigua («03/04/2026»: 3 de abril o 4 de marzo) nunca se adivina:
+ * devuelve "" y la persona la escribe. También "" si no reconoce el formato.
  */
 export function toIsoDate(raw: string): string {
   const s = (raw ?? "").trim();
@@ -44,8 +45,12 @@ export function toIsoDate(raw: string): string {
     rawYear.length === 2
       ? String((Number(rawYear) <= 68 ? 2000 : 1900) + Number(rawYear))
       : rawYear;
-  // AR: dd/mm primero; solo si el 2º campo no puede ser mes (>12) y el 1º sí,
-  // se interpreta como mm/dd.
+  // Los dos pueden ser mes y dicen fechas distintas: ambigua, no se adivina. Si
+  // son iguales («04/04») las dos lecturas dan el mismo día.
+  if (Number(first) <= 12 && Number(second) <= 12 && Number(first) !== Number(second)) {
+    return "";
+  }
+  // El que no puede ser mes (>12) es el día.
   let day = first;
   let month = second;
   if (Number(second) > 12 && Number(first) <= 12) {

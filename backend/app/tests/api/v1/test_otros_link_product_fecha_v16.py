@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -198,3 +199,129 @@ async def test_la_fecha_que_manda_el_cliente_no_puede_ser_futura(
 
     assert r.status_code == 422, r.text
     await _sin_efectos(db_session, sample_tenant, rec)
+
+
+@pytest.mark.parametrize(
+    ("monto", "esperado"),
+    [
+        ("1.234,50", Decimal("1234.50")),
+        # La forma canónica que escribe Véktor (B·5e/B·5g: `str(Decimal)`).
+        ("1200.00", Decimal("1200.00")),
+        ("1500.5", Decimal("1500.5")),
+    ],
+)
+async def test_el_monto_se_lee_como_en_el_lote(
+    client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession,
+    sample_tenant: Tenant, monto: str, esperado: Decimal,
+) -> None:
+    coca = await _coca(db_session, sample_tenant)
+    rec = await _fila(db_session, sample_tenant, "13/04/2024", monto=monto)
+
+    r = await _vincular(client, auth_headers, rec, coca.id)
+
+    assert r.status_code == 200, r.text
+    assert (await _venta(db_session, sample_tenant)).amount == esperado
+
+
+@pytest.mark.parametrize("monto", ["NaN", "12.500", "1.500", "12,50", ""])
+async def test_monto_ilegible_o_ambiguo_no_se_adivina(
+    client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession,
+    sample_tenant: Tenant, monto: str,
+) -> None:
+    coca = await _coca(db_session, sample_tenant)
+    rec = await _fila(db_session, sample_tenant, "13/04/2024", monto=monto)
+
+    r = await _vincular(client, auth_headers, rec, coca.id)
+
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["code"] == "MONTO_REQUERIDO"
+    assert "«Editar»" in r.json()["detail"]["message"]
+    await _sin_efectos(db_session, sample_tenant, rec)
+
+
+@pytest.mark.parametrize("campo", ["amount", "transaction_date"])
+async def test_reclassify_con_dato_invalido_da_422_legible_y_no_500(
+    client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession,
+    sample_tenant: Tenant, campo: str,
+) -> None:
+    """Un `ValueError` de un validador (fecha futura) viaja en `ctx`: sin sacarlo,
+    el 422 no se podía pasar a JSON y era un 500. El monto «NaN» da 422 igual."""
+    coca = await _coca(db_session, sample_tenant)
+    rec = await _fila(db_session, sample_tenant, "13/04/2024")
+    campos: dict[str, Any] = {
+        "amount": "3000",
+        "transaction_date": "2024-04-13T00:00:00",
+        "product_id": str(coca.id),
+        "quantity": 1,
+    }
+    campos[campo] = (
+        "NaN" if campo == "amount" else (today_ar() + timedelta(days=3)).isoformat() + "T10:00:00"
+    )
+
+    r = await client.post(
+        f"/api/v1/others/{rec.id}/reclassify",
+        json={"entity_type": "sale", "fields": campos},
+        headers=auth_headers,
+    )
+
+    assert r.status_code == 422, r.text
+    errores = r.json()["detail"]
+    assert isinstance(errores, list) and errores[0]["loc"] == [campo]
+    assert all("ctx" not in e for e in errores)
+    await _sin_efectos(db_session, sample_tenant, rec)
+
+
+async def _lote(client: AsyncClient, h: dict[str, Any]) -> dict[str, int]:
+    r = await client.post("/api/v1/others/bulk-import", json={}, headers=h)
+    assert r.status_code == 200, r.text
+    return dict(r.json())
+
+
+async def test_el_lote_lee_el_monto_canonico_de_una_venta_de_b5e(
+    client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """La fila que deja B·5e/B·5g («1200.00») entra por el lote, como por link-product."""
+    vela = await producto_con_compra(db_session, sample_tenant.tenant_id, nombre="Vela aromatica")
+    db_session.add(
+        UnclassifiedRecord(
+            tenant_id=sample_tenant.tenant_id,
+            source="ingestion",
+            context_label="Venta sin compra previa",
+            row_data={
+                "fecha": "2024-03-05", "monto": "1200.00", "cantidad": "1",
+                "producto": vela.name, "medio_de_pago": "cash",
+            },
+            suggested_entity="sale",
+            status="PENDING",
+        )
+    )
+    await db_session.commit()
+
+    cuerpo = await _lote(client, auth_headers)
+
+    assert (cuerpo["imported_sales"], cuerpo["needs_manual"]) == (1, 0), cuerpo
+    assert (await _venta(db_session, sample_tenant)).amount == Decimal("1200.00")
+
+
+@pytest.mark.parametrize("monto", ["12.500", "1.500", "12,50"])
+async def test_el_lote_no_adivina_un_monto_ambiguo(
+    client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession,
+    sample_tenant: Tenant, monto: str,
+) -> None:
+    db_session.add(
+        UnclassifiedRecord(
+            tenant_id=sample_tenant.tenant_id,
+            source="ingestion",
+            context_label="Monto ilegible",
+            row_data={"fecha": "2024-05-01", "detalle": "Pago luz", "monto": monto,
+                      "categoria": "Luz"},
+            suggested_entity="expense",
+            status="PENDING",
+        )
+    )
+    await db_session.commit()
+
+    cuerpo = await _lote(client, auth_headers)
+
+    assert (cuerpo["imported_expenses"], cuerpo["needs_manual"]) == (0, 1), cuerpo

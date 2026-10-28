@@ -11409,6 +11409,43 @@ def interpretar_fecha_de_fila_de_otros(row: dict[str, Any] | None) -> FechaInter
     return _interpretar_fecha_de_fila(row, columnas_de_fila_de_otros(row))
 
 
+def monto_de_fila_de_otros(row: dict[str, Any] | None) -> Decimal | None:
+    """V-16: el monto de una fila de «Otros» como lo lee el lote (``_parse_amount``).
+
+    ``None`` si no hay un monto positivo legible: «12.500» sin convenio es
+    ambiguo y no se adivina, igual que en la carga.
+    """
+    return _monto_de_fila(columnas_de_fila_de_otros(row))
+
+
+#: La forma en que Véktor escribe un monto en la fila (``str(Decimal)``: «1200.00»).
+#: Un punto seguido de 1 o 2 dígitos no puede ser separador de miles, así que no
+#: admite otra escala: es la ÚNICA excepción a la lectura por columna (V-16).
+_MONTO_CANONICO = re.compile(r"^\d+\.\d{1,2}$")
+
+
+def _monto_de_otros(raw: Any) -> Decimal | None:
+    valor = _parse_amount(raw)
+    if valor is not None:
+        return valor
+    texto = str(raw).strip() if isinstance(raw, str) else ""
+    if _MONTO_CANONICO.match(texto):
+        canonico = Decimal(texto)
+        return canonico if canonico > 0 else None
+    return None
+
+
+def _monto_de_fila(cols_fila: dict[str, Any]) -> Decimal | None:
+    # V-16: las filas que escribe Véktor (venta sin compra de B·5e/B·5g) guardan
+    # «1200.00», que `parsear_monto` sin convenio declara ambiguo: sin la forma
+    # canónica, ni el lote ni `link-product` las podían leer.
+    return (
+        _monto_de_otros(_row_val(cols_fila, _VENTA_TOTAL_COLS))
+        or _monto_de_otros(_row_val(cols_fila, _GASTO_AMOUNT_COLS))
+        or _monto_de_otros(_row_val(cols_fila, _VENTA_AMOUNT_COLS))
+    )
+
+
 def _fecha_de_fila_de_otros(
     row: dict[str, Any], cols_fila: dict[str, Any]
 ) -> datetime | None:
@@ -11605,11 +11642,7 @@ async def bulk_import_unclassified(
             continue
         cols_fila = _columnas(rec)
         fecha = _fecha_de_fila_de_otros(row, cols_fila)
-        amount = (
-            _parse_amount(_row_val(cols_fila, _VENTA_TOTAL_COLS))
-            or _parse_amount(_row_val(cols_fila, _GASTO_AMOUNT_COLS))
-            or _parse_amount(_row_val(cols_fila, _VENTA_AMOUNT_COLS))
-        )
+        amount = _monto_de_fila(cols_fila)
         if fecha is None or amount is None:
             # F6-A5: no parseó (fecha o monto ilegible) → requiere completarlo a
             # mano en el modal. Distinto de "ya importado" (skipped): la UI debe
