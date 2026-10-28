@@ -96,7 +96,7 @@ export function ForecastPanel() {
         Las ventas con tarjeta de crédito se cuentan a {data.credit_card_settlement_days}{" "}
         {data.credit_card_settlement_days === 1 ? "día" : "días"} de la venta. Lo cambiás en{" "}
         <Link href="/settings?tab=salud" className="underline hover:text-vektor-body">
-          Configuración → Score de salud
+          Configuración → Margen objetivo
         </Link>
         .
         {(data.credit_card_pending_ars ?? 0) > 0 && (

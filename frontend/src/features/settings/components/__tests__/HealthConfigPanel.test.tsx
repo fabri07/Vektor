@@ -1,6 +1,6 @@
 /**
  * D-3/R-10: el plazo de acreditación de la tarjeta de crédito se ve y se cambia
- * en Configuración → Score de salud, y guardarlo manda SÓLO ese campo (no pisa
+ * en Configuración → Margen objetivo, y guardarlo manda SÓLO ese campo (no pisa
  * los márgenes ni los marca como personalizados).
  */
 import "@testing-library/jest-dom";

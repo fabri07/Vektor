@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.health.agent import AgentHealth
@@ -344,6 +344,75 @@ async def test_la_proyeccion_corta_en_el_dia_de_negocio(
     assert r.message is None
 
 
+async def _sembrar_tier1(db: AsyncSession, tid: Any) -> None:
+    for i in range(20):
+        dia = HOY - timedelta(days=i)
+        db.add(_venta(tid, "1000", "cash", dia))
+        db.add(_venta(tid, str(300 + 10 * i), "credit_card", dia))
+
+
+async def _sembrar_tier2(db: AsyncSession, tid: Any) -> None:
+    for i in range(45):
+        dia = HOY - timedelta(days=i)
+        db.add(_venta(tid, "1000", "cash", dia))
+        if dia.weekday() in (4, 5):
+            db.add(_venta(tid, "3000", "credit_card", dia))
+
+
+async def _sembrar_tier3(db: AsyncSession, tid: Any) -> None:
+    """El escenario de la revalidación: 120 días, efectivo creciente y crédito
+    sólo viernes y sábados, también creciente."""
+    for i in range(120):
+        dia = HOY - timedelta(days=i)
+        db.add(_venta(tid, str(1000 + (120 - i) * 5), "cash", dia))
+        if dia.weekday() in (4, 5):
+            db.add(_venta(tid, str(800 + (120 - i) * 20), "credit_card", dia))
+        db.add(_gasto(tid, "900", dia))
+
+
+@pytest.mark.parametrize(
+    ("sembrar", "tier"), [(_sembrar_tier1, 1), (_sembrar_tier2, 2), (_sembrar_tier3, 3)]
+)
+async def test_con_n_cero_es_lo_mismo_que_contar_el_credito_como_caja(
+    db_session: AsyncSession, sample_tenant: Tenant, sembrar: Any, tier: int
+) -> None:
+    """N-1: con N = 0 cada tier da exactamente lo mismo que el ingreso total
+    tratado como caja. En tier 3 el modelo del crédito ralo inflaba un 26 %."""
+    tid = sample_tenant.tenant_id
+    await sembrar(db_session, tid)
+    await db_session.commit()
+    con_n0 = await _compute_forecast(tid, db_session, 0)
+    await db_session.execute(
+        update(SaleEntry)
+        .where(SaleEntry.tenant_id == tid, SaleEntry.payment_method == "credit_card")
+        .values(payment_method="debit_card")
+    )
+    await db_session.commit()
+
+    como_caja = await _compute_forecast(tid, db_session, 0)
+
+    assert con_n0.tier == como_caja.tier == tier
+    for a, b in zip(con_n0.points, como_caja.points, strict=True):
+        assert abs(a.income - b.income) <= 1, (a, b)
+
+
+async def test_una_venta_con_credito_de_fecha_futura_no_es_historia(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    """m-8: no estira los días con datos ni entra al promedio."""
+    tid = sample_tenant.tenant_id
+    for i in range(20):
+        db_session.add(_venta(tid, "1000", "cash", HOY - timedelta(days=i)))
+    db_session.add(_venta(tid, "9000", "credit_card", HOY + timedelta(days=3)))
+    await db_session.commit()
+
+    r = await _compute_forecast(tid, db_session, 2)
+
+    assert r.data_days == 20
+    assert {p.income for p in r.points} == {1000}
+    assert r.credito_sin_acreditar_ars == 0
+
+
 # ── Alcance de las series ─────────────────────────────────────────────────────
 
 
@@ -413,6 +482,9 @@ async def test_un_blob_de_la_version_anterior_no_se_sirve(
         ("Crédito 3 cuotas", "credit_card"),
         ("Visa crédito", "credit_card"),
         ("Mastercard Credito", "credit_card"),
+        ("TC crédito", "credit_card"),
+        ("Tarjeta a crédito", "credit_card"),
+        ("Visa (crédito)", "credit_card"),
         ("Tarjeta de débito", "debit_card"),
         ("débito", "debit_card"),
         ("Visa débito", "debit_card"),
@@ -422,10 +494,27 @@ async def test_un_blob_de_la_version_anterior_no_se_sirve(
         ("Visa", "other"),
         ("crédito o débito", "other"),
         ("Nota de crédito", "other"),
+        ("Nota de débito", "other"),
+        ("Crédito fiscal", "other"),
+        ("Crédito fiscal IVA", "other"),
+        # Sin contexto de tarjeta, «crédito» no es tarjeta (N-2).
+        ("Crédito personal", "other"),
+        # Fiado (N-2): al canónico del fiado, el que dispara el guard del import.
+        ("Fiado a crédito", "account"),
+        ("Cuenta corriente crédito", "account"),
+        ("Cta. cte. a crédito", "account"),
+        ("Crédito en cuenta corriente", "account"),
+        ("Crédito de la casa", "account"),
+        ("Libreta crédito", "account"),
+        ("A crédito", "account"),
+        ("Venta a crédito", "account"),
+        ("Fiado (crédito)", "account"),
         # Ya existentes: no cambian.
         ("débito automático", "transfer"),
         ("Débito automático de la tarjeta", "transfer"),
+        # «crédito» sola: el mapa de antes del PR.
         ("credito", "credit_card"),
+        ("Crédito", "credit_card"),
         ("efectivo", "cash"),
     ],
 )

@@ -376,7 +376,7 @@ class AgentHealth(BaseAgent):
         lines.append(
             f"Las ventas con tarjeta de crédito las cuento a {dias} "
             f"{'día' if dias == 1 else 'días'} de la venta (lo cambiás en Configuración → "
-            "Score de salud)."
+            "Margen objetivo)."
         )
         return self._analysis_response(
             request,

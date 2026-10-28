@@ -15,6 +15,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from app.api.v1.deps import (
     require_modify_access,
     require_owner_stepup,
 )
+from app.application.services.forecast_service import invalidar_cache
 from app.application.services.health_config_service import (
     HealthConfigRequest,
     HealthConfigResponse,
@@ -42,6 +44,7 @@ from app.domain.fiscal_condition import (
     normalize_fiscal_condition,
 )
 from app.domain.pos_permissions import CASHIER_ROLE, effective_pos_permissions
+from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
 from app.persistence.models.business import BusinessProfile
 from app.persistence.models.user import User
@@ -75,6 +78,7 @@ async def update_health_config(
     body: HealthConfigRequest,
     current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
 ) -> HealthConfigResponse:
     """Actualiza el objetivo de margen bruto del tenant. Requiere permiso de modificación.
 
@@ -82,17 +86,23 @@ async def update_health_config(
     dispara recálculo; el cambio queda en decision_audit_log.
     """
     svc = HealthConfigService(db)
-    return await svc.update(current_user.tenant_id, current_user.user_id, body)
+    resultado = await svc.update(current_user.tenant_id, current_user.user_id, body)
+    # D-3/R-10: N cambia la proyección de caja; no servir un blob de antes.
+    await invalidar_cache(current_user.tenant_id, redis)
+    return resultado
 
 
 @router.delete("/health-config", response_model=HealthConfigResponse)
 async def reset_health_config(
     current_user: User = Depends(require_modify_access),
     db: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_redis),
 ) -> HealthConfigResponse:
     """Resetea el objetivo de margen bruto a los predeterminados de Véktor."""
     svc = HealthConfigService(db)
-    return await svc.reset(current_user.tenant_id, current_user.user_id)
+    resultado = await svc.reset(current_user.tenant_id, current_user.user_id)
+    await invalidar_cache(current_user.tenant_id, redis)
+    return resultado
 
 
 @router.get("/work-schedule", response_model=WorkScheduleResponse)

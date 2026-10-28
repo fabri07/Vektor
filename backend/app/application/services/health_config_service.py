@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictInt, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,7 +64,7 @@ class HealthConfigRequest(BaseModel):
     target_margin_pct: float | None = Field(None, ge=0.0, le=80.0)
     warning_margin_pct: float | None = Field(None, ge=0.0, le=80.0)
     # 0 = el día de la venta.
-    credit_card_settlement_days: int | None = Field(None, ge=0, le=60)
+    credit_card_settlement_days: StrictInt | None = Field(None, ge=0, le=60)
 
     @model_validator(mode="after")
     def _target_gte_warning(self) -> HealthConfigRequest:
@@ -178,6 +178,11 @@ class HealthConfigService:
             else "CREDIT_CARD_SETTLEMENT_DAYS_UPDATED"
         )
         self._auditar(tenant_id, user_id, decision_type, antes, despues)
+        if _KEY_TARGET in nuevos and _KEY_CC_DAYS in nuevos:
+            # Con los márgenes y N juntos, N queda también en su propia fila.
+            self._auditar(
+                tenant_id, user_id, "CREDIT_CARD_SETTLEMENT_DAYS_UPDATED", antes, despues
+            )
         await self._session.commit()
         logger.info(
             "health_config.updated",
@@ -205,6 +210,10 @@ class HealthConfigService:
             credit_card_settlement_days_is_custom=False,
         )
         self._auditar(tenant_id, user_id, "MARGIN_CONFIG_RESET", antes, despues)
+        if antes.credit_card_settlement_days != despues.credit_card_settlement_days:
+            self._auditar(
+                tenant_id, user_id, "CREDIT_CARD_SETTLEMENT_DAYS_RESET", antes, despues
+            )
         await self._session.commit()
         return despues
 

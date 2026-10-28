@@ -62,32 +62,57 @@ _PAYMENT_METHOD_MAP = {
 }
 
 
+#: Contexto de tarjeta: sin alguna de estas palabras, «crédito» NO es tarjeta (N-2).
+_CONTEXTO_TARJETA = frozenset(
+    {"tarjeta", "tc", "visa", "master", "mastercard", "amex", "cabal", "naranja", "cuotas"}
+)
+#: Contexto de fiado: «a crédito», «crédito de la casa», «en cuenta corriente»…
+_CONTEXTO_FIADO = frozenset({"fiado", "libreta", "corriente", "cte", "ctacte"})
+
+
 def normalize_payment_method(value: str | None) -> str:
     """Texto libre → código canónico de método de pago; sin match → 'other'.
 
     Tolera tildes y separadores ("Cuenta_Corriente", "débito automático",
-    "Mercado-Pago") normalizando la clave antes del lookup.
+    "Mercado-Pago", "Fiado (crédito)") normalizando la clave antes del lookup.
 
-    Tarjetas (G-2, D-3): si la clave no está en el mapa, una palabra «credito»
-    la hace crédito («Tarjeta de crédito», «Crédito 3 cuotas», «Visa crédito») y
-    una «debito», débito («Tarjeta de débito», «Visa débito»). «Tarjeta» o «Visa»
-    solos son ambiguos y quedan en 'other'; con las dos palabras, o «nota de
-    crédito» (un comprobante, no un medio de pago), también. Sólo es el camino
-    de entrada: lo importado antes con estas frases sigue guardado como 'other'.
+    Frases sin match exacto (G-2/N-2, revisión #217), en este orden:
+      - fiado: «fiado», «libreta», «cuenta corriente», «cta cte», «de la casa» o
+        «a crédito» (salvo «tarjeta a crédito») → 'account' (el canónico del
+        fiado, el que dispara el guard de fiado del import). Si además dice
+        «débito» es ambiguo → 'other'.
+      - «nota de crédito/débito» (un comprobante) → 'other'; «crédito fiscal»
+        también, porque no tiene contexto de tarjeta.
+      - «crédito» con contexto de tarjeta («tarjeta», «tc», «visa», «master»,
+        «amex», «cabal», «naranja», «cuotas») → 'credit_card'; sin ese
+        contexto → 'other' («crédito personal»).
+      - «débito» → 'debit_card' («Tarjeta de débito», «Visa débito»); «débito
+        automático …» → 'transfer'.
+      - «Tarjeta» o «Visa» solos, o con «crédito» y «débito» juntos → 'other'.
+    «crédito» sola sigue en el mapa → 'credit_card', como antes del PR. Sólo es
+    el camino de entrada: lo importado antes con estas frases sigue como 'other'.
     """
     if not value:
         return "other"
-    key = re.sub(r"[.\s\-_/]+", " ", strip_accents(str(value).strip().lower())).strip()
+    key = re.sub(r"[.,;:()\[\]\s\-_/]+", " ", strip_accents(str(value).strip().lower())).strip()
     canonico = _PAYMENT_METHOD_MAP.get(key)
     if canonico is not None:
         return canonico
     palabras = set(key.split())
     credito, debito = "credito" in palabras, "debito" in palabras
+    relleno = f" {key} "
+    if (
+        palabras & _CONTEXTO_FIADO
+        or " de la casa " in relleno
+        or (" a credito " in relleno and not palabras & _CONTEXTO_TARJETA)
+    ):
+        return "other" if debito else "account"
     if "nota" in palabras or credito == debito:
         return "other"
-    if debito and "automatico" in palabras:
-        return "transfer"  # «débito automático de la tarjeta»: sale del banco
-    return "credit_card" if credito else "debit_card"
+    if debito:
+        # «débito automático de la tarjeta»: sale del banco.
+        return "transfer" if "automatico" in palabras else "debit_card"
+    return "credit_card" if palabras & _CONTEXTO_TARJETA else "other"
 
 
 # Alias interno legacy.

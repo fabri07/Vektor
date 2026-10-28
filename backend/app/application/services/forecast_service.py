@@ -10,10 +10,12 @@ No requiere tabla propia en esta fase: los resultados se cachean en Redis (TTL 6
 
 Tarjeta de crédito (D-3/R-10, decisión del dueño 2026-10-28): lo vendido con
 crédito entra a caja N días corridos después de la venta (N por tenant, por
-defecto 14; `health_config_service.get_credit_card_settlement_days`). Se proyecta
-aparte del ingreso líquido: cada día futuro suma el crédito vendido N días antes
-—real si ese día ya pasó, promedio del historial de crédito si todavía no—, y
-nunca entra además al promedio del ingreso líquido.
+defecto 14; `health_config_service.get_credit_card_settlement_days`). Cada día
+futuro suma el crédito vendido N días antes: el real si ese día ya pasó; si no,
+el esperado según el modelo de la serie de crédito. Las dos series se modelan
+sobre el mismo calendario (tendencia por día corrido, no por fila), así que el
+modelo es lineal en la serie y con N = 0 la proyección da lo mismo que contar el
+crédito como caja el mismo día, en todos los tiers (N-1, revalidación #217).
 """
 
 from __future__ import annotations
@@ -40,6 +42,8 @@ from app.persistence.repositories.owner_capital_repository import flujo_de_diner
 logger = get_logger(__name__)
 
 _CACHE_TTL = 60 * 60 * 6  # 6 horas
+#: Tope de N (`HealthConfigRequest.credit_card_settlement_days`).
+_MAX_SETTLEMENT_DAYS = 60
 
 #: Ventas que NO son plata en caja el día de la venta: el fiado (deuda a cobrar)
 #: y la tarjeta de crédito (se acredita N días después; D-3/R-10). Es la resta de
@@ -77,6 +81,16 @@ def _cache_key(tenant_id: UUID, settlement_days: int) -> str:
     # v4: el crédito entra a N días; N va en la clave para que cambiarlo no
     # sirva la proyección calculada con el N anterior.
     return f"forecast:cash:v4:{tenant_id}:n{settlement_days}"
+
+
+async def invalidar_cache(tenant_id: UUID, redis: Redis) -> None:
+    """Borra la proyección cacheada del tenant con todos los N posibles: la
+    llaman PATCH/DELETE de /settings/health-config para no servir un blob de
+    antes del cambio (volver a un N anterior reusaría su clave)."""
+    try:
+        await redis.delete(*(_cache_key(tenant_id, n) for n in range(_MAX_SETTLEMENT_DAYS + 1)))
+    except Exception as exc:
+        logger.warning("forecast.cache_invalidate_failed", error=str(exc))
 
 
 def _dia(v: object) -> date:
@@ -225,6 +239,7 @@ class _Modelo:
         tier: int,
         today: date,
         dias_de_venta: Iterable[date],
+        inicio: date,
     ) -> None:
         self.avg = sum(serie.values()) / max(data_days, 1)
         self.wd_mult = [1.0] * 7
@@ -244,8 +259,13 @@ class _Modelo:
             if wd_cnt[wd] > 0 and self.avg > 0:
                 self.wd_mult[wd] = (wd_sum[wd] / wd_cnt[wd]) / self.avg
         if tier == 3:
-            recent_30 = [v for d, v in serie.items() if d >= today - timedelta(days=30)]
-            old_30 = [v for d, v in serie.items() if d <= today - timedelta(days=60)]
+            # N-1: la tendencia promedia sobre el CALENDARIO (día sin fila = 0),
+            # no por fila: en una serie rala daba una pendiente «por día con
+            # venta» que después se suma a todos los días (+26 % en tier 3). Así
+            # el modelo es lineal: líquido + crédito = total.
+            calendario = [inicio + timedelta(days=k) for k in range((today - inicio).days + 1)]
+            recent_30 = [serie.get(d, 0.0) for d in calendario if d >= today - timedelta(days=30)]
+            old_30 = [serie.get(d, 0.0) for d in calendario if d <= today - timedelta(days=60)]
             if recent_30 and old_30:
                 recent_avg = sum(recent_30) / len(recent_30)
                 old_avg = sum(old_30) / len(old_30)
@@ -268,9 +288,16 @@ async def _compute_forecast(
 
     # Agregados DIARIOS: agrupar por func.date() para no fragmentar por hora/minuto
     # ahora que transaction_date es un timestamp.
-    daily_income = await ingresos_de_caja_por_dia(tenant_id, db, window_start)
-    daily_credit = await credito_por_dia(tenant_id, db, window_start)
-    dias_de_venta = await dias_con_ventas(tenant_id, db, window_start)
+    # Borde superior duro: una fila con fecha futura no es historia (m-8).
+    daily_income = {
+        d: v for d, v in (await ingresos_de_caja_por_dia(tenant_id, db, window_start)).items()
+        if d <= today
+    }
+    daily_credit = {
+        d: v for d, v in (await credito_por_dia(tenant_id, db, window_start)).items()
+        if d <= today
+    }
+    dias_de_venta = {d for d in await dias_con_ventas(tenant_id, db, window_start) if d <= today}
     pendiente = round(credito_sin_acreditar(daily_credit, today, settlement_days), 2)
 
     expense_day = func.date(ExpenseEntry.transaction_date).label("day")
@@ -285,7 +312,9 @@ async def _compute_forecast(
     )
     expense_rows = (await db.execute(expense_q)).all()
 
-    daily_expense: dict[date, float] = {_dia(r.day): float(r.total or 0) for r in expense_rows}
+    daily_expense: dict[date, float] = {
+        _dia(r.day): float(r.total or 0) for r in expense_rows if _dia(r.day) <= today
+    }
     # Capital de socios (D·2): la proyección es de CAJA, y un retiro en dinero
     # sale de la caja igual que cuando era un gasto PAYROLL. Los aportes no se
     # proyectan: son plata del socio, no ingreso del negocio.
@@ -336,8 +365,9 @@ async def _compute_forecast(
             "la proyección puede no reflejar la actividad actual."
         )
 
-    liquido = _Modelo(daily_income, data_days, tier, today, dias_de_venta)
-    credito = _Modelo(daily_credit, data_days, tier, today, dias_de_venta)
+    inicio = all_dates[0]
+    liquido = _Modelo(daily_income, data_days, tier, today, dias_de_venta, inicio)
+    credito = _Modelo(daily_credit, data_days, tier, today, dias_de_venta, inicio)
     avg_expense = sum(daily_expense.values()) / data_days
 
     points: list[ForecastPoint] = []

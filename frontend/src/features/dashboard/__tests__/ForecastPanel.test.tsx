@@ -44,7 +44,7 @@ describe("ForecastPanel — tarjeta de crédito a N días (D-3/R-10)", () => {
 
     const aviso = await screen.findByTestId("forecast-acreditacion-credito");
     expect(aviso).toHaveTextContent(/tarjeta de crédito se cuentan a 21 días de la venta/i);
-    expect(screen.getByRole("link", { name: /Score de salud/i })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /Margen objetivo/i })).toHaveAttribute(
       "href",
       "/settings?tab=salud",
     );
