@@ -982,6 +982,36 @@ _CONTACTO_NO_DICE_QUE_DATO_ES = (
     "la columna trae el número, mapeala a mano a Teléfono."
 )
 
+#: I5-3: «N° Venta», «Nro compra», «Número de pago». El calificador se calculaba
+#: y ninguna regla lo leía, así que el número de orden se proponía como MONTO
+#: —«unico», sin duda— y cada fila entraba con su número correlativo como plata.
+#: No se resuelve a `invoice_number` solo: el número de una orden no siempre es
+#: el del comprobante, y la identidad no se adivina (E6b).
+_IDENTIFICADOR_NO_ES_MONTO = (
+    "Es el número que identifica la operación, no un monto: importarlo como monto "
+    "registraría el número de orden como plata. Si es el número de comprobante, "
+    "elegilo a mano; si no, se guarda como campo propio."
+)
+_CANTIDAD_VENDIDA_NO_ES_STOCK = (
+    "Es una cantidad vendida, no el stock que hay hoy: cargarla como stock de "
+    "apertura daría por existente mercadería que no está. Se guarda como campo "
+    "propio."
+)
+_UMBRAL_NO_ES_STOCK = (
+    "Es un umbral de stock (mínimo o máximo), no el stock que hay hoy: cargarlo "
+    "como stock de apertura daría por existente mercadería que no está. Se guarda "
+    "como campo propio."
+)
+#: I5-3/I5-4: el código es la IDENTIDAD del producto. El del proveedor no tiene
+#: por qué ser el del negocio, y dos artículos de proveedores distintos pueden
+#: compartirlo: tomarlo como SKU los fusiona.
+_CODIGO_DEL_PROVEEDOR = (
+    "Es el código con que el proveedor identifica el artículo, que no tiene por "
+    "qué ser el tuyo. El código (SKU) es la identidad del producto: tomar el del "
+    "proveedor puede juntar artículos distintos. Si es el mismo que usás vos, "
+    "elegí Código (SKU) a mano; si no, se guarda como campo propio."
+)
+
 RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
     "sale": {
         "fecha": (_r(target="transaction_date"),),
@@ -992,6 +1022,10 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
         "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "monto": (
+            _r("identificador", duda=_IDENTIFICADOR_NO_ES_MONTO),
+            # I5-3: «Valor unitario» es el precio de cada unidad, no el total
+            # de la línea: con cantidad > 1 subregistraba el ingreso.
+            _r("unitario", target="unit_price"),
             _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
             _r(
                 "de_pago",
@@ -1028,6 +1062,8 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         "mes": (_r(duda=_MES_NO_DICE_EL_DIA),),
         "hora": (_r(duda=_HORA_NO_SE_COMBINA_CON_LA_FECHA),),
         "monto": (
+            _r("identificador", duda=_IDENTIFICADOR_NO_ES_MONTO),
+            _r("unitario", target="unit_price"),
             _r("por_comprobante", duda=_MONTO_DEL_COMPROBANTE),
             _r(target="amount"),
         ),
@@ -1059,8 +1095,16 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
                 duda="¿es el nombre del producto de la línea, o el del proveedor?",
             ),
         ),
-        "sku": (_r(target="sku"),),
-        "codigo": (_r(target="sku"),),
+        "sku": (
+            _r("de_proveedor", opciones=("sku", "supplier_external_code"),
+               duda="¿es el código del artículo, o el código del proveedor?"),
+            _r(target="sku"),
+        ),
+        "codigo": (
+            _r("de_proveedor", opciones=("sku", "supplier_external_code"),
+               duda="¿es el código del artículo, o el código del proveedor?"),
+            _r(target="sku"),
+        ),
         "barcode": (_r(target="barcode"),),
         "comprobante": (_r(target="invoice_number"),),
         "envio": (
@@ -1111,16 +1155,27 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         # en un catálogo no dice cuál de los tres es, y adivinarlo es el bug que
         # F10 cerró.
         "monto": (
+            _r("identificador", duda=_IDENTIFICADOR_NO_ES_MONTO),
             _r("de_compra", target="unit_cost_ars"),
             _r("de_venta", target="sale_price_ars"),
         ),
         "nombre": (_r(target="name"),),
         "producto": (_r(target="name"),),
-        "sku": (_r(target="sku"),),
-        "codigo": (_r(target="sku"),),
+        "sku": (_r("de_proveedor", duda=_CODIGO_DEL_PROVEEDOR), _r(target="sku")),
+        "codigo": (_r("de_proveedor", duda=_CODIGO_DEL_PROVEEDOR), _r(target="sku")),
         "barcode": (_r(target="barcode"),),
-        "stock": (_r(target="stock_units"),),
-        "cantidad": (_r(target="stock_units"),),
+        # I5-3: un ranking de ventas o un umbral de reposición no es el stock de
+        # apertura; cargarlos como tal mueve inventario que no existe.
+        "stock": (
+            _r("vendido", duda=_CANTIDAD_VENDIDA_NO_ES_STOCK),
+            _r("umbral", duda=_UMBRAL_NO_ES_STOCK),
+            _r(target="stock_units"),
+        ),
+        "cantidad": (
+            _r("vendido", duda=_CANTIDAD_VENDIDA_NO_ES_STOCK),
+            _r("umbral", duda=_UMBRAL_NO_ES_STOCK),
+            _r(target="stock_units"),
+        ),
         "categoria": (_r(target="category"),),
         "descripcion": (_r(target="description"),),
         "vencimiento": (_r(target="expiry_date"),),
@@ -1237,34 +1292,63 @@ def read_header(normalized: str, entity_type: str) -> HeaderReading:
         concept=analisis.concept,
         qualifiers=quals,
     )
-    reglas = RESOLUCION.get(entity_type, {}).get(analisis.concept)
-    if reglas is None:
+    regla = _regla_aplicable(analisis.concept, quals, entity_type)
+    if regla is None:
         return sin_campo
+    if regla.target is not None:
+        return HeaderReading(
+            "unico",
+            target=regla.target,
+            concept=analisis.concept,
+            qualifiers=quals,
+        )
+    if regla.opciones:
+        return HeaderReading(
+            "ambiguo",
+            options=regla.opciones,
+            duda=regla.duda,
+            concept=analisis.concept,
+            qualifiers=quals,
+        )
+    return HeaderReading(
+        "sin_evidencia",
+        duda=regla.duda,
+        concept=analisis.concept,
+        qualifiers=quals,
+    )
 
-    for regla in reglas:
+
+def _regla_aplicable(
+    concept: str, quals: frozenset[str], entity_type: str
+) -> ReglaDeTarget | None:
+    """La primera regla del concepto cuyos calificadores están todos presentes."""
+    for regla in RESOLUCION.get(entity_type, {}).get(concept, ()):
         if regla.si <= quals:
-            if regla.target is not None:
-                return HeaderReading(
-                    "unico",
-                    target=regla.target,
-                    concept=analisis.concept,
-                    qualifiers=quals,
-                )
-            if regla.opciones:
-                return HeaderReading(
-                    "ambiguo",
-                    options=regla.opciones,
-                    duda=regla.duda,
-                    concept=analisis.concept,
-                    qualifiers=quals,
-                )
-            return HeaderReading(
-                "sin_evidencia",
-                duda=regla.duda,
-                concept=analisis.concept,
-                qualifiers=quals,
-            )
-    return sin_campo
+            return regla
+    return None
+
+
+def duda_del_calificador(normalized: str, entity_type: str) -> str | None:
+    """I5-3: la duda que le puso un CALIFICADOR del encabezado, o ``None``.
+
+    Para el importador, no para la pantalla. «Stock mínimo», «Código proveedor»
+    o «N° Venta» no se mapean solos, pero el confirm tenía una tercera capa —la
+    heurística por nombre (`_STOCK_COLS`, `_SKU_COLS`, los montos), que matchea
+    por substring— y con el campo sin mapear volvía a leerlas como stock, SKU o
+    monto. Esto es lo que esa capa consulta para no hacerlo.
+
+    Sólo cuenta la duda de una regla CON calificador: la de «esta hoja no tiene
+    un campo para eso» o la de «Precio» sin más (tres precios posibles) no dice
+    que la columna sea otra cosa, y la heurística sigue teniendo derecho a
+    mirarla como siempre.
+    """
+    analisis = analyze_header(normalized)
+    if analisis.concept is None:
+        return None
+    regla = _regla_aplicable(analisis.concept, analisis.qualifiers, entity_type)
+    if regla is None or not regla.si or regla.target is not None:
+        return None
+    return regla.duda
 
 
 def heuristic_target(
@@ -1306,8 +1390,10 @@ def heuristic_target(
 # bloquea, las dos leyendo de acá.
 #
 # Alcance deliberado: montos, cantidades, fechas y los tres precios — donde una
-# colisión corrompe plata. `name`/`notes`/`category` quedan afuera (varias
-# columnas pueden ser legítimas) y se cubren con un aviso no bloqueante.
+# colisión corrompe plata — y los campos de identidad (I5-4: sku, barcode).
+# `name`/`notes`/`category` quedan afuera (varias columnas pueden ser
+# legítimas); ahí el importador se queda con la primera columna y hoy NO hay
+# aviso (límite conocido: el aviso no bloqueante que se prometía acá no existe).
 # Campos de una venta/gasto que REFERENCIAN a un cliente o proveedor. Mapear
 # alguno hace que el import cree o toque ese maestro como efecto lateral, aunque
 # el archivo no traiga una hoja de maestros. El borrado necesita saberlo para
@@ -1352,6 +1438,12 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
             # B·7: una fila tiene UN código de cliente; dos columnas eligen a
             # quién se le atribuye la venta.
             "customer_external_code",
+            # I5-4: el código y el de barras identifican el PRODUCTO de la
+            # línea. Dos columnas al mismo destino se resolvían por orden de
+            # columna: otro archivo con las columnas al revés reconocía otro
+            # producto.
+            "sku",
+            "barcode",
         }
     ),
     # F-H6.a: los nuevos son escalares por la misma razón que en `sale` — dos
@@ -1381,12 +1473,19 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
             "supplier_cuil",
             # B·7: idem, el código del proveedor.
             "supplier_external_code",
+            # I5-4: ver la nota en `sale`.
+            "sku",
+            "barcode",
         }
     ),
     "product": frozenset(
         {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units",
          # E6a — ver la nota en `customer`.
-         "external_code", "external_source"}
+         "external_code", "external_source",
+         # I5-4: el SKU y el código de barras son la identidad del producto (el
+         # motor fusiona por SKU). Con «Código proveedor» y «Código» las dos al
+         # SKU ganaba la primera columna, y la identidad dependía del orden.
+         "sku", "barcode"}
     ),
     # Los maestros quedaron sin ningún campo escalar hasta acá, y no porque sus
     # campos admitan varias columnas: un proveedor tiene UN CUIL y UN teléfono

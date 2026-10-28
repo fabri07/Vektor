@@ -156,7 +156,14 @@ _SERIAL_MAXIMO = 73050  # 2099-12-31
 
 _SOLO_DIGITOS = re.compile(r"^\d+(?:\.\d+)?$")
 
-_SEPARADOR_DE_FECHA = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$")
+#: La hora, cuando viene, es un sufijo opcional y se captura aparte (I6-5): sin
+#: ella, una columna mm/dd exportada CON hora ('04/13/2026 10:30') no aportaba
+#: ninguna señal, caía al default dmy y cada celda se leía por su cuenta — la de
+#: '03/04/2026 11:00' como 3 de abril en una columna que dice 4 de marzo. El
+#: convenio es de la fecha; la hora no lo cambia y se conserva tal cual.
+_SEPARADOR_DE_FECHA = re.compile(
+    r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?$"
+)
 
 
 @dataclass(frozen=True)
@@ -343,4 +350,6 @@ def _parsear_con_orden(
     # Reescribir a dd/mm y reusar el parser único, en vez de mantener una segunda
     # lista de formatos que pueda divergir de `BUSINESS_DATE_FORMATS`.
     mes, dia, anio = match.group(1), match.group(2), match.group(3)
-    return parse_business_datetime(f"{dia}/{mes}/{anio}", century_pivot=century_pivot)
+    hora = match.group(4)
+    reescrita = f"{dia}/{mes}/{anio}" if hora is None else f"{dia}/{mes}/{anio} {hora}"
+    return parse_business_datetime(reescrita, century_pivot=century_pivot)

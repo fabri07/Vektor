@@ -872,6 +872,9 @@ class RereadCounts(BaseModel):
     # Filas ya importadas (huella presente) que el reimport saltea — ni nuevas ni
     # duplicadas. Default 0 por compatibilidad.
     unchanged: int = 0
+    # I4-6: pendientes de «Otros» que el apply vuelve a intentar (pueden entrar o
+    # volver a caer; no se cuentan como nuevas). Default 0 por compatibilidad.
+    retried_from_others: int = 0
     # Impacto estimado en el catálogo de productos.
     products_new: int = 0
     products_restock: int = 0
