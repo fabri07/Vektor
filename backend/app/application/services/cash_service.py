@@ -68,8 +68,11 @@ _CONTEXTO_TARJETA = frozenset(
 )
 #: Contexto de fiado: «a crédito», «crédito de la casa», «en cuenta corriente»…
 _CONTEXTO_FIADO = frozenset({"fiado", "libreta", "corriente", "cte", "ctacte"})
-#: Contexto bancario (N-3): «cuenta corriente» también es la cuenta del banco.
-_CONTEXTO_BANCARIO = frozenset({"transferencia", "transf", "banco", "bancaria", "bancario"})
+#: Contexto bancario (N-3/N-5): «cuenta corriente» también es la cuenta del banco.
+#: Una transferencia explícita nunca es tarjeta; «banco» solo sí puede serlo
+#: («Visa crédito Banco Nación»).
+_TRANSFERENCIA = frozenset({"transferencia", "transf"})
+_BANCO = frozenset({"banco", "bancaria", "bancario"})
 
 
 def normalize_payment_method(value: str | None) -> str:
@@ -79,8 +82,10 @@ def normalize_payment_method(value: str | None) -> str:
     "Mercado-Pago", "Fiado (crédito)") normalizando la clave antes del lookup.
 
     Frases sin match exacto (G-2/N-2/N-3, revisión #217), en este orden:
-      - bancario: «transferencia», «transf», «banco», «bancaria» → 'transfer';
-        «cheque» → 'other', como el mapa («Transferencia cuenta corriente»,
+      - «transferencia» o «transf» → 'transfer', siempre (nunca es tarjeta).
+      - «banco», «bancaria», «bancario» → 'transfer' sólo si no hay contexto de
+        tarjeta, «crédito» ni «débito» («Visa crédito Banco Nación» es tarjeta).
+      - «cheque» → 'other', como el mapa («Transferencia cuenta corriente»,
         «Cheque cuenta corriente»: la cuenta corriente del banco, no fiado).
       - fiado: «fiado», «libreta», «cuenta corriente», «cta cte», «de la casa» o
         «a crédito» (salvo «tarjeta a crédito») → 'account' (el canónico del
@@ -106,7 +111,9 @@ def normalize_payment_method(value: str | None) -> str:
     palabras = set(key.split())
     credito, debito = "credito" in palabras, "debito" in palabras
     relleno = f" {key} "
-    if palabras & _CONTEXTO_BANCARIO:
+    if palabras & _TRANSFERENCIA:
+        return "transfer"
+    if palabras & _BANCO and not (palabras & _CONTEXTO_TARJETA or credito or debito):
         return "transfer"
     if "cheque" in palabras:
         return "other"

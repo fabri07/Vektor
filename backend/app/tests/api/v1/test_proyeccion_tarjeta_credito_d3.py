@@ -510,6 +510,19 @@ async def test_un_blob_de_la_version_anterior_no_se_sirve(
         ("Transferencia desde cuenta corriente bancaria", "transfer"),
         ("Transf. cta cte", "transfer"),
         ("Cheque cuenta corriente", "other"),
+        ("Cuenta corriente bancaria", "transfer"),
+        ("Depósito en banco", "transfer"),
+        # N-5: «banco» con contexto de tarjeta, crédito o débito sigue la regla
+        # de tarjeta; una transferencia explícita nunca es tarjeta.
+        ("Tarjeta de crédito Banco X", "credit_card"),
+        ("Tarjeta de crédito Banco Nación", "credit_card"),
+        ("Visa crédito Banco Nación", "credit_card"),
+        ("Crédito Banco Galicia 3 cuotas", "credit_card"),
+        ("Tarjeta de débito Banco X", "debit_card"),
+        ("Débito Banco X", "debit_card"),
+        ("Visa débito Banco Galicia", "debit_card"),
+        ("Visa Banco Nación", "other"),  # «Visa» sin crédito ni débito: ambiguo
+        ("Transferencia tarjeta", "transfer"),
         # Fiado (N-2): al canónico del fiado, el que dispara el guard del import.
         ("Fiado a crédito", "account"),
         ("Cuenta corriente crédito", "account"),
