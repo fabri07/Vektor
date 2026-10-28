@@ -2049,6 +2049,33 @@ def _source_row_ref(anchor: str | None) -> str | None:
     return hashlib.sha256(anchor.encode()).hexdigest()
 
 
+#: V-19 — cuántas muestras de posibles duplicados viajan en ``counts``. El aviso
+#: muestra éstas; el total va aparte.
+_MUESTRAS_DE_POSIBLES_DUPLICADOS = 3
+
+
+def _anotar_posibles_duplicados(
+    counts: dict[str, Any], plan: PlanDeIdentidad, hoja: str | None = None
+) -> None:
+    """V-19: los pares «con letra / sin letra» del plan que entraron los dos,
+    a ``counts`` (total + hasta tres muestras en castellano). Se avisa y nada
+    más: pueden ser dos comprobantes, y colapsarlos podría borrar plata."""
+    if not plan.posibles_duplicados:
+        return
+    counts["posibles_duplicados_sin_letra"] = counts.get(
+        "posibles_duplicados_sin_letra", 0
+    ) + len(plan.posibles_duplicados)
+    muestras: list[str] = counts.setdefault("posibles_duplicados_sin_letra_muestras", [])
+    en_hoja = f" de la hoja «{hoja}»" if hoja else ""
+    for par in plan.posibles_duplicados:
+        if len(muestras) >= _MUESTRAS_DE_POSIBLES_DUPLICADOS:
+            break
+        muestras.append(
+            f"fila {par.fila_con_letra + 1} («{par.comprobante_con_letra}») y "
+            f"fila {par.fila_sin_letra + 1} («{par.comprobante_sin_letra}»){en_hoja}"
+        )
+
+
 def _registrar_monto_derivado(
     cf: dict[str, str], linea: LineAmount, counts: dict[str, Any]
 ) -> None:
@@ -6670,6 +6697,8 @@ async def _insert_confirmed_data_impl(
             else plan_vacio()
         )
         _planes_identidad_plano = [_plan_ventas, _plan_gastos]
+        _anotar_posibles_duplicados(counts, _plan_ventas)
+        _anotar_posibles_duplicados(counts, _plan_gastos)
         _efectos_de_la_fila_plano: list[tuple[str, uuid.UUID]] = []
 
         for row_index, row in enumerate(rows):
@@ -10927,6 +10956,7 @@ async def _insert_multisheet_data(
                 entity=entity,
             )
             _planes_identidad.append(_plan_ident)
+            _anotar_posibles_duplicados(counts, _plan_ident, str(ctx.get("label") or ""))
             for _i, row in enumerate(rows):
                 # B1: idempotencia por (archivo, contexto, índice). Chequeo
                 # READ-ONLY; la huella se registra recién DESPUÉS y solo si la

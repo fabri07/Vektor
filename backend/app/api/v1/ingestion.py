@@ -4352,6 +4352,21 @@ async def confirm_file(
             "precio y el costo de una tabla de ventas o compras no se cargan. Para "
             "cargarlos, subí el catálogo en una hoja o archivo de productos."
         )
+    if counts.get("posibles_duplicados_sin_letra"):
+        # V-19: «Factura A 0001-123» y «FC 0001-123» con el mismo monto entran
+        # las dos (pueden ser dos ventas), pero pueden ser la misma escrita dos
+        # veces. No se decide sola: se avisa qué revisar.
+        _pares = counts["posibles_duplicados_sin_letra"]
+        _muestras = counts.get("posibles_duplicados_sin_letra_muestras") or []
+        _detalle = "; ".join(_muestras)
+        if _pares > len(_muestras):
+            _detalle += f" y {_pares - len(_muestras)} más"
+        warnings.append(
+            f"{_pares} par(es) de comprobantes pueden estar repetidos: mismo punto de "
+            "venta, número y monto, y a uno le falta la letra (A, B, C…) "
+            f"({_detalle}). Se cargaron los dos. Revisá si son el mismo comprobante "
+            "escrito dos veces y, si lo son, anulá uno."
+        )
     if counts.get("filas_sin_cantidad"):
         # E4: la fila traía cantidad y no se pudo usar. Antes entraba como 1
         # unidad y no había nada que avisar porque no había nada que revisar.
