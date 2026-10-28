@@ -23,6 +23,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import stock_service
+from app.application.services.ingestion_import_service import (
+    MONTO_CANONICO_KEY,
+    monto_de_fila_de_otros,
+)
 from app.application.services.reparacion_ventas_sin_compra_service import (
     VOID_REASON,
     analizar,
@@ -101,6 +105,11 @@ async def test_apply_y_revert(db_session: AsyncSession, sample_tenant: Tenant) -
     assert sin_compra.void_reason == VOID_REASON
     otros = (await db_session.execute(select(UnclassifiedRecord))).scalars().all()
     assert sorted(Decimal(o.row_data["monto"]) for o in otros) == [Decimal("2000"), Decimal("3000")]
+    # V-16: la fila la escribió Véktor, así que su «2000.00» se lee (lote y link-product).
+    assert {o.row_data.get(MONTO_CANONICO_KEY) for o in otros} == {"1"}
+    assert sorted(Decimal(str(monto_de_fila_de_otros(o.row_data))) for o in otros) == [
+        Decimal("2000"), Decimal("3000"),
+    ]
     assert all(o.suggested_entity == "sale" for o in otros)
     await db_session.refresh(vela)
     assert vela.stock_units == 10  # las 2 unidades vuelven

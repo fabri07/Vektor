@@ -144,6 +144,13 @@ interface FilaConFalla {
   mensaje: string;
   cantidad: string;
   fecha: string;
+  /**
+   * Lo que el backend ya pidió para esta fila. Se acumula: si al mandar la
+   * cantidad responde que falta la fecha, la cantidad escrita se sigue mandando
+   * (si no, el reintento volvía a pedirla y la fila no salía nunca).
+   */
+  pideCantidad: boolean;
+  pideFecha: boolean;
 }
 
 const inputCls =
@@ -284,8 +291,11 @@ export function VincularColaModal({
           record,
           code,
           mensaje: mensajeVincular(error),
-          cantidad: "",
+          // La cantidad que se escribió arriba para esta fila no se pierde.
+          cantidad: usarCantidad ? cantidadPedida.valor : "",
           fecha: "",
+          pideCantidad: usarCantidad || code === "CANTIDAD_REQUERIDA",
+          pideFecha: code === "FECHA_REQUERIDA",
         });
       }
     }
@@ -315,13 +325,11 @@ export function VincularColaModal({
 
   const reintentar = async (falla: FilaConFalla) => {
     if (corriendo) return;
-    const conCantidad = falla.code === "CANTIDAD_REQUERIDA";
-    const conFecha = falla.code === "FECHA_REQUERIDA";
-    const problema = conCantidad
-      ? errorDeCantidad(falla.cantidad)
-      : conFecha
-        ? errorDeFecha(falla.fecha)
-        : null;
+    const conCantidad = falla.pideCantidad;
+    const conFecha = falla.pideFecha;
+    const problema =
+      (conCantidad ? errorDeCantidad(falla.cantidad) : null) ??
+      (conFecha ? errorDeFecha(falla.fecha) : null);
     if (problema) {
       setFallas((prev) =>
         prev.map((f) => (f.record.id === falla.record.id ? { ...f, mensaje: problema } : f)),
@@ -354,10 +362,17 @@ export function VincularColaModal({
         if (resto.length === 0) siguiente();
         return;
       }
+      const code = codigoDeError(error);
       setFallas((prev) =>
         prev.map((f) =>
           f.record.id === falla.record.id
-            ? { ...f, code: codigoDeError(error), mensaje: mensajeVincular(error) }
+            ? {
+                ...f,
+                code,
+                mensaje: mensajeVincular(error),
+                pideCantidad: f.pideCantidad || code === "CANTIDAD_REQUERIDA",
+                pideFecha: f.pideFecha || code === "FECHA_REQUERIDA",
+              }
             : f,
         ),
       );
@@ -519,7 +534,7 @@ export function VincularColaModal({
                   </span>
                   <span className="text-vk-danger">{f.mensaje}</span>
                   <span className="flex items-center gap-2">
-                    {f.code === "CANTIDAD_REQUERIDA" ? (
+                    {f.pideCantidad ? (
                       <input
                         aria-label={`Cantidad de la venta del ${f.record.row_data?.fecha ?? ""}`}
                         className={`${inputCls} w-24`}
@@ -530,7 +545,7 @@ export function VincularColaModal({
                         onChange={(e) => setCantidadFalla(f.record.id, e.target.value)}
                       />
                     ) : null}
-                    {f.code === "FECHA_REQUERIDA" ? (
+                    {f.pideFecha ? (
                       <input
                         aria-label={`Fecha de la venta del ${f.record.row_data?.fecha || "—"}`}
                         className={inputCls}

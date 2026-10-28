@@ -12,6 +12,13 @@ siempre. Esto la libera para que el lote la vuelva a juzgar.
   candados del lote (no frena las ventas del local) y una ``DataRepairRun``.
 - **``--revert <run_id>``**: vuelve a poner las huellas de esa corrida.
 
+**Supuesto:** «con respaldo» se reconoce por ``source_row_ref = unclassified:{id}``
+en una venta o un gasto vivo. Lo llevan las operaciones nacidas de la fila CON
+archivo (de a una o del lote); una fila de chat (sin archivo) o un gasto del lote
+viejo no lo llevan, así que ahí el chequeo no ve nada. Igual no pueden tener una
+operación viva: el lote viejo marcaba la fila IMPORTED en la misma transacción
+que creaba la operación, y lo que se mira son filas PENDING.
+
 Hay que decir a quién: ``--tenant-id`` o, explícito, ``--todos``. Nunca imprime la
 connection URL: sólo ``host`` y ``base``.
 

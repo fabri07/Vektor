@@ -23,7 +23,10 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services.ingestion_import_service import CONVENIOS_DE_FECHA_KEY
+from app.application.services.ingestion_import_service import (
+    CONVENIOS_DE_FECHA_KEY,
+    MONTO_CANONICO_KEY,
+)
 from app.domain.business_time import fecha_de_negocio, today_ar
 from app.persistence.models.product import Product
 from app.persistence.models.product_alias import ProductAlias
@@ -202,20 +205,21 @@ async def test_la_fecha_que_manda_el_cliente_no_puede_ser_futura(
 
 
 @pytest.mark.parametrize(
-    ("monto", "esperado"),
+    ("monto", "canonico", "esperado"),
     [
-        ("1.234,50", Decimal("1234.50")),
-        # La forma canónica que escribe Véktor (B·5e/B·5g: `str(Decimal)`).
-        ("1200.00", Decimal("1200.00")),
-        ("1500.5", Decimal("1500.5")),
+        ("1.234,50", False, Decimal("1234.50")),
+        # La forma canónica que escribe Véktor (B·5e/B·5g: `str(Decimal)`), con su marca.
+        ("1200.00", True, Decimal("1200.00")),
+        ("1500.5", True, Decimal("1500.5")),
     ],
 )
 async def test_el_monto_se_lee_como_en_el_lote(
     client: AsyncClient, auth_headers: dict[str, Any], db_session: AsyncSession,
-    sample_tenant: Tenant, monto: str, esperado: Decimal,
+    sample_tenant: Tenant, monto: str, canonico: bool, esperado: Decimal,
 ) -> None:
     coca = await _coca(db_session, sample_tenant)
-    rec = await _fila(db_session, sample_tenant, "13/04/2024", monto=monto)
+    marca = {MONTO_CANONICO_KEY: "1"} if canonico else {}
+    rec = await _fila(db_session, sample_tenant, "13/04/2024", monto=monto, **marca)
 
     r = await _vincular(client, auth_headers, rec, coca.id)
 
@@ -291,6 +295,7 @@ async def test_el_lote_lee_el_monto_canonico_de_una_venta_de_b5e(
             row_data={
                 "fecha": "2024-03-05", "monto": "1200.00", "cantidad": "1",
                 "producto": vela.name, "medio_de_pago": "cash",
+                MONTO_CANONICO_KEY: "1",
             },
             suggested_entity="sale",
             status="PENDING",

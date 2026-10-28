@@ -2115,6 +2115,12 @@ ORIGINALES_KEY = "__originales__"
 #: por celda: en una columna mm/dd, «04/03/2026» volvía como 4 de marzo.
 CONVENIOS_DE_FECHA_KEY = "__convenios_de_fecha__"
 
+# V-16: la fila de «Otros» la escribió Véktor (venta sacada por B·5e/B·5g) y su
+# ``monto`` es ``str(Decimal)`` («1200.00»), no una celda del archivo. Sólo con
+# esta marca el lote y `link-product` aceptan esa forma; una fila de archivo
+# sigue la lectura por columna sin excepción.
+MONTO_CANONICO_KEY = "__monto_canonico__"
+
 
 def _fila_con_articulo(nombre: Any, cantidad: Any) -> bool:
     """B·5b-2: ¿la fila de una compra de mercadería dice QUÉ artículo y CUÁNTOS?
@@ -5720,6 +5726,7 @@ async def _ventas_sin_compra_a_otros(
                 ),
                 "medio_de_pago": venta.payment_method,
                 "detalle": venta.notes,
+                MONTO_CANONICO_KEY: "1",
                 **filas_internas_de_venta(venta),
             }
             for _ident in identidades.get(("sale", venta.id), [])[:1]:
@@ -11410,39 +11417,53 @@ def interpretar_fecha_de_fila_de_otros(row: dict[str, Any] | None) -> FechaInter
 
 
 def monto_de_fila_de_otros(row: dict[str, Any] | None) -> Decimal | None:
-    """V-16: el monto de una fila de «Otros» como lo lee el lote (``_parse_amount``).
+    """V-16: el monto de una fila de «Otros» como lo lee el lote.
 
     ``None`` si no hay un monto positivo legible: «12.500» sin convenio es
     ambiguo y no se adivina, igual que en la carga.
     """
-    return _monto_de_fila(columnas_de_fila_de_otros(row))
+    row = row or {}
+    return _monto_de_fila(row, columnas_de_fila_de_otros(row))
 
 
-#: La forma en que Véktor escribe un monto en la fila (``str(Decimal)``: «1200.00»).
-#: Un punto seguido de 1 o 2 dígitos no puede ser separador de miles, así que no
-#: admite otra escala: es la ÚNICA excepción a la lectura por columna (V-16).
+#: La forma en que Véktor escribe el monto de una fila que saca a «Otros»
+#: (``str(Decimal)``: «1200.00»). Vale SÓLO con ``MONTO_CANONICO_KEY``: en una
+#: fila de archivo un «12.50» en una columna de coma decimal es un dato
+#: incompatible con su columna, y ahí manda la columna.
 _MONTO_CANONICO = re.compile(r"^\d+\.\d{1,2}$")
 
+#: Las columnas que SON el monto de la operación, en orden de prioridad. Si la
+#: fila tiene una, el monto sale de ésa o de ninguna (V-16): caer a otra columna
+#: convertía el precio unitario o el costo en el monto de la venta.
+_MONTO_EXPLICITO_COLS: tuple[str, ...] = (
+    "importe_total", "total_venta", "monto_total", "total", "monto", "importe",
+)
 
-def _monto_de_otros(raw: Any) -> Decimal | None:
+
+def _monto_de_otros(raw: Any, canonico: bool) -> Decimal | None:
     valor = _parse_amount(raw)
-    if valor is not None:
+    if valor is not None or not canonico:
         return valor
     texto = str(raw).strip() if isinstance(raw, str) else ""
     if _MONTO_CANONICO.match(texto):
-        canonico = Decimal(texto)
-        return canonico if canonico > 0 else None
+        monto = Decimal(texto)
+        return monto if monto > 0 else None
     return None
 
 
-def _monto_de_fila(cols_fila: dict[str, Any]) -> Decimal | None:
-    # V-16: las filas que escribe Véktor (venta sin compra de B·5e/B·5g) guardan
-    # «1200.00», que `parsear_monto` sin convenio declara ambiguo: sin la forma
-    # canónica, ni el lote ni `link-product` las podían leer.
+def _monto_de_fila(row: dict[str, Any], cols_fila: dict[str, Any]) -> Decimal | None:
+    canonico = str(row.get(MONTO_CANONICO_KEY) or "") == "1"
+    columna = _row_col(cols_fila, _MONTO_EXPLICITO_COLS)
+    if columna is not None:
+        return _monto_de_otros(cols_fila[columna], canonico)
+    # Sin columna de monto (una hoja con «gasto», «costo» o «precio_venta»): la
+    # cascada de siempre por palabra clave. Sus conjuntos traen columnas que no
+    # son montos («proveedor», «medio_de_pago» por «pago»), así que acá sí sigue
+    # a la próxima cuando una no se lee.
     return (
-        _monto_de_otros(_row_val(cols_fila, _VENTA_TOTAL_COLS))
-        or _monto_de_otros(_row_val(cols_fila, _GASTO_AMOUNT_COLS))
-        or _monto_de_otros(_row_val(cols_fila, _VENTA_AMOUNT_COLS))
+        _monto_de_otros(_row_val(cols_fila, _VENTA_TOTAL_COLS), canonico)
+        or _monto_de_otros(_row_val(cols_fila, _GASTO_AMOUNT_COLS), canonico)
+        or _monto_de_otros(_row_val(cols_fila, _VENTA_AMOUNT_COLS), canonico)
     )
 
 
@@ -11642,7 +11663,7 @@ async def bulk_import_unclassified(
             continue
         cols_fila = _columnas(rec)
         fecha = _fecha_de_fila_de_otros(row, cols_fila)
-        amount = _monto_de_fila(cols_fila)
+        amount = _monto_de_fila(row, cols_fila)
         if fecha is None or amount is None:
             # F6-A5: no parseó (fecha o monto ilegible) → requiere completarlo a
             # mano en el modal. Distinto de "ya importado" (skipped): la UI debe

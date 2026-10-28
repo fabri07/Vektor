@@ -389,6 +389,41 @@ it("FECHA_REQUERIDA (V-16): muestra el motivo del backend, pide la fecha y la ma
   });
 });
 
+it("cantidad y después fecha: el reintento manda las dos y no vuelve a pedir la cantidad", async () => {
+  svc.linkProduct!
+    .mockResolvedValueOnce("ok")
+    .mockRejectedValueOnce(axiosError(422, { code: "CANTIDAD_REQUERIDA" }))
+    .mockRejectedValueOnce(
+      axiosError(422, { code: "FECHA_REQUERIDA", message: "La fecha «04/03/2026» es ambigua." }),
+    )
+    .mockResolvedValueOnce("ok");
+  await abrirCola([venta("r1", "Queso"), venta("r2", "Queso", { cantidad: "1,5" })]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+
+  const boton = await screen.findByRole("button", {
+    name: /Reintentar la venta del 2026-10-02 por/,
+  });
+  fireEvent.change(screen.getByLabelText("Cantidad de la venta del 2026-10-02"), {
+    target: { value: "3" },
+  });
+  fireEvent.click(boton);
+  expect(await screen.findByText("La fecha «04/03/2026» es ambigua.")).toBeInTheDocument();
+  expect(svc.linkProduct).toHaveBeenLastCalledWith("r2", { product_id: "p-yerba", quantity: 3 });
+  // La cantidad ya escrita sigue a la vista, y aparece la fecha.
+  expect(screen.getByLabelText("Cantidad de la venta del 2026-10-02")).toHaveValue(3);
+  fireEvent.change(screen.getByLabelText("Fecha de la venta del 2026-10-02"), {
+    target: { value: "2026-03-04" },
+  });
+  fireEvent.click(boton);
+  await screen.findByText(/Terminaste la cola/);
+  expect(svc.linkProduct).toHaveBeenLastCalledWith("r2", {
+    product_id: "p-yerba",
+    quantity: 3,
+    transaction_date: "2026-03-04T00:00:00",
+  });
+});
+
 it("errorDeFecha: la fecha indicada no puede ser posterior a hoy", () => {
   const hoy = new Date(2026, 9, 27);
   expect(errorDeFecha("2026-10-27", hoy)).toBeNull();

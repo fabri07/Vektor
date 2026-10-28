@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service, stock_service
 from app.application.services.ingestion_import_service import (
+    MONTO_CANONICO_KEY,
     ROW_REF_KEY,
     _en_unidad_de_venta,
     filas_internas_de_identidad,
@@ -278,6 +279,8 @@ async def reparar(
             "detalle": v.notes,
             # Internas (``__``): no se muestran como columnas de la fila.
             "__sale_id__": str(v.id),
+            # V-16: el monto lo escribió Véktor («1200.00»), no es una celda.
+            MONTO_CANONICO_KEY: "1",
             **filas_internas_de_venta(v),
         }
         if v.source_row_ref:
