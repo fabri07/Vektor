@@ -184,15 +184,15 @@ _COVERAGE_BANDS: list[_Band] = [
 ]
 
 
-def _score_cash_coverage(liquid_inflow: Decimal, liquid_outflow: Decimal) -> int:
+def _score_cash_coverage(liquid_inflow: Decimal, liquid_outflow: Decimal) -> int | None:
     """
     ratio = ingresos_líquidos / egresos_líquidos en la ventana.
-    Si no hay egresos líquidos no se puede calcular el ratio: devolvemos un valor
-    sano-conservador cuando hay ingresos (no excelente, falta evidencia de egreso),
-    o 50 neutro si tampoco hay ingresos.
+    Sin egresos líquidos no hay ratio de cobertura que medir: ``None`` (caja
+    ausente, V-23). Antes devolvía 75 con ingresos y 50 sin nada, valores que
+    nadie midió y que pesaban 30% en el total.
     """
     if liquid_outflow <= 0:
-        return 75 if liquid_inflow > 0 else 50
+        return None
     ratio = float(liquid_inflow / liquid_outflow)
     return _band_score(ratio, _COVERAGE_BANDS)
 
@@ -201,21 +201,33 @@ def mide_caja_por_flujo(state: object) -> bool:
     """¿La caja se puntúa por cobertura de flujo líquido y no por días de saldo?
 
     Sí en modo «flujo» y también con saldo (arqueo u onboarding) pero sin gastos
-    fijos contra los que medirlo, si hay movimientos líquidos (D-10): un arqueo no
-    puede esconder una quema de caja que el flujo sí mide. Única definición: la
-    usan el motor, el insight `CASH_LOW` y la explicación de la dimensión.
+    fijos contra los que medirlo (D-10): un arqueo no puede esconder una quema de
+    caja que el flujo sí mide. En los dos casos hacen falta SALIDAS líquidas
+    (V-23): sin egresos no hay ratio, y entradas solas no dicen que la caja cubra
+    nada. Única definición: la usan el motor, el insight `CASH_LOW` y la
+    explicación de la dimensión.
     """
     cash_source = getattr(state, "cash_source", "desconocido")
-    if cash_source == "flujo":
-        return True
-    if cash_source not in FUENTES_CON_SALDO:
+    if cash_source != "flujo":
+        if cash_source not in FUENTES_CON_SALDO:
+            return False
+        if getattr(state, "monthly_fixed_expenses_est", Decimal("0")) > 0:
+            return False  # hay fijos: días de runway sobre el saldo
+    return bool(getattr(state, "liquid_outflow_est", Decimal("0")) > 0)
+
+
+def caja_sin_medir(state: object) -> bool:
+    """¿El motor deja la caja ausente (``None``) para este estado?
+
+    Sin saldo ni flujo (desconocido), en flujo sin salidas líquidas (V-23), o con
+    saldo sin gastos fijos ni salidas (D-10). La usan el insight y la dimensión
+    para no afirmar una cobertura que no se midió.
+    """
+    if mide_caja_por_flujo(state):
         return False
-    if getattr(state, "monthly_fixed_expenses_est", Decimal("0")) > 0:
-        return False  # hay fijos: días de runway sobre el saldo
-    return (
-        getattr(state, "liquid_inflow_est", Decimal("0")) > 0
-        or getattr(state, "liquid_outflow_est", Decimal("0")) > 0
-    )
+    if getattr(state, "cash_source", "desconocido") not in FUENTES_CON_SALDO:
+        return True
+    return not getattr(state, "monthly_fixed_expenses_est", Decimal("0")) > 0
 
 
 # ── Margin score ──────────────────────────────────────────────────────────────
@@ -415,7 +427,8 @@ def calculate_health_score(
     #   flujo               → cobertura líquida (no hay saldo, sí movimientos)
     #   desconocido         → sin dato: caja excluida del total y del riesgo
     # Con saldo pero sin gastos fijos no hay días de runway (D-10): se mide la
-    # cobertura del flujo si hay movimientos; si tampoco los hay, ausente.
+    # cobertura del flujo. Sin salidas líquidas no hay cobertura que medir, en
+    # flujo ni con saldo sin fijos (V-23): ausente, nunca un 75/50.
     cash_source = getattr(state, "cash_source", "desconocido")
     s_cash: int | None
     if mide_caja_por_flujo(state):
@@ -425,7 +438,7 @@ def calculate_health_score(
         )
     elif cash_source in FUENTES_CON_SALDO:
         s_cash = _score_cash(state.cash_on_hand_est, state.monthly_fixed_expenses_est, config)
-    else:  # desconocido
+    else:  # desconocido, o flujo sin salidas líquidas (V-23)
         s_cash = None
 
     s_margin = _score_margin(state, benchmark)

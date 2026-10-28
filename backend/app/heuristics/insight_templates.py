@@ -17,6 +17,7 @@ from app.domain.product import effective_threshold
 from app.domain.verticals import VERTICAL_LABELS, Vertical, parse_vertical
 from app.heuristics.health_engine import (
     FUENTES_CON_SALDO,
+    caja_sin_medir,
     margin_net_ratio,
     mide_caja_por_flujo,
 )
@@ -130,8 +131,34 @@ def render_insight(
     template = TEMPLATES[risk_code]
     description_override: str | None = None
     title_override: str | None = None
+    action_override: str | None = None
 
-    if risk_code == "CASH_LOW" and (
+    if risk_code == "CASH_LOW" and caja_sin_medir(state):
+        # El snapshot marcó CASH_LOW pero el estado de hoy no permite medir la
+        # caja (V-23): ni «cubre poco», ni días; se pide lo que falta.
+        vars_: dict[str, str] = {}
+        title_override = "Hoy no podemos medir tu caja"
+        cash_source = getattr(state, "cash_source", None)
+        if cash_source in FUENTES_CON_SALDO:
+            description_override = (
+                "No tenés gastos fijos cargados ni registramos salidas en efectivo, "
+                "transferencia, QR o débito en los últimos 30 días: sin eso no podemos "
+                "decir para cuánto alcanza tu caja."
+            )
+            action_override = "Cargá tus gastos fijos o los pagos y gastos que hiciste."
+        elif cash_source == "flujo":
+            entradas = Decimal(str(state.liquid_inflow_est))
+            description_override = (
+                f"En los últimos 30 días entraron {_fmt_ars(entradas)} en efectivo, "
+                "transferencia, QR y débito, pero no registramos salidas: sin ellas no "
+                "podemos medir tu caja."
+            )
+            action_override = "Cargá los pagos y gastos que hiciste, o hacé el arqueo del día."
+        else:
+            description_override = "No tenemos un saldo de caja ni movimientos para medirla."
+            action_override = "Hacé el arqueo del día o cargá tus ventas y gastos."
+
+    elif risk_code == "CASH_LOW" and (
         getattr(state, "cash_source", None) not in FUENTES_CON_SALDO or mide_caja_por_flujo(state)
     ):
         # Modo flujo (D-5): no hay saldo medido, así que no se afirma «$0 en
@@ -139,7 +166,7 @@ def render_insight(
         # saldo y sin gastos fijos (D-10): sin fijos no hay días que contar.
         entradas = Decimal(str(state.liquid_inflow_est))
         salidas = Decimal(str(state.liquid_outflow_est))
-        vars_: dict[str, str] = {}
+        vars_ = {}
         title_override = "Tu plata líquida cubre poco lo que sale"
         cierre = (
             # Hay saldo, pero sin fijos no hay días de cobertura que afirmar.
@@ -260,7 +287,9 @@ def render_insight(
         if description_override is not None
         else template.description_tpl.format(**vars_)
     )
-    action = template.action_tpl.format(**vars_)
+    action = (
+        action_override if action_override is not None else template.action_tpl.format(**vars_)
+    )
 
     return title, description, action
 
