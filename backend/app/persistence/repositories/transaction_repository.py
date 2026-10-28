@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import Select, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.business_time import today_ar
 from app.persistence.models.customer import Customer
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories._expense_scope import gasto_de_resultado
@@ -65,9 +66,10 @@ async def get_daily_net_series(
 
     Calcula `[from_date, to_date]` UNA sola vez y arma ambas series con ese rango,
     de modo que ventas y gastos quedan alineados día a día (evita la desalineación
-    si dos `date.today()` separados cruzaran la medianoche).
+    si dos `today_ar()` separados cruzaran la medianoche). El día es el AR (B-8):
+    con el del server (UTC), de 21 a 24 la serie terminaba mañana en 0.0.
     """
-    to_date = date.today()
+    to_date = today_ar()
     from_date = to_date - timedelta(days=days - 1)
     rev = await _daily_amount_series(session, SaleEntry, tenant_id, from_date, to_date)
     exp = await _daily_amount_series(session, ExpenseEntry, tenant_id, from_date, to_date)
@@ -227,7 +229,7 @@ class SaleRepository:
         Serie continua `list[float]` (días sin venta = 0.0) que alimenta
         `stats_enrichment.enrich_timeseries` (promedio diario, tendencia, anomalías).
         """
-        to_date = date.today()
+        to_date = today_ar()
         from_date = to_date - timedelta(days=days - 1)
         return await _daily_amount_series(self._session, SaleEntry, tenant_id, from_date, to_date)
 
@@ -242,10 +244,9 @@ class SaleRepository:
         ventas con `product_id` no nulo y no anuladas. Se usa para días de stock,
         sobrestock y priorización de reposición.
         """
-        from datetime import date as _date  # noqa: PLC0415
-        from datetime import timedelta as _timedelta
+        from datetime import timedelta as _timedelta  # noqa: PLC0415
 
-        cutoff = _date.today() - _timedelta(days=days)
+        cutoff = today_ar() - _timedelta(days=days)
         q = (
             select(
                 SaleEntry.product_id,
@@ -884,7 +885,7 @@ class ExpenseRepository:
         Serie continua `list[float]` (días sin gasto = 0.0) que alimenta
         `stats_enrichment.enrich_timeseries`. Espeja `get_daily_revenue_series`.
         """
-        to_date = date.today()
+        to_date = today_ar()
         from_date = to_date - timedelta(days=days - 1)
         return await _daily_amount_series(
             self._session, ExpenseEntry, tenant_id, from_date, to_date
@@ -903,11 +904,10 @@ class ExpenseRepository:
 
         Returns dict[category, {count, total, mean, stddev, amounts: list[float]}].
         """
-        from datetime import date as _date  # noqa: PLC0415
-        from datetime import timedelta as _timedelta
+        from datetime import timedelta as _timedelta  # noqa: PLC0415
         from statistics import pstdev  # noqa: PLC0415
 
-        cutoff = _date.today() - _timedelta(days=days)
+        cutoff = today_ar() - _timedelta(days=days)
         q = select(
             ExpenseEntry.category,
             ExpenseEntry.amount,

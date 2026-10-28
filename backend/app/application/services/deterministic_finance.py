@@ -27,6 +27,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.business_time import today_ar
 from app.observability.logger import get_logger
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 
@@ -41,7 +42,8 @@ _TWO_PLACES = Decimal("0.01")
 
 
 def _today() -> date:
-    return date.today()
+    """El día de negocio AR (E0-A-9): el del server (UTC) corría la ventana a mañana de 21 a 24."""
+    return today_ar()
 
 
 def _window_start() -> date:

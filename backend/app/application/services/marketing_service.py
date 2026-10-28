@@ -12,6 +12,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.business_time import today_ar
 from app.persistence.repositories.social_metric_repository import SocialMetricRepository
 from app.persistence.repositories.transaction_repository import SaleRepository
 from app.schemas.marketing import (
@@ -37,7 +38,7 @@ class MarketingService:
         self._session = session
 
     async def get_dashboard(self, tenant_id: UUID, days: int = 30) -> MarketingDashboardResponse:
-        to_date = date.today()
+        to_date = today_ar()
         from_date = to_date - timedelta(days=days)
 
         repo = SocialMetricRepository(self._session)

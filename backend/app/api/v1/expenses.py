@@ -22,7 +22,7 @@ from app.application.services.idempotency import claim_idempotency_key
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
-from app.domain.business_time import fecha_de_negocio
+from app.domain.business_time import fecha_de_negocio, today_ar
 from app.domain.expense_categories import infer_expense_type, resolve_tax_kind
 from app.domain.linea_de_compra import (
     CLAVE_GRUPO_DE_COMPRA,
@@ -160,7 +160,7 @@ async def expenses_summary(
     session: AsyncSession = Depends(get_db_session),
 ) -> ExpenseSummaryResponse:
     repo = ExpenseRepository(session)
-    to_date = date.today()
+    to_date = today_ar()
     from_date = to_date - timedelta(days=30)
     total = await repo.total_expenses(tenant.tenant_id, from_date=from_date, to_date=to_date)
     count = await repo.count_by_date_range(tenant.tenant_id, from_date=from_date, to_date=to_date)
@@ -198,7 +198,7 @@ async def list_expenses(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ExpenseEntry]:
     if from_date is None:
-        from_date = date.today() - timedelta(days=30)
+        from_date = today_ar() - timedelta(days=30)
     repo = ExpenseRepository(session)
     return await repo.list_by_tenant(
         tenant.tenant_id,
@@ -445,7 +445,7 @@ async def count_expenses(
     Mismo default de `from_date` que el list (últimos 30 días) para que el
     total coincida con lo que se ve sin filtros explícitos."""
     if from_date is None:
-        from_date = date.today() - timedelta(days=30)
+        from_date = today_ar() - timedelta(days=30)
     repo = ExpenseRepository(session)
     total = await repo.count_by_tenant(
         tenant.tenant_id,
