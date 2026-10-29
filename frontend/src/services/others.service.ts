@@ -53,6 +53,12 @@ export interface ReclassifyPayload {
    * mirar deja las dos versiones cargadas y nadie se entera.
    */
   aplicar_pese_al_conflicto?: boolean;
+  /**
+   * V-24: la fila es un fiado importado sin cliente. Sin este flag, resolverla
+   * con otro medio de pago es 422 (`FIADO_CAMBIO_DE_MEDIO`): el modal lo manda
+   * sólo cuando la persona cambió el medio a propósito.
+   */
+  cambiar_medio_de_pago?: boolean;
 }
 
 /**

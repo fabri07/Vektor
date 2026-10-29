@@ -100,10 +100,11 @@ async def assign_orphan_sales_to_local(
     sentinela "Local". UNA query, idempotente. La usan los imports (al cerrar) y el
     script de backfill ``scripts/backfill_local_customer.py``.
 
-    Nota: en Fase A los imports no mapean cliente, así que TODA venta importada cae
-    a "Local" (incluido un eventual "account"/fiado de archivo). La regla estricta
-    "fiado exige cliente real" aplica al alta interactiva (API de ventas), donde el
-    usuario elige el método de pago explícitamente. Devuelve la cantidad reasignada.
+    Nota: la regla "fiado exige cliente real" vale también en el import: antes de
+    llamar acá, ``insert_confirmed_data`` manda a «Otros» el fiado nuevo sin
+    cliente (V-24). Lo que esta query reasigna sin mirar el medio de pago es el
+    fiado histórico (backfill) y el que ya era venta. Devuelve la cantidad
+    reasignada.
     """
     # Solo resolver/crear el sentinela si hay ventas huérfanas que reasignar.
     has_orphans = await session.execute(
