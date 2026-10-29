@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -29,9 +29,14 @@ class AdminTenantListItem(BaseModel):
     current_period_end: datetime | None
     users_count: int
     #: Último inicio de sesión conocido de cualquiera de sus usuarios. NO es
-    #: actividad real: eso llega con la telemetría diaria (F5).
+    #: actividad real: ésa es `last_activity_date` (telemetría diaria, F5).
     last_login_at: datetime | None
     tokens_30d: int
+    #: Último día (hora Argentina) con al menos una petición de un usuario del
+    #: negocio, sin contar al soporte. `None` = sin uso registrado todavía.
+    last_activity_date: date | None
+    #: Días distintos con uso en los últimos 30 (de 0 a 30).
+    active_days_30d: int
 
 
 class AdminTenantListResponse(BaseModel):
@@ -80,6 +85,8 @@ class AdminTenantDetail(BaseModel):
     status_changed_at: datetime | None
     is_demo: bool
     created_at: datetime
+    last_activity_date: date | None
+    active_days_30d: int
     subscription: AdminTenantSubscription | None
     users: list[AdminTenantUser]
     recent_events: list[AdminTenantAuditEvent]

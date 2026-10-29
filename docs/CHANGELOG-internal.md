@@ -98,5 +98,6 @@
 | `20261026_0001` | `users.deactivated_at` (TIMESTAMPTZ NULL) + backfill conservador de bajas previas — una baja de `DELETE /users/{id}` no se reactiva con `verify-email` (X3-1), ver `docs/claude/maestros.md` |
 | `20261027_0001` | `pos_cash_refunds` (ORM: `PosCashRefund`; único `operation_id`, FK a `pos_operations`/`pos_cash_sessions`, `sale_date`/`refund_date`, CHECK `cash_ars > 0`) — el reintegro en efectivo al anular un ticket de otro turno u otro día (A-4), ver `docs/claude/pos.md` |
 | `20261029_0001` | `tenants.status_changed_at` (TIMESTAMPTZ NULL, sin backfill) — cuándo pasó la cuenta a su estado; lo usa la excepción de la caja offline del panel SUPERADMIN (F2), ver `docs/claude/plataforma.md` |
+| `20261029_0002` | tabla `tenant_daily_activity` (PK `(user_id, activity_date)`, FK a users/tenants con CASCADE) — actividad diaria por usuario para el panel SUPERADMIN (F5), ver `docs/claude/plataforma.md` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.

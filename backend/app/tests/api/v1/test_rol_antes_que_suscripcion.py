@@ -184,11 +184,19 @@ async def _vencer(db: AsyncSession, tenant: Tenant) -> None:
     await db.commit()
 
 
+#: Telemetría de uso (F5): se escribe en `get_current_user`, antes de que la ruta
+#: rechace. En producción el rechazo hace rollback de la sesión y la fila no queda;
+#: este fixture comparte la sesión y no la revierte, así que se ve acá. No es
+#: estado del negocio.
+_TABLAS_DE_TELEMETRIA = frozenset({"tenant_daily_activity"})
+
+
 async def _conteos(db: AsyncSession) -> dict[str, int]:
     """Filas de cada tabla: un rechazo por dependencia no escribe NADA."""
     return {
         t.name: int((await db.execute(select(func.count()).select_from(t))).scalar_one())
         for t in Base.metadata.sorted_tables
+        if t.name not in _TABLAS_DE_TELEMETRIA
     }
 
 

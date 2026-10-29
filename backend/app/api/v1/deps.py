@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service
 from app.application.services import subscription_service as quota_service
+from app.application.services.activity_tracker import registrar_actividad
 from app.application.services.pin_service import PinService
 from app.config.settings import get_settings
 from app.domain.pos_permissions import (
@@ -101,6 +102,7 @@ async def get_current_user(
     # no las alcanzara dejaría operar al tenant. Se mira el rol de la BASE.
     tenant = await _tenant_de_la_peticion(request, session, user.tenant_id)
     _exigir_cuenta_habilitada(request, user, tenant)
+    await registrar_actividad(session, user)  # F5: un registro por usuario y día
 
     # B5 — un cajero llega SÓLO a la lista cerrada de rutas de caja. Denegar por
     # defecto y acá, porque ésta es la única puerta por la que pasan las rutas
