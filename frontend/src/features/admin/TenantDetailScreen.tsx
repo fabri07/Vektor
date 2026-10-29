@@ -12,6 +12,7 @@ import {
   CONSECUENCIAS,
   ESTADOS_DE_CUENTA,
   entero,
+  diaCorto,
   fechaCorta,
   fechaYHora,
   rotuloDeCuenta,
@@ -181,6 +182,8 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
           <Dato label="Desde" value={fechaYHora(t.status_changed_at)} />
           <Dato label="Rubro" value={t.vertical_code ?? "—"} />
           <Dato label="Alta" value={fechaCorta(t.created_at)} />
+          <Dato label="Último uso" value={diaCorto(t.last_activity_date)} />
+          <Dato label="Días con uso (30 d)" value={entero(t.active_days_30d)} />
         </dl>
         <form
           className="flex flex-col gap-3"

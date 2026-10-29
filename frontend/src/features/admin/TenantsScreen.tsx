@@ -13,6 +13,7 @@ import type { AdminTenantListItem } from "@/services/adminTenants.service";
 import {
   ESTADOS_DE_CUENTA,
   entero,
+  diaCorto,
   fechaCorta,
   rotuloDeCuenta,
   rotuloDeSuscripcion,
@@ -64,6 +65,18 @@ const columns: SmartColumn<AdminTenantListItem>[] = [
   {
     key: "users_count",
     header: "Usuarios",
+    render: (v) => entero(Number(v ?? 0)),
+    csvValue: (v) => String(Number(v ?? 0)),
+  },
+  {
+    key: "last_activity_date",
+    header: "Último uso",
+    render: (v) => diaCorto(v as string | null),
+    csvValue: (v) => String(v ?? ""),
+  },
+  {
+    key: "active_days_30d",
+    header: "Días con uso (30 d)",
     render: (v) => entero(Number(v ?? 0)),
     csvValue: (v) => String(Number(v ?? 0)),
   },
