@@ -18,6 +18,7 @@ import {
   Settings,
   Plug,
   Inbox,
+  Building2,
   Coins,
   ScanBarcode,
   ChevronLeft,
@@ -51,6 +52,7 @@ const POS_NAV_ITEM = { label: "Caja", href: "/pos", icon: ScanBarcode };
 
 // Items visibles solo para SUPERADMIN (admin de plataforma).
 const SUPERADMIN_NAV_ITEMS = [
+  { label: "Negocios", href: "/admin/tenants", icon: Building2 },
   { label: "Uso & costos", href: "/admin/usage", icon: Coins },
 ];
 
