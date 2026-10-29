@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     access_requests,
     admin,
+    admin_tenant_subscription,
     admin_tenants,
     agent,
     auth,
@@ -46,6 +47,11 @@ api_router = APIRouter()
 api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])
 api_router.include_router(
     admin_tenants.router, prefix="/admin/tenants", tags=["Admin Tenants"]
+)
+api_router.include_router(
+    admin_tenant_subscription.router,
+    prefix="/admin/tenants/{tenant_id}/subscription",
+    tags=["Admin Tenants"],
 )
 # Solicitudes de acceso: el formulario es público, la cola de revisión es SUPERADMIN.
 api_router.include_router(
