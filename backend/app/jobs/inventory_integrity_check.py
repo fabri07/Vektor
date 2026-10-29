@@ -22,6 +22,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from app.domain.tenant_status import ESTADOS_OPERATIVOS
 from app.jobs.celery_app import celery_app
 from app.observability.logger import get_logger, log_job
 
@@ -197,7 +198,7 @@ def inventory_integrity_check_all_tenants() -> None:
         async with factory() as session:
             # Canónico uppercase: la app solo escribe 'ACTIVE'/'TRIAL' (ver deps.py).
             result = await session.execute(
-                select(Tenant.tenant_id).where(Tenant.status.in_(["ACTIVE", "TRIAL"]))
+                select(Tenant.tenant_id).where(Tenant.status.in_(ESTADOS_OPERATIVOS))
             )
             ids = [str(tid) for tid in result.scalars().all()]
 

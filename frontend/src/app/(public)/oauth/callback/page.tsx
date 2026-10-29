@@ -33,7 +33,11 @@ export default function OAuthCallbackPage() {
     const sessionId = searchParams.get("session_id");
 
     if (error) {
-      setErrorMsg("Google rechazó el acceso. Intentá de nuevo.");
+      setErrorMsg(
+        error === "TENANT_SUSPENDED"
+          ? "Tu cuenta está suspendida. Escribinos para reactivarla: los datos están a salvo."
+          : "Google rechazó el acceso. Intentá de nuevo.",
+      );
       setStage("error");
       return;
     }

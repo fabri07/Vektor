@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getMeRequest } from "@/services/auth.service";
+import { useAccountStatusStore } from "@/stores/accountStatusStore";
 import { useAuthStore } from "@/stores/authStore";
 
 /**
@@ -43,6 +44,8 @@ export function useSessionSync(): "pending" | "ok" | "offline" {
           phone: me.phone,
           pos_permissions: me.pos_permissions ?? [],
         });
+        // Contestó bien: si había un aviso de cuenta bloqueada, ya no rige.
+        useAccountStatusStore.getState().clear();
         setEstado("ok");
       } catch {
         if (vivo) setEstado((e) => (e === "pending" ? "offline" : e));

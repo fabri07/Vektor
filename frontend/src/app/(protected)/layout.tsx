@@ -8,6 +8,7 @@ import { EconomicTicker } from "@/components/dashboard/EconomicTicker";
 import { ActionNotificationToast } from "@/features/notifications/ActionNotificationToast";
 import { ChatWidget } from "@/features/chat/ChatWidget";
 import { PinGateModal } from "@/components/ui/PinGateModal";
+import { AccountBlockNotice } from "@/components/layout/AccountBlockNotice";
 import { useAuthStore } from "@/stores/authStore";
 import { useSessionSync } from "@/hooks/useSessionSync";
 import { CASHIER_ROLE } from "@/lib/roles";
@@ -63,6 +64,7 @@ export default function ProtectedLayout({
   if (isPosRoute) {
     return (
       <>
+        <AccountBlockNotice enCaja />
         {children}
         <PinGateModal />
       </>
@@ -85,6 +87,7 @@ export default function ProtectedLayout({
       />
 
       <div className="flex flex-1 flex-col overflow-hidden">
+        <AccountBlockNotice />
         <Header onMenuToggle={() => setMobileOpen((v) => !v)} />
         {isDashboardRoute ? <EconomicTicker /> : null}
         {isChatPage ? (

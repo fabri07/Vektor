@@ -104,8 +104,12 @@ async def oauth_google_callback(
         svc = GoogleOAuthService(session, redis)
         exchange_session_id = await svc.handle_callback(code=code, state=state)
     except HTTPException as exc:
+        # `detail` puede ser un dict con `code` (cuenta suspendida): a la URL va el
+        # código, nunca el repr del dict.
+        detalle: object = exc.detail
+        motivo = detalle["code"] if isinstance(detalle, dict) else detalle
         return RedirectResponse(
-            url=f"{frontend_callback}?error={exc.detail}",
+            url=f"{frontend_callback}?error={motivo}",
             status_code=status.HTTP_302_FOUND,
         )
 

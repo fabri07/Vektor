@@ -77,6 +77,10 @@ export function LoginForm() {
           const detail = loginError?.response?.data?.detail;
           if (!detail) return "Credenciales incorrectas. Intentá de nuevo.";
           if (typeof detail === "string") return detail;
+          // Cuenta suspendida (403 con código): el servidor manda el mensaje a mostrar.
+          if (!Array.isArray(detail)) {
+            return detail.message ?? "No pudimos iniciar tu sesión. Intentá de nuevo.";
+          }
           return detail.map((e) => e.msg).join(" · ");
         })()
       : null;

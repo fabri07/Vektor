@@ -25,6 +25,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from app.domain.tenant_status import ESTADOS_OPERATIVOS
 from app.jobs.celery_app import celery_app
 from app.observability.logger import get_logger, log_job
 
@@ -481,7 +482,7 @@ def update_momentum_all_tenants() -> None:
 
         async with factory() as session:
             result = await session.execute(
-                select(Tenant.tenant_id).where(Tenant.status.in_(["active", "trial", "ACTIVE"]))
+                select(Tenant.tenant_id).where(Tenant.status.in_(ESTADOS_OPERATIVOS))
             )
             ids = [str(tid) for tid in result.scalars().all()]
 

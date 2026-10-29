@@ -20,8 +20,10 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.tenant_access import exigir_cuenta_que_autentica
 from app.application.services.tenant_provisioning import provision_tenant
 from app.config.settings import get_settings
+from app.domain.tenant_status import puede_autenticarse
 from app.domain.verticals import parse_vertical
 from app.integrations.email_templates import render_action_email
 from app.observability.logger import get_logger
@@ -155,8 +157,9 @@ class AuthService:
             )
 
         tenant = await self._tenant_repo.get_by_id(user.tenant_id)
-        if tenant is None or tenant.status not in ("ACTIVE", "TRIAL"):
+        if tenant is None:
             return None
+        exigir_cuenta_que_autentica(tenant, user)
 
         if _is_demo_auth_blocked(tenant):
             # Generic 401 (via None) — no revela que la cuenta existe ni que es demo.
@@ -220,6 +223,16 @@ class AuthService:
             # Una baja del dueño no se deshace con el link del email (X3-1): mismo
             # 400 genérico, sin consumir el token ni activar.
             logger.warning("auth.verify_email.deactivated_user", user_id=str(user.user_id))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid_or_expired_token",
+            )
+
+        if not puede_autenticarse(tenant.status, user.role_code):
+            # Mismo 400 genérico que el resto del flujo (no revela el estado de la
+            # cuenta) y antes de consumir el token: reactivar el tenant no debería
+            # obligar a pedir otro link.
+            logger.warning("auth.verify_email.tenant_blocked", tenant_id=str(tenant.tenant_id))
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="invalid_or_expired_token",
@@ -291,6 +304,8 @@ class AuthService:
         tenant = await self._tenant_repo.get_by_id(user.tenant_id)
         if tenant is None:
             return None
+        # Sin esto una cuenta suspendida seguía renovando tokens para siempre.
+        exigir_cuenta_que_autentica(tenant, user)
 
         if _is_demo_auth_blocked(tenant):
             # Impide extender una sesión demo emitida antes del deploy del guard.

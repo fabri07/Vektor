@@ -14,8 +14,14 @@ export interface PydanticError {
   ctx?: Record<string, unknown>;
 }
 
+/** `detail` estructurado del servidor: un código estable y un mensaje para mostrar. */
+export interface ApiErrorDetail {
+  code: string;
+  message?: string;
+}
+
 export interface ApiError {
-  detail: string | PydanticError[];
+  detail: string | PydanticError[] | ApiErrorDetail;
 }
 
 export interface TokenResponse {
