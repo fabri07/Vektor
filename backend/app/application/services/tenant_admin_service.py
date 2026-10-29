@@ -15,6 +15,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.activity_tracker import resumen_de_actividad
 from app.domain.subscription import TERMINAL_STATUSES
 from app.domain.tenant_status import ESTADOS_ASIGNABLES, normalizar
 from app.persistence.models.audit import DecisionAuditLog
@@ -114,6 +115,7 @@ async def list_tenants(
         .offset((page - 1) * page_size)
     )
     filas = (await session.execute(stmt)).all()
+    actividad = await resumen_de_actividad(session, [fila[0].tenant_id for fila in filas])
     items = [
         AdminTenantListItem(
             tenant_id=t.tenant_id,
@@ -130,6 +132,8 @@ async def list_tenants(
             users_count=int(n_users or 0),
             last_login_at=ult_login,
             tokens_30d=int(tokens or 0),
+            last_activity_date=actividad[t.tenant_id][0],
+            active_days_30d=actividad[t.tenant_id][1],
         )
         for t, vertical, plan, sub_status, period_end, n_users, ult_login, tokens in filas
     ]
@@ -160,6 +164,9 @@ async def get_tenant_detail(session: AsyncSession, tenant_id: uuid.UUID) -> Admi
         )
     ).all()
 
+    ultimo_uso, dias_activos = (await resumen_de_actividad(session, [tenant.tenant_id]))[
+        tenant.tenant_id
+    ]
     return AdminTenantDetail(
         tenant_id=tenant.tenant_id,
         display_name=tenant.display_name,
@@ -169,6 +176,8 @@ async def get_tenant_detail(session: AsyncSession, tenant_id: uuid.UUID) -> Admi
         status_changed_at=tenant.status_changed_at,
         is_demo=tenant.is_demo,
         created_at=tenant.created_at,
+        last_activity_date=ultimo_uso,
+        active_days_30d=dias_activos,
         subscription=(
             AdminTenantSubscription(
                 plan_code=sub.plan_code,
