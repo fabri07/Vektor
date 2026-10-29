@@ -14,11 +14,13 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     create_async_engine,
 )
+from sqlalchemy.ext.compiler import compiles
 
 from app.config.settings import get_settings
 from app.domain.verticals import Vertical
@@ -123,6 +125,18 @@ def fake_redis() -> FakeRedis:
 # Si un test necesita crear sus PROPIAS sesiones/factories sobre el engine
 # (commits reales fuera de la transacción del test), usá `isolated_db_engine`.
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+
+@compiles(PG_UUID, "sqlite")
+def _uuid_de_postgres_como_texto_en_sqlite(tipo, compilador, **kw) -> str:
+    """`postgresql.UUID` se creaba en SQLite como `UUID`, un tipo SIN afinidad de
+    texto: SQLite le da afinidad NUMÉRICA y convierte el hex que parece número
+    (32 dígitos, o dígitos con una `e`) en entero/float al guardarlo. Después
+    `UUID(float)` rompía —un test al azar, ~1 de cada 2 corridas del CI—. Con
+    `CHAR(32)` el hex queda como texto. Sólo vale para SQLite y sólo en tests:
+    Postgres tiene `uuid` nativo y no se ve afectado.
+    """
+    return "CHAR(32)"
 
 
 @pytest_asyncio.fixture(scope="session")
