@@ -6,6 +6,15 @@
  */
 
 export const CASHIER_ROLE = "CASHIER";
+export const SUPERADMIN_ROLE = "SUPERADMIN";
+
+/**
+ * ¿Es soporte de la plataforma? Sólo para decidir qué MOSTRAR: el control real
+ * es el 403 del backend en cada ruta `/admin/*`.
+ */
+export function isSuperadmin(role: string | null | undefined): boolean {
+  return role === SUPERADMIN_ROLE;
+}
 
 const ROLE_LABELS: Record<string, string> = {
   OWNER: "Dueño",
