@@ -36,6 +36,14 @@ const DE_AUTENTICACION = new Set([
 /** Se arreglan sin tocar la venta: el dueño paga, o el mantenimiento termina. */
 const REINTENTABLES = new Set([402, 408, 423, 429, 503]);
 
+/**
+ * Cuenta suspendida o en solo lectura (panel SUPERADMIN): también se arregla sin
+ * tocar la venta, cuando el soporte reactiva. La venta queda en la cola, con el
+ * motivo a la vista, y entra sola al reactivar. Son 403, y un 403 de otro tipo
+ * sigue siendo "la mira una persona".
+ */
+const REINTENTABLES_POR_CODIGO = new Set(["TENANT_SUSPENDED", "TENANT_READ_ONLY"]);
+
 export function clasificarSync(info: PosErrorInfo): ClaseSync {
   const { status } = info;
   // Un error del código de la caja no se arregla reintentando: se repetiría
@@ -47,6 +55,9 @@ export function clasificarSync(info: PosErrorInfo): ClaseSync {
   if (status === null) return "reintento";
   if (status >= 200 && status < 300) return "sincronizada";
   if (status >= 500 || REINTENTABLES.has(status)) return "reintento";
+  if (status === 403 && info.code && REINTENTABLES_POR_CODIGO.has(info.code)) {
+    return "reintento";
+  }
   if (status === 401) return "autenticacion";
   if (status === 403 && info.code && DE_AUTENTICACION.has(info.code)) {
     return "autenticacion";

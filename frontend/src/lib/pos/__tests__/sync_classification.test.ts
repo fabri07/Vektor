@@ -39,6 +39,15 @@ describe("clasificarSync", () => {
     expect(clasificarSync(info(503, "SUBSCRIPTION_UNAVAILABLE"))).toBe("reintento");
   });
 
+  it("una cuenta suspendida o en solo lectura conserva la venta y la reintenta", () => {
+    // Se arregla cuando el soporte reactiva, sin tocar la venta: igual que el 402
+    // de la suscripción. Nunca "revision" (que pide a una persona) ni "autenticacion".
+    expect(clasificarSync(info(403, "TENANT_SUSPENDED"))).toBe("reintento");
+    expect(clasificarSync(info(403, "TENANT_READ_ONLY"))).toBe("reintento");
+    // Un 403 de otra cosa sigue siendo revisión humana.
+    expect(clasificarSync(info(403, "PIN_REQUIRED"))).toBe("revision");
+  });
+
   it("los transitorios del servidor se reintentan", () => {
     for (const s of [408, 429, 500, 502, 504]) {
       expect(clasificarSync(info(s))).toBe("reintento");

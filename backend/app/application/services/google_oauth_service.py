@@ -70,6 +70,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.tenant_access import exigir_cuenta_que_autentica
 from app.config.settings import get_settings
 from app.observability.logger import get_logger
 from app.persistence.models.tenant import Tenant
@@ -583,6 +584,10 @@ class GoogleOAuthService:
             if user is not None and user.is_active:
                 tenant = await self._tenant_repo.get_by_id(user.tenant_id)
                 if tenant is not None:
+                    # Cuenta suspendida: 403 con código estable, NO caer al caso 2
+                    # ("vincular") que le diría a alguien que ya está vinculado que
+                    # le falta vincularse.
+                    exigir_cuenta_que_autentica(tenant, user)
                     identity.last_login_at = datetime.now(UTC)
                     user.last_login_at = datetime.now(UTC)
                     await self._session.flush()

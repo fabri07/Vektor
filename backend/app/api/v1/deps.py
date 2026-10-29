@@ -35,6 +35,7 @@ from app.domain.subscription import (
     SubscriptionAccessDenied,
     SubscriptionMissing,
 )
+from app.domain.tenant_status import bloqueo_de_peticion, mensaje_de
 from app.observability.logger import bind_request_context, get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -89,6 +90,13 @@ async def get_current_user(
     sentry_sdk.set_tag("tenant_id", str(user.tenant_id))
     sentry_sdk.set_user({"id": str(user.user_id)})
 
+    # Estado de CUENTA (panel SUPERADMIN, F1). Va acá y no sólo en
+    # `get_current_tenant` porque ésta es la única puerta por la que pasan las
+    # rutas autenticadas: 200 de ellas piden sólo un usuario, y una suspensión que
+    # no las alcanzara dejaría operar al tenant. Se mira el rol de la BASE.
+    tenant = await _tenant_de_la_peticion(request, session, user.tenant_id)
+    _exigir_cuenta_habilitada(request, user, tenant)
+
     # B5 — un cajero llega SÓLO a la lista cerrada de rutas de caja. Denegar por
     # defecto y acá, porque ésta es la única puerta por la que pasan las rutas
     # autenticadas: una ruta nueva nace cerrada para el cajero aunque nadie se
@@ -109,25 +117,53 @@ async def get_current_user(
     return user
 
 
+async def _tenant_de_la_peticion(
+    request: Request, session: AsyncSession, tenant_id: UUID
+) -> Tenant | None:
+    """El tenant del usuario, leído UNA vez por petición.
+
+    `get_current_user` y `get_current_tenant` lo necesitan los dos; sin esta
+    caché cada request autenticado hacía la misma consulta dos veces.
+    """
+    cacheado: Tenant | None = getattr(request.state, "tenant_de_la_peticion", None)
+    if cacheado is not None and cacheado.tenant_id == tenant_id:
+        return cacheado
+    tenant = await TenantRepository(session).get_by_id(tenant_id)
+    request.state.tenant_de_la_peticion = tenant
+    return tenant
+
+
+def _exigir_cuenta_habilitada(request: Request, user: User, tenant: Tenant | None) -> None:
+    """403 con código estable si el estado de cuenta no deja hacer esta petición."""
+    if tenant is None:
+        # Un usuario sin tenant no es un caso que "deje pasar": falla cerrado.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found.")
+    ruta = request.scope.get("route")
+    plantilla = getattr(ruta, "path", request.url.path)
+    codigo = bloqueo_de_peticion(tenant.status, user.role_code, request.method, plantilla)
+    if codigo is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": codigo, "message": mensaje_de(codigo)},
+        )
+
+
 def get_current_tenant_id(current_user: User = Depends(get_current_user)) -> UUID:
     """Return the tenant_id of the authenticated user. Propagates to all business queries."""
     return current_user.tenant_id
 
 
 async def get_current_tenant(
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> Tenant:
-    """Return the tenant for the authenticated user. Raises 403 if suspended."""
-    repo = TenantRepository(session)
-    tenant = await repo.get_by_id(current_user.tenant_id)
-    if tenant is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found.")
-    if tenant.status not in ("ACTIVE", "TRIAL"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Tenant is {tenant.status}.",
-        )
+    """Return the tenant for the authenticated user. Raises 403 if the account is blocked."""
+    tenant = await _tenant_de_la_peticion(request, session, current_user.tenant_id)
+    # Ya lo aplicó `get_current_user`; se repite por si una ruta (o un test) lo
+    # sustituye: es barato —no hay otra consulta— y falla cerrado.
+    _exigir_cuenta_habilitada(request, current_user, tenant)
+    assert tenant is not None  # noqa: S101 — `_exigir_cuenta_habilitada` ya cortó el None
     return tenant
 
 

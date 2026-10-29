@@ -8,6 +8,7 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from app.domain.tenant_status import ESTADOS_OPERATIVOS
 from app.jobs.celery_app import celery_app
 from app.observability.logger import get_logger, log_job
 
@@ -88,7 +89,7 @@ def rebuild_weekly_history() -> None:
 
         async with factory() as session:
             result = await session.execute(
-                select(Tenant.tenant_id).where(Tenant.status.in_(["active", "trial"]))
+                select(Tenant.tenant_id).where(Tenant.status.in_(ESTADOS_OPERATIVOS))
             )
             tenant_ids = result.scalars().all()
 

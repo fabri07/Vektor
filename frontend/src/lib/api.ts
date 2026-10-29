@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/nextjs";
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from "axios";
+import { bloqueoDeCodigo, useAccountStatusStore } from "@/stores/accountStatusStore";
 import { useAuthStore } from "@/stores/authStore";
 import { usePinGateStore } from "@/stores/pinGateStore";
 import { llevaHeaderDeTerminal, usePosTerminalStore } from "@/stores/posTerminalStore";
@@ -173,6 +174,16 @@ export async function handleApiResponseError(error: AxiosError) {
     (codigo === "TERMINAL_DISABLED" || codigo === "TERMINAL_UNKNOWN")
   ) {
     usePosTerminalStore.getState().markInvalid();
+  }
+  // Cuenta suspendida / en solo lectura (F1 del panel SUPERADMIN): se marca para
+  // que el layout muestre el aviso. No se hace logout ni se toca la cola de la
+  // caja: lo que el servidor rechaza por la cuenta no borra nada local.
+  const bloqueo = error.response?.status === 403 ? bloqueoDeCodigo(codigo) : null;
+  if (bloqueo) {
+    const mensaje = (
+      error.response?.data as { detail?: { message?: string } } | undefined
+    )?.detail?.message;
+    useAccountStatusStore.getState().setBlock(bloqueo, mensaje ?? null);
   }
   return Promise.reject(error);
 }
