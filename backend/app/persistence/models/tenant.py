@@ -37,6 +37,12 @@ class Tenant(TimestampMixin, Base):
     currency: Mapped[str] = mapped_column(Text, nullable=False, default="ARS")
     pricing_reference_mode: Mapped[str] = mapped_column(Text, nullable=False, default="MEP")
     status: Mapped[str] = mapped_column(Text, nullable=False, default="ACTIVE")
+    #: Cuándo pasó la cuenta a `status` (panel SUPERADMIN, F2). NULL = nunca se
+    #: cambió desde el panel; con la cuenta bloqueada, NULL no habilita la
+    #: excepción de la caja offline. Ver `domain/tenant_status.py`.
+    status_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Relationships
