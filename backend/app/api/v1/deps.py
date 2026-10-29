@@ -26,6 +26,7 @@ from app.domain.pos_permissions import (
     cashier_can_reach,
     has_pos_permission,
 )
+from app.domain.pos_terminal import OFFLINE_HEADER, es_offline
 from app.domain.subscription import (
     SUBSCRIPTION_ERRORS,
     QuotaExceeded,
@@ -35,7 +36,11 @@ from app.domain.subscription import (
     SubscriptionAccessDenied,
     SubscriptionMissing,
 )
-from app.domain.tenant_status import bloqueo_de_peticion, mensaje_de
+from app.domain.tenant_status import (
+    RUTAS_CON_EXCEPCION_OFFLINE,
+    bloqueo_de_peticion,
+    mensaje_de,
+)
 from app.observability.logger import bind_request_context, get_logger
 from app.persistence.db.redis_client import get_redis
 from app.persistence.db.session import get_db_session
@@ -141,6 +146,17 @@ def _exigir_cuenta_habilitada(request: Request, user: User, tenant: Tenant | Non
     ruta = request.scope.get("route")
     plantilla = getattr(ruta, "path", request.url.path)
     codigo = bloqueo_de_peticion(tenant.status, user.role_code, request.method, plantilla)
+    if (
+        codigo is not None
+        and (request.method.upper(), plantilla) in RUTAS_CON_EXCEPCION_OFFLINE
+        and es_offline(request.headers.get(OFFLINE_HEADER))
+    ):
+        # Venta cobrada sin conexión: no se corta acá, el handler la compara con el
+        # corte (`charged_at` < `status_changed_at`). Si el handler no lo decide,
+        # `cuenta_bloqueada` queda puesta y la venta NO entra: la única ruta con
+        # excepción lo consulta antes de escribir.
+        request.state.cuenta_bloqueada = codigo
+        return
     if codigo is not None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

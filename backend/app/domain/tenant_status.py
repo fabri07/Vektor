@@ -19,6 +19,7 @@ escrito.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 ACTIVE = "ACTIVE"
@@ -125,3 +126,41 @@ def bloqueo_de_peticion(
 
 def mensaje_de(codigo: str) -> str:
     return MENSAJE_SOLO_LECTURA if codigo == TENANT_READ_ONLY_CODE else MENSAJE_SUSPENDIDA
+
+
+# ── Caja offline: la venta ya cobrada antes del corte (F2) ─────────────────────
+
+#: Rutas de escritura que, con el header offline, NO cortan en la dependencia: la
+#: decisión la toma el handler, que es el único que conoce `charged_at`.
+RUTAS_CON_EXCEPCION_OFFLINE: frozenset[tuple[str, str]] = frozenset(
+    {("POST", "/api/v1/pos/operations")}
+)
+
+#: Antigüedad máxima (contra el momento en que llega) de una venta offline que se
+#: acepta con la cuenta bloqueada. `charged_at` lo declara el cliente, así que
+#: fechar hacia atrás sólo puede cubrir esta ventana, y siempre desde una caja
+#: habilitada (ya exigido). Valor propuesto en F0; ajustable con el dueño.
+MAX_ANTIGUEDAD_VENTA_OFFLINE = timedelta(hours=72)
+
+
+def _utc(momento: datetime) -> datetime:
+    """SQLite devuelve los `DateTime(timezone=True)` sin zona: se leen como UTC."""
+    return momento if momento.tzinfo is not None else momento.replace(tzinfo=UTC)
+
+
+def venta_offline_aceptable(
+    charged_at: datetime | None,
+    status_changed_at: datetime | None,
+    ahora: datetime,
+) -> bool:
+    """¿Se acepta, con la cuenta bloqueada, esta venta cobrada sin conexión?
+
+    Sí si se cobró ANTES del corte —el dinero ya se recibió y tiene que quedar
+    registrado— y no es más vieja que `MAX_ANTIGUEDAD_VENTA_OFFLINE`. Sin corte
+    conocido (`status_changed_at` NULL) o sin `charged_at`: **no**, falla cerrado.
+    """
+    if charged_at is None or status_changed_at is None:
+        return False
+    cobrada = _utc(charged_at)
+    antes_del_corte = cobrada < _utc(status_changed_at)
+    return antes_del_corte and _utc(ahora) - cobrada <= MAX_ANTIGUEDAD_VENTA_OFFLINE

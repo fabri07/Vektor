@@ -30,6 +30,7 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     Response,
     status,
 )
@@ -102,6 +103,7 @@ from app.domain.pos_price_token import ResultadoToken
 from app.domain.pos_price_token import verificar as verificar_precio
 from app.domain.pos_terminal import OFFLINE_HEADER, TERMINAL_HEADER, es_offline
 from app.domain.sale_unit import formatear_cantidad
+from app.domain.tenant_status import mensaje_de, venta_offline_aceptable
 from app.domain.transaction import MIXED_PAYMENT_METHOD
 from app.persistence.db.session import get_db_session
 from app.persistence.models import (
@@ -248,6 +250,7 @@ async def create_pos_operation(
     body: PosOperationRequest,
     background: BackgroundTasks,
     response: Response,
+    request: Request,
     tenant: Tenant = Depends(get_current_tenant),
     user: User = Depends(require_role("OWNER", "ADMIN", CASHIER_ROLE)),
     _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
@@ -325,6 +328,42 @@ async def create_pos_operation(
                             "habilitada."
                         ),
                     },
+                )
+            # Cuenta suspendida o en solo lectura (panel SUPERADMIN): la dependencia
+            # no cortó esta venta porque llegó con el header offline, y la decide
+            # acá, que es donde se conoce `charged_at`. Se acepta si se cobró ANTES
+            # del corte —el dinero ya entró— y dentro de la ventana; una posterior
+            # se rechaza y la caja la conserva en su cola (`reintento`).
+            cuenta_bloqueada: str | None = getattr(request.state, "cuenta_bloqueada", None)
+            if cuenta_bloqueada is not None:
+                ahora = datetime.now(UTC)
+                if not venta_offline_aceptable(body.charged_at, tenant.status_changed_at, ahora):
+                    raise HTTPException(
+                        status_code=403,
+                        detail={
+                            "code": cuenta_bloqueada,
+                            "message": mensaje_de(cuenta_bloqueada),
+                        },
+                    )
+                session.add(
+                    DecisionAuditLog(
+                        tenant_id=tenant.tenant_id,
+                        decision_type="POS_OFFLINE_SALE_ACCEPTED_AFTER_STATUS_CHANGE",
+                        decision_data={
+                            "client_operation_id": body.client_operation_id,
+                            "charged_at": body.charged_at.isoformat() if body.charged_at else None,
+                            "status_changed_at": (
+                                tenant.status_changed_at.isoformat()
+                                if tenant.status_changed_at
+                                else None
+                            ),
+                            "tenant_status": tenant.status,
+                            "blocked_by": cuenta_bloqueada,
+                        },
+                        triggered_by="pos_offline_sync",
+                        actor_user_id=user.user_id,
+                        created_at=ahora,
+                    )
                 )
 
     # La idempotencia va antes de tocar stock, precios o locks. Un reintento
