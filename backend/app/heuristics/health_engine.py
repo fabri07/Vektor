@@ -34,7 +34,11 @@ from app.heuristics.verticals import (
     weakest_confidence,
 )
 from app.heuristics.verticals.loader import load_vertical_heuristics
-from app.state.business_state_service import BusinessState, ProductSummary
+from app.state.business_state_service import (
+    BusinessState,
+    ProductSummary,
+    hay_salidas_liquidas,
+)
 
 # ── Risk metadata ─────────────────────────────────────────────────────────────
 
@@ -213,7 +217,7 @@ def mide_caja_por_flujo(state: object) -> bool:
             return False
         if getattr(state, "monthly_fixed_expenses_est", Decimal("0")) > 0:
             return False  # hay fijos: días de runway sobre el saldo
-    return bool(getattr(state, "liquid_outflow_est", Decimal("0")) > 0)
+    return hay_salidas_liquidas(getattr(state, "liquid_outflow_est", Decimal("0")))
 
 
 def caja_sin_medir(state: object) -> bool:

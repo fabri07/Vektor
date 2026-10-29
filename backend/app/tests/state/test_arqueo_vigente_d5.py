@@ -152,7 +152,7 @@ async def test_un_arqueo_con_fecha_futura_no_tapa_el_de_hoy(
     assert state.cash_on_hand_est == Decimal("100.00")
 
 
-async def test_un_arqueo_de_la_ventana_no_es_saldo_pero_es_caja_observada(
+async def test_un_arqueo_de_la_ventana_no_vigente_no_es_saldo_ni_caja_observada(
     db_session: AsyncSession, sample_tenant, sample_business_profile: BusinessProfile
 ) -> None:
     await _perfil_viejo(db_session, sample_business_profile)
@@ -162,7 +162,9 @@ async def test_un_arqueo_de_la_ventana_no_es_saldo_pero_es_caja_observada(
     state = await _estado(db_session, sample_tenant.tenant_id)
 
     assert state.cash_source != "arqueo"
-    assert state.data_completeness_score > sin_arqueo.data_completeness_score
+    # V-26 (revisión #227): el motor no lo usa, así que tampoco suma como caja
+    # observada. Antes sumaba por estar en la ventana de 30 días.
+    assert state.data_completeness_score == sin_arqueo.data_completeness_score
 
 
 async def test_el_mismo_contado_en_otra_fecha_invalida_el_cache(
