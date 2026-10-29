@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TenantDetailScreen } from "@/features/admin/TenantDetailScreen";
 import { TenantsScreen } from "@/features/admin/TenantsScreen";
 import { isSuperadmin } from "@/lib/roles";
+import { diaCorto } from "@/features/admin/format";
 import { adminErrorMessage, adminTenantsService } from "@/services/adminTenants.service";
 import type { AdminTenantDetail, AdminTenantListItem } from "@/services/adminTenants.service";
 
@@ -47,6 +48,8 @@ const ITEM: AdminTenantListItem = {
   users_count: 3,
   last_login_at: null,
   tokens_30d: 1200,
+  last_activity_date: "2026-10-29",
+  active_days_30d: 12,
 };
 
 const DETALLE: AdminTenantDetail = {
@@ -58,6 +61,8 @@ const DETALLE: AdminTenantDetail = {
   status_changed_at: null,
   is_demo: false,
   created_at: "2026-01-01T00:00:00Z",
+  last_activity_date: "2026-10-29",
+  active_days_30d: 12,
   subscription: {
     plan_code: "control",
     status: "ACTIVE",
@@ -107,6 +112,17 @@ describe("adminErrorMessage", () => {
   });
 });
 
+describe("diaCorto", () => {
+  it("muestra el día tal cual, sin correrlo por la zona horaria", () => {
+    expect(diaCorto("2026-10-29")).toBe("29/10/2026");
+    expect(diaCorto("2026-01-01")).toBe("01/01/2026");
+  });
+  it("sin día o con un formato raro muestra un guion", () => {
+    expect(diaCorto(null)).toBe("—");
+    expect(diaCorto("2026-10-29T00:00:00Z")).toBe("—");
+  });
+});
+
 describe("TenantsScreen", () => {
   it("muestra el estado de cuenta y el de suscripción por separado", async () => {
     svc.list.mockResolvedValue({ items: [ITEM], total: 1, page: 1, page_size: 25 });
@@ -118,6 +134,14 @@ describe("TenantsScreen", () => {
       "href",
       "/admin/tenants/t-1",
     );
+  });
+
+  it("muestra el último uso y los días con uso, separados del último ingreso", async () => {
+    svc.list.mockResolvedValue({ items: [ITEM], total: 1, page: 1, page_size: 25 });
+    conCliente(<TenantsScreen />);
+    expect(await screen.findByText("Kiosco Don Pedro")).toBeInTheDocument();
+    expect(screen.getByText("29/10/2026")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
   });
 
   it("al filtrar vuelve a la primera página y manda el filtro", async () => {

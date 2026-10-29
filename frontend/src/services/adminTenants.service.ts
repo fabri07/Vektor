@@ -20,6 +20,10 @@ export interface AdminTenantListItem {
   /** Último login conocido: NO es actividad real. */
   last_login_at: string | null;
   tokens_30d: number;
+  /** Último día (hora Argentina, `YYYY-MM-DD`) con uso de un usuario del negocio. */
+  last_activity_date: string | null;
+  /** Días distintos con uso en los últimos 30. */
+  active_days_30d: number;
 }
 
 export interface AdminTenantListResponse {
@@ -68,6 +72,8 @@ export interface AdminTenantDetail {
   status_changed_at: string | null;
   is_demo: boolean;
   created_at: string;
+  last_activity_date: string | null;
+  active_days_30d: number;
   subscription: AdminTenantSubscription | null;
   users: AdminTenantUser[];
   recent_events: AdminTenantAuditEvent[];

@@ -35,6 +35,18 @@ export function fechaCorta(iso: string | null | undefined): string {
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
+/**
+ * Un día de calendario (`YYYY-MM-DD`, sin hora ni zona), tal cual viene.
+ * `new Date("2026-10-29")` lo toma como medianoche UTC y en Argentina (UTC-3)
+ * mostraría el día anterior: acá no hay conversión de zona.
+ */
+export function diaCorto(dia: string | null | undefined): string {
+  if (!dia) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dia);
+  if (!m) return "—";
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
 export function fechaYHora(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
