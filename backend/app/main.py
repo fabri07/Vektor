@@ -87,6 +87,7 @@ CORS_ALLOW_HEADERS: list[str] = [
     "baggage",
     TERMINAL_HEADER,
     OFFLINE_HEADER,
+    "X-Admin-Password",
 ]
 CORS_EXPOSE_HEADERS: list[str] = ["X-Request-ID", "X-Trace-Id"]
 

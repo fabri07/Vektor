@@ -75,6 +75,9 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
     void queryClient.invalidateQueries({ queryKey: ["admin-tenants"] });
   };
 
+  // Reconfirmación del SUPERADMIN: se pide en cada acción de alto impacto y no se guarda.
+  const [contrasena, setContrasena] = useState("");
+
   // ── Estado de cuenta ──
   const [nuevoEstado, setNuevoEstado] = useState<EstadoDeCuenta | "">("");
   const [motivo, setMotivo] = useState("");
@@ -83,7 +86,7 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
       adminTenantsService.changeStatus(tenantId, {
         status: nuevoEstado as EstadoDeCuenta,
         reason: motivo.trim(),
-      }),
+      }, contrasena),
     onSuccess: (r) => {
       toast(r.changed ? "Estado de cuenta actualizado." : "La cuenta ya estaba en ese estado.", "success");
       setNuevoEstado("");
@@ -110,7 +113,7 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
         exchange_rate: pago.exchange_rate,
         plan_code: pago.plan_code.trim() || null,
         notes: pago.notes.trim() || null,
-      }),
+      }, contrasena),
     onSuccess: (r) => {
       toast(
         r.already_applied
@@ -126,7 +129,7 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
   // ── Plan / cancelación ──
   const [plan, setPlan] = useState("");
   const cambiarPlan = useMutation({
-    mutationFn: () => adminTenantsService.changePlan(tenantId, plan.trim()),
+    mutationFn: () => adminTenantsService.changePlan(tenantId, plan.trim(), contrasena),
     onSuccess: (r) => {
       toast(`Plan programado para la próxima renovación: ${r.scheduled_plan_code}.`, "success");
       setPlan("");
@@ -136,7 +139,7 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
   const [confirmaCancelar, setConfirmaCancelar] = useState(false);
   const [motivoCancelar, setMotivoCancelar] = useState("");
   const cancelar = useMutation({
-    mutationFn: () => adminTenantsService.cancelRenewal(tenantId, motivoCancelar.trim() || null),
+    mutationFn: () => adminTenantsService.cancelRenewal(tenantId, motivoCancelar.trim() || null, contrasena),
     onSuccess: (r) => {
       toast(`Renovación cancelada. Conserva el acceso hasta ${fechaCorta(r.access_until)}.`, "success");
       setConfirmaCancelar(false);
@@ -185,6 +188,19 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
           <Dato label="Último uso" value={diaCorto(t.last_activity_date)} />
           <Dato label="Días con uso (30 d)" value={entero(t.active_days_30d)} />
         </dl>
+        <div className="mb-4 flex flex-col gap-1">
+          <label htmlFor="admin-password" className="text-xs text-vk-text-muted">
+            Tu contraseña (para confirmar suspender, plan, cancelación y pagos)
+          </label>
+          <input
+            id="admin-password"
+            type="password"
+            autoComplete="current-password"
+            value={contrasena}
+            onChange={(e) => setContrasena(e.target.value)}
+            className={inputClass}
+          />
+        </div>
         <form
           className="flex flex-col gap-3"
           onSubmit={(e) => {

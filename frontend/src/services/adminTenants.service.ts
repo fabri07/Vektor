@@ -131,6 +131,11 @@ export interface ListTenantsParams {
 
 const base = (id: string) => `/admin/tenants/${id}`;
 
+/** Las acciones de alto impacto reconfirman con la contraseña del SUPERADMIN. */
+const conContrasena = (contrasena: string) => ({
+  headers: { "X-Admin-Password": contrasena },
+});
+
 export const adminTenantsService = {
   async list(params: ListTenantsParams = {}): Promise<AdminTenantListResponse> {
     const { data } = await api.get<AdminTenantListResponse>("/admin/tenants", { params });
@@ -143,31 +148,48 @@ export const adminTenantsService = {
   async changeStatus(
     id: string,
     body: { status: EstadoDeCuenta; reason: string },
+    contrasena: string,
   ): Promise<TenantStatusChangeResponse> {
-    const { data } = await api.post<TenantStatusChangeResponse>(`${base(id)}/status`, body);
+    const { data } = await api.post<TenantStatusChangeResponse>(
+      `${base(id)}/status`,
+      body,
+      conContrasena(contrasena),
+    );
     return data;
   },
   async applyPayment(
     id: string,
     body: SubscriptionPaymentInput,
+    contrasena: string,
   ): Promise<SubscriptionPaymentResponse> {
     const { data } = await api.post<SubscriptionPaymentResponse>(
       `${base(id)}/subscription/payments`,
       body,
+      conContrasena(contrasena),
     );
     return data;
   },
-  async changePlan(id: string, planCode: string): Promise<{ scheduled_plan_code: string }> {
+  async changePlan(
+    id: string,
+    planCode: string,
+    contrasena: string,
+  ): Promise<{ scheduled_plan_code: string }> {
     const { data } = await api.post<{ scheduled_plan_code: string }>(
       `${base(id)}/subscription/change-plan`,
       { plan_code: planCode },
+      conContrasena(contrasena),
     );
     return data;
   },
-  async cancelRenewal(id: string, reason: string | null): Promise<{ access_until: string }> {
+  async cancelRenewal(
+    id: string,
+    reason: string | null,
+    contrasena: string,
+  ): Promise<{ access_until: string }> {
     const { data } = await api.post<{ access_until: string }>(
       `${base(id)}/subscription/cancel`,
       { reason },
+      conContrasena(contrasena),
     );
     return data;
   },

@@ -16,7 +16,7 @@ import uuid
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import require_role
+from app.api.v1.deps import exigir_contrasena_superadmin, require_role
 from app.application.services import tenant_admin_service as svc
 from app.persistence.db.session import get_db_session
 from app.persistence.models.user import User
@@ -59,7 +59,7 @@ async def get_tenant(
 async def change_status(
     tenant_id: uuid.UUID,
     body: TenantStatusChangeRequest,
-    actor: User = Depends(require_role("SUPERADMIN")),
+    actor: User = Depends(exigir_contrasena_superadmin),
     session: AsyncSession = Depends(get_db_session),
 ) -> TenantStatusChangeResponse:
     return await svc.change_tenant_status(

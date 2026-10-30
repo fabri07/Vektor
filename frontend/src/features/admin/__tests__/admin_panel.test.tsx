@@ -179,13 +179,16 @@ describe("TenantDetailScreen", () => {
       target: { value: "falta de pago" },
     });
     expect(boton).toBeEnabled();
+    fireEvent.change(screen.getByLabelText(/Tu contraseña/), { target: { value: "Secure789" } });
     fireEvent.click(boton);
 
+    // La contraseña viaja como tercer argumento (header en el servicio).
     await waitFor(() =>
-      expect(svc.changeStatus).toHaveBeenCalledWith("t-1", {
-        status: "READ_ONLY",
-        reason: "falta de pago",
-      }),
+      expect(svc.changeStatus).toHaveBeenCalledWith(
+        "t-1",
+        { status: "READ_ONLY", reason: "falta de pago" },
+        "Secure789",
+      ),
     );
   });
 
@@ -229,6 +232,6 @@ describe("TenantDetailScreen", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Cancelar renovación/ }));
     expect(svc.cancelRenewal).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Confirmar cancelación" }));
-    await waitFor(() => expect(svc.cancelRenewal).toHaveBeenCalledWith("t-1", null));
+    await waitFor(() => expect(svc.cancelRenewal).toHaveBeenCalledWith("t-1", null, ""));
   });
 });

@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import require_role
+from app.api.v1.deps import exigir_contrasena_superadmin, require_role
 from app.application.services import subscription_billing_service as billing
 from app.persistence.db.session import get_db_session
 from app.persistence.models.tenant import Subscription, SubscriptionPayment
@@ -85,7 +85,7 @@ async def _suscripcion(session: AsyncSession, tenant_id: uuid.UUID) -> Subscript
 async def apply_payment(
     tenant_id: uuid.UUID,
     body: SubscriptionPaymentRequest,
-    actor: User = Depends(require_role("SUPERADMIN")),
+    actor: User = Depends(exigir_contrasena_superadmin),
     session: AsyncSession = Depends(get_db_session),
 ) -> SubscriptionPaymentResponse:
     sub = await _suscripcion(session, tenant_id)
@@ -121,7 +121,7 @@ async def apply_payment(
 async def change_plan(
     tenant_id: uuid.UUID,
     body: ChangePlanRequest,
-    actor: User = Depends(require_role("SUPERADMIN")),
+    actor: User = Depends(exigir_contrasena_superadmin),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChangePlanResponse:
     sub = await _suscripcion(session, tenant_id)
@@ -145,7 +145,7 @@ async def change_plan(
 async def cancel(
     tenant_id: uuid.UUID,
     body: CancelRequest,
-    actor: User = Depends(require_role("SUPERADMIN")),
+    actor: User = Depends(exigir_contrasena_superadmin),
     session: AsyncSession = Depends(get_db_session),
 ) -> CancelResponse:
     sub = await _suscripcion(session, tenant_id)
