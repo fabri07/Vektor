@@ -419,3 +419,28 @@ class TestSchedulerConfiguredCorrectly:
     async def test_celery_task_time_limit_configured(self) -> None:
         assert celery_app.conf.task_time_limit == 300
         assert celery_app.conf.task_soft_time_limit == 240
+
+
+async def test_el_resumen_semanal_va_a_los_tenants_que_operan(session: AsyncSession) -> None:
+    """ACTIVE y TRIAL lo reciben; READ_ONLY, SUSPENDED y un estado raro, no."""
+    from app.jobs.send_weekly_email import _tenant_ids_a_notificar
+
+    ids: dict[str, uuid.UUID] = {}
+    for estado in ("ACTIVE", "TRIAL", "READ_ONLY", "SUSPENDED", "BANANA"):
+        t = Tenant(
+            tenant_id=uuid.uuid4(),
+            legal_name=f"Negocio {estado}",
+            display_name=f"Negocio {estado}",
+            currency="ARS",
+            pricing_reference_mode="MEP",
+            status=estado,
+        )
+        session.add(t)
+        ids[estado] = t.tenant_id
+    await session.commit()
+
+    elegidos = set(await _tenant_ids_a_notificar(session))
+    assert str(ids["ACTIVE"]) in elegidos
+    assert str(ids["TRIAL"]) in elegidos
+    for estado in ("READ_ONLY", "SUSPENDED", "BANANA"):
+        assert str(ids[estado]) not in elegidos
