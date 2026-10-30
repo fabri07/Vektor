@@ -221,6 +221,7 @@ describe("TenantDetailScreen", () => {
     expect(svc.applyPayment).toHaveBeenCalledWith(
       "t-1",
       expect.objectContaining({ amount_ars: "40500", exchange_rate: "1500" }),
+      "",
     );
   });
 
