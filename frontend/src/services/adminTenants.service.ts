@@ -91,8 +91,9 @@ export interface TenantStatusChangeResponse {
 export interface SubscriptionPaymentInput {
   expected: "activate" | "renew";
   reference: string;
-  amount_usd: string;
   amount_ars: string;
+  /** Pesos por dólar; el servidor deriva el equivalente en USD. */
+  exchange_rate: string;
   plan_code?: string | null;
   notes?: string | null;
 }
@@ -113,6 +114,7 @@ export interface SubscriptionPaymentItem {
   plan_code: string;
   amount_usd: string;
   amount_ars: string;
+  exchange_rate: string | null;
   operator: string;
   period_start: string;
   period_end: string;

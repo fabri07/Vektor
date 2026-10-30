@@ -208,11 +208,17 @@ describe("TenantDetailScreen", () => {
     fireEvent.change(await screen.findByLabelText("Referencia del pago"), {
       target: { value: "TRF-9" },
     });
-    fireEvent.change(screen.getByLabelText("Importe en USD"), { target: { value: "27" } });
-    fireEvent.change(screen.getByLabelText("Importe en ARS"), { target: { value: "41500" } });
+    fireEvent.change(screen.getByLabelText("Importe en ARS"), { target: { value: "40500" } });
+    fireEvent.change(screen.getByLabelText("Cotización (ARS por USD)"), {
+      target: { value: "1500" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Acreditar pago" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Corresponde renovar.");
+    expect(svc.applyPayment).toHaveBeenCalledWith(
+      "t-1",
+      expect.objectContaining({ amount_ars: "40500", exchange_rate: "1500" }),
+    );
   });
 
   it("cancelar la renovación pide confirmación explícita", async () => {
