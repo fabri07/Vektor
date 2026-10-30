@@ -24,6 +24,8 @@ import { filesService } from "@/services/files.service";
 import { onboardingService } from "@/services/onboarding.service";
 import { useChatStore } from "@/stores/chatStore";
 import { useChatWidgetStore } from "@/stores/chatWidgetStore";
+import { useAuthStore } from "@/stores/authStore";
+import { isSuperadmin } from "@/lib/roles";
 
 const SUGGESTIONS = [
   "Hoy vendí $85.000",
@@ -45,6 +47,7 @@ function buildAttachmentMessage(attachments: AttachmentFile[]): string {
 export function ChatWidget() {
   const router = useRouter();
   const pathname = usePathname();
+  const role = useAuthStore((s) => s.user?.role);
   const queryClient = useQueryClient();
   const { isOpen, open, close, posX, posY, setPosition, consumePendingPrompt } =
     useChatWidgetStore();
@@ -77,9 +80,12 @@ export function ChatWidget() {
   const { conversationId, loadMessages } = useChatStore();
 
   // Redirigir a onboarding si el negocio aún no fue configurado (una sola vez).
+  // El soporte de la plataforma no tiene un negocio que configurar: su tenant es
+  // sólo el contenedor de la cuenta.
   useEffect(() => {
-    if (onboardingChecked.current) return;
+    if (onboardingChecked.current || !role) return;
     onboardingChecked.current = true;
+    if (isSuperadmin(role)) return;
     if (pathname.startsWith("/onboarding")) return;
     onboardingService
       .getStatus()
@@ -89,7 +95,7 @@ export function ChatWidget() {
       .catch(() => {
         /* no bloquear si el check falla */
       });
-  }, [router, pathname]);
+  }, [router, pathname, role]);
 
   useEffect(() => {
     if (isOpen) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
