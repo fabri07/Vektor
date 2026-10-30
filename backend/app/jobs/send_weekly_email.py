@@ -447,27 +447,37 @@ async def _async_send(tenant_id: str) -> None:
     queue="notifications",
 )
 def send_weekly_email_all_tenants() -> None:
-    """Fan-out: enqueue send_weekly_email_summary for every active tenant."""
+    """Fan-out: enqueue send_weekly_email_summary for every operating tenant."""
     with log_job("jobs.send_weekly_email_all_tenants", logger=logger):
         asyncio.run(_fan_out())
 
 
-async def _fan_out() -> None:
+async def _tenant_ids_a_notificar(session: Any) -> list[str]:
+    """Tenants que reciben el resumen: los que operan (ACTIVE y TRIAL)."""
     from sqlalchemy import select  # noqa: PLC0415
+
+    from app.domain.tenant_status import ESTADOS_OPERATIVOS  # noqa: PLC0415
+    from app.persistence.models.tenant import Tenant  # noqa: PLC0415
+
+    result = await session.execute(
+        select(Tenant.tenant_id).where(Tenant.status.in_(ESTADOS_OPERATIVOS))
+    )
+    return [str(row) for row in result.scalars().all()]
+
+
+async def _fan_out() -> None:
     from sqlalchemy.ext.asyncio import AsyncSession  # noqa: PLC0415
     from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
 
     from app.config.settings import get_settings  # noqa: PLC0415
     from app.persistence.db.engine_factory import crear_engine  # noqa: PLC0415
-    from app.persistence.models.tenant import Tenant  # noqa: PLC0415
 
     s = get_settings()
     engine = crear_engine(s.DATABASE_URL, pool_pre_ping=True, connect_args=s.pg_connect_args)
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
 
     async with factory() as session:
-        result = await session.execute(select(Tenant.tenant_id).where(Tenant.status == "ACTIVE"))
-        tenant_ids = [str(row) for row in result.scalars().all()]
+        tenant_ids = await _tenant_ids_a_notificar(session)
 
     await engine.dispose()
 
