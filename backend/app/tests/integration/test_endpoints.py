@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.agents.shared.event_bus import EventBus
 from app.application.agents.shared.schemas import AgentResponse, LLMCall, RiskLevel
+from app.domain.business_time import today_ar
 from app.integrations.mcp.exceptions import McpToolAuthError
 from app.main import create_app
 from app.persistence.db.redis_client import get_redis
@@ -496,7 +497,7 @@ async def test_rate_limit_429(auth_client):
     ac, headers, tenant, user, fake_redis = auth_client
 
     # Precargar el contador a 50 para no hacer 51 llamadas reales al LLM
-    rate_key = f"rate:chat:{tenant.tenant_id}:{__import__('datetime').date.today()}"
+    rate_key = f"rate:chat:{tenant.tenant_id}:{today_ar()}"
     fake_redis._store[rate_key] = ("50", None)
 
     resp = await ac.post(
@@ -512,7 +513,7 @@ async def test_rate_limit_429(auth_client):
 async def test_chat_error_response_does_not_increment_rate_limit(auth_client):
     """Errores controlados del orquestador no consumen cuota diaria."""
     ac, headers, tenant, user, fake_redis = auth_client
-    rate_key = f"rate:chat:{tenant.tenant_id}:{__import__('datetime').date.today()}"
+    rate_key = f"rate:chat:{tenant.tenant_id}:{today_ar()}"
 
     with patch("app.api.v1.agent.ChatOrchestrator") as mock_orchestrator:
         mock_orchestrator.return_value.handle = AsyncMock(

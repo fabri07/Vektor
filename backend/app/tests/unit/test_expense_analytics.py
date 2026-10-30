@@ -1,7 +1,7 @@
 """Tests de los handlers analíticos de AgentExpense (Sprint 17, Stage 5)."""
 
 import uuid
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 import pytest_asyncio
@@ -41,7 +41,7 @@ async def seeded(db_session: AsyncSession) -> uuid.UUID:
             status="ACTIVE",
         )
     )
-    today = date.today()
+    today = today_ar()
     # Alquiler recurrente (fijo) + servicios normales + 1 outlier
     rows = [
         ExpenseEntry(
