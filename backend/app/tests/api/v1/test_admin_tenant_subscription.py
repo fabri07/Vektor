@@ -101,7 +101,8 @@ async def _con_rol(db: AsyncSession, tenant: Tenant, rol: str) -> dict[str, str]
     token = create_access_token(
         {"sub": str(user.user_id), "tenant_id": str(tenant.tenant_id), "role_code": rol}
     )
-    return {"Authorization": f"Bearer {token}"}
+    # El SUPERADMIN reconfirma con su contraseña las acciones de alto impacto.
+    return {"Authorization": f"Bearer {token}", "X-Admin-Password": "Secure789"}
 
 
 @pytest.fixture

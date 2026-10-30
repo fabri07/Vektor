@@ -53,7 +53,8 @@ async def _headers_con_rol(
     token = create_access_token(
         {"sub": str(user.user_id), "tenant_id": str(tenant.tenant_id), "role_code": rol}
     )
-    return {"Authorization": f"Bearer {token}"}
+    # El SUPERADMIN reconfirma con su contraseña las acciones de alto impacto.
+    return {"Authorization": f"Bearer {token}", "X-Admin-Password": "Secure789"}
 
 
 @pytest.fixture

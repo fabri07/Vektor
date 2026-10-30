@@ -11,7 +11,7 @@ from collections.abc import Callable
 from uuid import UUID
 
 import sentry_sdk
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +49,7 @@ from app.persistence.models.tenant import Tenant
 from app.persistence.models.user import User
 from app.persistence.repositories.tenant_repository import TenantRepository
 from app.persistence.repositories.user_repository import UserRepository
-from app.utils.security import decode_access_token
+from app.utils.security import decode_access_token, verify_password
 
 # Código que el frontend reconoce para abrir el modal de PIN y reintentar.
 PIN_REQUIRED_CODE = "PIN_REQUIRED"
@@ -492,6 +492,67 @@ async def require_owner_stepup(
         )
     await _require_pin_window(current_user, redis)
     return current_user
+
+
+#: Header con la contraseña con que el SUPERADMIN reconfirma una acción de alto impacto.
+ADMIN_PASSWORD_HEADER = "X-Admin-Password"
+ADMIN_PASSWORD_REQUIRED_CODE = "ADMIN_PASSWORD_REQUIRED"
+ADMIN_PASSWORD_INVALID_CODE = "ADMIN_PASSWORD_INVALID"
+_ADMIN_PASSWORD_MAX_FALLOS = 5
+_ADMIN_PASSWORD_VENTANA_S = 600
+
+
+async def exigir_contrasena_superadmin(
+    actor: User = Depends(require_role("SUPERADMIN")),
+    redis: Redis = Depends(get_redis),
+    contrasena: str | None = Header(default=None, alias=ADMIN_PASSWORD_HEADER),
+) -> User:
+    """Step-up del SUPERADMIN: suspender, cambiar plan, cancelar y acreditar pagos
+    piden volver a escribir su contraseña (un token robado no alcanza).
+
+    428 si falta, 403 si no coincide, 429 tras 5 fallos en 10 minutos (contados
+    por usuario en Redis; si Redis no responde, se deniega: fail-closed). El hash
+    se lee de la base, nunca del JWT. Un intento fallido sólo se registra en el
+    log (la petición se corta y su transacción se revierte).
+    """
+    if not contrasena:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail={
+                "code": ADMIN_PASSWORD_REQUIRED_CODE,
+                "message": "Reingresá tu contraseña para confirmar esta acción.",
+            },
+        )
+    clave = f"admin_pw_fallos:{actor.user_id}"
+    try:
+        fallos = int(await redis.get(clave) or 0)
+    except Exception as exc:  # noqa: BLE001 — fail-closed ante cualquier error de Redis
+        get_logger(__name__).error("admin_stepup.redis_error", error=type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "ADMIN_STEPUP_UNAVAILABLE"},
+        ) from exc
+    if fallos >= _ADMIN_PASSWORD_MAX_FALLOS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "ADMIN_PASSWORD_LOCKED",
+                "message": "Demasiados intentos. Esperá unos minutos.",
+            },
+        )
+    if not verify_password(contrasena, actor.password_hash):
+        await redis.incr(clave)
+        await redis.expire(clave, _ADMIN_PASSWORD_VENTANA_S)
+        get_logger(__name__).warning("admin_stepup.contrasena_invalida", user_id=str(actor.user_id))
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": ADMIN_PASSWORD_INVALID_CODE,
+                "message": "La contraseña no es correcta.",
+            },
+        )
+    await redis.delete(clave)
+    return actor
 
 
 # ── Suscripción (Etapa 2 — política de planes) ──────────────────────────────────
