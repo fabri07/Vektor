@@ -209,6 +209,7 @@ async def _registrar_pago(
     period_start: datetime,
     period_end: datetime,
     notes: str | None,
+    exchange_rate: Decimal | None = None,
 ) -> bool:
     """Reclama `(source, reference)`. `False` = ya existía (no se insertó)."""
     dialecto = session.bind.dialect.name if session.bind is not None else ""
@@ -242,6 +243,8 @@ async def _registrar_pago(
                     "ia_queries_per_month": plan.ia_queries_per_month,
                     "imports_per_month": plan.imports_per_month,
                     "photo_pdf_reads_per_month": plan.photo_pdf_reads_per_month,
+                    # ARS por USD con que se convirtió el pago (None = sin cotización).
+                    "exchange_rate": None if exchange_rate is None else str(exchange_rate),
                 },
                 notes=notes,
             )
@@ -303,6 +306,7 @@ async def apply_payment(
     plan_code: str | None = None,
     source: str = SOURCE_MANUAL_TRANSFER,
     notes: str | None = None,
+    exchange_rate: Decimal | None = None,
     now: datetime | None = None,
 ) -> ResultadoDePago:
     """Acredita un pago. `expected` es ``"activate"`` o ``"renew"``.
@@ -367,7 +371,7 @@ async def apply_payment(
     if not await _registrar_pago(
         session, sub, source=source, reference=reference, kind=kind, plan=plan,
         amount_usd=amount_usd, amount_ars=amount_ars, operator=operator,
-        period_start=inicio, period_end=nuevo_fin, notes=notes,
+        period_start=inicio, period_end=nuevo_fin, notes=notes, exchange_rate=exchange_rate,
     ):
         # Otra ejecución reclamó la referencia entre nuestro SELECT y el INSERT
         # (sólo posible desde OTRA suscripción: la nuestra está bloqueada).
@@ -401,7 +405,9 @@ async def apply_payment(
         {
             "source": source, "reference": reference, "kind": kind, "before": antes,
             "plan_code": plan.plan_code, "amount_usd": str(amount_usd),
-            "amount_ars": str(amount_ars), "period_start": inicio.isoformat(),
+            "amount_ars": str(amount_ars),
+            "exchange_rate": None if exchange_rate is None else str(exchange_rate),
+            "period_start": inicio.isoformat(),
             "period_end": nuevo_fin.isoformat(), "anchor_day": ancla, "notes": notes,
         },
     )
