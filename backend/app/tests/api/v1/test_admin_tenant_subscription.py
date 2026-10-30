@@ -33,8 +33,8 @@ def _pago(**extra: Any) -> dict[str, Any]:
     cuerpo: dict[str, Any] = {
         "expected": "activate",
         "reference": _REF,
-        "amount_usd": "27.00",
-        "amount_ars": "41500.00",
+        "amount_ars": "40500.00",
+        "exchange_rate": "1500.00",
         "plan_code": "control",
     }
     cuerpo.update(extra)
@@ -189,7 +189,7 @@ async def test_la_misma_referencia_con_otros_datos_es_409_y_no_aplica_nada(
 ) -> None:
     await client.post(_url(sample_tenant, "payments"), headers=sa, json=_pago())
     r = await client.post(
-        _url(sample_tenant, "payments"), headers=sa, json=_pago(amount_usd="99.00")
+        _url(sample_tenant, "payments"), headers=sa, json=_pago(exchange_rate="400.00")
     )
     assert r.status_code == 409
     assert _codigo(r) == "REFERENCE_MISMATCH"
@@ -235,7 +235,7 @@ async def test_activar_sin_plan_o_con_un_plan_inexistente_es_422(
 
 @pytest.mark.parametrize(
     "extra",
-    [{"amount_usd": "0"}, {"amount_ars": "-5"}, {"reference": "ab"}, {"expected": "regalar"}],
+    [{"exchange_rate": "0"}, {"amount_ars": "-5"}, {"reference": "ab"}, {"expected": "regalar"}],
 )
 async def test_los_datos_invalidos_se_rechazan_sin_tocar_nada(
     client: AsyncClient,
@@ -327,3 +327,28 @@ async def test_el_listado_de_pagos_trae_lo_acreditado(
     assert item["reference"] == _REF
     assert item["plan_code"] == "control"
     assert Decimal(item["amount_usd"]) == Decimal("27")
+    # El USD lo deriva el servidor de ARS / cotización, y la cotización queda anotada.
+    assert Decimal(item["amount_ars"]) == Decimal("40500")
+    assert Decimal(item["exchange_rate"]) == Decimal("1500")
+
+
+async def test_el_usd_se_redondea_a_centavos_desde_la_cotizacion(
+    client: AsyncClient, sa: dict[str, str], sample_tenant: Tenant, en_prueba: Subscription
+) -> None:
+    r = await client.post(
+        _url(sample_tenant, "payments"),
+        headers=sa,
+        json=_pago(amount_ars="41500.00", exchange_rate="1537.00"),
+    )
+    assert r.status_code == 200, r.text
+    (item,) = (await client.get(_url(sample_tenant, "payments"), headers=sa)).json()["items"]
+    assert Decimal(item["amount_usd"]) == Decimal("27.00")
+
+
+async def test_un_pago_sin_cotizacion_se_rechaza(
+    client: AsyncClient, sa: dict[str, str], sample_tenant: Tenant, en_prueba: Subscription
+) -> None:
+    cuerpo = _pago()
+    del cuerpo["exchange_rate"]
+    r = await client.post(_url(sample_tenant, "payments"), headers=sa, json=cuerpo)
+    assert r.status_code == 422

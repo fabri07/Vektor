@@ -96,8 +96,8 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
   const [pago, setPago] = useState({
     expected: "renew" as "activate" | "renew",
     reference: "",
-    amount_usd: "",
     amount_ars: "",
+    exchange_rate: "",
     plan_code: "",
     notes: "",
   });
@@ -106,8 +106,8 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
       adminTenantsService.applyPayment(tenantId, {
         expected: pago.expected,
         reference: pago.reference.trim(),
-        amount_usd: pago.amount_usd,
         amount_ars: pago.amount_ars,
+        exchange_rate: pago.exchange_rate,
         plan_code: pago.plan_code.trim() || null,
         notes: pago.notes.trim() || null,
       }),
@@ -118,7 +118,7 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
           : `Pago acreditado. Acceso hasta ${fechaCorta(r.period_end)}.`,
         "success",
       );
-      setPago({ ...pago, reference: "", amount_usd: "", amount_ars: "", notes: "" });
+      setPago({ ...pago, reference: "", amount_ars: "", exchange_rate: "", notes: "" });
       refrescar();
     },
   });
@@ -293,19 +293,19 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
                 className={inputClass}
               />
               <input
-                aria-label="Importe en USD"
-                placeholder="Importe USD"
-                inputMode="decimal"
-                value={pago.amount_usd}
-                onChange={(e) => setPago({ ...pago, amount_usd: e.target.value })}
-                className={inputClass}
-              />
-              <input
                 aria-label="Importe en ARS"
                 placeholder="Importe ARS"
                 inputMode="decimal"
                 value={pago.amount_ars}
                 onChange={(e) => setPago({ ...pago, amount_ars: e.target.value })}
+                className={inputClass}
+              />
+              <input
+                aria-label="Cotización (ARS por USD)"
+                placeholder="Cotización ARS/USD"
+                inputMode="decimal"
+                value={pago.exchange_rate}
+                onChange={(e) => setPago({ ...pago, exchange_rate: e.target.value })}
                 className={inputClass}
               />
               <input
@@ -327,8 +327,8 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
                   disabled={
                     registrarPago.isPending ||
                     pago.reference.trim().length < 3 ||
-                    !pago.amount_usd ||
-                    !pago.amount_ars
+                    !pago.amount_ars ||
+                    !pago.exchange_rate
                   }
                   className={buttonClass}
                 >
@@ -434,7 +434,10 @@ export function TenantDetailScreen({ tenantId }: { tenantId: string }) {
                   <td>{p.kind}</td>
                   <td>{p.plan_code}</td>
                   <td>{p.amount_usd}</td>
-                  <td>{p.amount_ars}</td>
+                  <td>
+                    {p.amount_ars}
+                    {p.exchange_rate ? ` (a ${p.exchange_rate})` : ""}
+                  </td>
                   <td>
                     {fechaCorta(p.period_start)} → {fechaCorta(p.period_end)}
                   </td>

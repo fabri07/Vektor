@@ -19,8 +19,12 @@ class SubscriptionPaymentRequest(BaseModel):
     #: Clave de idempotencia (junto con la fuente): repetirla con los MISMOS datos
     #: devuelve lo ya acreditado; con otros datos, 409 `REFERENCE_MISMATCH`.
     reference: str = Field(min_length=3, max_length=200)
-    amount_usd: Decimal = Field(gt=0, max_digits=8, decimal_places=2)
+    #: Lo que el cliente pagó, en pesos.
     amount_ars: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    #: Pesos por dólar con que se convierte el pago. El servidor deriva el
+    #: equivalente en USD (`amount_ars / exchange_rate`, 2 decimales): el operador
+    #: no tipea un importe en USD que pueda no cerrar con los otros dos.
+    exchange_rate: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
     #: Obligatorio al activar; al renovar, por defecto el plan programado o el vigente.
     plan_code: str | None = Field(default=None, max_length=50)
     notes: str | None = Field(default=None, max_length=300)
@@ -61,6 +65,7 @@ class SubscriptionPaymentItem(BaseModel):
     plan_code: str
     amount_usd: Decimal
     amount_ars: Decimal
+    exchange_rate: Decimal | None = None
     operator: str
     period_start: datetime
     period_end: datetime

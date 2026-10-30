@@ -15,6 +15,7 @@ de la suscripción acá: es una reparación operativa y sigue siendo del CLI.
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -95,8 +96,9 @@ async def apply_payment(
             expected=body.expected,
             plan_code=body.plan_code,
             reference=body.reference,
-            amount_usd=body.amount_usd,
+            amount_usd=(body.amount_ars / body.exchange_rate).quantize(Decimal("0.01")),
             amount_ars=body.amount_ars,
+            exchange_rate=body.exchange_rate,
             operator=_operador(actor),
             notes=body.notes,
         )
@@ -159,6 +161,13 @@ async def cancel(
     return CancelResponse(access_until=hasta)
 
 
+def _item(fila: SubscriptionPayment) -> SubscriptionPaymentItem:
+    item = SubscriptionPaymentItem.model_validate(fila, from_attributes=True)
+    cotizacion = (fila.granted_json or {}).get("exchange_rate")
+    item.exchange_rate = None if cotizacion is None else Decimal(cotizacion)
+    return item
+
+
 @router.get(
     "/payments",
     response_model=SubscriptionPaymentsResponse,
@@ -178,6 +187,4 @@ async def list_payments(
             .limit(_PAGOS_EN_LA_FICHA)
         )
     ).all()
-    return SubscriptionPaymentsResponse(
-        items=[SubscriptionPaymentItem.model_validate(f, from_attributes=True) for f in filas]
-    )
+    return SubscriptionPaymentsResponse(items=[_item(f) for f in filas])
