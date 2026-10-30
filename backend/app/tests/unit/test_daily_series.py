@@ -9,12 +9,13 @@ Verifica:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.business_time import today_ar
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.repositories.transaction_repository import (
@@ -47,7 +48,7 @@ def _sale(tid: uuid.UUID, amount: str, days_ago: int, *, voided: bool = False) -
         amount=Decimal(amount),
         quantity=1,
         transaction_date=datetime.combine(
-            date.today() - timedelta(days=days_ago), datetime.min.time()
+            today_ar() - timedelta(days=days_ago), datetime.min.time()
         ),
         payment_method="cash",
         voided_at=datetime.now(UTC) if voided else None,
@@ -62,7 +63,7 @@ def _expense(tid: uuid.UUID, amount: str, days_ago: int) -> ExpenseEntry:
         category="OTHER",
         description="test",
         transaction_date=datetime.combine(
-            date.today() - timedelta(days=days_ago), datetime.min.time()
+            today_ar() - timedelta(days=days_ago), datetime.min.time()
         ),
         payment_method="cash",
     )
