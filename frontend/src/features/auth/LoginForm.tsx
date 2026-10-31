@@ -8,6 +8,7 @@ import { loginSchema } from "@/validation/auth";
 import type { LoginInput } from "@/validation/auth";
 import type { AxiosError } from "axios";
 import type { ApiError } from "@/types/api";
+import { rutaDeInicio } from "@/lib/roles";
 
 const GoogleIcon = () => (
   <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
@@ -102,7 +103,7 @@ export function LoginForm() {
     if (!result.success) return;
 
     login.mutate(result.data, {
-      onSuccess: () => router.replace("/dashboard"),
+      onSuccess: ({ user }) => router.replace(rutaDeInicio(user.role_code)),
     });
   }
 

@@ -16,6 +16,28 @@ export function isSuperadmin(role: string | null | undefined): boolean {
   return role === SUPERADMIN_ROLE;
 }
 
+/**
+ * Pantalla a la que se entra tras iniciar sesión: el soporte de la plataforma
+ * aterriza en su consola; el resto, en el dashboard de su negocio.
+ */
+export function rutaDeInicio(role: string | null | undefined): string {
+  return isSuperadmin(role) ? "/admin" : "/dashboard";
+}
+
+/**
+ * ¿Puede el soporte estar en esta ruta? Su tenant es sólo el contenedor de la
+ * cuenta: no tiene negocio, así que las pantallas de negocio no le sirven. Sólo
+ * `/admin/*` y la configuración de su cuenta (contraseña). UX, no seguridad.
+ */
+export function rutaDelSoporte(pathname: string): boolean {
+  return (
+    pathname === "/admin" ||
+    pathname.startsWith("/admin/") ||
+    pathname === "/settings" ||
+    pathname.startsWith("/settings/")
+  );
+}
+
 const ROLE_LABELS: Record<string, string> = {
   OWNER: "Dueño",
   ADMIN: "Administrador",

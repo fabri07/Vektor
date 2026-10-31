@@ -1,6 +1,6 @@
 "use client";
 
-import { roleLabel } from "@/lib/roles";
+import { isSuperadmin, roleLabel, rutaDeInicio } from "@/lib/roles";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -18,6 +18,7 @@ import {
   Settings,
   Plug,
   Inbox,
+  Activity,
   Building2,
   Coins,
   ScanBarcode,
@@ -50,8 +51,10 @@ const NAV_ITEMS = [
 // La caja (B13): sólo quien puede cobrar. El cajero no ve esta barra.
 const POS_NAV_ITEM = { label: "Caja", href: "/pos", icon: ScanBarcode };
 
-// Items visibles solo para SUPERADMIN (admin de plataforma).
-const SUPERADMIN_NAV_ITEMS = [
+// El soporte de la plataforma no tiene un negocio: su menú es sólo la consola.
+// `exact`: el Monitor es `/admin`, que no debe quedar marcado en `/admin/tenants`.
+const SUPERADMIN_NAV_ITEMS: { label: string; href: string; icon: typeof Activity; exact?: boolean }[] = [
+  { label: "Monitor", href: "/admin", icon: Activity, exact: true },
   { label: "Negocios", href: "/admin/tenants", icon: Building2 },
   { label: "Uso & costos", href: "/admin/usage", icon: Coins },
 ];
@@ -77,6 +80,8 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
     }
   }, []);
 
+  const esSoporte = isSuperadmin(user?.role);
+
   const { data: profileData } = useQuery({
     queryKey: ["business-profile"],
     queryFn: async () => {
@@ -85,6 +90,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
     },
     staleTime: 5 * 60 * 1000,
     retry: false,
+    enabled: !esSoporte,
   });
 
   const businessName = profileData?.display_name ?? "Mi negocio";
@@ -92,10 +98,8 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
 
   const puedeCobrar = user?.role === "OWNER" || user?.role === "ADMIN";
   const baseItems = puedeCobrar ? [POS_NAV_ITEM, ...NAV_ITEMS] : NAV_ITEMS;
-  const navItems =
-    user?.role === "SUPERADMIN"
-      ? [...baseItems, ...SUPERADMIN_NAV_ITEMS]
-      : baseItems;
+  const navItems: { label: string; href: string; icon: typeof Activity; exact?: boolean }[] =
+    esSoporte ? SUPERADMIN_NAV_ITEMS : baseItems;
 
   return (
     <aside
@@ -119,7 +123,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         )}
       >
         <Link
-          href="/dashboard"
+          href={rutaDeInicio(user?.role)}
           onClick={onClose}
           className={clsx(
             "flex items-center focus:outline-none focus-visible:ring-2 focus-visible:ring-vk-blue/60 rounded",
@@ -138,7 +142,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
       </div>
 
       {/* ── Business name ── */}
-      {!collapsed && (
+      {!collapsed && !esSoporte && (
         <div className="px-4 py-2.5 border-b border-vk-border-dark">
           <p className="text-xs font-medium text-vk-text-muted truncate">{businessName}</p>
         </div>
@@ -149,7 +153,8 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         <ul className="space-y-0.5">
           {navItems.map((item) => {
             const isActive =
-              pathname === item.href || pathname.startsWith(item.href + "/");
+              pathname === item.href ||
+              (!item.exact && pathname.startsWith(item.href + "/"));
             const Icon = item.icon;
 
             return (
@@ -200,15 +205,17 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
       </nav>
 
       {/* ── Botón destacado de carga manual (debajo de Aplicaciones) ── */}
-      <div
-        className={clsx(
-          "border-t border-vk-border-dark px-4 py-3",
-          // En tablet colapsado (60px) el botón ancho no entra → ocultarlo ahí.
-          collapsed && "md:hidden lg:block",
-        )}
-      >
-        <ManualEntryLauncher prominent />
-      </div>
+      {!esSoporte && (
+        <div
+          className={clsx(
+            "border-t border-vk-border-dark px-4 py-3",
+            // En tablet colapsado (60px) el botón ancho no entra → ocultarlo ahí.
+            collapsed && "md:hidden lg:block",
+          )}
+        >
+          <ManualEntryLauncher prominent />
+        </div>
+      )}
 
       {/* ── Tablet collapse toggle ── */}
       <div className="hidden md:flex lg:hidden items-center justify-center border-t border-vk-border-dark py-2">

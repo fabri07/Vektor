@@ -14,6 +14,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { PublicNav } from "@/components/public/PublicNav";
 import { PublicFooter } from "@/components/public/PublicFooter";
 import { DoodleHero } from "@/components/public/DoodleHero";
+import { rutaDeInicio } from "@/lib/roles";
 
 const SOCIAL_PROOF_CARDS = [
   { src: "/screenshots/kiosco.jpg", rubro: "Kiosco" },
@@ -289,12 +290,13 @@ export default function RootPage() {
   const router = useRouter();
   const token = useAuthStore((s) => s.token);
   const hasHydrated = useAuthStore((s) => s._hasHydrated);
+  const role = useAuthStore((s) => s.user?.role);
 
   useEffect(() => {
     if (hasHydrated && token) {
-      router.replace("/dashboard");
+      router.replace(rutaDeInicio(role));
     }
-  }, [hasHydrated, token, router]);
+  }, [hasHydrated, token, role, router]);
 
   return (
     <>
