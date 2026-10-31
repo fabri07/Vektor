@@ -11,7 +11,7 @@ import { PinGateModal } from "@/components/ui/PinGateModal";
 import { AccountBlockNotice } from "@/components/layout/AccountBlockNotice";
 import { useAuthStore } from "@/stores/authStore";
 import { useSessionSync } from "@/hooks/useSessionSync";
-import { CASHIER_ROLE } from "@/lib/roles";
+import { CASHIER_ROLE, isSuperadmin, rutaDelSoporte } from "@/lib/roles";
 
 export default function ProtectedLayout({
   children,
@@ -29,6 +29,8 @@ export default function ProtectedLayout({
 
   const isPosRoute = pathname === "/pos" || pathname.startsWith("/pos/");
   const isCashier = role === CASHIER_ROLE;
+  const esSoporte = isSuperadmin(role);
+  const fueraDeLaConsola = esSoporte && !rutaDelSoporte(pathname);
 
   useEffect(() => {
     if (!token) {
@@ -44,6 +46,14 @@ export default function ProtectedLayout({
     }
   }, [token, sesion, isCashier, isPosRoute, router]);
 
+  // El soporte de la plataforma no tiene negocio: las pantallas de negocio le
+  // darían 403 o vacíos. Su casa es la consola.
+  useEffect(() => {
+    if (token && sesion !== "pending" && fueraDeLaConsola) {
+      router.replace("/admin");
+    }
+  }, [token, sesion, fueraDeLaConsola, router]);
+
   if (!token) {
     return null;
   }
@@ -56,6 +66,10 @@ export default function ProtectedLayout({
   }
 
   if (isCashier && !isPosRoute) {
+    return null;
+  }
+
+  if (fueraDeLaConsola) {
     return null;
   }
 
@@ -103,7 +117,7 @@ export default function ProtectedLayout({
         )}
       </div>
       <ActionNotificationToast />
-      <ChatWidget />
+      {!esSoporte && <ChatWidget />}
       <PinGateModal />
     </div>
   );
