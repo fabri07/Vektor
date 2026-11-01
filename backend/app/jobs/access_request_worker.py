@@ -212,7 +212,7 @@ def _despachar(
     import asyncio  # noqa: PLC0415
 
     from app.domain.contact_lead import EmailNotificationStatus  # noqa: PLC0415
-    from app.integrations.smtp import SMTPClient  # noqa: PLC0415
+    from app.integrations.smtp import SMTPClient, es_rechazo_permanente  # noqa: PLC0415
 
     subject, cuerpo_html, texto = email
 
@@ -224,6 +224,12 @@ def _despachar(
         SMTPClient().send(destinatario, subject, cuerpo_html, texto, raise_on_error=True)
     except Exception as exc:  # noqa: BLE001 — reintenta; si se agotó, marca failed
         logger.warning(f"{evento}.email_failed", request_id=request_id, error=str(exc))
+        if es_rechazo_permanente(exc):
+            # El proveedor rechazó el pedido (4xx): reintentarlo da lo mismo.
+            # Se sella ya, y `list --email-failed` lo muestra al dueño.
+            logger.error(f"{evento}.email_rejected", request_id=request_id)
+            _sellar(EmailNotificationStatus.FAILED)
+            return
         maximo = self.max_retries
         # `max_retries=None` en Celery significa "reintentar para siempre", que NO
         # es lo mismo que 0: por eso se compara `is not None` en vez de `or 0`
@@ -316,7 +322,11 @@ def notify_access_request_owner(self: Any, request_id: str) -> None:
         # dirección no operativa, se marca failed y se loguea.
         destinatario = get_settings().contact_lead_recipient
         if not destinatario:
-            logger.error("access_request.no_recipient", request_id=request_id)
+            logger.error(
+                "access_request.no_recipient",
+                request_id=request_id,
+                problem=get_settings().contact_lead_recipient_problem,
+            )
             asyncio.run(
                 _marcar(
                     request_id,

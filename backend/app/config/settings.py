@@ -58,6 +58,23 @@ def _to_psycopg2_url(raw: str) -> str:
     return url
 
 
+_DIRECCION = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+$")
+
+
+def es_direccion_valida(valor: str) -> bool:
+    """Forma mínima `local@dominio.tld`, sin nombre ni delimitadores (`Nombre <x@y>`)."""
+    return bool(_DIRECCION.match(valor))
+
+
+def _caracteres_invalidos(valor: str) -> str:
+    """` (caracteres no válidos: ')' y ' ')` o vacío si el problema es de forma."""
+    raros = sorted({c for c in valor if not (c.isascii() and c.isalnum()) and c not in "._%+-@"})
+    if not raros:
+        return ""
+    return " (caracteres no válidos: " + " y ".join(repr(c) for c in raros) + ")"
+
+
+
 class Settings(BaseSettings):
     DEV_CORS_ORIGINS: ClassVar[list[str]] = [
         "http://localhost:3000",
@@ -559,16 +576,35 @@ class Settings(BaseSettings):
     def contact_lead_recipient(self) -> str:
         """Destinatario resuelto para los leads del formulario de contacto.
 
-        CONTACT_LEAD_EMAIL si está configurado; en dev cae a SMTP_FROM_EMAIL.
-        En producción sin CONTACT_LEAD_EMAIL devuelve "" a propósito: la tarea
-        de email lo trata como fallo (loguea + marca failed) SIN perder el lead,
-        en vez de mandar el aviso a una casilla no operativa.
+        CONTACT_LEAD_EMAIL si está configurado Y es una dirección válida; en dev
+        cae a SMTP_FROM_EMAIL. En producción sin CONTACT_LEAD_EMAIL —o con un
+        valor que no es una dirección— devuelve "" a propósito: la tarea de email
+        lo trata como fallo (loguea + marca failed) SIN perder el lead ni
+        reintentar contra el proveedor, en vez de mandar el aviso a una casilla
+        no operativa. Un valor inválido NO se "repara": un `)` o unas comillas
+        de más son un error de carga de la variable y adivinar la dirección
+        correcta sería peor que avisar. Sólo se descartan los espacios de los
+        extremos, que no se ven. El motivo está en `contact_lead_recipient_problem`.
         """
-        if self.CONTACT_LEAD_EMAIL:
-            return self.CONTACT_LEAD_EMAIL
+        configurado = self.CONTACT_LEAD_EMAIL.strip()
+        if configurado:
+            return configurado if es_direccion_valida(configurado) else ""
         if self.is_development:
             return self.SMTP_FROM_EMAIL
         return ""
+
+    @property
+    def contact_lead_recipient_problem(self) -> str | None:
+        """Por qué `contact_lead_recipient` quedó vacío (para el log); `None` si no.
+
+        No incluye la dirección: sólo los caracteres que la invalidan.
+        """
+        if self.contact_lead_recipient:
+            return None
+        configurado = self.CONTACT_LEAD_EMAIL.strip()
+        if not configurado:
+            return "CONTACT_LEAD_EMAIL no está configurado"
+        return f"CONTACT_LEAD_EMAIL no es una dirección válida{_caracteres_invalidos(configurado)}"
 
     @classmethod
     def settings_customise_sources(  # type: ignore[override]

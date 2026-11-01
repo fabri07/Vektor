@@ -25,6 +25,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import pytest
 import pytest_asyncio
 from celery.exceptions import MaxRetriesExceededError, Retry
@@ -91,6 +92,8 @@ class _SMTPEspia:
 
     enviados: list[tuple[str, str, str]] = []
     falla: bool = False
+    #: Si está, `send` levanta ESTA excepción (p. ej. un `HTTPStatusError` real).
+    excepcion: BaseException | None = None
 
     def send(
         self,
@@ -101,6 +104,8 @@ class _SMTPEspia:
         *,
         raise_on_error: bool = False,
     ) -> str | None:
+        if self.excepcion is not None:
+            raise self.excepcion
         if self.falla:
             raise RuntimeError("resend caído")
         _SMTPEspia.enviados.append((to_email, subject, body_text or ""))
@@ -147,6 +152,7 @@ class _SelfFalso:
 def smtp(monkeypatch: pytest.MonkeyPatch) -> type[_SMTPEspia]:
     _SMTPEspia.enviados = []
     _SMTPEspia.falla = False
+    _SMTPEspia.excepcion = None
     monkeypatch.setattr("app.integrations.smtp.SMTPClient", _SMTPEspia)
     return _SMTPEspia
 
@@ -360,6 +366,111 @@ def test_al_agotar_reintentos_se_marca_failed_en_su_columna(
     # Y la columna existe de verdad en la tabla (`setattr` con un nombre mal
     # escrito no falla: crearía un atributo de instancia y no commitearía nada).
     assert esperada in AccessRequest.__table__.columns
+
+
+# ── Destinatario inválido y rechazos permanentes ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "valor",
+    [
+        "hola@vektor.app)",
+        '"hola@vektor.app"',
+        "hola@vektor",
+        "hola vektor.app",
+        "Vektor <hola@vektor.app>",
+    ],
+)
+def test_un_destinatario_mal_cargado_no_se_intenta_y_queda_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    smtp: type[_SMTPEspia],
+    marcados: list[tuple[str, str, str]],
+    valor: str,
+) -> None:
+    """Incidente 2026-10-30: `CONTACT_LEAD_EMAIL` con un `)` de más dio 422 en Resend,
+    se reintentó 3 veces para nada y el dueño no recibió ningún aviso."""
+    solicitud = _solicitud()
+    _cargar(monkeypatch, solicitud)
+    monkeypatch.setattr(get_settings(), "CONTACT_LEAD_EMAIL", valor)
+
+    worker.notify_access_request_owner.__wrapped__(str(solicitud.id))
+
+    assert smtp.enviados == []
+    assert marcados == [
+        (str(solicitud.id), "owner_notification_status", EmailNotificationStatus.FAILED.value)
+    ]
+
+
+def test_el_destinatario_no_se_repara_y_el_motivo_dice_que_caracter_sobra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = get_settings()
+    monkeypatch.setattr(s, "CONTACT_LEAD_EMAIL", "hola@vektor.app)")
+    assert s.contact_lead_recipient == ""
+    assert s.contact_lead_recipient_problem == (
+        "CONTACT_LEAD_EMAIL no es una dirección válida (caracteres no válidos: ')')"
+    )
+    # El motivo nunca incluye la dirección.
+    assert "hola" not in (s.contact_lead_recipient_problem or "")
+
+
+def test_espacios_en_los_extremos_se_descartan_y_la_direccion_valida_pasa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = get_settings()
+    monkeypatch.setattr(s, "CONTACT_LEAD_EMAIL", "  hola+avisos@vektor.app \n")
+    assert s.contact_lead_recipient == "hola+avisos@vektor.app"
+    assert s.contact_lead_recipient_problem is None
+
+
+def _http_error(codigo: int) -> httpx.HTTPStatusError:
+    pedido = httpx.Request("POST", "https://api.resend.com/emails")
+    return httpx.HTTPStatusError(
+        "error", request=pedido, response=httpx.Response(codigo, request=pedido)
+    )
+
+
+@pytest.mark.parametrize("codigo", [400, 401, 403, 404, 422])
+def test_un_rechazo_4xx_del_proveedor_se_sella_failed_sin_reintentar(
+    smtp: type[_SMTPEspia], marcados: list[tuple[str, str, str]], codigo: int
+) -> None:
+    smtp.excepcion = _http_error(codigo)
+    falso = _SelfFalso(max_retries=3, retries=0)  # le quedan los 3 reintentos
+
+    worker._despachar(
+        falso,
+        evento="access_request.owner",
+        destinatario="hola@vektor.app",
+        email=("asunto", "<p>x</p>", "x"),
+        request_id="rid",
+        columna=worker.COLUMNA_AVISO_DUENIO,
+    )
+
+    assert falso.intentos == 0
+    assert marcados == [
+        ("rid", "owner_notification_status", EmailNotificationStatus.FAILED.value)
+    ]
+
+
+@pytest.mark.parametrize("codigo", [408, 429, 500, 502, 503])
+def test_un_fallo_transitorio_del_proveedor_sigue_reintentando(
+    smtp: type[_SMTPEspia], marcados: list[tuple[str, str, str]], codigo: int
+) -> None:
+    smtp.excepcion = _http_error(codigo)
+    falso = _SelfFalso(max_retries=3, retries=0)
+
+    with pytest.raises(Retry):
+        worker._despachar(
+            falso,
+            evento="access_request.owner",
+            destinatario="hola@vektor.app",
+            email=("asunto", "<p>x</p>", "x"),
+            request_id="rid",
+            columna=worker.COLUMNA_AVISO_DUENIO,
+        )
+
+    assert falso.intentos == 1
+    assert marcados == []
 
 
 def test_el_fake_de_celery_relanza_la_excepcion_original_al_agotarse() -> None:
