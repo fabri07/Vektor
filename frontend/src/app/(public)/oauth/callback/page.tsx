@@ -8,6 +8,7 @@ import {
   linkPendingOAuth,
 } from "@/services/auth.service";
 import type { OAuthLinkRequiredResponse } from "@/types/api";
+import { rutaDeInicio } from "@/lib/roles";
 
 type Stage = "loading" | "error" | "link_required";
 
@@ -25,7 +26,7 @@ export default function OAuthCallbackPage() {
 
   useEffect(() => {
     if (token) {
-      router.replace("/dashboard");
+      router.replace(rutaDeInicio(useAuthStore.getState().user?.role));
       return;
     }
 
@@ -76,7 +77,7 @@ export default function OAuthCallbackPage() {
             tenant_id: auth.user.tenant_id,
             phone: auth.user.phone ?? null,
           });
-          router.replace("/dashboard");
+          router.replace(rutaDeInicio(auth.user.role_code));
         }
       } catch {
         setErrorMsg("No se pudo completar el inicio de sesión con Google. Intentá de nuevo.");
@@ -104,7 +105,7 @@ export default function OAuthCallbackPage() {
         tenant_id: auth.user.tenant_id,
         phone: auth.user.phone ?? null,
       });
-      router.replace("/dashboard");
+      router.replace(rutaDeInicio(auth.user.role_code));
     } catch {
       setLinkError("Contraseña incorrecta. Intentá de nuevo.");
     } finally {
