@@ -62,3 +62,6 @@ class UsageDashboardResponse(BaseModel):
     by_model: list[ModelUsage]
     by_day: list[DayUsage]
     by_tenant: list[TenantUsage]
+    #: Día (UTC) del último turno con tokens, en cualquier momento y no sólo dentro
+    #: de la ventana: con la ventana vacía, distingue "nunca hubo" de "hace meses".
+    last_consumption_date: date | None = None

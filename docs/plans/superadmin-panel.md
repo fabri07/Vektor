@@ -89,3 +89,5 @@ Pendientes del dueño: catálogo de add-ons y moneda de los pagos manuales (ante
 ## 10. Fuera de alcance
 
 Impersonación; moderación de tienda (Véktor no tiene tienda); cobro automático.
+
+> **Monitor de plataforma (2026-10-31):** `GET /admin/monitor` y la portada `/admin` implementados; detalle y decisiones en `docs/claude/plataforma.md` («Monitor de plataforma»). Queda el PR siguiente: errores de Sentry (necesita un token de sólo lectura en Railway).

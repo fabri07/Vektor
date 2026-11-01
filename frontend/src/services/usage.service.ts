@@ -51,6 +51,8 @@ export interface UsageDashboard {
   by_model: UsageByModel[];
   by_day: UsageByDay[];
   by_tenant: UsageByTenant[];
+  /** `YYYY-MM-DD` del último turno con tokens (en todo el historial), o `null` si nunca hubo. */
+  last_consumption_date?: string | null;
 }
 
 export const usageService = {
