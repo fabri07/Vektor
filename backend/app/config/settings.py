@@ -371,6 +371,15 @@ class Settings(BaseSettings):
     # MCP_SERVER_URL="". Sin flag ENABLE_* nuevo a propósito.
     SENTRY_DSN: str = ""
     SENTRY_TRACES_SAMPLE_RATE: float = 0.1
+    # LECTURA de issues para el panel SUPERADMIN (distinto del DSN, que sólo ENVÍA).
+    # Token de una Internal Integration con permisos de sólo lectura. Vacío =
+    # el panel dice "Sentry no configurado" en vez de fallar. La organización
+    # puede compartirse con otras apps: SENTRY_PROJECTS es la lista CERRADA de
+    # proyectos que el panel muestra.
+    SENTRY_AUTH_TOKEN: str = ""
+    SENTRY_ORG: str = ""
+    SENTRY_API_BASE: str = "https://us.sentry.io"
+    SENTRY_PROJECTS: str = "python-fastapi,javascript-nextjs"
 
     # ── Google OAuth ──────────────────────────────────────────────────────────
     GOOGLE_OAUTH_CLIENT_ID: str = ""

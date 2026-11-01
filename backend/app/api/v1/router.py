@@ -6,6 +6,7 @@ from app.api.v1 import (
     access_requests,
     admin,
     admin_monitor,
+    admin_sentry,
     admin_tenant_subscription,
     admin_tenants,
     agent,
@@ -47,6 +48,7 @@ api_router = APIRouter()
 
 api_router.include_router(admin.router, prefix="/admin", tags=["Admin"])
 api_router.include_router(admin_monitor.router, prefix="/admin/monitor", tags=["Admin Monitor"])
+api_router.include_router(admin_sentry.router, prefix="/admin/sentry", tags=["Admin Sentry"])
 api_router.include_router(
     admin_tenants.router, prefix="/admin/tenants", tags=["Admin Tenants"]
 )

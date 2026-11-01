@@ -90,4 +90,4 @@ Pendientes del dueño: catálogo de add-ons y moneda de los pagos manuales (ante
 
 Impersonación; moderación de tienda (Véktor no tiene tienda); cobro automático.
 
-> **Monitor de plataforma (2026-10-31):** `GET /admin/monitor` y la portada `/admin` implementados; detalle y decisiones en `docs/claude/plataforma.md` («Monitor de plataforma»). Queda el PR siguiente: errores de Sentry (necesita un token de sólo lectura en Railway).
+> **Monitor de plataforma (2026-10-31):** `GET /admin/monitor` y la portada `/admin` implementados; detalle y decisiones en `docs/claude/plataforma.md` («Monitor de plataforma»). Errores de Sentry implementados (bullet «Errores de Sentry en el panel»); requiere `SENTRY_AUTH_TOKEN` y `SENTRY_ORG` en el servicio de la API.

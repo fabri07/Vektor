@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { StatCard } from "@/components/ui/StatCard";
 import { adminMonitorService } from "@/services/adminMonitor.service";
 import type { MonitorAtencion, MotivoDeAtencion } from "@/services/adminMonitor.service";
+import { SentryErrorsBlock } from "./SentryErrorsBlock";
 import { diaCorto, entero, fechaCorta } from "./format";
 
 const MOTIVOS: Record<MotivoDeAtencion, { rotulo: string; fecha: string }> = {
@@ -139,6 +140,8 @@ export function MonitorScreen() {
             </>
           )}
         </Bloque>
+
+        <SentryErrorsBlock />
 
         <Bloque titulo={`IA — últimos ${ia.dias} días`}>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">

@@ -11,6 +11,19 @@ jest.mock("@/services/adminMonitor.service", () => ({
   adminMonitorService: { get: jest.fn() },
 }));
 
+jest.mock("@/services/adminSentry.service", () => ({
+  adminSentryService: {
+    issues: jest.fn().mockResolvedValue({
+      configured: false,
+      dias: 14,
+      projects: [],
+      issues: [],
+      total: 0,
+    }),
+  },
+  sentryErrorMessage: () => "",
+}));
+
 const svc = adminMonitorService as jest.Mocked<typeof adminMonitorService>;
 
 const BASE: MonitorResponse = {
