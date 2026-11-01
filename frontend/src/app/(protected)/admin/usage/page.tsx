@@ -17,6 +17,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Select } from "@/components/ui/Select";
 import { SmartTable } from "@/components/ui/SmartTable";
 import type { SmartColumn } from "@/components/ui/SmartTable";
+import { diaCorto } from "@/features/admin/format";
 import { useAuthStore } from "@/stores/authStore";
 import { usageService } from "@/services/usage.service";
 import type {
@@ -181,7 +182,11 @@ export default function AdminUsagePage() {
         <div className="rounded-lg border border-vk-border-w bg-vk-surface-w p-10">
           <EmptyState
             title="Sin consumo en el período"
-            description="No se registró consumo de tokens en la ventana seleccionada."
+            description={
+              data?.last_consumption_date
+                ? `No se registró consumo de tokens en la ventana seleccionada. El último consumo fue el ${diaCorto(data.last_consumption_date)}.`
+                : "No se registró consumo de tokens en la ventana seleccionada, ni antes: todavía no hubo ningún consumo."
+            }
           />
         </div>
       ) : (

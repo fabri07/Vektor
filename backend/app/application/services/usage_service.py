@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.model_pricing import estimate_cost_usd
@@ -57,6 +57,16 @@ def _coerce_int(value: Any) -> int:
         return int(value) if value is not None else 0
     except (TypeError, ValueError):
         return 0
+
+
+def _ultimo_consumo_stmt(tenant_id: UUID | None) -> Select[Any]:
+    """Último turno con tokens de TODO el historial (no sólo de la ventana pedida)."""
+    stmt: Select[Any] = select(func.max(DecisionAuditLog.created_at)).where(
+        DecisionAuditLog.tokens_total > 0
+    )
+    if tenant_id is not None:
+        stmt = stmt.where(DecisionAuditLog.tenant_id == tenant_id)
+    return stmt
 
 
 async def get_usage_dashboard(
@@ -237,6 +247,10 @@ async def get_usage_dashboard(
         reverse=True,
     )
 
+    ultimo = await session.scalar(_ultimo_consumo_stmt(tenant_id))
+    if ultimo is not None and ultimo.tzinfo is None:
+        ultimo = ultimo.replace(tzinfo=UTC)
+
     return UsageDashboardResponse(
         days=days,
         from_date=from_date,
@@ -246,4 +260,5 @@ async def get_usage_dashboard(
         by_model=by_model,
         by_day=by_day,
         by_tenant=by_tenant,
+        last_consumption_date=ultimo.astimezone(UTC).date() if ultimo is not None else None,
     )
