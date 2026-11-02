@@ -11,6 +11,23 @@ logger = get_logger(__name__)
 
 _RESEND_API_URL = "https://api.resend.com/emails"
 
+#: 4xx que SÍ pueden resolverse reintentando: timeout del pedido y límite de tasa.
+_4XX_REINTENTABLES = frozenset({408, 429})
+
+
+def es_rechazo_permanente(exc: BaseException) -> bool:
+    """El proveedor rechazó ESTE mail por su contenido o destinatario (4xx).
+
+    Reintentar el mismo pedido no lo arregla (p. ej. un 422 por un destinatario
+    inválido): hay que sellarlo como fallido ya, no gastar los reintentos ni
+    demorar el aviso. Los 5xx, los cortes de red y los 408/429 son transitorios
+    y siguen reintentándose.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    codigo = exc.response.status_code
+    return 400 <= codigo < 500 and codigo not in _4XX_REINTENTABLES
+
 
 class SMTPClient:
     def __init__(self) -> None:

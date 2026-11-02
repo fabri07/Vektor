@@ -75,7 +75,11 @@ def notify_contact_lead(self: Any, lead_id: str) -> None:
         if not recipient:
             # Producción sin CONTACT_LEAD_EMAIL: no perdemos el lead, marcamos
             # failed y logueamos para que se configure la casilla.
-            logger.error("contact_lead.no_recipient", lead_id=lead_id)
+            logger.error(
+                "contact_lead.no_recipient",
+                lead_id=lead_id,
+                problem=s.contact_lead_recipient_problem,
+            )
             asyncio.run(_mark(EmailNotificationStatus.FAILED))
             return
 
