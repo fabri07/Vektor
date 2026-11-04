@@ -8,7 +8,6 @@ import httpx
 import pytest
 
 from app.config.settings import get_settings
-from app.integrations import smtp
 from app.integrations.smtp import SMTPClient, remitente
 
 
@@ -39,9 +38,7 @@ def _enviar(monkeypatch: pytest.MonkeyPatch, **config: str) -> dict[str, Any]:
 
     transporte = httpx.MockTransport(handler)
     cliente_real = httpx.Client
-    monkeypatch.setattr(
-        smtp.httpx, "Client", lambda **kw: cliente_real(transport=transporte, **kw)
-    )
+    monkeypatch.setattr(httpx, "Client", lambda **kw: cliente_real(transport=transporte, **kw))
     s = get_settings()
     monkeypatch.setattr(s, "RESEND_API_KEY", "re_test")
     for clave, valor in config.items():
