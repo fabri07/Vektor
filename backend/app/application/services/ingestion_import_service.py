@@ -1307,6 +1307,7 @@ async def _import_master_entities(
     column_mappings: dict[str, str] | None,
     counts: dict[str, Any],
     context_entity: dict[str, str] | None = None,
+    uploaded_file_id: uuid.UUID | None = None,
 ) -> None:
     """Paso 1/2 del orden maestro→transacción: importa clientes y proveedores
     ANTES de cualquier venta/gasto, reusando los import services de F7b
@@ -1404,6 +1405,18 @@ async def _import_master_entities(
             counts["clientes_needs_review"] = (
                 counts.get("clientes_needs_review", 0) + cust_result.needs_review
             )
+            counts["clientes_a_otros"] = counts.get("clientes_a_otros", 0) + (
+                await _capturar_maestro_sin_identificacion(
+                    session,
+                    tenant_id,
+                    rows,
+                    cust_result.needs_review_indices,
+                    uploaded_file_id,
+                    ctx_id,
+                    "Cliente sin dato de identificación (DNI, CUIT, email o teléfono): "
+                    "completalo y elegí «Cliente» para importarlo",
+                )
+            )
             counts["clientes_invalidos"] = (
                 counts.get("clientes_invalidos", 0) + cust_result.invalid
             )
@@ -1439,6 +1452,18 @@ async def _import_master_entities(
             counts["proveedores_needs_review"] = (
                 counts.get("proveedores_needs_review", 0) + sup_result.needs_review
             )
+            counts["proveedores_a_otros"] = counts.get("proveedores_a_otros", 0) + (
+                await _capturar_maestro_sin_identificacion(
+                    session,
+                    tenant_id,
+                    rows,
+                    sup_result.needs_review_indices,
+                    uploaded_file_id,
+                    ctx_id,
+                    "Proveedor sin dato de identificación (CUIT, email o teléfono): "
+                    "completalo y elegí «Proveedor» para importarlo",
+                )
+            )
             counts["proveedores_invalidos"] = (
                 counts.get("proveedores_invalidos", 0) + sup_result.invalid
             )
@@ -1448,6 +1473,65 @@ async def _import_master_entities(
             counts["proveedores_actualizados_ids"] = counts.get(
                 "proveedores_actualizados_ids", []
             ) + [str(i) for i in sup_result.updated_ids]
+
+
+async def _capturar_maestro_sin_identificacion(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    rows: list[dict[str, Any]],
+    indices: list[int],
+    uploaded_file_id: uuid.UUID | None,
+    context_id: str,
+    motivo: str,
+) -> int:
+    """Las filas de un maestro (clientes/proveedores) sin clave fuerte no se crean
+    —«el nombre nunca identifica solo»— pero TAMPOCO se pierden en silencio: van a
+    «Otros» con el motivo, para completarlas e importarlas a mano.
+
+    Sin destino sugerido (`suggested_entity=None`): «Importar todo lo sugerido» no
+    puede crearlas por nombre. Idempotente por archivo+hoja+fila: confirmar dos
+    veces el mismo archivo no duplica la bandeja.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.persistence.models.unclassified_record import UnclassifiedRecord  # noqa: PLC0415
+
+    if not indices:
+        return 0
+    filas = [rows[i] for i in indices if 0 <= i < len(rows)]
+    if uploaded_file_id is not None and filas:
+        existentes = (
+            await session.execute(
+                select(UnclassifiedRecord.row_data).where(
+                    UnclassifiedRecord.tenant_id == tenant_id,
+                    UnclassifiedRecord.uploaded_file_id == uploaded_file_id,
+                    UnclassifiedRecord.context_id == (context_id or None),
+                )
+            )
+        ).scalars()
+        ya = {json.dumps(r, sort_keys=True) for r in existentes if isinstance(r, dict)}
+
+        def _huella(fila: dict[str, Any]) -> str:
+            limpia = {
+                k: ("" if v is None else str(v))
+                for k, v in fila.items()
+                if not es_clave_reservada(k)
+            }
+            return json.dumps(limpia, sort_keys=True)
+
+        filas = [f for f in filas if _huella(f) not in ya]
+    if not filas:
+        return 0
+    return _capture_unclassified(
+        session,
+        tenant_id,
+        filas,
+        list(filas[0].keys()),
+        "ingestion",
+        uploaded_file_id,
+        context_label=motivo,
+        context_id=context_id or None,
+    )
 
 
 # ── B1: idempotencia de imports (anti re-subida del mismo archivo) ────────────
@@ -6436,6 +6520,7 @@ async def _insert_confirmed_data_impl(
         column_mappings,
         counts,
         context_entity=context_entity,
+        uploaded_file_id=uploaded_file_id,
     )
 
     # Batch anti-N+1: en vez de un SELECT y un savepoint por fila (miles de
