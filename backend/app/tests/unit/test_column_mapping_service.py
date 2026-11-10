@@ -547,3 +547,19 @@ def test_todo_campo_escalar_existe_en_el_catalogo_canonico() -> None:
     for entity, fields in SINGLE_VALUE_FIELDS.items():
         for f in fields:
             assert f in CANONICAL_FIELDS[entity], f"{entity}.{f} no está en CANONICAL_FIELDS"
+
+
+def test_costo_total_no_se_sugiere_como_costo_unitario() -> None:
+    """«costo_total» es el total de la línea: leerlo como `unit_cost_ars` carga el
+    total del lote como costo de cada unidad (valor de inventario × cantidad)."""
+    from app.application.services.column_mapping_service import read_header
+
+    lectura = read_header("costo_total", "product")
+    assert lectura.target != "unit_cost_ars"
+    assert lectura.duda is not None
+
+
+def test_costo_pelado_sigue_siendo_costo_unitario() -> None:
+    from app.application.services.column_mapping_service import read_header
+
+    assert read_header("Costo", "product").target == "unit_cost_ars"
