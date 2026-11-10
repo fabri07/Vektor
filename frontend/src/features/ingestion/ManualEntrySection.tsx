@@ -530,14 +530,6 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
       setError("Ingresá un monto válido mayor a 0.");
       return;
     }
-    if (category === "OTHER" && !customCategory.trim()) {
-      setError("Escribí el nombre de la categoría nueva.");
-      return;
-    }
-    if (!supplierId) {
-      setError("Seleccioná (o creá) un proveedor.");
-      return;
-    }
     // Categoría custom del tenant (value "__custom__:<label>") → OTHER + label.
     const isCustom = category.startsWith("__custom__:");
     const finalCategory = isCustom ? "OTHER" : category;
@@ -558,7 +550,9 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
           : {}),
         expense_type: "OPEX", // la mercadería va en la pestaña Compra
         payment_method: paymentMethod,
-        supplier_id: supplierId,
+        // Proveedor opcional: un alquiler, la luz o un sueldo no tienen. Un "" no
+        // es un UUID: sin proveedor no se manda la clave.
+        ...(supplierId ? { supplier_id: supplierId } : {}),
         expense_date: expenseDate,
         description: description.trim(),
         is_recurring: isRecurring,
@@ -640,7 +634,7 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
 
       {category === "OTHER" && (
         <Input
-          label="Nueva categoría"
+          label="Nueva categoría (opcional)"
           placeholder="Ej: Veterinaria, Combustible…"
           maxLength={50}
           value={customCategory}
@@ -673,7 +667,7 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
         </Field>
       </div>
 
-      <Field label="Proveedor">
+      <Field label="Proveedor (opcional)">
         <select
           value={showNewSupplier ? NEW_OPTION : supplierId}
           onChange={(e) => {
@@ -686,7 +680,7 @@ function ExpenseTab({ onToast, online }: { onToast: (t: ToastState) => void; onl
           }}
           className={selectClass}
         >
-          <option value="">Seleccioná un proveedor…</option>
+          <option value="">Sin proveedor</option>
           {(suppliers ?? []).map((s) => (
             <option key={s.id} value={s.id}>
               {s.name}

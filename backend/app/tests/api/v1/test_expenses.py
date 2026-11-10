@@ -32,6 +32,18 @@ class TestExpensesCRUD:
         # transaction_date ahora es datetime ISO; chequear solo la parte de fecha.
         assert data["transaction_date"].startswith(_TODAY)
 
+    async def test_gasto_otros_sin_proveedor_ni_nombre_de_categoria(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        """El formulario manual ya no obliga a elegir proveedor ni a nombrar la
+        categoría «Otros» (un alquiler o la luz no tienen proveedor): el backend lo
+        acepta, y el gasto no entra a los rankings por proveedor."""
+        payload = {"amount": "1000.00", "category": "OTHER", "expense_date": _TODAY}
+        resp = await client.post("/api/v1/expenses", json=payload, headers=auth_headers)
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["category"] == "OTHER"
+        assert resp.json().get("supplier_id") is None
+
     async def test_merchandise_expense_without_items_is_rejected(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
