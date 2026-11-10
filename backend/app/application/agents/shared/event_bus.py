@@ -1,9 +1,18 @@
+import time
 from typing import Any
 
 from celery import current_app as celery_app
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.persistence.db.despues_del_commit import al_confirmar
+
+# `send_task` es una escritura SÍNCRONA al broker, y `emit` corre dentro del commit del
+# request: mientras espera, el event loop del único worker uvicorn no atiende nada.
+# Si el broker está lejos, una venta con varias líneas suma esa espera por línea.
+# Sospechoso principal de las escrituras de 5–13 s medidas el 2026-11-10, sin medir
+# todavía: este umbral deja la evidencia en el log (`event_bus.emit_slow`) antes de
+# decidir si hay que sacarlo del camino de la respuesta.
+_EMIT_LENTO_SEGUNDOS = 0.2
 
 
 class EventBus:
@@ -21,8 +30,18 @@ class EventBus:
         vale para los DOS caminos de emisión porque `emit_after_commit` termina
         acá.
         """
+        inicio = time.perf_counter()
         try:
             celery_app.send_task(f"events.{event_type.lower()}", kwargs={"payload": payload})
+            demora = time.perf_counter() - inicio
+            if demora >= _EMIT_LENTO_SEGUNDOS:
+                from app.observability.logger import get_logger  # noqa: PLC0415
+
+                get_logger(__name__).warning(
+                    "event_bus.emit_slow",
+                    event_type=event_type,
+                    duration_ms=round(demora * 1000),
+                )
         except Exception as exc:  # noqa: BLE001 — un evento nunca rompe la respuesta
             from app.observability.logger import get_logger  # noqa: PLC0415
 
