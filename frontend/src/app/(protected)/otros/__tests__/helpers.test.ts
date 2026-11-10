@@ -1,5 +1,12 @@
 import type { UnclassifiedRecordResponse } from "@/services/others.service";
-import { agruparPorReferencia, esQueryAfectadaPorVincular, prefill, toIsoDate } from "../helpers";
+import {
+  agruparPorReferencia,
+  esQueryAfectadaPorVincular,
+  mensajeDeImportacion,
+  mensajeDeValidacion,
+  prefill,
+  toIsoDate,
+} from "../helpers";
 
 describe("toIsoDate", () => {
   it("normaliza dd/mm/yyyy inequívoco a ISO", () => {
@@ -107,5 +114,47 @@ describe("esQueryAfectadaPorVincular (B·8b)", () => {
     for (const k of ["product-categories", "health-score", "expenses", "salesman"]) {
       expect(esQueryAfectadaPorVincular([k])).toBe(false);
     }
+  });
+});
+
+describe("mensajeDeValidacion / mensajeDeImportacion", () => {
+  it("un 422 en lista dice el campo y el motivo", () => {
+    const detail = [
+      {
+        type: "value_error",
+        loc: ["transaction_date"],
+        msg: "Value error, transaction_date cannot be in the future",
+      },
+    ];
+    expect(mensajeDeValidacion(detail)).toBe("La fecha: no puede ser futura.");
+  });
+
+  it("junta varios campos y marca el faltante", () => {
+    const detail = [
+      { type: "missing", loc: ["product_id"], msg: "Field required" },
+      { type: "greater_than", loc: ["amount"], msg: "Input should be greater than 0" },
+    ];
+    expect(mensajeDeValidacion(detail)).toBe(
+      "El producto: falta. El monto: tiene que ser mayor que cero.",
+    );
+  });
+
+  it("una lista vacía o un objeto no es un error de campos", () => {
+    expect(mensajeDeValidacion([])).toBeNull();
+    expect(mensajeDeValidacion({ code: "X" })).toBeNull();
+  });
+
+  it("mensajeDeImportacion prefiere el message del servidor", () => {
+    const error = { response: { data: { detail: { code: "NUEVO", message: "Falta algo." } } } };
+    expect(mensajeDeImportacion(error)).toBe("Falta algo.");
+  });
+
+  it("mensajeDeImportacion lee la lista de validación y devuelve null si no hay nada", () => {
+    const error = {
+      response: { data: { detail: [{ loc: ["quantity"], msg: "Field required", type: "missing" }] } },
+    };
+    expect(mensajeDeImportacion(error)).toBe("La cantidad: falta.");
+    expect(mensajeDeImportacion({ response: { data: {} } })).toBeNull();
+    expect(mensajeDeImportacion(new Error("x"))).toBeNull();
   });
 });

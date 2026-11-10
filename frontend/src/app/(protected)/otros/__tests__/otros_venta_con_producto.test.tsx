@@ -111,3 +111,20 @@ it("una cantidad con decimales no se pega como un entero", async () => {
   );
   expect(screen.getByLabelText("Cantidad vendida")).toHaveValue(null);
 });
+
+it("si lo que decía el archivo no está en ningún producto, el combo muestra todos y lo explica", async () => {
+  render(
+    <ReclassifyModal
+      record={{ ...record, row_data: { ...record.row_data, producto: "Lote camperas" } }}
+      productCategories={[]}
+      saving={false}
+      onClose={jest.fn()}
+      onSave={jest.fn()}
+      onLink={jest.fn()}
+      onResolvePurchase={jest.fn()}
+    />,
+  );
+  await waitFor(() => expect(screen.getByRole("option", { name: "Yerba" })).toBeInTheDocument());
+  expect(screen.getByRole("option", { name: "Vela aromática" })).toBeInTheDocument();
+  expect(screen.getByText(/Ningún producto contiene «Lote camperas»/)).toBeInTheDocument();
+});
