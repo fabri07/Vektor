@@ -519,8 +519,12 @@ function CustomerFormModal({
   const isCompany = form.customer_type === "company";
 
   function set(key: keyof CustomerFormState) {
-    return (e: React.ChangeEvent<HTMLInputElement>) =>
+    return (e: React.ChangeEvent<HTMLInputElement>) => {
+      // Editar un campo descarta el aviso anterior: si no, el banner rojo sobrevive
+      // al arreglo (y al guardado) y parece que no se guardó.
+      if (error) setError(null);
       setForm((prev) => ({ ...prev, [key]: e.target.value }));
+    };
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -530,29 +534,24 @@ function CustomerFormModal({
     const dni = form.dni.trim();
     const cuit = form.cuit.trim();
     const phone = form.phone.trim();
+    const email = form.email.trim();
 
+    // Todos los faltantes juntos: un error por intento obliga a reintentar de a uno.
+    const errores: string[] = [];
     if (!name) {
-      setError(isCompany ? "La razón social es requerida." : "El nombre es requerido.");
-      return;
+      errores.push(isCompany ? "La razón social es requerida." : "El nombre es requerido.");
     }
-    if (!isCompany && !lastName) {
-      setError("El apellido es requerido para una persona.");
-      return;
-    }
-    if (!dni && !cuit) {
-      setError("Cargá al menos un documento: DNI o CUIT.");
-      return;
+    if (!phone && !email) {
+      errores.push("Cargá al menos un contacto: celular o email.");
     }
     if (cuit && !isValidCuit(cuit)) {
-      setError("El CUIT/CUIL no es válido (revisá el dígito verificador).");
-      return;
+      errores.push("El CUIT/CUIL no es válido (revisá el dígito verificador).");
     }
     if (dni && !isValidDni(dni)) {
-      setError("El DNI no es válido (7 u 8 dígitos).");
-      return;
+      errores.push("El DNI no es válido (7 u 8 dígitos).");
     }
-    if (!phone) {
-      setError("El celular es requerido.");
+    if (errores.length > 0) {
+      setError(errores.join(" "));
       return;
     }
 
@@ -616,7 +615,7 @@ function CustomerFormModal({
           />
           {!isCompany && (
             <Input
-              label="Apellido"
+              label="Apellido (opcional)"
               type="text"
               placeholder="Pérez"
               value={form.last_name}
@@ -629,7 +628,7 @@ function CustomerFormModal({
         <div className="grid grid-cols-2 gap-4">
           {!isCompany && (
             <Input
-              label="DNI (opcional si cargás CUIT)"
+              label="DNI (opcional)"
               type="text"
               placeholder="30123456"
               value={form.dni}
@@ -637,7 +636,7 @@ function CustomerFormModal({
             />
           )}
           <Input
-            label="CUIT / CUIL"
+            label="CUIT / CUIL (opcional)"
             type="text"
             placeholder="20-12345678-6"
             value={form.cuit}
@@ -657,14 +656,14 @@ function CustomerFormModal({
         {/* Contacto */}
         <div className="grid grid-cols-2 gap-4">
           <Input
-            label="Celular (WhatsApp)"
+            label="Celular (WhatsApp) — celular o email"
             type="text"
             placeholder="+54 9 11 1234-5678"
             value={form.phone}
             onChange={set("phone")}
           />
           <Input
-            label="Email (opcional)"
+            label="Email — celular o email"
             type="email"
             placeholder="cliente@email.com"
             value={form.email}
