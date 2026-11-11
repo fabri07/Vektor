@@ -32,6 +32,7 @@ import { useSaveCustomField } from "@/features/customFields/useSaveCustomField";
 import { formatDateTime } from "@/lib/datetime";
 import { useToastStore } from "@/stores/toastStore";
 import { useAuthStore } from "@/stores/authStore";
+import { mensajeDelServidor } from "@/features/ingestion/useOfflineSubmit";
 
 const COLUMNS = [
   {
@@ -173,7 +174,8 @@ export default function SuppliersPage() {
       toast("Proveedor creado.", "success");
       await queryClient.invalidateQueries({ queryKey: ["suppliers-list"] });
     },
-    onError: () => toast("No se pudo crear el proveedor.", "error"),
+    onError: (error) =>
+      toast(mensajeDelServidor(error) ?? "No se pudo crear el proveedor.", "error"),
   });
 
   const updateMutation = useMutation({
@@ -464,25 +466,23 @@ function SupplierFormModal({
     const name = form.name.trim();
     const cuil = form.cuil.trim();
     const cuit = form.cuit.trim();
-    if (!name) {
-      setError("El nombre o razón social es requerido.");
-      return;
-    }
-    if (!isSentinel) {
-      if (!form.email.trim()) return setError("El email es requerido.");
-      if (!form.phone.trim()) return setError("El teléfono es requerido.");
-      // Uno de los dos alcanza: una empresa tiene CUIT y una persona física
-      // CUIL. Exigir CUIL obligaba a poner el CUIT de una SRL en el campo
-      // equivocado, que es lo que este cambio viene a arreglar.
-      if (!cuit && !cuil) return setError("Cargá el CUIT (empresa) o el CUIL (persona).");
-      if (!form.payment_method) return setError("La forma de pago es requerida.");
+    // Todos los faltantes juntos (antes: un error por intento, cuatro reintentos para
+    // un solo proveedor). Mínimo (decisión del dueño, 2026-11-10): nombre + UN
+    // contacto, teléfono o email. CUIT/CUIL y forma de pago son opcionales —un
+    // proveedor informal no los tiene a mano—; si vienen, el formato se valida igual.
+    const errores: string[] = [];
+    if (!name) errores.push("El nombre o razón social es requerido.");
+    if (!isSentinel && !form.email.trim() && !form.phone.trim()) {
+      errores.push("Cargá al menos un contacto: teléfono o email.");
     }
     if (cuit && !isValidCuit(cuit)) {
-      setError("CUIT inválido: revisá el número (dígito verificador no coincide).");
-      return;
+      errores.push("CUIT inválido: revisá el número (dígito verificador no coincide).");
     }
     if (cuil && !isValidCuil(cuil)) {
-      setError("CUIL inválido: revisá el número (dígito verificador no coincide).");
+      errores.push("CUIL inválido: revisá el número (dígito verificador no coincide).");
+    }
+    if (errores.length > 0) {
+      setError(errores.join(" "));
       return;
     }
     onSave({
@@ -509,7 +509,7 @@ function SupplierFormModal({
         )}
         {!isSentinel && (
           <p className="text-xs text-vk-text-secondary">
-            Los campos sin “(opcional)” son obligatorios.
+            Nombre y un contacto (teléfono o email) alcanzan; el resto se completa cuando lo tengas.
           </p>
         )}
         <div className="grid grid-cols-2 gap-4">
@@ -530,14 +530,14 @@ function SupplierFormModal({
         </div>
         <div className="grid grid-cols-2 gap-4">
           <Input
-            label="CUIT (empresa)"
+            label="CUIT (empresa, opcional)"
             type="text"
             placeholder="30-71234567-8"
             value={form.cuit}
             onChange={set("cuit")}
           />
           <Input
-            label="CUIL (persona)"
+            label="CUIL (persona, opcional)"
             type="text"
             placeholder="20-12345678-6"
             value={form.cuil}
@@ -556,7 +556,7 @@ function SupplierFormModal({
             }}
           />
           <Select
-            label="Forma de pago"
+            label="Forma de pago (opcional)"
             placeholder="Elegí una opción"
             options={PAYMENT_METHOD_OPTIONS}
             value={form.payment_method}
@@ -568,14 +568,14 @@ function SupplierFormModal({
         </div>
         <div className="grid grid-cols-2 gap-4">
           <Input
-            label="Email"
+            label="Email (o teléfono)"
             type="email"
             placeholder="proveedor@email.com"
             value={form.email}
             onChange={set("email")}
           />
           <Input
-            label="Teléfono"
+            label="Teléfono (o email)"
             type="text"
             placeholder="+54 9 11 1234-5678"
             value={form.phone}
