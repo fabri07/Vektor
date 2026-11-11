@@ -24,6 +24,7 @@ from typing import Any, Literal
 import sentry_sdk
 from sentry_sdk.integrations.celery import CeleryIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from sentry_sdk.types import Event, Hint, SamplingContext
 
@@ -76,8 +77,23 @@ def _scrub_anidado(valor: Any) -> Any:
     return _redact_value("", valor)
 
 
+def _es_ruido_de_apagado(event: Event) -> bool:
+    """El `CancelledError` del lifespan de uvicorn al apagarse el contenedor.
+
+    Cada redeploy de Railway corta el proceso y uvicorn loguea (logger
+    ``uvicorn.error``) el traceback de la tarea `lifespan` cancelada. No es un
+    error de la app y no afecta a ningún usuario (PYTHON-FASTAPI-A, 2026-10-27).
+    """
+    if event.get("logger") != "uvicorn.error":
+        return False
+    texto = str((event.get("logentry") or {}).get("message") or event.get("message") or "")
+    return "CancelledError" in texto and "lifespan" in texto
+
+
 def _scrub_event(event: Event, hint: Hint) -> Event | None:
     """before_send: scrubbing propio, capa aparte de `send_default_pii=False`."""
+    if _es_ruido_de_apagado(event):
+        return None
     request = event.get("request")
     if isinstance(request, dict):
         headers = request.get("headers")
@@ -125,6 +141,13 @@ def _resolve_release() -> str:
 
 _EXCLUDED_PATHS = ("/health", "/ready")
 
+# Las ESCRITURAS de negocio se muestrean más que el resto: son las que tardan
+# (5–13 s medidos en producción el 2026-11-10) y con 0.1 un trace «sin spans» no
+# deja ver dónde se va el tiempo. El volumen es bajo (carga manual, no tráfico
+# masivo), así que el piso de 0.5 no pesa en la cuota. Nunca baja del rate global.
+_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_WRITE_TRACES_FLOOR = 0.5
+
 
 def _traces_sampler(sampling_context: SamplingContext) -> float:
     """
@@ -148,11 +171,14 @@ def _traces_sampler(sampling_context: SamplingContext) -> float:
     name = str(transaction_context.get("name") or "")
     # Formato "METHOD /path" (ej. "GET /health") — comparar el path exacto
     # tras el primer espacio, no una substring del nombre completo.
-    _, _, path = name.partition(" ")
+    metodo, _, path = name.partition(" ")
     if path in _EXCLUDED_PATHS:
         return 0.0
 
-    return settings.SENTRY_TRACES_SAMPLE_RATE
+    rate = settings.SENTRY_TRACES_SAMPLE_RATE
+    if metodo.upper() in _WRITE_METHODS and path.startswith("/api/"):
+        return max(rate, _WRITE_TRACES_FLOOR)
+    return rate
 
 
 def init_sentry(service: Literal["web", "worker", "beat"]) -> None:
@@ -169,7 +195,12 @@ def init_sentry(service: Literal["web", "worker", "beat"]) -> None:
     if sentry_sdk.is_initialized():
         return
 
-    integrations: list[Any] = [CeleryIntegration(monitor_beat_tasks=(service == "beat"))]
+    # SqlalchemyIntegration explícita: sin ella el trace de una escritura lenta no
+    # trae los spans de las consultas y no se puede ver si el tiempo se va en la base.
+    integrations: list[Any] = [
+        CeleryIntegration(monitor_beat_tasks=(service == "beat")),
+        SqlalchemyIntegration(),
+    ]
     if service == "web":
         # El proceso web también encola tasks vía `.delay()` — necesita
         # CeleryIntegration para propagar el trace distribuido hacia la task.

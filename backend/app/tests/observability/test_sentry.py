@@ -152,8 +152,46 @@ class TestTracesSampler:
             cast(Any, {"transaction_context": {"name": "GET /api/v1/health-scores/history/v2"}})
         )
         rate_health_config = _traces_sampler(
-            cast(Any, {"transaction_context": {"name": "PATCH /api/v1/settings/health-config"}})
+            cast(Any, {"transaction_context": {"name": "GET /api/v1/settings/health-config"}})
         )
 
         assert rate_health_scores == 0.1
         assert rate_health_config == 0.1
+
+
+class TestMuestreoDeEscrituras:
+    def test_una_escritura_de_negocio_se_muestrea_con_piso_de_0_5(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(get_settings(), "SENTRY_TRACES_SAMPLE_RATE", 0.1)
+        for metodo in ("POST", "PUT", "PATCH", "DELETE"):
+            rate = _traces_sampler(
+                cast(Any, {"transaction_context": {"name": f"{metodo} /api/v1/sales/manual-batch"}})
+            )
+            assert rate == 0.5, metodo
+
+    def test_el_piso_nunca_baja_un_rate_mayor(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(get_settings(), "SENTRY_TRACES_SAMPLE_RATE", 0.8)
+        rate = _traces_sampler(
+            cast(Any, {"transaction_context": {"name": "POST /api/v1/products"}})
+        )
+        assert rate == 0.8
+
+    def test_las_lecturas_siguen_con_el_rate_global(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(get_settings(), "SENTRY_TRACES_SAMPLE_RATE", 0.1)
+        rate = _traces_sampler(cast(Any, {"transaction_context": {"name": "GET /api/v1/products"}}))
+        assert rate == 0.1
+
+
+class TestRuidoDeApagado:
+    def test_el_cancelederror_del_lifespan_de_uvicorn_no_se_envia(self) -> None:
+        evento = _event(
+            logger="uvicorn.error",
+            logentry={
+                "message": "Traceback...\n  File \"starlette/routing.py\", line 700, in lifespan"
+                "\nasyncio.exceptions.CancelledError"
+            },
+        )
+        assert _scrub_event(evento, cast(Any, {})) is None
+
+    def test_otro_error_de_uvicorn_si_se_envia(self) -> None:
+        evento = _event(logger="uvicorn.error", logentry={"message": "Exception in ASGI app"})
+        assert _scrub_event(evento, cast(Any, {})) is not None
