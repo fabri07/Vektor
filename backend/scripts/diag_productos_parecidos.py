@@ -8,6 +8,10 @@ el mismo producto. NO fusiona, no crea alias, no escribe.
 Uso (la DATABASE_URL la provee el usuario desde su shell; NUNCA se imprime):
     DATABASE_URL='postgresql://...' \
         .venv/bin/python scripts/diag_productos_parecidos.py <tenant_uuid>
+    DATABASE_URL='postgresql://...' \
+        .venv/bin/python scripts/diag_productos_parecidos.py --all-tenants
+
+``--all-tenants`` imprime UNA línea por tenant que tenga grupos de nombre parecido.
 
 SOLO SELECT. Seguro contra producción.
 """
@@ -60,8 +64,34 @@ async def main(tenant_id: uuid.UUID) -> None:
         print()
 
 
+async def resumen_de_todos() -> None:
+    url, connect_args = async_engine_config()
+    engine = create_async_engine(url, connect_args=connect_args)
+    try:
+        async with engine.connect() as conn:
+            tenants = [
+                r.tenant_id
+                for r in (await conn.execute(text("SELECT tenant_id FROM tenants"))).all()
+            ]
+            print(f"{len(tenants)} tenants revisados\n")
+            for t in tenants:
+                filas = (await conn.execute(_SQL, {"t": t})).all()
+                grupos = agrupar_parecidos([ProductoParaComparar(f.id, f.name) for f in filas])
+                if grupos:
+                    dudosos = sum(1 for g in grupos if not g.mismos_numeros)
+                    print(
+                        f"{t} | productos={len(filas)} grupos={len(grupos)} "
+                        f"con_talles_distintos={dudosos}"
+                    )
+    finally:
+        await engine.dispose()
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if sys.argv[1:] == ["--all-tenants"]:
+        asyncio.run(resumen_de_todos())
+    elif len(sys.argv) == 2:
+        asyncio.run(main(uuid.UUID(sys.argv[1])))
+    else:
         print(__doc__)
         sys.exit(2)
-    asyncio.run(main(uuid.UUID(sys.argv[1])))
