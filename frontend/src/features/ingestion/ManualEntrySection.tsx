@@ -1423,16 +1423,18 @@ function InlineCustomerCreate({
 
   async function create() {
     setErr(null);
-    if (!name.trim() || !lastName.trim() || !doc.trim() || !phone.trim()) {
-      setErr("Completá nombre, apellido, DNI/CUIT y teléfono.");
+    // Mismo mínimo que el formulario de Clientes: nombre + un contacto. Apellido y
+    // documento son opcionales (un cliente de fiado informal no los tiene a mano).
+    if (!name.trim() || !phone.trim()) {
+      setErr("Completá el nombre y el teléfono.");
       return;
     }
     const digits = doc.replace(/\D/g, "");
     const payload = {
       name: name.trim(),
-      last_name: lastName.trim(),
       phone: phone.trim(),
-      ...(digits.length > 8 ? { cuit: digits } : { dni: digits }),
+      ...(lastName.trim() ? { last_name: lastName.trim() } : {}),
+      ...(digits ? (digits.length > 8 ? { cuit: digits } : { dni: digits }) : {}),
     };
     setSaving(true);
     try {
@@ -1449,8 +1451,8 @@ function InlineCustomerCreate({
       <p className="text-xs font-medium text-vektor-body">Nuevo cliente</p>
       <div className="grid gap-2 sm:grid-cols-2">
         <input placeholder="Nombre *" value={name} onChange={(e) => setName(e.target.value)} className={selectClass} />
-        <input placeholder="Apellido *" value={lastName} onChange={(e) => setLastName(e.target.value)} className={selectClass} />
-        <input placeholder="DNI o CUIT *" value={doc} onChange={(e) => setDoc(e.target.value)} className={selectClass} />
+        <input placeholder="Apellido (opcional)" value={lastName} onChange={(e) => setLastName(e.target.value)} className={selectClass} />
+        <input placeholder="DNI o CUIT (opcional)" value={doc} onChange={(e) => setDoc(e.target.value)} className={selectClass} />
         <input placeholder="Teléfono *" value={phone} onChange={(e) => setPhone(e.target.value)} className={selectClass} />
       </div>
       <FieldError msg={err ?? undefined} />

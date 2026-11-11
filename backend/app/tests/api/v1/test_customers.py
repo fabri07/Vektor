@@ -117,7 +117,7 @@ _VALID_CUIT = "20-12345678-6"
 
 
 class TestCustomerFiscalValidation:
-    """Validación fiscal del alta manual: identidad + documento + celular."""
+    """Validación del alta manual: nombre + un contacto (celular o email)."""
 
     @pytest.fixture(autouse=True)
     def patch_celery(self, mock_score_trigger):
@@ -126,14 +126,25 @@ class TestCustomerFiscalValidation:
     async def test_missing_required_returns_422_incomplete(
         self, client: AsyncClient, auth_headers: dict[str, Any]
     ) -> None:
-        # Solo nombre: faltan apellido, documento y celular.
+        # Solo nombre: falta un medio de contacto (celular o email).
         resp = await client.post(
             "/api/v1/customers", json={"name": "Solo Nombre"}, headers=auth_headers
         )
         assert resp.status_code == 422
         detail = resp.json()["detail"]
         assert detail["code"] == "CUSTOMER_INCOMPLETE"
-        assert set(detail["missing"]) == {"last_name", "dni_or_cuit", "phone"}
+        assert detail["missing"] == ["contact"]
+
+    async def test_nombre_y_un_contacto_alcanzan(
+        self, client: AsyncClient, auth_headers: dict[str, Any]
+    ) -> None:
+        # Sin apellido ni documento: un cliente de fiado informal (decisión 2026-11-10).
+        for payload in (
+            {"name": "Caro G.", "phone": "+54 9 351 555 0000"},
+            {"name": "Reventa Belén", "email": "belen@example.com"},
+        ):
+            resp = await client.post("/api/v1/customers", json=payload, headers=auth_headers)
+            assert resp.status_code == 201, resp.text
 
     async def test_invalid_dni_returns_422(
         self, client: AsyncClient, auth_headers: dict[str, Any]

@@ -126,23 +126,19 @@ class CreateCustomerRequest(BaseModel):
     def missing_required_fields(self) -> list[str]:
         """Campos obligatorios faltantes para alta manual de un cliente REAL.
 
-        Reglas (AFIP + comerciales): identidad (razón social para empresa; nombre +
-        apellido para persona), un documento (DNI o CUIT) y celular. El resto es
-        opcional. Devuelve la lista de faltantes — vacía si está completo. NO se
+        Regla (decisión del dueño, 2026-11-10): un NOMBRE (razón social para una
+        empresa) y UN medio de contacto, celular o email — alcanza para poder cobrar
+        un fiado. Apellido, DNI/CUIT e IVA son opcionales (un cliente informal de
+        fiado no los tiene a mano); si vienen, el formato se valida igual. NO se
         aplica al sentinela "Local" ni a import/reclasificación (caminos internos
-        que construyen el registro sin pasar por este guard).
+        que construyen el registro sin pasar por este guard). Devuelve la lista de
+        faltantes — vacía si está completo.
         """
         missing: list[str] = []
         if not self.name or not self.name.strip():
             missing.append("name")
-        # Empresa: la razón social va en ``name`` (ya exigido). Persona / sin tipo:
-        # se exige apellido.
-        if self.customer_type != "company" and not (self.last_name or "").strip():
-            missing.append("last_name")
-        if not (self.dni or "").strip() and not (self.cuit or "").strip():
-            missing.append("dni_or_cuit")
-        if not (self.phone or "").strip():
-            missing.append("phone")
+        if not (self.phone or "").strip() and not (self.email or "").strip():
+            missing.append("contact")
         return missing
 
 
