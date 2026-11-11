@@ -9,7 +9,7 @@ jest.mock("@sentry/nextjs", () => ({
   addBreadcrumb: jest.fn(),
 }));
 
-import { api, handleApiResponseError } from "@/lib/api";
+import { api, handleApiResponseError, TIMEOUT_ESCRITURA_IDEMPOTENTE_MS } from "@/lib/api";
 import { useAuthStore } from "@/stores/authStore";
 import { usePosTerminalStore } from "@/stores/posTerminalStore";
 
@@ -127,5 +127,39 @@ describe("credencial de la caja", () => {
     } as unknown as AxiosError;
     await expect(handleApiResponseError(e)).rejects.toBe(e);
     expect(usePosTerminalStore.getState().invalid).toBe(true);
+  });
+});
+
+describe("timeout de las escrituras con clave de idempotencia", () => {
+  type Handler = { fulfilled: (c: InternalAxiosRequestConfig) => InternalAxiosRequestConfig };
+  const handler = (api.interceptors.request as unknown as { handlers: Handler[] }).handlers[0];
+  if (!handler) throw new Error("api no tiene interceptor de request");
+  const interceptor = handler.fulfilled;
+
+  function pedir(
+    method: string,
+    headers: Record<string, string> = {},
+    timeout = 15_000,
+  ): InternalAxiosRequestConfig {
+    return interceptor({
+      url: "/sales/manual-batch",
+      method,
+      timeout,
+      headers: new axios.AxiosHeaders(headers),
+    } as InternalAxiosRequestConfig);
+  }
+
+  it("un POST con Idempotency-Key espera más que los 15 s por defecto", () => {
+    const c = pedir("post", { "Idempotency-Key": "k-1" });
+    expect(c.timeout).toBe(TIMEOUT_ESCRITURA_IDEMPOTENTE_MS);
+  });
+
+  it("sin clave, o con otro método, sigue en 15 s", () => {
+    expect(pedir("post").timeout).toBe(15_000);
+    expect(pedir("get", { "Idempotency-Key": "k-1" }).timeout).toBe(15_000);
+  });
+
+  it("un timeout fijado a mano por quien llama no se pisa", () => {
+    expect(pedir("post", { "Idempotency-Key": "k-1" }, 5_000).timeout).toBe(5_000);
   });
 });

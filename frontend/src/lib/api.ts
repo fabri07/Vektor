@@ -7,10 +7,17 @@ import { llevaHeaderDeTerminal, usePosTerminalStore } from "@/stores/posTerminal
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+const TIMEOUT_MS = 15_000;
+// Una escritura con `Idempotency-Key` tarda más (5–13 s medidos el 2026-11-10) y
+// cortarla a los 15 s no la cancela en el servidor: sólo deja al usuario sin saber
+// si se guardó. Con la clave, esperar es seguro y reintentar también (el replay
+// devuelve el registro original, no duplica).
+export const TIMEOUT_ESCRITURA_IDEMPOTENTE_MS = 45_000;
+
 export const api = axios.create({
   baseURL: `${BASE_URL}/api/v1`,
   headers: { "Content-Type": "application/json" },
-  timeout: 15_000,
+  timeout: TIMEOUT_MS,
 });
 
 // Single-flight: todos los 401 simultáneos comparten el mismo promise de refresh
@@ -29,6 +36,15 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
     if (caja && tenantId && caja.tenantId === tenantId && llevaHeaderDeTerminal(config.url)) {
       config.headers["X-POS-Terminal"] = caja.secret;
     }
+  }
+  // Sólo se alarga el timeout por DEFECTO de un POST con clave de idempotencia; uno
+  // fijado a mano por quien llama no se pisa.
+  if (
+    config.method?.toLowerCase() === "post" &&
+    config.headers["Idempotency-Key"] &&
+    (config.timeout === undefined || config.timeout === TIMEOUT_MS)
+  ) {
+    config.timeout = TIMEOUT_ESCRITURA_IDEMPOTENTE_MS;
   }
   // Trazabilidad: una correlación por request (frontend → API → audit → response).
   if (!config.headers["X-Trace-Id"]) {
