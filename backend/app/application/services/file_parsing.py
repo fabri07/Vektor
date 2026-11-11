@@ -706,6 +706,13 @@ def infer_spreadsheet_type(
             return "proveedores"
         if cliente_score > proveedor_master_score:
             return "clientes"
+        # «Nombre + teléfono/email/DNI» sin ninguna señal de cliente ni de proveedor
+        # es un MAESTRO de contactos, no un catálogo de productos: no se sabe de cuál
+        # de los dos. Caer a «stock» (regla `has_nombre and not has_venta`) importaba
+        # a «Caro G.» y «Reventa Belén» como PRODUCTOS. «general» deja que el NOMBRE
+        # de la hoja desempate (`_classify_sheet`) y, sin él, que el usuario elija.
+        if cliente_score == 0 and proveedor_master_score == 0:
+            return "general"
 
     # FASE 3: compra de mercadería/insumos para reventa CON columna de cantidad →
     # inventario, NO gasto corriente. Conservador: requiere AMBAS señales para no

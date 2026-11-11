@@ -95,6 +95,9 @@ class ImportResult:
     # el mismo campo en customer_import_service.ImportResult.
     needs_review: int = 0
     invalid: int = 0
+    #: Posición (en `records`) de cada fila que quedó en `needs_review`: el import
+    #: de archivos las manda a «Otros» con el motivo en vez de perderlas en silencio.
+    needs_review_indices: list[int] = field(default_factory=list)
     #: E6a: cuántos valores NO se pisaron porque la ficha tenía ediciones
     #: manuales. Se cuenta y se reporta: una actualización que no ocurrió es
     #: exactamente el tipo de silencio que este programa viene a cerrar — el
@@ -249,7 +252,7 @@ async def apply_import(
     index = _existing_index(existing)
     result = ImportResult()
 
-    for record in records:
+    for posicion, record in enumerate(records):
         if _validate_record(record):
             result.skipped += 1
             result.invalid += 1
@@ -261,6 +264,7 @@ async def apply_import(
         if resolution.outcome == "needs_review":
             result.skipped += 1
             result.needs_review += 1
+            result.needs_review_indices.append(posicion)
             continue
         if resolution.outcome == "conflict":
             result.skipped += 1
