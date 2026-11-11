@@ -11,6 +11,11 @@ psycopg2-binary==2.9.10          # sync driver for Alembic / Celery tasks
 # ── Cache / Queue ─────────────────────────────────────────────────────────────
 redis==5.2.1
 celery[redis]==5.4.0
+# kombu fijado a mano: celery 5.4.0 acepta cualquier kombu 5.x y un build limpio
+# trajo 5.7.0, cuyo transporte Redis exige redis-py >= 6.1 (VersionMismatch, el
+# worker no arrancaba, 2026-11-11). 5.5.4 declara redis <= 5.2.1. Subir kombu y
+# redis juntos, nunca uno solo.
+kombu==5.5.4
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.0
