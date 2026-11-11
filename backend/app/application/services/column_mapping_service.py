@@ -931,6 +931,11 @@ _ENVIO_POR_LINEA = (
     "se leen con reglas opuestas —uno se cobra una vez, el otro se suma— así que "
     "no se pueden usar como si fueran el mismo campo."
 )
+_COSTO_ES_TOTAL_DE_LINEA = (
+    "Parece el costo TOTAL de la línea (cantidad × costo unitario), no el costo de "
+    "cada unidad. Importarlo como costo unitario multiplicaría el costo por la "
+    "cantidad. Mapealo a mano si es el unitario."
+)
 _MONTO_DEL_COMPROBANTE = (
     "Parece el total del comprobante, no el de esta línea. Importarlo como el monto "
     "de la fila repetiría el total en cada línea del remito."
@@ -1149,7 +1154,15 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
                 ),
             ),
         ),
-        "costo": (_r(target="unit_cost_ars"),),
+        # «Costo total» es el total de la línea (cantidad × unitario), no el
+        # costo por unidad: leerlo como `unit_cost_ars` carga el total del lote
+        # como costo de CADA unidad e infla el valor de inventario (cantidad²).
+        # Interpretación por columna: el calificador manda, ante la duda sin target.
+        "costo": (
+            _r("por_comprobante", duda=_COSTO_ES_TOTAL_DE_LINEA),
+            _r("por_linea", duda=_COSTO_ES_TOTAL_DE_LINEA),
+            _r(target="unit_cost_ars"),
+        ),
         # «Compra» y «Venta» a secas, en un catálogo, dicen cuál de los tres
         # precios es la columna. Sin calificador NO hay regla: un «Monto» pelado
         # en un catálogo no dice cuál de los tres es, y adivinarlo es el bug que
