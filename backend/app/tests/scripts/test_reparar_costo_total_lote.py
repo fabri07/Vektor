@@ -72,3 +72,19 @@ def test_el_costo_del_catalogo_se_guarda_sin_notacion_cientifica(mod: Any) -> No
     assert mod._como_texto(Decimal("12000.00")) == "12000"
     assert mod._como_texto(Decimal("4600.00")) == "4600"
     assert mod._como_texto(Decimal("4500.50")) == "4500.50"
+
+
+def test_solo_se_reparan_los_ids_aprobados(mod: Any) -> None:
+    import uuid
+
+    a, b = uuid.uuid4(), uuid.uuid4()
+    reparar = [{"product_id": a, "name": "A"}, {"product_id": b, "name": "B"}]
+    assert [r["name"] for r in mod.filtrar_por_ids(reparar, {a})] == ["A"]
+
+
+def test_un_id_que_no_es_candidato_aborta(mod: Any) -> None:
+    import uuid
+
+    reparar = [{"product_id": uuid.uuid4(), "name": "A"}]
+    with pytest.raises(SystemExit):
+        mod.filtrar_por_ids(reparar, {uuid.uuid4()})

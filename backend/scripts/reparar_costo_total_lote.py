@@ -26,7 +26,14 @@ REVERSIBLE: cada cambio queda en `decision_audit_log` (`COSTO_TOTAL_LOTE_REPAIR`
 Uso (la DATABASE_URL la provee el usuario desde su shell; NUNCA se imprime):
     export DATABASE_URL='postgresql://...'
     .venv/bin/python scripts/reparar_costo_total_lote.py --tenant <uuid>           # dry-run
-    .venv/bin/python scripts/reparar_costo_total_lote.py --tenant <uuid> --apply   # escribe
+    .venv/bin/python scripts/reparar_costo_total_lote.py --tenant <uuid> \\
+        --apply --ids <product_id>,<product_id>                                    # escribe
+
+``--apply`` SIN ``--ids`` no corre. La evidencia del script (confirm con mapeo malo, único
+movimiento con costo, división exacta) NO alcanza sola: un producto cargado bien desde el
+mismo archivo cumple lo mismo y se dañaría (visto en la prueba del 2026-11-10: cinco
+costos unitarios correctos aparecían como «a reparar»). Por eso el dry-run imprime cada
+`product_id` y las fechas de carga, y la persona aprueba la lista exacta.
 
 Hacer BACKUP de Neon (branch o snapshot) antes de `--apply`.
 """
@@ -55,15 +62,16 @@ DECISION_TYPE = "COSTO_TOTAL_LOTE_REPAIR"
 _CENTAVO = Decimal("0.01")
 
 _SQL_ARCHIVOS = text(
-    "SELECT DISTINCT file_id FROM pipeline_events "
+    "SELECT file_id, max(created_at) AS confirmado_en FROM pipeline_events "
     "WHERE tenant_id = :t AND stage = 'confirm' AND file_id IS NOT NULL "
-    "AND detail::text ~* '\"[^\"]*total[^\"]*\": *\"unit_cost_ars\"'"
+    "AND detail::text ~* '\"[^\"]*total[^\"]*\": *\"unit_cost_ars\"' "
+    "GROUP BY file_id"
 )
 # Un solo movimiento con costo y vivo por producto: si hubo otra compra o ajuste con
 # costo, el costo vigente ya no depende sólo de este movimiento y no se adivina.
 _SQL_CANDIDATOS = text(
     "SELECT m.id AS movement_id, m.product_id, p.name, m.qty, m.unit_cost AS mov_cost, "
-    "p.unit_cost_ars, m.source_upload_id "
+    "p.unit_cost_ars, m.source_upload_id, m.created_at AS cargado_en "
     "FROM inventory_movements m "
     "JOIN products p ON p.id = m.product_id AND p.tenant_id = m.tenant_id "
     "WHERE m.tenant_id = :t AND m.source_type = 'catalog_initial_stock' "
@@ -121,14 +129,32 @@ def planificar(
     return reparar, a_mano
 
 
+def filtrar_por_ids(
+    reparar: list[dict[str, Any]], ids: set[uuid.UUID]
+) -> list[dict[str, Any]]:
+    """Sólo los productos aprobados a mano. Un id que no es candidato aborta: nadie
+    aprueba algo que el dry-run no propuso."""
+    propuestos = {uuid.UUID(str(r["product_id"])) for r in reparar}
+    desconocidos = ids - propuestos
+    if desconocidos:
+        raise SystemExit(
+            "ids que NO están entre los candidatos a reparar: "
+            + ", ".join(sorted(str(i) for i in desconocidos))
+        )
+    return [r for r in reparar if uuid.UUID(str(r["product_id"])) in ids]
+
+
 async def _cargar(conn: AsyncConnection, tenant_id: uuid.UUID) -> list[dict[str, Any]]:
-    archivos = [r.file_id for r in (await conn.execute(_SQL_ARCHIVOS, {"t": tenant_id})).all()]
+    confirms = (await conn.execute(_SQL_ARCHIVOS, {"t": tenant_id})).all()
+    archivos = {r.file_id: r.confirmado_en for r in confirms}
     if not archivos:
         return []
     filas = (
-        await conn.execute(_SQL_CANDIDATOS, {"t": tenant_id, "files": [str(a) for a in archivos]})
+        await conn.execute(
+            _SQL_CANDIDATOS, {"t": tenant_id, "files": [str(a) for a in archivos]}
+        )
     ).mappings().all()
-    return [dict(f) for f in filas]
+    return [{**dict(f), "confirmado_en": archivos.get(f["source_upload_id"])} for f in filas]
 
 
 async def _aplicar(
@@ -192,7 +218,7 @@ async def _aplicar(
     return hechos
 
 
-async def main(tenant_id: uuid.UUID, apply: bool) -> None:
+async def main(tenant_id: uuid.UUID, apply: bool, ids: set[uuid.UUID]) -> None:
     url, connect_args = async_engine_config()
     engine = create_async_engine(url, connect_args=connect_args)
     try:
@@ -203,8 +229,10 @@ async def main(tenant_id: uuid.UUID, apply: bool) -> None:
             print(f"\nA REPARAR ({len(reparar)}):")
             for r in reparar:
                 print(
-                    f"  {r['name'][:32]:32} qty={r['qty']:>4} total={r['mov_cost']} "
-                    f"-> unitario={r['unitario']}"
+                    f"  {r['product_id']} | {r['name'][:28]:28} qty={r['qty']:>4} "
+                    f"total={r['mov_cost']} -> unitario={r['unitario']}\n"
+                    f"      movimiento cargado={r['cargado_en']}  "
+                    f"archivo confirmado={r['confirmado_en']}"
                 )
             print(f"\nA MANO ({len(a_mano)}):")
             for r in a_mano:
@@ -212,9 +240,17 @@ async def main(tenant_id: uuid.UUID, apply: bool) -> None:
                     f"  {r['name'][:32]:32} qty={r['qty']:>4} costo={r['mov_cost']}: {r['motivo']}"
                 )
             if not apply:
-                print("\nDRY-RUN: no se escribió nada. Agregá --apply para aplicar.")
+                print(
+                    "\nDRY-RUN: no se escribió nada. Revisá la lista y, para aplicar, pasá "
+                    "--apply --ids <uuid>,<uuid>… con SOLO los que son el bug."
+                )
                 return
-            hechos = await _aplicar(conn, tenant_id, reparar)
+            if not ids:
+                raise SystemExit(
+                    "--apply exige --ids con los productos aprobados a mano: la evidencia del "
+                    "script no alcanza para distinguir un total de un costo unitario correcto."
+                )
+            hechos = await _aplicar(conn, tenant_id, filtrar_por_ids(reparar, ids))
             valor_despues = (await conn.execute(_SQL_VALOR, {"t": tenant_id})).scalar_one()
             print(f"\nAPLICADO: {hechos} producto(s). valor de inventario DESPUÉS: {valor_despues}")
             if hechos:
@@ -230,5 +266,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--tenant", required=True, type=uuid.UUID)
     ap.add_argument("--apply", action="store_true", help="escribe (default: dry-run)")
+    ap.add_argument(
+        "--ids",
+        default="",
+        help="product_id aprobados, separados por coma (obligatorio con --apply)",
+    )
     args = ap.parse_args()
-    asyncio.run(main(args.tenant, args.apply))
+    aprobados = {uuid.UUID(x.strip()) for x in args.ids.split(",") if x.strip()}
+    asyncio.run(main(args.tenant, args.apply, aprobados))
