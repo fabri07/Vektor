@@ -134,7 +134,11 @@ export function ReclassifyModal({
   // V-24: el fiado lleva a quién se le fió (nunca «Local»).
   const [clienteId, setClienteId] = useState("");
 
-  const { data: productos = [], isError: productosError } = useQuery({
+  const {
+    data: productos = [],
+    isError: productosError,
+    isLoading: productosCargando,
+  } = useQuery({
     queryKey: ["products-list"],
     queryFn: () => productsService.getAllProducts({ is_active: true }),
     enabled: !!record && (entityType === "purchase" || entityType === "sale"),
@@ -429,6 +433,7 @@ export function ReclassifyModal({
               onChange={setVentaProducto}
               referencia={nombreDeLaFila}
               inputClassName={inputCls}
+              cargando={productosCargando}
             >
               <input
                 aria-label="Cantidad vendida"

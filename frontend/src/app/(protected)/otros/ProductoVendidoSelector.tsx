@@ -23,6 +23,7 @@ export function ProductoVendidoSelector({
   onChange,
   referencia,
   inputClassName,
+  cargando = false,
   children,
 }: {
   productos: ProductoElegible[];
@@ -32,6 +33,8 @@ export function ProductoVendidoSelector({
   onChange: (productId: string) => void;
   referencia: string;
   inputClassName: string;
+  /** El catálogo todavía se está cargando: se dice, en vez de mostrar un combo vacío. */
+  cargando?: boolean;
   /** Lo que va al lado del selector (la cantidad, en el modal). */
   children?: ReactNode;
 }) {
@@ -43,6 +46,11 @@ export function ProductoVendidoSelector({
   }, [value, nombre, productos, onChange]);
 
   const filtro = busqueda.trim().toLowerCase();
+  // Lo que decía el archivo («Lote camperas») puede no estar contenido en el nombre
+  // de ningún producto: filtrar igual dejaba el combo vacío y sin salida. Sin
+  // coincidencias se muestra el catálogo entero y se dice por qué.
+  const hayCoincidencias = !filtro || productos.some((p) => p.name.toLowerCase().includes(filtro));
+  const sinCoincidencias = !cargando && productos.length > 0 && !hayCoincidencias;
   const select = (
     <select
       aria-label="Producto vendido"
@@ -50,9 +58,12 @@ export function ProductoVendidoSelector({
       value={value}
       onChange={(e) => onChange(e.target.value)}
     >
-      <option value="">Elegí el producto</option>
+      <option value="">{cargando ? "Cargando productos…" : "Elegí el producto"}</option>
       {productos
-        .filter((p) => p.id === value || !filtro || p.name.toLowerCase().includes(filtro))
+        .filter(
+          (p) =>
+            p.id === value || !filtro || sinCoincidencias || p.name.toLowerCase().includes(filtro),
+        )
         .map((p) => (
           <option key={p.id} value={p.id}>
             {p.name}
@@ -73,6 +84,12 @@ export function ProductoVendidoSelector({
         />
       </label>
       {children ? <div className="grid grid-cols-[1fr_6rem] gap-2">{select}{children}</div> : select}
+      {sinCoincidencias ? (
+        <p className="text-xs text-vk-text-muted">
+          Ningún producto contiene «{busqueda.trim()}»: se muestran todos. Borrá la búsqueda o
+          elegí el que corresponda.
+        </p>
+      ) : null}
     </>
   );
 }

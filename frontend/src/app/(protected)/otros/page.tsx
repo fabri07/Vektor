@@ -12,7 +12,12 @@ import { Modal } from "@/components/ui/Modal";
 import { ReclassifyModal, type OpcionesDeReclassify } from "./ReclassifyModal";
 import { OthersGroups } from "./OthersGroups";
 import { VincularColaModal } from "./VincularColaModal";
-import { esQueryAfectadaPorVincular, prefill, rowPreview } from "./helpers";
+import {
+  esQueryAfectadaPorVincular,
+  mensajeDeImportacion,
+  prefill,
+  rowPreview,
+} from "./helpers";
 import { Table } from "@/components/ui/Table";
 import {
   othersService,
@@ -247,7 +252,12 @@ export default function OtrosPage() {
         // B·5e: el servidor dice qué falta (la compra de X, el producto).
         toast(mensajeDelServidor(error) ?? "Falta la compra o el producto.", "error");
       } else {
-        toast("No se pudo importar el registro. Revisá los campos.", "error");
+        // Un 422 de validación (lista de campos) o un código que no conocemos pero
+        // trae `message`: se muestra lo que dice el servidor en vez de ocultarlo.
+        toast(
+          mensajeDeImportacion(error) ?? "No se pudo importar el registro. Revisá los campos.",
+          "error",
+        );
       }
     },
   });

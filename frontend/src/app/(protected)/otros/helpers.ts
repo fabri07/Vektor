@@ -129,3 +129,54 @@ export function agruparPorReferencia(records: UnclassifiedRecordResponse[]): Gru
 export function esQueryAfectadaPorVincular(queryKey: readonly unknown[]): boolean {
   return /^(others|products|sales)(-|$)/.test(String(queryKey[0]));
 }
+
+const CAMPOS_DE_ERROR: Record<string, string> = {
+  amount: "El monto",
+  quantity: "La cantidad",
+  transaction_date: "La fecha",
+  payment_method: "La forma de pago",
+  product_id: "El producto",
+  customer_id: "El cliente",
+  supplier_id: "El proveedor",
+  notes: "Las notas",
+  name: "El nombre",
+};
+
+type ErrorDeCampo = { loc?: unknown[]; msg?: unknown; type?: unknown };
+
+/**
+ * Los 422 de validación (pydantic) traen `detail` como LISTA de `{loc, msg}`: sin
+ * leerla, el usuario sólo veía «Revisá los campos» sin saber cuál. Devuelve un
+ * texto con el campo y el motivo («La fecha: no puede ser futura»), o `null` si
+ * `detail` no es una lista de errores de campo.
+ */
+export function mensajeDeValidacion(detail: unknown): string | null {
+  if (!Array.isArray(detail) || detail.length === 0) return null;
+  const partes: string[] = [];
+  for (const e of detail as ErrorDeCampo[]) {
+    if (!e || typeof e.msg !== "string") continue;
+    const ultimo = Array.isArray(e.loc) ? e.loc[e.loc.length - 1] : undefined;
+    const campo = typeof ultimo === "string" ? (CAMPOS_DE_ERROR[ultimo] ?? ultimo) : "Un dato";
+    let motivo = e.msg.replace(/^Value error,\s*/i, "");
+    if (/future/i.test(motivo)) motivo = "no puede ser futura";
+    else if (/greater than/i.test(motivo)) motivo = "tiene que ser mayor que cero";
+    else if (/field required|missing/i.test(motivo) || e.type === "missing") motivo = "falta";
+    partes.push(`${campo}: ${motivo}`);
+  }
+  return partes.length ? partes.join(". ") + "." : null;
+}
+
+/**
+ * El texto de un error al importar/reclasificar un registro de «Otros»: el
+ * `detail.message` del servidor si lo trae, el detalle por campo si es una lista
+ * de validación, o `null` (el llamador pone su mensaje genérico).
+ */
+export function mensajeDeImportacion(error: unknown): string | null {
+  const detail = (error as { response?: { data?: { detail?: unknown } } } | null)?.response?.data
+    ?.detail;
+  if (detail && typeof detail === "object" && !Array.isArray(detail) && "message" in detail) {
+    const m = (detail as { message?: unknown }).message;
+    if (typeof m === "string" && m.trim()) return m;
+  }
+  return mensajeDeValidacion(detail);
+}
