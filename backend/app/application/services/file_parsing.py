@@ -144,6 +144,9 @@ FECHA_NO_TRANSACCIONAL_COLS = {"nacimiento", "cumpleanos", "cumple"}
 # Conservador: solo se rerutea a stock si HAY mercadería Y una columna de cantidad.
 MERCADERIA_COLS = {"mercaderia", "insumo", "insumos", "reposicion"}
 CANTIDAD_COLS = {"cantidad", "unidades", "unidad", "qty", "cant"}
+PRECIO_UNITARIO_COLS = {
+    "precio unitario", "precio_unitario", "precio unit", "p unitario", "unit price",
+}
 
 # FASE 3: clasificación CONTEXTUAL venta vs gasto. Las columnas de dinero genéricas
 # (monto/importe/total/precio/valor) son NEUTRALES — aparecen en cualquier documento
@@ -521,6 +524,22 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         for col in normalized
     )
 
+    # Libro de ventas SIN columna de total: fecha + cantidad + precio UNITARIO +
+    # (cliente o forma de pago). La operación se documenta con cantidad × unitario
+    # en vez de un «Total»; sin esto la hoja caía en «stock» y la importación ofrecía
+    # campos de producto (sin cliente ni medio de pago). Un catálogo con fecha de alta
+    # + cantidad + precio unitario NO trae cliente ni forma de pago, así que no entra.
+    has_precio_unitario = any(
+        any(k in col for k in PRECIO_UNITARIO_COLS) for col in normalized
+    )
+    has_cliente_columna = any(col in {"cliente", "clientes"} for col in normalized)
+    has_venta_unitaria = (
+        has_fecha
+        and has_cantidad
+        and has_precio_unitario
+        and (has_cliente_columna or has_forma_pago)
+    )
+
     # F7a: señales de maestro de clientes/proveedores (identidad fiscal/contacto).
     cliente_score = sum(any(k in col for k in CLIENTE_SIGNAL_COLS) for col in normalized)
     proveedor_master_score = sum(
@@ -560,6 +579,7 @@ def analyze_headers(headers: list[str]) -> dict[str, Any]:
         proveedor_master_score=proveedor_master_score,
         has_identidad_contacto=has_identidad_contacto,
         has_listado_de_productos=has_listado_de_productos,
+        has_venta_unitaria=has_venta_unitaria,
     )
 
     has_catalogo_signal = has_catalogo_fuerte or has_nombre
@@ -598,6 +618,7 @@ def infer_spreadsheet_type(
     has_fecha_transaccional: bool | None = None,
     has_contexto_operacion: bool | None = None,
     has_listado_de_productos: bool = False,
+    has_venta_unitaria: bool = False,
 ) -> str:
     """Determina el tipo más probable del archivo tabular.
 
@@ -729,7 +750,13 @@ def infer_spreadsheet_type(
     # sola vez: son la misma pregunta hecha sobre dos señales de catálogo distintas
     # (la fuerte y la de nombre), y tenerlas escritas por separado fue justamente
     # lo que las dejó divergir.
-    evidencia_transaccional = has_fecha and has_monto_transaccion and has_contexto_operacion
+    # `has_venta_unitaria` (fecha + cantidad + precio unitario + cliente/forma de
+    # pago) documenta la operación sin una columna «Total»: cantidad × unitario.
+    evidencia_transaccional = (
+        has_fecha
+        and (has_monto_transaccion or has_venta_unitaria)
+        and has_contexto_operacion
+    )
 
     # Señal fuerte (sku, inventario, articulo, codigo, item) → catálogo, SALVO que
     # el archivo traiga la evidencia transaccional completa.
