@@ -1260,3 +1260,28 @@ def test_un_libro_de_compras_con_articulo_sigue_siendo_gasto() -> None:
     mercadería sigue siendo gasto (COGS + salida de caja), no venta."""
     headers = ["Fecha", "Proveedor", "Artículo", "Cantidad", "Total", "Forma de Pago"]
     assert analyze_headers(headers)["inferred_type"] == "gastos"
+
+
+@pytest.mark.parametrize(
+    ("headers", "esperado"),
+    [
+        # Libro de ventas SIN «Total»: cantidad × precio unitario + cliente/pago.
+        (["Fecha", "Cliente", "Producto", "Cantidad", "Precio unitario", "Pago"], "ventas"),
+        (
+            ["Fecha", "Cliente", "Producto", "Cantidad", "Precio unitario", "Medio de pago"],
+            "ventas",
+        ),
+        # Mismas columnas de producto sin cliente ni pago: es un catálogo.
+        (["Fecha", "Producto", "Cantidad", "Precio unitario"], "stock"),
+        (["Fecha de alta", "Producto", "Cantidad", "Precio unitario"], "stock"),
+        # Un libro de compras (proveedor) no se vuelve venta por traer forma de pago.
+        (
+            ["Fecha", "Proveedor", "Producto", "Cantidad", "Precio unitario", "Forma de pago"],
+            "stock",
+        ),
+    ],
+)
+def test_libro_de_ventas_sin_total_se_clasifica_por_cantidad_y_precio_unitario(
+    headers: list[str], esperado: str
+) -> None:
+    assert analyze_headers(headers)["inferred_type"] == esperado
