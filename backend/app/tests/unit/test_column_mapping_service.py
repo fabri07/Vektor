@@ -526,6 +526,9 @@ def test_single_value_fields_cubre_dinero_cantidad_y_fecha() -> None:
         "sale_price_ars",
         "list_price_ars",
         "unit_cost_ars",
+        # Dos columnas de «costo total» dividirían por la misma cantidad y el
+        # costo unitario saldría de una cualquiera: escalar como `unit_cost_ars`.
+        "line_total_cost_ars",
         "stock_units",
         # E6a: el código externo es escalar por una razón más dura que los
         # precios — dos columnas al mismo destino fusionan identidades, no
@@ -556,7 +559,8 @@ def test_costo_total_no_se_sugiere_como_costo_unitario() -> None:
 
     lectura = read_header("costo_total", "product")
     assert lectura.target != "unit_cost_ars"
-    assert lectura.duda is not None
+    # Ya no queda en duda: va al campo propio, que el import divide por la cantidad.
+    assert lectura.target == "line_total_cost_ars"
 
 
 def test_costo_pelado_sigue_siendo_costo_unitario() -> None:

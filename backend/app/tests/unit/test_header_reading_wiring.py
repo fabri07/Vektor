@@ -254,3 +254,53 @@ class TestLosConsumidoresSincronicosNoPierdenColumnas:
         from app.application.services.column_mapping_service import heuristic_target
 
         assert heuristic_target(_normalize_col("Precio"), "product", prefer=("notes",)) is None
+
+
+class TestCostoPeladoEnUnLibroDeCompras:
+    """A4 (2026-11-14): «Costo» pelado junto a «Cantidad» entró como costo unitario y
+    tres totales de lote (280.000, 174.000, 162.000) inflaron el inventario ×cantidad.
+    La columna sola no dice si es el total o el de cada unidad: se pregunta."""
+
+    async def test_costo_pelado_con_cantidad_es_una_duda_con_las_dos_opciones(self) -> None:
+        s = (await _sugerir("product", ["Producto", "Cantidad", "Costo"]))["Costo"]
+        assert s["target_field"] is None
+        assert s["status"] == "ambiguo"
+        assert set(s["options"]) == {"unit_cost_ars", "line_total_cost_ars"}
+        assert s["duda"]
+
+    async def test_un_catalogo_con_stock_conserva_el_costo_unitario(self) -> None:
+        s = (await _sugerir("product", ["Producto", "Stock", "Costo"]))["Costo"]
+        assert s["target_field"] == "unit_cost_ars"
+        assert s["status"] == "mapped"
+
+    async def test_con_otro_costo_unitario_en_la_hoja_no_se_pregunta(self) -> None:
+        s = (await _sugerir("product", ["Producto", "Cantidad", "Costo", "Costo unitario"]))
+        assert s["Costo unitario"]["target_field"] == "unit_cost_ars"
+        assert s["Costo"]["status"] != "ambiguo"
+
+    async def test_un_alias_confirmado_por_el_tenant_se_respeta(self) -> None:
+        alias = MagicMock()
+        alias.source_column = "costo"
+        alias.target_field = "unit_cost_ars"
+        alias.confirmed_count = 3
+        s = (await _sugerir("product", ["Producto", "Cantidad", "Costo"], [alias]))["Costo"]
+        assert s["target_field"] == "unit_cost_ars"
+        assert s["source"] == "tenant_history"
+
+    async def test_en_otra_entidad_no_aplica(self) -> None:
+        s = (await _sugerir("expense", ["Producto", "Cantidad", "Costo"]))["Costo"]
+        assert s["status"] != "ambiguo" or "line_total_cost_ars" not in s["options"]
+
+    async def test_con_unidades_en_vez_de_cantidad_no_se_pregunta(self) -> None:
+        """«Unidades» es un encabezado de stock de catálogo habitual: el costo ahí es
+        unitario y no se convierte en duda."""
+        s = (await _sugerir("product", ["Producto", "Unidades", "Costo"]))["Costo"]
+        assert s["target_field"] == "unit_cost_ars"
+
+    async def test_un_precio_de_venta_en_la_hoja_la_hace_un_catalogo(self) -> None:
+        s = (
+            await _sugerir(
+                "product", ["Producto", "Cantidad", "Costo", "Precio de venta"]
+            )
+        )["Costo"]
+        assert s["target_field"] == "unit_cost_ars"

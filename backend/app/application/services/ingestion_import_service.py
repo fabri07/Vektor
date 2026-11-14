@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5054,6 +5054,25 @@ def _find_col(headers: list[str], keywords: set[str] | tuple[str, ...]) -> str |
     return None
 
 
+def _costo_unitario_desde_total(total_raw: Any, cantidad: int) -> Decimal | None:
+    """Costo unitario = costo total de la línea ÷ cantidad, a 2 decimales.
+
+    ``None`` si el total no se lee, es negativo, o la cantidad no es positiva:
+    sin divisor (o con un total que no es un monto) no se inventa un costo.
+    """
+    if cantidad is None or cantidad <= 0:
+        return None
+    total = _parse_amount(total_raw)
+    if total is None or total < 0:
+        return None
+    unitario = (Decimal(total) / Decimal(cantidad)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    # Un total chico sobre una cantidad enorme redondea a 0,00: un costo de cero no
+    # es «sin costo» sino un costo falso (margen 100 %, inventario en 0).
+    return unitario if unitario > 0 else None
+
+
 def _is_total_cost_col(col: str | None) -> bool:
     """¿El nombre de la columna apunta a un COSTO TOTAL de línea (no unitario)?"""
     if not col:
@@ -8364,6 +8383,13 @@ async def _insert_confirmed_data_impl(
                 # devuelve 0 con el motivo en el log, que es lo que ya significaba
                 # una celda de stock ilegible en este camino.
                 stock_val = _parse_qty(row.get(stock_col) if stock_col else None)
+                # Costo TOTAL de la línea ÷ cantidad de la misma fila, sólo si nadie
+                # resolvió un unitario (ver `_costo_unitario_desde_total`).
+                _total_col_tabla = target_to_col.get("line_total_cost_ars")
+                if cost is None and _total_col_tabla:
+                    cost = _costo_unitario_desde_total(
+                        row.get(_total_col_tabla), stock_val
+                    )
                 sku_raw = row.get(sku_col) if sku_col else None
                 sku = _sku_del_archivo(sku_raw)
                 # F2-T5: código de barras de la fila (si el archivo trae la columna).
@@ -10813,6 +10839,13 @@ async def _insert_multisheet_data(
         stock_val = _parse_qty(
             _val_del_producto(row, cols, cf_cols, "stock_units", _STOCK_COLS)
         )
+        # Costo TOTAL de la línea ÷ cantidad de la MISMA fila = costo unitario. Sólo
+        # si nadie resolvió un unitario (un mapeo a `unit_cost_ars` o una columna
+        # inequívoca gana) y la fila trae una cantidad positiva: sin divisor no se
+        # inventa nada y el producto nace `requires_completion`.
+        _total_col = cols.get("line_total_cost_ars")
+        if cost is None and _total_col:
+            cost = _costo_unitario_desde_total(row.get(_total_col), stock_val)
         sku = _sku_del_archivo(_val_del_producto(row, cols, cf_cols, "sku", _SKU_COLS))
         # F2-T5: código de barras (columna mapeada o detección por keyword).
         barcode = _clean_str(

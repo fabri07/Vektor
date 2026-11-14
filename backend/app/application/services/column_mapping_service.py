@@ -194,6 +194,10 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "sale_price_ars": "Precio de venta",
         "list_price_ars": "Precio de lista (sugerido)",
         "unit_cost_ars": "Costo unitario",
+        # El costo TOTAL de la línea (cantidad × unitario): el import lo divide por
+        # la cantidad de la misma fila para obtener el costo unitario. Nunca se
+        # guarda como costo de cada unidad.
+        "line_total_cost_ars": "Costo total de la línea (se divide por la cantidad)",
         # Bloque 3A: auxiliares del costo — NO son el costo final que usa el
         # margen (ese es `unit_cost_ars`), se guardan en `custom_fields` para
         # no perder el dato de origen cuando el archivo trae compra+envío ya
@@ -1159,8 +1163,8 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         # como costo de CADA unidad e infla el valor de inventario (cantidad²).
         # Interpretación por columna: el calificador manda, ante la duda sin target.
         "costo": (
-            _r("por_comprobante", duda=_COSTO_ES_TOTAL_DE_LINEA),
-            _r("por_linea", duda=_COSTO_ES_TOTAL_DE_LINEA),
+            _r("por_comprobante", target="line_total_cost_ars"),
+            _r("por_linea", target="line_total_cost_ars"),
             _r(target="unit_cost_ars"),
         ),
         # «Compra» y «Venta» a secas, en un catálogo, dicen cuál de los tres
@@ -1492,7 +1496,8 @@ SINGLE_VALUE_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "product": frozenset(
-        {"sale_price_ars", "list_price_ars", "unit_cost_ars", "stock_units",
+        {"sale_price_ars", "list_price_ars", "unit_cost_ars", "line_total_cost_ars",
+         "stock_units",
          # E6a — ver la nota en `customer`.
          "external_code", "external_source",
          # I5-4: el SKU y el código de barras son la identidad del producto (el
@@ -1585,6 +1590,61 @@ class ParsedTarget:
     kind: str
     entity: str | None
     field: str
+
+
+_COSTO_PELADO_EN_COMPRAS = (
+    "Dice «costo» pero la hoja trae cantidades y ningún costo unitario: puede ser "
+    "el costo de cada unidad o el total de la línea (cantidad × unitario), y el "
+    "encabezado solo no lo distingue. Elegí cuál es: si es el total, Véktor lo "
+    "divide por la cantidad."
+)
+#: Sólo «cantidad»: «unidades», «unidad», «cant» y «qty» también son encabezados
+#: habituales del stock de un catálogo, y ahí el costo es unitario.
+_CANTIDAD_DE_COMPRA = frozenset({"cantidad"})
+#: Un precio de venta en la hoja la hace un catálogo, no un libro de compras.
+_PRECIOS_DE_CATALOGO = frozenset({"sale_price_ars", "list_price_ars"})
+
+
+def _cuestionar_costo_pelado(
+    suggestions: list[dict[str, Any]], entity_type: str
+) -> set[int]:
+    """Convierte en duda un «Costo» pelado de un libro de compras.
+
+    Se dispara sólo si, en una hoja de productos: (a) la columna es «costo»/«cost»
+    sin calificador y la sugirió el reconocedor (un alias que el tenant ya confirmó
+    es una decisión de la persona y se respeta); (b) hay una columna de cantidad; y
+    (c) ninguna otra columna se leyó como costo unitario. Un catálogo con «Stock»
+    en vez de «Cantidad» no entra. Devuelve los índices que quedan indecididos.
+    """
+    if entity_type != "product":
+        return set()
+    if not any(s["normalized_column"] in _CANTIDAD_DE_COMPRA for s in suggestions):
+        return set()
+    if any(s["target_field"] in _PRECIOS_DE_CATALOGO for s in suggestions):
+        return set()
+    candidatas = [
+        i
+        for i, s in enumerate(suggestions)
+        if s["normalized_column"] in {"costo", "cost"}
+        and s["source"] == "heuristic"
+        and s["target_field"] == "unit_cost_ars"
+    ]
+    if not candidatas:
+        return set()
+    otro_unitario = any(
+        s["target_field"] == "unit_cost_ars" and i not in candidatas
+        for i, s in enumerate(suggestions)
+    )
+    if otro_unitario:
+        return set()
+    for i in candidatas:
+        s = suggestions[i]
+        s["target_field"] = None
+        s["confidence"] = 0.0
+        s["status"] = "ambiguo"
+        s["options"] = ["unit_cost_ars", "line_total_cost_ars"]
+        s["duda"] = _COSTO_PELADO_EN_COMPRAS
+    return set(candidatas)
 
 
 def candidata_a_campo_propio(
@@ -2080,6 +2140,11 @@ class ColumnMappingService:
                     "missing_field": None,
                 }
             )
+
+        # Un «Costo» pelado junto a una cantidad, en una hoja sin otro costo
+        # unitario, es un libro de compras: el costo puede ser el total del lote o
+        # el de cada unidad, y la columna sola no lo dice. Se pregunta.
+        sin_desambiguar |= _cuestionar_costo_pelado(suggestions, entity_type)
 
         # FASE 2: 4ª capa LLM (fallback). Solo para columnas con baja confianza
         # determinística. Una sola llamada batch; fail-silent (flag/key/errores).
