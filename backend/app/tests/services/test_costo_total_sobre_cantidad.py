@@ -132,3 +132,67 @@ def test_sin_divisor_o_total_valido_no_hay_costo(total: Any, cantidad: int) -> N
 def test_el_encabezado_costo_total_apunta_al_campo_de_total() -> None:
     assert read_header("costo_total", "product").target == "line_total_cost_ars"
     assert read_header("Costo", "product").target == "unit_cost_ars"
+
+
+# ── Hallazgos de la revisión (code-review) ───────────────────────────────────
+
+
+def test_el_campo_de_total_es_un_campo_monetario() -> None:
+    """Sin esto la columna no pasa por la política numérica por convenio y
+    «280.000» (es-AR) llega ilegible: el producto nace sin costo, sin aviso."""
+    from app.domain.numeric_parsing import CAMPOS_MONETARIOS
+
+    assert "line_total_cost_ars" in CAMPOS_MONETARIOS
+
+
+async def test_un_total_con_punto_de_miles_se_lee_bien(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    prods = await _importar(
+        db_session,
+        sample_tenant,
+        [
+            {"producto": "Campera A", "cantidad": "10", "costo_total": "280.000"},
+            {"producto": "Campera B", "cantidad": "5", "costo_total": "1.500.000"},
+        ],
+        _MAPEO_TOTAL,
+    )
+    assert prods["Campera A"].unit_cost_ars == Decimal("28000.00")
+    assert prods["Campera B"].unit_cost_ars == Decimal("300000.00")
+
+
+async def test_la_tabla_suelta_tambien_divide_el_total(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    summary = {
+        "file_type": "spreadsheet",
+        "inferred_type": "stock",
+        "has_producto": True,
+        "stock_detectado": [
+            {"producto": "Jean negro", "cantidad": "20", "costo total": "260000"},
+            {"producto": "Sin cantidad", "cantidad": "", "costo total": "9000"},
+        ],
+    }
+    await insert_confirmed_data(
+        db_session,
+        sample_tenant.tenant_id,
+        summary,
+        {"productos": True},
+        column_mappings={
+            "producto": "name",
+            "cantidad": "stock_units",
+            "costo total": "line_total_cost_ars",
+        },
+    )
+    prods = {
+        str(p.name): p for p in (await db_session.execute(select(Product))).scalars().all()
+    }
+    assert prods["Jean negro"].unit_cost_ars == Decimal("13000.00")
+    assert prods["Sin cantidad"].unit_cost_ars is None
+
+
+def test_un_total_que_redondea_a_cero_no_es_un_costo() -> None:
+    """1 peso de total sobre 1000 unidades da 0,001: un costo de 0,00 no es «sin
+    costo» sino un costo falso (margen 100 %, inventario en 0)."""
+    assert _costo_unitario_desde_total("1", 1000) is None
+    assert _costo_unitario_desde_total("10", 1000) == Decimal("0.01")

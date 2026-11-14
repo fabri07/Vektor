@@ -5065,9 +5065,12 @@ def _costo_unitario_desde_total(total_raw: Any, cantidad: int) -> Decimal | None
     total = _parse_amount(total_raw)
     if total is None or total < 0:
         return None
-    return (Decimal(total) / Decimal(cantidad)).quantize(
+    unitario = (Decimal(total) / Decimal(cantidad)).quantize(
         Decimal("0.01"), rounding=ROUND_HALF_UP
     )
+    # Un total chico sobre una cantidad enorme redondea a 0,00: un costo de cero no
+    # es «sin costo» sino un costo falso (margen 100 %, inventario en 0).
+    return unitario if unitario > 0 else None
 
 
 def _is_total_cost_col(col: str | None) -> bool:
@@ -8380,6 +8383,13 @@ async def _insert_confirmed_data_impl(
                 # devuelve 0 con el motivo en el log, que es lo que ya significaba
                 # una celda de stock ilegible en este camino.
                 stock_val = _parse_qty(row.get(stock_col) if stock_col else None)
+                # Costo TOTAL de la línea ÷ cantidad de la misma fila, sólo si nadie
+                # resolvió un unitario (ver `_costo_unitario_desde_total`).
+                _total_col_tabla = target_to_col.get("line_total_cost_ars")
+                if cost is None and _total_col_tabla:
+                    cost = _costo_unitario_desde_total(
+                        row.get(_total_col_tabla), stock_val
+                    )
                 sku_raw = row.get(sku_col) if sku_col else None
                 sku = _sku_del_archivo(sku_raw)
                 # F2-T5: código de barras de la fila (si el archivo trae la columna).

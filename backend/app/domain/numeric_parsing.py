@@ -66,6 +66,7 @@ CAMPOS_MONETARIOS = frozenset(
         "amount",
         "unit_price",
         "unit_cost_ars",
+        "line_total_cost_ars",
         "sale_price_ars",
         "list_price_ars",
         "shipping_cost",
