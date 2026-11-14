@@ -194,6 +194,10 @@ CANONICAL_FIELDS: dict[str, dict[str, str]] = {
         "sale_price_ars": "Precio de venta",
         "list_price_ars": "Precio de lista (sugerido)",
         "unit_cost_ars": "Costo unitario",
+        # El costo TOTAL de la línea (cantidad × unitario): el import lo divide por
+        # la cantidad de la misma fila para obtener el costo unitario. Nunca se
+        # guarda como costo de cada unidad.
+        "line_total_cost_ars": "Costo total de la línea (se divide por la cantidad)",
         # Bloque 3A: auxiliares del costo — NO son el costo final que usa el
         # margen (ese es `unit_cost_ars`), se guardan en `custom_fields` para
         # no perder el dato de origen cuando el archivo trae compra+envío ya
@@ -1159,8 +1163,8 @@ RESOLUCION: dict[str, dict[str, tuple[ReglaDeTarget, ...]]] = {
         # como costo de CADA unidad e infla el valor de inventario (cantidad²).
         # Interpretación por columna: el calificador manda, ante la duda sin target.
         "costo": (
-            _r("por_comprobante", duda=_COSTO_ES_TOTAL_DE_LINEA),
-            _r("por_linea", duda=_COSTO_ES_TOTAL_DE_LINEA),
+            _r("por_comprobante", target="line_total_cost_ars"),
+            _r("por_linea", target="line_total_cost_ars"),
             _r(target="unit_cost_ars"),
         ),
         # «Compra» y «Venta» a secas, en un catálogo, dicen cuál de los tres

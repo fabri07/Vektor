@@ -556,7 +556,8 @@ def test_costo_total_no_se_sugiere_como_costo_unitario() -> None:
 
     lectura = read_header("costo_total", "product")
     assert lectura.target != "unit_cost_ars"
-    assert lectura.duda is not None
+    # Ya no queda en duda: va al campo propio, que el import divide por la cantidad.
+    assert lectura.target == "line_total_cost_ars"
 
 
 def test_costo_pelado_sigue_siendo_costo_unitario() -> None:
