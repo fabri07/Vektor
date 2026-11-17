@@ -47,7 +47,12 @@ from app.api.v1.products import (
     _tenant_vertical,
 )
 from app.api.v1.sales import FIADO_PAYMENT_METHOD, _resolve_sale_customer
-from app.application.services import compra_service, maintenance_lock_service, stock_service
+from app.application.services import (
+    compra_service,
+    maintenance_lock_service,
+    stock_service,
+    supplier_payment_service,
+)
 from app.application.services._ledger_restore import snapshot_master
 from app.application.services.customer_alias_service import (
     aprender_alias,
@@ -136,6 +141,7 @@ from app.persistence.models.file import UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.supplier import Supplier
+from app.persistence.models.supplier_payment import SOURCE_ARCHIVO, SOURCE_MANUAL
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
@@ -154,6 +160,7 @@ from app.schemas.customer import CreateCustomerRequest
 from app.schemas.product import CreateProductRequest, UpdateProductRequest
 from app.schemas.purchase import PurchaseShipping, PurchaseTax
 from app.schemas.supplier import CreateSupplierRequest
+from app.schemas.supplier_payment import ResolveSupplierPaymentFields
 from app.schemas.transaction import (
     PAYMENT_METHOD_PATTERN,
     CreateExpenseRequest,
@@ -209,7 +216,9 @@ class UnclassifiedRecordResponse(BaseModel):
 
 
 class ReclassifyRequest(BaseModel):
-    entity_type: Literal["sale", "expense", "product", "customer", "supplier", "cobro"]
+    entity_type: Literal[
+        "sale", "expense", "product", "customer", "supplier", "cobro", "pago_proveedor"
+    ]
     # Campos del registro a crear; se validan con el schema de creación
     # correspondiente (CreateSaleRequest / CreateExpenseRequest / CreateProductRequest /
     # CreateCustomerRequest / CreateSupplierRequest).
@@ -1404,6 +1413,29 @@ async def reclassify_record(
                 user_id=user.user_id,
             )
             label = "cobro de fiado"
+        elif body.entity_type == "pago_proveedor":
+            pago_req = ResolveSupplierPaymentFields(**body.fields)
+            try:
+                await supplier_payment_service.registrar_pago(
+                    session,
+                    tenant_id=tenant.tenant_id,
+                    user_id=user.user_id,
+                    supplier_id=pago_req.supplier_id,
+                    amount=pago_req.amount,
+                    occurred_on=pago_req.occurred_on,
+                    payment_method=pago_req.payment_method,
+                    notes=pago_req.notes,
+                    endpoint="others/reclassify",
+                    source_type=SOURCE_ARCHIVO if _upload_id else SOURCE_MANUAL,
+                    source_upload_id=_upload_id,
+                    source_ref=_row_ref,
+                )
+            except supplier_payment_service.SupplierPaymentSupplierError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"code": "INVALID_SUPPLIER"},
+                ) from exc
+            label = "pago a proveedor"
         elif body.entity_type == "sale" and body.items:
             await _registrar_ventas_de_combo_desde_otros(
                 session,

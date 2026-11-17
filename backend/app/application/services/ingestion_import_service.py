@@ -5701,12 +5701,22 @@ async def insert_confirmed_data(
             o.id for o in sess.new if isinstance(o, SaleEntry) and o.id is not None
         )
 
+    _gastos_nuevos: list[uuid.UUID] = []
+
+    def _anotar_gastos_nuevos(sess: Any, _ctx: Any) -> None:
+        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+        _gastos_nuevos.extend(
+            o.id for o in sess.new if isinstance(o, ExpenseEntry) and o.id is not None
+        )
+
     _cross_buffer = CrossFieldBuffer() if apply_cross_fields else None
     # V-19: nada de una corrida anterior que haya salido por excepción.
     session.info.pop(_V19_PLANES, None)
     session.info.pop(_V24_CLIENTES_POR_NOMBRE, None)
     session.info.pop(_V24_ALIAS_DE_CLIENTE, None)
     sa_event.listen(session.sync_session, "after_flush", _anotar_ventas_nuevas)
+    sa_event.listen(session.sync_session, "after_flush", _anotar_gastos_nuevos)
     try:
         counts = await _insert_confirmed_data_impl(
             session,
@@ -5735,6 +5745,7 @@ async def insert_confirmed_data(
         await session.flush()
     finally:
         sa_event.remove(session.sync_session, "after_flush", _anotar_ventas_nuevas)
+        sa_event.remove(session.sync_session, "after_flush", _anotar_gastos_nuevos)
         session.info.pop(_V24_CLIENTES_POR_NOMBRE, None)
         session.info.pop(_V24_ALIAS_DE_CLIENTE, None)
 
@@ -5750,6 +5761,12 @@ async def insert_confirmed_data(
         await _fiados_sin_cliente_a_otros(
             session, tenant_id, uploaded_file_id, set(_ventas_nuevas), _filas_previas,
             counts, source,
+        )
+    # Un «Pago a proveedor» no es un gasto (la compra fiada ya contó): a «Otros» para
+    # elegir el proveedor, y de ahí es un pago que baja la deuda, no un costo más.
+    if _gastos_nuevos:
+        await _pagos_a_proveedor_a_otros(
+            session, tenant_id, uploaded_file_id, set(_gastos_nuevos), counts, source
         )
     # Un cobro de fiado («Cobro saldo fiado») no es una venta: a caja con su cliente, o
     # a «Otros». Antes del cierre que asigna «Local» y de B·5e, que no juzga un cobro.
@@ -6210,6 +6227,111 @@ async def _cobros_de_fiado_a_caja(
         )
         if _bucket and counts.get(f"ventas_cliente_{_bucket}"):
             counts[f"ventas_cliente_{_bucket}"] -= 1
+
+
+MOTIVO_PAGO_A_PROVEEDOR: Final = (
+    "Pago a proveedor: indicá a cuál (baja lo que se le debe; no es un gasto)"
+)
+#: Interna: la fila es un pago a proveedor que el import sacó de los gastos.
+PAGO_A_PROVEEDOR_KEY: Final = "__pago_a_proveedor__"
+#: El destino sugerido de esa fila en «Otros» (cabe en `suggested_entity`, 10).
+ENTIDAD_PAGO_PROVEEDOR: Final = "pago_prov"
+
+
+async def _pagos_a_proveedor_a_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    nuevos_ids: set[uuid.UUID],
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """«Pago a proveedor» no es un gasto: cancela una compra fiada que ya se contó.
+
+    De los gastos NUEVOS de la corrida, los que dicen que se le pagó a un proveedor
+    (`domain/pago_a_proveedor`), sin producto ni proveedor ya identificado y pagados con
+    un medio real, salen de los gastos —así el costo no se cuenta dos veces— y van a
+    «Otros» con su motivo: el archivo no trae a QUÉ proveedor, y sin eso no se sabe a
+    quién bajarle la deuda. Al resolverla se crea el pago (`supplier_payments`).
+
+    Una compra a cuenta corriente, con producto o con un proveedor ya identificado sigue
+    siendo gasto. Una relectura que vuelve a mandar la misma fila no la duplica.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.application.services.operation_identity_service import (  # noqa: PLC0415
+        liberar_identidades_de,
+    )
+    from app.domain.pago_a_proveedor import es_texto_de_pago_a_proveedor  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+    from app.persistence.models.unclassified_record import UnclassifiedRecord  # noqa: PLC0415
+
+    gastos = (
+        await session.execute(
+            select(ExpenseEntry).where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.id.in_(nuevos_ids),
+                ExpenseEntry.voided_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    candidatos = [
+        g
+        for g in gastos
+        if g.product_id is None
+        and g.supplier_id is None
+        and (g.payment_method or "").strip().lower() != "account"
+        and es_texto_de_pago_a_proveedor(
+            g.description, g.notes, (g.custom_fields or {}).get("category_label")
+        )
+    ]
+    if not candidatos:
+        return
+    ya_pendientes: set[str | None] = set()
+    if uploaded_file_id is not None:
+        ya_pendientes = {
+            (fila or {}).get(ROW_REF_KEY)
+            for fila in (
+                await session.execute(
+                    select(UnclassifiedRecord.row_data).where(
+                        UnclassifiedRecord.tenant_id == tenant_id,
+                        UnclassifiedRecord.uploaded_file_id == uploaded_file_id,
+                        UnclassifiedRecord.status == "PENDING",
+                        UnclassifiedRecord.context_label == MOTIVO_PAGO_A_PROVEEDOR[:200],
+                    )
+                )
+            ).scalars()
+        }
+    for gasto in candidatos:
+        if not (gasto.source_row_ref and gasto.source_row_ref in ya_pendientes):
+            fila = {
+                "fecha": gasto.transaction_date.date().isoformat(),
+                "monto": str(gasto.amount),
+                "medio_de_pago": gasto.payment_method,
+                "detalle": gasto.description,
+                "categoria": (gasto.custom_fields or {}).get("category_label"),
+            }
+            _capture_unclassified(
+                session,
+                tenant_id,
+                [{k: v for k, v in fila.items() if v not in (None, "")}],
+                None,
+                source,
+                uploaded_file_id,
+                context_label=MOTIVO_PAGO_A_PROVEEDOR[:200],
+                suggested_entity=ENTIDAD_PAGO_PROVEEDOR,
+                row_ref=gasto.source_row_ref,
+                skip_blank_rows=False,
+                internas={MONTO_CANONICO_KEY: "1", PAGO_A_PROVEEDOR_KEY: "1"},
+            )
+    await liberar_identidades_de(session, tenant_id, [("expense", g.id) for g in candidatos])
+    for gasto in candidatos:
+        await session.delete(gasto)
+    await session.flush()
+    counts["gastos"] = max(0, int(counts.get("gastos", 0)) - len(candidatos))
+    counts["pagos_a_proveedor_a_otros"] = (
+        counts.get("pagos_a_proveedor_a_otros", 0) + len(candidatos)
+    )
 
 
 def _es_fiado(payment_method: str | None) -> bool:

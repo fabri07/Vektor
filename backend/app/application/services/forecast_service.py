@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.facts_service import DELAYED_METHODS, FIADO_METHODS
 from app.application.services.health_config_service import get_credit_card_settlement_days
+from app.application.services.supplier_payment_service import flujo_de_pagos
 from app.domain.business_time import today_ar
 from app.observability.logger import get_logger
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
@@ -321,6 +322,11 @@ async def _compute_forecast(
     for f in await flujo_de_dinero(db, tenant_id, window_start, today):
         if f.salidas:
             daily_expense[f.dia] = daily_expense.get(f.dia, 0.0) + float(f.salidas)
+    # Pagos de deuda a proveedores: no son gasto (la compra fiada ya contó), pero la
+    # plata sale de la caja el día que se pagó.
+    for pago in await flujo_de_pagos(db, tenant_id, window_start, today):
+        if pago.salidas:
+            daily_expense[pago.dia] = daily_expense.get(pago.dia, 0.0) + float(pago.salidas)
 
     # M-1/M-2/M-3: los días con datos salen de TODAS las ventas (cualquier
     # método) y los gastos, no sólo del ingreso líquido.

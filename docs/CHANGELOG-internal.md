@@ -100,5 +100,6 @@
 | `20261029_0001` | `tenants.status_changed_at` (TIMESTAMPTZ NULL, sin backfill) — cuándo pasó la cuenta a su estado; lo usa la excepción de la caja offline del panel SUPERADMIN (F2), ver `docs/claude/plataforma.md` |
 | `20261029_0002` | tabla `tenant_daily_activity` (PK `(user_id, activity_date)`, FK a users/tenants con CASCADE) — actividad diaria por usuario para el panel SUPERADMIN (F5), ver `docs/claude/plataforma.md` |
 | `20261116_0001` | `customer_aliases` (ORM: `CustomerAlias`; único `(tenant_id, alias_normalizado)`, FK a tenants/customers con CASCADE, sin FK al archivo) — alias de cliente aprendidos al resolver una venta fiada de «Otros»; aditiva e idempotente, ningún código viejo la lee, ver `docs/claude/ingesta.md` |
+| `20261116_0002` | `supplier_payments` (ORM: `SupplierPayment`; `amount_ars > 0`, medio de dinero sin `account`, procedencia manual/archivo, anulable, FK a tenants/suppliers con CASCADE y al archivo con SET NULL) — pago de deuda a un proveedor como movimiento propio (no gasto ni compra); aditiva e idempotente, ningún código viejo la lee, ver `docs/claude/maestros.md` e `ingesta.md` |
 
 **Post-Sprint 8–9:** Email reemplazado SMTP→Resend HTTP API (`app/integrations/smtp.py` usa `httpx`). Railway bloquea port 587. Variables Railway: `RESEND_API_KEY=re_...` + `SMTP_FROM_EMAIL=noreply@vektor.app`. `SMTP_PASSWORD` es alias legacy.

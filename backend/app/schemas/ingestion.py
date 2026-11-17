@@ -122,6 +122,8 @@ class FileDeletionPreviewResponse(BaseModel):
     gastos: int
     productos: int
     movimientos_stock: int
+    # Pagos de deuda a proveedores que cargó el archivo (se anulan).
+    pagos_a_proveedores: int = 0
     otros: int
     # Filas de "Otros" que el usuario YA clasificó: NO se borran. El registro que
     # generaron (venta/gasto/producto) no lleva `source_upload_id`, así que la

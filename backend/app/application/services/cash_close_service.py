@@ -17,6 +17,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.supplier_payment_service import flujo_de_pagos
 from app.application.services.work_schedule_service import resolve_schedule
 from app.domain.business_time import AR_TZ
 from app.domain.fiscal_condition import (
@@ -88,6 +89,16 @@ class CashCloseService:
         )
         if capital_cash:
             by_method[_CASH_METHOD] = by_method.get(_CASH_METHOD, 0.0) + capital_cash
+
+        # Pagos de deuda a proveedores en efectivo: no son gasto, pero la plata salió
+        # del cajón. Sin esto, pagar una deuda en efectivo dejaría un sobrante falso.
+        pagos_en_efectivo = sum(
+            float(f.salidas)
+            for f in await flujo_de_pagos(self._session, tenant_id, close_date, close_date)
+            if f.medio == _CASH_METHOD
+        )
+        if pagos_en_efectivo:
+            by_method[_CASH_METHOD] = by_method.get(_CASH_METHOD, 0.0) - pagos_en_efectivo
 
         # A-4: el reintegro de un ticket de caja de OTRO día. La venta anulada
         # ya no figura en su día, pero su efectivo entró al cajón ese día: se

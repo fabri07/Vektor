@@ -73,6 +73,7 @@ from app.persistence.models.score import (
 )
 from app.persistence.models.social_metric import SocialMetric
 from app.persistence.models.supplier import Supplier
+from app.persistence.models.supplier_payment import SupplierPayment
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
@@ -129,6 +130,7 @@ __all__ = [
     "PosTerminal",
     "ProductAlias",
     "CustomerAlias",
+    "SupplierPayment",
     "ImportAttempt",
     "ImportOutbox",
     "OperationFingerprint",

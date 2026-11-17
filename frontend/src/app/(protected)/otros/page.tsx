@@ -40,13 +40,16 @@ const SOURCE_LABELS: Record<string, string> = {
   pos: "Caja (venta sin compra)",
 };
 
-const ENTITY_LABELS: Record<ReclassifyEntityType, string> = {
+const ENTITY_LABELS: Record<ReclassifyEntityType | "pago_prov", string> = {
   sale: "Venta",
   expense: "Gasto",
   product: "Producto",
   customer: "Cliente",
   supplier: "Proveedor",
   cobro: "Cobro de fiado",
+  pago_proveedor: "Pago a proveedor",
+  // Así lo sugiere el servidor (`suggested_entity` tiene 10 caracteres de tope).
+  pago_prov: "Pago a proveedor",
 };
 
 /** Extrae el `detail.code` de un error de axios (contrato del backend: `{detail:{code}}`). */

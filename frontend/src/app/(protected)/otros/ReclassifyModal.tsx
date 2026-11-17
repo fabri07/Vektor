@@ -18,6 +18,7 @@ import type {
 } from "@/services/others.service";
 import { productsService, type ProductCategoryOption } from "@/services/products.service";
 import { customersService, type CustomerResponse } from "@/services/customers.service";
+import { suppliersService } from "@/services/suppliers.service";
 import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
 import { PurchaseTermsFields } from "@/features/purchases/PurchaseTermsFields";
 import {
@@ -134,6 +135,7 @@ export function ReclassifyModal({
   const [category, setCategory] = useState("OTHER");
   const [productCategory, setProductCategory] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [proveedorId, setProveedorId] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   // B·5e: una venta lleva producto (y su compra previa); sin él el servidor la
@@ -170,6 +172,14 @@ export function ReclassifyModal({
   const medioDeLaFila = String(record?.row_data?.medio_de_pago ?? "");
   const esFiadoDeLaFila = medioDeLaFila === FIADO;
   const clienteDeLaFila = String(record?.row_data?.cliente ?? "").trim();
+  // Un pago a proveedor siempre dice A CUÁL: sin eso no se sabe a quién bajarle la deuda.
+  const esPagoProveedor = entityType === "pago_proveedor";
+  const { data: proveedores = [], isError: proveedoresError } = useQuery({
+    queryKey: ["suppliers-list"],
+    queryFn: () => suppliersService.getAllSuppliers(),
+    enabled: !!record && esPagoProveedor,
+    staleTime: 60 * 1000,
+  });
   // Un cobro de fiado siempre lleva el cliente al que se le baja la deuda.
   const esCobro = entityType === "cobro";
   const pideCliente = (entityType === "sale" && paymentMethod === FIADO) || esCobro;
@@ -206,10 +216,18 @@ export function ReclassifyModal({
     }
   }, [pideCliente, clienteDeLaFila, clientes, clienteId, sugerenciaPorAlias]);
 
+  // «Cuenta corriente» no es un medio con que se pague una deuda.
+  useEffect(() => {
+    if (esPagoProveedor && paymentMethod === FIADO) setPaymentMethod("cash");
+  }, [esPagoProveedor, paymentMethod]);
+
   useEffect(() => {
     if (!record) return;
     const pre = prefill(record);
-    const entity = record.suggested_entity ?? "expense";
+    const entity =
+      record.suggested_entity === "pago_prov"
+        ? "pago_proveedor"
+        : (record.suggested_entity ?? "expense");
     // Una compra de mercadería (con candidatos, o con categoría mercadería) se
     // abre directamente como compra: va con sus artículos.
     const esCompra =
@@ -242,6 +260,7 @@ export function ReclassifyModal({
     const medio = String(record.row_data?.medio_de_pago ?? "");
     setPaymentMethod(MEDIOS_DE_PAGO.includes(medio) ? medio : "cash");
     setClienteId("");
+    setProveedorId("");
     setEmail("");
     setPhone("");
     setVentaProducto("");
@@ -287,7 +306,8 @@ export function ReclassifyModal({
     entityType === "sale" ||
     entityType === "expense" ||
     entityType === "purchase" ||
-    entityType === "cobro";
+    entityType === "cobro" ||
+    entityType === "pago_proveedor";
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (needsDate && !date) return;
@@ -306,6 +326,19 @@ export function ReclassifyModal({
         payment_method: paymentMethod,
         ...(supplierName.trim() ? { supplier_name: supplierName.trim() } : {}),
         ...termsPayload(terms),
+      });
+      return;
+    }
+    if (esPagoProveedor) {
+      setIntento(true);
+      // Pagar «a cuenta corriente» no saca plata de ningún lado: no es un medio de pago.
+      if (!proveedorId || !(num > 0) || paymentMethod === FIADO) return;
+      onSave("pago_proveedor", {
+        supplier_id: proveedorId,
+        amount: num,
+        occurred_on: date,
+        payment_method: paymentMethod,
+        notes: text || null,
       });
       return;
     }
@@ -465,6 +498,9 @@ export function ReclassifyModal({
             {/* Una venta cuyo detalle dice que se cobró una deuda puede ser un cobro. */}
             {record.suggested_entity === "cobro" || record.suggested_entity === "sale" ? (
               <option value="cobro">Cobro de fiado</option>
+            ) : null}
+            {record.suggested_entity === "pago_prov" ? (
+              <option value="pago_proveedor">Pago a proveedor</option>
             ) : null}
             {/* Sólo una fila de gasto (o sin sugerencia) se resuelve como compra. */}
             {record.suggested_entity === "expense" || record.suggested_entity === null ? (
@@ -783,9 +819,39 @@ export function ReclassifyModal({
               <option value="debit_card">Débito</option>
               <option value="credit_card">Crédito</option>
               <option value="qr">QR</option>
-              <option value="account">Cuenta corriente</option>
+              {esPagoProveedor ? null : <option value="account">Cuenta corriente</option>}
             </select>
           </label>
+        ) : null}
+        {esPagoProveedor ? (
+          <div className="grid gap-1">
+            <label className="grid gap-1 text-sm text-vektor-body">
+              Proveedor al que se le pagó
+              <select
+                className={inputCls}
+                value={proveedorId}
+                onChange={(e) => setProveedorId(e.target.value)}
+                aria-required="true"
+              >
+                <option value="">Elegí un proveedor…</option>
+                {proveedores.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                    {p.last_name ? ` ${p.last_name}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="text-xs text-vk-text-muted">
+              No es un gasto: sale de la caja y baja lo que se le debe a ese proveedor.
+            </span>
+            {proveedoresError ? (
+              <span className="text-xs text-vk-danger">No se pudieron cargar los proveedores.</span>
+            ) : null}
+            {intento && !proveedorId ? (
+              <span className="text-xs text-vk-danger">Elegí a qué proveedor se le pagó.</span>
+            ) : null}
+          </div>
         ) : null}
         {entityType === "sale" && esFiadoDeLaFila && paymentMethod !== FIADO ? (
           <p className="text-xs text-vk-warning">
