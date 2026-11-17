@@ -8,7 +8,7 @@ import React from "react";
 import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import type { UnclassifiedRecordResponse } from "@/services/others.service";
+import { othersService, type UnclassifiedRecordResponse } from "@/services/others.service";
 import { customersService } from "@/services/customers.service";
 import { ReclassifyModal } from "../ReclassifyModal";
 
@@ -155,4 +155,71 @@ it("cambiar el medio a propósito viaja como marca explícita y sin cliente", as
     ),
   );
   expect(onSave.mock.calls[0][1]).toMatchObject({ payment_method: "cash" });
+});
+
+it("un alias confirmado antes («Caro G.» → Ana) deja al cliente sugerido aunque el nombre no coincida", async () => {
+  const espia = jest
+    .spyOn(othersService, "customerSuggestion")
+    .mockResolvedValue({ customer_id: "c-ana", via: "alias" });
+  abrir(fila({ cliente: "Caro G." }), jest.fn());
+  const cliente = await screen.findByLabelText("Cliente al que se le fió");
+  await waitFor(() => expect(cliente).toHaveValue("c-ana"));
+  expect(screen.getByText(/El archivo decía: «Caro G\.»/)).toBeInTheDocument();
+  espia.mockRestore();
+});
+
+it("sin alias ni nombre que coincida no se sugiere a nadie", async () => {
+  const espia = jest
+    .spyOn(othersService, "customerSuggestion")
+    .mockResolvedValue({ customer_id: null, via: null });
+  abrir(fila({ cliente: "Caro G." }), jest.fn());
+  const cliente = await screen.findByLabelText("Cliente al que se le fió");
+  await waitFor(() => expect(espia).toHaveBeenCalled());
+  expect(cliente).toHaveValue("");
+  espia.mockRestore();
+});
+
+// ── Cobro de fiado («Cobro saldo fiado»): entra a caja y baja la deuda ─────────
+
+function cobro(extra: Record<string, unknown> = {}): UnclassifiedRecordResponse {
+  return {
+    ...fila({ medio_de_pago: "cash", producto: undefined, cliente: "pedro gomez", ...extra }),
+    context_label: "Cobro de fiado: indicá de qué cliente es",
+    suggested_entity: "cobro",
+  } as UnclassifiedRecordResponse;
+}
+
+it("una fila de cobro abre como «Cobro de fiado», pide el cliente y no pide producto", async () => {
+  abrir(cobro(), jest.fn());
+  expect(screen.getByLabelText("Importar como")).toHaveValue("cobro");
+  expect(await screen.findByLabelText("Cliente que pagó")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Producto vendido")).toBeNull();
+});
+
+it("un cobro sin cliente no se manda y dice por qué", async () => {
+  const onSave = jest.fn();
+  abrir(cobro({ cliente: "alguien que no existe" }), onSave);
+  await screen.findByLabelText("Cliente que pagó");
+  importar();
+  expect(await screen.findByText(/El cobro necesita un cliente registrado/)).toBeInTheDocument();
+  expect(onSave).not.toHaveBeenCalled();
+});
+
+it("el cobro se manda como cobro, con el cliente y el medio con que se cobró", async () => {
+  const onSave = jest.fn();
+  abrir(cobro(), onSave);
+  const cliente = await screen.findByLabelText("Cliente que pagó");
+  await waitFor(() => expect(cliente).toHaveValue("c-pedro")); // sugerido por el nombre
+  importar();
+  await waitFor(() =>
+    expect(onSave).toHaveBeenCalledWith(
+      "cobro",
+      expect.objectContaining({
+        amount: 2000,
+        payment_method: "cash",
+        customer_id: "c-pedro",
+      }),
+    ),
+  );
+  expect(onSave.mock.calls[0]![1]).not.toHaveProperty("product_id");
 });

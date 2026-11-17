@@ -20,6 +20,7 @@ from app.persistence.models.contact_lead import ContactLead
 from app.persistence.models.conversation_context import AgentConversationContext
 from app.persistence.models.coverage_gap import ChatCoverageGap
 from app.persistence.models.customer import Customer
+from app.persistence.models.customer_alias import CustomerAlias
 from app.persistence.models.daily_activity import TenantDailyActivity
 from app.persistence.models.external_operation_log import ExternalOperationLog
 from app.persistence.models.field_definitions import (
@@ -72,6 +73,7 @@ from app.persistence.models.score import (
 )
 from app.persistence.models.social_metric import SocialMetric
 from app.persistence.models.supplier import Supplier
+from app.persistence.models.supplier_payment import SupplierPayment
 from app.persistence.models.tenant import Subscription, Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import UnclassifiedRecord
@@ -127,6 +129,8 @@ __all__ = [
     "PosTender",
     "PosTerminal",
     "ProductAlias",
+    "CustomerAlias",
+    "SupplierPayment",
     "ImportAttempt",
     "ImportOutbox",
     "OperationFingerprint",

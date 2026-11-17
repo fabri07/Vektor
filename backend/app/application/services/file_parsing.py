@@ -21,6 +21,7 @@ import filetype
 if TYPE_CHECKING:
     from decimal import Decimal
 
+from app.domain.capital_import import detectar_hoja_de_capital
 from app.domain.expense_categories import strip_accents
 from app.domain.formulas import Evaluador, RegistroDeCalculo
 from app.domain.header_keys import fold_header, match_key
@@ -1905,6 +1906,39 @@ def _store_rows_by_type(
         summary["stock_detectado"] = []
 
 
+def _contexto_de_capital(
+    sheet_name: str, headers: list[str], dicts: list[dict[str, Any]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Una hoja de capital de socios («Aportes de socios»: columna de socio + monto).
+
+    No es una entidad del mapeador de columnas: el import (`_importar_capital_del_archivo`)
+    la lee por sus encabezados. El contexto la muestra en la revisión (con
+    ``es_capital``) y deja que se la excluya como a cualquier hoja; sus filas viven en
+    ``capital_detectado``, nunca en ``gastos_detectados`` ni en ``otros_detectados``.
+    """
+    context_id = f"sheet:{sheet_name}"
+    contexto = {
+        "context_id": context_id,
+        "label": sheet_name,
+        "source_kind": "sheet",
+        "entity_type": None,
+        "headers": headers,
+        "fields": None,
+        "preview_rows": dicts[:10],
+        "row_count": len(dicts),
+        "es_capital": True,
+    }
+    return contexto, [{**d, "__context__": context_id} for d in dicts]
+
+
+def _aviso_de_capital(sheet_name: str, filas: int) -> str:
+    return (
+        f"La hoja '{sheet_name}' tiene una columna de socio: se importa como capital "
+        f"({filas} fila(s)), no como gasto ni venta. Una fila sin fecha, monto o forma de "
+        "pago legibles, o de la que no se sepa si es aporte o retiro, no se carga: va a «Otros»."
+    )
+
+
 # Mapeo tipo-inferido / clasificación-de-hoja → entity_type del ColumnMapper.
 _TYPE_TO_ENTITY: dict[str, str] = {
     "ventas": "sale",
@@ -2435,6 +2469,7 @@ def _parse_spreadsheet(
             # F7a: aditivo — el import/vinculación de clientes/proveedores queda para 7b/7c.
             all_clientes: list[dict[str, Any]] = []
             all_proveedores: list[dict[str, Any]] = []
+            all_capital: list[dict[str, Any]] = []
             primary_headers: list[str] = []
             contexts: list[dict[str, Any]] = []
             total_rows = 0
@@ -2553,6 +2588,18 @@ def _parse_spreadsheet(
                 total_rows += len(data_rows)
 
                 dicts = _apartar_filas_no_reales(summary, contexts, sheet_name, headers, dicts)
+
+                # Capital de socios: la columna de socio es la evidencia (por columna,
+                # nunca por celda). Va antes del libro mixto y de la clasificación por
+                # contenido, que la tomarían por una hoja de gastos.
+                if detectar_hoja_de_capital(headers) is not None:
+                    _ctx_capital, _filas_capital = _contexto_de_capital(
+                        sheet_name, headers, dicts
+                    )
+                    contexts.append(_ctx_capital)
+                    all_capital.extend(_filas_capital)
+                    summary["warnings"].append(_aviso_de_capital(sheet_name, len(dicts)))
+                    continue
 
                 # Libro mixto: la columna de tipo decide fila por fila. Va antes de
                 # clasificar la hoja entera, que le daría un solo destino a todas.
@@ -2673,7 +2720,9 @@ def _parse_spreadsheet(
                     "multi_sheet": True,
                     "sheet_names": sheet_names,
                     "inferred_type": inferred_type,
-                    "confidence": "HIGH" if (has_ventas or has_gastos or has_stock) else "LOW",
+                    "confidence": (
+                        "HIGH" if (has_ventas or has_gastos or has_stock or all_capital) else "LOW"
+                    ),
                     "has_venta": has_ventas,
                     "has_gasto": has_gastos,
                     "has_producto": has_stock,
@@ -2686,6 +2735,7 @@ def _parse_spreadsheet(
                     "stock_detectado": all_stock,
                     "clientes_detectados": all_clientes,
                     "proveedores_detectados": all_proveedores,
+                    "capital_detectado": all_capital,
                     "preview_rows": preview,
                     "mapping_contexts": contexts,
                 }
@@ -2752,6 +2802,15 @@ def _parse_spreadsheet(
             summary["warnings"].append(
                 f"{len(at_risk)} columna(s) con 40% o más de datos vacíos."
             )
+        if detectar_hoja_de_capital(headers) is not None:
+            _hoja = str(worksheet.title or "Hoja")
+            _ctx_capital, _filas_capital = _contexto_de_capital(_hoja, headers, all_dicts)
+            summary["inferred_type"] = "general"
+            summary["confidence"] = "HIGH"
+            summary["capital_detectado"] = _filas_capital
+            summary["mapping_contexts"] = [_ctx_capital]
+            summary["warnings"].append(_aviso_de_capital(_hoja, len(all_dicts)))
+            return summary
         inferred = analysis.get("inferred_type", "general")
         _store_rows_by_type(summary, all_dicts, inferred)
         summary["mapping_contexts"] = [

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Header,
@@ -28,6 +29,7 @@ from app.api.v1.deps import (
 )
 from app.application.agents.shared.schemas import LLMCall
 from app.application.services import subscription_service
+from app.application.services import supplier_payment_service as pagos
 from app.application.services.file_parsing import (
     MAX_FILE_SIZE_BYTES,
     reads_with_ai,
@@ -39,6 +41,9 @@ from app.application.services.ingestion_import_service import (
     import_receipt,
 )
 from app.application.services.remito_extraction_service import extract_remito
+from app.application.services.score_trigger_service import (
+    trigger_score_recalculation_after_commit,
+)
 from app.domain.comprobante_de_compra import ComprobanteInvalidoError, Iva, TratamientoIva
 from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
@@ -67,6 +72,13 @@ from app.schemas.supplier import (
     SupplierProductsGroupedResponse,
     SupplierResponse,
     UpdateSupplierRequest,
+)
+from app.schemas.supplier_payment import (
+    CreateSupplierPaymentRequest,
+    SupplierBalanceResponse,
+    SupplierPaymentListResponse,
+    SupplierPaymentResponse,
+    VoidSupplierPaymentRequest,
 )
 
 logger = get_logger(__name__)
@@ -640,3 +652,126 @@ async def reactivate_supplier(
         after=_supplier_snapshot(saved),
     )
     return saved
+
+
+# --- Pagos de deuda a proveedores (PR7) -------------------------------------------
+# Un pago NO es un gasto ni una compra: saca plata de la caja y baja la deuda.
+
+
+@router.post(
+    "/{supplier_id}/payments",
+    dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
+    response_model=SupplierPaymentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Registrar un pago de deuda a un proveedor",
+)
+async def create_supplier_payment(
+    supplier_id: UUID,
+    body: CreateSupplierPaymentRequest,
+    background_tasks: BackgroundTasks,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> Any:
+    if idempotency_key is not None and not await claim_idempotency_key(
+        session, tenant.tenant_id, idempotency_key, "IDEMPOTENT_POST_SUPPLIER_PAYMENT"
+    ):
+        raise HTTPException(status_code=409, detail={"code": "DUPLICATE_IDEMPOTENT"})
+    try:
+        pago = await pagos.registrar_pago(
+            session,
+            tenant_id=tenant.tenant_id,
+            user_id=user.user_id,
+            supplier_id=supplier_id,
+            amount=body.amount,
+            occurred_on=body.occurred_on,
+            payment_method=body.payment_method,
+            notes=body.notes,
+        )
+    except pagos.SupplierPaymentSupplierError as exc:
+        raise HTTPException(status_code=404, detail="Supplier not found.") from exc
+    # La plata salió de la caja: el score se recalcula DESPUÉS del commit.
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "supplier_payment_created", background=background_tasks
+    )
+    return pago
+
+
+@router.get(
+    "/{supplier_id}/payments",
+    dependencies=[Depends(require_role("OWNER", "ADMIN", "VIEWER"))],
+    response_model=SupplierPaymentListResponse,
+    summary="Pagos de un proveedor",
+)
+async def list_supplier_payments(
+    supplier_id: UUID,
+    include_voided: bool = Query(default=False),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> SupplierPaymentListResponse:
+    items = await pagos.listar_pagos(
+        session, tenant.tenant_id, supplier_id, incluir_anulados=include_voided
+    )
+    return SupplierPaymentListResponse(
+        items=[SupplierPaymentResponse.model_validate(p) for p in items]
+    )
+
+
+@router.get(
+    "/{supplier_id}/balance",
+    dependencies=[Depends(require_role("OWNER", "ADMIN", "VIEWER"))],
+    response_model=SupplierBalanceResponse,
+    summary="Deuda con un proveedor: comprado a cuenta corriente menos pagado",
+)
+async def get_supplier_balance(
+    supplier_id: UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> SupplierBalanceResponse:
+    repo = SupplierRepository(session)
+    if await repo.get_by_id(supplier_id, tenant.tenant_id) is None:
+        raise HTTPException(status_code=404, detail="Supplier not found.")
+    s = await pagos.saldo_de_proveedor(session, tenant.tenant_id, supplier_id)
+    return SupplierBalanceResponse(
+        supplier_id=supplier_id,
+        comprado_a_cuenta_corriente=s.comprado_a_cuenta_corriente,
+        pagado=s.pagado,
+        deuda=s.deuda,
+    )
+
+
+@router.post(
+    "/{supplier_id}/payments/{payment_id}/void",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+    response_model=SupplierPaymentResponse,
+    summary="Anular un pago a proveedor (no se borra)",
+)
+async def void_supplier_payment(
+    supplier_id: UUID,
+    payment_id: UUID,
+    body: VoidSupplierPaymentRequest,
+    background_tasks: BackgroundTasks,
+    tenant: Tenant = Depends(get_current_tenant),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> Any:
+    try:
+        pago = await pagos.anular_pago(
+            session,
+            tenant_id=tenant.tenant_id,
+            user_id=user.user_id,
+            supplier_id=supplier_id,
+            payment_id=payment_id,
+            reason=body.reason,
+        )
+    except pagos.SupplierPaymentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Payment not found.") from exc
+    except pagos.SupplierPaymentAlreadyVoidedError as exc:
+        raise HTTPException(
+            status_code=409, detail={"code": "SUPPLIER_PAYMENT_ALREADY_VOIDED"}
+        ) from exc
+    trigger_score_recalculation_after_commit(
+        session, str(tenant.tenant_id), "supplier_payment_voided", background=background_tasks
+    )
+    return pago

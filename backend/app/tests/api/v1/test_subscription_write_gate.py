@@ -64,6 +64,7 @@ RUTAS_CON_GATE: frozenset[tuple[str, str]] = frozenset(
         ("POST", f"{P}/customers/extract"),
         ("POST", f"{P}/customers/import/confirm"),
         ("POST", f"{P}/suppliers"),
+        ("POST", f"{P}/suppliers/{{supplier_id}}/payments"),
         ("POST", f"{P}/suppliers/{{supplier_id}}/receipts"),
         ("POST", f"{P}/suppliers/{{supplier_id}}/receipts/extract"),
         ("POST", f"{P}/fields/definitions"),

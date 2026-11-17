@@ -95,6 +95,8 @@ export interface ProductResponse {
   /** B·5c: activo y sin stock inicial vivo (manual o de archivo). `null` o
    *  ausente en servidores viejos: no se ofrece cargarlo. */
   needs_initial_stock?: boolean | null;
+  /** Primer día con una fuente con costo; sólo con `con_fuente`. null: sin fuente. */
+  primer_dia_de_fuente?: string | null;
 }
 
 // ── B·5c: stock inicial a mano ──────────────────────────────────────────────
@@ -179,6 +181,8 @@ export interface LoteStockInicialResponse {
 
 export interface ProductsListParams {
   is_active?: boolean;
+  /** Trae `primer_dia_de_fuente` de cada producto (respaldo de una venta, B·5e). */
+  con_fuente?: boolean;
   limit?: number;
   offset?: number;
 }

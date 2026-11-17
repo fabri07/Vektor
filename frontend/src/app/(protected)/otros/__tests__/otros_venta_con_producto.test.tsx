@@ -128,3 +128,33 @@ it("si lo que decía el archivo no está en ningún producto, el combo muestra t
   expect(screen.getByRole("option", { name: "Vela aromática" })).toBeInTheDocument();
   expect(screen.getByText(/Ningún producto contiene «Lote camperas»/)).toBeInTheDocument();
 });
+
+it("una fila sin cantidad no se registra como una unidad: la cantidad queda para escribirla", async () => {
+  const onSave = jest.fn();
+  const sinCantidad: Record<string, string> = { ...(record.row_data as Record<string, string>) };
+  delete sinCantidad.cantidad;
+  render(
+    <ReclassifyModal
+      record={{ ...record, row_data: sinCantidad }}
+      productCategories={[]}
+      saving={false}
+      onClose={jest.fn()}
+      onSave={onSave}
+      onLink={jest.fn()}
+      onResolvePurchase={jest.fn()}
+    />,
+  );
+  const select = await screen.findByLabelText("Producto vendido");
+  await waitFor(() => expect(screen.getByRole("option", { name: "Vela aromática" })).toBeInTheDocument());
+  expect(screen.getByLabelText("Cantidad vendida")).toHaveValue(null);
+  fireEvent.change(select, { target: { value: "p-vela" } });
+  fireEvent.click(screen.getByRole("button", { name: /importar|guardar|clasificar/i }));
+  expect(await screen.findByText(/Ingresá la cantidad|cantidad/i)).toBeInTheDocument();
+  expect(onSave).not.toHaveBeenCalled();
+});
+
+it("una venta que no es fiado dice que queda a nombre de «Local»", async () => {
+  abrir(jest.fn());
+  await screen.findByLabelText("Producto vendido");
+  expect(screen.getByText(/Cliente: «Local» \(mostrador, sin identificar\)/)).toBeInTheDocument();
+});

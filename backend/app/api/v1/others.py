@@ -10,12 +10,14 @@ venta/gasto/producto queda en ``unclassified_records``. Desde acá el tenant:
     `POST /others/dismiss-group/preview` → `POST /others/dismiss-group`).
 """
 
+import asyncio
 import base64
 import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from time import perf_counter
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -46,8 +48,17 @@ from app.api.v1.products import (
     _tenant_vertical,
 )
 from app.api.v1.sales import FIADO_PAYMENT_METHOD, _resolve_sale_customer
-from app.application.services import compra_service, maintenance_lock_service, stock_service
+from app.application.services import (
+    compra_service,
+    maintenance_lock_service,
+    stock_service,
+    supplier_payment_service,
+)
 from app.application.services._ledger_restore import snapshot_master
+from app.application.services.customer_alias_service import (
+    aprender_alias,
+    cliente_por_alias,
+)
 from app.application.services.file_deletion_service import (
     ACTION_CREATE_CUSTOMER,
     ACTION_CREATE_PRODUCT,
@@ -74,7 +85,11 @@ from app.application.services.product_identity import (
     ProductIdentityConflictError,
     product_identity_guard,
 )
-from app.application.services.respaldo_service import exigir_respaldo
+from app.application.services.respaldo_service import (
+    exigir_respaldo,
+    primeros_dias_de_fuente,
+    respaldada,
+)
 from app.application.services.score_trigger_service import (
     trigger_score_recalculation_after_commit,
 )
@@ -83,6 +98,12 @@ from app.domain.business_time import (
     fecha_de_negocio,
     now_ar_naive,
     today_ar,
+)
+from app.domain.combo_ventas import (
+    Candidato,
+    candidatos_de_referencia,
+    referencias_de,
+    resolver,
 )
 from app.domain.comprobante_de_compra import (
     MOTIVO_COMPRA_SIN_ARTICULOS,
@@ -111,7 +132,9 @@ from app.domain.product_categories import (
     normalize_product_category,
 )
 from app.domain.product_completion import recompute_requires_completion
-from app.domain.sale_unit import a_unidades_base
+from app.domain.sale_unit import a_unidades_base, importe
+from app.domain.transaction import INFLOW_PAYMENT_METHOD
+from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
@@ -119,6 +142,7 @@ from app.persistence.models.file import UploadedFile
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.supplier import Supplier
+from app.persistence.models.supplier_payment import SOURCE_ARCHIVO, SOURCE_MANUAL
 from app.persistence.models.tenant import Tenant
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
@@ -137,6 +161,7 @@ from app.schemas.customer import CreateCustomerRequest
 from app.schemas.product import CreateProductRequest, UpdateProductRequest
 from app.schemas.purchase import PurchaseShipping, PurchaseTax
 from app.schemas.supplier import CreateSupplierRequest
+from app.schemas.supplier_payment import ResolveSupplierPaymentFields
 from app.schemas.transaction import (
     PAYMENT_METHOD_PATTERN,
     CreateExpenseRequest,
@@ -144,6 +169,28 @@ from app.schemas.transaction import (
 )
 
 router = APIRouter()
+logger = get_logger(__name__)
+
+
+class _Etapas:
+    """Milisegundos por etapa de `_registrar_venta_desde_otros`.
+
+    Las escrituras de «Otros» tardan 5-13 s y no se sabe en qué (pruebas del dueño,
+    2026-11-16): se mide antes de tocar nada, con el mismo `trace_id` del request.
+    """
+
+    def __init__(self) -> None:
+        self._ultimo = perf_counter()
+        self._inicio = self._ultimo
+        self.ms: dict[str, int] = {}
+
+    def marca(self, nombre: str) -> None:
+        ahora = perf_counter()
+        self.ms[nombre] = round((ahora - self._ultimo) * 1000)
+        self._ultimo = ahora
+
+    def total(self) -> int:
+        return round((perf_counter() - self._inicio) * 1000)
 
 
 class UnclassifiedRecordResponse(BaseModel):
@@ -170,7 +217,9 @@ class UnclassifiedRecordResponse(BaseModel):
 
 
 class ReclassifyRequest(BaseModel):
-    entity_type: Literal["sale", "expense", "product", "customer", "supplier"]
+    entity_type: Literal[
+        "sale", "expense", "product", "customer", "supplier", "cobro", "pago_proveedor"
+    ]
     # Campos del registro a crear; se validan con el schema de creación
     # correspondiente (CreateSaleRequest / CreateExpenseRequest / CreateProductRequest /
     # CreateCustomerRequest / CreateSupplierRequest).
@@ -193,6 +242,38 @@ class ReclassifyRequest(BaseModel):
     # propósito; sin él, resolverla con otro medio es 422 (un modal viejo manda
     # «Efectivo» por defecto y el fiado entraría a caja como cobrado).
     cambiar_medio_de_pago: bool = False
+    # Combo («Jean + buzo» $41.000): la venta de la fila tiene VARIAS líneas. Sólo para
+    # entity_type="sale"; `fields` sigue trayendo el encabezado (monto de la fila,
+    # fecha, medio de pago, cliente, notas) y la suma de las líneas tiene que dar ese
+    # monto, al centavo: no se reparte nada por la persona.
+    items: list["ComboItem"] | None = Field(default=None, min_length=2, max_length=4)
+
+
+class ComboItem(BaseModel):
+    """Una línea de la venta de un combo, en la unidad de VENTA del producto."""
+
+    product_id: UUID
+    quantity: int = Field(ge=1, le=10_000)
+    unit_price: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+
+
+class ComboLineSuggestion(BaseModel):
+    product_id: UUID
+    product_name: str
+    quantity: int
+    unit_price: Decimal
+    amount: Decimal
+
+
+class ComboSuggestionsResponse(BaseModel):
+    """Las combinaciones de productos que suman el monto de una fila combo."""
+
+    references: list[str]
+    amount: Decimal | None
+    #: Vacío cuando la fila no es un combo, no tiene monto o fecha legibles, o ninguna
+    #: combinación suma el monto: en ese caso la persona arma las líneas a mano.
+    solutions: list[list[ComboLineSuggestion]]
+    reason: str | None = None
 
 
 class ResolvePurchaseLine(BaseModel):
@@ -920,6 +1001,7 @@ async def _registrar_venta_desde_otros(
     *,
     aplicar_pese_al_conflicto: bool = False,
     cambiar_medio_de_pago: bool = False,
+    user_id: uuid.UUID | None = None,
 ) -> SaleEntry:
     """La venta de una fila de «Otros». Fuente única de `reclassify` (como venta)
     y de `link-product` (B·8a): las dos salidas tienen que dar la misma venta.
@@ -948,22 +1030,8 @@ async def _registrar_venta_desde_otros(
 
     No marca la fila como importada: eso lo hace quien la llama, al final.
     """
-    if (
-        (record.row_data or {}).get(FIADO_SIN_CLIENTE_KEY)
-        and sale_req.payment_method != FIADO_PAYMENT_METHOD
-        and not cambiar_medio_de_pago
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "FIADO_CAMBIO_DE_MEDIO",
-                "message": (
-                    "Esta venta se importó como fiada: para importarla, elegí a qué "
-                    "cliente se le fió. Si en realidad no fue fiada, cambiá la forma "
-                    "de pago y confirmá el cambio."
-                ),
-            },
-        )
+    etapas = _Etapas()
+    _exigir_cambio_de_medio_explicito(record, sale_req, cambiar_medio_de_pago)
     await _exigir_identidad_libre(
         session,
         tenant_id,
@@ -971,6 +1039,7 @@ async def _registrar_venta_desde_otros(
         aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
         entidad="sale",
     )
+    etapas.marca("identidad_libre")
     _cantidad = sale_req.quantity
     if sale_req.product_id is not None:
         _vendido = await session.get(Product, sale_req.product_id)
@@ -981,10 +1050,12 @@ async def _registrar_venta_desde_otros(
     await exigir_respaldo(
         session, tenant_id, [(sale_req.product_id, sale_req.transaction_date.date())]
     )
+    etapas.marca("respaldo")
     if sale_req.product_id is not None:
         await stock_service.check_stock_available(
             sale_req.product_id, tenant_id, _cantidad, session
         )
+    etapas.marca("stock_disponible")
     _fila = record.row_data or {}
     _cliente = sale_req.customer_id
     if _cliente is None and _fila.get(CUSTOMER_REF_KEY):
@@ -1003,6 +1074,8 @@ async def _registrar_venta_desde_otros(
         _cliente,
         is_fiado=sale_req.payment_method == FIADO_PAYMENT_METHOD,
     )
+    await _aprender_alias_del_cliente(session, tenant_id, user_id, sale_req, _fila)
+    etapas.marca("cliente")
     _upload_id = record.uploaded_file_id
     venta = SaleEntry(
         tenant_id=tenant_id,
@@ -1020,9 +1093,11 @@ async def _registrar_venta_desde_otros(
     )
     session.add(venta)
     await session.flush()
+    etapas.marca("alta_venta")
     movimiento = await stock_service.decrement_for_sale(venta, session)
     if movimiento is not None and _upload_id is not None:
         movimiento.source_upload_id = _upload_id
+    etapas.marca("descuento_de_stock")
     await _reclamar_identidad_de_la_fila(
         session,
         tenant_id,
@@ -1031,7 +1106,251 @@ async def _registrar_venta_desde_otros(
         [venta.id],
         aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
     )
+    etapas.marca("reclamo_de_identidad")
+    logger.info("otros.venta.etapas_ms", total_ms=etapas.total(), **etapas.ms)
     return venta
+
+
+async def _aprender_alias_del_cliente(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID | None,
+    sale_req: CreateSaleRequest,
+    fila: dict[str, Any],
+) -> None:
+    """La persona eligió el cliente de una fila que el archivo nombraba de otra forma
+    («Caro G.»): ese nombre queda como alias de SU cliente, así la próxima carga lo
+    reconoce sola. Sólo con cliente elegido a propósito (`sale_req.customer_id`); un
+    conflicto (el alias ya es de otro cliente o es el nombre de otra ficha) no escribe
+    nada y nunca frena la venta que se está resolviendo."""
+    nombre_del_archivo = fila.get("cliente")
+    if sale_req.customer_id is None or not nombre_del_archivo:
+        return
+    resultado = await aprender_alias(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        texto=str(nombre_del_archivo),
+        customer_id=sale_req.customer_id,
+    )
+    logger.info("otros.alias_de_cliente", resultado=resultado)
+
+
+def _exigir_cambio_de_medio_explicito(
+    record: UnclassifiedRecord, sale_req: CreateSaleRequest, cambiar_medio_de_pago: bool
+) -> None:
+    """V-24: una fila fiada sin cliente no se resuelve con otro medio sin que el
+    pedido lo diga (`cambiar_medio_de_pago`): 422 `FIADO_CAMBIO_DE_MEDIO`."""
+    if (
+        (record.row_data or {}).get(FIADO_SIN_CLIENTE_KEY)
+        and sale_req.payment_method != FIADO_PAYMENT_METHOD
+        and not cambiar_medio_de_pago
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "FIADO_CAMBIO_DE_MEDIO",
+                "message": (
+                    "Esta venta se importó como fiada: para importarla, elegí a qué "
+                    "cliente se le fió. Si en realidad no fue fiada, cambiá la forma "
+                    "de pago y confirmá el cambio."
+                ),
+            },
+        )
+
+
+async def _registrar_ventas_de_combo_desde_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    record: UnclassifiedRecord,
+    sale_req: CreateSaleRequest,
+    items: list[ComboItem],
+    *,
+    aplicar_pese_al_conflicto: bool = False,
+    cambiar_medio_de_pago: bool = False,
+    user_id: uuid.UUID | None = None,
+) -> list[SaleEntry]:
+    """Las ventas de una fila combo de «Otros»: UNA venta por línea, agrupadas.
+
+    Las mismas reglas que `_registrar_venta_desde_otros` (candado de identidad, respaldo
+    B·5e, stock, cliente, procedencia del archivo, reclamo de identidad) con las de
+    `POST /sales/manual-batch` (productos repetidos, `FOR UPDATE` por id en orden
+    estable, todo o nada). Σ importes == monto de la fila, al centavo: si no cierra, 422
+    sin escribir nada. La cantidad de cada línea está en la unidad de VENTA del producto
+    y se pasa a unidades base, como en la venta de una sola línea.
+    """
+    _exigir_cambio_de_medio_explicito(record, sale_req, cambiar_medio_de_pago)
+    ids = [i.product_id for i in items]
+    if len(set(ids)) != len(ids):
+        raise HTTPException(
+            status_code=400,
+            detail="Hay productos repetidos en la venta. Unificá la cantidad en una sola línea.",
+        )
+    # Antes que cualquier FOR UPDATE de fila (deadlock AB-BA contra el script de dedup).
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+    await _exigir_identidad_libre(
+        session,
+        tenant_id,
+        record,
+        aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
+        entidad="sale",
+    )
+    bloqueados = (
+        await session.execute(
+            select(Product)
+            .where(
+                Product.tenant_id == tenant_id,
+                Product.id.in_(sorted(ids, key=str)),
+                Product.is_active.is_(True),
+            )
+            .order_by(Product.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    por_id = {p.id: p for p in bloqueados}
+    lineas: list[tuple[ComboItem, Product, int, Decimal]] = []
+    for item in items:
+        producto = por_id.get(item.product_id)
+        if producto is None:
+            raise HTTPException(
+                status_code=400, detail=f"Producto {item.product_id} no encontrado."
+            )
+        factor = producto.base_units_per_sale_unit or 1
+        base = a_unidades_base(item.quantity, factor)
+        lineas.append((item, producto, base, importe(item.unit_price, base, factor)))
+    total = sum((linea[3] for linea in lineas), Decimal("0"))
+    if total != sale_req.amount.quantize(Decimal("0.01")):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "COMBO_SUMA_NO_COINCIDE",
+                "message": (
+                    f"Las líneas suman ${total} y la fila dice ${sale_req.amount}: "
+                    "ajustá los precios o las cantidades hasta que coincidan."
+                ),
+                "sum": str(total),
+                "amount": str(sale_req.amount),
+            },
+        )
+    await exigir_respaldo(
+        session, tenant_id, [(i.product_id, sale_req.transaction_date.date()) for i in items]
+    )
+    for _item, producto, base, _imp in lineas:
+        await stock_service.check_stock_available(producto.id, tenant_id, base, session)
+    _fila = record.row_data or {}
+    _cliente = sale_req.customer_id
+    if _cliente is None and _fila.get(CUSTOMER_REF_KEY):
+        try:
+            _candidato = uuid.UUID(str(_fila[CUSTOMER_REF_KEY]))
+        except ValueError:
+            _candidato = None
+        if (
+            _candidato is not None
+            and await CustomerRepository(session).get_by_id(_candidato, tenant_id) is not None
+        ):
+            _cliente = _candidato
+    _cliente = await _resolve_sale_customer(
+        session,
+        tenant_id,
+        _cliente,
+        is_fiado=sale_req.payment_method == FIADO_PAYMENT_METHOD,
+    )
+    await _aprender_alias_del_cliente(session, tenant_id, user_id, sale_req, _fila)
+    _upload_id = record.uploaded_file_id
+    grupo = uuid.uuid4()
+    ventas: list[SaleEntry] = []
+    for item, _producto, base, monto in lineas:
+        venta = SaleEntry(
+            tenant_id=tenant_id,
+            amount=monto,
+            quantity=base,
+            unit_price=item.unit_price,
+            transaction_date=sale_req.transaction_date,
+            payment_method=sale_req.payment_method,
+            product_id=item.product_id,
+            customer_id=_cliente,
+            notes=sale_req.notes,
+            custom_fields={**(sale_req.custom_fields or {}), "sale_group_id": str(grupo)},
+            provenance="REAL",
+            source_upload_id=_upload_id,
+            source_row_ref=unclassified_row_ref(record.id) if _upload_id else None,
+        )
+        session.add(venta)
+        ventas.append(venta)
+    await session.flush()
+    for venta in ventas:
+        movimiento = await stock_service.decrement_for_sale(venta, session)
+        if movimiento is not None and _upload_id is not None:
+            movimiento.source_upload_id = _upload_id
+    await _reclamar_identidad_de_la_fila(
+        session,
+        tenant_id,
+        record,
+        "sale",
+        [v.id for v in ventas],
+        aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
+    )
+    return ventas
+
+
+async def _registrar_cobro_desde_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    record: UnclassifiedRecord,
+    cobro_req: CreateSaleRequest,
+    *,
+    aplicar_pese_al_conflicto: bool = False,
+    user_id: uuid.UUID | None = None,
+) -> SaleEntry:
+    """El COBRO de una fila de «Otros» que el import sacó por no tener cliente.
+
+    «Cobro saldo fiado» no es una venta: es plata que entra a la caja y baja la deuda
+    de un cliente (`payment_method = "inflow"`, sin producto ni stock). Exige un cliente
+    REAL —sin cliente no se sabe a quién bajarle la deuda, igual que un fiado— y deja el
+    nombre que traía el archivo como alias de ese cliente. El medio con que se cobró (el
+    del formulario) queda en `custom_fields`: la caja no distingue el de un cobro.
+    """
+    await _exigir_identidad_libre(
+        session,
+        tenant_id,
+        record,
+        aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
+        entidad="sale",
+    )
+    cliente = await _resolve_sale_customer(
+        session, tenant_id, cobro_req.customer_id, is_fiado=True
+    )
+    await _aprender_alias_del_cliente(session, tenant_id, user_id, cobro_req, record.row_data or {})
+    _upload_id = record.uploaded_file_id
+    cobro = SaleEntry(
+        tenant_id=tenant_id,
+        amount=cobro_req.amount,
+        quantity=1,
+        transaction_date=cobro_req.transaction_date,
+        payment_method=INFLOW_PAYMENT_METHOD,
+        product_id=None,
+        customer_id=cliente,
+        notes=cobro_req.notes,
+        custom_fields={
+            **(cobro_req.custom_fields or {}),
+            "medio_del_cobro": cobro_req.payment_method,
+        },
+        provenance="REAL",
+        source_upload_id=_upload_id,
+        source_row_ref=unclassified_row_ref(record.id) if _upload_id else None,
+    )
+    session.add(cobro)
+    await session.flush()
+    await _reclamar_identidad_de_la_fila(
+        session,
+        tenant_id,
+        record,
+        "sale",
+        [cobro.id],
+        aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
+    )
+    return cobro
 
 
 @router.post(
@@ -1085,7 +1404,52 @@ async def reclassify_record(
         )
 
     try:
-        if body.entity_type == "sale":
+        if body.entity_type == "cobro":
+            await _registrar_cobro_desde_otros(
+                session,
+                tenant.tenant_id,
+                record,
+                CreateSaleRequest(**body.fields),
+                aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
+                user_id=user.user_id,
+            )
+            label = "cobro de fiado"
+        elif body.entity_type == "pago_proveedor":
+            pago_req = ResolveSupplierPaymentFields(**body.fields)
+            try:
+                await supplier_payment_service.registrar_pago(
+                    session,
+                    tenant_id=tenant.tenant_id,
+                    user_id=user.user_id,
+                    supplier_id=pago_req.supplier_id,
+                    amount=pago_req.amount,
+                    occurred_on=pago_req.occurred_on,
+                    payment_method=pago_req.payment_method,
+                    notes=pago_req.notes,
+                    endpoint="others/reclassify",
+                    source_type=SOURCE_ARCHIVO if _upload_id else SOURCE_MANUAL,
+                    source_upload_id=_upload_id,
+                    source_ref=_row_ref,
+                )
+            except supplier_payment_service.SupplierPaymentSupplierError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"code": "INVALID_SUPPLIER"},
+                ) from exc
+            label = "pago a proveedor"
+        elif body.entity_type == "sale" and body.items:
+            await _registrar_ventas_de_combo_desde_otros(
+                session,
+                tenant.tenant_id,
+                record,
+                CreateSaleRequest(**body.fields),
+                body.items,
+                aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
+                cambiar_medio_de_pago=body.cambiar_medio_de_pago,
+                user_id=user.user_id,
+            )
+            label = "venta"
+        elif body.entity_type == "sale":
             await _registrar_venta_desde_otros(
                 session,
                 tenant.tenant_id,
@@ -1093,6 +1457,7 @@ async def reclassify_record(
                 CreateSaleRequest(**body.fields),
                 aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
                 cambiar_medio_de_pago=body.cambiar_medio_de_pago,
+                user_id=user.user_id,
             )
             label = "venta"
         elif body.entity_type == "expense":
@@ -1328,6 +1693,117 @@ async def reclassify_record(
     return MessageResponse(message=f"Registro importado como {label}.")
 
 
+class CustomerSuggestionResponse(BaseModel):
+    customer_id: UUID | None
+    #: ``alias`` (lo confirmó una persona) o ``None`` (sin sugerencia).
+    via: str | None = None
+
+
+@router.get(
+    "/{record_id}/customer-suggestion",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+    response_model=CustomerSuggestionResponse,
+    summary="El cliente que un alias confirmado asigna al nombre que decía el archivo",
+)
+async def customer_suggestion(
+    record_id: UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> CustomerSuggestionResponse:
+    """Sólo propone (la persona confirma en el modal): si el nombre que traía la fila
+    es un alias que una persona confirmó antes, devuelve ese cliente."""
+    record = await _get_pending_record(session, tenant.tenant_id, record_id)
+    cid = await cliente_por_alias(
+        session, tenant.tenant_id, str((record.row_data or {}).get("cliente") or "")
+    )
+    return CustomerSuggestionResponse(customer_id=cid, via="alias" if cid else None)
+
+
+@router.get(
+    "/{record_id}/combo-suggestions",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+    response_model=ComboSuggestionsResponse,
+    summary="Productos que suman el monto de una fila combo («Jean + buzo»)",
+)
+async def combo_suggestions(
+    record_id: UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> ComboSuggestionsResponse:
+    """Propuesta, no escritura: del texto de la fila («Jean + buzo») y su monto, las
+    combinaciones de productos vendibles ese día cuyo precio de venta vigente suma
+    EXACTAMENTE el monto (`domain/combo_ventas.py`). Sólo entran productos activos con
+    precio y con respaldo (compra o stock inicial con costo) a la fecha de la venta:
+    la regla B·5e no se afloja. Quien confirma es la persona, en el modal.
+    """
+    record = await _get_pending_record(session, tenant.tenant_id, record_id)
+    fila = record.row_data or {}
+    texto = str(fila.get("producto") or fila.get("detalle") or "")
+    referencias = referencias_de(texto)
+    monto = monto_de_fila_de_otros(fila)
+
+    def vacio(motivo: str) -> ComboSuggestionsResponse:
+        return ComboSuggestionsResponse(
+            references=referencias, amount=monto, solutions=[], reason=motivo
+        )
+
+    if not referencias:
+        return vacio("La fila no dice más de un producto.")
+    if monto is None:
+        return vacio("El monto de la fila no se puede leer sin adivinar.")
+    try:
+        fecha = _fecha_de_la_venta(fila)
+    except HTTPException:
+        return vacio("La fecha de la fila no se puede leer sin adivinar.")
+    productos = (
+        await session.execute(
+            select(Product).where(
+                Product.tenant_id == tenant.tenant_id,
+                Product.is_active.is_(True),
+                Product.sale_price_ars > 0,
+            )
+        )
+    ).scalars().all()
+    primeros = await primeros_dias_de_fuente(
+        session, tenant.tenant_id, [p.id for p in productos]
+    )
+    vendibles = [
+        Candidato(
+            str(p.id), p.name, Decimal(p.sale_price_ars), p.base_units_per_sale_unit or 1
+        )
+        for p in productos
+        if respaldada(primeros.get(p.id), fecha.date())
+    ]
+    por_referencia = [candidatos_de_referencia(r, vendibles) for r in referencias]
+    for referencia, candidatos in zip(referencias, por_referencia, strict=True):
+        if not candidatos:
+            return vacio(
+                "Ningún producto con compra o stock inicial a esa fecha coincide con "
+                f"«{referencia}»."
+            )
+    # Hasta ~400.000 combinaciones de aritmética decimal: en un hilo, no en el event loop
+    # (si no, cada modal de combo frenaba a todos los demás negocios).
+    soluciones = await asyncio.to_thread(resolver, monto, por_referencia)
+    return ComboSuggestionsResponse(
+        references=referencias,
+        amount=monto,
+        solutions=[
+            [
+                ComboLineSuggestion(
+                    product_id=UUID(ln.product_id),
+                    product_name=ln.nombre,
+                    quantity=ln.cantidad,
+                    unit_price=ln.precio,
+                    amount=ln.importe,
+                )
+                for ln in sol
+            ]
+            for sol in soluciones
+        ],
+        reason=None if soluciones else "Ninguna combinación suma exactamente el monto de la fila.",
+    )
+
+
 def _errores_de_validacion(exc: ValidationError) -> list[Any]:
     """Los errores de un schema de creación, serializables.
 
@@ -1339,9 +1815,15 @@ def _errores_de_validacion(exc: ValidationError) -> list[Any]:
 
 
 def _cantidad_de_la_fila(raw: Any) -> int | None:
-    """La cantidad de la fila de «Otros» si es un entero ≥ 1; si no, ``None``."""
+    """La cantidad de la fila de «Otros» si es un entero ≥ 1; si no, ``None``.
+
+    Una fila SIN cantidad no es una unidad: «Lote 10 remeras» sin columna de
+    cantidad quedaba como venta de 1 unidad sin que nadie la eligiera (pruebas del
+    dueño, 2026-11-16). Sin cantidad se pide (``CANTIDAD_REQUERIDA``), nunca se
+    inventa.
+    """
     if raw is None or str(raw).strip() == "":
-        return 1
+        return None
     try:
         valor = Decimal(str(raw).replace(",", "."))
     except (ArithmeticError, ValueError):
@@ -1511,7 +1993,9 @@ async def link_product(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "code": "CANTIDAD_REQUERIDA",
-                "message": "La cantidad de la fila no es un número entero: indicala.",
+                "message": (
+                    "La fila no trae la cantidad o no es un número entero: indicala."
+                ),
             },
         )
     fecha = body.transaction_date or _fecha_de_la_venta(record.row_data)

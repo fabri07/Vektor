@@ -21,7 +21,7 @@ export interface UnclassifiedRecordResponse {
   context_label: string | null;
   headers: string[] | null;
   row_data: Record<string, string>;
-  suggested_entity: "sale" | "expense" | "product" | null;
+  suggested_entity: "sale" | "expense" | "product" | "cobro" | "pago_prov" | null;
   /** Código canónico recomendado (catálogo de gastos o de productos según destino). */
   suggested_category: string | null;
   suggested_category_label: string | null;
@@ -34,11 +34,48 @@ export interface UnclassifiedRecordResponse {
   created_at: string;
 }
 
-export type ReclassifyEntityType = "sale" | "expense" | "product" | "customer" | "supplier";
+export type ReclassifyEntityType =
+  | "sale"
+  | "expense"
+  | "product"
+  | "customer"
+  | "supplier"
+  /** Cobro de una deuda de un cliente: entra a la caja y baja su deuda, no es venta. */
+  | "cobro"
+  /** Pago de deuda a un proveedor: sale de la caja y baja lo que se le debe, no es gasto. */
+  | "pago_proveedor";
+
+/** Una línea de la venta de un combo, en la unidad de VENTA del producto. */
+export interface ComboItemPayload {
+  product_id: string;
+  quantity: number;
+  unit_price: number;
+}
+
+export interface ComboLineSuggestion {
+  product_id: string;
+  product_name: string;
+  quantity: number;
+  unit_price: string;
+  amount: string;
+}
+
+/** Las combinaciones que suman el monto de una fila combo («Jean + buzo»). */
+export interface ComboSuggestionsResponse {
+  references: string[];
+  amount: string | null;
+  solutions: ComboLineSuggestion[][];
+  reason: string | null;
+}
 
 export interface ReclassifyPayload {
   entity_type: ReclassifyEntityType;
   fields: Record<string, unknown>;
+  /**
+   * Combo: la venta de la fila tiene varias líneas (sólo entity_type="sale"). La
+   * suma de las líneas tiene que dar el monto de `fields.amount`, al centavo.
+   */
+  items?: ComboItemPayload[];
   /**
    * F2-T2b: solo para entity_type="product". Si viene, se VINCULA el registro a
    * ese producto existente (uno de los `match_candidates`) en vez de crear uno
@@ -87,7 +124,7 @@ export interface OthersGroup {
   file_name: string | null;
   context_id: string | null;
   motivo: string | null;
-  suggested_entity: "sale" | "expense" | "product" | null;
+  suggested_entity: "sale" | "expense" | "product" | "cobro" | "pago_prov" | null;
   status: "PENDING" | "IMPORTED" | "DISMISSED";
   count: number;
 }
@@ -159,6 +196,19 @@ export const othersService = {
       pending: res.data.pending,
       pendingSuggested: res.data.pending_suggested ?? 0,
     };
+  },
+
+  /** El cliente que un alias confirmado asigna al nombre que decía el archivo. */
+  async customerSuggestion(id: string): Promise<{ customer_id: string | null; via: string | null }> {
+    const { data } = await api.get<{ customer_id: string | null; via: string | null }>(
+      `/others/${id}/customer-suggestion`,
+    );
+    return data;
+  },
+
+  async comboSuggestions(id: string): Promise<ComboSuggestionsResponse> {
+    const { data } = await api.get<ComboSuggestionsResponse>(`/others/${id}/combo-suggestions`);
+    return data;
   },
 
   async reclassify(id: string, payload: ReclassifyPayload): Promise<void> {

@@ -155,7 +155,13 @@ _EXPENSE_ALIASES: dict[str, str] = {
     "stock": "INVENTORY",
     "compra proveedor": "INVENTORY",  # literal legacy de REGISTER_PURCHASE
     "compras": "INVENTORY",
-    "reposicion": "INVENTORY",
+    # «Reposición» a secas NO es mercadería: «Reposición de caja» es plata que pone un
+    # socio (capital, 2026-11-16). Sólo cuenta como INVENTORY cuando dice QUÉ se repone.
+    "reposicion de mercaderia": "INVENTORY",
+    "reposicion de stock": "INVENTORY",
+    "reposicion de inventario": "INVENTORY",
+    "reposicion mercaderia": "INVENTORY",
+    "reposicion stock": "INVENTORY",
     # MARKETING
     "publicidad": "MARKETING",
     "carteleria": "MARKETING",

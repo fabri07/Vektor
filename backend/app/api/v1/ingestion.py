@@ -2644,6 +2644,10 @@ async def confirm_file(
             _ent_efectiva = _override.get(_cid) or _context_entity.get(_cid)
             if _ent_efectiva:
                 continue
+            # Una hoja de capital de socios («Aportes de socios») tiene su propio
+            # destino —el capital, no una sección del mapeador— y no es "sin sección".
+            if _ctx.get("es_capital"):
+                continue
             if _context_included(_cid, _ent_efectiva):
                 _sin_entidad.append(str(_ctx.get("label") or _cid))
         if _sin_entidad:
@@ -4089,6 +4093,8 @@ async def confirm_file(
     parts: list[str] = []
     if counts["ventas"]:
         parts.append(f"{counts['ventas']} venta(s)")
+    if counts.get("cobros_de_fiado"):
+        parts.append(f"{counts['cobros_de_fiado']} cobro(s) de fiado a caja")
     if counts["gastos"]:
         parts.append(f"{counts['gastos']} gasto(s)")
     if counts["productos"]:
@@ -4097,6 +4103,8 @@ async def confirm_file(
         parts.append(f"{counts['clientes']} cliente(s)")
     if counts["proveedores"]:
         parts.append(f"{counts['proveedores']} proveedor(es)")
+    if counts.get("capital"):
+        parts.append(f"{counts['capital']} movimiento(s) de capital de socios")
 
     # E8: cuando no se importó NADA y todo quedó esperando revisión, decirlo. El
     # caso normal es el documento (foto/PDF/texto): F6-A4 no le extrae fecha, así
@@ -4105,10 +4113,14 @@ async def confirm_file(
     _pendientes_de_revision = (
         counts.get("otros", 0)
         + counts.get("filas_riesgo_a_otros", 0)
+        # Un cobro de fiado sin cliente real espera que se elija de quién es.
+        + counts.get("cobros_sin_cliente", 0)
         # B·5e y V-24: las ventas que el import sacó a «Otros» por regla.
         + counts.get("ventas_sin_compra", 0)
         + counts.get("ventas_sin_producto", 0)
         + counts.get("ventas_fiado_sin_cliente", 0)
+        # Capital: filas que no se pudieron leer sin adivinar.
+        + counts.get("capital_a_otros", 0)
     )
     if parts:
         message = f"Importados: {', '.join(parts)}. La puntuación será recalculada."
@@ -4138,6 +4150,18 @@ async def confirm_file(
             f"{counts['ventas_sin_producto']} venta(s) fueron a «Otros» porque no dicen "
             "qué producto se vendió: elegilo desde «Otros»."
         )
+    # Capital de socios: lo que no se pudo leer sin adivinar no se carga.
+    if counts.get("capital_a_otros"):
+        warnings.append(
+            f"{counts['capital_a_otros']} fila(s) de capital de socios fueron a «Otros» "
+            "porque falta la fecha, el monto, la forma de pago o no se sabe si es un "
+            "aporte o un retiro: completalas desde «Otros»."
+        )
+    if counts.get("capital_ya_cargado"):
+        warnings.append(
+            f"{counts['capital_ya_cargado']} aporte(s) o retiro(s) de socios ya estaban "
+            "cargados de otra subida del mismo archivo: no se repitieron."
+        )
     # V-24: un fiado necesita a quién se le fió. Se distingue la fila que no
     # nombra a nadie de la que nombra un cliente que no se pudo identificar.
     _fiados_nombrados = counts.get("ventas_fiado_cliente_no_identificado", 0)
@@ -4160,6 +4184,18 @@ async def confirm_file(
             "que nombran no se pudo identificar con seguridad (no hay una sola ficha "
             "con ese nombre, o el documento, contacto o código no coincide): elegilo "
             "desde «Otros»."
+        )
+    # Un cobro de fiado no es una venta: a caja con su cliente, o a «Otros» sin él.
+    if counts.get("cobros_de_fiado"):
+        warnings.append(
+            f"{counts['cobros_de_fiado']} cobro(s) de fiado entraron a la caja y bajaron la "
+            "deuda de su cliente (no se cuentan como ventas)."
+        )
+    if counts.get("cobros_sin_cliente"):
+        warnings.append(
+            f"{counts['cobros_sin_cliente']} cobro(s) de fiado fueron a «Otros» porque no se "
+            "sabe de qué cliente son: elegí el cliente desde «Otros» y el cobro entra a la "
+            "caja y baja su deuda."
         )
     # Una columna que el usuario mapeó a otra sección y el importador NO escribió.
     # Pasa cuando el destino todavía no está implementado (F-D) o cuando el

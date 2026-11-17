@@ -5,6 +5,26 @@ import { useEffect, type ReactNode } from "react";
 export interface ProductoElegible {
   id: string;
   name: string;
+  /** Primer día con una fuente con costo (compra o stock inicial); null: ninguna. */
+  primer_dia_de_fuente?: string | null;
+}
+
+function fechaCorta(iso: string): string {
+  const [y, m, d] = iso.slice(0, 10).split("-");
+  return `${d}/${m}/${y}`;
+}
+
+/** Con `dia` (YYYY-MM-DD): ¿el producto tiene respaldo ese día? `undefined`: no se sabe. */
+export function respaldoA(p: ProductoElegible, dia: string | undefined): boolean | undefined {
+  if (!dia || p.primer_dia_de_fuente === undefined) return undefined;
+  return !!p.primer_dia_de_fuente && p.primer_dia_de_fuente.slice(0, 10) <= dia;
+}
+
+function etiqueta(p: ProductoElegible, dia: string | undefined): string {
+  if (respaldoA(p, dia) !== false) return p.name;
+  return p.primer_dia_de_fuente
+    ? `${p.name} · sin compra ni stock antes del ${fechaCorta(p.primer_dia_de_fuente)}`
+    : `${p.name} · sin compra ni stock inicial`;
 }
 
 /**
@@ -24,6 +44,7 @@ export function ProductoVendidoSelector({
   referencia,
   inputClassName,
   cargando = false,
+  diaDeLaVenta,
   children,
 }: {
   productos: ProductoElegible[];
@@ -35,6 +56,9 @@ export function ProductoVendidoSelector({
   inputClassName: string;
   /** El catálogo todavía se está cargando: se dice, en vez de mostrar un combo vacío. */
   cargando?: boolean;
+  /** Día de la venta (YYYY-MM-DD): ordena primero los productos con respaldo ese día y marca el
+   * resto. No bloquea: el que decide es el servidor. */
+  diaDeLaVenta?: string;
   /** Lo que va al lado del selector (la cantidad, en el modal). */
   children?: ReactNode;
 }) {
@@ -64,9 +88,12 @@ export function ProductoVendidoSelector({
           (p) =>
             p.id === value || !filtro || sinCoincidencias || p.name.toLowerCase().includes(filtro),
         )
-        .map((p) => (
+        // Sort estable: los respaldados a la fecha primero, el resto en su orden.
+        .map((p, i) => ({ p, i, ok: respaldoA(p, diaDeLaVenta) === false ? 1 : 0 }))
+        .sort((a, b) => a.ok - b.ok || a.i - b.i)
+        .map(({ p }) => (
           <option key={p.id} value={p.id}>
-            {p.name}
+            {etiqueta(p, diaDeLaVenta)}
           </option>
         ))}
     </select>

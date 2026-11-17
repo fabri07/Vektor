@@ -65,6 +65,11 @@ export function DeleteFileModal({
     ? [
         { label: "Ventas", valor: preview.ventas },
         { label: "Gastos", valor: preview.gastos },
+        { label: "Aportes o retiros de socios (se anulan)", valor: preview.capital ?? 0 },
+        {
+          label: "Pagos a proveedores (se anulan: la deuda vuelve a subir)",
+          valor: preview.pagos_a_proveedores ?? 0,
+        },
         { label: "Productos creados por el archivo", valor: preview.productos },
         { label: "Movimientos de stock", valor: preview.movimientos_stock },
         { label: "Filas en «Otros»", valor: preview.otros },

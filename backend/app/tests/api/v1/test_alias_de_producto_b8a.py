@@ -408,6 +408,9 @@ class TestRechazos:
             ({"producto": None}, "SIN_REFERENCIA"),
             ({"sugerida": "expense"}, "NOT_A_SALE"),
             ({"cantidad": "2,5"}, "CANTIDAD_REQUERIDA"),
+            # Sin cantidad no se asume 1 unidad: se pide (antes «Lote 10 remeras»
+            # sin columna de cantidad se registraba como una unidad).
+            ({"cantidad": ""}, "CANTIDAD_REQUERIDA"),
         ],
     )
     async def test_fila_que_no_se_puede_vincular_es_422(

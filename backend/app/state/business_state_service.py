@@ -46,6 +46,7 @@ from app.application.services.facts_provider import (
     leer_margenes,
 )
 from app.application.services.facts_service import Period
+from app.application.services.supplier_payment_service import flujo_de_pagos
 from app.config.net_margin_rollout import net_margin_enabled_for
 from app.domain.business_time import today_ar
 from app.domain.verticals import try_parse_vertical
@@ -688,6 +689,17 @@ async def compute_business_state(
         Decimal("0"),
     )
     liquid_outflow_est += capital_liquid_out
+    # Pagos de deuda a proveedores: no son gasto (la compra fiada ya contó) pero la
+    # plata sale de la caja el día que se pagó, igual que un gasto líquido.
+    pagos_liquid_out = sum(
+        (
+            f.salidas
+            for f in await flujo_de_pagos(session, tenant_id, window_start, window_end)
+            if f.medio in _LIQUID_METHODS
+        ),
+        Decimal("0"),
+    )
+    liquid_outflow_est += pagos_liquid_out
 
     # ── 3c. Último arqueo (CashClose) — saldo medido si existe ──────────────────
     cash_close_result = await session.execute(
@@ -766,7 +778,9 @@ async def compute_business_state(
         product_count=real_product_count,
         profile_updated_at=profile.updated_at,
         prev_sales_amount=str(prev_real_sales),
-        capital_liquid_out=str(capital_liquid_out),
+        # Un pago a proveedor no es gasto ni venta, no mueve ningún conteo: va en la
+        # huella o el estado cacheado serviría la liquidez vieja.
+        capital_liquid_out=f"{capital_liquid_out}+{pagos_liquid_out}",
         sold_cost=sold_cost,
         confirmed_cost_count=confirmed_cost_count,
         # FactsService corta su ventana en fecha AR: al cambiar el día AR el

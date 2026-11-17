@@ -213,7 +213,7 @@ from app.domain.text_norm import (
     normalize_sku,
     normalize_text,
 )
-from app.domain.transaction import PaymentMethod
+from app.domain.transaction import INFLOW_PAYMENT_METHOD, PaymentMethod
 from app.domain.verticals import Vertical, parse_vertical
 from app.observability.logger import get_logger
 
@@ -320,6 +320,8 @@ def check_nonempty_import(
         + counts.get("productos", 0)
         + counts.get("clientes", 0)
         + counts.get("proveedores", 0)
+        # Capital de socios: un aporte cargado es un dato importado.
+        + counts.get("capital", 0)
     )
     had_rows = bool(summary.get("row_count")) or any(
         summary.get(k)
@@ -330,6 +332,7 @@ def check_nonempty_import(
             "otros_detectados",
             "clientes_detectados",
             "proveedores_detectados",
+            "capital_detectado",
         )
     )
     confirmed_any = any((confirmed_fields or {}).values()) or any(
@@ -345,12 +348,18 @@ def check_nonempty_import(
     _decididas = (
         counts.get("ya_aplicadas", 0)
         + counts.get("conflictos_de_identidad", 0)
+        # Un cobro de fiado: a caja con su cliente o a «Otros» con su motivo.
+        + counts.get("cobros_de_fiado", 0)
+        + counts.get("cobros_sin_cliente", 0)
         # B·5e: una venta sin compra previa o sin producto fue a «Otros» por
         # regla, con su motivo: es una decisión sobre la fila, no un mapeo roto.
         + counts.get("ventas_sin_compra", 0)
         + counts.get("ventas_sin_producto", 0)
         # V-24: un fiado sin cliente, lo mismo.
         + counts.get("ventas_fiado_sin_cliente", 0)
+        # Capital: una fila ya cargada de antes o enviada a «Otros» con su motivo.
+        + counts.get("capital_ya_cargado", 0)
+        + counts.get("capital_a_otros", 0)
     )
     # E8: en un DOCUMENTO (foto/PDF/texto), quedar en «Otros» es el resultado
     # correcto del camino, no un fallback que tape una pérdida. Esos archivos no
@@ -5625,6 +5634,123 @@ def _resolve_stock_treatment(
     return (raw or STOCK_TREATMENT_OPENING_BALANCE) == STOCK_TREATMENT_PURCHASE, {}
 
 
+async def _importar_capital_del_archivo(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    summary: dict[str, Any],
+    uploaded_file_id: uuid.UUID | None,
+    context_confirmed: dict[str, bool] | None,
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """Las hojas de capital de socios del archivo → movimientos de capital.
+
+    Un aporte o retiro del socio es capital, nunca gasto ni venta (invariante): se
+    escribe en ``owner_capital_movements`` con la procedencia del archivo
+    (``source_type='archivo'``, ``source_upload_id``), así que borrar el archivo lo
+    ANULA (`file_deletion_service`). La hoja entra salvo que el usuario la haya
+    excluido a propósito (``context_confirmed[ctx] is False``); una hoja que la
+    pantalla no conoce no se pierde en silencio.
+
+    Lo que no se puede leer sin adivinar (fecha, monto, forma de pago o sentido)
+    NO se carga: va a «Otros» con su motivo (`domain/capital_import`). La huella de la
+    fila (`source_ref`) evita cargarla dos veces si el mismo archivo se sube o se
+    relee de nuevo: una fila ya cargada se cuenta como ``capital_ya_cargado``.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.application.services.owner_capital_service import (  # noqa: PLC0415
+        registrar_movimiento,
+    )
+    from app.domain.capital_import import (  # noqa: PLC0415
+        detectar_hoja_de_capital,
+        leer_filas,
+    )
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+    from app.persistence.models.owner_capital import (  # noqa: PLC0415
+        SOURCE_ARCHIVO,
+        OwnerCapitalMovement,
+    )
+
+    filas_del_resumen = summary.get("capital_detectado") or []
+    if not filas_del_resumen or uploaded_file_id is None:
+        return
+    archivo = await session.get(UploadedFile, uploaded_file_id)
+    usuario = archivo.uploaded_by if archivo is not None else None
+    contextos = {
+        str(c.get("context_id")): c for c in (summary.get("mapping_contexts") or [])
+    }
+    por_contexto: dict[str, list[dict[str, Any]]] = {}
+    for fila in filas_del_resumen:
+        por_contexto.setdefault(str(fila.get("__context__") or ""), []).append(fila)
+
+    cargados = rechazados = ya_cargados = 0
+    for contexto_id, filas in por_contexto.items():
+        if context_confirmed and context_confirmed.get(contexto_id) is False:
+            continue
+        ctx = contextos.get(contexto_id) or {}
+        encabezados = list(ctx.get("headers") or [])
+        if not encabezados:
+            encabezados = [k for k in filas[0] if not str(k).startswith("__")]
+        columnas = detectar_hoja_de_capital(encabezados)
+        if columnas is None:
+            continue
+        nombre_de_hoja = str(ctx.get("label") or contexto_id.removeprefix("sheet:"))
+        movimientos, rechazadas = leer_filas(nombre_de_hoja, columnas, filas)
+        refs = [m.source_ref for m in movimientos]
+        existentes: set[str] = set()
+        if refs:
+            existentes = {
+                ref
+                for ref in (
+                    await session.execute(
+                        select(OwnerCapitalMovement.source_ref).where(
+                            OwnerCapitalMovement.tenant_id == tenant_id,
+                            OwnerCapitalMovement.source_ref.in_(refs),
+                            OwnerCapitalMovement.voided_at.is_(None),
+                        )
+                    )
+                ).scalars()
+                if ref is not None
+            }
+        for mov in movimientos:
+            if mov.source_ref in existentes:
+                ya_cargados += 1
+                continue
+            await registrar_movimiento(
+                session,
+                tenant_id=tenant_id,
+                user_id=usuario,
+                kind=mov.kind,
+                amount=mov.amount,
+                occurred_on=mov.occurred_on,
+                payment_method=mov.payment_method,
+                partner_name=mov.partner_name,
+                notes=mov.notes,
+                endpoint="ingestion/confirm",
+                source_type=SOURCE_ARCHIVO,
+                triggered_by="ingestion:capital",
+                source_upload_id=uploaded_file_id,
+                source_ref=mov.source_ref,
+            )
+            cargados += 1
+        for rechazada in rechazadas:
+            counts["otros"] = counts.get("otros", 0) + _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[dict(rechazada.row)],
+                headers=encabezados,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=rechazada.motivo,
+                context_id=contexto_id,
+            )
+            rechazados += 1
+    counts["capital"] = counts.get("capital", 0) + cargados
+    counts["capital_a_otros"] = counts.get("capital_a_otros", 0) + rechazados
+    counts["capital_ya_cargado"] = counts.get("capital_ya_cargado", 0) + ya_cargados
+
+
 async def insert_confirmed_data(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -5698,11 +5824,22 @@ async def insert_confirmed_data(
             o.id for o in sess.new if isinstance(o, SaleEntry) and o.id is not None
         )
 
+    _gastos_nuevos: list[uuid.UUID] = []
+
+    def _anotar_gastos_nuevos(sess: Any, _ctx: Any) -> None:
+        from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+        _gastos_nuevos.extend(
+            o.id for o in sess.new if isinstance(o, ExpenseEntry) and o.id is not None
+        )
+
     _cross_buffer = CrossFieldBuffer() if apply_cross_fields else None
     # V-19: nada de una corrida anterior que haya salido por excepción.
     session.info.pop(_V19_PLANES, None)
     session.info.pop(_V24_CLIENTES_POR_NOMBRE, None)
+    session.info.pop(_V24_ALIAS_DE_CLIENTE, None)
     sa_event.listen(session.sync_session, "after_flush", _anotar_ventas_nuevas)
+    sa_event.listen(session.sync_session, "after_flush", _anotar_gastos_nuevos)
     try:
         counts = await _insert_confirmed_data_impl(
             session,
@@ -5731,7 +5868,9 @@ async def insert_confirmed_data(
         await session.flush()
     finally:
         sa_event.remove(session.sync_session, "after_flush", _anotar_ventas_nuevas)
+        sa_event.remove(session.sync_session, "after_flush", _anotar_gastos_nuevos)
         session.info.pop(_V24_CLIENTES_POR_NOMBRE, None)
+        session.info.pop(_V24_ALIAS_DE_CLIENTE, None)
 
     # M·1c-2: red de seguridad por si algún camino del import salió antes de
     # cerrar sus costos. Vacía = no-op.
@@ -5746,7 +5885,24 @@ async def insert_confirmed_data(
             session, tenant_id, uploaded_file_id, set(_ventas_nuevas), _filas_previas,
             counts, source,
         )
+    # Un «Pago a proveedor» no es un gasto (la compra fiada ya contó): a «Otros» para
+    # elegir el proveedor, y de ahí es un pago que baja la deuda, no un costo más.
+    if _gastos_nuevos:
+        await _pagos_a_proveedor_a_otros(
+            session, tenant_id, uploaded_file_id, set(_gastos_nuevos), counts, source
+        )
+    # Un cobro de fiado («Cobro saldo fiado») no es una venta: a caja con su cliente, o
+    # a «Otros». Antes del cierre que asigna «Local» y de B·5e, que no juzga un cobro.
+    if _ventas_nuevas:
+        await _cobros_de_fiado_a_caja(
+            session, tenant_id, uploaded_file_id, set(_ventas_nuevas), _filas_previas,
+            counts, source,
+        )
     await assign_orphan_sales_to_local(session, tenant_id)
+    # Capital de socios: sus propias hojas, fuera de ventas y gastos.
+    await _importar_capital_del_archivo(
+        session, tenant_id, summary, uploaded_file_id, context_confirmed, counts, source
+    )
     # B·5e: toda venta con compra previa. Al final, con las compras y aperturas
     # del archivo ya escritas, para que el orden de las hojas o de las filas no
     # decida nada.
@@ -6083,6 +6239,227 @@ async def _fiados_sin_cliente_a_otros(
             counts[f"ventas_cliente_{_bucket}"] -= 1
 
 
+#: El motivo con que un cobro de fiado sin cliente real va a «Otros».
+MOTIVO_COBRO_SIN_CLIENTE: Final = (
+    "Cobro de fiado: indicá de qué cliente es (sin cliente no se sabe a quién bajarle la deuda)"
+)
+#: Interna: la fila es un cobro de fiado que el import sacó por no tener cliente.
+#: Resolverla crea el COBRO (`inflow`), nunca una venta.
+COBRO_DE_FIADO_KEY: Final = "__cobro_de_fiado__"
+#: El destino sugerido de esa fila en «Otros» (cabe en `suggested_entity`, 10).
+ENTIDAD_COBRO: Final = "cobro"
+
+
+async def _cobros_de_fiado_a_caja(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    nuevas_ids: set[uuid.UUID],
+    filas_previas: set[str],
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """«Cobro saldo fiado» no es una venta: es plata que entra a caja y baja la deuda.
+
+    Decisión del dueño (2026-11-16): una venta al fiado mueve stock y no mueve caja al
+    instante; su cobro, después, va directo a caja. Una hoja de ventas lo trae como una
+    fila más (detalle «Cobro saldo fiado» y el medio real con que se cobró), y entraba
+    como «Venta sin producto». Acá, de las ventas NUEVAS de la corrida, las que dicen
+    que cobran una deuda (`domain/cobro_de_fiado`), no son fiadas y no tienen producto:
+
+    - con el cliente identificado (clave fuerte del archivo, nombre exacto de una ficha o
+      alias confirmado) pasan a ``inflow`` con ese cliente: entran a la caja y bajan su
+      deuda, no son ingreso ni tienen margen;
+    - sin cliente real, a «Otros» con su motivo (sin cliente no se sabe a quién bajarle la
+      deuda, igual que el fiado sin cliente): la persona elige el cliente.
+
+    Lo ambiguo —sin la pareja de palabras, con producto o ya fiado— sigue siendo una
+    venta. Va ANTES de B·5e, que no juzga un `inflow`, y del cierre que asigna «Local».
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.domain.cobro_de_fiado import es_texto_de_cobro_de_fiado  # noqa: PLC0415
+    from app.persistence.models._sentinel import SENTINEL_FLAG_KEY  # noqa: PLC0415
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+
+    nuevas = await _ventas_nuevas_a_juzgar(session, tenant_id, nuevas_ids, filas_previas)
+    candidatas = [
+        v
+        for v in nuevas
+        if v.product_id is None
+        and not _es_fiado(v.payment_method)
+        and (v.payment_method or "").strip().lower() != INFLOW_PAYMENT_METHOD
+        and es_texto_de_cobro_de_fiado(v.notes)
+    ]
+    if not candidatas:
+        return
+    centinelas = set(
+        (
+            await session.execute(
+                select(Customer.id).where(
+                    Customer.tenant_id == tenant_id,
+                    Customer.custom_fields[SENTINEL_FLAG_KEY].as_string() == "true",
+                )
+            )
+        ).scalars()
+    )
+    sin_cliente: list[Any] = []
+    for venta in candidatas:
+        cliente = venta.customer_id if venta.customer_id not in centinelas else None
+        if cliente is None:
+            crudo = (venta.custom_fields or {}).get("_customer_reference_raw")
+            if crudo:
+                cliente = await _cliente_por_nombre_para_fiado(
+                    session,
+                    tenant_id,
+                    {"name": str(crudo)},
+                    RowReferenceResolution(outcome="unresolved", raw_value=str(crudo)),
+                    PaymentMethod.ACCOUNT.value,
+                )
+        if cliente is None:
+            sin_cliente.append(venta)
+            continue
+        cf = dict(venta.custom_fields or {})
+        # La caja no distingue el medio de un cobro; se conserva para rastrearlo.
+        cf["medio_del_cobro"] = venta.payment_method
+        venta.custom_fields = cf
+        venta.payment_method = INFLOW_PAYMENT_METHOD
+        venta.customer_id = cliente
+        counts["ventas"] = max(0, int(counts.get("ventas", 0)) - 1)
+        counts["cobros_de_fiado"] = counts.get("cobros_de_fiado", 0) + 1
+        # F7c la contó como venta de «Local» o de un cliente: no lo es.
+        _bucket = _REFERENCE_OUTCOME_SUFFIX.get(str(cf.get("_customer_resolution") or ""))
+        if _bucket and counts.get(f"ventas_cliente_{_bucket}"):
+            counts[f"ventas_cliente_{_bucket}"] -= 1
+    await session.flush()
+    if not sin_cliente:
+        return
+    sacadas = await _sacar_ventas_a_otros(
+        session,
+        tenant_id,
+        uploaded_file_id,
+        [(v, MOTIVO_COBRO_SIN_CLIENTE) for v in sin_cliente],
+        {},
+        {},
+        {},
+        source,
+        cobro=True,
+    )
+    counts["ventas"] = max(0, int(counts.get("ventas", 0)) - len(sacadas))
+    counts["cobros_sin_cliente"] = counts.get("cobros_sin_cliente", 0) + len(sacadas)
+    for venta in sacadas:
+        _bucket = _REFERENCE_OUTCOME_SUFFIX.get(
+            str((venta.custom_fields or {}).get("_customer_resolution") or "")
+        )
+        if _bucket and counts.get(f"ventas_cliente_{_bucket}"):
+            counts[f"ventas_cliente_{_bucket}"] -= 1
+
+
+MOTIVO_PAGO_A_PROVEEDOR: Final = (
+    "Pago a proveedor: indicá a cuál (baja lo que se le debe; no es un gasto)"
+)
+#: Interna: la fila es un pago a proveedor que el import sacó de los gastos.
+PAGO_A_PROVEEDOR_KEY: Final = "__pago_a_proveedor__"
+#: El destino sugerido de esa fila en «Otros» (cabe en `suggested_entity`, 10).
+ENTIDAD_PAGO_PROVEEDOR: Final = "pago_prov"
+
+
+async def _pagos_a_proveedor_a_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    nuevos_ids: set[uuid.UUID],
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """«Pago a proveedor» no es un gasto: cancela una compra fiada que ya se contó.
+
+    De los gastos NUEVOS de la corrida, los que dicen que se le pagó a un proveedor
+    (`domain/pago_a_proveedor`), sin producto ni proveedor ya identificado y pagados con
+    un medio real, salen de los gastos —así el costo no se cuenta dos veces— y van a
+    «Otros» con su motivo: el archivo no trae a QUÉ proveedor, y sin eso no se sabe a
+    quién bajarle la deuda. Al resolverla se crea el pago (`supplier_payments`).
+
+    Una compra a cuenta corriente, con producto o con un proveedor ya identificado sigue
+    siendo gasto. Una relectura que vuelve a mandar la misma fila no la duplica.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.application.services.operation_identity_service import (  # noqa: PLC0415
+        liberar_identidades_de,
+    )
+    from app.domain.pago_a_proveedor import es_texto_de_pago_a_proveedor  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+    from app.persistence.models.unclassified_record import UnclassifiedRecord  # noqa: PLC0415
+
+    gastos = (
+        await session.execute(
+            select(ExpenseEntry).where(
+                ExpenseEntry.tenant_id == tenant_id,
+                ExpenseEntry.id.in_(nuevos_ids),
+                ExpenseEntry.voided_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    candidatos = [
+        g
+        for g in gastos
+        if g.product_id is None
+        and g.supplier_id is None
+        and (g.payment_method or "").strip().lower() != "account"
+        and es_texto_de_pago_a_proveedor(
+            g.description, g.notes, (g.custom_fields or {}).get("category_label")
+        )
+    ]
+    if not candidatos:
+        return
+    ya_pendientes: set[str | None] = set()
+    if uploaded_file_id is not None:
+        ya_pendientes = {
+            (fila or {}).get(ROW_REF_KEY)
+            for fila in (
+                await session.execute(
+                    select(UnclassifiedRecord.row_data).where(
+                        UnclassifiedRecord.tenant_id == tenant_id,
+                        UnclassifiedRecord.uploaded_file_id == uploaded_file_id,
+                        UnclassifiedRecord.status == "PENDING",
+                        UnclassifiedRecord.context_label == MOTIVO_PAGO_A_PROVEEDOR[:200],
+                    )
+                )
+            ).scalars()
+        }
+    for gasto in candidatos:
+        if not (gasto.source_row_ref and gasto.source_row_ref in ya_pendientes):
+            fila = {
+                "fecha": gasto.transaction_date.date().isoformat(),
+                "monto": str(gasto.amount),
+                "medio_de_pago": gasto.payment_method,
+                "detalle": gasto.description,
+                "categoria": (gasto.custom_fields or {}).get("category_label"),
+            }
+            _capture_unclassified(
+                session,
+                tenant_id,
+                [{k: v for k, v in fila.items() if v not in (None, "")}],
+                None,
+                source,
+                uploaded_file_id,
+                context_label=MOTIVO_PAGO_A_PROVEEDOR[:200],
+                suggested_entity=ENTIDAD_PAGO_PROVEEDOR,
+                row_ref=gasto.source_row_ref,
+                skip_blank_rows=False,
+                internas={MONTO_CANONICO_KEY: "1", PAGO_A_PROVEEDOR_KEY: "1"},
+            )
+    await liberar_identidades_de(session, tenant_id, [("expense", g.id) for g in candidatos])
+    for gasto in candidatos:
+        await session.delete(gasto)
+    await session.flush()
+    counts["gastos"] = max(0, int(counts.get("gastos", 0)) - len(candidatos))
+    counts["pagos_a_proveedor_a_otros"] = (
+        counts.get("pagos_a_proveedor_a_otros", 0) + len(candidatos)
+    )
+
+
 def _es_fiado(payment_method: str | None) -> bool:
     """Sin distinguir mayúsculas, como `es_cobro_de_fiado`."""
     return (payment_method or "").strip().lower() == PaymentMethod.ACCOUNT.value
@@ -6091,6 +6468,9 @@ def _es_fiado(payment_method: str | None) -> bool:
 #: ``session.info``: ``{nombre normalizado: id del cliente | None si es ambiguo}``,
 #: armado una vez por import (``insert_confirmed_data`` lo limpia).
 _V24_CLIENTES_POR_NOMBRE = "v24_clientes_por_nombre"
+#: ``session.info``: ``{alias normalizado: cliente}`` confirmados por una persona,
+#: armado una vez por import (`insert_confirmed_data` lo limpia).
+_V24_ALIAS_DE_CLIENTE = "v24_alias_de_cliente"
 
 
 async def _cliente_por_nombre_para_fiado(
@@ -6153,7 +6533,23 @@ async def _cliente_por_nombre_para_fiado(
             if forma
         }
         session.info[_V24_CLIENTES_POR_NOMBRE] = indice
-    return indice.get(nombre)
+    # Un alias confirmado por una persona («Caro G.» → Carolina Giménez) identifica a
+    # su cliente aunque ese texto no sea el nombre de ninguna ficha. Si además el
+    # nombre coincide con OTRA ficha, la fila contradice al alias: no se elige a
+    # ninguna (va a «Otros»).
+    alias = session.info.get(_V24_ALIAS_DE_CLIENTE)
+    if alias is None:
+        from app.application.services.customer_alias_service import (  # noqa: PLC0415
+            indice_de_alias,
+        )
+
+        alias = await indice_de_alias(session, tenant_id)
+        session.info[_V24_ALIAS_DE_CLIENTE] = alias
+    por_alias = alias.get(nombre)
+    por_nombre = indice.get(nombre)
+    if por_alias is not None and por_nombre is not None and por_alias != por_nombre:
+        return None
+    return por_alias if por_alias is not None else por_nombre
 
 
 async def _ventas_nuevas_a_juzgar(
@@ -6220,6 +6616,7 @@ async def _sacar_ventas_a_otros(
     source: str,
     *,
     fiado_sin_cliente: bool = False,
+    cobro: bool = False,
 ) -> list[Any]:
     """Saca de las ventas las ya insertadas en esta corrida y manda su fila a
     «Otros» con su motivo (B·5e, V-24): revierte el descuento de stock, suelta la
@@ -6299,12 +6696,18 @@ async def _sacar_ventas_a_otros(
             }
             # Las internas van aparte: `_capture_unclassified` descarta toda clave
             # `__x__` de la fila (podría venir del archivo).
+            # Un cobro de fiado no lleva el cliente de la venta (es «Local» o nadie): se
+            # resuelve eligiendo el cliente, y crea un cobro, no una venta.
             internas: dict[str, str] = {
                 MONTO_CANONICO_KEY: "1",
                 **(
-                    {FIADO_SIN_CLIENTE_KEY: "1"}
-                    if fiado_sin_cliente
-                    else filas_internas_de_venta(venta)
+                    {COBRO_DE_FIADO_KEY: "1"}
+                    if cobro
+                    else (
+                        {FIADO_SIN_CLIENTE_KEY: "1"}
+                        if fiado_sin_cliente
+                        else filas_internas_de_venta(venta)
+                    )
                 ),
             }
             for _ident in identidades.get(("sale", venta.id), [])[:1]:
@@ -6324,7 +6727,7 @@ async def _sacar_ventas_a_otros(
                 source,
                 uploaded_file_id,
                 context_label=motivo,
-                suggested_entity="sale",
+                suggested_entity=ENTIDAD_COBRO if cobro else "sale",
                 row_ref=venta.source_row_ref,
                 skip_blank_rows=False,
                 internas=internas,

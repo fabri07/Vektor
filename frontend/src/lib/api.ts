@@ -14,6 +14,16 @@ const TIMEOUT_MS = 15_000;
 // devuelve el registro original, no duplica).
 export const TIMEOUT_ESCRITURA_IDEMPOTENTE_MS = 45_000;
 
+/**
+ * `reclassify` / `link-product` de «Otros» no llevan `Idempotency-Key` pero son
+ * seguros de esperar: el registro se toma con FOR UPDATE y un reintento da 409
+ * `RECORD_ALREADY_RESOLVED` (no duplica). Con 15 s el navegador cortaba mientras el
+ * servidor terminaba y guardaba (pruebas del dueño, 2026-11-16).
+ */
+export function esEscrituraDeOtros(url: string | undefined): boolean {
+  return /\/others\/[^/?]+\/(reclassify|link-product)(\?|$)/.test(url ?? "");
+}
+
 export const api = axios.create({
   baseURL: `${BASE_URL}/api/v1`,
   headers: { "Content-Type": "application/json" },
@@ -41,7 +51,7 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   // fijado a mano por quien llama no se pisa.
   if (
     config.method?.toLowerCase() === "post" &&
-    config.headers["Idempotency-Key"] &&
+    (config.headers["Idempotency-Key"] || esEscrituraDeOtros(config.url)) &&
     (config.timeout === undefined || config.timeout === TIMEOUT_MS)
   ) {
     config.timeout = TIMEOUT_ESCRITURA_IDEMPOTENTE_MS;

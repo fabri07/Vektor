@@ -6,9 +6,10 @@
 // ``tsc`` pero rompe ``next build`` con "is not a valid Page export field" — que es
 // exactamente como se coló, exportado únicamente para que lo importara su test.
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link2, Package, Plus, Trash2 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
+import { othersService } from "@/services/others.service";
 import type {
   ProductMatchCandidate,
   ReclassifyEntityType,
@@ -17,6 +18,7 @@ import type {
 } from "@/services/others.service";
 import { productsService, type ProductCategoryOption } from "@/services/products.service";
 import { customersService, type CustomerResponse } from "@/services/customers.service";
+import { suppliersService } from "@/services/suppliers.service";
 import { ALL_CATEGORIES, CATEGORY_LABELS } from "@/lib/expenseCategories";
 import { PurchaseTermsFields } from "@/features/purchases/PurchaseTermsFields";
 import {
@@ -25,8 +27,15 @@ import {
   termsPayload,
   type PurchaseTerms,
 } from "@/features/purchases/purchaseTerms";
+import {
+  ComboVentaLineas,
+  errorDeCombo,
+  LINEA_VACIA,
+  type LineaDeCombo,
+} from "./ComboVentaLineas";
 import { prefill, rowPreview } from "./helpers";
-import { ProductoVendidoSelector } from "./ProductoVendidoSelector";
+import { ConfirmarAperturaInline } from "@/features/dashboard/AperturasPorConfirmar";
+import { ProductoVendidoSelector, respaldoA } from "./ProductoVendidoSelector";
 
 /** B·5b: «Compra de mercadería» es un destino propio: se resuelve con artículos. */
 type Destino = ReclassifyEntityType | "purchase";
@@ -47,6 +56,8 @@ const FIADO = "account";
 export interface OpcionesDeReclassify {
   /** V-24: el usuario cambió a propósito el medio de una fila importada fiada. */
   cambiar_medio_de_pago?: boolean;
+  /** Combo: las líneas de la venta (la suma tiene que dar el monto de la fila). */
+  items?: { product_id: string; quantity: number; unit_price: number }[];
 }
 
 function normalizarNombre(texto: string): string {
@@ -125,31 +136,60 @@ export function ReclassifyModal({
   const [category, setCategory] = useState("OTHER");
   const [productCategory, setProductCategory] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [proveedorId, setProveedorId] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   // B·5e: una venta lleva producto (y su compra previa); sin él el servidor la
   // rechaza. Se elige acá, con la misma búsqueda que la compra.
   const [ventaProducto, setVentaProducto] = useState("");
-  const [ventaCantidad, setVentaCantidad] = useState("1");
+  const [ventaCantidad, setVentaCantidad] = useState("");
   // V-24: el fiado lleva a quién se le fió (nunca «Local»).
   const [clienteId, setClienteId] = useState("");
+  // Combo: `null` = una venta de un solo producto; con líneas, la venta se reparte.
+  const [comboLineas, setComboLineas] = useState<LineaDeCombo[] | null>(null);
 
   const {
     data: productos = [],
     isError: productosError,
     isLoading: productosCargando,
   } = useQuery({
-    queryKey: ["products-list"],
-    queryFn: () => productsService.getAllProducts({ is_active: true }),
+    queryKey: ["products-list", "con-fuente"],
+    queryFn: () => productsService.getAllProducts({ is_active: true, con_fuente: true }),
     enabled: !!record && (entityType === "purchase" || entityType === "sale"),
     staleTime: 60 * 1000,
+  });
+
+  // Una fila que dice varios productos («Jean + buzo»): el servidor propone las
+  // combinaciones que suman el monto. Es una propuesta; nada se escribe sin confirmar.
+  const { data: sugerenciasDeCombo } = useQuery({
+    queryKey: ["combo-suggestions", record?.id],
+    queryFn: () => othersService.comboSuggestions(record!.id),
+    enabled: !!record && entityType === "sale",
+    staleTime: 60 * 1000,
+    retry: false,
   });
 
   // La forma de pago que guardó el import (B·5e/V-24 la escriben canónica).
   const medioDeLaFila = String(record?.row_data?.medio_de_pago ?? "");
   const esFiadoDeLaFila = medioDeLaFila === FIADO;
   const clienteDeLaFila = String(record?.row_data?.cliente ?? "").trim();
-  const pideCliente = entityType === "sale" && paymentMethod === FIADO;
+  // Un pago a proveedor siempre dice A CUÁL: sin eso no se sabe a quién bajarle la deuda.
+  const esPagoProveedor = entityType === "pago_proveedor";
+  const qc = useQueryClient();
+  // El producto elegido no tiene fuente a la fecha de la venta pero SÍ más tarde (un stock
+  // inicial cargado después): se puede confirmar desde cuándo se tenía.
+  const productoSinRespaldo = productos.find(
+    (p) => p.id === ventaProducto && respaldoA(p, date || undefined) === false,
+  );
+  const { data: proveedores = [], isError: proveedoresError } = useQuery({
+    queryKey: ["suppliers-list"],
+    queryFn: () => suppliersService.getAllSuppliers(),
+    enabled: !!record && esPagoProveedor,
+    staleTime: 60 * 1000,
+  });
+  // Un cobro de fiado siempre lleva el cliente al que se le baja la deuda.
+  const esCobro = entityType === "cobro";
+  const pideCliente = (entityType === "sale" && paymentMethod === FIADO) || esCobro;
 
   // Sin el centinela «Local»: un fiado necesita un cliente real.
   const { data: clientes = [], isError: clientesError } = useQuery({
@@ -159,18 +199,42 @@ export function ReclassifyModal({
     staleTime: 60 * 1000,
   });
 
-  // El cliente que nombraba el archivo, si es uno solo, queda elegido.
+  // Un alias que una persona confirmó antes («Caro G.» → Carolina Giménez): lo propone
+  // el servidor; la persona confirma al importar.
+  const { data: sugerenciaPorAlias } = useQuery({
+    queryKey: ["customer-suggestion", record?.id],
+    queryFn: () => othersService.customerSuggestion(record!.id),
+    enabled: !!record && pideCliente && !!clienteDeLaFila,
+    staleTime: 60 * 1000,
+    retry: false,
+  });
+
+  // El cliente que nombraba el archivo, si es uno solo, queda elegido: primero por el
+  // alias confirmado, después por el nombre exacto de una ficha.
   useEffect(() => {
     if (pideCliente && !clienteId && clienteDeLaFila) {
+      const porAlias = sugerenciaPorAlias?.customer_id;
+      if (porAlias && clientes.some((c) => c.id === porAlias)) {
+        setClienteId(porAlias);
+        return;
+      }
       const sugerido = clienteSugerido(clienteDeLaFila, clientes);
       if (sugerido) setClienteId(sugerido);
     }
-  }, [pideCliente, clienteDeLaFila, clientes, clienteId]);
+  }, [pideCliente, clienteDeLaFila, clientes, clienteId, sugerenciaPorAlias]);
+
+  // «Cuenta corriente» no es un medio con que se pague ni se cobre una deuda.
+  useEffect(() => {
+    if ((esPagoProveedor || esCobro) && paymentMethod === FIADO) setPaymentMethod("cash");
+  }, [esPagoProveedor, esCobro, paymentMethod]);
 
   useEffect(() => {
     if (!record) return;
     const pre = prefill(record);
-    const entity = record.suggested_entity ?? "expense";
+    const entity =
+      record.suggested_entity === "pago_prov"
+        ? "pago_proveedor"
+        : (record.suggested_entity ?? "expense");
     // Una compra de mercadería (con candidatos, o con categoría mercadería) se
     // abre directamente como compra: va con sus artículos.
     const esCompra =
@@ -203,9 +267,11 @@ export function ReclassifyModal({
     const medio = String(record.row_data?.medio_de_pago ?? "");
     setPaymentMethod(MEDIOS_DE_PAGO.includes(medio) ? medio : "cash");
     setClienteId("");
+    setProveedorId("");
     setEmail("");
     setPhone("");
     setVentaProducto("");
+    setComboLineas(null);
     // La cantidad de «Otros» viene en la unidad de venta. Una con decimales no se
     // trunca ni se pega («1.5» no es «15»): queda para que la persona la escriba.
     const cantidadCruda = String(record.row_data?.cantidad ?? pre.quantity ?? "").trim();
@@ -243,7 +309,12 @@ export function ReclassifyModal({
   // F6: la fila llegó a /otros porque no tiene fecha confiable. Al resolverla NO
   // se inventa "hoy": la fecha es obligatoria para venta/gasto. El <input> es
   // required, pero lo validamos explícito (defensa) y nunca construimos un fallback.
-  const needsDate = entityType === "sale" || entityType === "expense" || entityType === "purchase";
+  const needsDate =
+    entityType === "sale" ||
+    entityType === "expense" ||
+    entityType === "purchase" ||
+    entityType === "cobro" ||
+    entityType === "pago_proveedor";
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (needsDate && !date) return;
@@ -262,6 +333,52 @@ export function ReclassifyModal({
         payment_method: paymentMethod,
         ...(supplierName.trim() ? { supplier_name: supplierName.trim() } : {}),
         ...termsPayload(terms),
+      });
+      return;
+    }
+    if (esPagoProveedor) {
+      setIntento(true);
+      // Pagar «a cuenta corriente» no saca plata de ningún lado: no es un medio de pago.
+      if (!proveedorId || !(num > 0) || paymentMethod === FIADO) return;
+      onSave("pago_proveedor", {
+        supplier_id: proveedorId,
+        amount: num,
+        occurred_on: date,
+        payment_method: paymentMethod,
+        notes: text || null,
+      });
+      return;
+    }
+    if (esCobro) {
+      setIntento(true);
+      if (!clienteId || !(num > 0)) return;
+      onSave("cobro", {
+        amount: num,
+        transaction_date: isoDate,
+        // El medio con que se cobró: la caja no lo distingue, queda para rastrearlo.
+        payment_method: paymentMethod,
+        notes: text || null,
+        customer_id: clienteId,
+      });
+      return;
+    }
+    if (entityType === "sale" && comboLineas) {
+      setIntento(true);
+      if (errorDeCombo(comboLineas, num) || (pideCliente && !clienteId)) return;
+      const campos = {
+        amount: num,
+        transaction_date: isoDate,
+        payment_method: paymentMethod,
+        notes: text || null,
+        ...(pideCliente ? { customer_id: clienteId } : {}),
+      };
+      onSave("sale", campos, {
+        items: comboLineas.map((l) => ({
+          product_id: l.productId,
+          quantity: Number(l.quantity),
+          unit_price: Number(l.unitPrice.replace(",", ".")),
+        })),
+        ...(esFiadoDeLaFila && paymentMethod !== FIADO ? { cambiar_medio_de_pago: true } : {}),
       });
       return;
     }
@@ -385,6 +502,13 @@ export function ReclassifyModal({
             onChange={(e) => setEntityType(e.target.value as Destino)}
           >
             <option value="sale">Venta</option>
+            {/* Una venta cuyo detalle dice que se cobró una deuda puede ser un cobro. */}
+            {record.suggested_entity === "cobro" || record.suggested_entity === "sale" ? (
+              <option value="cobro">Cobro de fiado</option>
+            ) : null}
+            {record.suggested_entity === "pago_prov" ? (
+              <option value="pago_proveedor">Pago a proveedor</option>
+            ) : null}
             {/* Sólo una fila de gasto (o sin sugerencia) se resuelve como compra. */}
             {record.suggested_entity === "expense" || record.suggested_entity === null ? (
               <option value="purchase">Compra de mercadería</option>
@@ -423,7 +547,19 @@ export function ReclassifyModal({
             ) : null}
           </div>
         ) : null}
-        {entityType === "sale" ? (
+        {entityType === "sale" && comboLineas ? (
+          <ComboVentaLineas
+            productos={productos}
+            lineas={comboLineas}
+            onLineas={setComboLineas}
+            montoDeLaFila={Number(amount.replace(",", ".")) || 0}
+            sugerencias={sugerenciasDeCombo}
+            mostrarErrores={intento}
+            onVolver={() => setComboLineas(null)}
+            inputClassName={inputCls}
+          />
+        ) : null}
+        {entityType === "sale" && !comboLineas ? (
           <div className="grid gap-2">
             <ProductoVendidoSelector
               productos={productos}
@@ -434,6 +570,7 @@ export function ReclassifyModal({
               referencia={nombreDeLaFila}
               inputClassName={inputCls}
               cargando={productosCargando}
+              diaDeLaVenta={date || undefined}
             >
               <input
                 aria-label="Cantidad vendida"
@@ -445,6 +582,16 @@ export function ReclassifyModal({
                 onChange={(e) => setVentaCantidad(e.target.value)}
               />
             </ProductoVendidoSelector>
+            {productoSinRespaldo?.primer_dia_de_fuente ? (
+              <ConfirmarAperturaInline
+                productId={productoSinRespaldo.id}
+                producto={productoSinRespaldo.name}
+                desde={productoSinRespaldo.primer_dia_de_fuente}
+                alConfirmar={() =>
+                  qc.invalidateQueries({ queryKey: ["products-list"] })
+                }
+              />
+            ) : null}
             {intento && !ventaProducto ? (
               <p role="alert" className="text-xs text-vk-danger">
                 Elegí qué producto se vendió: sin producto no hay compra previa ni costo.
@@ -458,6 +605,28 @@ export function ReclassifyModal({
                 El producto tiene que tener una compra o un stock inicial a esa fecha.
               </p>
             )}
+            {sugerenciasDeCombo && sugerenciasDeCombo.references.length >= 2 ? (
+              <button
+                type="button"
+                className="justify-self-start text-xs text-vk-blue underline"
+                onClick={() => {
+                  const primera = sugerenciasDeCombo.solutions[0];
+                  setComboLineas(
+                    sugerenciasDeCombo.solutions.length === 1 && primera
+                      ? primera.map((l) => ({
+                          productId: l.product_id,
+                          quantity: String(l.quantity),
+                          unitPrice: l.unit_price,
+                        }))
+                      : [{ ...LINEA_VACIA }, { ...LINEA_VACIA }],
+                  );
+                }}
+              >
+                {sugerenciasDeCombo.solutions.length === 1
+                  ? `Parece un combo («${sugerenciasDeCombo.references.join(" + ")}»): una combinación suma el monto. Cargar como combo`
+                  : `Parece un combo («${sugerenciasDeCombo.references.join(" + ")}»). Cargar como combo`}
+              </button>
+            ) : null}
           </div>
         ) : null}
         {isPurchaseResolution ? (
@@ -668,9 +837,41 @@ export function ReclassifyModal({
               <option value="debit_card">Débito</option>
               <option value="credit_card">Crédito</option>
               <option value="qr">QR</option>
-              <option value="account">Cuenta corriente</option>
+              {esPagoProveedor || esCobro ? null : (
+                <option value="account">Cuenta corriente</option>
+              )}
             </select>
           </label>
+        ) : null}
+        {esPagoProveedor ? (
+          <div className="grid gap-1">
+            <label className="grid gap-1 text-sm text-vektor-body">
+              Proveedor al que se le pagó
+              <select
+                className={inputCls}
+                value={proveedorId}
+                onChange={(e) => setProveedorId(e.target.value)}
+                aria-required="true"
+              >
+                <option value="">Elegí un proveedor…</option>
+                {proveedores.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                    {p.last_name ? ` ${p.last_name}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="text-xs text-vk-text-muted">
+              No es un gasto: sale de la caja y baja lo que se le debe a ese proveedor.
+            </span>
+            {proveedoresError ? (
+              <span className="text-xs text-vk-danger">No se pudieron cargar los proveedores.</span>
+            ) : null}
+            {intento && !proveedorId ? (
+              <span className="text-xs text-vk-danger">Elegí a qué proveedor se le pagó.</span>
+            ) : null}
+          </div>
         ) : null}
         {entityType === "sale" && esFiadoDeLaFila && paymentMethod !== FIADO ? (
           <p className="text-xs text-vk-warning">
@@ -680,7 +881,7 @@ export function ReclassifyModal({
         {pideCliente ? (
           <div className="grid gap-1">
             <label className="grid gap-1 text-sm text-vektor-body">
-              Cliente al que se le fió
+              {esCobro ? "Cliente que pagó" : "Cliente al que se le fió"}
               <select
                 className={inputCls}
                 value={clienteId}
@@ -705,10 +906,21 @@ export function ReclassifyModal({
             ) : null}
             {intento && !clienteId ? (
               <span className="text-xs text-vk-danger">
-                El fiado necesita un cliente registrado (no «Local»).
+                {esCobro
+                  ? "El cobro necesita un cliente registrado (no «Local»): se le baja la deuda."
+                  : "El fiado necesita un cliente registrado (no «Local»)."}
               </span>
             ) : null}
           </div>
+        ) : null}
+        {entityType === "sale" && !pideCliente ? (
+          // Sin fiado no se elige cliente: la venta queda en el mostrador. Se dice, en
+          // vez de dejar que «Local» aparezca después sin que nadie lo haya visto.
+          <span className="text-xs text-vk-text-muted">
+            Cliente: «Local» (mostrador, sin identificar)
+            {clienteDeLaFila ? `; el archivo decía «${clienteDeLaFila}»` : ""}. Para que quede
+            a nombre de un cliente registrado, cambiá el medio de pago a fiado.
+          </span>
         ) : null}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">

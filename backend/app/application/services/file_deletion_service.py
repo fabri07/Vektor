@@ -45,7 +45,7 @@ from typing import Any
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.application.services import maintenance_lock_service
+from app.application.services import maintenance_lock_service, supplier_payment_service
 from app.application.services._ledger_restore import (
     entity_changed_since_ledger,
     fields_changed_since_ledger,
@@ -55,6 +55,9 @@ from app.application.services._ledger_restore import (
 from app.application.services.costo_vigente_service import recalcular_pendientes
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
+)
+from app.application.services.owner_capital_service import (
+    anular_de_archivo as anular_capital_de_archivo,
 )
 from app.application.services.stock_service import (
     bloquear_catalogo,
@@ -69,8 +72,10 @@ from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.memory import OperationFingerprint
+from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
+from app.persistence.models.supplier_payment import SupplierPayment
 from app.persistence.models.transaction import ExpenseEntry, SaleEntry
 from app.persistence.models.unclassified_record import (
     UNCLASSIFIED_ROW_REF_PREFIX,
@@ -909,7 +914,9 @@ async def preview_file_deletion(
 
     ventas = await _contar(SaleEntry, SaleEntry.source_upload_id)
     gastos = await _contar(ExpenseEntry, ExpenseEntry.source_upload_id)
+    capital = await _contar(OwnerCapitalMovement, OwnerCapitalMovement.source_upload_id)
     movimientos = await _contar(InventoryMovement, InventoryMovement.source_upload_id)
+    pagos_a_proveedores = await _contar(SupplierPayment, SupplierPayment.source_upload_id)
 
     otros = (
         await session.execute(
@@ -1019,8 +1026,10 @@ async def preview_file_deletion(
     return {
         "ventas": ventas,
         "gastos": gastos,
+        "capital": capital,
         "productos": productos_activos,
         "movimientos_stock": movimientos,
+        "pagos_a_proveedores": pagos_a_proveedores,
         "otros": otros,
         "otros_ya_clasificados": otros_ya_clasificados,
         "has_user_edits": await file_has_user_edits(session, file_id, tenant_id),
@@ -1137,8 +1146,10 @@ async def revert_file_data(
     contadores = {
         "ventas": 0,
         "gastos": 0,
+        "capital": 0,
         "productos": 0,
         "movimientos_stock": 0,
+        "pagos_a_proveedores": 0,
         "otros": 0,
         # Productos que el archivo MODIFICÓ: se les devolvió su valor anterior, o
         # se conservaron porque alguien los editó después del import.
@@ -1183,6 +1194,27 @@ async def revert_file_data(
         gasto.void_reason = VOID_REASON_FILE_DELETED
         contadores["gastos"] += 1
         _efectos_revertidos.append(("expense", gasto.id))
+
+    # 1b. Capital de socios que cargó el archivo → se ANULA (no se borra, como todo
+    #     movimiento de capital) y queda con quién y por qué. Sin esto, borrar el
+    #     archivo dejaba aportes y retiros vivos y huérfanos (la FK es SET NULL).
+    contadores["capital"] = await anular_capital_de_archivo(
+        session,
+        tenant_id=tenant_id,
+        file_id=file_id,
+        user_id=actor_user_id,
+        reason="Se eliminó el archivo que lo cargó",
+    )
+
+    # 1c. Pagos de deuda a proveedores que cargó el archivo: se ANULAN (no se
+    #     borran, igual que el capital), con lo que la deuda vuelve a subir.
+    contadores["pagos_a_proveedores"] = await supplier_payment_service.anular_de_archivo(
+        session,
+        tenant_id=tenant_id,
+        file_id=file_id,
+        user_id=actor_user_id,
+        reason="Se eliminó el archivo que lo cargó",
+    )
 
     # 2. Movimientos de inventario → `void_movement` revierte el efecto de cada
     #    uno sobre stock_units/inventory_balances. Incremental e idempotente:

@@ -60,7 +60,7 @@ def _audit(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    user_id: uuid.UUID,
+    user_id: uuid.UUID | None,
     decision_type: str,
     before: dict[str, object] | None,
     after: dict[str, object],
@@ -90,7 +90,7 @@ async def registrar_movimiento(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    user_id: uuid.UUID,
+    user_id: uuid.UUID | None,
     kind: str,
     amount: Decimal,
     occurred_on: date,
@@ -100,6 +100,8 @@ async def registrar_movimiento(
     endpoint: str = "capital-movements",
     source_type: str = SOURCE_MANUAL,
     triggered_by: str = "ui:owner_capital",
+    source_upload_id: uuid.UUID | None = None,
+    source_ref: str | None = None,
 ) -> OwnerCapitalMovement:
     """Alta de un movimiento en dinero, con su auditoría. No commitea.
 
@@ -117,6 +119,8 @@ async def registrar_movimiento(
         partner_name=partner_name,
         notes=notes,
         source_type=source_type,
+        source_upload_id=source_upload_id,
+        source_ref=source_ref,
         created_by_user_id=user_id,
     )
     session.add(mov)
@@ -197,3 +201,46 @@ async def anular_movimiento(
         endpoint="capital-movements/void",
     )
     return mov
+
+
+async def anular_de_archivo(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    file_id: uuid.UUID,
+    user_id: uuid.UUID | None,
+    reason: str,
+) -> int:
+    """Anula (sin borrar) los movimientos vivos que cargó un archivo. No commitea.
+
+    Es la reversa de «borrar el archivo»: un aporte o retiro nunca se elimina (se
+    anula, con quién y por qué, como el resto del capital). Devuelve cuántos anuló.
+    """
+    movimientos = (
+        await session.execute(
+            select(OwnerCapitalMovement)
+            .where(
+                OwnerCapitalMovement.tenant_id == tenant_id,
+                OwnerCapitalMovement.source_upload_id == file_id,
+                OwnerCapitalMovement.voided_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalars().all()
+    for mov in movimientos:
+        before = _snapshot(mov)
+        mov.voided_at = datetime.now(UTC)
+        mov.voided_by_user_id = user_id
+        mov.void_reason = reason
+        await session.flush()
+        _audit(
+            session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            decision_type=AUDIT_VOIDED,
+            before=before,
+            after=_snapshot(mov),
+            endpoint="ingestion/files/delete",
+            triggered_by="ui:file_deletion",
+        )
+    return len(movimientos)
