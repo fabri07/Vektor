@@ -36,9 +36,37 @@ export interface UnclassifiedRecordResponse {
 
 export type ReclassifyEntityType = "sale" | "expense" | "product" | "customer" | "supplier";
 
+/** Una línea de la venta de un combo, en la unidad de VENTA del producto. */
+export interface ComboItemPayload {
+  product_id: string;
+  quantity: number;
+  unit_price: number;
+}
+
+export interface ComboLineSuggestion {
+  product_id: string;
+  product_name: string;
+  quantity: number;
+  unit_price: string;
+  amount: string;
+}
+
+/** Las combinaciones que suman el monto de una fila combo («Jean + buzo»). */
+export interface ComboSuggestionsResponse {
+  references: string[];
+  amount: string | null;
+  solutions: ComboLineSuggestion[][];
+  reason: string | null;
+}
+
 export interface ReclassifyPayload {
   entity_type: ReclassifyEntityType;
   fields: Record<string, unknown>;
+  /**
+   * Combo: la venta de la fila tiene varias líneas (sólo entity_type="sale"). La
+   * suma de las líneas tiene que dar el monto de `fields.amount`, al centavo.
+   */
+  items?: ComboItemPayload[];
   /**
    * F2-T2b: solo para entity_type="product". Si viene, se VINCULA el registro a
    * ese producto existente (uno de los `match_candidates`) en vez de crear uno
@@ -159,6 +187,11 @@ export const othersService = {
       pending: res.data.pending,
       pendingSuggested: res.data.pending_suggested ?? 0,
     };
+  },
+
+  async comboSuggestions(id: string): Promise<ComboSuggestionsResponse> {
+    const { data } = await api.get<ComboSuggestionsResponse>(`/others/${id}/combo-suggestions`);
+    return data;
   },
 
   async reclassify(id: string, payload: ReclassifyPayload): Promise<void> {

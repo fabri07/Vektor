@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link2, Package, Plus, Trash2 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
+import { othersService } from "@/services/others.service";
 import type {
   ProductMatchCandidate,
   ReclassifyEntityType,
@@ -25,6 +26,12 @@ import {
   termsPayload,
   type PurchaseTerms,
 } from "@/features/purchases/purchaseTerms";
+import {
+  ComboVentaLineas,
+  errorDeCombo,
+  LINEA_VACIA,
+  type LineaDeCombo,
+} from "./ComboVentaLineas";
 import { prefill, rowPreview } from "./helpers";
 import { ProductoVendidoSelector } from "./ProductoVendidoSelector";
 
@@ -47,6 +54,8 @@ const FIADO = "account";
 export interface OpcionesDeReclassify {
   /** V-24: el usuario cambió a propósito el medio de una fila importada fiada. */
   cambiar_medio_de_pago?: boolean;
+  /** Combo: las líneas de la venta (la suma tiene que dar el monto de la fila). */
+  items?: { product_id: string; quantity: number; unit_price: number }[];
 }
 
 function normalizarNombre(texto: string): string {
@@ -133,6 +142,8 @@ export function ReclassifyModal({
   const [ventaCantidad, setVentaCantidad] = useState("");
   // V-24: el fiado lleva a quién se le fió (nunca «Local»).
   const [clienteId, setClienteId] = useState("");
+  // Combo: `null` = una venta de un solo producto; con líneas, la venta se reparte.
+  const [comboLineas, setComboLineas] = useState<LineaDeCombo[] | null>(null);
 
   const {
     data: productos = [],
@@ -143,6 +154,16 @@ export function ReclassifyModal({
     queryFn: () => productsService.getAllProducts({ is_active: true }),
     enabled: !!record && (entityType === "purchase" || entityType === "sale"),
     staleTime: 60 * 1000,
+  });
+
+  // Una fila que dice varios productos («Jean + buzo»): el servidor propone las
+  // combinaciones que suman el monto. Es una propuesta; nada se escribe sin confirmar.
+  const { data: sugerenciasDeCombo } = useQuery({
+    queryKey: ["combo-suggestions", record?.id],
+    queryFn: () => othersService.comboSuggestions(record!.id),
+    enabled: !!record && entityType === "sale",
+    staleTime: 60 * 1000,
+    retry: false,
   });
 
   // La forma de pago que guardó el import (B·5e/V-24 la escriben canónica).
@@ -206,6 +227,7 @@ export function ReclassifyModal({
     setEmail("");
     setPhone("");
     setVentaProducto("");
+    setComboLineas(null);
     // La cantidad de «Otros» viene en la unidad de venta. Una con decimales no se
     // trunca ni se pega («1.5» no es «15»): queda para que la persona la escriba.
     const cantidadCruda = String(record.row_data?.cantidad ?? pre.quantity ?? "").trim();
@@ -262,6 +284,26 @@ export function ReclassifyModal({
         payment_method: paymentMethod,
         ...(supplierName.trim() ? { supplier_name: supplierName.trim() } : {}),
         ...termsPayload(terms),
+      });
+      return;
+    }
+    if (entityType === "sale" && comboLineas) {
+      setIntento(true);
+      if (errorDeCombo(comboLineas, num) || (pideCliente && !clienteId)) return;
+      const campos = {
+        amount: num,
+        transaction_date: isoDate,
+        payment_method: paymentMethod,
+        notes: text || null,
+        ...(pideCliente ? { customer_id: clienteId } : {}),
+      };
+      onSave("sale", campos, {
+        items: comboLineas.map((l) => ({
+          product_id: l.productId,
+          quantity: Number(l.quantity),
+          unit_price: Number(l.unitPrice.replace(",", ".")),
+        })),
+        ...(esFiadoDeLaFila && paymentMethod !== FIADO ? { cambiar_medio_de_pago: true } : {}),
       });
       return;
     }
@@ -423,7 +465,19 @@ export function ReclassifyModal({
             ) : null}
           </div>
         ) : null}
-        {entityType === "sale" ? (
+        {entityType === "sale" && comboLineas ? (
+          <ComboVentaLineas
+            productos={productos}
+            lineas={comboLineas}
+            onLineas={setComboLineas}
+            montoDeLaFila={Number(amount.replace(",", ".")) || 0}
+            sugerencias={sugerenciasDeCombo}
+            mostrarErrores={intento}
+            onVolver={() => setComboLineas(null)}
+            inputClassName={inputCls}
+          />
+        ) : null}
+        {entityType === "sale" && !comboLineas ? (
           <div className="grid gap-2">
             <ProductoVendidoSelector
               productos={productos}
@@ -458,6 +512,28 @@ export function ReclassifyModal({
                 El producto tiene que tener una compra o un stock inicial a esa fecha.
               </p>
             )}
+            {sugerenciasDeCombo && sugerenciasDeCombo.references.length >= 2 ? (
+              <button
+                type="button"
+                className="justify-self-start text-xs text-vk-blue underline"
+                onClick={() => {
+                  const primera = sugerenciasDeCombo.solutions[0];
+                  setComboLineas(
+                    sugerenciasDeCombo.solutions.length === 1 && primera
+                      ? primera.map((l) => ({
+                          productId: l.product_id,
+                          quantity: String(l.quantity),
+                          unitPrice: l.unit_price,
+                        }))
+                      : [{ ...LINEA_VACIA }, { ...LINEA_VACIA }],
+                  );
+                }}
+              >
+                {sugerenciasDeCombo.solutions.length === 1
+                  ? `Parece un combo («${sugerenciasDeCombo.references.join(" + ")}»): una combinación suma el monto. Cargar como combo`
+                  : `Parece un combo («${sugerenciasDeCombo.references.join(" + ")}»). Cargar como combo`}
+              </button>
+            ) : null}
           </div>
         ) : null}
         {isPurchaseResolution ? (

@@ -172,6 +172,7 @@ export default function OtrosPage() {
         ...(targetProductId ? { target_product_id: targetProductId } : {}),
         ...(pesesAlConflicto ? { aplicar_pese_al_conflicto: true } : {}),
         ...(opciones?.cambiar_medio_de_pago ? { cambiar_medio_de_pago: true } : {}),
+        ...(opciones?.items ? { items: opciones.items } : {}),
       }),
     onSuccess: async (_, vars) => {
       setReclassifying(null);
