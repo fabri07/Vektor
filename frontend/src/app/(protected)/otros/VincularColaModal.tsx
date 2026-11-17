@@ -24,6 +24,10 @@ interface DetalleDeError {
   code?: string;
   message?: string;
   product_name?: string | null;
+  // 422 SALE_WITHOUT_PURCHASE: primer día con compra o stock inicial del producto
+  // (null = ninguna) y fecha de la venta que se rechazó.
+  primer_dia_de_fuente?: string | null;
+  sale_date?: string;
 }
 
 interface CuerpoDeError {
@@ -71,6 +75,9 @@ export function mensajeVincular(error: unknown): string {
         "registró). Descartala o revisala desde la lista."
       );
     case "SALE_WITHOUT_PURCHASE":
+      // Con fuente posterior el servidor dice desde cuándo y qué hacer (confirmar
+      // la fecha del stock inicial u otro producto): se muestra tal cual.
+      if (detail.primer_dia_de_fuente && detail.message) return detail.message;
       return (
         `Ese producto${detail.product_name ? ` («${detail.product_name}»)` : ""} no tiene ` +
         "compra ni stock inicial antes de la fecha de la venta: cargá la compra o el " +

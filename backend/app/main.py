@@ -341,6 +341,10 @@ def create_app() -> FastAPI:
                     "message": exc.user_message,
                     "product_id": str(exc.product_id),
                     "product_name": exc.nombre,
+                    "sale_date": exc.dia.isoformat(),
+                    "primer_dia_de_fuente": (
+                        exc.primer_dia.isoformat() if exc.primer_dia is not None else None
+                    ),
                 }
             },
         )
