@@ -9,6 +9,22 @@ export interface ProductoElegible {
   primer_dia_de_fuente?: string | null;
 }
 
+/**
+ * Texto comparable para buscar un producto: sin tildes ni mayúsculas y con cada palabra en
+ * singular («buzos canguro» y «Buzo canguro» son lo mismo). Sólo sirve para filtrar la lista:
+ * nunca decide qué producto es.
+ */
+export function plegarBusqueda(texto: string): string {
+  return texto
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w))
+    .join(" ");
+}
+
 function fechaCorta(iso: string): string {
   const [y, m, d] = iso.slice(0, 10).split("-");
   return `${d}/${m}/${y}`;
@@ -69,11 +85,12 @@ export function ProductoVendidoSelector({
     if (exacto.length === 1) onChange(exacto[0]!.id);
   }, [value, nombre, productos, onChange]);
 
-  const filtro = busqueda.trim().toLowerCase();
+  const filtro = plegarBusqueda(busqueda);
+  const coincide = (p: ProductoElegible) => plegarBusqueda(p.name).includes(filtro);
   // Lo que decía el archivo («Lote camperas») puede no estar contenido en el nombre
   // de ningún producto: filtrar igual dejaba el combo vacío y sin salida. Sin
   // coincidencias se muestra el catálogo entero y se dice por qué.
-  const hayCoincidencias = !filtro || productos.some((p) => p.name.toLowerCase().includes(filtro));
+  const hayCoincidencias = !filtro || productos.some(coincide);
   const sinCoincidencias = !cargando && productos.length > 0 && !hayCoincidencias;
   const select = (
     <select
@@ -86,7 +103,7 @@ export function ProductoVendidoSelector({
       {productos
         .filter(
           (p) =>
-            p.id === value || !filtro || sinCoincidencias || p.name.toLowerCase().includes(filtro),
+            p.id === value || !filtro || sinCoincidencias || coincide(p),
         )
         // Sort estable: los respaldados a la fecha primero, el resto en su orden.
         .map((p, i) => ({ p, i, ok: respaldoA(p, diaDeLaVenta) === false ? 1 : 0 }))
