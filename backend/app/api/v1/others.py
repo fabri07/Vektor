@@ -16,6 +16,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from time import perf_counter
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -112,6 +113,7 @@ from app.domain.product_categories import (
 )
 from app.domain.product_completion import recompute_requires_completion
 from app.domain.sale_unit import a_unidades_base
+from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.customer import Customer
@@ -144,6 +146,28 @@ from app.schemas.transaction import (
 )
 
 router = APIRouter()
+logger = get_logger(__name__)
+
+
+class _Etapas:
+    """Milisegundos por etapa de `_registrar_venta_desde_otros`.
+
+    Las escrituras de «Otros» tardan 5-13 s y no se sabe en qué (pruebas del dueño,
+    2026-11-16): se mide antes de tocar nada, con el mismo `trace_id` del request.
+    """
+
+    def __init__(self) -> None:
+        self._ultimo = perf_counter()
+        self._inicio = self._ultimo
+        self.ms: dict[str, int] = {}
+
+    def marca(self, nombre: str) -> None:
+        ahora = perf_counter()
+        self.ms[nombre] = round((ahora - self._ultimo) * 1000)
+        self._ultimo = ahora
+
+    def total(self) -> int:
+        return round((perf_counter() - self._inicio) * 1000)
 
 
 class UnclassifiedRecordResponse(BaseModel):
@@ -948,6 +972,7 @@ async def _registrar_venta_desde_otros(
 
     No marca la fila como importada: eso lo hace quien la llama, al final.
     """
+    etapas = _Etapas()
     if (
         (record.row_data or {}).get(FIADO_SIN_CLIENTE_KEY)
         and sale_req.payment_method != FIADO_PAYMENT_METHOD
@@ -971,6 +996,7 @@ async def _registrar_venta_desde_otros(
         aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
         entidad="sale",
     )
+    etapas.marca("identidad_libre")
     _cantidad = sale_req.quantity
     if sale_req.product_id is not None:
         _vendido = await session.get(Product, sale_req.product_id)
@@ -981,10 +1007,12 @@ async def _registrar_venta_desde_otros(
     await exigir_respaldo(
         session, tenant_id, [(sale_req.product_id, sale_req.transaction_date.date())]
     )
+    etapas.marca("respaldo")
     if sale_req.product_id is not None:
         await stock_service.check_stock_available(
             sale_req.product_id, tenant_id, _cantidad, session
         )
+    etapas.marca("stock_disponible")
     _fila = record.row_data or {}
     _cliente = sale_req.customer_id
     if _cliente is None and _fila.get(CUSTOMER_REF_KEY):
@@ -1003,6 +1031,7 @@ async def _registrar_venta_desde_otros(
         _cliente,
         is_fiado=sale_req.payment_method == FIADO_PAYMENT_METHOD,
     )
+    etapas.marca("cliente")
     _upload_id = record.uploaded_file_id
     venta = SaleEntry(
         tenant_id=tenant_id,
@@ -1020,9 +1049,11 @@ async def _registrar_venta_desde_otros(
     )
     session.add(venta)
     await session.flush()
+    etapas.marca("alta_venta")
     movimiento = await stock_service.decrement_for_sale(venta, session)
     if movimiento is not None and _upload_id is not None:
         movimiento.source_upload_id = _upload_id
+    etapas.marca("descuento_de_stock")
     await _reclamar_identidad_de_la_fila(
         session,
         tenant_id,
@@ -1031,6 +1062,8 @@ async def _registrar_venta_desde_otros(
         [venta.id],
         aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
     )
+    etapas.marca("reclamo_de_identidad")
+    logger.info("otros.venta.etapas_ms", total_ms=etapas.total(), **etapas.ms)
     return venta
 
 
@@ -1339,9 +1372,15 @@ def _errores_de_validacion(exc: ValidationError) -> list[Any]:
 
 
 def _cantidad_de_la_fila(raw: Any) -> int | None:
-    """La cantidad de la fila de «Otros» si es un entero ≥ 1; si no, ``None``."""
+    """La cantidad de la fila de «Otros» si es un entero ≥ 1; si no, ``None``.
+
+    Una fila SIN cantidad no es una unidad: «Lote 10 remeras» sin columna de
+    cantidad quedaba como venta de 1 unidad sin que nadie la eligiera (pruebas del
+    dueño, 2026-11-16). Sin cantidad se pide (``CANTIDAD_REQUERIDA``), nunca se
+    inventa.
+    """
     if raw is None or str(raw).strip() == "":
-        return 1
+        return None
     try:
         valor = Decimal(str(raw).replace(",", "."))
     except (ArithmeticError, ValueError):
@@ -1511,7 +1550,9 @@ async def link_product(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "code": "CANTIDAD_REQUERIDA",
-                "message": "La cantidad de la fila no es un número entero: indicala.",
+                "message": (
+                    "La fila no trae la cantidad o no es un número entero: indicala."
+                ),
             },
         )
     fecha = body.transaction_date or _fecha_de_la_venta(record.row_data)

@@ -130,7 +130,7 @@ export function ReclassifyModal({
   // B·5e: una venta lleva producto (y su compra previa); sin él el servidor la
   // rechaza. Se elige acá, con la misma búsqueda que la compra.
   const [ventaProducto, setVentaProducto] = useState("");
-  const [ventaCantidad, setVentaCantidad] = useState("1");
+  const [ventaCantidad, setVentaCantidad] = useState("");
   // V-24: el fiado lleva a quién se le fió (nunca «Local»).
   const [clienteId, setClienteId] = useState("");
 
@@ -709,6 +709,15 @@ export function ReclassifyModal({
               </span>
             ) : null}
           </div>
+        ) : null}
+        {entityType === "sale" && !pideCliente ? (
+          // Sin fiado no se elige cliente: la venta queda en el mostrador. Se dice, en
+          // vez de dejar que «Local» aparezca después sin que nadie lo haya visto.
+          <span className="text-xs text-vk-text-muted">
+            Cliente: «Local» (mostrador, sin identificar)
+            {clienteDeLaFila ? `; el archivo decía «${clienteDeLaFila}»` : ""}. Para que quede
+            a nombre de un cliente registrado, cambiá el medio de pago a fiado.
+          </span>
         ) : null}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="rounded border border-vk-border-w px-4 py-2 text-sm">

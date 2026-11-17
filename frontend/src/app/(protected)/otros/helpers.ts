@@ -71,7 +71,9 @@ export function prefill(record: UnclassifiedRecordResponse): {
   let amount = "";
   let date = "";
   let text = "";
-  let quantity = "1";
+  // Sin columna de cantidad queda vacía: «1» era una cantidad inventada que llegaba a
+  // la venta (el modal de compras se pone su propio «1» visible y editable).
+  let quantity = "";
   let unitCost = "";
   for (const [key, value] of Object.entries(record.row_data)) {
     const k = key.toLowerCase();
@@ -79,7 +81,7 @@ export function prefill(record: UnclassifiedRecordResponse): {
     // Normalizar a ISO: un "12/03/2024" crudo dejaba el <input type="date"> vacío.
     if (!date && /(fecha|date|dia)/.test(k)) date = toIsoDate(value);
     if (!text && /(detalle|concepto|descripcion|nombre|producto|item)/.test(k)) text = value;
-    if (quantity === "1" && /^(cantidad|cant|unidades|qty)$/.test(k)) quantity = value;
+    if (!quantity && /^(cantidad|cant|unidades|qty)$/.test(k)) quantity = value;
     if (!unitCost && /(costo|precio.?unit|unitario)/.test(k)) unitCost = value;
   }
   return { amount, date, text, quantity, unitCost };

@@ -185,7 +185,18 @@ export default function OtrosPage() {
     },
     onError: async (error, vars) => {
       const code = errorCode(error);
-      if (code === "DUPLICATE_PRODUCT_IDENTITY") {
+      if (!(error as AxiosError)?.response) {
+        // Sin respuesta (timeout o corte de red): el servidor pudo haber terminado y
+        // guardado igual (el reclassify tarda varios segundos y no se cancela al
+        // cortar el cliente). Reintentar a ciegas daría «ya se había resuelto».
+        toast(
+          "No recibimos la respuesta del servidor: puede que el registro se haya guardado. " +
+            "Actualizamos la lista; revisala antes de volver a importarlo.",
+          "error",
+        );
+        setReclassifying(null);
+        await invalidate();
+      } else if (code === "DUPLICATE_PRODUCT_IDENTITY") {
         toast(
           "Ya existe un producto activo con ese SKU o código de barras. " +
             "Vinculalo a uno de los sugeridos en vez de crear uno nuevo.",

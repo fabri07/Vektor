@@ -501,3 +501,14 @@ describe("botón «Vincular ventas a productos» en /otros", () => {
     expect(svc.getPendingSalesWithReference).toHaveBeenCalledWith(5000);
   });
 });
+
+
+it("un error sin respuesta (timeout) avisa que pudo guardarse, no «probá de nuevo»", async () => {
+  svc.linkProduct!.mockRejectedValueOnce(new Error("timeout of 45000ms exceeded"));
+  await abrirCola([venta("r1", "Yerba")]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+
+  expect(await screen.findByText(/puede que la venta se haya vinculado/)).toBeInTheDocument();
+  expect(screen.queryByText(/Probá de nuevo/)).not.toBeInTheDocument();
+});

@@ -173,11 +173,17 @@ describe("resolución de venta/gasto sin fecha (F6)", () => {
     fireEvent.change(screen.getByPlaceholderText("Buscar producto"), { target: { value: "" } });
     await waitFor(() => expect(screen.getByRole("option", { name: "Soda" })).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Producto vendido"), { target: { value: "product-2" } });
+    // La fila no trae cantidad: no se asume 1, se escribe.
+    fireEvent.change(screen.getByLabelText("Cantidad vendida"), { target: { value: "3" } });
     fireEvent.submit(screen.getByRole("button", { name: /importar/i }).closest("form")!);
     await waitFor(() =>
       expect(onSave).toHaveBeenCalledWith(
         "sale",
-        expect.objectContaining({ transaction_date: "2024-03-05T00:00:00", product_id: "product-2" }),
+        expect.objectContaining({
+          transaction_date: "2024-03-05T00:00:00",
+          product_id: "product-2",
+          quantity: 3,
+        }),
       ),
     );
   });

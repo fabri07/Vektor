@@ -95,6 +95,13 @@ export function mensajeVincular(error: unknown): string {
     case "INVALID_TARGET_PRODUCT":
       return "Ese producto ya no está activo: elegí otro.";
   }
+  if (status === undefined) {
+    // Timeout o corte de red: el servidor pudo guardarla igual.
+    return (
+      "No recibimos la respuesta del servidor: puede que la venta se haya vinculado. " +
+      "Actualizá la cola antes de reintentar."
+    );
+  }
   if (status === 404) return "Esta venta ya no está en «Otros».";
   if (status === 403) {
     return "No tenés permiso para vincular ventas: lo hace el dueño o un administrador.";
