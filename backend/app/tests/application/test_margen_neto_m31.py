@@ -372,8 +372,10 @@ def test_compras_con_texto_libre_viejo_no_restan_como_gasto() -> None:
     from app.application.services.facts_service import es_categoria_de_mercaderia  # noqa: PLC0415
 
     for cat in ("INVENTORY", "mercaderia", "Mercadería", "compras", "compra proveedor",
-                "reposicion"):
+                "reposicion de mercaderia"):
         assert es_categoria_de_mercaderia(cat), cat
+    # «Reposición» a secas ya no es mercadería: «Reposición de caja» es capital.
+    assert not es_categoria_de_mercaderia("reposicion")
     for otra in ("RENT", "TAXES", "OTHER", None):
         assert not es_categoria_de_mercaderia(otra), otra
 
