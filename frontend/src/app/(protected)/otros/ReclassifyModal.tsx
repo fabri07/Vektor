@@ -170,7 +170,9 @@ export function ReclassifyModal({
   const medioDeLaFila = String(record?.row_data?.medio_de_pago ?? "");
   const esFiadoDeLaFila = medioDeLaFila === FIADO;
   const clienteDeLaFila = String(record?.row_data?.cliente ?? "").trim();
-  const pideCliente = entityType === "sale" && paymentMethod === FIADO;
+  // Un cobro de fiado siempre lleva el cliente al que se le baja la deuda.
+  const esCobro = entityType === "cobro";
+  const pideCliente = (entityType === "sale" && paymentMethod === FIADO) || esCobro;
 
   // Sin el centinela «Local»: un fiado necesita un cliente real.
   const { data: clientes = [], isError: clientesError } = useQuery({
@@ -281,7 +283,11 @@ export function ReclassifyModal({
   // F6: la fila llegó a /otros porque no tiene fecha confiable. Al resolverla NO
   // se inventa "hoy": la fecha es obligatoria para venta/gasto. El <input> es
   // required, pero lo validamos explícito (defensa) y nunca construimos un fallback.
-  const needsDate = entityType === "sale" || entityType === "expense" || entityType === "purchase";
+  const needsDate =
+    entityType === "sale" ||
+    entityType === "expense" ||
+    entityType === "purchase" ||
+    entityType === "cobro";
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (needsDate && !date) return;
@@ -300,6 +306,19 @@ export function ReclassifyModal({
         payment_method: paymentMethod,
         ...(supplierName.trim() ? { supplier_name: supplierName.trim() } : {}),
         ...termsPayload(terms),
+      });
+      return;
+    }
+    if (esCobro) {
+      setIntento(true);
+      if (!clienteId || !(num > 0)) return;
+      onSave("cobro", {
+        amount: num,
+        transaction_date: isoDate,
+        // El medio con que se cobró: la caja no lo distingue, queda para rastrearlo.
+        payment_method: paymentMethod,
+        notes: text || null,
+        customer_id: clienteId,
       });
       return;
     }
@@ -443,6 +462,10 @@ export function ReclassifyModal({
             onChange={(e) => setEntityType(e.target.value as Destino)}
           >
             <option value="sale">Venta</option>
+            {/* Una venta cuyo detalle dice que se cobró una deuda puede ser un cobro. */}
+            {record.suggested_entity === "cobro" || record.suggested_entity === "sale" ? (
+              <option value="cobro">Cobro de fiado</option>
+            ) : null}
             {/* Sólo una fila de gasto (o sin sugerencia) se resuelve como compra. */}
             {record.suggested_entity === "expense" || record.suggested_entity === null ? (
               <option value="purchase">Compra de mercadería</option>
@@ -772,7 +795,7 @@ export function ReclassifyModal({
         {pideCliente ? (
           <div className="grid gap-1">
             <label className="grid gap-1 text-sm text-vektor-body">
-              Cliente al que se le fió
+              {esCobro ? "Cliente que pagó" : "Cliente al que se le fió"}
               <select
                 className={inputCls}
                 value={clienteId}
@@ -797,7 +820,9 @@ export function ReclassifyModal({
             ) : null}
             {intento && !clienteId ? (
               <span className="text-xs text-vk-danger">
-                El fiado necesita un cliente registrado (no «Local»).
+                {esCobro
+                  ? "El cobro necesita un cliente registrado (no «Local»): se le baja la deuda."
+                  : "El fiado necesita un cliente registrado (no «Local»)."}
               </span>
             ) : null}
           </div>

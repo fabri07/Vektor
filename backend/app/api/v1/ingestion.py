@@ -4089,6 +4089,8 @@ async def confirm_file(
     parts: list[str] = []
     if counts["ventas"]:
         parts.append(f"{counts['ventas']} venta(s)")
+    if counts.get("cobros_de_fiado"):
+        parts.append(f"{counts['cobros_de_fiado']} cobro(s) de fiado a caja")
     if counts["gastos"]:
         parts.append(f"{counts['gastos']} gasto(s)")
     if counts["productos"]:
@@ -4105,6 +4107,8 @@ async def confirm_file(
     _pendientes_de_revision = (
         counts.get("otros", 0)
         + counts.get("filas_riesgo_a_otros", 0)
+        # Un cobro de fiado sin cliente real espera que se elija de quién es.
+        + counts.get("cobros_sin_cliente", 0)
         # B·5e y V-24: las ventas que el import sacó a «Otros» por regla.
         + counts.get("ventas_sin_compra", 0)
         + counts.get("ventas_sin_producto", 0)
@@ -4160,6 +4164,18 @@ async def confirm_file(
             "que nombran no se pudo identificar con seguridad (no hay una sola ficha "
             "con ese nombre, o el documento, contacto o código no coincide): elegilo "
             "desde «Otros»."
+        )
+    # Un cobro de fiado no es una venta: a caja con su cliente, o a «Otros» sin él.
+    if counts.get("cobros_de_fiado"):
+        warnings.append(
+            f"{counts['cobros_de_fiado']} cobro(s) de fiado entraron a la caja y bajaron la "
+            "deuda de su cliente (no se cuentan como ventas)."
+        )
+    if counts.get("cobros_sin_cliente"):
+        warnings.append(
+            f"{counts['cobros_sin_cliente']} cobro(s) de fiado fueron a «Otros» porque no se "
+            "sabe de qué cliente son: elegí el cliente desde «Otros» y el cobro entra a la "
+            "caja y baja su deuda."
         )
     # Una columna que el usuario mapeó a otra sección y el importador NO escribió.
     # Pasa cuando el destino todavía no está implementado (F-D) o cuando el

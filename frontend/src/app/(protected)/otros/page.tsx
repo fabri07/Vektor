@@ -46,6 +46,7 @@ const ENTITY_LABELS: Record<ReclassifyEntityType, string> = {
   product: "Producto",
   customer: "Cliente",
   supplier: "Proveedor",
+  cobro: "Cobro de fiado",
 };
 
 /** Extrae el `detail.code` de un error de axios (contrato del backend: `{detail:{code}}`). */

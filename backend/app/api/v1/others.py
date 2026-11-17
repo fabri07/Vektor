@@ -127,6 +127,7 @@ from app.domain.product_categories import (
 )
 from app.domain.product_completion import recompute_requires_completion
 from app.domain.sale_unit import a_unidades_base, importe
+from app.domain.transaction import INFLOW_PAYMENT_METHOD
 from app.observability.logger import get_logger
 from app.persistence.db.session import get_db_session
 from app.persistence.models.audit import DecisionAuditLog
@@ -208,7 +209,7 @@ class UnclassifiedRecordResponse(BaseModel):
 
 
 class ReclassifyRequest(BaseModel):
-    entity_type: Literal["sale", "expense", "product", "customer", "supplier"]
+    entity_type: Literal["sale", "expense", "product", "customer", "supplier", "cobro"]
     # Campos del registro a crear; se validan con el schema de creación
     # correspondiente (CreateSaleRequest / CreateExpenseRequest / CreateProductRequest /
     # CreateCustomerRequest / CreateSupplierRequest).
@@ -1283,6 +1284,65 @@ async def _registrar_ventas_de_combo_desde_otros(
     return ventas
 
 
+async def _registrar_cobro_desde_otros(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    record: UnclassifiedRecord,
+    cobro_req: CreateSaleRequest,
+    *,
+    aplicar_pese_al_conflicto: bool = False,
+    user_id: uuid.UUID | None = None,
+) -> SaleEntry:
+    """El COBRO de una fila de «Otros» que el import sacó por no tener cliente.
+
+    «Cobro saldo fiado» no es una venta: es plata que entra a la caja y baja la deuda
+    de un cliente (`payment_method = "inflow"`, sin producto ni stock). Exige un cliente
+    REAL —sin cliente no se sabe a quién bajarle la deuda, igual que un fiado— y deja el
+    nombre que traía el archivo como alias de ese cliente. El medio con que se cobró (el
+    del formulario) queda en `custom_fields`: la caja no distingue el de un cobro.
+    """
+    await _exigir_identidad_libre(
+        session,
+        tenant_id,
+        record,
+        aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
+        entidad="sale",
+    )
+    cliente = await _resolve_sale_customer(
+        session, tenant_id, cobro_req.customer_id, is_fiado=True
+    )
+    await _aprender_alias_del_cliente(session, tenant_id, user_id, cobro_req, record.row_data or {})
+    _upload_id = record.uploaded_file_id
+    cobro = SaleEntry(
+        tenant_id=tenant_id,
+        amount=cobro_req.amount,
+        quantity=1,
+        transaction_date=cobro_req.transaction_date,
+        payment_method=INFLOW_PAYMENT_METHOD,
+        product_id=None,
+        customer_id=cliente,
+        notes=cobro_req.notes,
+        custom_fields={
+            **(cobro_req.custom_fields or {}),
+            "medio_del_cobro": cobro_req.payment_method,
+        },
+        provenance="REAL",
+        source_upload_id=_upload_id,
+        source_row_ref=unclassified_row_ref(record.id) if _upload_id else None,
+    )
+    session.add(cobro)
+    await session.flush()
+    await _reclamar_identidad_de_la_fila(
+        session,
+        tenant_id,
+        record,
+        "sale",
+        [cobro.id],
+        aplicar_pese_al_conflicto=aplicar_pese_al_conflicto,
+    )
+    return cobro
+
+
 @router.post(
     "/{record_id}/reclassify",
     dependencies=[Depends(require_role("OWNER", "ADMIN")), Depends(require_active_subscription)],
@@ -1334,7 +1394,17 @@ async def reclassify_record(
         )
 
     try:
-        if body.entity_type == "sale" and body.items:
+        if body.entity_type == "cobro":
+            await _registrar_cobro_desde_otros(
+                session,
+                tenant.tenant_id,
+                record,
+                CreateSaleRequest(**body.fields),
+                aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
+                user_id=user.user_id,
+            )
+            label = "cobro de fiado"
+        elif body.entity_type == "sale" and body.items:
             await _registrar_ventas_de_combo_desde_otros(
                 session,
                 tenant.tenant_id,

@@ -213,7 +213,7 @@ from app.domain.text_norm import (
     normalize_sku,
     normalize_text,
 )
-from app.domain.transaction import PaymentMethod
+from app.domain.transaction import INFLOW_PAYMENT_METHOD, PaymentMethod
 from app.domain.verticals import Vertical, parse_vertical
 from app.observability.logger import get_logger
 
@@ -345,6 +345,9 @@ def check_nonempty_import(
     _decididas = (
         counts.get("ya_aplicadas", 0)
         + counts.get("conflictos_de_identidad", 0)
+        # Un cobro de fiado: a caja con su cliente o a «Otros» con su motivo.
+        + counts.get("cobros_de_fiado", 0)
+        + counts.get("cobros_sin_cliente", 0)
         # B·5e: una venta sin compra previa o sin producto fue a «Otros» por
         # regla, con su motivo: es una decisión sobre la fila, no un mapeo roto.
         + counts.get("ventas_sin_compra", 0)
@@ -5748,6 +5751,13 @@ async def insert_confirmed_data(
             session, tenant_id, uploaded_file_id, set(_ventas_nuevas), _filas_previas,
             counts, source,
         )
+    # Un cobro de fiado («Cobro saldo fiado») no es una venta: a caja con su cliente, o
+    # a «Otros». Antes del cierre que asigna «Local» y de B·5e, que no juzga un cobro.
+    if _ventas_nuevas:
+        await _cobros_de_fiado_a_caja(
+            session, tenant_id, uploaded_file_id, set(_ventas_nuevas), _filas_previas,
+            counts, source,
+        )
     await assign_orphan_sales_to_local(session, tenant_id)
     # B·5e: toda venta con compra previa. Al final, con las compras y aperturas
     # del archivo ya escritas, para que el orden de las hojas o de las filas no
@@ -6085,6 +6095,123 @@ async def _fiados_sin_cliente_a_otros(
             counts[f"ventas_cliente_{_bucket}"] -= 1
 
 
+#: El motivo con que un cobro de fiado sin cliente real va a «Otros».
+MOTIVO_COBRO_SIN_CLIENTE: Final = (
+    "Cobro de fiado: indicá de qué cliente es (sin cliente no se sabe a quién bajarle la deuda)"
+)
+#: Interna: la fila es un cobro de fiado que el import sacó por no tener cliente.
+#: Resolverla crea el COBRO (`inflow`), nunca una venta.
+COBRO_DE_FIADO_KEY: Final = "__cobro_de_fiado__"
+#: El destino sugerido de esa fila en «Otros» (cabe en `suggested_entity`, 10).
+ENTIDAD_COBRO: Final = "cobro"
+
+
+async def _cobros_de_fiado_a_caja(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    uploaded_file_id: uuid.UUID | None,
+    nuevas_ids: set[uuid.UUID],
+    filas_previas: set[str],
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """«Cobro saldo fiado» no es una venta: es plata que entra a caja y baja la deuda.
+
+    Decisión del dueño (2026-11-16): una venta al fiado mueve stock y no mueve caja al
+    instante; su cobro, después, va directo a caja. Una hoja de ventas lo trae como una
+    fila más (detalle «Cobro saldo fiado» y el medio real con que se cobró), y entraba
+    como «Venta sin producto». Acá, de las ventas NUEVAS de la corrida, las que dicen
+    que cobran una deuda (`domain/cobro_de_fiado`), no son fiadas y no tienen producto:
+
+    - con el cliente identificado (clave fuerte del archivo, nombre exacto de una ficha o
+      alias confirmado) pasan a ``inflow`` con ese cliente: entran a la caja y bajan su
+      deuda, no son ingreso ni tienen margen;
+    - sin cliente real, a «Otros» con su motivo (sin cliente no se sabe a quién bajarle la
+      deuda, igual que el fiado sin cliente): la persona elige el cliente.
+
+    Lo ambiguo —sin la pareja de palabras, con producto o ya fiado— sigue siendo una
+    venta. Va ANTES de B·5e, que no juzga un `inflow`, y del cierre que asigna «Local».
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.domain.cobro_de_fiado import es_texto_de_cobro_de_fiado  # noqa: PLC0415
+    from app.persistence.models._sentinel import SENTINEL_FLAG_KEY  # noqa: PLC0415
+    from app.persistence.models.customer import Customer  # noqa: PLC0415
+
+    nuevas = await _ventas_nuevas_a_juzgar(session, tenant_id, nuevas_ids, filas_previas)
+    candidatas = [
+        v
+        for v in nuevas
+        if v.product_id is None
+        and not _es_fiado(v.payment_method)
+        and (v.payment_method or "").strip().lower() != INFLOW_PAYMENT_METHOD
+        and es_texto_de_cobro_de_fiado(v.notes)
+        and v.product_id not in (session.info.get(_B5E_VINCULO_PENDIENTE) or {})
+    ]
+    if not candidatas:
+        return
+    centinelas = set(
+        (
+            await session.execute(
+                select(Customer.id).where(
+                    Customer.tenant_id == tenant_id,
+                    Customer.custom_fields[SENTINEL_FLAG_KEY].as_string() == "true",
+                )
+            )
+        ).scalars()
+    )
+    sin_cliente: list[Any] = []
+    for venta in candidatas:
+        cliente = venta.customer_id if venta.customer_id not in centinelas else None
+        if cliente is None:
+            crudo = (venta.custom_fields or {}).get("_customer_reference_raw")
+            if crudo:
+                cliente = await _cliente_por_nombre_para_fiado(
+                    session,
+                    tenant_id,
+                    {"name": str(crudo)},
+                    RowReferenceResolution(outcome="unresolved", raw_value=str(crudo)),
+                    PaymentMethod.ACCOUNT.value,
+                )
+        if cliente is None:
+            sin_cliente.append(venta)
+            continue
+        cf = dict(venta.custom_fields or {})
+        # La caja no distingue el medio de un cobro; se conserva para rastrearlo.
+        cf["medio_del_cobro"] = venta.payment_method
+        venta.custom_fields = cf
+        venta.payment_method = INFLOW_PAYMENT_METHOD
+        venta.customer_id = cliente
+        counts["ventas"] = max(0, int(counts.get("ventas", 0)) - 1)
+        counts["cobros_de_fiado"] = counts.get("cobros_de_fiado", 0) + 1
+        # F7c la contó como venta de «Local» o de un cliente: no lo es.
+        _bucket = _REFERENCE_OUTCOME_SUFFIX.get(str(cf.get("_customer_resolution") or ""))
+        if _bucket and counts.get(f"ventas_cliente_{_bucket}"):
+            counts[f"ventas_cliente_{_bucket}"] -= 1
+    await session.flush()
+    if not sin_cliente:
+        return
+    sacadas = await _sacar_ventas_a_otros(
+        session,
+        tenant_id,
+        uploaded_file_id,
+        [(v, MOTIVO_COBRO_SIN_CLIENTE) for v in sin_cliente],
+        {},
+        {},
+        {},
+        source,
+        cobro=True,
+    )
+    counts["ventas"] = max(0, int(counts.get("ventas", 0)) - len(sacadas))
+    counts["cobros_sin_cliente"] = counts.get("cobros_sin_cliente", 0) + len(sacadas)
+    for venta in sacadas:
+        _bucket = _REFERENCE_OUTCOME_SUFFIX.get(
+            str((venta.custom_fields or {}).get("_customer_resolution") or "")
+        )
+        if _bucket and counts.get(f"ventas_cliente_{_bucket}"):
+            counts[f"ventas_cliente_{_bucket}"] -= 1
+
+
 def _es_fiado(payment_method: str | None) -> bool:
     """Sin distinguir mayúsculas, como `es_cobro_de_fiado`."""
     return (payment_method or "").strip().lower() == PaymentMethod.ACCOUNT.value
@@ -6241,6 +6368,7 @@ async def _sacar_ventas_a_otros(
     source: str,
     *,
     fiado_sin_cliente: bool = False,
+    cobro: bool = False,
 ) -> list[Any]:
     """Saca de las ventas las ya insertadas en esta corrida y manda su fila a
     «Otros» con su motivo (B·5e, V-24): revierte el descuento de stock, suelta la
@@ -6320,12 +6448,18 @@ async def _sacar_ventas_a_otros(
             }
             # Las internas van aparte: `_capture_unclassified` descarta toda clave
             # `__x__` de la fila (podría venir del archivo).
+            # Un cobro de fiado no lleva el cliente de la venta (es «Local» o nadie): se
+            # resuelve eligiendo el cliente, y crea un cobro, no una venta.
             internas: dict[str, str] = {
                 MONTO_CANONICO_KEY: "1",
                 **(
-                    {FIADO_SIN_CLIENTE_KEY: "1"}
-                    if fiado_sin_cliente
-                    else filas_internas_de_venta(venta)
+                    {COBRO_DE_FIADO_KEY: "1"}
+                    if cobro
+                    else (
+                        {FIADO_SIN_CLIENTE_KEY: "1"}
+                        if fiado_sin_cliente
+                        else filas_internas_de_venta(venta)
+                    )
                 ),
             }
             for _ident in identidades.get(("sale", venta.id), [])[:1]:
@@ -6345,7 +6479,7 @@ async def _sacar_ventas_a_otros(
                 source,
                 uploaded_file_id,
                 context_label=motivo,
-                suggested_entity="sale",
+                suggested_entity=ENTIDAD_COBRO if cobro else "sale",
                 row_ref=venta.source_row_ref,
                 skip_blank_rows=False,
                 internas=internas,

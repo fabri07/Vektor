@@ -21,7 +21,7 @@ export interface UnclassifiedRecordResponse {
   context_label: string | null;
   headers: string[] | null;
   row_data: Record<string, string>;
-  suggested_entity: "sale" | "expense" | "product" | null;
+  suggested_entity: "sale" | "expense" | "product" | "cobro" | null;
   /** Código canónico recomendado (catálogo de gastos o de productos según destino). */
   suggested_category: string | null;
   suggested_category_label: string | null;
@@ -34,7 +34,14 @@ export interface UnclassifiedRecordResponse {
   created_at: string;
 }
 
-export type ReclassifyEntityType = "sale" | "expense" | "product" | "customer" | "supplier";
+export type ReclassifyEntityType =
+  | "sale"
+  | "expense"
+  | "product"
+  | "customer"
+  | "supplier"
+  /** Cobro de una deuda de un cliente: entra a la caja y baja su deuda, no es venta. */
+  | "cobro";
 
 /** Una línea de la venta de un combo, en la unidad de VENTA del producto. */
 export interface ComboItemPayload {
@@ -115,7 +122,7 @@ export interface OthersGroup {
   file_name: string | null;
   context_id: string | null;
   motivo: string | null;
-  suggested_entity: "sale" | "expense" | "product" | null;
+  suggested_entity: "sale" | "expense" | "product" | "cobro" | null;
   status: "PENDING" | "IMPORTED" | "DISMISSED";
   count: number;
 }
