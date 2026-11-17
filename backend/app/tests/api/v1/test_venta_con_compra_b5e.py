@@ -104,6 +104,9 @@ async def test_sin_compra_da_422_y_con_compra_entra(
         "SALE_WITHOUT_PURCHASE", str(p.id), "Vela"
     )
     assert "no se puede vender algo que no se compró" in d["message"]
+    # Sin ninguna fuente no hay «primer día»: la pantalla pide cargar la compra.
+    assert d["primer_dia_de_fuente"] is None
+    assert d["sale_date"] == hace(1).isoformat()
 
     con = await producto_con_compra(db_session, tid, nombre="Yerba", dia=hace(30))
     r = await client.post("/api/v1/sales", json=_venta(con.id, hace(1)), headers=auth_headers)
@@ -117,7 +120,14 @@ async def test_una_compra_posterior_a_la_venta_no_la_respalda(
     p = await producto_con_compra(db_session, sample_tenant.tenant_id, dia=hace(5))
     r = await client.post("/api/v1/sales", json=_venta(p.id, hace(10)), headers=auth_headers)
     assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "SALE_WITHOUT_PURCHASE"
+    d = r.json()["detail"]
+    assert d["code"] == "SALE_WITHOUT_PURCHASE"
+    # Hay fuente, pero posterior: el error dice desde cuándo (y la pantalla ofrece
+    # confirmar la fecha del stock inicial en vez de pedir «cargá la compra»).
+    assert d["primer_dia_de_fuente"] == hace(5).isoformat()
+    assert d["sale_date"] == hace(10).isoformat()
+    assert "confirmá desde cuándo" in d["message"]
+    assert "no se puede vender algo que no se compró" not in d["message"]
     # El mismo día de la compra, sí.
     r = await client.post("/api/v1/sales", json=_venta(p.id, hace(5)), headers=auth_headers)
     assert r.status_code == 201, r.text

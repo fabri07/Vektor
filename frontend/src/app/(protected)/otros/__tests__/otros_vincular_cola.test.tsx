@@ -512,3 +512,24 @@ it("un error sin respuesta (timeout) avisa que pudo guardarse, no «probá de nu
   expect(await screen.findByText(/puede que la venta se haya vinculado/)).toBeInTheDocument();
   expect(screen.queryByText(/Probá de nuevo/)).not.toBeInTheDocument();
 });
+
+it("SALE_WITHOUT_PURCHASE con fuente posterior muestra el mensaje del servidor, no el genérico", async () => {
+  const mensaje =
+    "«Yerba» tiene compra o stock inicial recién desde el 05/11/2026, y la venta es del 22/10/2026. " +
+    "Si ya tenías ese stock antes, confirmá desde cuándo; si no, elegí otro producto o cargá la compra.";
+  svc.linkProduct!.mockRejectedValueOnce(
+    axiosError(422, {
+      code: "SALE_WITHOUT_PURCHASE",
+      product_name: "Yerba",
+      primer_dia_de_fuente: "2026-11-05",
+      sale_date: "2026-10-22",
+      message: mensaje,
+    }),
+  );
+  await abrirCola([venta("r1", "Yerba")]);
+  await elegir("p-yerba");
+  fireEvent.click(screen.getByRole("button", { name: "Vincular" }));
+
+  expect(await screen.findByText(mensaje)).toBeInTheDocument();
+  expect(screen.queryByText(/cargá la compra o el stock inicial primero/)).not.toBeInTheDocument();
+});

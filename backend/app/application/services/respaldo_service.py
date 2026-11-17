@@ -146,15 +146,33 @@ def motivo_sin_respaldo(
 class VentaSinCompraError(Exception):
     """Una venta de un producto sin compra ni stock inicial con costo a su fecha."""
 
-    def __init__(self, product_id: uuid.UUID, nombre: str, dia: date) -> None:
-        super().__init__(product_id, nombre, dia)
+    def __init__(
+        self,
+        product_id: uuid.UUID,
+        nombre: str,
+        dia: date,
+        primer_dia: date | None = None,
+    ) -> None:
+        super().__init__(product_id, nombre, dia, primer_dia)
         self.product_id = product_id
         self.nombre = nombre
         self.dia = dia
+        #: Primer día con una fuente con costo del producto (``None`` = ninguna).
+        #: Posterior a ``dia`` cuando el producto sí tiene compra o stock inicial,
+        #: pero recién después de la venta: la pantalla distingue ese caso del de
+        #: «no hay nada» (el stock inicial puede estar con la fecha de carga).
+        self.primer_dia = primer_dia
 
     @property
     def user_message(self) -> str:
         # El chat muestra ``user_message`` tal cual (``agent.py``).
+        if self.primer_dia is not None:
+            return (
+                f"«{self.nombre}» tiene compra o stock inicial recién desde el "
+                f"{self.primer_dia:%d/%m/%Y}, y la venta es del {self.dia:%d/%m/%Y}. "
+                "Si ya tenías ese stock antes, confirmá desde cuándo; si no, elegí "
+                "otro producto o cargá la compra."
+            )
         return (
             f"No hay compra ni stock inicial de «{self.nombre}» al {self.dia:%d/%m/%Y}: "
             "no se puede vender algo que no se compró. Cargá la compra o el stock "
@@ -205,7 +223,7 @@ async def exigir_respaldo(
     for producto, dia in lista:
         assert producto is not None
         if not respaldada(primeros.get(producto), dia):
-            raise VentaSinCompraError(producto, nombres[producto], dia)
+            raise VentaSinCompraError(producto, nombres[producto], dia, primeros.get(producto))
 
 
 async def productos_con_fuente_en_archivo(
