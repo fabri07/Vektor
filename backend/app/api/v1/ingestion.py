@@ -2644,6 +2644,10 @@ async def confirm_file(
             _ent_efectiva = _override.get(_cid) or _context_entity.get(_cid)
             if _ent_efectiva:
                 continue
+            # Una hoja de capital de socios («Aportes de socios») tiene su propio
+            # destino —el capital, no una sección del mapeador— y no es "sin sección".
+            if _ctx.get("es_capital"):
+                continue
             if _context_included(_cid, _ent_efectiva):
                 _sin_entidad.append(str(_ctx.get("label") or _cid))
         if _sin_entidad:
@@ -4099,6 +4103,8 @@ async def confirm_file(
         parts.append(f"{counts['clientes']} cliente(s)")
     if counts["proveedores"]:
         parts.append(f"{counts['proveedores']} proveedor(es)")
+    if counts.get("capital"):
+        parts.append(f"{counts['capital']} movimiento(s) de capital de socios")
 
     # E8: cuando no se importó NADA y todo quedó esperando revisión, decirlo. El
     # caso normal es el documento (foto/PDF/texto): F6-A4 no le extrae fecha, así
@@ -4113,6 +4119,8 @@ async def confirm_file(
         + counts.get("ventas_sin_compra", 0)
         + counts.get("ventas_sin_producto", 0)
         + counts.get("ventas_fiado_sin_cliente", 0)
+        # Capital: filas que no se pudieron leer sin adivinar.
+        + counts.get("capital_a_otros", 0)
     )
     if parts:
         message = f"Importados: {', '.join(parts)}. La puntuación será recalculada."
@@ -4141,6 +4149,18 @@ async def confirm_file(
         warnings.append(
             f"{counts['ventas_sin_producto']} venta(s) fueron a «Otros» porque no dicen "
             "qué producto se vendió: elegilo desde «Otros»."
+        )
+    # Capital de socios: lo que no se pudo leer sin adivinar no se carga.
+    if counts.get("capital_a_otros"):
+        warnings.append(
+            f"{counts['capital_a_otros']} fila(s) de capital de socios fueron a «Otros» "
+            "porque falta la fecha, el monto, la forma de pago o no se sabe si es un "
+            "aporte o un retiro: completalas desde «Otros»."
+        )
+    if counts.get("capital_ya_cargado"):
+        warnings.append(
+            f"{counts['capital_ya_cargado']} aporte(s) o retiro(s) de socios ya estaban "
+            "cargados de otra subida del mismo archivo: no se repitieron."
         )
     # V-24: un fiado necesita a quién se le fió. Se distingue la fila que no
     # nombra a nadie de la que nombra un cliente que no se pudo identificar.

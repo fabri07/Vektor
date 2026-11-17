@@ -56,6 +56,9 @@ from app.application.services.costo_vigente_service import recalcular_pendientes
 from app.application.services.operation_identity_service import (
     liberar_identidades_de,
 )
+from app.application.services.owner_capital_service import (
+    anular_de_archivo as anular_capital_de_archivo,
+)
 from app.application.services.stock_service import (
     bloquear_catalogo,
     exigir_reversa_sin_stock_negativo,
@@ -69,6 +72,7 @@ from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.file import UploadedFile
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.memory import OperationFingerprint
+from app.persistence.models.owner_capital import OwnerCapitalMovement
 from app.persistence.models.product import Product
 from app.persistence.models.repair import DataRepairItem, DataRepairRun
 from app.persistence.models.supplier_payment import SupplierPayment
@@ -910,6 +914,7 @@ async def preview_file_deletion(
 
     ventas = await _contar(SaleEntry, SaleEntry.source_upload_id)
     gastos = await _contar(ExpenseEntry, ExpenseEntry.source_upload_id)
+    capital = await _contar(OwnerCapitalMovement, OwnerCapitalMovement.source_upload_id)
     movimientos = await _contar(InventoryMovement, InventoryMovement.source_upload_id)
     pagos_a_proveedores = await _contar(SupplierPayment, SupplierPayment.source_upload_id)
 
@@ -1021,6 +1026,7 @@ async def preview_file_deletion(
     return {
         "ventas": ventas,
         "gastos": gastos,
+        "capital": capital,
         "productos": productos_activos,
         "movimientos_stock": movimientos,
         "pagos_a_proveedores": pagos_a_proveedores,
@@ -1140,6 +1146,7 @@ async def revert_file_data(
     contadores = {
         "ventas": 0,
         "gastos": 0,
+        "capital": 0,
         "productos": 0,
         "movimientos_stock": 0,
         "pagos_a_proveedores": 0,
@@ -1188,7 +1195,18 @@ async def revert_file_data(
         contadores["gastos"] += 1
         _efectos_revertidos.append(("expense", gasto.id))
 
-    # 1b. Pagos de deuda a proveedores que cargó el archivo: se ANULAN (no se
+    # 1b. Capital de socios que cargó el archivo → se ANULA (no se borra, como todo
+    #     movimiento de capital) y queda con quién y por qué. Sin esto, borrar el
+    #     archivo dejaba aportes y retiros vivos y huérfanos (la FK es SET NULL).
+    contadores["capital"] = await anular_capital_de_archivo(
+        session,
+        tenant_id=tenant_id,
+        file_id=file_id,
+        user_id=actor_user_id,
+        reason="Se eliminó el archivo que lo cargó",
+    )
+
+    # 1c. Pagos de deuda a proveedores que cargó el archivo: se ANULAN (no se
     #     borran, igual que el capital), con lo que la deuda vuelve a subir.
     contadores["pagos_a_proveedores"] = await supplier_payment_service.anular_de_archivo(
         session,

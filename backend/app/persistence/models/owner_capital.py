@@ -45,12 +45,15 @@ FORM_ESPECIE = "especie"
 FORMS: tuple[str, ...] = (FORM_DINERO, FORM_ESPECIE)
 
 SOURCE_MANUAL = "manual"
+#: Lo cargó la importación de un archivo (hoja «Aportes de socios»): lleva
+#: ``source_upload_id`` y se anula al borrar el archivo.
+SOURCE_ARCHIVO = "archivo"
 #: Capital inicial declarado en el onboarding (D·5). Es un dato DECLARADO, no
 #: plata contada: ningún agregado de caja lo lee (``flujo_de_dinero`` lo excluye).
 SOURCE_ONBOARDING_DECLARADO = "onboarding_declarado"
 SOURCE_TYPES: tuple[str, ...] = (
     SOURCE_MANUAL,
-    "archivo",
+    SOURCE_ARCHIVO,
     SOURCE_ONBOARDING_DECLARADO,
     "migrado_de_gasto",
 )
