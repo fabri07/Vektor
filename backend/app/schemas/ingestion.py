@@ -120,6 +120,8 @@ class FileDeletionPreviewResponse(BaseModel):
     file_id: UUID
     ventas: int
     gastos: int
+    # Aportes y retiros de socios que cargó el archivo: se ANULAN (no se borran).
+    capital: int = 0
     productos: int
     movimientos_stock: int
     otros: int

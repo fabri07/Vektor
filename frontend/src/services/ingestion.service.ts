@@ -511,6 +511,8 @@ export interface FileDeletionPreview {
   file_id: string;
   ventas: number;
   gastos: number;
+  /** Aportes/retiros de socios que cargó el archivo: se anulan, no se borran. */
+  capital?: number;
   productos: number;
   movimientos_stock: number;
   otros: number;

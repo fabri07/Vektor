@@ -320,6 +320,8 @@ def check_nonempty_import(
         + counts.get("productos", 0)
         + counts.get("clientes", 0)
         + counts.get("proveedores", 0)
+        # Capital de socios: un aporte cargado es un dato importado.
+        + counts.get("capital", 0)
     )
     had_rows = bool(summary.get("row_count")) or any(
         summary.get(k)
@@ -330,6 +332,7 @@ def check_nonempty_import(
             "otros_detectados",
             "clientes_detectados",
             "proveedores_detectados",
+            "capital_detectado",
         )
     )
     confirmed_any = any((confirmed_fields or {}).values()) or any(
@@ -351,6 +354,9 @@ def check_nonempty_import(
         + counts.get("ventas_sin_producto", 0)
         # V-24: un fiado sin cliente, lo mismo.
         + counts.get("ventas_fiado_sin_cliente", 0)
+        # Capital: una fila ya cargada de antes o enviada a «Otros» con su motivo.
+        + counts.get("capital_ya_cargado", 0)
+        + counts.get("capital_a_otros", 0)
     )
     # E8: en un DOCUMENTO (foto/PDF/texto), quedar en «Otros» es el resultado
     # correcto del camino, no un fallback que tape una pérdida. Esos archivos no
@@ -5625,6 +5631,123 @@ def _resolve_stock_treatment(
     return (raw or STOCK_TREATMENT_OPENING_BALANCE) == STOCK_TREATMENT_PURCHASE, {}
 
 
+async def _importar_capital_del_archivo(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    summary: dict[str, Any],
+    uploaded_file_id: uuid.UUID | None,
+    context_confirmed: dict[str, bool] | None,
+    counts: dict[str, Any],
+    source: str,
+) -> None:
+    """Las hojas de capital de socios del archivo → movimientos de capital.
+
+    Un aporte o retiro del socio es capital, nunca gasto ni venta (invariante): se
+    escribe en ``owner_capital_movements`` con la procedencia del archivo
+    (``source_type='archivo'``, ``source_upload_id``), así que borrar el archivo lo
+    ANULA (`file_deletion_service`). La hoja entra salvo que el usuario la haya
+    excluido a propósito (``context_confirmed[ctx] is False``); una hoja que la
+    pantalla no conoce no se pierde en silencio.
+
+    Lo que no se puede leer sin adivinar (fecha, monto, forma de pago o sentido)
+    NO se carga: va a «Otros» con su motivo (`domain/capital_import`). La huella de la
+    fila (`source_ref`) evita cargarla dos veces si el mismo archivo se sube o se
+    relee de nuevo: una fila ya cargada se cuenta como ``capital_ya_cargado``.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.application.services.owner_capital_service import (  # noqa: PLC0415
+        registrar_movimiento,
+    )
+    from app.domain.capital_import import (  # noqa: PLC0415
+        detectar_hoja_de_capital,
+        leer_filas,
+    )
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+    from app.persistence.models.owner_capital import (  # noqa: PLC0415
+        SOURCE_ARCHIVO,
+        OwnerCapitalMovement,
+    )
+
+    filas_del_resumen = summary.get("capital_detectado") or []
+    if not filas_del_resumen or uploaded_file_id is None:
+        return
+    archivo = await session.get(UploadedFile, uploaded_file_id)
+    usuario = archivo.uploaded_by if archivo is not None else None
+    contextos = {
+        str(c.get("context_id")): c for c in (summary.get("mapping_contexts") or [])
+    }
+    por_contexto: dict[str, list[dict[str, Any]]] = {}
+    for fila in filas_del_resumen:
+        por_contexto.setdefault(str(fila.get("__context__") or ""), []).append(fila)
+
+    cargados = rechazados = ya_cargados = 0
+    for contexto_id, filas in por_contexto.items():
+        if context_confirmed and context_confirmed.get(contexto_id) is False:
+            continue
+        ctx = contextos.get(contexto_id) or {}
+        encabezados = list(ctx.get("headers") or [])
+        if not encabezados:
+            encabezados = [k for k in filas[0] if not str(k).startswith("__")]
+        columnas = detectar_hoja_de_capital(encabezados)
+        if columnas is None:
+            continue
+        nombre_de_hoja = str(ctx.get("label") or contexto_id.removeprefix("sheet:"))
+        movimientos, rechazadas = leer_filas(nombre_de_hoja, columnas, filas)
+        refs = [m.source_ref for m in movimientos]
+        existentes: set[str] = set()
+        if refs:
+            existentes = {
+                ref
+                for ref in (
+                    await session.execute(
+                        select(OwnerCapitalMovement.source_ref).where(
+                            OwnerCapitalMovement.tenant_id == tenant_id,
+                            OwnerCapitalMovement.source_ref.in_(refs),
+                            OwnerCapitalMovement.voided_at.is_(None),
+                        )
+                    )
+                ).scalars()
+                if ref is not None
+            }
+        for mov in movimientos:
+            if mov.source_ref in existentes:
+                ya_cargados += 1
+                continue
+            await registrar_movimiento(
+                session,
+                tenant_id=tenant_id,
+                user_id=usuario,
+                kind=mov.kind,
+                amount=mov.amount,
+                occurred_on=mov.occurred_on,
+                payment_method=mov.payment_method,
+                partner_name=mov.partner_name,
+                notes=mov.notes,
+                endpoint="ingestion/confirm",
+                source_type=SOURCE_ARCHIVO,
+                triggered_by="ingestion:capital",
+                source_upload_id=uploaded_file_id,
+                source_ref=mov.source_ref,
+            )
+            cargados += 1
+        for rechazada in rechazadas:
+            counts["otros"] = counts.get("otros", 0) + _capture_unclassified(
+                session,
+                tenant_id,
+                rows=[dict(rechazada.row)],
+                headers=encabezados,
+                source=source,
+                uploaded_file_id=uploaded_file_id,
+                context_label=rechazada.motivo,
+                context_id=contexto_id,
+            )
+            rechazados += 1
+    counts["capital"] = counts.get("capital", 0) + cargados
+    counts["capital_a_otros"] = counts.get("capital_a_otros", 0) + rechazados
+    counts["capital_ya_cargado"] = counts.get("capital_ya_cargado", 0) + ya_cargados
+
+
 async def insert_confirmed_data(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -5747,6 +5870,10 @@ async def insert_confirmed_data(
             counts, source,
         )
     await assign_orphan_sales_to_local(session, tenant_id)
+    # Capital de socios: sus propias hojas, fuera de ventas y gastos.
+    await _importar_capital_del_archivo(
+        session, tenant_id, summary, uploaded_file_id, context_confirmed, counts, source
+    )
     # B·5e: toda venta con compra previa. Al final, con las compras y aperturas
     # del archivo ya escritas, para que el orden de las hojas o de las filas no
     # decida nada.
