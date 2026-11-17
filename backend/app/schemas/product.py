@@ -93,6 +93,10 @@ class ProductResponse(BaseModel):
     #: B·5c: activo y sin stock inicial vivo (``productos_con_apertura_viva``).
     #: ``None`` sólo en respuestas que no lo calculan.
     needs_initial_stock: bool | None = None
+    #: Primer día con una fuente con costo (compra o apertura): sólo con
+    #: ``GET /products?con_fuente=true``. Una venta de ese producto de un día ANTERIOR
+    #: no tiene respaldo (B·5e). ``None``: sin fuente, o no se pidió.
+    primer_dia_de_fuente: date | None = None
 
     @field_validator("custom_fields", mode="before")
     @classmethod

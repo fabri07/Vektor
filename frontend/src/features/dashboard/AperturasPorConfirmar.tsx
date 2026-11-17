@@ -45,14 +45,17 @@ function mensajeDeError(e: unknown): string {
   return "No se pudo guardar la fecha. Probá de nuevo.";
 }
 
-function FilaConFecha({
+export function FilaConFecha({
   titulo,
   detalle,
   confirmar,
+  alConfirmar,
 }: {
   titulo: string;
   detalle: string;
   confirmar: (fecha: string) => Promise<ConfirmarAperturaResponse>;
+  /** Después de guardar la fecha (para refrescar lo que dependa de ella). */
+  alConfirmar?: () => void | Promise<void>;
 }) {
   const qc = useQueryClient();
   // Vacía a propósito: la fecha la dice el usuario, no se supone ninguna.
@@ -63,6 +66,7 @@ function FilaConFecha({
     onSuccess: async (r) => {
       setMensaje(resultadoEnTexto(r));
       await qc.invalidateQueries({ queryKey: ["margins"] });
+      await alConfirmar?.();
     },
     onError: (e) => {
       if (esPinCancelado(e)) return;
@@ -283,5 +287,35 @@ export function AperturasPorConfirmarAviso({ datos }: { datos: AperturasPorConfi
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * La fecha del stock inicial de UN producto, confirmable donde se la necesita (el modal
+ * de «Otros»): una venta de antes de esa fecha se rechaza porque el stock figura desde
+ * la carga, no desde cuando se tenía. Pide PIN; atrasar la fecha no cambia el costo de
+ * las ventas ya costeadas (el resultado lo dice).
+ */
+export function ConfirmarAperturaInline({
+  productId,
+  producto,
+  desde,
+  alConfirmar,
+}: {
+  productId: string;
+  producto: string;
+  /** Desde cuándo figura el stock hoy (YYYY-MM-DD). */
+  desde: string;
+  alConfirmar?: () => void | Promise<void>;
+}) {
+  return (
+    <ul className="grid gap-2">
+      <FilaConFecha
+        titulo={producto}
+        detalle={`El stock figura desde ${fechaCorta(desde)}. Si lo tenías antes, confirmá desde cuándo.`}
+        confirmar={(fecha) => confirmarAperturaDeProducto(productId, fecha)}
+        alConfirmar={alConfirmar}
+      />
+    </ul>
   );
 }

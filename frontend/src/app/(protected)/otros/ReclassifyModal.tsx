@@ -6,7 +6,7 @@
 // ``tsc`` pero rompe ``next build`` con "is not a valid Page export field" — que es
 // exactamente como se coló, exportado únicamente para que lo importara su test.
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link2, Package, Plus, Trash2 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { othersService } from "@/services/others.service";
@@ -34,7 +34,8 @@ import {
   type LineaDeCombo,
 } from "./ComboVentaLineas";
 import { prefill, rowPreview } from "./helpers";
-import { ProductoVendidoSelector } from "./ProductoVendidoSelector";
+import { ConfirmarAperturaInline } from "@/features/dashboard/AperturasPorConfirmar";
+import { ProductoVendidoSelector, respaldoA } from "./ProductoVendidoSelector";
 
 /** B·5b: «Compra de mercadería» es un destino propio: se resuelve con artículos. */
 type Destino = ReclassifyEntityType | "purchase";
@@ -152,8 +153,8 @@ export function ReclassifyModal({
     isError: productosError,
     isLoading: productosCargando,
   } = useQuery({
-    queryKey: ["products-list"],
-    queryFn: () => productsService.getAllProducts({ is_active: true }),
+    queryKey: ["products-list", "con-fuente"],
+    queryFn: () => productsService.getAllProducts({ is_active: true, con_fuente: true }),
     enabled: !!record && (entityType === "purchase" || entityType === "sale"),
     staleTime: 60 * 1000,
   });
@@ -174,6 +175,12 @@ export function ReclassifyModal({
   const clienteDeLaFila = String(record?.row_data?.cliente ?? "").trim();
   // Un pago a proveedor siempre dice A CUÁL: sin eso no se sabe a quién bajarle la deuda.
   const esPagoProveedor = entityType === "pago_proveedor";
+  const qc = useQueryClient();
+  // El producto elegido no tiene fuente a la fecha de la venta pero SÍ más tarde (un stock
+  // inicial cargado después): se puede confirmar desde cuándo se tenía.
+  const productoSinRespaldo = productos.find(
+    (p) => p.id === ventaProducto && respaldoA(p, date || undefined) === false,
+  );
   const { data: proveedores = [], isError: proveedoresError } = useQuery({
     queryKey: ["suppliers-list"],
     queryFn: () => suppliersService.getAllSuppliers(),
@@ -563,6 +570,7 @@ export function ReclassifyModal({
               referencia={nombreDeLaFila}
               inputClassName={inputCls}
               cargando={productosCargando}
+              diaDeLaVenta={date || undefined}
             >
               <input
                 aria-label="Cantidad vendida"
@@ -574,6 +582,16 @@ export function ReclassifyModal({
                 onChange={(e) => setVentaCantidad(e.target.value)}
               />
             </ProductoVendidoSelector>
+            {productoSinRespaldo?.primer_dia_de_fuente ? (
+              <ConfirmarAperturaInline
+                productId={productoSinRespaldo.id}
+                producto={productoSinRespaldo.name}
+                desde={productoSinRespaldo.primer_dia_de_fuente}
+                alConfirmar={() =>
+                  qc.invalidateQueries({ queryKey: ["products-list"] })
+                }
+              />
+            ) : null}
             {intento && !ventaProducto ? (
               <p role="alert" className="text-xs text-vk-danger">
                 Elegí qué producto se vendió: sin producto no hay compra previa ni costo.

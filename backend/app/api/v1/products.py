@@ -135,7 +135,11 @@ async def _tenant_vertical(session: AsyncSession, tenant_id: UUID) -> Vertical:
 
 
 async def _con_sugerencias(
-    session: AsyncSession, tenant_id: UUID, products: list[Product]
+    session: AsyncSession,
+    tenant_id: UUID,
+    products: list[Product],
+    *,
+    con_fuente: bool = False,
 ) -> list[ProductResponse]:
     """Serializa productos y les agrega ``category_suggestion`` (B·3).
 
@@ -163,9 +167,15 @@ async def _con_sugerencias(
     con_apertura = await apertura_service.productos_con_apertura_viva(
         session, tenant_id, [p.id for p in products]
     )
+    primeros = (
+        await primeros_dias_de_fuente(session, tenant_id, [p.id for p in products])
+        if con_fuente
+        else {}
+    )
     out: list[ProductResponse] = []
     for product in products:
         response = ProductResponse.model_validate(product)
+        response.primer_dia_de_fuente = primeros.get(product.id)
         response.needs_initial_stock = bool(product.is_active) and product.id not in con_apertura
         registro = promedios.get(product.id)
         if registro is not None:
@@ -397,6 +407,9 @@ async def list_products(
     is_active: bool | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    # Con `true`, cada producto trae `primer_dia_de_fuente`: «Otros» ordena y marca los
+    # que tienen respaldo a la fecha de la venta (B·5e).
+    con_fuente: bool = Query(default=False),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ProductResponse]:
@@ -404,7 +417,7 @@ async def list_products(
     products = await repo.list_by_tenant(
         tenant.tenant_id, is_active=is_active, limit=limit, offset=offset
     )
-    return await _con_sugerencias(session, tenant.tenant_id, list(products))
+    return await _con_sugerencias(session, tenant.tenant_id, list(products), con_fuente=con_fuente)
 
 
 @router.get(
