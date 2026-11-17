@@ -315,7 +315,7 @@ async def test_los_movimientos_de_stock_llevan_el_archivo_de_la_fila(
     ventas = await _ventas(db_session, sample_tenant)
     assert {v.source_upload_id for v in ventas} == {archivo.id}
     refs = {v.source_row_ref for v in ventas}
-    assert len(refs) == 1 and next(iter(refs)).endswith(str(rec.id))
+    assert len(refs) == 1 and str(next(iter(refs))).endswith(str(rec.id))
     movs = (
         await db_session.execute(
             select(InventoryMovement).where(

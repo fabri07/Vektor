@@ -8,7 +8,7 @@ import React from "react";
 import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import type { UnclassifiedRecordResponse } from "@/services/others.service";
+import { othersService, type UnclassifiedRecordResponse } from "@/services/others.service";
 import { customersService } from "@/services/customers.service";
 import { ReclassifyModal } from "../ReclassifyModal";
 
@@ -155,4 +155,26 @@ it("cambiar el medio a propósito viaja como marca explícita y sin cliente", as
     ),
   );
   expect(onSave.mock.calls[0][1]).toMatchObject({ payment_method: "cash" });
+});
+
+it("un alias confirmado antes («Caro G.» → Ana) deja al cliente sugerido aunque el nombre no coincida", async () => {
+  const espia = jest
+    .spyOn(othersService, "customerSuggestion")
+    .mockResolvedValue({ customer_id: "c-ana", via: "alias" });
+  abrir(fila({ cliente: "Caro G." }), jest.fn());
+  const cliente = await screen.findByLabelText("Cliente al que se le fió");
+  await waitFor(() => expect(cliente).toHaveValue("c-ana"));
+  expect(screen.getByText(/El archivo decía: «Caro G\.»/)).toBeInTheDocument();
+  espia.mockRestore();
+});
+
+it("sin alias ni nombre que coincida no se sugiere a nadie", async () => {
+  const espia = jest
+    .spyOn(othersService, "customerSuggestion")
+    .mockResolvedValue({ customer_id: null, via: null });
+  abrir(fila({ cliente: "Caro G." }), jest.fn());
+  const cliente = await screen.findByLabelText("Cliente al que se le fió");
+  await waitFor(() => expect(espia).toHaveBeenCalled());
+  expect(cliente).toHaveValue("");
+  espia.mockRestore();
 });

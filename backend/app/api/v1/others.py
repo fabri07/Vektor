@@ -49,6 +49,10 @@ from app.api.v1.products import (
 from app.api.v1.sales import FIADO_PAYMENT_METHOD, _resolve_sale_customer
 from app.application.services import compra_service, maintenance_lock_service, stock_service
 from app.application.services._ledger_restore import snapshot_master
+from app.application.services.customer_alias_service import (
+    aprender_alias,
+    cliente_por_alias,
+)
 from app.application.services.file_deletion_service import (
     ACTION_CREATE_CUSTOMER,
     ACTION_CREATE_PRODUCT,
@@ -986,6 +990,7 @@ async def _registrar_venta_desde_otros(
     *,
     aplicar_pese_al_conflicto: bool = False,
     cambiar_medio_de_pago: bool = False,
+    user_id: uuid.UUID | None = None,
 ) -> SaleEntry:
     """La venta de una fila de «Otros». Fuente única de `reclassify` (como venta)
     y de `link-product` (B·8a): las dos salidas tienen que dar la misma venta.
@@ -1058,6 +1063,7 @@ async def _registrar_venta_desde_otros(
         _cliente,
         is_fiado=sale_req.payment_method == FIADO_PAYMENT_METHOD,
     )
+    await _aprender_alias_del_cliente(session, tenant_id, user_id, sale_req, _fila)
     etapas.marca("cliente")
     _upload_id = record.uploaded_file_id
     venta = SaleEntry(
@@ -1094,6 +1100,31 @@ async def _registrar_venta_desde_otros(
     return venta
 
 
+async def _aprender_alias_del_cliente(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID | None,
+    sale_req: CreateSaleRequest,
+    fila: dict[str, Any],
+) -> None:
+    """La persona eligió el cliente de una fila que el archivo nombraba de otra forma
+    («Caro G.»): ese nombre queda como alias de SU cliente, así la próxima carga lo
+    reconoce sola. Sólo con cliente elegido a propósito (`sale_req.customer_id`); un
+    conflicto (el alias ya es de otro cliente o es el nombre de otra ficha) no escribe
+    nada y nunca frena la venta que se está resolviendo."""
+    nombre_del_archivo = fila.get("cliente")
+    if sale_req.customer_id is None or not nombre_del_archivo:
+        return
+    resultado = await aprender_alias(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        texto=str(nombre_del_archivo),
+        customer_id=sale_req.customer_id,
+    )
+    logger.info("otros.alias_de_cliente", resultado=resultado)
+
+
 def _exigir_cambio_de_medio_explicito(
     record: UnclassifiedRecord, sale_req: CreateSaleRequest, cambiar_medio_de_pago: bool
 ) -> None:
@@ -1126,6 +1157,7 @@ async def _registrar_ventas_de_combo_desde_otros(
     *,
     aplicar_pese_al_conflicto: bool = False,
     cambiar_medio_de_pago: bool = False,
+    user_id: uuid.UUID | None = None,
 ) -> list[SaleEntry]:
     """Las ventas de una fila combo de «Otros»: UNA venta por línea, agrupadas.
 
@@ -1213,6 +1245,7 @@ async def _registrar_ventas_de_combo_desde_otros(
         _cliente,
         is_fiado=sale_req.payment_method == FIADO_PAYMENT_METHOD,
     )
+    await _aprender_alias_del_cliente(session, tenant_id, user_id, sale_req, _fila)
     _upload_id = record.uploaded_file_id
     grupo = uuid.uuid4()
     ventas: list[SaleEntry] = []
@@ -1310,6 +1343,7 @@ async def reclassify_record(
                 body.items,
                 aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
                 cambiar_medio_de_pago=body.cambiar_medio_de_pago,
+                user_id=user.user_id,
             )
             label = "venta"
         elif body.entity_type == "sale":
@@ -1320,6 +1354,7 @@ async def reclassify_record(
                 CreateSaleRequest(**body.fields),
                 aplicar_pese_al_conflicto=body.aplicar_pese_al_conflicto,
                 cambiar_medio_de_pago=body.cambiar_medio_de_pago,
+                user_id=user.user_id,
             )
             label = "venta"
         elif body.entity_type == "expense":
@@ -1553,6 +1588,32 @@ async def reclassify_record(
         session, str(tenant.tenant_id), "unclassified_reclassified"
     )
     return MessageResponse(message=f"Registro importado como {label}.")
+
+
+class CustomerSuggestionResponse(BaseModel):
+    customer_id: UUID | None
+    #: ``alias`` (lo confirmó una persona) o ``None`` (sin sugerencia).
+    via: str | None = None
+
+
+@router.get(
+    "/{record_id}/customer-suggestion",
+    dependencies=[Depends(require_role("OWNER", "ADMIN"))],
+    response_model=CustomerSuggestionResponse,
+    summary="El cliente que un alias confirmado asigna al nombre que decía el archivo",
+)
+async def customer_suggestion(
+    record_id: UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> CustomerSuggestionResponse:
+    """Sólo propone (la persona confirma en el modal): si el nombre que traía la fila
+    es un alias que una persona confirmó antes, devuelve ese cliente."""
+    record = await _get_pending_record(session, tenant.tenant_id, record_id)
+    cid = await cliente_por_alias(
+        session, tenant.tenant_id, str((record.row_data or {}).get("cliente") or "")
+    )
+    return CustomerSuggestionResponse(customer_id=cid, via="alias" if cid else None)
 
 
 @router.get(

@@ -189,6 +189,14 @@ export const othersService = {
     };
   },
 
+  /** El cliente que un alias confirmado asigna al nombre que decía el archivo. */
+  async customerSuggestion(id: string): Promise<{ customer_id: string | null; via: string | null }> {
+    const { data } = await api.get<{ customer_id: string | null; via: string | null }>(
+      `/others/${id}/customer-suggestion`,
+    );
+    return data;
+  },
+
   async comboSuggestions(id: string): Promise<ComboSuggestionsResponse> {
     const { data } = await api.get<ComboSuggestionsResponse>(`/others/${id}/combo-suggestions`);
     return data;

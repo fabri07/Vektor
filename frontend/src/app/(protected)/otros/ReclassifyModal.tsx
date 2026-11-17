@@ -180,13 +180,29 @@ export function ReclassifyModal({
     staleTime: 60 * 1000,
   });
 
-  // El cliente que nombraba el archivo, si es uno solo, queda elegido.
+  // Un alias que una persona confirmó antes («Caro G.» → Carolina Giménez): lo propone
+  // el servidor; la persona confirma al importar.
+  const { data: sugerenciaPorAlias } = useQuery({
+    queryKey: ["customer-suggestion", record?.id],
+    queryFn: () => othersService.customerSuggestion(record!.id),
+    enabled: !!record && pideCliente && !!clienteDeLaFila,
+    staleTime: 60 * 1000,
+    retry: false,
+  });
+
+  // El cliente que nombraba el archivo, si es uno solo, queda elegido: primero por el
+  // alias confirmado, después por el nombre exacto de una ficha.
   useEffect(() => {
     if (pideCliente && !clienteId && clienteDeLaFila) {
+      const porAlias = sugerenciaPorAlias?.customer_id;
+      if (porAlias && clientes.some((c) => c.id === porAlias)) {
+        setClienteId(porAlias);
+        return;
+      }
       const sugerido = clienteSugerido(clienteDeLaFila, clientes);
       if (sugerido) setClienteId(sugerido);
     }
-  }, [pideCliente, clienteDeLaFila, clientes, clienteId]);
+  }, [pideCliente, clienteDeLaFila, clientes, clienteId, sugerenciaPorAlias]);
 
   useEffect(() => {
     if (!record) return;

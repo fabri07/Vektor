@@ -5702,6 +5702,7 @@ async def insert_confirmed_data(
     # V-19: nada de una corrida anterior que haya salido por excepción.
     session.info.pop(_V19_PLANES, None)
     session.info.pop(_V24_CLIENTES_POR_NOMBRE, None)
+    session.info.pop(_V24_ALIAS_DE_CLIENTE, None)
     sa_event.listen(session.sync_session, "after_flush", _anotar_ventas_nuevas)
     try:
         counts = await _insert_confirmed_data_impl(
@@ -5732,6 +5733,7 @@ async def insert_confirmed_data(
     finally:
         sa_event.remove(session.sync_session, "after_flush", _anotar_ventas_nuevas)
         session.info.pop(_V24_CLIENTES_POR_NOMBRE, None)
+        session.info.pop(_V24_ALIAS_DE_CLIENTE, None)
 
     # M·1c-2: red de seguridad por si algún camino del import salió antes de
     # cerrar sus costos. Vacía = no-op.
@@ -6091,6 +6093,9 @@ def _es_fiado(payment_method: str | None) -> bool:
 #: ``session.info``: ``{nombre normalizado: id del cliente | None si es ambiguo}``,
 #: armado una vez por import (``insert_confirmed_data`` lo limpia).
 _V24_CLIENTES_POR_NOMBRE = "v24_clientes_por_nombre"
+#: ``session.info``: ``{alias normalizado: cliente}`` confirmados por una persona,
+#: armado una vez por import (`insert_confirmed_data` lo limpia).
+_V24_ALIAS_DE_CLIENTE = "v24_alias_de_cliente"
 
 
 async def _cliente_por_nombre_para_fiado(
@@ -6153,7 +6158,23 @@ async def _cliente_por_nombre_para_fiado(
             if forma
         }
         session.info[_V24_CLIENTES_POR_NOMBRE] = indice
-    return indice.get(nombre)
+    # Un alias confirmado por una persona («Caro G.» → Carolina Giménez) identifica a
+    # su cliente aunque ese texto no sea el nombre de ninguna ficha. Si además el
+    # nombre coincide con OTRA ficha, la fila contradice al alias: no se elige a
+    # ninguna (va a «Otros»).
+    alias = session.info.get(_V24_ALIAS_DE_CLIENTE)
+    if alias is None:
+        from app.application.services.customer_alias_service import (  # noqa: PLC0415
+            indice_de_alias,
+        )
+
+        alias = await indice_de_alias(session, tenant_id)
+        session.info[_V24_ALIAS_DE_CLIENTE] = alias
+    por_alias = alias.get(nombre)
+    por_nombre = indice.get(nombre)
+    if por_alias is not None and por_nombre is not None and por_alias != por_nombre:
+        return None
+    return por_alias if por_alias is not None else por_nombre
 
 
 async def _ventas_nuevas_a_juzgar(
