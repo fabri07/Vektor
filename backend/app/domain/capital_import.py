@@ -43,6 +43,7 @@ MOTIVO_SIN_SENTIDO: Final = (
     "No se sabe si es un aporte o un retiro del socio: indicalo (no se adivina)"
 )
 
+_PRODUCTO = {"producto", "productos", "articulo", "articulos", "item", "sku", "cantidad"}
 _SOCIO = {"socio", "socia", "socios", "aportante", "partner"}
 _MONTO = {
     "monto", "monto ars", "importe", "importe ars", "total", "total ars", "valor",
@@ -134,6 +135,10 @@ def detectar_hoja_de_capital(headers: Sequence[str]) -> ColumnasDeCapital | None
     monto = _por_rol(headers, _MONTO)
     if socio is None or monto is None:
         return None
+    # Un libro de ventas o compras con una columna «Socio» (de un club, de un vendedor)
+    # no es capital: si la hoja nombra un producto, es una venta o una compra.
+    if _por_rol(headers, _PRODUCTO) is not None:
+        return None
     return ColumnasDeCapital(
         socio=socio,
         monto=monto,
@@ -174,10 +179,10 @@ def medio_de_pago(texto: Any) -> str | None:
     return _MEDIOS.get(normalize_text(texto if texto is not None else ""))
 
 
-def _huella(hoja: str, orden: int, kind: str, monto: Decimal, dia: date, socio: str, medio: str,
-            concepto: str) -> str:
+def _huella(hoja: str, repeticion: int, kind: str, monto: Decimal, dia: date, socio: str,
+            medio: str, concepto: str) -> str:
     base = "|".join(
-        [normalize_text(hoja), str(orden), kind, str(monto), dia.isoformat(),
+        [normalize_text(hoja), str(repeticion), kind, str(monto), dia.isoformat(),
          normalize_text(socio), medio, normalize_text(concepto)]
     )
     return "arch:" + hashlib.sha256(base.encode("utf-8")).hexdigest()[:40]
@@ -190,15 +195,17 @@ def leer_filas(
 ) -> tuple[list[MovimientoDeCapital], list[FilaRechazada]]:
     """Cada fila a un movimiento de capital, o rechazada con su motivo.
 
-    La fecha se interpreta con el convenio de su COLUMNA (resuelto una vez) y una
-    fecha ilegible o futura nunca se reemplaza por hoy; el medio y el sentido se
-    reconocen o la fila no se carga. Orden estable: el índice de la fila entra en la
-    huella, así que dos filas idénticas del mismo archivo son dos movimientos.
+    Una fecha ilegible, ambigua («05/03/2026») o futura nunca se reemplaza por hoy: la
+    fila va a «Otros» con su motivo; el medio y el sentido se reconocen o la fila no se
+    carga. La huella NO usa la posición de la fila (un archivo corregido con una fila
+    insertada no re-cargaría las demás) sino cuántas veces ya apareció el mismo
+    contenido: dos filas idénticas del mismo archivo siguen siendo dos movimientos.
     """
     sentido_hoja = sentido_por_nombre_de_hoja(nombre_de_hoja)
     movimientos: list[MovimientoDeCapital] = []
     rechazadas: list[FilaRechazada] = []
-    for orden, fila in enumerate(filas):
+    vistas: dict[tuple[str, str, str, str, str, str], int] = {}
+    for fila in filas:
         if all(v in (None, "") for k, v in fila.items() if not str(k).startswith("__")):
             continue
         dia = None
@@ -226,6 +233,10 @@ def leer_filas(
             rechazadas.append(FilaRechazada(fila, MOTIVO_SIN_SENTIDO))
             continue
         socio = str(fila.get(columnas.socio) or "").strip()
+        contenido = (kind, str(monto), dia.isoformat(), normalize_text(socio), medio,
+                     normalize_text(concepto))
+        repeticion = vistas.get(contenido, 0)
+        vistas[contenido] = repeticion + 1
         movimientos.append(
             MovimientoDeCapital(
                 kind=kind,
@@ -235,7 +246,7 @@ def leer_filas(
                 partner_name=socio[:120] or None,
                 notes=concepto[:1000] or None,
                 source_ref=_huella(
-                    nombre_de_hoja, orden, kind, monto, dia, socio, medio, concepto
+                    nombre_de_hoja, repeticion, kind, monto, dia, socio, medio, concepto
                 ),
             )
         )

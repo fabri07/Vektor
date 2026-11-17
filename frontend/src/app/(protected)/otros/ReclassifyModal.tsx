@@ -223,10 +223,10 @@ export function ReclassifyModal({
     }
   }, [pideCliente, clienteDeLaFila, clientes, clienteId, sugerenciaPorAlias]);
 
-  // «Cuenta corriente» no es un medio con que se pague una deuda.
+  // «Cuenta corriente» no es un medio con que se pague ni se cobre una deuda.
   useEffect(() => {
-    if (esPagoProveedor && paymentMethod === FIADO) setPaymentMethod("cash");
-  }, [esPagoProveedor, paymentMethod]);
+    if ((esPagoProveedor || esCobro) && paymentMethod === FIADO) setPaymentMethod("cash");
+  }, [esPagoProveedor, esCobro, paymentMethod]);
 
   useEffect(() => {
     if (!record) return;
@@ -837,7 +837,9 @@ export function ReclassifyModal({
               <option value="debit_card">Débito</option>
               <option value="credit_card">Crédito</option>
               <option value="qr">QR</option>
-              {esPagoProveedor ? null : <option value="account">Cuenta corriente</option>}
+              {esPagoProveedor || esCobro ? null : (
+                <option value="account">Cuenta corriente</option>
+              )}
             </select>
           </label>
         ) : null}

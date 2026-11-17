@@ -10,6 +10,7 @@ venta/gasto/producto queda en ``unclassified_records``. Desde acá el tenant:
     `POST /others/dismiss-group/preview` → `POST /others/dismiss-group`).
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -1780,7 +1781,9 @@ async def combo_suggestions(
                 "Ningún producto con compra o stock inicial a esa fecha coincide con "
                 f"«{referencia}»."
             )
-    soluciones = resolver(monto, por_referencia)
+    # Hasta ~400.000 combinaciones de aritmética decimal: en un hilo, no en el event loop
+    # (si no, cada modal de combo frenaba a todos los demás negocios).
+    soluciones = await asyncio.to_thread(resolver, monto, por_referencia)
     return ComboSuggestionsResponse(
         references=referencias,
         amount=monto,

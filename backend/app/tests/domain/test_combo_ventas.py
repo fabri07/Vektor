@@ -90,3 +90,10 @@ def test_el_espacio_de_busqueda_esta_acotado() -> None:
     muchos = [[c(f"{i}-{k}", f"p{i}{k}", str(100 + k)) for k in range(12)] for i in range(4)]
     # No cuelga y devuelve a lo sumo MAX_SOLUCIONES.
     assert len(resolver(Decimal("450"), muchos)) <= 20
+
+
+def test_una_coma_o_barra_dentro_de_un_numero_no_separa_productos() -> None:
+    assert referencias_de("Coca 1,5L") == []
+    assert referencias_de("Aceite 1/2 L") == []
+    assert referencias_de("Jean, buzo") == ["Jean", "buzo"]
+    assert referencias_de("Jean / buzo") == ["Jean", "buzo"]

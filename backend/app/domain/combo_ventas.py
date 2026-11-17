@@ -32,7 +32,10 @@ MAX_SOLUCIONES: Final = 20
 #: línea en vez de colgar la request.
 MAX_ESPACIO_DE_BUSQUEDA: Final = 400_000
 
-_SEPARADOR = re.compile(r"\s*(?:\+|,|;|/|&|\by\b|\be\b)\s*", re.IGNORECASE)
+# «+», «;», «&», «y», «e» separan; «,» y «/» sólo FUERA de un número («Coca 1,5L», «Aceite 1/2 L»).
+_SEPARADOR = re.compile(
+    r"\s*(?:\+|;|&|\by\b|\be\b|(?<!\d),|,(?!\d)|(?<!\d)/|/(?!\d))\s*", re.IGNORECASE
+)
 _CANTIDAD_ADELANTE = re.compile(r"^\d+\s*x?\s+")
 
 

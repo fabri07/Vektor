@@ -122,3 +122,17 @@ def test_las_filas_vacias_se_ignoran() -> None:
     assert cols is not None
     vacia = {h: None for h in HEADERS}
     assert leer_filas("Aportes de socios", cols, [vacia]) == ([], [])
+
+
+def test_una_fila_insertada_antes_no_cambia_la_huella_de_las_demas() -> None:
+    """Un archivo corregido (una fila nueva arriba) no vuelve a cargar las que ya estaban."""
+    cols = detectar_hoja_de_capital(HEADERS)
+    assert cols is not None
+    otra = {**FILA, "Monto ARS": 50000, "Fecha": "2026-10-21"}
+    antes, _ = leer_filas("Aportes de socios", cols, [FILA])
+    despues, _ = leer_filas("Aportes de socios", cols, [otra, FILA])
+    assert antes[0].source_ref == despues[1].source_ref
+
+
+def test_un_libro_de_ventas_con_columna_socio_no_es_capital() -> None:
+    assert detectar_hoja_de_capital(["Fecha", "Socio", "Producto", "Total"]) is None

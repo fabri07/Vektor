@@ -235,3 +235,4 @@ async def test_importar_los_sugeridos_no_toca_un_cobro_pendiente(
     assert await _ventas(db_session, tid) == []
     (fila,) = await _otros(db_session, tid)
     assert fila.status == "PENDING"
+

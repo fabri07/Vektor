@@ -6290,7 +6290,6 @@ async def _cobros_de_fiado_a_caja(
         and not _es_fiado(v.payment_method)
         and (v.payment_method or "").strip().lower() != INFLOW_PAYMENT_METHOD
         and es_texto_de_cobro_de_fiado(v.notes)
-        and v.product_id not in (session.info.get(_B5E_VINCULO_PENDIENTE) or {})
     ]
     if not candidatas:
         return
