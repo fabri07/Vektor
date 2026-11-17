@@ -420,6 +420,64 @@ async def test_por_producto_confirma_sólo_la_carga_manual(
     assert ap.manuales == () and [a.upload_id for a in ap.por_archivo] == [f.id]
 
 
+async def test_por_producto_confirma_la_unica_apertura_de_un_archivo(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    """Caso real (tenant de prueba, 2026-11-17): el stock inicial de un archivo, con la hora
+    de carga como placeholder, se confirma de a un producto — sin tener que dar la misma
+    fecha a todo el archivo. Las demás aperturas del archivo no se tocan."""
+    tid = sample_tenant.tenant_id
+    f = await _archivo(db_session, tid)
+    p = await _producto_con_apertura_vieja(db_session, tid, nombre="Buzo", upload_id=f.id)
+    otro = await _producto_con_apertura_vieja(
+        db_session, tid, nombre="Remera", upload_id=f.id
+    )
+    resp = await client.post(
+        f"/api/v1/products/{p.id}/opening-confirmation",
+        json={"fecha": _iso(HACE_30)},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["aperturas"] == 1
+    (mov,) = await _aperturas(db_session, p.id)
+    assert mov.opening_confirmed_at is not None
+    assert mov.opening_date_source == FECHA_DE_USUARIO
+    assert mov.occurred_at is not None and mov.occurred_at.date() == HACE_30
+    (sin_tocar,) = await _aperturas(db_session, otro.id)
+    assert sin_tocar.opening_confirmed_at is None
+
+
+async def test_dos_aperturas_de_archivos_y_ninguna_manual_es_409(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    sample_tenant: Tenant,
+) -> None:
+    tid = sample_tenant.tenant_id
+    f1 = await _archivo(db_session, tid)
+    f2 = await _archivo(db_session, tid)
+    p = await _producto_con_apertura_vieja(db_session, tid, upload_id=f1.id)
+    db_session.add(
+        InventoryMovement(
+            tenant_id=tid, product_id=p.id, movement_type="adjustment", qty=5,
+            unit_cost=Decimal("60"), source_type=SOURCE_CATALOG_INITIAL_STOCK,
+            source_event_id="import", source_upload_id=f2.id,
+        )
+    )
+    await db_session.commit()
+    resp = await client.post(
+        f"/api/v1/products/{p.id}/opening-confirmation",
+        json={"fecha": _iso(HACE_30)},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["code"] == "OPENING_AMBIGUOUS"
+    assert all(m.opening_confirmed_at is None for m in await _aperturas(db_session, p.id))
+
+
 async def test_un_producto_dado_de_baja_no_se_confirma(
     client: AsyncClient,
     auth_headers: dict[str, str],

@@ -173,10 +173,15 @@ async def confirmar_apertura_de_producto(
     fecha: datetime,
     user_id: uuid.UUID,
 ) -> ResultadoConfirmacion:
-    """El stock inicial cargado A MANO del producto (sin archivo).
+    """La fecha del stock inicial de UN producto.
 
-    El de un archivo se confirma desde el archivo (``confirmar_aperturas_de_archivo``):
-    así un producto con una carga manual y otra importada nunca queda sin camino.
+    Si el producto tiene una carga A MANO (sin archivo), se confirma esa; la importada
+    sigue yendo por su archivo (``confirmar_aperturas_de_archivo``), así un producto con
+    una carga manual y otra importada nunca queda sin camino. Sin carga manual y con UNA
+    sola apertura importada, también se confirma por producto: la fecha de carga de un
+    archivo es un placeholder, y confirmarla de a un producto evita tener que dar una
+    misma fecha a todo el archivo. Con varias importadas y ninguna manual no se elige:
+    ``AperturaAmbiguaError``.
     """
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
     await _bloquear_productos(session, tenant_id, [product_id])
@@ -195,10 +200,21 @@ async def confirmar_apertura_de_producto(
         ).scalars()
     )
     if not aperturas:
-        raise SinAperturaError(
-            "El producto no tiene stock inicial cargado a mano; el de un archivo se "
-            "confirma desde el archivo."
+        aperturas = list(
+            (
+                await session.execute(
+                    select(InventoryMovement)
+                    .where(
+                        *filtro_aperturas_vivas(tenant_id),
+                        InventoryMovement.product_id == product_id,
+                    )
+                    .order_by(InventoryMovement.id)
+                    .with_for_update()
+                )
+            ).scalars()
         )
+    if not aperturas:
+        raise SinAperturaError("El producto no tiene stock inicial cargado.")
     if len(aperturas) > 1:
         raise AperturaAmbiguaError(len(aperturas))
     return await _confirmar(

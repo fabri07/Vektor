@@ -906,7 +906,10 @@ async def confirm_product_opening(
 
     - 404: el producto no existe o no tiene stock inicial.
     - 409 ``OPENING_AMBIGUOUS``: tiene más de una carga de stock inicial viva
-      (de archivos distintos); se confirma desde cada archivo.
+      (de archivos distintos, sin carga manual); se confirma desde cada archivo.
+
+    Una carga manual manda sobre las importadas; sin ella, una sola apertura importada
+    también se confirma acá.
 
     Las ventas ya costeadas con el stock inicial y anteriores a la fecha nueva no
     cambian de costo: se devuelven para revisarlas.
