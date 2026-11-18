@@ -305,7 +305,8 @@ export function ReclassifyModal({
 
   // Cliente y Proveedor son entidades de contacto: solo nombre + email/teléfono.
   const isContact = entityType === "customer" || entityType === "supplier";
-  const inputCls = "rounded border border-vk-border-w px-3 py-2";
+  const inputCls =
+    "rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary";
   // F6: la fila llegó a /otros porque no tiene fecha confiable. Al resolverla NO
   // se inventa "hoy": la fecha es obligatoria para venta/gasto. El <input> es
   // required, pero lo validamos explícito (defensa) y nunca construimos un fallback.
@@ -432,7 +433,7 @@ export function ReclassifyModal({
   };
 
   return (
-    <Modal isOpen={!!record} onClose={onClose} title="Editar e importar registro" size="lg">
+    <Modal isOpen={!!record} onClose={onClose} title="Editar e importar registro" size="4xl">
       <form className="grid gap-4" onSubmit={submit}>
         <div className="rounded border border-vk-border-w bg-vk-bg-light p-3 text-xs text-vk-text-muted">
           {rowPreview(record)}
@@ -557,6 +558,7 @@ export function ReclassifyModal({
             mostrarErrores={intento}
             onVolver={() => setComboLineas(null)}
             inputClassName={inputCls}
+            diaDeLaVenta={date || undefined}
           />
         ) : null}
         {entityType === "sale" && !comboLineas ? (

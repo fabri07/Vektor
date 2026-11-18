@@ -20,7 +20,8 @@ export function PurchaseTermsFields({
   /** El remito siempre carga el envío aparte: ahí sólo se pide el IVA. */
   showShippingModes?: boolean;
 }) {
-  const inputCls = "rounded border border-vk-border-w px-3 py-2";
+  const inputCls =
+    "rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary";
   const conAlicuota = value.taxTreatment === "incluido" || value.taxTreatment === "adicional";
   return (
     <div className="grid gap-3">
