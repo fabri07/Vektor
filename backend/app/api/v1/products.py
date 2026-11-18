@@ -80,6 +80,9 @@ from app.persistence.repositories.product_repository import ProductRepository
 from app.schemas.common import MessageResponse
 from app.schemas.pos import PosProductResponse, a_pos_product
 from app.schemas.product import (
+    AperturaDelProducto,
+    CargarCostoDeAperturaRequest,
+    CargarCostoDeAperturaResponse,
     CategorySuggestionResponse,
     CoincidenciaDeFila,
     ConfirmarAperturaRequest,
@@ -711,7 +714,22 @@ async def get_product(
     product = await repo.get_by_id(product_id, tenant.tenant_id)
     if not product:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found.")
-    return (await _con_sugerencias(session, tenant.tenant_id, [product]))[0]
+    response = (await _con_sugerencias(session, tenant.tenant_id, [product]))[0]
+    estado = await apertura_service.estado_de_apertura(session, tenant.tenant_id, product_id)
+    if estado is not None:
+        response.apertura = AperturaDelProducto(
+            movement_id=estado.movement_id,
+            fecha=estado.fecha,
+            confirmada=estado.confirmada,
+            origen=estado.origen,
+            con_costo=estado.con_costo,
+            costo=estado.costo,
+            editable=estado.editable,
+            motivo_no_editable=estado.motivo_no_editable,
+        )
+    fuentes = await primeros_dias_de_fuente(session, tenant.tenant_id, [product_id])
+    response.primer_dia_de_fuente = fuentes.get(product_id)
+    return response
 
 
 @router.patch(
@@ -933,6 +951,70 @@ async def confirm_product_opening(
         productos=r.productos,
         ventas_costeadas_antes=r.ventas_costeadas_antes,
         venta_ids=r.venta_ids,
+    )
+
+
+@router.post(
+    "/{product_id}/opening-cost",
+    response_model=CargarCostoDeAperturaResponse,
+    summary="Cargar el costo de un stock inicial que se cargó sin costo",
+)
+async def set_product_opening_cost(
+    product_id: UUID,
+    body: CargarCostoDeAperturaRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    # Escribe un costo del ledger: el mismo permiso que editar el producto.
+    user: User = Depends(require_modify_access),
+    _maintenance_guard: None = Depends(ensure_tenant_not_under_maintenance),
+    session: AsyncSession = Depends(get_db_session),
+) -> CargarCostoDeAperturaResponse:
+    """Una apertura sin costo no respalda ventas con ninguna fecha. Acá se le carga el que
+    falta; uno que YA existe no se corrige (tocaría ventas ya costeadas).
+
+    - 404: el producto no existe, está dado de baja o no tiene stock inicial.
+    - 409 ``OPENING_AMBIGUOUS``: más de una carga candidata (se corrige desde cada archivo).
+    - 409 ``OPENING_HAS_COST``: ya tiene costo.
+
+    Las ventas ``sin_costo`` del producto desde la fecha del stock inicial se costean al
+    guardar (salvo las de unidad dudosa).
+    """
+    estado = await apertura_service.estado_de_apertura(session, tenant.tenant_id, product_id)
+    desde = (
+        datetime.combine(estado.fecha, datetime.min.time())
+        if estado is not None and estado.fecha is not None
+        else None
+    )
+    try:
+        movimiento = await apertura_service.cargar_costo_de_apertura(
+            session, tenant.tenant_id, product_id, body.unit_cost_ars, body.costo_envio,
+            user.user_id,
+        )
+    except apertura_service.SinAperturaError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except apertura_service.AperturaAmbiguaError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "OPENING_AMBIGUOUS", "message": str(exc), "cantidad": exc.cantidad},
+        ) from exc
+    except apertura_service.AperturaConCostoError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "OPENING_HAS_COST",
+                "message": "El stock inicial ya tiene costo: acá sólo se carga el que falta.",
+                "costo": str(exc.costo),
+            },
+        ) from exc
+    pendientes = (
+        await _ventas_sin_costo_desde(session, tenant.tenant_id, product_id, desde)
+        if desde is not None
+        else 0
+    )
+    trigger_score_recalculation_after_commit(session, str(tenant.tenant_id), "opening_cost_set")
+    return CargarCostoDeAperturaResponse(
+        movement_id=movimiento.id,
+        product_id=product_id,
+        ventas_sin_costo_desde_la_fecha=pendientes,
     )
 
 
