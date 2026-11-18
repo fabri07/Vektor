@@ -95,8 +95,32 @@ export interface ProductResponse {
   /** B·5c: activo y sin stock inicial vivo (manual o de archivo). `null` o
    *  ausente en servidores viejos: no se ofrece cargarlo. */
   needs_initial_stock?: boolean | null;
-  /** Primer día con una fuente con costo; sólo con `con_fuente`. null: sin fuente. */
+  /** Primer día con una fuente con costo; sólo con `con_fuente` (y en el detalle). null: sin fuente. */
   primer_dia_de_fuente?: string | null;
+  /** Sólo en `GET /products/{id}`: el stock inicial vivo del producto; null: no tiene. */
+  apertura?: AperturaDelProducto | null;
+}
+
+/** El stock inicial de un producto, para corregirlo desde «Editar producto». */
+export interface AperturaDelProducto {
+  movement_id: string;
+  /** Día de negocio desde el que figura el stock (YYYY-MM-DD). */
+  fecha: string | null;
+  confirmada: boolean;
+  /** `carga`: es la fecha en que se cargó, un placeholder hasta que alguien la confirme. */
+  origen: "usuario" | "archivo" | "carga";
+  /** Falso: el stock se cargó sin costo y no respalda ventas con ninguna fecha. */
+  con_costo: boolean;
+  costo: string | null;
+  /** Falso con más de una carga candidata: se corrige desde cada archivo. */
+  editable: boolean;
+  motivo_no_editable: string | null;
+}
+
+export interface CargarCostoDeAperturaResponse {
+  movement_id: string;
+  product_id: string;
+  ventas_sin_costo_desde_la_fecha: number;
 }
 
 // ── B·5c: stock inicial a mano ──────────────────────────────────────────────
@@ -261,6 +285,23 @@ export const productsService = {
   // Crea una categoría de producto personalizada del tenant (reutilizable).
   async createCategory(label: string): Promise<ProductCategoryOption> {
     const res = await api.post<ProductCategoryOption>("/products/custom-categories", { label });
+    return res.data;
+  },
+
+  async getProduct(productId: string): Promise<ProductResponse> {
+    const res = await api.get<ProductResponse>(`/products/${productId}`);
+    return res.data;
+  },
+
+  /** Carga el costo de un stock inicial que se cargó sin costo (PIN). 409 si ya tiene uno. */
+  async setOpeningCost(
+    productId: string,
+    unitCostArs: string,
+  ): Promise<CargarCostoDeAperturaResponse> {
+    const res = await api.post<CargarCostoDeAperturaResponse>(
+      `/products/${productId}/opening-cost`,
+      { unit_cost_ars: unitCostArs },
+    );
     return res.data;
   },
 

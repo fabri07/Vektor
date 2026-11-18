@@ -8,6 +8,7 @@ import { PageWrapper } from "@/components/layout/PageWrapper";
 import { ManualEntryLauncher } from "@/features/ingestion/ManualEntryLauncher";
 import { LabelsModal } from "@/features/products/LabelsModal";
 import { StockDiscrepanciesPanel } from "@/features/products/StockDiscrepanciesPanel";
+import { StockInicialSection } from "@/features/products/StockInicialSection";
 import { StatCard } from "@/components/ui/StatCard";
 import { SmartTable } from "@/components/ui/SmartTable";
 import { Badge } from "@/components/ui/Badge";
@@ -1025,12 +1026,12 @@ function ProductEditModal({
           );
         }}
       >
-        <label className="grid gap-1 text-sm text-vektor-body">Producto<input className="rounded border border-vk-border-w px-3 py-2" value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
+        <label className="grid gap-1 text-sm text-vektor-body">Producto<input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vektor-body">SKU<input className="rounded border border-vk-border-w px-3 py-2" value={form.sku ?? ""} onChange={(e) => set("sku", e.target.value || null)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">SKU<input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" value={form.sku ?? ""} onChange={(e) => set("sku", e.target.value || null)} /></label>
           <label className="grid gap-1 text-sm text-vektor-body">Categoría
             <select
-              className="rounded border border-vk-border-w px-3 py-2"
+              className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary"
               value={creandoCategoria ? NUEVA_CATEGORIA : form.category ?? ""}
               onChange={(e) => {
                 if (e.target.value === NUEVA_CATEGORIA) {
@@ -1064,7 +1065,7 @@ function ProductEditModal({
               <label className="grid flex-1 gap-1 text-sm text-vektor-body">
                 Nombre de la nueva categoría
                 <input
-                  className="rounded border border-vk-border-w px-3 py-2"
+                  className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary"
                   maxLength={100}
                   value={nuevaCategoria}
                   onChange={(e) => setNuevaCategoria(e.target.value)}
@@ -1104,7 +1105,7 @@ function ProductEditModal({
         <label className="grid gap-1 text-sm text-vektor-body">
           Se vende por
           <select
-            className="rounded border border-vk-border-w px-3 py-2"
+            className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary"
             value={unidad.key}
             onChange={(e) => {
               const nueva = UNIDADES_DE_VENTA.find((u) => u.key === e.target.value);
@@ -1127,16 +1128,16 @@ function ProductEditModal({
           </span>
         </label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vektor-body">Precio{unidad.sufijo}<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.sale_price_ars} onChange={(e) => set("sale_price_ars", Number(e.target.value))} /></label>
-          <label className="grid gap-1 text-sm text-vektor-body">Costo{unidad.sufijo}<input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.unit_cost_ars ?? ""} onChange={(e) => set("unit_cost_ars", e.target.value ? Number(e.target.value) : null)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Precio{unidad.sufijo}<input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" type="number" min={0} step="0.01" value={form.sale_price_ars} onChange={(e) => set("sale_price_ars", Number(e.target.value))} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Costo{unidad.sufijo}<input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" type="number" min={0} step="0.01" value={form.unit_cost_ars ?? ""} onChange={(e) => set("unit_cost_ars", e.target.value ? Number(e.target.value) : null)} /></label>
         </div>
         <label className="grid gap-1 text-sm text-vektor-body">
           Precio de lista (sugerido)
-          <input className="rounded border border-vk-border-w px-3 py-2" type="number" min={0} step="0.01" value={form.list_price_ars ?? ""} onChange={(e) => set("list_price_ars", e.target.value ? Number(e.target.value) : null)} />
+          <input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" type="number" min={0} step="0.01" value={form.list_price_ars ?? ""} onChange={(e) => set("list_price_ars", e.target.value ? Number(e.target.value) : null)} />
         </label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-1 text-sm text-vektor-body">Stock ({unidad.etiqueta})<input className="rounded border border-vk-border-w px-3 py-2" inputMode="decimal" value={stockText} onChange={(e) => setStockText(e.target.value)} /></label>
-          <label className="grid gap-1 text-sm text-vektor-body">Umbral mínimo ({unidad.etiqueta})<input className="rounded border border-vk-border-w px-3 py-2" inputMode="decimal" placeholder="5 (default)" value={umbralText} onChange={(e) => setUmbralText(e.target.value)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Stock ({unidad.etiqueta})<input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" inputMode="decimal" value={stockText} onChange={(e) => setStockText(e.target.value)} /></label>
+          <label className="grid gap-1 text-sm text-vektor-body">Umbral mínimo ({unidad.etiqueta})<input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" inputMode="decimal" placeholder="5 (default)" value={umbralText} onChange={(e) => setUmbralText(e.target.value)} /></label>
         </div>
         {invalido ? (
           <p className="text-xs text-vk-danger">
@@ -1207,8 +1208,12 @@ function ProductEditModal({
             ) : null}
           </fieldset>
         ) : null}
-        <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w px-3 py-2" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
-        <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w px-3 py-2" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
+        <StockInicialSection
+          productId={form.id}
+          costoDelProducto={sinCosto ? null : Number(form.unit_cost_ars)}
+        />
+        <label className="grid gap-1 text-sm text-vektor-body">Descripción<input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" value={form.description ?? ""} onChange={(e) => set("description", e.target.value || null)} /></label>
+        <label className="grid gap-1 text-sm text-vektor-body">Fecha de alta<input className="rounded border border-vk-border-w bg-vk-bg-light px-3 py-2 text-sm text-vk-text-primary" type="datetime-local" value={form.acquired_at ? toDatetimeLocal(form.acquired_at) : ""} onChange={(e) => set("acquired_at", e.target.value || null)} /></label>
         {categoriaAMedias ? (
           <p className="text-xs text-vektor-muted">Creá o cancelá la categoría nueva antes de guardar.</p>
         ) : null}
