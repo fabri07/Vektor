@@ -7,7 +7,7 @@
 // reparte por ella ni se escribe con una suma que no cierra.
 import { Plus, Trash2 } from "lucide-react";
 import type { ComboSuggestionsResponse } from "@/services/others.service";
-import type { ProductoElegible } from "./ProductoVendidoSelector";
+import { etiqueta, respaldoA, type ProductoElegible } from "./ProductoVendidoSelector";
 
 export interface LineaDeCombo {
   productId: string;
@@ -58,6 +58,7 @@ export function ComboVentaLineas({
   mostrarErrores,
   onVolver,
   inputClassName,
+  diaDeLaVenta,
 }: {
   productos: ProductoElegible[];
   lineas: LineaDeCombo[];
@@ -67,9 +68,17 @@ export function ComboVentaLineas({
   mostrarErrores: boolean;
   onVolver: () => void;
   inputClassName: string;
+  /** Día de la venta (YYYY-MM-DD): los productos con respaldo ese día van primero y el resto
+   * queda marcado. No bloquea: el que decide es el servidor. */
+  diaDeLaVenta?: string;
 }) {
   const setLinea = (i: number, patch: Partial<LineaDeCombo>) =>
     onLineas(lineas.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+  // Sort estable: los respaldados a la fecha primero, el resto en su orden.
+  const opciones = productos
+    .map((p, i) => ({ p, i, sin: respaldoA(p, diaDeLaVenta) === false ? 1 : 0 }))
+    .sort((a, b) => a.sin - b.sin || a.i - b.i)
+    .map(({ p }) => p);
   const error = errorDeCombo(lineas, montoDeLaFila);
   const suma = sumaEnCentavos(lineas);
   const cierra = suma === Math.round(montoDeLaFila * 100);
@@ -125,9 +134,9 @@ export function ComboVentaLineas({
               onChange={(e) => setLinea(i, { productId: e.target.value })}
             >
               <option value="">Elegí un producto…</option>
-              {productos.map((p) => (
+              {opciones.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name}
+                  {etiqueta(p, diaDeLaVenta)}
                 </option>
               ))}
             </select>

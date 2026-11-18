@@ -36,7 +36,7 @@ export function respaldoA(p: ProductoElegible, dia: string | undefined): boolean
   return !!p.primer_dia_de_fuente && p.primer_dia_de_fuente.slice(0, 10) <= dia;
 }
 
-function etiqueta(p: ProductoElegible, dia: string | undefined): string {
+export function etiqueta(p: ProductoElegible, dia: string | undefined): string {
   if (respaldoA(p, dia) !== false) return p.name;
   return p.primer_dia_de_fuente
     ? `${p.name} · sin compra ni stock antes del ${fechaCorta(p.primer_dia_de_fuente)}`
