@@ -41,6 +41,27 @@ class CategorySuggestionResponse(BaseModel):
     label: str
 
 
+class AperturaDelProducto(BaseModel):
+    """El stock inicial de UN producto, para corregirlo desde «Editar producto».
+
+    ``fecha`` es el día de negocio desde el que figura el stock; ``origen`` dice quién la
+    puso (``usuario``: la confirmó una persona; ``archivo``: la trajo la fila de un archivo;
+    ``carga``: es la fecha en que se cargó, un placeholder hasta que alguien la confirme).
+    ``con_costo`` es falso si el stock se cargó sin costo: no respalda ventas con ninguna
+    fecha. ``editable`` es falso cuando hay más de una carga candidata (se confirma desde
+    cada archivo).
+    """
+
+    movement_id: UUID
+    fecha: date | None
+    confirmada: bool
+    origen: Literal["usuario", "archivo", "carga"]
+    con_costo: bool
+    costo: Decimal | None
+    editable: bool
+    motivo_no_editable: str | None = None
+
+
 class ProductResponse(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -97,6 +118,9 @@ class ProductResponse(BaseModel):
     #: ``GET /products?con_fuente=true``. Una venta de ese producto de un día ANTERIOR
     #: no tiene respaldo (B·5e). ``None``: sin fuente, o no se pidió.
     primer_dia_de_fuente: date | None = None
+    #: Sólo en ``GET /products/{id}``: el stock inicial vivo del producto, o ``None`` si no
+    #: tiene (o no se calculó).
+    apertura: AperturaDelProducto | None = None
 
     @field_validator("custom_fields", mode="before")
     @classmethod
@@ -405,6 +429,21 @@ class RegistrarAperturaResponse(BaseModel):
     product_id: UUID
     stock_units: int
     #: Ventas ``sin_costo`` del producto desde la fecha: se costean al confirmar.
+    ventas_sin_costo_desde_la_fecha: int
+
+
+class CargarCostoDeAperturaRequest(BaseModel):
+    """El costo unitario (por unidad de VENTA) de un stock inicial que se cargó sin costo."""
+
+    unit_cost_ars: Decimal = Field(gt=0, decimal_places=2)
+    costo_envio: TratamientoEnvio | None = None
+
+
+class CargarCostoDeAperturaResponse(BaseModel):
+    movement_id: UUID
+    product_id: UUID
+    #: Ventas ``sin_costo`` del producto desde la fecha del stock inicial: se costean al
+    #: guardar (salvo las de unidad dudosa).
     ventas_sin_costo_desde_la_fecha: int
 
 

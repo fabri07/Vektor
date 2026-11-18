@@ -38,9 +38,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Final
+from typing import Final, Literal
 
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services import maintenance_lock_service
@@ -52,6 +52,8 @@ from app.application.services.inventory_movement_origin import (
     columnas_de_apertura_confirmada,
     momento_de_negocio_rotulado,
 )
+from app.domain.contrato_de_costo import contrato_declarado
+from app.domain.costo_de_referencia import Tratamiento
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.product import Product
@@ -79,6 +81,14 @@ class AperturaAmbiguaError(Exception):
             "no se puede elegir cuál corregir."
         )
         self.cantidad = cantidad
+
+
+class AperturaConCostoError(Exception):
+    """La apertura ya tiene costo: acá sólo se carga el que falta, nunca se corrige uno."""
+
+    def __init__(self, costo: Decimal) -> None:
+        super().__init__(f"El stock inicial ya tiene costo (${costo}).")
+        self.costo = costo
 
 
 @dataclass
@@ -166,6 +176,86 @@ async def productos_con_apertura_viva(
     return {pid for pid in filas.scalars() if pid is not None}
 
 
+async def _aperturas_del_producto(
+    session: AsyncSession, tenant_id: uuid.UUID, product_id: uuid.UUID, *, bloquear: bool
+) -> list[InventoryMovement]:
+    """Las aperturas CANDIDATAS de un producto: la carga a mano manda; sin ella, las
+    importadas. Una sola regla para confirmar la fecha, cargar el costo y mostrar el
+    estado: si cambia, cambia para los tres."""
+
+    def consulta(*extra: ColumnElement[bool]) -> Select[tuple[InventoryMovement]]:
+        q = (
+            select(InventoryMovement)
+            .where(
+                *filtro_aperturas_vivas(tenant_id),
+                InventoryMovement.product_id == product_id,
+                *extra,
+            )
+            .order_by(InventoryMovement.id)
+        )
+        return q.with_for_update() if bloquear else q
+
+    manuales = list(
+        (await session.execute(consulta(InventoryMovement.source_upload_id.is_(None)))).scalars()
+    )
+    if manuales:
+        return manuales
+    return list((await session.execute(consulta())).scalars())
+
+
+def _costo_de(m: InventoryMovement) -> Decimal | None:
+    return m.unit_cost_final if m.unit_cost_final is not None else m.unit_cost
+
+
+@dataclass(frozen=True)
+class EstadoDeApertura:
+    movement_id: uuid.UUID
+    fecha: date | None
+    confirmada: bool
+    origen: Literal["usuario", "archivo", "carga"]
+    con_costo: bool
+    costo: Decimal | None
+    editable: bool
+    motivo_no_editable: str | None
+
+
+async def estado_de_apertura(
+    session: AsyncSession, tenant_id: uuid.UUID, product_id: uuid.UUID
+) -> EstadoDeApertura | None:
+    """El stock inicial vivo del producto (SELECT-only), o ``None`` si no tiene (o está
+    dado de baja). Con más de una candidata no se elige: ``editable=False``."""
+    from app.application.services.facts_provider import _dia_de_negocio  # noqa: PLC0415
+
+    aperturas = await _aperturas_del_producto(session, tenant_id, product_id, bloquear=False)
+    if not aperturas:
+        return None
+    m = aperturas[0]
+    costo = _costo_de(m)
+    origen: Literal["usuario", "archivo", "carga"] = (
+        "usuario"
+        if m.opening_date_source == FECHA_DE_USUARIO
+        else "archivo"
+        if m.opening_date_source == FECHA_DE_ARCHIVO
+        else "carga"
+    )
+    ambigua = len(aperturas) > 1
+    return EstadoDeApertura(
+        movement_id=m.id,
+        fecha=_dia_de_negocio(m.occurred_at or m.created_at),
+        confirmada=m.opening_confirmed_at is not None,
+        origen=origen,
+        con_costo=costo is not None and costo > 0,
+        costo=costo if costo is not None and costo > 0 else None,
+        editable=not ambigua,
+        motivo_no_editable=(
+            f"Tiene {len(aperturas)} cargas de stock inicial de archivos distintos: "
+            "se corrige desde cada archivo."
+            if ambigua
+            else None
+        ),
+    )
+
+
 async def confirmar_apertura_de_producto(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -185,34 +275,9 @@ async def confirmar_apertura_de_producto(
     """
     await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
     await _bloquear_productos(session, tenant_id, [product_id])
-    aperturas = list(
-        (
-            await session.execute(
-                select(InventoryMovement)
-                .where(
-                    *filtro_aperturas_vivas(tenant_id),
-                    InventoryMovement.product_id == product_id,
-                    InventoryMovement.source_upload_id.is_(None),
-                )
-                .order_by(InventoryMovement.id)
-                .with_for_update()
-            )
-        ).scalars()
+    aperturas = await _aperturas_del_producto(
+        session, tenant_id, product_id, bloquear=True
     )
-    if not aperturas:
-        aperturas = list(
-            (
-                await session.execute(
-                    select(InventoryMovement)
-                    .where(
-                        *filtro_aperturas_vivas(tenant_id),
-                        InventoryMovement.product_id == product_id,
-                    )
-                    .order_by(InventoryMovement.id)
-                    .with_for_update()
-                )
-            ).scalars()
-        )
     if not aperturas:
         raise SinAperturaError("El producto no tiene stock inicial cargado.")
     if len(aperturas) > 1:
@@ -220,6 +285,61 @@ async def confirmar_apertura_de_producto(
     return await _confirmar(
         session, tenant_id, [(m, fecha) for m in aperturas], user_id, alcance="producto"
     )
+
+
+async def cargar_costo_de_apertura(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_id: uuid.UUID,
+    costo: Decimal,
+    envio: Tratamiento | None,
+    user_id: uuid.UUID,
+) -> InventoryMovement:
+    """El costo de un stock inicial que se cargó SIN costo.
+
+    Una apertura sin costo no es fuente (``costo > 0``): ni cambiándole la fecha respalda
+    una venta, y editar el costo del producto no llega a este movimiento. Sólo se carga el
+    que falta; uno que ya existe NO se corrige acá (``AperturaConCostoError``): tocaría
+    ventas ya costeadas y márgenes. Se escribe por ORM con el contrato del costo declarado
+    (el mismo de ``registrar_apertura_manual``), así los listeners del costeo de ventas y del
+    costo promedio lo ven; el costo vigente del producto se recalcula.
+
+    Mismos locks que confirmar la fecha: el producto antes que su movimiento.
+    """
+    await maintenance_lock_service.acquire_write_lock_shared(session, tenant_id)
+    await _bloquear_productos(session, tenant_id, [product_id])
+    aperturas = await _aperturas_del_producto(session, tenant_id, product_id, bloquear=True)
+    if not aperturas:
+        raise SinAperturaError("El producto no tiene stock inicial cargado.")
+    if len(aperturas) > 1:
+        raise AperturaAmbiguaError(len(aperturas))
+    mov = aperturas[0]
+    actual = _costo_de(mov)
+    if actual is not None and actual > 0:
+        raise AperturaConCostoError(actual)
+    contrato = contrato_declarado(costo, envio=envio or "desconocido")
+    mov.unit_cost = contrato.unit_cost_final
+    for columna, valor in contrato.columnas().items():
+        setattr(mov, columna, valor)
+    await session.flush()
+    await recalcular_costo_vigente(session, tenant_id, [product_id])
+    session.add(
+        DecisionAuditLog(
+            tenant_id=tenant_id,
+            decision_type="OPENING_COST_SET",
+            decision_data={
+                "product_id": str(product_id),
+                "movement_id": str(mov.id),
+                "unit_cost_ars": str(costo),
+                "costo_envio": envio or "desconocido",
+            },
+            triggered_by="ui:opening_cost",
+            actor_user_id=user_id,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    return mov
 
 
 async def confirmar_aperturas_de_archivo(
