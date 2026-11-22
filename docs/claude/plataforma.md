@@ -236,6 +236,20 @@
 - `diag_missing_purchases_scope.py` / `fix_adjustment_sign.py` / `fix_reconciled_stock.py` — diagnóstico y fixes puntuales del incidente de inventario de don pedro (2026-07).
 - `_db.py` — helper compartido de conexión para los scripts.
 
+## Mejoras de datos (`/data-improvements`)
+
+Aplica a lo YA cargado las correcciones que la ingesta ganó después, sin que nadie reimporte. **PR 1 = sólo el mecanismo**: el registro está vacío en producción (`registro._REGISTRO`), así que los endpoints devuelven `[]`. La primera mejora (`compra_sin_costo`) es el PR 2, condicionado a que el dueño corra el «Paso 0» (consulta de sólo lectura sobre los 3 movimientos reales: ruta A `purchase`+`purchase_import`+1 gasto vivo; ruta B catálogo sin gasto es OTRA mejora).
+
+- **Contrato** (`app/application/services/mejoras_de_datos/contrato.py`): `id`, `clase` (`completa_vacios` | `cambia_valores`), `detectar` (SELECT-only), `aplicar`, `revertir`. **El detector es el libro de cuentas**: no hay tabla de «aplicadas» ni migración; una mejora aplicada deja de detectar candidatos.
+- **Clase → política** (decisión del dueño): `completa_vacios` se aplica sola (`POST /auto`, actor sistema, sin PIN, lock compartido); `cambia_valores` sólo a mano con vista previa + PIN (`require_modify_access`), lock exclusivo con `SET LOCAL lock_timeout='3s'` (423 si está ocupado) y nunca corre en el automático.
+- **Lápida**: toda entidad con auditoría `MEJORA_DE_DATOS:<id>` (aplicada o revertida) queda fuera del AUTOMÁTICO; si no, el próximo `POST /auto` reaplicaría lo que el usuario acaba de deshacer. Sólo el apply manual puede forzarla.
+- **`aplicar` no confía en la vista previa**: re-detecta bajo lock con `FOR UPDATE` y aplica la intersección con los ids pedidos. Tandas de 200 (un `DataRepairRun` por tanda, el llamador commitea entre una y otra: el lock se suelta y el recosteo de `before_commit` corre por tanda).
+- **Auditoría**: `DataRepairRun(repair_type='MEJORA:<id>', status='APPLIED')` + un `DecisionAuditLog` por entidad (`MEJORA_DE_DATOS:<id>`, `{run_id, mejora_id, entidad_id, antes, despues}`; revert: `MEJORA_DE_DATOS_REVERTIDA:<id>`). `ActionType` no se toca. `DataRepairItem.action` es un CHECK cerrado: sólo lo usarán las ventas del PR 2.
+- **Deshacer** es condicional: restaura el «antes» sólo si la fila sigue como la dejó la corrida; si no, queda `pendiente` con motivo (nunca pisa una edición). Idempotente vía `details_json['revertidos']`; la corrida pasa a `REVERTED` sólo si quedó completa.
+- **Tarea Celery** `jobs.aplicar_mejoras_de_datos` (cola `scores`, 240/290 s, sin result backend: el estado vive en `DataRepairRun`). `POST /auto` hace `SET NX` (TTL 600 s) ANTES del SELECT y encola por `BackgroundTasks`; si Redis falla no encola; omite tenants fuera de `ESTADOS_OPERATIVOS`. Si el worker corre código viejo (deploys en paralelo) la tarea falla sin daño y el próximo disparo reintenta.
+- **Endpoints sin `require_active_subscription`** (como `opening-confirmation`): corregir datos ya cargados queda abierto en solo-lectura. Apply/revert llevan además `ensure_tenant_not_under_maintenance` (423).
+- **Tests**: la mejora de juguete vive en `app/tests/_mejora_juguete.py` (`registro_con`). SQLite no ejercita advisory locks ni `FOR UPDATE`: la concurrencia está en `test_mejoras_de_datos_pg.py` (`-m postgres -n 0`).
+
 ## Repo: nada de venvs ni uploads versionados
 
 `backend/.venv312` (10.646 archivos, un virtualenv de macOS) estuvo versionado de 2026-03-10 a 2026-10-09 y, como `backend/.dockerignore` sólo excluía `.venv/`, viajaba en la imagen de Railway (`COPY . .` de la etapa runtime). Ahora `.dockerignore` excluye `.venv*/` y `.local_uploads/` (el almacenamiento local de `S3Client`: archivos de clientes), y `app/tests/test_repo_sin_artefactos_locales.py` falla si `git ls-files` encuentra algo bajo un venv o `.local_uploads`. El historial de git sigue teniendo los blobs: achicarlo exige reescribir la historia y no se hizo.

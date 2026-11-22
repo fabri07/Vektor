@@ -50,6 +50,7 @@ celery_app = Celery(
         "app.jobs.stock_tasks",
         "app.jobs.inventory_integrity_check",
         "app.jobs.recalcular_costo_promedio",
+        "app.jobs.mejoras_de_datos",
     ],
 )
 
@@ -108,6 +109,8 @@ celery_app.conf.update(
         "jobs.reconcile_subscription_reservations": {"queue": "scores"},
         "jobs.inventory_integrity_check": {"queue": "scores"},
         "jobs.inventory_integrity_check_all_tenants": {"queue": "scores"},
+        # Mejoras de datos (auto): housekeeping, no carga primaria → `scores`.
+        "jobs.aplicar_mejoras_de_datos": {"queue": "scores"},
     },
 )
 
