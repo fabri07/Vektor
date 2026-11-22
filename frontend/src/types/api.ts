@@ -521,3 +521,50 @@ export interface FieldChangeLog {
   new_state: Record<string, unknown>;
   changed_at: string;
 }
+
+// ── Mejoras de datos (`/data-improvements`) ─────────────────────────────────
+
+export interface MejoraCandidato {
+  id: string;
+  etiqueta: string;
+  detalle: Record<string, unknown>;
+}
+
+export interface MejoraPendiente {
+  mejora_id: string;
+  titulo: string;
+  clase: "completa_vacios" | "cambia_valores";
+  cantidad: number;
+  en_lapida: number;
+  muestra: MejoraCandidato[];
+  a_mano: Record<string, string>;
+}
+
+export interface MejoraAplicada {
+  run_id: string;
+  mejora_id: string;
+  titulo: string;
+  status: string;
+  aplicadas: number;
+  creada: string;
+  revertible: boolean;
+  resumen: Record<string, unknown>;
+}
+
+export interface MejorasDeDatosPanel {
+  pendientes: MejoraPendiente[];
+  aplicadas: MejoraAplicada[];
+}
+
+export interface MejoraAplicarResponse {
+  run_ids: string[];
+  aplicadas: number;
+  restantes: number;
+  a_mano: Record<string, string>;
+}
+
+export interface MejoraRevertirResponse {
+  revertidos: string[];
+  pendientes: Record<string, string>;
+  completa: boolean;
+}

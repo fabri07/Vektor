@@ -20,6 +20,7 @@ import { DashboardSkeleton } from "@/features/dashboard/DashboardSkeleton";
 import { EmptyState } from "@/features/dashboard/EmptyState";
 import { HealthScoreCard } from "@/features/dashboard/HealthScoreCard";
 import { DashboardSummaryCards } from "@/features/dashboard/DashboardSummaryCards";
+import { MejorasDeDatosAviso } from "@/features/dashboard/MejorasDeDatosAviso";
 import { HealthAlertBanner } from "@/components/dashboard/HealthAlertBanner";
 import { SubscriptionLockedNotice } from "@/components/subscription/SubscriptionLockedNotice";
 import { esAnalisisBloqueado, reintentarSalvoBloqueo } from "@/lib/subscription";
@@ -166,6 +167,7 @@ export default function DashboardPage() {
       <div className="space-y-5">
         <DashboardLaunchpadNav active="dashboard" />
         <SubscriptionLockedNotice />
+        <MejorasDeDatosAviso />
       </div>
     );
   }
@@ -175,6 +177,7 @@ export default function DashboardPage() {
       <div className="space-y-5">
         <DashboardLaunchpadNav active="dashboard" />
         <EmptyState />
+        <MejorasDeDatosAviso />
       </div>
     );
   }
@@ -229,6 +232,8 @@ export default function DashboardPage() {
           customersLoading
         }
       />
+
+      <MejorasDeDatosAviso />
 
       {score.confidence_level !== "LOW" && score.data_completeness_score >= 50 && (
         <HealthAlertBanner score={score} />
