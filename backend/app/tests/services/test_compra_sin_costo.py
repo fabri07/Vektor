@@ -34,6 +34,19 @@ HOY = today_ar()
 HACE_40 = HOY - timedelta(days=40)
 HACE_10 = HOY - timedelta(days=10)
 MEJORA = "compra_sin_costo"
+#: Lo que el confirm del archivo real (Jeans azules T42) guardó: multihoja, «Costo total
+#: ARS» mapeado al monto de la hoja de compras.
+MAPEO_REAL: dict[str, Any] = {
+    "flat": {},
+    "context": {
+        "sheet:Ventas clientes": {"Monto ARS": "amount", "Detalle": "product_name"},
+        "sheet:Compras mercaderia": {
+            "Cantidad": "quantity",
+            "Producto": "product_name",
+            "Costo total ARS": "amount",
+        },
+    },
+}
 
 
 @pytest.fixture(autouse=True)
@@ -61,6 +74,7 @@ async def _escenario(
     version: int | None = 1,
     source_type: str = "purchase_import",
     editado: bool = False,
+    mappings: dict[str, Any] | None = None,
 ) -> tuple[Product, InventoryMovement, uuid.UUID]:
     await db.execute(
         update(BusinessProfile)
@@ -108,7 +122,7 @@ async def _escenario(
                 tenant_id=tenant.tenant_id,
                 file_id=upload,
                 stage="confirm",
-                detail={"mappings": {"flat": {"Costo total": "line_total_cost_ars"}}},
+                detail={"mappings": mappings or MAPEO_REAL},
             )
         )
     await db.commit()
@@ -162,6 +176,8 @@ async def test_completa_el_costo_y_deja_estimado(
     "kw, motivo",
     [
         ({"con_confirm": False}, "costo total"),
+        # Un «Monto» a secas podría ser un precio unitario: no alcanza.
+        ({"mappings": {"flat": {"Monto ARS": "amount"}}}, "costo total"),
         ({"importe": None}, "gasto único"),
         ({"importe": "4500.01"}, "exacto"),
         ({"editado": True}, "editado"),
@@ -179,6 +195,15 @@ async def test_sin_evidencia_va_a_mano_y_no_se_toca(
     r = await servicio.aplicar(db_session, sample_tenant.tenant_id, MEJORA, automatica=True)
     assert r.aplicadas == 0
     assert (await _releer(db_session, InventoryMovement, mov.id)).unit_cost is None
+
+
+async def test_tambien_vale_el_destino_line_total_cost(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    await _escenario(
+        db_session, sample_tenant, mappings={"flat": {"Total": "line_total_cost_ars"}}
+    )
+    assert len((await _detectar(db_session, sample_tenant)).candidatos) == 1
 
 
 @pytest.mark.parametrize(

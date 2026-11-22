@@ -178,7 +178,7 @@ async def test_compra_sin_costo_contra_postgres(
         s.add(
             PipelineEvent(
                 trace_id=uuid.uuid4(), tenant_id=tid, file_id=upload, stage="confirm",
-                detail={"mappings": {"flat": {"Costo total": "line_total_cost_ars"}}},
+                detail={"mappings": {"flat": {"Costo total ARS": "amount"}}},
             )
         )
         await s.commit()

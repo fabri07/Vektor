@@ -14,8 +14,9 @@ misma fila, un gasto con el importe de la línea. Esta mejora completa ese vací
 - exactamente UN gasto vivo con el mismo ``(archivo, fila, producto)``, importe
   > 0 y sin ediciones manuales, y ese movimiento es la única compra viva de esa
   fila (dos compras por fila no dicen cuál es de cuál);
-- el confirm del archivo mapeó una columna a ``line_total_cost_ars`` (el costo
-  TOTAL de la línea): sin eso el importe del gasto podría ser un precio unitario;
+- el confirm del archivo declaró el costo TOTAL de la línea: una columna a
+  ``line_total_cost_ars``, o un encabezado «costo total» mapeado al monto (``amount``)
+  del gasto. Sin eso el importe podría ser un precio unitario;
 - la división es EXACTA al centavo (``importe(costo, qty, factor) == gasto``).
 
 **Qué escribe:** ``unit_cost`` y ``unit_cost_final`` (por ``contrato_declarado``:
@@ -81,23 +82,44 @@ MAX_A_MANO: Final = 50
 _CENTAVO: Final = Decimal("0.01")
 
 
-def _destinos_del_confirm(detail: dict[str, Any] | None) -> set[str]:
-    """Los destinos mapeados por el confirm, en las dos formas que lo guarda:
-    ``mappings`` (``flat`` de una hoja, ``context`` de un libro multihoja) y el
-    ``receipt`` (``columns[].target_field``)."""
-    out: set[str] = set()
+def _columnas_del_confirm(detail: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """``(encabezado, destino)`` de lo que mapeó el confirm, en las dos formas que lo
+    guarda: ``mappings`` (``flat`` de una hoja, ``context`` de un libro multihoja) y el
+    ``receipt`` (``columns[]``)."""
+    out: list[tuple[str, str]] = []
     if not detail:
         return out
     mappings = detail.get("mappings") or {}
-    for destino in (mappings.get("flat") or {}).values():
-        out.add(str(destino))
+    for col, destino in (mappings.get("flat") or {}).items():
+        out.append((str(col), str(destino)))
     for columnas in (mappings.get("context") or {}).values():
-        for destino in (columnas or {}).values():
-            out.add(str(destino))
-    for col in (detail.get("receipt") or {}).get("columns") or []:
-        if isinstance(col, dict) and col.get("target_field"):
-            out.add(str(col["target_field"]))
+        for col, destino in (columnas or {}).items():
+            out.append((str(col), str(destino)))
+    for c in (detail.get("receipt") or {}).get("columns") or []:
+        if isinstance(c, dict) and c.get("target_field"):
+            out.append((str(c.get("source_column") or ""), str(c["target_field"])))
     return out
+
+
+def _es_costo_total(encabezado: str) -> bool:
+    """Mismo criterio que ``ingestion_import_service._is_total_cost_col``."""
+    norm = encabezado.lower().strip().replace(" ", "_")
+    return "costo_total" in norm or "total_costo" in norm
+
+
+def _declara_costo_total(detail: dict[str, Any] | None) -> bool:
+    """¿El confirm dice que el importe de la línea es el costo TOTAL?
+
+    Sí si mapeó algo a ``line_total_cost_ars``, o si una columna cuyo encabezado es
+    «costo total» quedó como el monto (``amount``) del gasto: el caso real (hoja
+    «Compras mercaderia», «Costo total ARS» → ``amount``). Un «Monto» a secas no
+    alcanza: podría ser un precio unitario."""
+    for col, destino in _columnas_del_confirm(detail):
+        if destino == TARGET_COSTO_TOTAL:
+            return True
+        if destino == "amount" and _es_costo_total(col):
+            return True
+    return False
 
 
 def _costo_exacto(total: Decimal, qty: int, factor: int) -> Decimal | None:
@@ -224,9 +246,7 @@ class CompraSinCosto(Mejora):
                 )
             )
         ).all()
-        con_costo_total = {
-            fid for fid, detail in confirms if TARGET_COSTO_TOTAL in _destinos_del_confirm(detail)
-        }
+        con_costo_total = {fid for fid, detail in confirms if _declara_costo_total(detail)}
 
         for mov, nombre, factor in validas:
             clave = (mov.source_upload_id, mov.source_row_ref, mov.product_id)
