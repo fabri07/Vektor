@@ -28,6 +28,7 @@ from app.api.v1 import (
     insights,
     integrations,
     marketing,
+    mejoras_de_datos,
     momentum,
     notifications,
     oauth,
@@ -87,6 +88,9 @@ api_router.include_router(purchases.router, prefix="/purchases", tags=["Purchase
 api_router.include_router(customers.router, prefix="/customers", tags=["Customers"])
 api_router.include_router(suppliers.router, prefix="/suppliers", tags=["Suppliers"])
 api_router.include_router(others.router, prefix="/others", tags=["Others"])
+api_router.include_router(
+    mejoras_de_datos.router, prefix="/data-improvements", tags=["Data Improvements"]
+)
 api_router.include_router(contact.router, prefix="/contact", tags=["Contact"])
 api_router.include_router(
     communication.router, prefix="/communication", tags=["Communication"]
