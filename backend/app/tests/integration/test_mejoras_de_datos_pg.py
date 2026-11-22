@@ -29,6 +29,8 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from app.application.services.mejoras_de_datos import servicio
+from app.application.services.mejoras_de_datos.compra_sin_costo import CompraSinCosto
 from app.jobs.mejoras_de_datos import procesar
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.product import Product
@@ -47,7 +49,7 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def _registro() -> Iterator[None]:
-    with registro_con(MejoraJuguete()):
+    with registro_con(MejoraJuguete(), CompraSinCosto()):
         yield
 
 
@@ -127,3 +129,85 @@ async def test_dos_tareas_simultaneas_aplican_una_sola_vez(
     )
     # Una tercera pasada ya no encuentra nada (el detector es el libro de cuentas).
     assert (await procesar(sm, tenant_id))["juguete"] == 0
+
+
+async def test_compra_sin_costo_contra_postgres(
+    sm: async_sessionmaker[AsyncSession], pg_engine: AsyncEngine
+) -> None:
+    """El SQL de ``compra_sin_costo`` (``FOR UPDATE OF`` con join, agrupados, JSON del
+    confirm) corre en Postgres: SQLite ignora el ``FOR UPDATE`` y no lo prueba."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+    from app.persistence.models.inventory import InventoryMovement  # noqa: PLC0415
+    from app.persistence.models.pipeline_event import PipelineEvent  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+    tid, upload, pid = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with sm() as s:
+        s.add(Tenant(tenant_id=tid, legal_name="T", display_name="T", status="ACTIVE"))
+        await s.flush()
+        s.add(
+            UploadedFile(
+                id=upload, tenant_id=tid, original_filename="a.xlsx", s3_key="k",
+                content_type="x", size_bytes=1, purpose="general",
+            )
+        )
+        s.add(
+            Product(
+                id=pid, tenant_id=tid, name="Jeans", sale_price_ars=Decimal("100"), stock_units=3
+            )
+        )
+        await s.flush()
+        s.add(
+            InventoryMovement(
+                tenant_id=tid, product_id=pid, movement_type="purchase", qty=3,
+                source_type="purchase_import", source_upload_id=upload,
+                source_row_ref="r1", cost_contract_version=1,
+                occurred_at=datetime(2026, 9, 1, 10, tzinfo=UTC),
+            )
+        )
+        s.add(
+            ExpenseEntry(
+                tenant_id=tid, amount=Decimal("4500.00"), category="INVENTORY",
+                expense_type="COGS", transaction_date=datetime(2026, 9, 1, 10),
+                description="c", product_id=pid, source_upload_id=upload,
+                source_row_ref="r1",
+            )
+        )
+        s.add(
+            PipelineEvent(
+                trace_id=uuid.uuid4(), tenant_id=tid, file_id=upload, stage="confirm",
+                detail={"mappings": {"flat": {"Costo total ARS": "amount"}}},
+            )
+        )
+        await s.commit()
+    try:
+        async with sm() as s:
+            det = await CompraSinCosto().detectar(s, tid, bloquear=True)
+        assert [c.detalle["unit_cost"] for c in det.candidatos] == ["1500.00"]
+
+        async with sm() as s:
+            r = await servicio.aplicar(s, tid, "compra_sin_costo", automatica=True)
+            await s.commit()
+        assert r.aplicadas == 1
+        async with sm() as s:
+            m = (
+                await s.execute(
+                    select(InventoryMovement).where(InventoryMovement.tenant_id == tid)
+                )
+            ).scalar_one()
+            assert (m.unit_cost, m.unit_cost_final) == (Decimal("1500.00"), Decimal("1500.00"))
+            otra = await servicio.aplicar(s, tid, "compra_sin_costo", automatica=True)
+            assert otra.aplicadas == 0
+    finally:
+        from app.persistence.models.repair import DataRepairItem  # noqa: PLC0415
+
+        async with sm() as s:
+            for modelo in (
+                DecisionAuditLog, DataRepairItem, DataRepairRun, PipelineEvent,
+                ExpenseEntry, InventoryMovement, Product, UploadedFile,
+            ):
+                await s.execute(delete(modelo).where(modelo.tenant_id == tid))
+            await s.execute(delete(Tenant).where(Tenant.tenant_id == tid))
+            await s.commit()
