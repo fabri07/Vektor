@@ -46,6 +46,7 @@ from app.application.services.mejoras_de_datos.contrato import (
     Candidato,
     Clase,
     Mejora,
+    MotivoANoCargar,
     Reversion,
 )
 from app.observability.logger import get_logger
@@ -121,11 +122,84 @@ class Resultado:
     a_mano: dict[str, str] = field(default_factory=dict)
 
 
+def crear_s3() -> Any:
+    """El cliente de S3 de las mejoras que leen el archivo original. Perezoso (no
+    se construye al importar) y reemplazable en los tests."""
+    from app.integrations.s3 import S3Client  # noqa: PLC0415
+
+    return S3Client()
+
+
 def _mejora(mejora_id: str) -> Mejora:
     m = registro.obtener(mejora_id)
     if m is None:
         raise MejoraDesconocidaError(mejora_id)
     return m
+
+
+async def reunir_evidencia(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    mejora_id: str,
+    ids: set[uuid.UUID] | None = None,
+    s3: Any = None,
+) -> dict[uuid.UUID, Any] | None:
+    """La evidencia de archivo de una mejora que la necesita (``None`` si no).
+
+    Se llama SIN lock: lee S3, y con el lock exclusivo tomado eso frenaría las
+    escrituras del tenant durante una descarga. Una vez por request (el endpoint
+    la reutiliza en todas las tandas)."""
+    mejora = _mejora(mejora_id)
+    if not mejora.necesita_archivo:
+        return None
+    det = await mejora.detectar(session, tenant_id, ids)
+    if not det.candidatos:
+        return {}
+    return await mejora.evidencia(
+        session, tenant_id, det.candidatos, s3 if s3 is not None else crear_s3()
+    )
+
+
+async def vista_previa(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    mejora_id: str,
+    s3: Any = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """SELECT + lectura de S3, sin escribir: ``(filas a aplicar, «a mano» con motivo)``."""
+    mejora = _mejora(mejora_id)
+    det = await mejora.detectar(session, tenant_id)
+    evidencia = (
+        await mejora.evidencia(
+            session, tenant_id, det.candidatos, s3 if s3 is not None else crear_s3()
+        )
+        if mejora.necesita_archivo and det.candidatos
+        else {}
+    )
+    a_mano = dict(det.a_mano)
+    con_evidencia = _separar_por_evidencia(mejora, det.candidatos, evidencia, a_mano)
+    return await mejora.vista_previa(session, tenant_id, con_evidencia, evidencia), a_mano
+
+
+def _separar_por_evidencia(
+    mejora: Mejora,
+    candidatos: list[Candidato],
+    evidencia: dict[uuid.UUID, Any] | None,
+    a_mano: dict[str, str],
+) -> list[Candidato]:
+    """Una mejora que necesita archivo sólo aplica lo que tiene evidencia; el resto
+    queda «a mano» con su motivo (y NO cuenta como pendiente de la próxima tanda)."""
+    if not mejora.necesita_archivo:
+        return candidatos
+    ok: list[Candidato] = []
+    for c in candidatos:
+        ev = (evidencia or {}).get(c.id)
+        if ev is None or isinstance(ev, MotivoANoCargar):
+            motivo = ev.motivo if isinstance(ev, MotivoANoCargar) else "sin evidencia del archivo"
+            a_mano[f"{c.etiqueta} ({str(c.id)[:8]})"] = motivo
+        else:
+            ok.append(c)
+    return ok
 
 
 async def _tomar_lock(session: AsyncSession, tenant_id: uuid.UUID, mejora: Mejora) -> None:
@@ -260,21 +334,28 @@ async def aplicar(
     automatica: bool = False,
     limite: int = TANDA,
     background: BackgroundTasks | None = None,
+    evidencia: dict[uuid.UUID, Any] | None = None,
 ) -> Resultado:
-    """Aplica UNA tanda. No commitea. ``ids`` acota a lo que eligió la vista previa."""
+    """Aplica UNA tanda. No commitea. ``ids`` acota a lo que eligió la vista previa.
+
+    ``evidencia``: sólo para mejoras que leen un archivo. Si no viene se reúne ACÁ,
+    antes del lock; el endpoint la reúne una vez y la pasa a todas las tandas."""
     mejora = _mejora(mejora_id)
     if automatica and mejora.clase != Clase.COMPLETA_VACIOS:
         raise ClaseIncorrectaError(mejora_id)
+    if mejora.necesita_archivo and evidencia is None:
+        evidencia = await reunir_evidencia(session, tenant_id, mejora_id, ids)
     await _tomar_lock(session, tenant_id, mejora)
     # Bajo el lock y ``FOR UPDATE``: se detecta DE NUEVO. Lo que vio la vista previa
     # pudo cambiar (otro usuario, otra tarea): aplica sólo la intersección.
     det = await mejora.detectar(session, tenant_id, ids, bloquear=True)
-    candidatos = det.candidatos
+    a_mano = dict(det.a_mano)
+    candidatos = _separar_por_evidencia(mejora, det.candidatos, evidencia, a_mano)
     if automatica:
         lapida = await ids_con_lapida(session, tenant_id, mejora.id)
         candidatos = [c for c in candidatos if c.id not in lapida]
     if not candidatos:
-        return Resultado(run_id=None, aplicadas=0, restantes=0, a_mano=det.a_mano)
+        return Resultado(run_id=None, aplicadas=0, restantes=0, a_mano=a_mano)
     candidatos = sorted(candidatos, key=lambda c: c.id)
     tanda = candidatos[: max(1, limite)]
     run = DataRepairRun(
@@ -288,11 +369,11 @@ async def aplicar(
     )
     session.add(run)
     await session.flush()
-    n = await mejora.aplicar(session, tenant_id, tanda, run)
+    n = await mejora.aplicar(session, tenant_id, tanda, run, evidencia)
     run.details_json = {
         **(run.details_json or {}),
         "aplicadas": n,
-        "a_mano": det.a_mano,
+        "a_mano": a_mano,
         "actor": str(actor_user_id) if actor_user_id else TRIGGERED_BY_SISTEMA,
     }
     await session.flush()
@@ -309,7 +390,7 @@ async def aplicar(
         run_id=run.id,
         aplicadas=n,
         restantes=len(candidatos) - len(tanda),
-        a_mano=det.a_mano,
+        a_mano=a_mano,
     )
 
 

@@ -8,7 +8,7 @@ se prueba (contrato, lápida, lock, tandas, revert) de la lógica de dominio.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -62,6 +62,7 @@ class MejoraJuguete(Mejora):
         tenant_id: uuid.UUID,
         candidatos: list[Candidato],
         run: DataRepairRun,
+        evidencia: Mapping[uuid.UUID, Any] | None = None,
     ) -> int:
         ids = {c.id for c in candidatos}
         productos = (

@@ -211,3 +211,107 @@ async def test_compra_sin_costo_contra_postgres(
                 await s.execute(delete(modelo).where(modelo.tenant_id == tid))
             await s.execute(delete(Tenant).where(Tenant.tenant_id == tid))
             await s.commit()
+
+
+async def test_compra_catalogo_sin_costo_contra_postgres(
+    sm: async_sessionmaker[AsyncSession],
+) -> None:
+    """``cambia_valores`` contra Postgres real: lock EXCLUSIVO con ``lock_timeout``, el
+    ``FOR UPDATE OF`` con join, el gasto nuevo y el Deshacer que lo anula. La evidencia
+    del archivo (S3) se pasa ya resuelta: acá se prueba la base, no la lectura."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from app.application.services.mejoras_de_datos.compra_catalogo_sin_costo import (  # noqa: PLC0415
+        CompraCatalogoSinCosto,
+        Evidencia,
+    )
+    from app.persistence.models.file import UploadedFile  # noqa: PLC0415
+    from app.persistence.models.inventory import InventoryMovement  # noqa: PLC0415
+    from app.persistence.models.pipeline_event import PipelineEvent  # noqa: PLC0415
+    from app.persistence.models.repair import DataRepairItem  # noqa: PLC0415
+    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
+
+    tid, upload, pid = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    mejora = CompraCatalogoSinCosto()
+    async with sm() as s:
+        s.add(Tenant(tenant_id=tid, legal_name="T", display_name="T", status="ACTIVE"))
+        await s.flush()
+        s.add(
+            UploadedFile(
+                id=upload, tenant_id=tid, original_filename="a.xlsx", s3_key="k",
+                content_type="x", size_bytes=1, purpose="stock",
+            )
+        )
+        s.add(
+            Product(
+                id=pid, tenant_id=tid, name="Camisa", sale_price_ars=Decimal("100"), stock_units=8
+            )
+        )
+        await s.flush()
+        s.add(
+            InventoryMovement(
+                tenant_id=tid, product_id=pid, movement_type="purchase", qty=8,
+                source_type="catalog_initial_stock", source_upload_id=upload,
+                source_row_ref="r1", occurred_at=datetime(2026, 11, 14, 10, tzinfo=UTC),
+            )
+        )
+        s.add(
+            PipelineEvent(
+                trace_id=uuid.uuid4(), tenant_id=tid, file_id=upload, stage="confirm",
+                detail={
+                    "mappings": {
+                        "flat": {},
+                        "context": {"sheet:t": {"Costo total": "purchase_base_cost"}},
+                    },
+                    "stock_treatment": {"sheet:t": "purchase"},
+                },
+            )
+        )
+        await s.commit()
+    try:
+        async with sm() as s:
+            det = await mejora.detectar(s, tid, bloquear=True)
+        assert [c.etiqueta for c in det.candidatos] == ["Camisa"]
+        evidencia = {
+            det.candidatos[0].id: Evidencia(
+                total=Decimal("48000"), unit_cost=Decimal("6000.00"),
+                payment_method="transfer", medio_por_defecto=True, hoja="sheet:t",
+            )
+        }
+        with registro_con(mejora):
+            async with sm() as s:
+                r = await servicio.aplicar(
+                    s, tid, "compra_catalogo_sin_costo", evidencia=evidencia
+                )
+                await s.commit()
+            assert r.aplicadas == 1 and r.run_id is not None
+            async with sm() as s:
+                gasto = (
+                    await s.execute(select(ExpenseEntry).where(ExpenseEntry.tenant_id == tid))
+                ).scalar_one()
+                assert (gasto.amount, gasto.payment_method) == (Decimal("48000.00"), "transfer")
+                assert gasto.voided_at is None
+            async with sm() as s:
+                rev = await servicio.revertir(s, tid, r.run_id)
+                await s.commit()
+            assert rev.completa
+            async with sm() as s:
+                gasto = (
+                    await s.execute(select(ExpenseEntry).where(ExpenseEntry.tenant_id == tid))
+                ).scalar_one()
+                assert gasto.void_reason == "MANUAL_ADMIN_VOID"
+                m = (
+                    await s.execute(
+                        select(InventoryMovement).where(InventoryMovement.tenant_id == tid)
+                    )
+                ).scalar_one()
+                assert m.unit_cost is None
+    finally:
+        async with sm() as s:
+            for modelo in (
+                DecisionAuditLog, DataRepairItem, DataRepairRun, PipelineEvent,
+                ExpenseEntry, InventoryMovement, Product, UploadedFile,
+            ):
+                await s.execute(delete(modelo).where(modelo.tenant_id == tid))
+            await s.execute(delete(Tenant).where(Tenant.tenant_id == tid))
+            await s.commit()

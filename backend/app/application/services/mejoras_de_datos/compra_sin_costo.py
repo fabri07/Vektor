@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final
 
@@ -273,6 +274,7 @@ class CompraSinCosto(Mejora):
         tenant_id: uuid.UUID,
         candidatos: list[Candidato],
         run: DataRepairRun,
+        evidencia: Mapping[uuid.UUID, Any] | None = None,
     ) -> int:
         from app.application.services.mejoras_de_datos import servicio  # noqa: PLC0415
 
