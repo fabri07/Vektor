@@ -41,6 +41,7 @@ from app.application.services.field_definition_service import ensure_custom_fiel
 from app.application.services.file_parsing import FECHA_COLS as _FECHA_COLS
 from app.application.services.file_parsing import GASTO_COLS as _GASTO_COLS
 from app.application.services.file_parsing import VENTA_COLS as _VENTA_COLS
+from app.application.services.gasto_de_stock_de_catalogo import armar_gasto_de_stock_de_catalogo
 from app.application.services.identity_resolution import (
     IdentityKey,
     build_existing_index,
@@ -4212,27 +4213,19 @@ def _add_catalog_initial_stock_cogs(
     """
     if qty <= 0 or unit_cost is None or unit_cost <= 0:
         return
-    from app.persistence.models.transaction import ExpenseEntry  # noqa: PLC0415
-
-    expense = ExpenseEntry(
-        tenant_id=tenant_id,
-        # `qty` en unidades base y el costo por unidad de venta: un producto por
-        # peso divide por su factor (con factor 1 es costo × cantidad).
-        amount=importe(unit_cost, qty, base_units_per_sale_unit),
-        category="INVENTORY",
-        # Producto ligado + categoría INVENTORY ⇒ COGS (mismo helper que el resto).
-        expense_type=infer_expense_type("INVENTORY", product_id=product_id),
-        transaction_date=tx_date,
-        description=f"Stock inicial: {product_name}"[:500],
-        is_recurring=False,
-        payment_method="transfer",
-        provenance="REAL",
-        product_id=product_id,
-        source_upload_id=source_upload_id,
+    session.add(
+        armar_gasto_de_stock_de_catalogo(
+            tenant_id,
+            product_id=product_id,
+            product_name=product_name,
+            # `qty` en unidades base y el costo por unidad de venta: un producto por
+            # peso divide por su factor (con factor 1 es costo × cantidad).
+            amount=importe(unit_cost, qty, base_units_per_sale_unit),
+            tx_date=tx_date,
+            source_upload_id=source_upload_id,
+            source_row_ref=source_row_ref,
+        )
     )
-    if source_row_ref is not None:
-        expense.source_row_ref = source_row_ref
-    session.add(expense)
 
 
 async def _opening_stock_date(

@@ -40,13 +40,7 @@ from typing import Any, Final
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
-from app.application.services.costeo_retroactivo_service import (
-    _columnas_del_snapshot,
-    _restaurar,
-    _serializar,
-)
 from app.application.services.costo_vigente_service import recalcular_costo_vigente
 from app.application.services.inventory_movement_origin import SOURCE_PURCHASE_IMPORT
 from app.application.services.mejoras_de_datos.contrato import (
@@ -56,19 +50,21 @@ from app.application.services.mejoras_de_datos.contrato import (
     Mejora,
     Reversion,
 )
+from app.application.services.mejoras_de_datos.costeo_compartido import (
+    costear_ventas_del_movimiento,
+    foto_movimiento,
+    foto_producto,
+    restaurar_costo_de_productos,
+    restaurar_ventas_de_la_corrida,
+)
 from app.domain.contrato_de_costo import contrato_declarado
 from app.domain.sale_unit import importe
-from app.persistence.costeo_de_ventas import (
-    _dia_de_negocio,
-    costear_ventas,
-    ventas_sin_costo_desde,
-)
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.inventory import InventoryMovement
 from app.persistence.models.pipeline_event import PipelineEvent
 from app.persistence.models.product import Product
-from app.persistence.models.repair import DataRepairItem, DataRepairRun
-from app.persistence.models.transaction import ExpenseEntry, SaleEntry
+from app.persistence.models.repair import DataRepairRun
+from app.persistence.models.transaction import ExpenseEntry
 
 #: El gasto guarda ``source_row_ref`` en 64; el movimiento en 100. Una fila más
 #: larga no se puede cruzar por igualdad sin riesgo de truncado.
@@ -134,22 +130,6 @@ def _costo_exacto(total: Decimal, qty: int, factor: int) -> Decimal | None:
     if costo <= 0 or importe(costo, qty, f) != total:
         return None
     return costo
-
-
-def _foto_movimiento(m: InventoryMovement) -> dict[str, Any]:
-    return {
-        "unit_cost": None if m.unit_cost is None else str(m.unit_cost),
-        "unit_cost_final": None if m.unit_cost_final is None else str(m.unit_cost_final),
-        "shipping_treatment": m.shipping_treatment,
-        "tax_treatment": m.tax_treatment,
-    }
-
-
-def _foto_producto(p: Product) -> dict[str, Any]:
-    return {
-        "unit_cost_ars": None if p.unit_cost_ars is None else str(p.unit_cost_ars),
-        "custom_fields": dict(p.custom_fields or {}),
-    }
 
 
 class CompraSinCosto(Mejora):
@@ -326,8 +306,8 @@ class CompraSinCosto(Mejora):
             costo = Decimal(str(cand.detalle["unit_cost"]))
             contrato = contrato_declarado(costo, envio="desconocido")
             antes: dict[str, Any] = {
-                "movimiento": _foto_movimiento(mov),
-                "producto": _foto_producto(producto),
+                "movimiento": foto_movimiento(mov),
+                "producto": foto_producto(producto),
                 "producto_id": str(producto.id),
             }
 
@@ -340,11 +320,11 @@ class CompraSinCosto(Mejora):
                 session, tenant_id, [producto.id], movimientos_nuevos={mov.id}
             )
 
-            ventas = await self._costear_ventas(session, tenant_id, mov, run)
+            ventas = await costear_ventas_del_movimiento(session, tenant_id, mov, run)
             ventas_costeadas += ventas
             despues: dict[str, Any] = {
-                "movimiento": _foto_movimiento(mov),
-                "producto": _foto_producto(producto),
+                "movimiento": foto_movimiento(mov),
+                "producto": foto_producto(producto),
                 "producto_id": str(producto.id),
                 "ventas_costeadas": ventas,
             }
@@ -355,50 +335,6 @@ class CompraSinCosto(Mejora):
         run.details_json = {**(run.details_json or {}), "ventas_costeadas": ventas_costeadas}
         run.sales_detected = ventas_costeadas
         return n
-
-    async def _costear_ventas(
-        self,
-        session: AsyncSession,
-        tenant_id: uuid.UUID,
-        mov: InventoryMovement,
-        run: DataRepairRun,
-    ) -> int:
-        """Costea YA las ventas ``sin_costo`` que este movimiento hace costeables y
-        guarda su antes/después. Devuelve cuántas quedaron costeadas."""
-        dia = _dia_de_negocio(mov)
-        product_id = mov.product_id
-
-        def _sync(s: Session) -> list[tuple[SaleEntry, dict[str, Any]]]:
-            ids = ventas_sin_costo_desde(s, {(tenant_id, product_id): dia})
-            if not ids:
-                return []
-            ventas = list(
-                s.execute(
-                    select(SaleEntry).where(
-                        SaleEntry.id.in_(ids), SaleEntry.tenant_id == tenant_id
-                    )
-                ).scalars()
-            )
-            antes = {v.id: _serializar(v) for v in ventas}
-            costear_ventas(s, dict.fromkeys(ids, True), set())
-            return [(v, antes[v.id]) for v in ventas if v.cost_origin != "sin_costo"]
-
-        costeadas = await session.run_sync(_sync)
-        for venta, antes in costeadas:
-            session.add(
-                DataRepairItem(
-                    run_id=run.id,
-                    tenant_id=tenant_id,
-                    sale_entry_id=venta.id,
-                    product_id=venta.product_id,
-                    action="UPDATE_SALE",
-                    before_json=antes,
-                    after_json=_serializar(venta),
-                    confidence="MEDIUM",
-                )
-            )
-        await session.flush()
-        return len(costeadas)
 
     async def revertir(
         self, session: AsyncSession, tenant_id: uuid.UUID, run: DataRepairRun
@@ -443,7 +379,7 @@ class CompraSinCosto(Mejora):
                 res.pendientes[mid] = "la compra ya no existe"
                 pendientes_por_producto.add(pid)
                 continue
-            if mov.voided_at is not None or _foto_movimiento(mov) != d["despues"]["movimiento"]:
+            if mov.voided_at is not None or foto_movimiento(mov) != d["despues"]["movimiento"]:
                 res.pendientes[mid] = "la compra cambió después de la corrida"
                 pendientes_por_producto.add(pid)
                 continue
@@ -455,60 +391,10 @@ class CompraSinCosto(Mejora):
             res.revertidos.append(mid)
         await session.flush()
 
-        # El costo vigente del producto: se restaura sólo si nadie lo tocó desde la
-        # corrida y TODAS sus compras de esta corrida volvieron atrás.
-        for pid, del_producto in por_producto.items():
-            if pid in pendientes_por_producto:
-                continue
-            producto = (
-                await session.execute(
-                    select(Product)
-                    .where(Product.id == uuid.UUID(pid), Product.tenant_id == tenant_id)
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if producto is None:
-                continue
-            inicial = del_producto[0].decision_data["antes"]["producto"]
-            final = del_producto[-1].decision_data["despues"]["producto"]
-            if _foto_producto(producto) == final:
-                producto.unit_cost_ars = (
-                    None if inicial["unit_cost_ars"] is None else Decimal(inicial["unit_cost_ars"])
-                )
-                producto.custom_fields = dict(inicial["custom_fields"])
-
-        # Las ventas, con el costo del movimiento ya en NULL en este mismo flush: así
-        # el movimiento deja de ser fuente y el costeo no las vuelve a tomar.
-        items = list(
-            (
-                await session.execute(
-                    select(DataRepairItem).where(
-                        DataRepairItem.run_id == run.id,
-                        DataRepairItem.tenant_id == tenant_id,
-                    )
-                )
-            ).scalars()
+        await restaurar_costo_de_productos(
+            session, tenant_id, por_producto, pendientes_por_producto
         )
-        columnas = _columnas_del_snapshot()
-        for item in items:
-            sid = str(item.sale_entry_id)
-            if sid in ya:
-                continue
-            if str(item.product_id) in pendientes_por_producto:
-                res.pendientes[sid] = "la compra de su producto no se pudo deshacer"
-                continue
-            venta = (
-                await session.execute(
-                    select(SaleEntry)
-                    .where(SaleEntry.id == item.sale_entry_id, SaleEntry.tenant_id == tenant_id)
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if venta is None or _serializar(venta) != item.after_json:
-                res.pendientes[sid] = "la venta cambió después de la corrida"
-                continue
-            for c in columnas:
-                setattr(venta, c, _restaurar(c, (item.before_json or {}).get(c)))
-            res.revertidos.append(sid)
-        await session.flush()
+        await restaurar_ventas_de_la_corrida(
+            session, tenant_id, run, ya, pendientes_por_producto, res
+        )
         return res
