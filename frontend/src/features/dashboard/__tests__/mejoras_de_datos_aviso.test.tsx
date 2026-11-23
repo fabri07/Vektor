@@ -10,17 +10,19 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MejorasDeDatosAviso } from "../MejorasDeDatosAviso";
 import { useAuthStore } from "@/stores/authStore";
 import { PinCancelledError } from "@/stores/pinGateStore";
-import type { MejorasDeDatosPanel } from "@/types/api";
+import type { MejoraVistaPrevia, MejorasDeDatosPanel } from "@/types/api";
 
 const mockPanel = jest.fn();
 const mockAuto = jest.fn();
 const mockAplicar = jest.fn();
 const mockRevertir = jest.fn();
+const mockVistaPrevia = jest.fn();
 jest.mock("@/services/mejorasDeDatos.service", () => ({
   fetchMejorasDeDatos: (...a: unknown[]) => mockPanel(...a),
   dispararMejorasAutomaticas: (...a: unknown[]) => mockAuto(...a),
   aplicarMejora: (...a: unknown[]) => mockAplicar(...a),
   revertirMejora: (...a: unknown[]) => mockRevertir(...a),
+  fetchVistaPrevia: (...a: unknown[]) => mockVistaPrevia(...a),
 }));
 
 const PANEL: MejorasDeDatosPanel = {
@@ -49,6 +51,36 @@ const PANEL: MejorasDeDatosPanel = {
   ],
 };
 
+const VISTA: MejoraVistaPrevia = {
+  filas: [
+    {
+      id: "f1",
+      etiqueta: "Camisa lino beige M",
+      qty: 8,
+      total: "48000",
+      costo_unitario: "6000.00",
+      fecha: "2026-11-14T10:00:00",
+      medio_de_pago: "cash",
+      medio_por_defecto: false,
+      ventas_a_costear: 2,
+      arqueo_del_dia: true,
+    },
+    {
+      id: "f2",
+      etiqueta: "Pantalón cargo verde T42",
+      qty: 15,
+      total: "90000",
+      costo_unitario: "6000.00",
+      fecha: "2026-11-14T10:00:00",
+      medio_de_pago: "transfer",
+      medio_por_defecto: true,
+      ventas_a_costear: 0,
+      arqueo_del_dia: false,
+    },
+  ],
+  a_mano: { "Remera X (1a2b3c4d)": "no se encontró la fila en el archivo" },
+};
+
 function pintar() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -68,6 +100,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockAuto.mockResolvedValue({ queued: false });
   mockPanel.mockResolvedValue(PANEL);
+  mockVistaPrevia.mockResolvedValue(VISTA);
   conRol("OWNER");
 });
 
@@ -80,12 +113,73 @@ test("muestra lo completado y deshace la corrida", async () => {
   expect(await screen.findByText(/se deshizo la corrida/)).toBeInTheDocument();
 });
 
-test("lo que cambia valores se aplica a mano", async () => {
+async function abrirVistaPrevia() {
+  fireEvent.click(await screen.findByRole("button", { name: "Ver y aplicar" }));
+  return screen.findByRole("list", { name: "Qué se va a cambiar" });
+}
+
+test("lo que cambia valores muestra su vista previa antes de aplicar", async () => {
+  pintar();
+  await abrirVistaPrevia();
+  expect(mockVistaPrevia).toHaveBeenCalledWith("cambia");
+  // Nada se aplicó sólo por abrirla.
+  expect(mockAplicar).not.toHaveBeenCalled();
+  expect(screen.getByText("Camisa lino beige M")).toBeInTheDocument();
+  expect(screen.getByText(/Total pagado\s+\$\s?48\.000,00/)).toBeInTheDocument();
+  // Las dos filas salen a $ 6.000,00 por unidad.
+  expect(screen.getAllByText(/costo por unidad\s+\$\s?6\.000,00/)).toHaveLength(2);
+  expect(screen.getAllByText(/14\/11\/2026/).length).toBe(2);
+  expect(screen.getByText(/Efectivo$/)).toBeInTheDocument();
+  expect(screen.getByText(/Transferencia \(el archivo no lo decía\)/)).toBeInTheDocument();
+  expect(screen.getByText(/Se costean 2 ventas/)).toBeInTheDocument();
+});
+
+test("avisa del arqueo sólo en la fila que lo tiene", async () => {
+  pintar();
+  await abrirVistaPrevia();
+  expect(screen.getAllByRole("note")).toHaveLength(1);
+  expect(screen.getByRole("note")).toHaveTextContent(/ya tiene arqueo/);
+});
+
+test("lo que no se pudo verificar se lista con su motivo y no se manda", async () => {
   mockAplicar.mockResolvedValue({ run_ids: ["r2"], aplicadas: 2, restantes: 0, a_mano: {} });
   pintar();
-  fireEvent.click(await screen.findByRole("button", { name: "Aplicar" }));
-  await waitFor(() => expect(mockAplicar).toHaveBeenCalledWith("cambia"));
+  await abrirVistaPrevia();
+  expect(screen.getByText(/1 dato no se puede verificar y no se toca/)).toBeInTheDocument();
+  expect(screen.getByText(/no se encontró la fila en el archivo/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Aplicar" }));
+  // Sólo los ids que se mostraron.
+  await waitFor(() => expect(mockAplicar).toHaveBeenCalledWith("cambia", ["f1", "f2"]));
   expect(await screen.findByText(/2 datos corregidos/)).toBeInTheDocument();
+  // La vista previa se cierra al aplicar.
+  expect(screen.queryByRole("list", { name: "Qué se va a cambiar" })).not.toBeInTheDocument();
+});
+
+test("sin filas aplicables no ofrece aplicar", async () => {
+  mockVistaPrevia.mockResolvedValue({ filas: [], a_mano: { X: "el archivo original ya no está" } });
+  pintar();
+  fireEvent.click(await screen.findByRole("button", { name: "Ver y aplicar" }));
+  expect(await screen.findByText(/No hay nada para aplicar hoy/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Aplicar" })).not.toBeInTheDocument();
+});
+
+test("si la vista previa falla muestra el motivo y se puede cerrar", async () => {
+  mockVistaPrevia.mockRejectedValue({ response: { data: { detail: "Mejora no encontrada." } } });
+  pintar();
+  fireEvent.click(await screen.findByRole("button", { name: "Ver y aplicar" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Mejora no encontrada.");
+  fireEvent.click(screen.getByRole("button", { name: "Cerrar" }));
+  expect(screen.getByRole("button", { name: "Ver y aplicar" })).toBeInTheDocument();
+});
+
+test("un PIN cancelado al aplicar no muestra error y deja la vista previa", async () => {
+  mockAplicar.mockRejectedValue(new PinCancelledError());
+  pintar();
+  await abrirVistaPrevia();
+  fireEvent.click(screen.getByRole("button", { name: "Aplicar" }));
+  await waitFor(() => expect(mockAplicar).toHaveBeenCalled());
+  expect(screen.queryByText(/No se pudo completar/)).not.toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Qué se va a cambiar" })).toBeInTheDocument();
 });
 
 test("un PIN cancelado no muestra error", async () => {

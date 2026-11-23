@@ -10,6 +10,7 @@ import {
 } from "@/services/mejorasDeDatos.service";
 import { useAuthStore } from "@/stores/authStore";
 import { esPinCancelado } from "@/stores/pinGateStore";
+import { MejoraVistaPrevia } from "./MejoraVistaPrevia";
 
 // Quién ve el aviso: UX, no seguridad (el 403/428 del servidor decide).
 const ROLES_QUE_CORRIGEN: ReadonlySet<string> = new Set(["OWNER", "ADMIN"]);
@@ -42,6 +43,8 @@ export function MejorasDeDatosAviso() {
   const qc = useQueryClient();
   const [polling, setPolling] = useState(0);
   const [mensaje, setMensaje] = useState<string | null>(null);
+  // La mejora cuya vista previa está abierta (una a la vez).
+  const [abierta, setAbierta] = useState<string | null>(null);
 
   const panel = useQuery({
     queryKey: ["data-improvements"],
@@ -69,10 +72,20 @@ export function MejorasDeDatosAviso() {
   }, [polling]);
 
   const refrescar = async () => {
+    // Aplicar/deshacer mueve costos, gastos, caja y margen: todo lo que los lee.
     await Promise.all(
-      [["data-improvements"], ["margins"], ["products"], ["health-scores"]].map((queryKey) =>
-        qc.invalidateQueries({ queryKey }),
-      ),
+      [
+        ["data-improvements"],
+        ["margins"],
+        ["products"],
+        ["health-scores"],
+        ["expenses-entries"],
+        ["expenses-all"],
+        ["expenses-count"],
+        ["expenses-date-range"],
+        ["cash-preview"],
+        ["economic-summary"],
+      ].map((queryKey) => qc.invalidateQueries({ queryKey })),
     );
   };
 
@@ -92,8 +105,10 @@ export function MejorasDeDatosAviso() {
   });
 
   const aplicar = useMutation({
-    mutationFn: (mejoraId: string) => aplicarMejora(mejoraId),
+    mutationFn: ({ mejoraId, ids }: { mejoraId: string; ids: string[] }) =>
+      aplicarMejora(mejoraId, ids),
     onSuccess: async (r) => {
+      setAbierta(null);
       setMensaje(
         `Listo: ${r.aplicadas} ${r.aplicadas === 1 ? "dato corregido" : "datos corregidos"}.` +
           (r.restantes > 0 ? ` Quedan ${r.restantes}: volvé a aplicar.` : ""),
@@ -139,19 +154,22 @@ export function MejorasDeDatosAviso() {
           <p className="text-sm font-medium text-vektor-white">
             {p.titulo}: {p.cantidad} {p.cantidad === 1 ? "dato cambiaría" : "datos cambiarían"}
           </p>
-          <ul className="text-xs text-vektor-muted">
-            {p.muestra.map((m) => (
-              <li key={m.id}>{m.etiqueta}</li>
-            ))}
-          </ul>
-          <button
-            type="button"
-            disabled={aplicar.isPending}
-            onClick={() => aplicar.mutate(p.mejora_id)}
-            className="h-8 rounded-lg bg-vektor-blue px-3 text-xs font-medium text-white disabled:opacity-40"
-          >
-            Aplicar
-          </button>
+          {abierta === p.mejora_id ? (
+            <MejoraVistaPrevia
+              mejoraId={p.mejora_id}
+              aplicando={aplicar.isPending}
+              onAplicar={(ids) => aplicar.mutate({ mejoraId: p.mejora_id, ids })}
+              onCerrar={() => setAbierta(null)}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAbierta(p.mejora_id)}
+              className="h-8 rounded-lg bg-vektor-blue px-3 text-xs font-medium text-white"
+            >
+              Ver y aplicar
+            </button>
+          )}
         </div>
       ))}
       {mensaje && <p className="text-xs text-vektor-muted">{mensaje}</p>}
