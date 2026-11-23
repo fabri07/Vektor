@@ -29,6 +29,15 @@ def es_rechazo_permanente(exc: BaseException) -> bool:
     return 400 <= codigo < 500 and codigo not in _4XX_REINTENTABLES
 
 
+def remitente(from_email: str, from_name: str) -> str:
+    """`From` del mail: con nombre visible, sin duplicarlo si ya viene armado."""
+    base = from_email.strip()
+    nombre = from_name.strip()
+    if not nombre or "<" in base:
+        return base
+    return f"{nombre} <{base}>"
+
+
 class SMTPClient:
     def __init__(self) -> None:
         self._settings = get_settings()
@@ -68,11 +77,14 @@ class SMTPClient:
             return None
 
         payload: dict[str, Any] = {
-            "from": s.SMTP_FROM_EMAIL,
+            "from": remitente(s.SMTP_FROM_EMAIL, s.EMAIL_FROM_NAME),
             "to": [to_email],
             "subject": subject,
             "html": body_html,
         }
+        reply_to = s.EMAIL_REPLY_TO.strip()
+        if reply_to:
+            payload["reply_to"] = reply_to
         if body_text:
             payload["text"] = body_text
 

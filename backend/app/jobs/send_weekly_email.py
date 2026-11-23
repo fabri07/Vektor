@@ -372,11 +372,7 @@ async def _async_send(tenant_id: str) -> None:
             await engine.dispose()
             return
 
-        dashboard_url = (
-            f"{s.FRONTEND_URL}/dashboard"
-            if hasattr(s, "FRONTEND_URL")
-            else "https://app.vektor.com.ar/dashboard"
-        )
+        dashboard_url = f"{s.FRONTEND_URL.rstrip('/')}/dashboard"
 
         html = _build_html(
             business_name=data["business_name"],

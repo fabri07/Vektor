@@ -219,10 +219,18 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = (
         ""  # alias legacy — se usa como RESEND_API_KEY si RESEND_API_KEY está vacío
     )
-    SMTP_FROM_EMAIL: str = "noreply@vektor.app"
-    # Destinatario de los leads del formulario público de contacto. OBLIGATORIO
-    # en producción (ver validador abajo). En dev, si queda vacío, se usa
-    # SMTP_FROM_EMAIL como fallback. Poné acá el mail oficial de Véktor.
+    # Remitente de todos los mails automáticos. Dominio verificado en Resend:
+    # vek7or.com. Puede venir como `noreply@vek7or.com` (se le antepone
+    # EMAIL_FROM_NAME) o ya con nombre: `Véktor <noreply@vek7or.com>`.
+    SMTP_FROM_EMAIL: str = "noreply@vek7or.com"
+    EMAIL_FROM_NAME: str = "Véktor"
+    # Reply-To de los mails automáticos (p. ej. soporte@vek7or.com). Vacío = sin
+    # Reply-To. NO activarlo hasta que esa casilla reciba mail de verdad: una
+    # respuesta a una casilla muerta se pierde sin avisar.
+    EMAIL_REPLY_TO: str = ""
+    # Destinatario de los leads del formulario público de contacto y de los avisos
+    # de solicitudes de acceso. OBLIGATORIO en producción (ver validador abajo).
+    # En dev, si queda vacío, se usa SMTP_FROM_EMAIL como fallback.
     CONTACT_LEAD_EMAIL: str = ""
 
     # ── Comunicación: WhatsApp (DORMIDO — Fase posterior) ──────────────────────
