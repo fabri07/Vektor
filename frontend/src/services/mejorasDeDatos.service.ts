@@ -2,12 +2,22 @@ import { api } from "@/lib/api";
 import type {
   MejoraAplicarResponse,
   MejoraRevertirResponse,
+  MejoraVistaPrevia,
   MejorasDeDatosPanel,
 } from "@/types/api";
 
 /** Pendientes y lo aplicado en los últimos 14 días. SELECT-only en el servidor. */
 export async function fetchMejorasDeDatos(): Promise<MejorasDeDatosPanel> {
   const { data } = await api.get<MejorasDeDatosPanel>("/data-improvements");
+  return data;
+}
+
+/**
+ * Lo que se aplicaría hoy, con los números que verá el dueño. Algunas mejoras releen
+ * el archivo original (S3): puede tardar. No escribe nada.
+ */
+export async function fetchVistaPrevia(mejoraId: string): Promise<MejoraVistaPrevia> {
+  const { data } = await api.get<MejoraVistaPrevia>(`/data-improvements/${mejoraId}/preview`);
   return data;
 }
 

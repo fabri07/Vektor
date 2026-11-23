@@ -556,6 +556,28 @@ export interface MejorasDeDatosPanel {
   aplicadas: MejoraAplicada[];
 }
 
+/** Una fila de la vista previa. Los campos de dinero llegan como texto decimal. */
+export interface MejoraVistaPreviaFila {
+  id: string;
+  etiqueta: string;
+  qty?: number;
+  total?: string;
+  costo_unitario?: string;
+  fecha?: string;
+  medio_de_pago?: string;
+  /** `true` si el archivo no decía cómo se pagó y se usa el medio por defecto. */
+  medio_por_defecto?: boolean;
+  hoja?: string | null;
+  ventas_a_costear?: number;
+  /** Efectivo en un día que ya tiene arqueo: el cierre guardado no se modifica. */
+  arqueo_del_dia?: boolean;
+}
+
+export interface MejoraVistaPrevia {
+  filas: MejoraVistaPreviaFila[];
+  a_mano: Record<string, string>;
+}
+
 export interface MejoraAplicarResponse {
   run_ids: string[];
   aplicadas: number;

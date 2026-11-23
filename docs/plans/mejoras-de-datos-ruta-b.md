@@ -1,6 +1,6 @@
 # Mejoras de datos · Ruta B — `compra_catalogo_sin_costo` (3 PRs, sin migración)
 
-Estado: **aprobado 2026-11-23**. B1 (refactor) en `main` (#269); B2 (mejora + vista previa) en curso; B3 (frontend) sigue. Continúa `compra_sin_costo` (ruta A, #268).
+Estado: **aprobado 2026-11-23**. B1 (refactor) en `main` (#269); B2 (mejora + vista previa) en `main` (#270); B3 (frontend) en curso. Continúa `compra_sin_costo` (ruta A, #268).
 
 ## Context
 El mecanismo de «mejoras de datos» y la mejora `compra_sin_costo` (ruta A) ya están en `main` (#266, #267, #268). Quedan compras de stock de catálogo que el dueño cargó como «La compré ahora» y que quedaron **sin costo y sin gasto**: Camisa lino beige M (8 u.) y Pantalón cargo verde T42 (15 u.), movimientos `purchase` + `catalog_initial_stock`, fechados el 14-nov (fecha de carga), 0 gastos vivos, sin proveedor.
