@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -38,6 +39,14 @@ class Candidato:
     id: uuid.UUID
     etiqueta: str
     detalle: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MotivoANoCargar:
+    """Lo que ``evidencia`` devuelve cuando la fuente externa no alcanza: la entidad
+    queda «a mano» con este motivo en vez de cargarse a ciegas."""
+
+    motivo: str
 
 
 @dataclass
@@ -67,6 +76,33 @@ class Mejora(ABC):
     id: str
     clase: Clase
     titulo: str
+    #: ``True`` si el valor a escribir no está en la base sino en un archivo (S3).
+    #: ``detectar`` sigue siendo SQL puro (lo usa el panel); el servicio pide la
+    #: ``evidencia`` ANTES de tomar el lock, para no leer S3 con las escrituras frenadas.
+    necesita_archivo: bool = False
+
+    async def evidencia(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        candidatos: list[Candidato],
+        s3: Any,
+    ) -> dict[uuid.UUID, Any]:
+        """Sólo si ``necesita_archivo``: candidato → su evidencia, o ``MotivoANoCargar``.
+
+        Lee S3 (nunca bajo el lock). La evidencia del archivo es inmutable; lo que
+        puede cambiar es la base, y eso lo revalida ``aplicar`` bajo lock."""
+        return {}
+
+    async def vista_previa(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        candidatos: list[Candidato],
+        evidencia: Mapping[uuid.UUID, Any],
+    ) -> list[dict[str, Any]]:
+        """Lo que la pantalla muestra antes de aplicar. Por defecto, el detalle."""
+        return [{"id": str(c.id), "etiqueta": c.etiqueta, **c.detalle} for c in candidatos]
 
     @abstractmethod
     async def detectar(
@@ -90,6 +126,7 @@ class Mejora(ABC):
         tenant_id: uuid.UUID,
         candidatos: list[Candidato],
         run: DataRepairRun,
+        evidencia: Mapping[uuid.UUID, Any] | None = None,
     ) -> int:
         """Escribe por ORM (los listeners ven el cambio) y deja la auditoría por
         fila con ``servicio.registrar_cambio``. Devuelve cuántas filas cambió."""

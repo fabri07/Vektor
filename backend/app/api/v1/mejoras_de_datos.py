@@ -25,6 +25,7 @@ from app.api.v1.deps import (
     get_current_tenant,
     get_current_user,
     require_modify_access,
+    require_role,
 )
 from app.application.services.mejoras_de_datos import servicio
 from app.observability.logger import get_logger
@@ -97,6 +98,13 @@ class AutoOut(BaseModel):
     queued: bool
 
 
+class VistaPreviaOut(BaseModel):
+    #: Lo que se aplicaría hoy, con los números que verá el dueño.
+    filas: list[dict[str, Any]]
+    #: Lo que NO se puede cargar sin adivinar, con su motivo.
+    a_mano: dict[str, str]
+
+
 def _lock_ocupado(exc: OperationalError) -> bool:
     texto = str(exc.orig).lower()
     return "lock" in texto and ("timeout" in texto or "not available" in texto)
@@ -147,6 +155,25 @@ async def listar(
             for a in panel.aplicadas
         ],
     )
+
+
+@router.get(
+    "/{mejora_id}/preview",
+    response_model=VistaPreviaOut,
+    summary="Vista previa de una mejora que lee el archivo original (no escribe)",
+)
+async def vista_previa(
+    mejora_id: str,
+    tenant: Tenant = Depends(get_current_tenant),
+    _user: User = Depends(require_role("OWNER", "ADMIN")),
+    session: AsyncSession = Depends(get_db_session),
+) -> VistaPreviaOut:
+    """SELECT + lectura de S3. Una descarga por archivo, con tope por request."""
+    try:
+        filas, a_mano = await servicio.vista_previa(session, tenant.tenant_id, mejora_id)
+    except servicio.MejoraDesconocidaError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Mejora no encontrada.") from exc
+    return VistaPreviaOut(filas=filas, a_mano=a_mano)
 
 
 @router.post(
@@ -246,6 +273,8 @@ async def aplicar(
     restantes = 0
     a_mano: dict[str, str] = {}
     try:
+        # Una sola lectura de S3 por request (fuera del lock), compartida por las tandas.
+        evidencia = await servicio.reunir_evidencia(session, tenant.tenant_id, mejora_id, ids)
         for _ in range(MAX_TANDAS_MANUAL):
             r = await servicio.aplicar(
                 session,
@@ -254,6 +283,7 @@ async def aplicar(
                 ids,
                 actor_user_id=user.user_id,
                 background=background,
+                evidencia=evidencia,
             )
             a_mano = r.a_mano
             restantes = r.restantes

@@ -25,11 +25,15 @@ def todas() -> list[Mejora]:
 def _de_fabrica() -> None:
     # Import tardío y al final: el módulo de la mejora importa el servicio, que a su
     # vez importa este registro.
+    from app.application.services.mejoras_de_datos.compra_catalogo_sin_costo import (  # noqa: PLC0415
+        CompraCatalogoSinCosto,
+    )
     from app.application.services.mejoras_de_datos.compra_sin_costo import (  # noqa: PLC0415
         CompraSinCosto,
     )
 
     registrar(CompraSinCosto())
+    registrar(CompraCatalogoSinCosto())
 
 
 _de_fabrica()
