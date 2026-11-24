@@ -134,6 +134,33 @@ test("lo que cambia valores muestra su vista previa antes de aplicar", async () 
   expect(screen.getByText(/Se costean 2 ventas/)).toBeInTheDocument();
 });
 
+test("no vuelve a leer los archivos al volver el foco a la ventana", async () => {
+  pintar();
+  await abrirVistaPrevia();
+  expect(mockVistaPrevia).toHaveBeenCalledTimes(1);
+  // Volver a la pestaña no baja y parsea otra vez los archivos ni cambia las filas.
+  window.dispatchEvent(new Event("visibilitychange"));
+  window.dispatchEvent(new Event("focus"));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(mockVistaPrevia).toHaveBeenCalledTimes(1);
+});
+
+test("si la cantidad depende del archivo, el aviso dice «hasta N»", async () => {
+  mockPanel.mockResolvedValue({
+    ...PANEL,
+    pendientes: [{ ...PANEL.pendientes[0], necesita_archivo: true }],
+  });
+  pintar();
+  expect(
+    await screen.findByText(/hasta 2 datos podrían cambiar \(se confirma al leer tus archivos\)/),
+  ).toBeInTheDocument();
+});
+
+test("sin archivo de por medio, el aviso cuenta lo que cambiaría", async () => {
+  pintar();
+  expect(await screen.findByText(/Corrige un valor: 2 datos cambiarían/)).toBeInTheDocument();
+});
+
 test("avisa del arqueo sólo en la fila que lo tiene", async () => {
   pintar();
   await abrirVistaPrevia();

@@ -302,6 +302,57 @@ def _dia_de_la_venta(valor: object) -> date:
     return datetime.fromisoformat(str(valor)).date()
 
 
+def contar_ventas_sin_costo(
+    session: Session,
+    tenant_id: uuid.UUID,
+    fuentes: list[tuple[uuid.UUID, date]],
+    *,
+    lote: int = 1000,
+) -> list[int]:
+    """Cuántas ventas vivas ``sin_costo`` pasaría a costear cada ``(producto, día)``.
+
+    Sólo CUENTA (sin ``FOR UPDATE``: la vista previa no escribe ni bloquea): mismos
+    criterios que ``ventas_sin_costo_desde`` (vivas, ``sin_costo``, día >= el de la
+    fuente, sin unidad dudosa), pero una consulta por lote de productos en vez de una
+    por candidato. Devuelve una cuenta por elemento de ``fuentes``, en su orden.
+    """
+    cuentas = [0] * len(fuentes)
+    if not fuentes:
+        return cuentas
+    por_producto: dict[uuid.UUID, list[int]] = defaultdict(list)
+    for i, (pid, _dia) in enumerate(fuentes):
+        por_producto[pid].append(i)
+    pids = list(por_producto)
+    for k in range(0, len(pids), lote):
+        grupo = pids[k : k + lote]
+        desde = datetime.combine(
+            min(fuentes[i][1] for pid in grupo for i in por_producto[pid]),
+            datetime.min.time(),
+        )
+        filas = session.execute(
+            select(SaleEntry.product_id, SaleEntry.transaction_date, SaleEntry.cost_reason)
+            .where(
+                SaleEntry.tenant_id == tenant_id,
+                SaleEntry.product_id.in_(grupo),
+                SaleEntry.voided_at.is_(None),
+                SaleEntry.cost_origin == "sin_costo",
+                SaleEntry.transaction_date >= desde,
+                or_(
+                    SaleEntry.cost_reason.is_(None),
+                    ~SaleEntry.cost_reason.contains(MOTIVO_UNIDAD_DUDOSA),
+                ),
+            )
+        ).all()
+        for pid, fecha, motivo in filas:
+            if es_unidad_dudosa(motivo):
+                continue
+            dia_venta = _dia_de_la_venta(fecha)
+            for i in por_producto[pid]:
+                if dia_venta >= fuentes[i][1]:
+                    cuentas[i] += 1
+    return cuentas
+
+
 def primeras_fuentes(
     session: Session, tenant_id: uuid.UUID, product_ids: Iterable[uuid.UUID]
 ) -> dict[tuple[uuid.UUID, uuid.UUID], date]:
