@@ -53,10 +53,15 @@ interface Props {
  */
 export function MejoraVistaPrevia({ mejoraId, aplicando, onAplicar, onCerrar }: Props) {
   const vista = useQuery({
-    queryKey: ["data-improvements", "preview", mejoraId],
+    // Fuera del prefijo ["data-improvements"]: refrescar el panel no relee los archivos.
+    queryKey: ["data-improvements-preview", mejoraId],
     queryFn: () => fetchVistaPrevia(mejoraId),
     retry: false,
-    gcTime: 0, // lo que se muestra tiene que ser lo de AHORA, no una copia vieja
+    gcTime: 0, // al reabrirla se lee de nuevo: lo que se muestra es lo de AHORA
+    // Cada lectura baja y parsea los archivos originales: no se repite al volver el
+    // foco ni cambia bajo los ojos de quien está por poner el PIN.
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   });
 
   if (vista.isPending) {

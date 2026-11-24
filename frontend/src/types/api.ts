@@ -538,6 +538,8 @@ export interface MejoraPendiente {
   en_lapida: number;
   muestra: MejoraCandidato[];
   a_mano: Record<string, string>;
+  /** `cantidad` es un máximo: el archivo original confirma cuántas se pueden cargar. */
+  necesita_archivo?: boolean;
 }
 
 export interface MejoraAplicada {

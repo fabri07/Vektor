@@ -12,6 +12,7 @@ desde un S3 falso.
 from __future__ import annotations
 
 import io
+import threading
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -25,10 +26,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.application.services.ingestion_import_service as importer
 from app.application.services.file_parsing import parse_uploaded_content
+from app.application.services.mejoras_de_datos import compra_catalogo_sin_costo as modulo
 from app.application.services.mejoras_de_datos import registro, servicio
 from app.application.services.mejoras_de_datos.compra_catalogo_sin_costo import (
     CompraCatalogoSinCosto,
 )
+from app.application.services.mejoras_de_datos.contrato import Candidato, MotivoANoCargar
 from app.domain.business_time import today_ar
 from app.persistence.models.audit import DecisionAuditLog
 from app.persistence.models.business import BusinessProfile
@@ -552,3 +555,234 @@ async def test_endpoint_de_vista_previa(
     assert await _gastos(db_session, sample_tenant, vivos=False) == []
     r404 = await client.get("/api/v1/data-improvements/no_existe/preview", headers=auth_headers)
     assert r404.status_code == 404
+
+
+# ── Revisión de la ruta B: hoja única, sin tope, parseo en hilo, contrato, S3 ────────
+
+
+#: UNA sola hoja: el importador la trata por el camino plano (ancla de fila SIN contexto
+#: y con el índice sobre toda la lista), distinto del libro de varias hojas.
+UNA_HOJA: dict[str, list[list[Any]]] = {
+    HOJA_1: [
+        ["Producto", "Cantidad", "Costo total", "Forma de pago"],
+        [CAMISA, 8, 48000, "Efectivo"],
+        [PANTALON, 15, 90000, None],
+    ],
+}
+
+
+async def test_archivo_de_una_sola_hoja_se_ubica_se_aplica_y_se_deshace(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, contenido = await _importar(db_session, sample_tenant, hojas=UNA_HOJA)
+    _s3(monkeypatch, S3Falso(contenido))
+
+    filas, a_mano = await servicio.vista_previa(db_session, sample_tenant.tenant_id, MEJORA)
+
+    assert a_mano == {}
+    por = {f["etiqueta"]: f for f in filas}
+    assert set(por) == {CAMISA, PANTALON}
+    assert (por[CAMISA]["total"], por[CAMISA]["costo_unitario"]) == ("48000", "6000.00")
+    assert (por[PANTALON]["total"], por[PANTALON]["costo_unitario"]) == ("90000", "6000.00")
+    assert por[CAMISA]["medio_de_pago"] == "cash"
+    assert por[PANTALON]["medio_por_defecto"] is True
+
+    r = await servicio.aplicar(db_session, sample_tenant.tenant_id, MEJORA)
+    await db_session.commit()
+    assert r.aplicadas == 2 and r.run_id is not None
+    assert [g.amount for g in await _gastos(db_session, sample_tenant)] == [
+        Decimal("48000.00"),
+        Decimal("90000.00"),
+    ]
+
+    rev = await servicio.revertir(db_session, sample_tenant.tenant_id, r.run_id)
+    await db_session.commit()
+    assert rev.completa
+    assert await _gastos(db_session, sample_tenant) == []
+    for _, m in (await _por_nombre(db_session, sample_tenant)).values():
+        assert m.unit_cost is None
+
+
+async def test_una_hoja_y_un_libro_conviven_en_el_mismo_tenant(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cada archivo se ubica con SU ancla: el plano con ``None``, el libro con la hoja."""
+    fid_plano, plano = await _importar(
+        db_session,
+        sample_tenant,
+        hojas={"Solo": [["Producto", "Cantidad", "Costo total"], ["Buzo azul", 4, 8000]]},
+    )
+    fid_libro, libro = await _importar(db_session, sample_tenant)
+    contenidos = {fid_plano: plano, fid_libro: libro}
+    claves = {
+        f.s3_key: f.id
+        for f in (await db_session.execute(select(UploadedFile))).scalars()
+    }
+
+    class PorArchivo:
+        async def download(self, key: str) -> bytes:
+            return contenidos[claves[key]]
+
+    _s3(monkeypatch, PorArchivo())  # type: ignore[arg-type]
+
+    filas, a_mano = await servicio.vista_previa(db_session, sample_tenant.tenant_id, MEJORA)
+
+    assert a_mano == {}
+    assert {f["etiqueta"] for f in filas} == {"Buzo azul", CAMISA, PANTALON, REMERA}
+
+
+async def test_no_hay_tope_de_archivos_y_uno_ilegible_no_deja_sin_atender_a_otro(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Antes se leían los primeros 20 archivos: con 24 irresolubles delante, el real
+    (el último) nunca se corregía."""
+    _, contenido = await _importar(db_session, sample_tenant, hojas=UNA_HOJA)
+    det = await CompraCatalogoSinCosto().detectar(db_session, sample_tenant.tenant_id)
+    reales = list(det.candidatos)
+    fantasmas = [
+        Candidato(
+            id=uuid.uuid4(),
+            etiqueta=f"Fantasma {i}",
+            detalle={
+                "archivo_id": str(uuid.uuid4()),
+                "fila": f"x{i}",
+                "factor": 1,
+                "fecha": "2026-11-14T10:00:00",
+            },
+        )
+        for i in range(24)
+    ]
+
+    ev = await CompraCatalogoSinCosto().evidencia(
+        db_session, sample_tenant.tenant_id, [*fantasmas, *reales], S3Falso(contenido)
+    )
+
+    assert all(isinstance(ev[c.id], MotivoANoCargar) for c in fantasmas)
+    assert all(not isinstance(ev[c.id], MotivoANoCargar) for c in reales)
+    assert len(reales) == 2
+
+
+async def test_las_consultas_en_lote_dan_lo_mismo_que_sin_partir(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, contenido = await _importar(db_session, sample_tenant)
+    _s3(monkeypatch, S3Falso(contenido))
+    monkeypatch.setattr(modulo, "LOTE_IN", 1)  # cada IN lleva un solo valor
+
+    filas, a_mano = await servicio.vista_previa(db_session, sample_tenant.tenant_id, MEJORA)
+    r = await servicio.aplicar(db_session, sample_tenant.tenant_id, MEJORA)
+    await db_session.commit()
+
+    assert a_mano == {} and len(filas) == 3 and r.aplicadas == 3
+    assert len(await _gastos(db_session, sample_tenant)) == 3
+
+
+async def test_el_parseo_del_archivo_corre_fuera_del_event_loop(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, contenido = await _importar(db_session, sample_tenant)
+    _s3(monkeypatch, S3Falso(contenido))
+    hilos: list[int] = []
+    real = parse_uploaded_content
+
+    def espia(*a: Any, **k: Any) -> Any:
+        hilos.append(threading.get_ident())
+        return real(*a, **k)
+
+    monkeypatch.setattr(modulo, "parse_uploaded_content", espia)
+
+    await servicio.vista_previa(db_session, sample_tenant.tenant_id, MEJORA)
+
+    assert hilos and all(h != threading.get_ident() for h in hilos)
+
+
+async def test_aplicar_fija_el_contrato_y_deshacer_lo_devuelve(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, contenido = await _importar(db_session, sample_tenant)
+    _s3(monkeypatch, S3Falso(contenido))
+    _, mov = (await _por_nombre(db_session, sample_tenant))[CAMISA]
+    assert (mov.shipping_treatment, mov.tax_treatment, mov.cost_contract_version) == (
+        None,
+        None,
+        None,
+    )
+
+    r = await servicio.aplicar(db_session, sample_tenant.tenant_id, MEJORA, {mov.id})
+    await db_session.commit()
+    m = await _releer(db_session, InventoryMovement, mov.id)
+    # Como cualquier compra declarada: contrato versión 1 (el costo de referencia lo
+    # cuenta «con contrato»), envío e impuesto desconocidos, el costo «estimado».
+    assert (m.shipping_treatment, m.tax_treatment, m.cost_contract_version) == (
+        "desconocido",
+        "desconocido",
+        1,
+    )
+
+    assert r.run_id is not None
+    rev = await servicio.revertir(db_session, sample_tenant.tenant_id, r.run_id)
+    await db_session.commit()
+    assert rev.completa
+    m = await _releer(db_session, InventoryMovement, mov.id)
+    # El movimiento vuelve al estado previo a la mejora, no sólo sin costo.
+    assert (
+        m.unit_cost,
+        m.unit_cost_final,
+        m.shipping_treatment,
+        m.tax_treatment,
+        m.cost_contract_version,
+    ) == (None, None, None, None, None)
+
+
+async def test_sin_s3_configurado_todo_va_a_mano_y_no_hay_500(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _importar(db_session, sample_tenant)
+
+    def sin_configurar() -> Any:
+        raise RuntimeError("sin credenciales")
+
+    monkeypatch.setattr(servicio, "crear_s3", sin_configurar)
+
+    filas, a_mano = await servicio.vista_previa(db_session, sample_tenant.tenant_id, MEJORA)
+    assert filas == [] and len(a_mano) == 3
+    assert all("archivo original" in m for m in a_mano.values())
+    r = await servicio.aplicar(db_session, sample_tenant.tenant_id, MEJORA)
+    assert r.aplicadas == 0 and r.run_id is None
+
+
+async def test_el_panel_avisa_que_la_cantidad_depende_del_archivo(
+    db_session: AsyncSession, sample_tenant: Tenant
+) -> None:
+    await _importar(db_session, sample_tenant)
+    panel = await servicio.analizar(db_session, sample_tenant.tenant_id)
+    (p,) = [x for x in panel.pendientes if x.mejora_id == MEJORA]
+    assert p.cantidad == 3 and p.necesita_archivo is True
+
+
+async def test_el_conteo_de_ventas_agrupado_respeta_producto_y_dia(
+    db_session: AsyncSession, sample_tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, contenido = await _importar(db_session, sample_tenant)
+    _s3(monkeypatch, S3Falso(contenido))
+    por = await _por_nombre(db_session, sample_tenant)
+    camisa, _ = por[CAMISA]
+    pantalon, _ = por[PANTALON]
+    for producto, n in ((camisa, 2), (pantalon, 1)):
+        for _ in range(n):
+            db_session.add(
+                SaleEntry(
+                    tenant_id=sample_tenant.tenant_id,
+                    product_id=producto.id,
+                    amount=Decimal("1000"),
+                    quantity=1,
+                    transaction_date=_a_las(today_ar()),
+                    payment_method="cash",
+                )
+            )
+    await db_session.commit()
+
+    filas, _ = await servicio.vista_previa(db_session, sample_tenant.tenant_id, MEJORA)
+
+    ventas = {f["etiqueta"]: f["ventas_a_costear"] for f in filas}
+    assert ventas == {CAMISA: 2, PANTALON: 1, REMERA: 0}

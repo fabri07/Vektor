@@ -152,7 +152,9 @@ export function MejorasDeDatosAviso() {
       {paraAplicar.map((p) => (
         <div key={p.mejora_id} className="space-y-1">
           <p className="text-sm font-medium text-vektor-white">
-            {p.titulo}: {p.cantidad} {p.cantidad === 1 ? "dato cambiaría" : "datos cambiarían"}
+            {p.necesita_archivo
+              ? `${p.titulo}: hasta ${p.cantidad} ${p.cantidad === 1 ? "dato podría cambiar" : "datos podrían cambiar"} (se confirma al leer tus archivos)`
+              : `${p.titulo}: ${p.cantidad} ${p.cantidad === 1 ? "dato cambiaría" : "datos cambiarían"}`}
           </p>
           {abierta === p.mejora_id ? (
             <MejoraVistaPrevia

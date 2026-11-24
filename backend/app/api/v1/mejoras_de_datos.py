@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +58,8 @@ class PendienteOut(BaseModel):
     en_lapida: int
     muestra: list[CandidatoOut]
     a_mano: dict[str, str]
+    #: ``cantidad`` es un máximo: el archivo original confirma cuántas se pueden cargar.
+    necesita_archivo: bool
 
 
 class AplicadaOut(BaseModel):
@@ -78,7 +80,7 @@ class PanelOut(BaseModel):
 
 class AplicarIn(BaseModel):
     #: ``None`` = todo lo que hoy detecta la mejora; si no, sólo lo elegido en la vista previa.
-    ids: list[uuid.UUID] | None = Field(default=None, max_length=5000)
+    ids: list[uuid.UUID] | None = None
 
 
 class AplicarOut(BaseModel):
@@ -138,6 +140,7 @@ async def listar(
                     for c in p.muestra
                 ],
                 a_mano=p.a_mano,
+                necesita_archivo=p.necesita_archivo,
             )
             for p in panel.pendientes
         ],
@@ -168,7 +171,7 @@ async def vista_previa(
     _user: User = Depends(require_role("OWNER", "ADMIN")),
     session: AsyncSession = Depends(get_db_session),
 ) -> VistaPreviaOut:
-    """SELECT + lectura de S3. Una descarga por archivo, con tope por request."""
+    """SELECT + lectura de S3. Una descarga por archivo, sin tope de archivos."""
     try:
         filas, a_mano = await servicio.vista_previa(session, tenant.tenant_id, mejora_id)
     except servicio.MejoraDesconocidaError as exc:

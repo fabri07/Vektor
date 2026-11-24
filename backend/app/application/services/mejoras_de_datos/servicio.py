@@ -90,6 +90,8 @@ class Pendiente:
     en_lapida: int
     muestra: list[Candidato]
     a_mano: dict[str, str] = field(default_factory=dict)
+    #: La cantidad sale sólo del SQL: lo que el archivo confirme se ve en la vista previa.
+    necesita_archivo: bool = False
 
 
 @dataclass
@@ -130,6 +132,24 @@ def crear_s3() -> Any:
     return S3Client()
 
 
+class _S3NoDisponible:
+    """Si el cliente de S3 ni siquiera se puede construir (sin credenciales, sin
+    configurar), cada descarga falla: la mejora deja todo «a mano» con el motivo, igual
+    que con un S3 caído, en vez de un 500."""
+
+    async def download(self, key: str) -> bytes:
+        raise RuntimeError("almacenamiento de archivos no disponible")
+
+
+def _s3_o_no_disponible(s3: Any) -> Any:
+    if s3 is not None:
+        return s3
+    try:
+        return crear_s3()
+    except Exception:  # noqa: BLE001 — configuración ausente: «a mano», nunca 500
+        return _S3NoDisponible()
+
+
 def _mejora(mejora_id: str) -> Mejora:
     m = registro.obtener(mejora_id)
     if m is None:
@@ -155,9 +175,7 @@ async def reunir_evidencia(
     det = await mejora.detectar(session, tenant_id, ids)
     if not det.candidatos:
         return {}
-    return await mejora.evidencia(
-        session, tenant_id, det.candidatos, s3 if s3 is not None else crear_s3()
-    )
+    return await mejora.evidencia(session, tenant_id, det.candidatos, _s3_o_no_disponible(s3))
 
 
 async def vista_previa(
@@ -170,9 +188,7 @@ async def vista_previa(
     mejora = _mejora(mejora_id)
     det = await mejora.detectar(session, tenant_id)
     evidencia = (
-        await mejora.evidencia(
-            session, tenant_id, det.candidatos, s3 if s3 is not None else crear_s3()
-        )
+        await mejora.evidencia(session, tenant_id, det.candidatos, _s3_o_no_disponible(s3))
         if mejora.necesita_archivo and det.candidatos
         else {}
     )
@@ -251,6 +267,7 @@ async def analizar(session: AsyncSession, tenant_id: uuid.UUID) -> Panel:
                 en_lapida=sum(1 for c in det.candidatos if c.id in lapida),
                 muestra=det.candidatos[:MUESTRA],
                 a_mano=det.a_mano,
+                necesita_archivo=m.necesita_archivo,
             )
         )
     desde = datetime.now(UTC) - timedelta(days=VENTANA_APLICADAS_DIAS)
